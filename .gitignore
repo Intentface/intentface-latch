@@ -27,3 +27,6 @@ pnpm-debug.log*
 .claude/settings.local.json
 .claude/skills/
 .agents/skills/
+
+# internal-only (kept locally, never committed)
+STRATEGY.md
