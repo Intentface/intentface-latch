@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+.pnp.*
+
+# builds
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# local tooling state
+.claude/settings.local.json
+.claude/skills/
+.agents/skills/
