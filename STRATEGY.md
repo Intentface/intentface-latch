@@ -20,5 +20,16 @@ Latch flips the conversation. Instead of "we'll build it from scratch in your ba
 - **"Must live in our backend" clients.** Some refuse a second service (ops, data residency, latency, shared auth). Standalone won't help; embed only if Node. Fine if those aren't our best-fit clients — but know it going in.
 - **Competition.** Buyers may compare to LangGraph/Mastra/Vercel/hosted platforms + a cheaper contractor. Differentiation = our expertise + customization + TS-native + we operate it + it's tuned to our delivery workflow.
 
+## Build vs. adopt — decided (Jun 2026)
+Evaluated **Eve** (`eve`, Vercel-aligned, Apache-2.0) as a base. Verdict: **build Latch, but reuse the engines.** Eve is a single-agent, single-identity, world-owned-state app framework; our clients need the opposite — agent logic embedded in an **existing, multi-tenant SaaS** with **multiple agents** and data in **their own DB**. Eve is opinionated against all of that. (It *is* the faster path for greenfield standalone single-agent apps — use it there, don't reinvent.)
+
+What we verified hands-on:
+- Eve's identity = a thin **principal stamp**; per-tenant context/credentials/workspace is DIY. Cron runs as one global `eve:app` — no per-tenant fan-out.
+- One **top-level agent per deploy**; subagents are delegated children, not a registry.
+- State lives in the Workflow **"world"**; cross-session/queryable data → "your own database" (bolt-on).
+- In-process embed is Next/Nuxt/SvelteKit only; everything else is a sidecar service.
+
+**Decision: don't rebuild engines; build the layer.** Reuse `@workflow/core` (durable execution, Apache-2.0) + `ai@7` + `@ai-sdk/sandbox-*`/`mcp` + `chat`. Build our IP: multi-agent registry, multi-tenant `defineContext`, tenant-aware scheduling, and a **Postgres `@workflow/world`** (durability + system-of-record in the client's DB — the gap Vercel left open). This keeps the maintenance burden small (thin layer over maintained OSS) and our differentiation concentrated where clients actually need it. Beta risk (`ai@7`/`@workflow@5` pre-1.0) is stack-wide and unavoidable on either path, so it's not a deciding factor.
+
 ## Why this also funds the future
 The progressive tiers map to a pricing ladder, and the maintenance burden + managed-adapter opportunity is the natural lead-in to the hosted/open-core platform (see `PHILOSOPHY.md` → Future direction). Consulting funds and validates the IP; the platform monetizes it at scale. Same core, two business models.

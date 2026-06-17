@@ -6,6 +6,23 @@ Reusable backend for building/persisting/operating agents, so customer projects 
 
 ---
 
+## Foundations — reuse the engines, build the layer
+Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable standalone. **We reuse them; we build only the multi-agent + multi-tenant + BYO-DB layer on top.** Eve (`eve` npm, Apache-2.0) is a *reference implementation* of one assembly of these — single-agent, single-identity, world-owned state — **not a dependency**.
+
+| Reuse (don't rebuild) | For |
+|---|---|
+| `ai@7` (`ToolLoopAgent`) | agent loop, streaming, UIMessage |
+| `@workflow/core` (5.0-beta, Apache-2.0) | durable execution: resume-after-crash, parked/HITL, steps |
+| `@workflow/world` interface | pluggable storage/queue/streaming seam |
+| `@ai-sdk/sandbox-*` | sandboxes |
+| `@ai-sdk/mcp` | MCP |
+| `chat` (4.x) | channels (Slack/Discord/etc.) when needed |
+| **zod v4** | schemas (AI SDK v7 + ecosystem are on zod 4, not 3) |
+
+**Build (our IP):** multi-agent registry · multi-tenant `defineContext` · tenant-aware scheduling fan-out · a **Postgres/Drizzle `@workflow/world`** (durability + system-of-record in the *client's* DB) · embed-into-any-backend.
+
+**When to use Eve instead of Latch:** greenfield, standalone, single-agent app (esp. Next.js/Vercel). **Use Latch when:** embed into an existing app · multi-tenant · multi-agent · data must live in the client's own DB. (Whole stack is pre-1.0 beta either way — unavoidable on `ai@7`/`@workflow@5`.)
+
 ## Stack & decisions (settled)
 - Monorepo: **pnpm + Turborepo**. Lib builds tsup/tsc.
 - Core **platform-agnostic**; Node + Vercel entrypoints now, Cloudflare later. HTTP via **Hono** (web-standard → embeds anywhere).
@@ -117,7 +134,7 @@ Persistence tier. Complements self-evolving agents (both read history; memory = 
 - `chats` — thread (orgId, userId, agent, title)
 - `messages` — `AppMessage` rows: `(id, chat_id, run_id, seq, role, parts jsonb, metadata jsonb, created_at)` — materialized conversation
 - `runs` — `(id, chat_id, agent, status: active|awaiting_input|completed|errored, usage, error)` — projection
-- `run_events` — `(run_id, offset, type, payload, ts)` append-only — **recoverable spine + transport**
+- `run_events` — `(run_id, offset, type, payload, ts)` — **projection of the `@workflow` event stream** (query/observability/replay); durability itself lives in the World
 - `compactions` — `(chat_id, at_offset, first_kept_offset, summary, tokens_before, details)` — fast model-projection read
 - `usage` / `cost` — tokens + $ per run/step × models.dev pricing
 - `memories` — scoped recall `(id, scope, scope_id, key, content, embedding?, created_at)` — optional pgvector
@@ -127,18 +144,19 @@ Tenant isolation: app-level `orgId` scoping in StorageAdapter for v1 (Postgres R
 
 ---
 
-## Durability — pluggable trio (ours)
+## Durability — wrap `@workflow/core`, own the World (ours)
+Don't build a durable-execution engine; **wrap `@workflow/core`** (resume-after-crash, parked/HITL, step checkpoints — Apache-2.0, self-hostable). The pluggable seam is the **`@workflow/world`** interface (storage + queue + streaming).
 ```ts
 durability: {
-  events:    drizzleEventStore(db),   // append/read/tail — default DB
-  executor:  inlineExecutor(),        // run + resume     — default in-request; swap queueWorker/inngest/temporal
-  transport: dbTailTransport(),       // live reconnect   — default DB-tail; swap resumable-stream+Redis / Durable Streams
+  world: postgresWorld(db),   // our @workflow/world impl — durable state in the CLIENT's Postgres
+                              //   dev default: workflowLocal() (disk JSON, from @workflow/world-local)
+                              //   swap: vercel()  /  custom (Redis, etc.)
 }
 ```
-- Agent/tool/route code written only against seams.
-- Default = all-DB + inline → zero infra; resume/history correct on default.
-- "No durability" (ephemeral + null store) is a valid plug.
-- **RunExecutor** is the keystone for long-running / resume-after-crash / HITL-approval (run `awaiting_input`, resume from log later).
+- The **Postgres/Drizzle World is our IP + the BYO-DB home**: durable workflow state lives in the client's own DB. Vercel ships `world-local` (dev/test only) + `world-vercel`; **no production self-host World exists → that gap is ours.**
+- **Projections** (`messages`/`runs`/`usage`/`compactions`) are derived from the workflow's session/event stream into queryable relational tables in the same DB — the system-of-record the client queries directly.
+- HITL/approvals + long-running + resume-after-crash come from `@workflow/core` for free (run parks durably, resumes later).
+- Dev = `world-local` (zero infra); production self-host = our Postgres World.
 
 ---
 
@@ -148,12 +166,12 @@ durability: {
 3. `agent.stream({ messages: toModelMessages(app), runtimeContext, toolsContext, prepareStep })`. Lifecycle callbacks → append events; `prepareStep` applies ContextExtension model projections (compaction fold).
 4. Stream out via `createUIMessageStream` + `writer.merge(toUIMessageStream(...))`; markers via `writer.write`; `messageMetadata` carries AppMetadata; server ids via `generateMessageId`.
 5. `onFinish` → persist AppMessage(s) + usage/cost; append `step_end`/`run_end`. `consumeStream()` for disconnect safety.
-6. Crash/resume → fold `run_events` to last `step_end` → rebuild messages → executor re-drives loop.
+6. Crash/resume → `@workflow/core` resumes from the last completed step (durable World state); projections (`messages`/`runs`) rebuilt from the event stream.
 
 ---
 
 ## Build phases
-1. Scaffold monorepo + `latch-core` skeleton + `latch-drizzle` event-log schema/StorageAdapter + durability seams (DB+inline). Pin `ai@beta`.
+1. Scaffold monorepo + `latch-core` skeleton wrapping `@workflow/core` (dev default `world-local`) + `latch-drizzle` projections schema. Pin `ai@7.0.0-beta.178`, `@workflow/*@5-beta`, **zod 4**.
 2. `runtime` (defineAgent/defineContext/projections) + example agent + `latch-server` Hono `/chat` route (stream + AppMessage persist + consumeStream) + Express bridge.
 3. ContextExtension registry + compaction built-in.
 4. Usage/cost + rate-limit middleware. OpenAPI (`@hono/zod-openapi`) + Scalar `/docs`.
