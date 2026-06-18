@@ -15,6 +15,28 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  apps/example:
+    dependencies:
+      '@intentface/latch-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@intentface/latch-drizzle':
+        specifier: workspace:*
+        version: link:../../packages/drizzle
+      '@libsql/client':
+        specifier: ^0.15.0
+        version: 0.15.15
+      ai:
+        specifier: 7.0.0-beta.178
+        version: 7.0.0-beta.178(zod@4.4.3)
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   packages/core:
     dependencies:
       zod:
