@@ -10,6 +10,7 @@
     "smoke:tools": "tsx --conditions development src/tools.smoke.ts",
     "smoke:durability": "tsx --conditions development src/durability.smoke.ts",
     "smoke:resume": "tsx --conditions development src/resume.smoke.ts",
+    "smoke:checkpoint": "tsx --conditions development src/checkpoint.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {

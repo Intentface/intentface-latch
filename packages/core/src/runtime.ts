@@ -1,4 +1,11 @@
-import { ToolLoopAgent, createAgentUIStreamResponse, createIdGenerator } from "ai";
+import {
+  ToolLoopAgent,
+  convertToModelMessages,
+  createIdGenerator,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  toUIMessageStream,
+} from "ai";
 import type { AppMessage } from "./message.js";
 import { type Principal, scopeOf } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
@@ -77,6 +84,15 @@ export interface Runtime {
   ): Promise<{ runId: string; status: RunStatus; attempt: number | null } | null>;
 }
 
+/**
+ * The minimal `UIMessageStreamWriter` surface we use: `merge` to fold in the
+ * model's stream, and `write` for custom data parts (exposed to tools/context).
+ */
+export interface TurnWriter {
+  write(part: unknown): void;
+  merge(stream: ReadableStream<unknown>): void;
+}
+
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 
@@ -117,7 +133,7 @@ export function createRuntime<RC = unknown>(
    * hand the stream to a client (handleChat) or drive it to completion
    * server-side (resume).
    */
-  function buildTurn(args: {
+  async function buildTurn(args: {
     resolvedChatId: string;
     principal: Principal;
     modelId: string;
@@ -162,27 +178,52 @@ export function createRuntime<RC = unknown>(
     let inputTokens = 0;
     let outputTokens = 0;
 
-    // Cast at the SDK generic boundary: our metadata/message types are looser
-    // than the fully-inferred AI SDK generics, but the runtime behaviour is
-    // exactly the stock stream helper (verified by the smoke tests).
-    return createAgentUIStreamResponse({
-      agent,
-      uiMessages,
-      originalMessages: uiMessages,
+    // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
+    // UI-stream `onStepEnd` — the SDK's per-step persistence hook — and a
+    // `writer` for custom data parts. Behaviour is otherwise identical.
+    const modelMessages = await convertToModelMessages(uiMessages, {
+      tools: cfg.tools,
+    } as never);
+    const result = await agent.stream({
+      prompt: modelMessages,
       abortSignal: dur.enabled ? abort.signal : undefined,
-      // Persistence mode: without this the response message id is empty, so
-      // every assistant turn upserts onto the same row. Give each a unique id.
-      generateMessageId,
-      messageMetadata: ({ part }: { part: { type: string } }) =>
-        part.type === "start"
-          ? { visibility: "user", model: modelId, createdAt: Date.now() }
-          : undefined,
+      // generate-text step callback: accumulate usage across steps.
       onStepEnd: (step: {
         usage?: { inputTokens?: number; outputTokens?: number };
       }) => {
         inputTokens += step.usage?.inputTokens ?? 0;
         outputTokens += step.usage?.outputTokens ?? 0;
       },
+    } as unknown as Parameters<typeof agent.stream>[0]);
+
+    const stream = createUIMessageStream({
+      originalMessages: uiMessages,
+      // Persistence mode: one stable assistant-message id per turn (else every
+      // turn would upsert onto the same row — see the dup-id regression test).
+      generateId: generateMessageId,
+      execute: ({ writer }: { writer: TurnWriter }) => {
+        // Fold the model's own output into the stream. The `writer` is also the
+        // seam for custom data parts (wired to tool context in a later step).
+        writer.merge(
+          toUIMessageStream({
+            stream: result.stream,
+            messageMetadata: ({ part }: { part: { type: string } }) =>
+              part.type === "start"
+                ? { visibility: "user", model: modelId, createdAt: Date.now() }
+                : undefined,
+          } as Parameters<typeof toUIMessageStream>[0]) as ReadableStream<unknown>,
+        );
+      },
+      // UI-stream per-step hook: checkpoint the in-progress assistant message
+      // (with any completed tool results) so a crash mid-turn doesn't repeat
+      // them on resume. Durable turns only — keeps T1 write counts unchanged.
+      onStepEnd: dur.enabled
+        ? ({ responseMessage }: { responseMessage: AppMessage }) => {
+            void storage
+              .appendMessages(resolvedChatId, [responseMessage])
+              .catch(() => {});
+          }
+        : undefined,
       onFinish: async ({
         messages,
         isAborted,
@@ -226,7 +267,9 @@ export function createRuntime<RC = unknown>(
         stopHeartbeat();
         return error instanceof Error ? error.message : "An error occurred.";
       },
-    } as Parameters<typeof createAgentUIStreamResponse>[0]);
+    } as Parameters<typeof createUIMessageStream>[0]);
+
+    return createUIMessageStreamResponse({ stream });
   }
 
   return {
