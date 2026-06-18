@@ -35,6 +35,7 @@ Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable sta
 - Streaming: **stock v7 helpers** (`createUIMessageStream`/`toUIMessageStream`/`createUIMessageStreamResponse`, `messageMetadata`, `generateMessageId`, `consumeStream`). Model projection in `prepareStep`.
 - Workspaces: **`WorkspaceProvider` (ours)** → AI SDK `experimental_sandbox` contract. Daytona first real impl (per-tenant creds), swappable.
 - MCP: **`@ai-sdk/mcp` `createMCPClient`** (HTTP/SSE/stdio, OAuth). Full session/notifications via official MCP SDK later.
+- Vault/Connections: **`SecretStore` seam + Connections registry + OAuth manager (ours)** — default envelope-encrypted in the customer's Postgres; swap to KMS/HashiCorp Vault/Doppler. Secrets brokered server-side, **never reach the model**. (Most clients lack this → we provide it.)
 - Memory: **`MemoryProvider` seam (ours)** — custom-tool-over-StorageAdapter default (+ optional pgvector); Anthropic memory tool / Mem0 / Letta / Supermemory adapters. Distinct from history/compaction/prompt-evolution.
 - Files: **`FileStore` seam (ours)**, S3-compatible default; references on `FileUIPart` (no base64 in DB).
 - Scheduling: **`Scheduler` seam (ours)**, DB schedules + tick endpoint default; BullMQ/Inngest/Temporal swap-in.
@@ -57,6 +58,7 @@ Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable sta
 — optional, pulled only if used —
 @intentface/latch-mcp          MCP manager.                       deps: @ai-sdk/mcp
 @intentface/latch-workspaces   WorkspaceProvider + daytona/local. deps: daytona sdk
+@intentface/latch-vault        SecretStore + Connections + OAuth manager. deps: crypto (+ optional KMS/Vault sdks)
 @intentface/latch-cli          init / add / dev codegen. bin: `latch`
 
 — future —
@@ -139,6 +141,15 @@ Inject user input into an in-flight run. Per-run **input queue** owned by `RunEx
 ### MCP
 `createMCPClient` per-tenant registry; OAuth `authProvider` + `validateAuthorizationServerURL` (SSRF guard); aggregate `.tools()` into agent; route elicitation to approval flow. AI SDK client is lightweight (no session/notifications) → upgrade specific connections to official MCP SDK later.
 
+### Vault / Connections — credentials seam (ours; most clients lack this)
+Secure per-tenant/per-user credential store + integration registry, so secrets never live in code, agent configs, logs, or model context. Borrows Claude Managed Agents' Vaults: **the agent declares which servers/tools; the session/`Principal` references the vault for auth** → secrets stay out of reusable configs.
+- **`SecretStore` seam:** default = **envelope-encrypted in the customer's Postgres** (env/KMS master key → per-tenant data keys → secrets); zero new infra. Swap: AWS Secrets Manager/KMS · GCP Secret Manager · HashiCorp Vault · Doppler · Infisical · env.
+- **Connections registry:** `{ scope (org/user), type: static_token|oauth|env_secret, server_url|name, credential_ref }`. MCP manager + tools resolve creds through these.
+- **OAuth flow manager** (clients won't build this): initiate → callback → store → **auto-refresh** → revoke; tokens encrypted in the Vault, scoped to `(org, user?, server)`. Connect-mid-run → the run **parks** (OAuth→park/resume).
+- **Injection, two levels:** default = server-side resolution into the MCP `authProvider` / `toolsContext` (model never sees it); hardened = **egress proxy / opaque placeholder** substituted at the network boundary (Claude-style) so the secret never enters the agent process — optional.
+- **Safety:** per-`Principal` scoping (no cross-tenant), encryption at rest, audit log, rotation, revocation, never in context/logs/telemetry, SSRF allowlist for MCP/auth servers.
+- Storage+lifecycle layer; `defineContext.toolsContext` / `SecretResolver` is the read-side. Package: `@intentface/latch-vault`.
+
 ### Memory — `MemoryProvider` seam (ours)
 Persistent recall **across** conversations/sessions — distinct from history (messages/log), compaction (within-convo, a ContextExtension), and self-evolving prompts (offline instruction tuning). Exposed to the agent as tools (add/search/recall), wired via context. Scope mirrors workspaces (`shared|org|user|agent`) resolved from RuntimeContext. AI SDK v7 offers three approaches; we wrap them behind one seam:
 - **Custom tool over our StorageAdapter** (default) — a scoped `memories` table; full control, no extra infra. Optional **pgvector** (Postgres) for semantic recall via AI SDK `embed` (a `VectorStore` sub-seam; default keyword, swap to vector/external).
@@ -161,6 +172,7 @@ Reconnect/observe = **stateless offset reads** over these tables → serverless-
 - `tool_results` — `(run_id, tool_call_id, output)` idempotency memo for T2 resume.
 - `stream_chunks` — transient batched segments for T2a resumable streaming (deleted on settle).
 - `run_events` — offset-addressed event log for deep observability/audit/replay + DS-protocol reactive stream. **Boundary events only, never tokens.**
+- `connections` + `vault_secrets` (envelope-encrypted) — the Vault/Connections layer (MCP/OAuth/tool creds), scoped per org/user.
 - `compactions`, `memories`, `schedules`, `mcp_servers`, `workspaces`, `api_keys` — with their features.
 
 Tenant isolation: app-level `org_id` scoping in StorageAdapter for v1 (Postgres RLS later). Framework owns `latch_*` tables + Drizzle migrations. **One `StorageAdapter` contract** (no SQL-only tier; Mongo first-class), schema-versioned.
@@ -220,7 +232,7 @@ Result: adopting `WorkflowAgent` = add an executor impl + the build transform fo
 5. Files/attachments (`FileStore` S3 + presigned upload). `FileUIPart` projections.
 6. T2 durability (our session-replay: lease/heartbeat/cron reaper/idempotency) + HITL approvals; T2a resumable streams (externalized chunk buffer).
 7. Scheduled/triggered runs (`Scheduler` seam + DB schedules + tick endpoint).
-8. `latch-mcp` (HTTP/OAuth).
+8. `latch-vault` (SecretStore: encrypted-Postgres default + Connections + OAuth manager) → `latch-mcp` (HTTP/OAuth; creds resolved via Vault, brokered server-side).
 9. Memory (`MemoryProvider`: custom-tool default + optional pgvector; Anthropic-memory-tool adapter). `latch-workspaces` (local → Daytona).
 10. Observability (OTel + event sink). `latch-cli` (`init`/`add`/`dev`) + `apps/docs` (MDX + TypeDoc) throughout.
 
