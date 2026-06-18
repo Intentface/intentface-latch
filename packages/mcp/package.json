@@ -1,0 +1,36 @@
+{
+  "name": "@intentface/latch-mcp",
+  "version": "0.0.0",
+  "description": "Latch MCP host — connect to MCP servers as tools, with a per-tenant SSRF allowlist and vault-brokered auth.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@intentface/latch-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@ai-sdk/mcp": ">=2.0.0-beta.66",
+    "ai": ">=7.0.0-beta.178"
+  },
+  "devDependencies": {
+    "@ai-sdk/mcp": "2.0.0-beta.66",
+    "ai": "7.0.0-beta.178",
+    "typescript": "^5.7.0"
+  }
+}

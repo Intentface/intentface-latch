@@ -13,6 +13,7 @@
     "smoke:checkpoint": "tsx --conditions development src/checkpoint.smoke.ts",
     "smoke:scheduler": "tsx --conditions development src/scheduler.smoke.ts",
     "smoke:vault": "tsx --conditions development src/vault.smoke.ts",
+    "smoke:mcp": "tsx --conditions development src/mcp.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "@hono/node-server": "^2.0.5",
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
+    "@intentface/latch-mcp": "workspace:*",
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
     "ai": "7.0.0-beta.178",
