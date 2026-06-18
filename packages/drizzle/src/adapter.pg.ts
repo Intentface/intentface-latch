@@ -65,7 +65,7 @@ export function createPostgresAdapter(
     async createChat(input) {
       const now = Date.now();
       const row = {
-        id: newId("chat"),
+        id: input.id ?? newId("chat"),
         orgId: input.orgId,
         userId: input.userId ?? null,
         agent: input.agent,

@@ -5,13 +5,16 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "tsx src/runtime.smoke.ts"
+    "smoke": "tsx src/runtime.smoke.ts",
+    "smoke:server": "tsx src/server.smoke.ts"
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
+    "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
-    "ai": "7.0.0-beta.178"
+    "ai": "7.0.0-beta.178",
+    "hono": "^4.6.0"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

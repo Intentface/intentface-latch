@@ -56,6 +56,8 @@ export interface UsageRecord {
 export interface StorageAdapter {
   // chats
   createChat(input: {
+    /** Optional explicit id (e.g. a tenant-namespaced client key); generated if omitted. */
+    id?: string;
     orgId: string;
     userId?: string;
     agent: string;

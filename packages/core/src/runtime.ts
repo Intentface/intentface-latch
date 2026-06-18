@@ -57,6 +57,7 @@ export function createRuntime<RC = unknown>(
       let chat = chatId ? await storage.getChat(scope, chatId) : null;
       if (!chat) {
         chat = await storage.createChat({
+          id: chatId, // use the provided id (create-or-continue); generated if omitted
           orgId: principal.orgId,
           userId: principal.userId,
           agent: agentName,

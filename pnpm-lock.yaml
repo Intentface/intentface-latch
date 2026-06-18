@@ -23,12 +23,18 @@ importers:
       '@intentface/latch-drizzle':
         specifier: workspace:*
         version: link:../../packages/drizzle
+      '@intentface/latch-server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@libsql/client':
         specifier: ^0.15.0
         version: 0.15.15
       ai:
         specifier: 7.0.0-beta.178
         version: 7.0.0-beta.178(zod@4.4.3)
+      hono:
+        specifier: ^4.6.0
+        version: 4.12.26
     devDependencies:
       tsx:
         specifier: ^4.19.0
@@ -71,6 +77,22 @@ importers:
       tsx:
         specifier: ^4.19.0
         version: 4.22.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  packages/server:
+    dependencies:
+      '@intentface/latch-core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      ai:
+        specifier: 7.0.0-beta.178
+        version: 7.0.0-beta.178(zod@4.4.3)
+      hono:
+        specifier: ^4.6.0
+        version: 4.12.26
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -490,6 +512,10 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
+  hono@4.12.26:
+    resolution: {integrity: sha512-uyZtpnYxM9CmQ7QsQknM4zN8EftNqhON1qYeIKM0Se67CCEe2c44xyGURwB0axX2fBDu1dqHrHAc1hmNT8ITkw==}
+    engines: {node: '>=16.9.0'}
+
   js-base64@3.7.8:
     resolution: {integrity: sha512-hNngCeKxIUQiEUN3GPJOkz4wF/YvdUdbNL9hsBcMQTkKzboD7T/q3OYOuuPZLUE6dBxSGpwhk5mwuDud7JVAow==}
 
@@ -804,6 +830,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  hono@4.12.26: {}
 
   js-base64@3.7.8: {}
 
