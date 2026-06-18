@@ -60,7 +60,7 @@ async function main() {
   let missingThrew = false;
   try {
     await buildAuthHeaders(
-      { name: "x", url: "https://x/mcp", auth: { type: "bearer", vaultKey: "nope" } },
+      { name: "x", auth: { type: "bearer", vaultKey: "nope" } },
       orgA,
       vault.resolver,
     );

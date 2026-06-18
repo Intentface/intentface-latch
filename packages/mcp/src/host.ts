@@ -1,4 +1,4 @@
-import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
+import { createMCPClient, type MCPClient, type MCPTransport } from "@ai-sdk/mcp";
 import type { Scope, SecretResolver } from "@intentface/latch-core";
 
 /**
@@ -16,14 +16,25 @@ export type McpAuth =
   | { type: "bearer"; vaultKey: string }
   | { type: "headers"; headers: Record<string, string> };
 
-export interface McpConnection {
-  /** Namespacing prefix for this server's tools (e.g. `linear` → `linear_*`). */
-  name: string;
-  /** MCP server URL (HTTP transport). */
-  url: string;
-  /** How to authenticate. Bearer tokens come from the Vault, per tenant. */
-  auth?: McpAuth;
-}
+/**
+ * A connection is either a URL (untrusted/config-driven → SSRF allowlist + auth
+ * applies) or a developer-provided transport instance (trusted in-process; e.g.
+ * stdio or an in-memory transport — no allowlist, it carries its own auth).
+ */
+export type McpConnection =
+  | {
+      /** Namespacing prefix for this server's tools (e.g. `linear` → `linear_*`). */
+      name: string;
+      /** MCP server URL (HTTP transport). */
+      url: string;
+      /** How to authenticate. Bearer tokens come from the Vault, per tenant. */
+      auth?: McpAuth;
+    }
+  | {
+      name: string;
+      /** A prebuilt transport (stdio/in-memory/custom). Used as-is. */
+      transport: MCPTransport;
+    };
 
 export interface McpHostConfig {
   connections: McpConnection[];
@@ -64,7 +75,7 @@ export function isHostAllowed(host: string, allowed: string[]): boolean {
  * logged or persisted by the host.
  */
 export async function buildAuthHeaders(
-  conn: McpConnection,
+  conn: { name: string; auth?: McpAuth },
   scope: Scope,
   secrets?: SecretResolver,
 ): Promise<Record<string, string>> {
@@ -102,23 +113,30 @@ export function createMcpHost(config: McpHostConfig): McpHost {
 
       try {
         for (const conn of config.connections) {
-          // SSRF guard: refuse to connect to a host this tenant isn't allowed.
-          const host = new URL(conn.url).hostname;
-          if (!isHostAllowed(host, allowed)) {
-            throw new Error(
-              `MCP host not allowed for this tenant: ${host} (connection "${conn.name}")`,
-            );
+          let client: MCPClient;
+          if ("transport" in conn) {
+            // Developer-provided transport (in-process; trusted): use as-is.
+            client = await createMCPClient({
+              transport: conn.transport,
+            } as Parameters<typeof createMCPClient>[0]);
+          } else {
+            // SSRF guard: refuse to connect to a host this tenant isn't allowed.
+            const host = new URL(conn.url).hostname;
+            if (!isHostAllowed(host, allowed)) {
+              throw new Error(
+                `MCP host not allowed for this tenant: ${host} (connection "${conn.name}")`,
+              );
+            }
+            const headers = await buildAuthHeaders(conn, scope, config.secrets);
+            client = await createMCPClient({
+              transport: {
+                type: "http",
+                url: conn.url,
+                headers,
+                redirect: "error", // no redirect-based SSRF
+              },
+            } as Parameters<typeof createMCPClient>[0]);
           }
-
-          const headers = await buildAuthHeaders(conn, scope, config.secrets);
-          const client = await createMCPClient({
-            transport: {
-              type: "http",
-              url: conn.url,
-              headers,
-              redirect: "error", // no redirect-based SSRF
-            },
-          } as Parameters<typeof createMCPClient>[0]);
           clients.push(client);
 
           const serverTools = await client.tools();

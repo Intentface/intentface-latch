@@ -14,6 +14,7 @@
     "smoke:scheduler": "tsx --conditions development src/scheduler.smoke.ts",
     "smoke:vault": "tsx --conditions development src/vault.smoke.ts",
     "smoke:mcp": "tsx --conditions development src/mcp.smoke.ts",
+    "smoke:mcp-integration": "tsx --conditions development src/mcp.integration.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
@@ -30,6 +31,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.9.3",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

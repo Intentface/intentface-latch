@@ -9,7 +9,7 @@ import {
 import type { AppMessage } from "./message.js";
 import { type Principal, scopeOf } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
-import type { AgentConfig, AgentFactory } from "./agent.js";
+import type { AgentConfig, AgentFactory, OpenToolSet } from "./agent.js";
 import type {
   RunLease,
   RunRecord,
@@ -186,10 +186,29 @@ export function createRuntime<RC = unknown>(
       (heartbeat as { unref?: () => void }).unref?.();
     }
 
+    // Open dynamic tool sources (e.g. MCP) for this tenant, then merge their
+    // tools with the static ones. They're closed when the turn ends. If opening
+    // one fails, close any already opened so we don't leak connections.
+    const opened: OpenToolSet[] = [];
+    try {
+      for (const source of cfg.toolSources ?? []) {
+        opened.push(await source.open(scopeOf(principal)));
+      }
+    } catch (error) {
+      await Promise.all(opened.map((o) => o.close().catch(() => {})));
+      stopHeartbeat();
+      throw error;
+    }
+    const closeSources = () =>
+      Promise.all(opened.map((o) => o.close().catch(() => {}))).then(
+        () => undefined,
+      );
+    const tools = Object.assign({}, cfg.tools, ...opened.map((o) => o.tools));
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
       instructions: cfg.instructions,
-      tools: cfg.tools,
+      tools,
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
@@ -199,7 +218,7 @@ export function createRuntime<RC = unknown>(
     // UI-stream `onStepEnd` — the SDK's per-step persistence hook — and a
     // `writer` for custom data parts. Behaviour is otherwise identical.
     const modelMessages = await convertToModelMessages(uiMessages, {
-      tools: cfg.tools,
+      tools,
     } as never);
     const result = await agent.stream({
       prompt: modelMessages,
@@ -249,6 +268,7 @@ export function createRuntime<RC = unknown>(
         isAborted?: boolean;
       }) => {
         stopHeartbeat();
+        await closeSources();
         await storage.appendMessages(resolvedChatId, messages);
         // Aborted (lease lost / client gone): don't claim completion. The
         // guarded update no-ops if the run was already reaped+reassigned.
@@ -282,6 +302,7 @@ export function createRuntime<RC = unknown>(
       },
       onError: (error: unknown) => {
         stopHeartbeat();
+        void closeSources();
         return error instanceof Error ? error.message : "An error occurred.";
       },
     } as Parameters<typeof createUIMessageStream>[0]);

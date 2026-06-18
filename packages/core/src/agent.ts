@@ -1,5 +1,5 @@
 import type { LanguageModel } from "ai";
-import type { Principal } from "./principal.js";
+import type { Principal, Scope } from "./principal.js";
 
 /**
  * Agent definitions.
@@ -15,10 +15,29 @@ import type { Principal } from "./principal.js";
  * `tools` is kept loose (`ToolSet` is not a public AI SDK export); the concrete
  * engine constrains it at the call site when the run executes.
  */
+/** A set of tools opened for a turn, plus the teardown to run when it ends. */
+export interface OpenToolSet {
+  tools: Record<string, unknown>;
+  close(): Promise<void>;
+}
+
+/**
+ * A dynamic, per-turn tool provider (e.g. an MCP host). The runtime calls
+ * `open(scope)` before the turn, merges the tools, and calls `close()` after —
+ * so connections are scoped to the tenant and torn down when the turn ends.
+ * `@intentface/latch-mcp`'s `McpHost` satisfies this structurally.
+ */
+export interface ToolSource {
+  open(scope: Scope): Promise<OpenToolSet>;
+}
+
 export interface AgentConfig {
   model: LanguageModel;
   instructions?: string;
+  /** Static tools, available every turn. */
   tools?: Record<string, unknown>;
+  /** Dynamic tool sources opened per turn and closed after (e.g. MCP). */
+  toolSources?: ToolSource[];
 }
 
 /** A factory that produces the agent's config for a given request/context. */
