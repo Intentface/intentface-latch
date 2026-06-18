@@ -38,8 +38,11 @@ importers:
         version: 0.15.15
       drizzle-orm:
         specifier: ^0.38.0
-        version: 0.38.4(@libsql/client@0.15.15)
+        version: 0.38.4(@electric-sql/pglite@0.2.17)(@libsql/client@0.15.15)
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.2.0
+        version: 0.2.17
       ai:
         specifier: 7.0.0-beta.178
         version: 7.0.0-beta.178(zod@4.4.3)
@@ -67,6 +70,9 @@ packages:
   '@ai-sdk/provider@4.0.0-beta.19':
     resolution: {integrity: sha512-Aca/KiGeRtMM7rOJ38Qio+Dc2V45PpiGoWgdrdtIkgM9zkhYpS043t0ggKoNOWgm/csv99XWGrfSF63PSkVeHw==}
     engines: {node: '>=22'}
+
+  '@electric-sql/pglite@0.2.17':
+    resolution: {integrity: sha512-qEpKRT2oUaWDH6tjRxLHjdzMqRUGYDnGZlKrnL4dJ77JVMcP2Hpo3NYnOSPKdZdeec57B6QPprCUFg0picx5Pw==}
 
   '@esbuild/aix-ppc64@0.28.1':
     resolution: {integrity: sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==}
@@ -542,6 +548,8 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
+  '@electric-sql/pglite@0.2.17': {}
+
   '@esbuild/aix-ppc64@0.28.1':
     optional: true
 
@@ -727,8 +735,9 @@ snapshots:
 
   detect-libc@2.0.2: {}
 
-  drizzle-orm@0.38.4(@libsql/client@0.15.15):
+  drizzle-orm@0.38.4(@electric-sql/pglite@0.2.17)(@libsql/client@0.15.15):
     optionalDependencies:
+      '@electric-sql/pglite': 0.2.17
       '@libsql/client': 0.15.15
 
   esbuild@0.28.1:

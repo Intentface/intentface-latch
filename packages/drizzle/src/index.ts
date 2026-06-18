@@ -7,3 +7,8 @@
 export { createSqliteAdapter } from "./adapter.js";
 export { migrate } from "./migrate.js";
 export * as schema from "./schema.js";
+
+// Postgres dialect (node-postgres / postgres-js in prod, PGlite for tests).
+export { createPostgresAdapter } from "./adapter.pg.js";
+export { migratePostgres } from "./migrate.pg.js";
+export * as pgSchema from "./schema.pg.js";
