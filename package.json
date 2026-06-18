@@ -1,0 +1,13 @@
+{
+  "name": "latch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "turbo run typecheck",
+    "build": "turbo run build"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0"
+  }
+}
