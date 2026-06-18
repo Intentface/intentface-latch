@@ -7,6 +7,7 @@ import {
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
 import { model } from "./models.js";
+import { tools } from "./tools.js";
 
 /**
  * A real-model runtime — same wiring as `setup.ts`, but the agent's `model` is
@@ -25,7 +26,10 @@ export async function makeLiveRuntime(): Promise<Runtime> {
   const agents = {
     assistant: defineAgent<{ orgId: string }>(() => ({
       model: model("latch:default"), // swap to "latch:smart" / "latch:openai" anytime
-      instructions: "You are a concise, friendly assistant.",
+      instructions:
+        "You are a concise, friendly assistant. Use tools when they help; " +
+        "for the current time, always call getCurrentTime rather than guessing.",
+      tools,
     })),
   };
 

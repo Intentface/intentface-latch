@@ -7,6 +7,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "tsx --conditions development src/runtime.smoke.ts",
     "smoke:server": "tsx --conditions development src/server.smoke.ts",
+    "smoke:tools": "tsx --conditions development src/tools.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
@@ -18,7 +19,8 @@
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
     "ai": "7.0.0-beta.178",
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.9.3",
