@@ -1,0 +1,37 @@
+{
+  "name": "@intentface/latch-drizzle",
+  "version": "0.0.0",
+  "description": "Latch StorageAdapter on Drizzle (SQLite/libsql first, Postgres next).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "tsx src/smoke.ts"
+  },
+  "dependencies": {
+    "@intentface/latch-core": "workspace:*",
+    "@libsql/client": "^0.15.0",
+    "drizzle-orm": "^0.38.0"
+  },
+  "peerDependencies": {
+    "ai": ">=7.0.0-beta.178"
+  },
+  "devDependencies": {
+    "ai": "7.0.0-beta.178",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
