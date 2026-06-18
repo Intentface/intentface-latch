@@ -1,5 +1,10 @@
 import { Hono } from "hono";
-import type { AppMessage, Principal, Runtime } from "@intentface/latch-core";
+import type {
+  ApprovalDecision,
+  AppMessage,
+  Principal,
+  Runtime,
+} from "@intentface/latch-core";
 
 /**
  * A mountable Hono app exposing the runtime over HTTP.
@@ -34,6 +39,23 @@ export function createLatchHono(config: LatchServerConfig): Hono {
       chatId,
       principal,
       message,
+      request: c.req.raw,
+    });
+  });
+
+  // HITL: submit tool-approval decisions and continue the turn (streams the
+  // continuation, same as a chat turn). Body: `{ decisions: [{approvalId, approved, reason?}] }`.
+  app.post("/agents/:agent/:id/approvals", async (c) => {
+    const principal = await config.resolveContext(c.req.raw);
+    const chatId = `${principal.orgId}:${c.req.param("id")}`;
+    const body = (await c.req.json().catch(() => ({}))) as {
+      decisions?: ApprovalDecision[];
+    };
+    const decisions = Array.isArray(body.decisions) ? body.decisions : [];
+    return config.runtime.applyApproval({
+      chatId,
+      principal,
+      decisions,
       request: c.req.raw,
     });
   });

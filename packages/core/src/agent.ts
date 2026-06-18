@@ -38,6 +38,14 @@ export interface AgentConfig {
   tools?: Record<string, unknown>;
   /** Dynamic tool sources opened per turn and closed after (e.g. MCP). */
   toolSources?: ToolSource[];
+  /**
+   * HITL approval policy (the SDK's `toolApproval`): per-tool `'user-approval'`,
+   * an object with a reason, or a function. A gated call ends the turn with an
+   * `approval-requested` part instead of executing; the decision round-trips as
+   * message state via `runtime.applyApproval`. Kept loose (the SDK type is
+   * complex); cast at the agent boundary.
+   */
+  toolApproval?: unknown;
 }
 
 /** A factory that produces the agent's config for a given request/context. */

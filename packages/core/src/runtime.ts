@@ -92,6 +92,26 @@ export interface Runtime {
     maxAttempts?: number;
     error?: string;
   }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }>;
+  /**
+   * Apply HITL tool-approval decisions and continue the turn. Records each
+   * decision onto the persisted assistant message (approval-requested →
+   * approval-responded), then re-runs the agent from history: approved tools
+   * execute, denied ones are skipped. Returns the continuation's streaming
+   * Response. No suspension machinery — approvals round-trip as message state.
+   */
+  applyApproval(input: {
+    chatId: string;
+    principal: Principal;
+    decisions: ApprovalDecision[];
+    request?: Request;
+  }): Promise<Response>;
+}
+
+/** A user's decision on one pending tool-approval request. */
+export interface ApprovalDecision {
+  approvalId: string;
+  approved: boolean;
+  reason?: string;
 }
 
 /** The terminal state of a resumed run. */
@@ -114,6 +134,50 @@ export interface TurnWriter {
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
+
+/** A tool/dynamic-tool UI part, narrowed to the approval fields we touch. */
+type ApprovalPart = {
+  type: string;
+  state?: string;
+  approval?: { id: string; approved?: boolean; reason?: string };
+};
+
+/** True if any message has a tool part still awaiting an approval decision. */
+function hasPendingApproval(messages: AppMessage[]): boolean {
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+      if (p.state === "approval-requested" && p.approval?.approved === undefined) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Record decisions onto matching `approval-requested` parts (→ `approval-responded`).
+ * Mutates in place and returns the messages that changed (to re-persist).
+ */
+function applyDecisions(
+  messages: AppMessage[],
+  decisions: ApprovalDecision[],
+): AppMessage[] {
+  const byId = new Map(decisions.map((d) => [d.approvalId, d]));
+  const changed: AppMessage[] = [];
+  for (const m of messages) {
+    let touched = false;
+    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+      if (p.state === "approval-requested" && p.approval && byId.has(p.approval.id)) {
+        const d = byId.get(p.approval.id)!;
+        p.state = "approval-responded";
+        p.approval = { ...p.approval, approved: d.approved, reason: d.reason };
+        touched = true;
+      }
+    }
+    if (touched) changed.push(m);
+  }
+  return changed;
+}
 
 export function createRuntime<RC = unknown>(
   config: RuntimeConfig<RC>,
@@ -209,6 +273,7 @@ export function createRuntime<RC = unknown>(
       model: cfg.model,
       instructions: cfg.instructions,
       tools,
+      toolApproval: cfg.toolApproval,
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
@@ -280,13 +345,16 @@ export function createRuntime<RC = unknown>(
           );
           return;
         }
+        // A gated tool ended the turn awaiting a decision — pause, don't
+        // complete. The decision arrives via applyApproval (message state).
+        const paused = hasPendingApproval(messages);
         await storage.updateRun(
           run.id,
           {
-            status: "completed",
+            status: paused ? "awaiting_input" : "completed",
             usageInputTokens: inputTokens,
             usageOutputTokens: outputTokens,
-            endedAt: Date.now(),
+            endedAt: paused ? undefined : Date.now(),
           },
           lease,
         );
@@ -317,6 +385,23 @@ export function createRuntime<RC = unknown>(
     return { reaped };
   }
 
+  /** Open a run for a turn: durable → leased claim; T1 → an unleased run. */
+  async function openRun(
+    chatId: string,
+    agentName: string,
+  ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
+    if (dur.enabled) {
+      const run = await storage.claimRun({
+        chatId,
+        agent: agentName,
+        owner: dur.instanceId,
+        ttlMs: dur.leaseTtlMs,
+      });
+      return { run, lease: { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } };
+    }
+    return { run: await storage.createRun({ chatId, agent: agentName }), lease: undefined };
+  }
+
   async function handleChat({
     agent: agentName,
     chatId,
@@ -344,29 +429,11 @@ export function createRuntime<RC = unknown>(
         request,
       );
 
-      const prior = await storage.loadMessages(scope, resolvedChatId);
+    const prior = await storage.loadMessages(scope, resolvedChatId);
 
-      // persist the user message up front (crash-safe), then open the run
-      await storage.appendMessages(resolvedChatId, [message]);
-
-      // T2: claim a single-writer lease; T1: an unleased run. `lease` (when set)
-      // fences our writes so a reaped/reassigned run can't be clobbered by us.
-      let run: RunRecord;
-      let lease: RunLease | undefined;
-      if (dur.enabled) {
-        run = await storage.claimRun({
-          chatId: resolvedChatId,
-          agent: agentName,
-          owner: dur.instanceId,
-          ttlMs: dur.leaseTtlMs,
-        });
-        lease = { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 };
-      } else {
-        run = await storage.createRun({
-          chatId: resolvedChatId,
-          agent: agentName,
-        });
-      }
+    // persist the user message up front (crash-safe), then open the run
+    await storage.appendMessages(resolvedChatId, [message]);
+    const { run, lease } = await openRun(resolvedChatId, agentName);
 
     return buildTurn({
       resolvedChatId,
@@ -439,5 +506,46 @@ export function createRuntime<RC = unknown>(
     return { reaped, resumed };
   }
 
-  return { tick: reapTick, handleChat, resume: resumeRun, sweep };
+  async function applyApproval({
+    chatId,
+    principal,
+    decisions,
+    request,
+  }: {
+    chatId: string;
+    principal: Principal;
+    decisions: ApprovalDecision[];
+    request?: Request;
+  }): Promise<Response> {
+    const scope = scopeOf(principal);
+    const chat = await storage.getChat(scope, chatId);
+    if (!chat) throw new Error(`Unknown chat: ${chatId}`);
+
+    // Merge the decisions onto the persisted assistant message, then re-persist
+    // only what changed. The agent continues from this updated history.
+    const messages = await storage.loadMessages(scope, chatId);
+    const changed = applyDecisions(messages, decisions);
+    if (changed.length > 0) await storage.appendMessages(chatId, changed);
+
+    const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request);
+    const { run, lease } = await openRun(chatId, chat.agent);
+
+    return buildTurn({
+      resolvedChatId: chatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: messages,
+    });
+  }
+
+  return {
+    tick: reapTick,
+    handleChat,
+    resume: resumeRun,
+    sweep,
+    applyApproval,
+  };
 }
