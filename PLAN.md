@@ -85,6 +85,24 @@ Scoped packages publish public via `"publishConfig": { "access": "public" }`. CL
 
 ## Core concepts
 
+### Runtime — composition root + operations facade (ours)
+`createRuntime(config)` is `latch-core`'s **front door**: build it once from the chosen seams; it resolves *which parts to use* and exposes the framework's operations. Routes, cron, CLI, and tests all call the **runtime**, never the seams directly.
+```ts
+const runtime = createRuntime({
+  storage, models, context, agents,
+  durability: inline() | sessionReplay() | workflow(),   // ← the tier/executor
+  scheduler, stream, files?, memory?, workspaces?, mcp?,
+})
+runtime.handleChat(req)            // run a turn → stream UIMessages → persist
+runtime.driveRun(runId)            // execute/resume a run (reaper + dispatch use this)
+runtime.tick()                     // dispatch due schedules + reap interrupted runs
+runtime.resumeStream(runId, off)   // reconnect by offset
+```
+- **Tiers = runtime assemblies.** T0 = `{ models, agents }`; T1 = `+ storage`; T2 = `+ durability: sessionReplay()`. "Right parts for this" = what you passed; it routes to the inline / session-replay / workflow executor per config (or per-agent `durable` flag).
+- **Facade, not a god object** — it *holds* the seams and exposes operations, delegating logic to them; the seams stay separate, testable units.
+- **Stateless / re-creatable** — holds adapter instances (DB pool, etc.) but **no per-run state** (that lives in the DB) → reconstructed per cold-start; serverless-friendly.
+- `latch-server` wraps it in Hono routes; the cron endpoint = `runtime.tick()`; CLI/tests build their own. (Proven shape: Eve's "runtime", Flue's `@flue/runtime`.)
+
 ### Agents — file-based + lazy factory (ours)
 `agents/support.ts` default-exports `defineAgent((c) => config)`; filename = id. Factory resolved **per request** with `c.runtime` (typed) + workspace injected. DB-driven configs = optional later source. Serverless: **build-time manifest** (codegen) since no runtime fs.
 
