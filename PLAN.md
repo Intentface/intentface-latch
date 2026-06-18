@@ -11,15 +11,14 @@ Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable sta
 
 | Reuse (don't rebuild) | For |
 |---|---|
-| `ai@7` (`ToolLoopAgent`) | agent loop, streaming, UIMessage |
-| `@workflow/core` (5.0-beta, Apache-2.0) | durable execution: resume-after-crash, parked/HITL, steps |
-| `@workflow/world` interface | pluggable storage/queue/streaming seam |
+| `ai@7` (`ToolLoopAgent`) | the agent loop (**all tiers**), streaming, UIMessage |
 | `@ai-sdk/sandbox-*` | sandboxes |
 | `@ai-sdk/mcp` | MCP |
 | `chat` (4.x) | channels (Slack/Discord/etc.) when needed |
 | **zod v4** | schemas (AI SDK v7 + ecosystem are on zod 4, not 3) |
+| `@ai-sdk/workflow` (`WorkflowAgent`) — **opt-in heavy tier only** | hardened durable execution when a client needs strict exactly-once **and** can run a worker; **not the default** |
 
-**Build (our IP):** multi-agent registry · multi-tenant `defineContext` · tenant-aware scheduling fan-out · a **Postgres/Drizzle `@workflow/world`** (durability + system-of-record in the *client's* DB) · embed-into-any-backend.
+**Build (our IP):** multi-agent registry · multi-tenant `defineContext` · tenant-aware scheduling fan-out · **our own lean session-replay durability** (lease+heartbeat+reaper+idempotency, plain TS + the *client's* Postgres) · embed-into-any-backend.
 
 **When to use Eve instead of Latch:** greenfield, standalone, single-agent app (esp. Next.js/Vercel). **Use Latch when:** embed into an existing app · multi-tenant · multi-agent · data must live in the client's own DB. (Whole stack is pre-1.0 beta either way — unavoidable on `ai@7`/`@workflow@5`.)
 
@@ -28,7 +27,7 @@ Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable sta
 - Core **platform-agnostic**; Node + Vercel entrypoints now, Cloudflare later. HTTP via **Hono** (web-standard → embeds anywhere).
 - Agent primitive: **`ToolLoopAgent`**. Tenancy/workspace isolation via **`runtimeContext` + `toolsContext` + per-tool `contextSchema`**.
 - Persistence: **Drizzle** (Postgres + SQLite now; mysql/mssql via dialect, mongo via separate adapter later).
-- Durability: **append-only event log = recoverable spine**, projections on top. **Pluggable** (3 seams). All-DB + inline default = zero infra.
+- Durability: **tiered, default is ours** — T1 = run-to-completion + persist (no machinery); T2 = **our own session-replay** (lease+heartbeat+reaper+idempotency, plain TS+Postgres); `WorkflowAgent`/`@workflow/world-postgres` only as an opt-in **hardened-exactly-once** path behind the seam. Serverless via **stateless offset reads + cron reaper** (DB is the coordination point — no instance affinity).
 - Auth: **bring-your-own** — `Principal` + `ContextResolver` seam **(ours)**. Adapters: apiKey, jwt/OIDC, betterAuth, passthrough.
 - Models: **own `createProviderRegistry` + `customProvider` aliases**; **models.dev** for catalog/pricing.
 - Messages: **`AppMessage`** = typed `UIMessage` **(ours)**, two axes (`visibility`, `sendToModel`); two projections.
@@ -48,12 +47,12 @@ Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable sta
 @intentface/latch-core         whole framework. deps: ai, zod (light).
     = runtime (defineAgent/defineContext), AppMessage + projections,
       ContextExtension registry + compaction, run orchestration,
-      durability SEAMS + inline/DB defaults, StorageAdapter iface,
+      session-replay durability (lease/heartbeat/reaper) behind a seam, StorageAdapter iface,
       model registry + aliases, usage/cost calc, rate-limit iface,
       observability hooks, Principal/auth seam, web-standard HTTP handlers.
 
 @intentface/latch-server       Hono app + auth adapters + Express bridge.   deps: hono
-@intentface/latch-drizzle      StorageAdapter + EventStore + schema + migrations (pg/sqlite). deps: drizzle
+@intentface/latch-drizzle      StorageAdapter (chats/messages/runs/usage) + migrations (pg/sqlite). deps: drizzle
 
 — optional, pulled only if used —
 @intentface/latch-mcp          MCP manager.                       deps: @ai-sdk/mcp
@@ -73,10 +72,11 @@ Minimal install = **core + drizzle** (+ server if standalone). Everything else o
 | Tier | Install | Infra | Get |
 |---|---|---|---|
 | 0 Stateless | core | none | defineAgent + context + tools + stock v7 streaming. ~AI SDK with ergonomics. Any serverless backend. |
-| 1 Persistence | + drizzle + Postgres | a DB | AppMessage persistence, token + cost tracking, history, file attachments, schedules. |
-| 2 Durability | + executor/transport (Redis/Inngest/Durable Streams) | a bit more | resume after death, human-resume, long-running/background/scheduled runs, HITL approvals. |
+| 1 Persistence (default) | + drizzle + Postgres | a DB | run-to-completion in one invocation + persist messages. Conversation, token/cost, history. **No durability machinery.** |
+| 2 Durability | + cron reaper (our session-replay) | the DB + a cron | resume-after-crash / long-running / background via lease+heartbeat+reaper+idempotency, plain TS+Postgres. (Strict exactly-once → `WorkflowAgent`+worker behind the seam.) |
+| 2a Resumable streams | + chunk buffer (Postgres or Redis) | optional | reconnect/replay token stream across tabs/devices via externalized **offset** buffer (not in-memory/affinity). |
 
-No migrations because 0→1 has no prior data, and 1→2 (resume) is forward-looking: just start writing `run_events`; old chats simply aren't resumable. MCP / workspaces / rate-limiting / scheduling are independent opt-ins at any tier ≥ their needs.
+No migrations because 0→1 has no prior data, and 1→2 (resume) is forward-looking: just start tracking run leases; old chats simply aren't resumable. MCP / workspaces / rate-limiting / scheduling are independent opt-ins at any tier ≥ their needs.
 Scoped packages publish public via `"publishConfig": { "access": "public" }`. CLI bin = `latch`.
 
 `agents/` is the **customer's** code (file-based `defineAgent`), not our package.
@@ -131,52 +131,68 @@ Persistence tier. Complements self-evolving agents (both read history; memory = 
 ---
 
 ## Data model (DB, prefixed `latch_*`)
-- `chats` — thread (orgId, userId, agent, title)
-- `messages` — `AppMessage` rows: `(id, chat_id, run_id, seq, role, parts jsonb, metadata jsonb, created_at)` — materialized conversation
-- `runs` — `(id, chat_id, agent, status: active|awaiting_input|completed|errored, usage, error)` — projection
-- `run_events` — `(run_id, offset, type, payload, ts)` — **projection of the `@workflow` event stream** (query/observability/replay); durability itself lives in the World
-- `compactions` — `(chat_id, at_offset, first_kept_offset, summary, tokens_before, details)` — fast model-projection read
-- `usage` / `cost` — tokens + $ per run/step × models.dev pricing
-- `memories` — scoped recall `(id, scope, scope_id, key, content, embedding?, created_at)` — optional pgvector
-- `mcp_servers`, `workspaces` (handle), `api_keys` (standalone only)
+**v1 (LOCKED) — four tables; `messages` is the source of truth:**
+- `chats` — thread `(id, org_id, user_id, agent, title, created_at, updated_at)`
+- `messages` — **`AppMessage` rows = the durable conversation AND the source of truth.** `(id, chat_id, run_id, seq, role, parts jsonb, metadata jsonb, created_at)`. Content in `parts`; **usage/cost/model/finishReason in `metadata`**. Persisted incrementally per step. **No separate steps table; no token deltas stored** (deltas stream live, never persisted).
+- `runs` — per-turn execution record `(id, chat_id, agent, status: active|awaiting_input|completed|errored, lease_owner, lease_expires_at, usage_totals, error, started_at, ended_at)`. Status + resume anchor + home for background/scheduled runs.
+- `usage` — billing/quota ledger `(id, org_id, user_id?, run_id, model, input_tokens, output_tokens, cost, created_at)`. Fast aggregation (also derivable from message metadata).
 
-Tenant isolation: app-level `orgId` scoping in StorageAdapter for v1 (Postgres RLS later). Framework owns `latch_*` tables + ships Drizzle migrations.
+Reconnect/observe = **stateless offset reads** over these tables → serverless-native, **no instance affinity** (the DB is the coordination point).
+
+**Deferred / opt-in (add with their feature — forward-only, no migration):**
+- `tool_results` — `(run_id, tool_call_id, output)` idempotency memo for T2 resume.
+- `stream_chunks` — transient batched segments for T2a resumable streaming (deleted on settle).
+- `run_events` — offset-addressed event log for deep observability/audit/replay + DS-protocol reactive stream. **Boundary events only, never tokens.**
+- `compactions`, `memories`, `schedules`, `mcp_servers`, `workspaces`, `api_keys` — with their features.
+
+Tenant isolation: app-level `org_id` scoping in StorageAdapter for v1 (Postgres RLS later). Framework owns `latch_*` tables + Drizzle migrations. **One `StorageAdapter` contract** (no SQL-only tier; Mongo first-class), schema-versioned.
+
+---
+
+## Durability — tiered; default is our own session-replay (ours)
+We do **not** put a workflow engine on the critical path by default. The agent loop's state *is* the message array, so durability = checkpoint messages + resume by reloading them.
+
+- **T1 (default):** the agent runs to completion in **one invocation** (`waitUntil` finishes it past client disconnect); persist messages at step boundaries. If it dies, you re-run on the next request. **No leases, no engine.** Covers most embed/SaaS cases.
+- **T2 (opt-in — our session-replay, no black box):**
+  - `runs.lease_owner`/`lease_expires_at` = **single-writer lease**, renewed by a **heartbeat timer** (~every 10s for a 30s TTL — decoupled from step duration so long steps don't drop it; the heartbeat also verifies ownership and aborts if lost).
+  - **checkpoint messages per step** (in a transaction) → completed steps are durable.
+  - **idempotency** via `tool_results(run_id, tool_call_id)` → a re-run step never re-fires a completed tool.
+  - a **cron reaper** finds `status=running AND lease_expires_at < now()` and re-drives `driveRun(runId)` → continues from the last checkpoint.
+  - Serverless: the loop runs in one invocation; if killed at the duration limit, the reaper resumes on a fresh invocation. Reads/reconnect = stateless offset queries (any instance). **No instance affinity** (DB is the coordination point — our platform-agnostic answer vs Flue's Cloudflare-DO).
+  - Strict exactly-once (the brief two-owner window) → add **fencing tokens** (lease epoch; reject stale writes) when a client needs it.
+- **Heavy/hardened opt-in (behind the seam):** `WorkflowAgent` (`@ai-sdk/workflow`) + `@workflow/world-postgres` for battle-tested durable execution — but it brings a **durable queue + leases + LISTEN/NOTIFY** (chattier writes, wants a **worker**, less serverless-native) and an **opaque engine schema** (not your queryable tables). Use only when a client genuinely needs its hardened guarantees and can run a worker.
+
+Validated against **Flue's** shipped source (session-replay in your own DB: `flue_session_entries` + `flue_event_stream_entries` + `flue_agent_turn_journals`/`stream_chunks`). We follow that model, **platform-agnostic via Postgres offsets** instead of its Cloudflare Durable Objects. **Not** Eve's opaque world-delegation; **not** Electric's separate stream server.
 
 ---
 
-## Durability — wrap `@workflow/core`, own the World (ours)
-Don't build a durable-execution engine; **wrap `@workflow/core`** (resume-after-crash, parked/HITL, step checkpoints — Apache-2.0, self-hostable). The pluggable seam is the **`@workflow/world`** interface (storage + queue + streaming).
-```ts
-durability: {
-  world: postgresWorld(db),   // our @workflow/world impl — durable state in the CLIENT's Postgres
-                              //   dev default: workflowLocal() (disk JSON, from @workflow/world-local)
-                              //   swap: vercel()  /  custom (Redis, etc.)
-}
-```
-- The **Postgres/Drizzle World is our IP + the BYO-DB home**: durable workflow state lives in the client's own DB. Vercel ships `world-local` (dev/test only) + `world-vercel`; **no production self-host World exists → that gap is ours.**
-- **Projections** (`messages`/`runs`/`usage`/`compactions`) are derived from the workflow's session/event stream into queryable relational tables in the same DB — the system-of-record the client queries directly.
-- HITL/approvals + long-running + resume-after-crash come from `@workflow/core` for free (run parks durably, resumes later).
-- Dev = `world-local` (zero infra); production self-host = our Postgres World.
+## Engine portability — keep-the-door-open invariants
+So `WorkflowAgent` (or any engine) stays a drop-in later, never violate these:
+- **`defineAgent` returns config, never an instantiated engine.** The executor builds `ToolLoopAgent` / `WorkflowAgent` from the same options (both share the constructor shape).
+- **Durability is an executor seam** with a stable contract: `run(agentConfig, input) → UIMessage stream + persist to messages`. Our session-replay is impl #1; `WorkflowAgent` is a later impl. Never bake an engine into app/route code.
+- **HTTP/route boundary = "produce a UIMessage stream"** — so WorkflowAgent's `start() → run.readable → createModelCallToUIChunkTransform()` slots in next to ToolLoopAgent's direct stream.
+- **Tools are plain `tool()`** — transform/serialization-friendly, no engine-specific assumptions.
+- **`runs.lease_owner`/`lease_expires_at` are nullable** — workflow-backed runs leave them null (the world owns leases); only our session-replay uses them.
 
----
+Result: adopting `WorkflowAgent` = add an executor impl + the build transform for that tier — **additive, not a rewrite.**
 
 ## Request lifecycle (one turn)
-1. Auth → `Principal`; `context.build` → RuntimeContext; load `messages`, `validateUIMessages`.
-2. Create `run` (active); append `run_start`.
-3. `agent.stream({ messages: toModelMessages(app), runtimeContext, toolsContext, prepareStep })`. Lifecycle callbacks → append events; `prepareStep` applies ContextExtension model projections (compaction fold).
-4. Stream out via `createUIMessageStream` + `writer.merge(toUIMessageStream(...))`; markers via `writer.write`; `messageMetadata` carries AppMetadata; server ids via `generateMessageId`.
-5. `onFinish` → persist AppMessage(s) + usage/cost; append `step_end`/`run_end`. `consumeStream()` for disconnect safety.
-6. Crash/resume → `@workflow/core` resumes from the last completed step (durable World state); projections (`messages`/`runs`) rebuilt from the event stream.
+1. Auth → `Principal`; `context.build` → RuntimeContext; load `messages` (+ `validateUIMessages`) → `convertToModelMessages`.
+2. Insert the user `AppMessage`; create `run` (`active`).
+3. `createAgentUIStreamResponse({ agent, uiMessages, runtimeContext, toolsContext, prepareStep, messageMetadata, onStepEnd, onFinish })`. `prepareStep` applies ContextExtension model projections (compaction fold).
+4. Stream to client (SSE). **`onStepEnd`** → step facts (usage/finishReason) → `runs`/`usage` + message metadata. **`onFinish`** → finalized `AppMessage[]` → `messages`. `consumeStream`/`waitUntil` for disconnect safety.
+5. **T2 only:** heartbeat the run lease while looping; checkpoint messages per step; dedupe tools by `tool_call_id`.
+6. **Crash/resume (T2):** cron reaper finds the interrupted `run` (expired lease) → re-drives → reloads `messages` → continues from the last checkpointed step (idempotent). Reconnect = offset read, any instance.
 
 ---
 
 ## Build phases
-1. Scaffold monorepo + `latch-core` skeleton wrapping `@workflow/core` (dev default `world-local`) + `latch-drizzle` projections schema. Pin `ai@7.0.0-beta.178`, `@workflow/*@5-beta`, **zod 4**.
+1. Scaffold monorepo + `latch-core` skeleton (`ToolLoopAgent` + `StorageAdapter` seam) + `latch-drizzle` (`chats/messages/runs/usage` schema, pg+sqlite) + a T1 `/chat` slice. Pin `ai@7.0.0-beta.178`, **zod 4**.
 2. `runtime` (defineAgent/defineContext/projections) + example agent + `latch-server` Hono `/chat` route (stream + AppMessage persist + consumeStream) + Express bridge.
 3. ContextExtension registry + compaction built-in.
 4. Usage/cost + rate-limit middleware. OpenAPI (`@hono/zod-openapi`) + Scalar `/docs`.
 5. Files/attachments (`FileStore` S3 + presigned upload). `FileUIPart` projections.
-6. Durability upgrades behind seams (queue/Durable-Streams transport); HITL approvals + resume.
+6. T2 durability (our session-replay: lease/heartbeat/cron reaper/idempotency) + HITL approvals; T2a resumable streams (externalized chunk buffer).
 7. Scheduled/triggered runs (`Scheduler` seam + DB schedules + tick endpoint).
 8. `latch-mcp` (HTTP/OAuth).
 9. Memory (`MemoryProvider`: custom-tool default + optional pgvector; Anthropic-memory-tool adapter). `latch-workspaces` (local → Daytona).
