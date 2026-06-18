@@ -258,6 +258,7 @@ Flow: presigned **PUT direct to S3** (no proxying bytes) → `AppMessage` stores
 
 ## Future / backlog (add when needed — most reuse existing seams)
 - **Subagents** — `asTool` helper + child runs (near-term; see above).
+- **Code mode / dynamic workflows (experimental)** — the model writes JS that orchestrates its own subagents/tools as **one durable step** (fan-out, conditionals, feed-one-into-next), run in an **in-process QuickJS sandbox** (allowlist: `tools.<name>` + built-ins; no fs/net/import — calls bridge back to the runtime). **Reuse `experimental-ai-sdk-code-mode`** (AI-SDK ecosystem, not Eve-proprietary). Composes with subagents (`asTool`) + runtime tool dispatch + durability (one step) + observability (`subagent.called/completed`). Serverless-friendly (QuickJS = WASM, in-process). **Distinct from `WorkspaceProvider`** (Daytona = real shell/fs; code-mode QuickJS = orchestration glue only). Flavors: `Workflow` tool (subagents-only) vs full `codeMode` (all tools). More expressive + fewer round-trips than one-off tool calls.
 - **Steering / input queue** — steer/followUp/nextTurn + interrupt (see above).
 - **Slash commands** — input-handling hook on the extension layer + input queue.
 - **History browsing** — API/UI over `messages`/`run_events` (data already there).
