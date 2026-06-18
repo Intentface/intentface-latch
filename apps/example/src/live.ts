@@ -33,5 +33,11 @@ export async function makeLiveRuntime(): Promise<Runtime> {
     })),
   };
 
-  return createRuntime({ storage, context, agents });
+  return createRuntime({
+    storage,
+    context,
+    agents,
+    // T2 durability: lease + heartbeat per turn; reaped/resumed by the scheduler.
+    durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
+  });
 }

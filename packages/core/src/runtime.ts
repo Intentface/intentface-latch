@@ -79,9 +79,26 @@ export interface Runtime {
    * Returns the run's final state, or null if it wasn't resumable (already
    * completed, or claimed by another node).
    */
-  resume(
-    runId: string,
-  ): Promise<{ runId: string; status: RunStatus; attempt: number | null } | null>;
+  resume(runId: string): Promise<RunOutcome | null>;
+  /**
+   * Reaper + auto-resume in one call — the Scheduler/cron entry point. Reaps
+   * lease-expired runs, then resumes each whose attempt count is still under
+   * `maxAttempts` (default 5; the cap stops poison runs from looping forever).
+   * Safe to fire on every node: reap and reclaim are atomic, so each run is
+   * handled exactly once.
+   */
+  sweep(opts?: {
+    now?: number;
+    maxAttempts?: number;
+    error?: string;
+  }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }>;
+}
+
+/** The terminal state of a resumed run. */
+export interface RunOutcome {
+  runId: string;
+  status: RunStatus;
+  attempt: number | null;
 }
 
 /**
@@ -272,16 +289,21 @@ export function createRuntime<RC = unknown>(
     return createUIMessageStreamResponse({ stream });
   }
 
-  return {
-    async tick(opts) {
-      const reaped = await storage.reapExpiredRuns(opts?.now ?? Date.now(), {
-        error: opts?.error,
-      });
-      return { reaped };
-    },
+  async function reapTick(opts?: { now?: number; error?: string }) {
+    const reaped = await storage.reapExpiredRuns(opts?.now ?? Date.now(), {
+      error: opts?.error,
+    });
+    return { reaped };
+  }
 
-    async handleChat({ agent: agentName, chatId, principal, message, request }) {
-      const scope = scopeOf(principal);
+  async function handleChat({
+    agent: agentName,
+    chatId,
+    principal,
+    message,
+    request,
+  }: HandleChatInput): Promise<Response> {
+    const scope = scopeOf(principal);
 
       // chat: scoped create-or-continue (cross-tenant ids resolve to "not found")
       let chat = chatId ? await storage.getChat(scope, chatId) : null;
@@ -325,58 +347,76 @@ export function createRuntime<RC = unknown>(
         });
       }
 
-      return buildTurn({
-        resolvedChatId,
-        principal,
-        modelId,
-        cfg,
-        run,
-        lease,
-        uiMessages: [...prior, message],
-      });
-    },
+    return buildTurn({
+      resolvedChatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: [...prior, message],
+    });
+  }
 
-    async resume(runId) {
-      if (!dur.enabled)
-        throw new Error("resume requires durability.enabled");
+  async function resumeRun(runId: string): Promise<RunOutcome | null> {
+    if (!dur.enabled) throw new Error("resume requires durability.enabled");
 
-      // Exactly-once re-claim: only one node wins; a concurrent resumer / an
-      // already-completed run yields null.
-      const run = await storage.reclaimRun(runId, dur.instanceId, dur.leaseTtlMs);
-      if (!run) return null;
+    // Exactly-once re-claim: only one node wins; a concurrent resumer / an
+    // already-completed run yields null.
+    const run = await storage.reclaimRun(runId, dur.instanceId, dur.leaseTtlMs);
+    if (!run) return null;
 
-      // System op: recover the tenant from the chat (no Principal on the wire).
-      const chat = await storage.getChatById(run.chatId);
-      if (!chat) return null;
-      const principal: Principal = { orgId: chat.orgId, userId: chat.userId };
-      const scope = scopeOf(principal);
+    // System op: recover the tenant from the chat (no Principal on the wire).
+    const chat = await storage.getChatById(run.chatId);
+    if (!chat) return null;
+    const principal: Principal = { orgId: chat.orgId, userId: chat.userId };
+    const scope = scopeOf(principal);
 
-      const { cfg, modelId } = await resolveAgentConfig(run.agent, principal);
-      const uiMessages = await storage.loadMessages(scope, run.chatId);
-      const lease: RunLease = {
-        owner: dur.instanceId,
-        fencingToken: run.fencingToken ?? 1,
-      };
+    const { cfg, modelId } = await resolveAgentConfig(run.agent, principal);
+    const uiMessages = await storage.loadMessages(scope, run.chatId);
+    const lease: RunLease = {
+      owner: dur.instanceId,
+      fencingToken: run.fencingToken ?? 1,
+    };
 
-      // Re-run from persisted history and drive to completion server-side
-      // (there's no client to consume the stream).
-      const res = await buildTurn({
-        resolvedChatId: run.chatId,
-        principal,
-        modelId,
-        cfg,
-        run,
-        lease,
-        uiMessages,
-      });
-      await res.text();
+    // Re-run from persisted history and drive to completion server-side
+    // (there's no client to consume the stream).
+    const res = await buildTurn({
+      resolvedChatId: run.chatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages,
+    });
+    await res.text();
 
-      const final = await storage.getRun(runId);
-      return {
-        runId,
-        status: final?.status ?? "errored",
-        attempt: final?.attempt ?? run.attempt ?? null,
-      };
-    },
-  };
+    const final = await storage.getRun(runId);
+    return {
+      runId,
+      status: final?.status ?? "errored",
+      attempt: final?.attempt ?? run.attempt ?? null,
+    };
+  }
+
+  async function sweep(opts?: {
+    now?: number;
+    maxAttempts?: number;
+    error?: string;
+  }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }> {
+    if (!dur.enabled) throw new Error("sweep requires durability.enabled");
+    const maxAttempts = opts?.maxAttempts ?? 5;
+    const { reaped } = await reapTick({ now: opts?.now, error: opts?.error });
+    const resumed: RunOutcome[] = [];
+    for (const run of reaped) {
+      // Give up on poison runs that keep dying — don't loop forever.
+      if ((run.attempt ?? 1) >= maxAttempts) continue;
+      const outcome = await resumeRun(run.id);
+      if (outcome) resumed.push(outcome);
+    }
+    return { reaped, resumed };
+  }
+
+  return { tick: reapTick, handleChat, resume: resumeRun, sweep };
 }
