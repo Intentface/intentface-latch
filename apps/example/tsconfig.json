@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "noEmit": true
+    "noEmit": true,
+    // Dev loop: resolve workspace deps to their `src` (the `development` export
+    // condition) so editing a package is reflected here without a rebuild.
+    // Safe because this project never emits. Package builds use `dist` resolution.
+    "customConditions": ["development"]
   },
   "include": ["src"]
 }

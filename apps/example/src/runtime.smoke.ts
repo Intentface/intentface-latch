@@ -53,7 +53,38 @@ async function main() {
   assert(Number(usageRow.rows[0]?.n) === 1, "usage recorded");
   assert(Number(usageRow.rows[0]?.inp) === 7, "usage tokens captured from onStepEnd");
 
-  console.log("✅ runtime smoke passed — full T1 turn persisted (messages + run + usage)");
+  // Second turn on the SAME chat: regression for the dup-id bug where every
+  // assistant reply upserted onto one row (empty message id). Each turn's
+  // assistant message must get a fresh id and append, not overwrite.
+  const secondMessage: AppMessage = {
+    id: "msg_user_2",
+    role: "user",
+    parts: [{ type: "text", text: "again" }],
+    metadata: { visibility: "user", createdAt: Date.now() },
+  };
+  await (
+    await runtime.handleChat({
+      agent: "echo",
+      chatId: chat.id,
+      principal,
+      message: secondMessage,
+    })
+  ).text();
+  await new Promise((r) => setTimeout(r, 50));
+
+  const afterTwo = await storage.loadMessages(
+    { orgId: "org_a", userId: "user_1" },
+    chat.id,
+  );
+  assert(afterTwo.length === 4, `two turns persist 4 messages (got ${afterTwo.length})`);
+  const assistantIds = afterTwo.filter((m) => m.role === "assistant").map((m) => m.id);
+  assert(assistantIds.length === 2, "two assistant messages persisted");
+  assert(
+    new Set(assistantIds).size === 2 && assistantIds.every((id) => id.length > 0),
+    "each assistant turn has a distinct, non-empty id",
+  );
+
+  console.log("✅ runtime smoke passed — T1 turn + multi-turn persistence (distinct ids)");
 }
 
 main().catch((e) => {

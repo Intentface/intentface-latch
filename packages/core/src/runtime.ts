@@ -1,4 +1,4 @@
-import { ToolLoopAgent, createAgentUIStreamResponse } from "ai";
+import { ToolLoopAgent, createAgentUIStreamResponse, createIdGenerator } from "ai";
 import type { AppMessage } from "./message.js";
 import { type Principal, scopeOf } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
@@ -41,6 +41,9 @@ export interface Runtime {
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput): Promise<Response>;
 }
+
+/** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
+const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 
 export function createRuntime<RC = unknown>(
   config: RuntimeConfig<RC>,
@@ -99,6 +102,9 @@ export function createRuntime<RC = unknown>(
         agent,
         uiMessages,
         originalMessages: uiMessages,
+        // Persistence mode: without this the response message id is empty, so
+        // every assistant turn upserts onto the same row. Give each a unique id.
+        generateMessageId,
         messageMetadata: ({ part }: { part: { type: string } }) =>
           part.type === "start"
             ? { visibility: "user", model: modelId, createdAt: Date.now() }

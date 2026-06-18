@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "tsx src/runtime.smoke.ts",
-    "smoke:server": "tsx src/server.smoke.ts"
+    "smoke": "tsx --conditions development src/runtime.smoke.ts",
+    "smoke:server": "tsx --conditions development src/server.smoke.ts",
+    "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.85",
+    "@ai-sdk/openai": "^3.0.73",
+    "@hono/node-server": "^2.0.5",
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
     "@intentface/latch-server": "workspace:*",
@@ -17,6 +21,7 @@
     "hono": "^4.6.0"
   },
   "devDependencies": {
+    "@types/node": "^25.9.3",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
