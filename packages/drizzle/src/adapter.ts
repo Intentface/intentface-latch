@@ -1,6 +1,6 @@
 import type { Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { and, asc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type {
   AppMessage,
   ChatRecord,
@@ -78,6 +78,14 @@ export function createSqliteAdapter(client: Client): StorageAdapter {
     },
 
     getChat,
+
+    async getChatById(id) {
+      const rows = await db
+        .select()
+        .from(schema.chats)
+        .where(eq(schema.chats.id, id));
+      return rows[0] ? rowToChat(rows[0]) : null;
+    },
 
     async loadMessages(scope, chatId) {
       // Scope check first — a chat outside the tenant returns nothing.
@@ -188,6 +196,34 @@ export function createSqliteAdapter(client: Client): StorageAdapter {
         )
         .returning({ id: schema.runs.id });
       return updated.length > 0;
+    },
+
+    async reclaimRun(id, owner, ttlMs) {
+      const now = Date.now();
+      const updated = await db
+        .update(schema.runs)
+        .set({
+          status: "active" as RunStatus,
+          leaseOwner: owner,
+          leaseExpiresAt: now + ttlMs,
+          heartbeatAt: now,
+          error: null,
+          endedAt: null,
+          fencingToken: sql`coalesce(${schema.runs.fencingToken}, 0) + 1`,
+          attempt: sql`coalesce(${schema.runs.attempt}, 1) + 1`,
+        })
+        .where(
+          and(
+            eq(schema.runs.id, id),
+            ne(schema.runs.status, "completed"),
+            or(
+              isNull(schema.runs.leaseOwner),
+              lt(schema.runs.leaseExpiresAt, now),
+            ),
+          ),
+        )
+        .returning();
+      return updated[0] ? rowToRun(updated[0]) : null;
     },
 
     async updateRun(id, patch, guard) {

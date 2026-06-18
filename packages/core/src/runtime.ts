@@ -2,8 +2,13 @@ import { ToolLoopAgent, createAgentUIStreamResponse, createIdGenerator } from "a
 import type { AppMessage } from "./message.js";
 import { type Principal, scopeOf } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
-import type { AgentFactory } from "./agent.js";
-import type { RunLease, RunRecord, StorageAdapter } from "./storage.js";
+import type { AgentConfig, AgentFactory } from "./agent.js";
+import type {
+  RunLease,
+  RunRecord,
+  RunStatus,
+  StorageAdapter,
+} from "./storage.js";
 
 /**
  * The Runtime — composition root + operations facade.
@@ -61,6 +66,15 @@ export interface Runtime {
    * Returns the reaped runs. No-op-safe to call on every node.
    */
   tick(opts?: { now?: number; error?: string }): Promise<{ reaped: RunRecord[] }>;
+  /**
+   * Resume an interrupted run (requires durability). Re-claims it exactly-once,
+   * re-runs the turn from persisted history, and completes it server-side.
+   * Returns the run's final state, or null if it wasn't resumable (already
+   * completed, or claimed by another node).
+   */
+  resume(
+    runId: string,
+  ): Promise<{ runId: string; status: RunStatus; attempt: number | null } | null>;
 }
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
@@ -79,6 +93,142 @@ export function createRuntime<RC = unknown>(
     instanceId: config.durability?.instanceId ?? newInstanceId(),
   };
 
+  /** Resolve an agent's per-request config + a display model id. */
+  async function resolveAgentConfig(
+    agentName: string,
+    principal: Principal,
+    request?: Request,
+  ): Promise<{ cfg: AgentConfig; modelId: string }> {
+    const factory = config.agents[agentName];
+    if (!factory) throw new Error(`Unknown agent: ${agentName}`);
+    const runtimeCtx = await config.context.build({ principal, request });
+    const cfg = await factory({ runtime: runtimeCtx, principal });
+    const modelId =
+      typeof cfg.model === "string"
+        ? cfg.model
+        : ((cfg.model as { modelId?: string }).modelId ?? "unknown");
+    return { cfg, modelId };
+  }
+
+  /**
+   * Build (and start) one turn's stream — shared by a fresh chat turn and a
+   * resume. With durability on, it heartbeats the lease and aborts if it's
+   * lost; onFinish writes are fenced by `lease`. The caller decides whether to
+   * hand the stream to a client (handleChat) or drive it to completion
+   * server-side (resume).
+   */
+  function buildTurn(args: {
+    resolvedChatId: string;
+    principal: Principal;
+    modelId: string;
+    cfg: AgentConfig;
+    run: RunRecord;
+    lease: RunLease | undefined;
+    uiMessages: AppMessage[];
+  }): Promise<Response> {
+    const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages } =
+      args;
+
+    const abort = new AbortController();
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const stopHeartbeat = () => {
+      if (heartbeat !== undefined) {
+        clearInterval(heartbeat);
+        heartbeat = undefined;
+      }
+    };
+    if (dur.enabled && lease) {
+      heartbeat = setInterval(() => {
+        void storage
+          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs)
+          .then((held) => {
+            if (!held) {
+              stopHeartbeat();
+              abort.abort(new Error("lease lost"));
+            }
+          })
+          .catch(() => {});
+      }, dur.heartbeatMs);
+      // Don't let the heartbeat alone keep a Node process alive.
+      (heartbeat as { unref?: () => void }).unref?.();
+    }
+
+    const agent = new ToolLoopAgent({
+      model: cfg.model,
+      instructions: cfg.instructions,
+      tools: cfg.tools,
+    } as ConstructorParameters<typeof ToolLoopAgent>[0]);
+
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    // Cast at the SDK generic boundary: our metadata/message types are looser
+    // than the fully-inferred AI SDK generics, but the runtime behaviour is
+    // exactly the stock stream helper (verified by the smoke tests).
+    return createAgentUIStreamResponse({
+      agent,
+      uiMessages,
+      originalMessages: uiMessages,
+      abortSignal: dur.enabled ? abort.signal : undefined,
+      // Persistence mode: without this the response message id is empty, so
+      // every assistant turn upserts onto the same row. Give each a unique id.
+      generateMessageId,
+      messageMetadata: ({ part }: { part: { type: string } }) =>
+        part.type === "start"
+          ? { visibility: "user", model: modelId, createdAt: Date.now() }
+          : undefined,
+      onStepEnd: (step: {
+        usage?: { inputTokens?: number; outputTokens?: number };
+      }) => {
+        inputTokens += step.usage?.inputTokens ?? 0;
+        outputTokens += step.usage?.outputTokens ?? 0;
+      },
+      onFinish: async ({
+        messages,
+        isAborted,
+      }: {
+        messages: AppMessage[];
+        isAborted?: boolean;
+      }) => {
+        stopHeartbeat();
+        await storage.appendMessages(resolvedChatId, messages);
+        // Aborted (lease lost / client gone): don't claim completion. The
+        // guarded update no-ops if the run was already reaped+reassigned.
+        if (isAborted) {
+          await storage.updateRun(
+            run.id,
+            { status: "errored", error: "aborted", endedAt: Date.now() },
+            lease,
+          );
+          return;
+        }
+        await storage.updateRun(
+          run.id,
+          {
+            status: "completed",
+            usageInputTokens: inputTokens,
+            usageOutputTokens: outputTokens,
+            endedAt: Date.now(),
+          },
+          lease,
+        );
+        await storage.recordUsage({
+          orgId: principal.orgId,
+          userId: principal.userId,
+          runId: run.id,
+          model: modelId,
+          inputTokens,
+          outputTokens,
+          cost: 0,
+        });
+      },
+      onError: (error: unknown) => {
+        stopHeartbeat();
+        return error instanceof Error ? error.message : "An error occurred.";
+      },
+    } as Parameters<typeof createAgentUIStreamResponse>[0]);
+  }
+
   return {
     async tick(opts) {
       const reaped = await storage.reapExpiredRuns(opts?.now ?? Date.now(), {
@@ -88,8 +238,6 @@ export function createRuntime<RC = unknown>(
     },
 
     async handleChat({ agent: agentName, chatId, principal, message, request }) {
-      const factory = config.agents[agentName];
-      if (!factory) throw new Error(`Unknown agent: ${agentName}`);
       const scope = scopeOf(principal);
 
       // chat: scoped create-or-continue (cross-tenant ids resolve to "not found")
@@ -104,13 +252,11 @@ export function createRuntime<RC = unknown>(
       }
       const resolvedChatId = chat.id;
 
-      // build typed context, then resolve the agent's config from it
-      const runtimeCtx = await config.context.build({ principal, request });
-      const cfg = await factory({ runtime: runtimeCtx, principal });
-      const modelId =
-        typeof cfg.model === "string"
-          ? cfg.model
-          : ((cfg.model as { modelId?: string }).modelId ?? "unknown");
+      const { cfg, modelId } = await resolveAgentConfig(
+        agentName,
+        principal,
+        request,
+      );
 
       const prior = await storage.loadMessages(scope, resolvedChatId);
 
@@ -136,107 +282,58 @@ export function createRuntime<RC = unknown>(
         });
       }
 
-      // T2: heartbeat the lease while streaming; abort the run if we lose it
-      // (reaped by another node, or the run was already closed).
-      const abort = new AbortController();
-      let heartbeat: ReturnType<typeof setInterval> | undefined;
-      const stopHeartbeat = () => {
-        if (heartbeat !== undefined) {
-          clearInterval(heartbeat);
-          heartbeat = undefined;
-        }
+      return buildTurn({
+        resolvedChatId,
+        principal,
+        modelId,
+        cfg,
+        run,
+        lease,
+        uiMessages: [...prior, message],
+      });
+    },
+
+    async resume(runId) {
+      if (!dur.enabled)
+        throw new Error("resume requires durability.enabled");
+
+      // Exactly-once re-claim: only one node wins; a concurrent resumer / an
+      // already-completed run yields null.
+      const run = await storage.reclaimRun(runId, dur.instanceId, dur.leaseTtlMs);
+      if (!run) return null;
+
+      // System op: recover the tenant from the chat (no Principal on the wire).
+      const chat = await storage.getChatById(run.chatId);
+      if (!chat) return null;
+      const principal: Principal = { orgId: chat.orgId, userId: chat.userId };
+      const scope = scopeOf(principal);
+
+      const { cfg, modelId } = await resolveAgentConfig(run.agent, principal);
+      const uiMessages = await storage.loadMessages(scope, run.chatId);
+      const lease: RunLease = {
+        owner: dur.instanceId,
+        fencingToken: run.fencingToken ?? 1,
       };
-      if (dur.enabled) {
-        heartbeat = setInterval(() => {
-          void storage
-            .heartbeatRun(run.id, dur.instanceId, dur.leaseTtlMs)
-            .then((held) => {
-              if (!held) {
-                stopHeartbeat();
-                abort.abort(new Error("lease lost"));
-              }
-            })
-            .catch(() => {});
-        }, dur.heartbeatMs);
-        // Don't let the heartbeat alone keep a Node process alive.
-        (heartbeat as { unref?: () => void }).unref?.();
-      }
 
-      const agent = new ToolLoopAgent({
-        model: cfg.model,
-        instructions: cfg.instructions,
-        tools: cfg.tools,
-      } as ConstructorParameters<typeof ToolLoopAgent>[0]);
-
-      const uiMessages = [...prior, message];
-      let inputTokens = 0;
-      let outputTokens = 0;
-
-      // Cast at the SDK generic boundary: our metadata/message types are looser
-      // than the fully-inferred AI SDK generics, but the runtime behaviour is
-      // exactly the stock stream helper (verified by the runtime smoke test).
-      return createAgentUIStreamResponse({
-        agent,
+      // Re-run from persisted history and drive to completion server-side
+      // (there's no client to consume the stream).
+      const res = await buildTurn({
+        resolvedChatId: run.chatId,
+        principal,
+        modelId,
+        cfg,
+        run,
+        lease,
         uiMessages,
-        originalMessages: uiMessages,
-        abortSignal: dur.enabled ? abort.signal : undefined,
-        // Persistence mode: without this the response message id is empty, so
-        // every assistant turn upserts onto the same row. Give each a unique id.
-        generateMessageId,
-        messageMetadata: ({ part }: { part: { type: string } }) =>
-          part.type === "start"
-            ? { visibility: "user", model: modelId, createdAt: Date.now() }
-            : undefined,
-        onStepEnd: (step: {
-          usage?: { inputTokens?: number; outputTokens?: number };
-        }) => {
-          inputTokens += step.usage?.inputTokens ?? 0;
-          outputTokens += step.usage?.outputTokens ?? 0;
-        },
-        onFinish: async ({
-          messages,
-          isAborted,
-        }: {
-          messages: AppMessage[];
-          isAborted?: boolean;
-        }) => {
-          stopHeartbeat();
-          await storage.appendMessages(resolvedChatId, messages);
-          // Aborted (lease lost / client gone): don't claim completion. The
-          // guarded update no-ops if the run was already reaped+reassigned.
-          if (isAborted) {
-            await storage.updateRun(
-              run.id,
-              { status: "errored", error: "aborted", endedAt: Date.now() },
-              lease,
-            );
-            return;
-          }
-          await storage.updateRun(
-            run.id,
-            {
-              status: "completed",
-              usageInputTokens: inputTokens,
-              usageOutputTokens: outputTokens,
-              endedAt: Date.now(),
-            },
-            lease,
-          );
-          await storage.recordUsage({
-            orgId: principal.orgId,
-            userId: principal.userId,
-            runId: run.id,
-            model: modelId,
-            inputTokens,
-            outputTokens,
-            cost: 0,
-          });
-        },
-        onError: (error: unknown) => {
-          stopHeartbeat();
-          return error instanceof Error ? error.message : "An error occurred.";
-        },
-      } as Parameters<typeof createAgentUIStreamResponse>[0]);
+      });
+      await res.text();
+
+      const final = await storage.getRun(runId);
+      return {
+        runId,
+        status: final?.status ?? "errored",
+        attempt: final?.attempt ?? run.attempt ?? null,
+      };
     },
   };
 }

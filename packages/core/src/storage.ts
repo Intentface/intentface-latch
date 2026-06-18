@@ -81,6 +81,13 @@ export interface StorageAdapter {
   }): Promise<ChatRecord>;
   /** Scoped: returns null if the chat isn't in the caller's tenant. */
   getChat(scope: Scope, id: string): Promise<ChatRecord | null>;
+  /**
+   * UNSCOPED system read — bypasses tenant scoping. Only for privileged
+   * operations like resume/reaper that act on behalf of a run's tenant (the
+   * tenant is recovered from the returned record). Never call this from a
+   * request path; use `getChat(scope, id)` there.
+   */
+  getChatById(id: string): Promise<ChatRecord | null>;
 
   // messages (the source of truth)
   /** Scoped read of the conversation, oldest first. */
@@ -106,6 +113,18 @@ export interface StorageAdapter {
    * (it was reaped/reassigned or already closed) — the caller should stop work.
    */
   heartbeatRun(id: string, owner: string, ttlMs: number): Promise<boolean>;
+  /**
+   * Re-claim an interrupted run for a new owner (resume). Succeeds only if the
+   * run is not completed AND currently unowned or lease-expired — so two nodes
+   * racing to resume the same run resolve to exactly one. Bumps the fencing
+   * token and attempt, clears the error/end, and re-leases. Returns the
+   * re-claimed record, or null if it wasn't resumable.
+   */
+  reclaimRun(
+    id: string,
+    owner: string,
+    ttlMs: number,
+  ): Promise<RunRecord | null>;
   /**
    * Patch a run. With `guard`, the write only applies while `(leaseOwner,
    * fencingToken)` still match — stale-writer protection (fencing). Without it,
