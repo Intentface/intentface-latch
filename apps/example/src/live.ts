@@ -1,23 +1,40 @@
 import { createClient } from "@libsql/client";
 import {
   createRuntime,
+  createVault,
   defineAgent,
   defineContext,
   type Runtime,
+  type Vault,
 } from "@intentface/latch-core";
-import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
+import {
+  createSqliteAdapter,
+  createSqliteSecretStore,
+  migrate,
+} from "@intentface/latch-drizzle";
 import { model } from "./models.js";
 import { tools } from "./tools.js";
 
 /**
  * A real-model runtime — same wiring as `setup.ts`, but the agent's `model` is
  * a live provider model (via the registry in `models.ts`) instead of the mock.
- * Used by `serve.ts`. Requires `ANTHROPIC_API_KEY` (and/or `OPENAI_API_KEY`).
+ * Also returns a Vault (for connection credentials / MCP OAuth). Used by
+ * `serve.ts`. Requires `ANTHROPIC_API_KEY` (and/or `OPENAI_API_KEY`); the Vault
+ * needs `LATCH_VAULT_KEY` (base64 32 bytes).
  */
-export async function makeLiveRuntime(): Promise<Runtime> {
+export async function makeLiveRuntime(): Promise<{ runtime: Runtime; vault: Vault }> {
   const client = createClient({ url: "file:./latch-dev.db" });
   await migrate(client);
   const storage = createSqliteAdapter(client);
+
+  const masterKey = process.env.LATCH_VAULT_KEY;
+  if (!masterKey) {
+    throw new Error(
+      "LATCH_VAULT_KEY is required (base64 of 32 bytes). Generate one with:\n" +
+        '  node -e "console.log(crypto.randomBytes(32).toString(\'base64\'))"',
+    );
+  }
+  const vault = createVault({ store: createSqliteSecretStore(client), masterKey });
 
   const context = defineContext<{ orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -33,11 +50,12 @@ export async function makeLiveRuntime(): Promise<Runtime> {
     })),
   };
 
-  return createRuntime({
+  const runtime = createRuntime({
     storage,
     context,
     agents,
     // T2 durability: lease + heartbeat per turn; reaped/resumed by the scheduler.
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
   });
+  return { runtime, vault };
 }

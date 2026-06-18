@@ -1,4 +1,9 @@
-import { createMCPClient, type MCPClient, type MCPTransport } from "@ai-sdk/mcp";
+import {
+  createMCPClient,
+  type MCPClient,
+  type MCPTransport,
+  type OAuthClientProvider,
+} from "@ai-sdk/mcp";
 import type { Scope, SecretResolver } from "@intentface/latch-core";
 
 /**
@@ -27,8 +32,10 @@ export type McpConnection =
       name: string;
       /** MCP server URL (HTTP transport). */
       url: string;
-      /** How to authenticate. Bearer tokens come from the Vault, per tenant. */
+      /** Static/bearer auth. Bearer tokens come from the Vault, per tenant. */
       auth?: McpAuth;
+      /** OAuth provider (auto-refreshing). Build per scope via `McpOAuth.provider(scope)`. */
+      authProvider?: OAuthClientProvider;
     }
   | {
       name: string;
@@ -37,7 +44,10 @@ export type McpConnection =
     };
 
 export interface McpHostConfig {
-  connections: McpConnection[];
+  /** Connections, static or resolved per tenant (e.g. to inject OAuth providers). */
+  connections:
+    | McpConnection[]
+    | ((scope: Scope) => McpConnection[] | Promise<McpConnection[]>);
   /**
    * SSRF allowlist of permitted hostnames. An entry beginning with `.` matches
    * that domain and its subdomains (`.example.com` → `example.com`,
@@ -103,6 +113,10 @@ export function createMcpHost(config: McpHostConfig): McpHost {
         typeof config.allowedHosts === "function"
           ? await config.allowedHosts(scope)
           : config.allowedHosts;
+      const connections =
+        typeof config.connections === "function"
+          ? await config.connections(scope)
+          : config.connections;
 
       const clients: MCPClient[] = [];
       const tools: Record<string, unknown> = {};
@@ -112,7 +126,7 @@ export function createMcpHost(config: McpHostConfig): McpHost {
         );
 
       try {
-        for (const conn of config.connections) {
+        for (const conn of connections) {
           let client: MCPClient;
           if ("transport" in conn) {
             // Developer-provided transport (in-process; trusted): use as-is.
@@ -133,6 +147,7 @@ export function createMcpHost(config: McpHostConfig): McpHost {
                 type: "http",
                 url: conn.url,
                 headers,
+                authProvider: conn.authProvider, // OAuth (auto-refresh) if present
                 redirect: "error", // no redirect-based SSRF
               },
             } as Parameters<typeof createMCPClient>[0]);

@@ -17,3 +17,8 @@ export type {
   McpAuth,
   OpenMcp,
 } from "./host.js";
+export {
+  createMcpOAuth,
+  createVaultOAuthProvider,
+} from "./oauth.js";
+export type { McpOAuth, McpOAuthConfig, StartResult } from "./oauth.js";
