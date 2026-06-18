@@ -33,12 +33,28 @@ export interface RunRecord {
   /** Single-writer lease (T2 durability). Null for T1 / non-durable runs. */
   leaseOwner?: string | null;
   leaseExpiresAt?: number | null;
+  /** Monotonic per claim; bumped when reaped/reclaimed. Guards stale-writer writes. */
+  fencingToken?: number | null;
+  /** Last heartbeat time (observability; the lease expiry is the functional gate). */
+  heartbeatAt?: number | null;
+  /** How many times this run has been claimed (1 on first claim). */
+  attempt?: number | null;
   usageInputTokens?: number;
   usageOutputTokens?: number;
   costTotal?: number;
   error?: string | null;
   startedAt: number;
   endedAt?: number | null;
+}
+
+/**
+ * Proof of single-writer ownership for a run. Pass to guarded writes so a stale
+ * worker (whose lease was reaped and reassigned) can't overwrite newer state —
+ * the write only lands if `(owner, fencingToken)` still match the row.
+ */
+export interface RunLease {
+  owner: string;
+  fencingToken: number;
 }
 
 export interface UsageRecord {
@@ -73,9 +89,44 @@ export interface StorageAdapter {
   appendMessages(chatId: string, messages: AppMessage[]): Promise<void>;
 
   // runs (per-turn execution record)
+  /** T1 / non-durable: an unleased run. */
   createRun(input: { chatId: string; agent: string }): Promise<RunRecord>;
-  updateRun(id: string, patch: Partial<RunRecord>): Promise<void>;
+  /**
+   * T2 durable: create a run already leased to `owner` (fencingToken starts at 1,
+   * lease expires at now + ttlMs). The returned record carries the lease to hold.
+   */
+  claimRun(input: {
+    chatId: string;
+    agent: string;
+    owner: string;
+    ttlMs: number;
+  }): Promise<RunRecord>;
+  /**
+   * Extend our lease by `ttlMs`. Returns false if we no longer own the active run
+   * (it was reaped/reassigned or already closed) — the caller should stop work.
+   */
+  heartbeatRun(id: string, owner: string, ttlMs: number): Promise<boolean>;
+  /**
+   * Patch a run. With `guard`, the write only applies while `(leaseOwner,
+   * fencingToken)` still match — stale-writer protection (fencing). Without it,
+   * an unconditional update (T1).
+   */
+  updateRun(
+    id: string,
+    patch: Partial<RunRecord>,
+    guard?: RunLease,
+  ): Promise<void>;
   getRun(id: string): Promise<RunRecord | null>;
+  /**
+   * Reaper: mark active runs whose lease has expired (`leaseExpiresAt < now`) as
+   * `errored`, clear the owner, and bump the fencing token (invalidating any
+   * zombie holder). Returns the reaped runs. Safe to run on many nodes — each
+   * row transitions once (the UPDATE is atomic per row).
+   */
+  reapExpiredRuns(
+    now: number,
+    opts?: { error?: string },
+  ): Promise<RunRecord[]>;
 
   // usage (billing/quota ledger)
   recordUsage(input: Omit<UsageRecord, "id" | "createdAt">): Promise<void>;

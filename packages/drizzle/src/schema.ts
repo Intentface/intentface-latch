@@ -48,6 +48,9 @@ export const runs = sqliteTable(
     status: text("status").notNull(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: integer("lease_expires_at"),
+    fencingToken: integer("fencing_token"),
+    heartbeatAt: integer("heartbeat_at"),
+    attempt: integer("attempt"),
     usageInputTokens: integer("usage_input_tokens"),
     usageOutputTokens: integer("usage_output_tokens"),
     costTotal: real("cost_total"),
@@ -55,7 +58,10 @@ export const runs = sqliteTable(
     startedAt: integer("started_at").notNull(),
     endedAt: integer("ended_at"),
   },
-  (t) => [index("latch_runs_chat_idx").on(t.chatId)],
+  (t) => [
+    index("latch_runs_chat_idx").on(t.chatId),
+    index("latch_runs_reaper_idx").on(t.status, t.leaseExpiresAt),
+  ],
 );
 
 export const usage = sqliteTable(

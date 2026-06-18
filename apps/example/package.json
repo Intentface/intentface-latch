@@ -8,6 +8,7 @@
     "smoke": "tsx --conditions development src/runtime.smoke.ts",
     "smoke:server": "tsx --conditions development src/server.smoke.ts",
     "smoke:tools": "tsx --conditions development src/tools.smoke.ts",
+    "smoke:durability": "tsx --conditions development src/durability.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {

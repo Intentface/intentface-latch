@@ -3,7 +3,7 @@ import type { AppMessage } from "./message.js";
 import { type Principal, scopeOf } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
 import type { AgentFactory } from "./agent.js";
-import type { StorageAdapter } from "./storage.js";
+import type { RunLease, RunRecord, StorageAdapter } from "./storage.js";
 
 /**
  * The Runtime — composition root + operations facade.
@@ -16,12 +16,28 @@ import type { StorageAdapter } from "./storage.js";
  * T1: `handleChat` runs one turn with a `ToolLoopAgent` and persists via the
  * stock AI SDK stream helper — `onStepEnd` → runs/usage, `onFinish` → messages.
  */
+/**
+ * T2 durability (opt-in). When enabled, each turn claims a single-writer lease,
+ * heartbeats it while streaming, and aborts if the lease is lost. A reaper
+ * (`runtime.tick()`, driven by cron) reclaims runs whose owner died.
+ */
+export interface DurabilityConfig {
+  enabled?: boolean;
+  /** Lease lifetime in ms; a run is reapable once `now > leaseExpiresAt` (default 30s). */
+  leaseTtlMs?: number;
+  /** Heartbeat cadence in ms; must be comfortably < leaseTtlMs (default 10s). */
+  heartbeatMs?: number;
+  /** Stable owner id for this runtime instance (default: random per process). */
+  instanceId?: string;
+}
+
 export interface RuntimeConfig<RuntimeContext = unknown> {
   storage: StorageAdapter;
   context: ContextDefinition<RuntimeContext>;
   /** The agent registry: name → factory (file-based or DB-driven upstream). */
   agents: Record<string, AgentFactory<RuntimeContext>>;
   secrets?: SecretResolver;
+  durability?: DurabilityConfig;
 }
 
 export interface HandleChatInput {
@@ -40,17 +56,37 @@ export interface HandleChatInput {
 export interface Runtime {
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput): Promise<Response>;
+  /**
+   * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
+   * Returns the reaped runs. No-op-safe to call on every node.
+   */
+  tick(opts?: { now?: number; error?: string }): Promise<{ reaped: RunRecord[] }>;
 }
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 
+const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
+
 export function createRuntime<RC = unknown>(
   config: RuntimeConfig<RC>,
 ): Runtime {
   const { storage } = config;
+  const dur = {
+    enabled: config.durability?.enabled ?? false,
+    leaseTtlMs: config.durability?.leaseTtlMs ?? 30_000,
+    heartbeatMs: config.durability?.heartbeatMs ?? 10_000,
+    instanceId: config.durability?.instanceId ?? newInstanceId(),
+  };
 
   return {
+    async tick(opts) {
+      const reaped = await storage.reapExpiredRuns(opts?.now ?? Date.now(), {
+        error: opts?.error,
+      });
+      return { reaped };
+    },
+
     async handleChat({ agent: agentName, chatId, principal, message, request }) {
       const factory = config.agents[agentName];
       if (!factory) throw new Error(`Unknown agent: ${agentName}`);
@@ -80,10 +116,51 @@ export function createRuntime<RC = unknown>(
 
       // persist the user message up front (crash-safe), then open the run
       await storage.appendMessages(resolvedChatId, [message]);
-      const run = await storage.createRun({
-        chatId: resolvedChatId,
-        agent: agentName,
-      });
+
+      // T2: claim a single-writer lease; T1: an unleased run. `lease` (when set)
+      // fences our writes so a reaped/reassigned run can't be clobbered by us.
+      let run: RunRecord;
+      let lease: RunLease | undefined;
+      if (dur.enabled) {
+        run = await storage.claimRun({
+          chatId: resolvedChatId,
+          agent: agentName,
+          owner: dur.instanceId,
+          ttlMs: dur.leaseTtlMs,
+        });
+        lease = { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 };
+      } else {
+        run = await storage.createRun({
+          chatId: resolvedChatId,
+          agent: agentName,
+        });
+      }
+
+      // T2: heartbeat the lease while streaming; abort the run if we lose it
+      // (reaped by another node, or the run was already closed).
+      const abort = new AbortController();
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const stopHeartbeat = () => {
+        if (heartbeat !== undefined) {
+          clearInterval(heartbeat);
+          heartbeat = undefined;
+        }
+      };
+      if (dur.enabled) {
+        heartbeat = setInterval(() => {
+          void storage
+            .heartbeatRun(run.id, dur.instanceId, dur.leaseTtlMs)
+            .then((held) => {
+              if (!held) {
+                stopHeartbeat();
+                abort.abort(new Error("lease lost"));
+              }
+            })
+            .catch(() => {});
+        }, dur.heartbeatMs);
+        // Don't let the heartbeat alone keep a Node process alive.
+        (heartbeat as { unref?: () => void }).unref?.();
+      }
 
       const agent = new ToolLoopAgent({
         model: cfg.model,
@@ -102,6 +179,7 @@ export function createRuntime<RC = unknown>(
         agent,
         uiMessages,
         originalMessages: uiMessages,
+        abortSignal: dur.enabled ? abort.signal : undefined,
         // Persistence mode: without this the response message id is empty, so
         // every assistant turn upserts onto the same row. Give each a unique id.
         generateMessageId,
@@ -115,14 +193,35 @@ export function createRuntime<RC = unknown>(
           inputTokens += step.usage?.inputTokens ?? 0;
           outputTokens += step.usage?.outputTokens ?? 0;
         },
-        onFinish: async ({ messages }: { messages: AppMessage[] }) => {
+        onFinish: async ({
+          messages,
+          isAborted,
+        }: {
+          messages: AppMessage[];
+          isAborted?: boolean;
+        }) => {
+          stopHeartbeat();
           await storage.appendMessages(resolvedChatId, messages);
-          await storage.updateRun(run.id, {
-            status: "completed",
-            usageInputTokens: inputTokens,
-            usageOutputTokens: outputTokens,
-            endedAt: Date.now(),
-          });
+          // Aborted (lease lost / client gone): don't claim completion. The
+          // guarded update no-ops if the run was already reaped+reassigned.
+          if (isAborted) {
+            await storage.updateRun(
+              run.id,
+              { status: "errored", error: "aborted", endedAt: Date.now() },
+              lease,
+            );
+            return;
+          }
+          await storage.updateRun(
+            run.id,
+            {
+              status: "completed",
+              usageInputTokens: inputTokens,
+              usageOutputTokens: outputTokens,
+              endedAt: Date.now(),
+            },
+            lease,
+          );
           await storage.recordUsage({
             orgId: principal.orgId,
             userId: principal.userId,
@@ -132,6 +231,10 @@ export function createRuntime<RC = unknown>(
             outputTokens,
             cost: 0,
           });
+        },
+        onError: (error: unknown) => {
+          stopHeartbeat();
+          return error instanceof Error ? error.message : "An error occurred.";
         },
       } as Parameters<typeof createAgentUIStreamResponse>[0]);
     },

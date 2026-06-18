@@ -49,6 +49,9 @@ export const runs = pgTable(
     status: text("status").notNull(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),
+    fencingToken: integer("fencing_token"),
+    heartbeatAt: bigint("heartbeat_at", { mode: "number" }),
+    attempt: integer("attempt"),
     usageInputTokens: integer("usage_input_tokens"),
     usageOutputTokens: integer("usage_output_tokens"),
     costTotal: doublePrecision("cost_total"),
@@ -56,7 +59,10 @@ export const runs = pgTable(
     startedAt: bigint("started_at", { mode: "number" }).notNull(),
     endedAt: bigint("ended_at", { mode: "number" }),
   },
-  (t) => [index("latch_runs_chat_idx").on(t.chatId)],
+  (t) => [
+    index("latch_runs_chat_idx").on(t.chatId),
+    index("latch_runs_reaper_idx").on(t.status, t.leaseExpiresAt),
+  ],
 );
 
 export const usage = pgTable(

@@ -132,6 +132,31 @@ export async function makeRuntime(): Promise<{
   return { runtime, storage, client };
 }
 
+/** A durable runtime (T2): leasing + heartbeat + reaper enabled, mock-backed. */
+export async function makeDurableRuntime(
+  durability: { leaseTtlMs?: number; heartbeatMs?: number; instanceId?: string } = {},
+): Promise<{ runtime: Runtime; storage: StorageAdapter; client: Client }> {
+  const client = createClient({ url: ":memory:" });
+  await migrate(client);
+  const storage = createSqliteAdapter(client);
+  const context = defineContext<{ orgId: string }>({
+    build: ({ principal }) => ({ orgId: principal.orgId }),
+  });
+  const agents = {
+    echo: defineAgent<{ orgId: string }>(() => ({
+      model: mockModel(),
+      instructions: "You are a friendly assistant.",
+    })),
+  };
+  const runtime = createRuntime({
+    storage,
+    context,
+    agents,
+    durability: { enabled: true, ...durability },
+  });
+  return { runtime, storage, client };
+}
+
 export function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error(`assertion failed: ${msg}`);
   console.log(`  ✓ ${msg}`);

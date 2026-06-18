@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, lt, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import type {
   AppMessage,
@@ -39,6 +39,9 @@ export function createPostgresAdapter(
     status: r.status as RunStatus,
     leaseOwner: r.leaseOwner,
     leaseExpiresAt: r.leaseExpiresAt,
+    fencingToken: r.fencingToken,
+    heartbeatAt: r.heartbeatAt,
+    attempt: r.attempt,
     usageInputTokens: r.usageInputTokens ?? undefined,
     usageOutputTokens: r.usageOutputTokens ?? undefined,
     costTotal: r.costTotal ?? undefined,
@@ -150,15 +153,80 @@ export function createPostgresAdapter(
       return rowToRun(got[0]!);
     },
 
-    async updateRun(id, patch) {
+    async claimRun(input) {
+      const now = Date.now();
+      const row = {
+        id: newId("run"),
+        chatId: input.chatId,
+        agent: input.agent,
+        status: "active" as RunStatus,
+        leaseOwner: input.owner,
+        leaseExpiresAt: now + input.ttlMs,
+        fencingToken: 1,
+        heartbeatAt: now,
+        attempt: 1,
+        startedAt: now,
+      };
+      await db.insert(schema.runs).values(row);
+      const got = await db
+        .select()
+        .from(schema.runs)
+        .where(eq(schema.runs.id, row.id));
+      return rowToRun(got[0]!);
+    },
+
+    async heartbeatRun(id, owner, ttlMs) {
+      const now = Date.now();
+      const updated = await db
+        .update(schema.runs)
+        .set({ leaseExpiresAt: now + ttlMs, heartbeatAt: now })
+        .where(
+          and(
+            eq(schema.runs.id, id),
+            eq(schema.runs.leaseOwner, owner),
+            eq(schema.runs.status, "active"),
+          ),
+        )
+        .returning({ id: schema.runs.id });
+      return updated.length > 0;
+    },
+
+    async updateRun(id, patch, guard) {
       const set = Object.fromEntries(
         Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "id"),
       );
       if (Object.keys(set).length === 0) return;
+      const where = guard
+        ? and(
+            eq(schema.runs.id, id),
+            eq(schema.runs.leaseOwner, guard.owner),
+            eq(schema.runs.fencingToken, guard.fencingToken),
+          )
+        : eq(schema.runs.id, id);
       await db
         .update(schema.runs)
         .set(set as Partial<typeof schema.runs.$inferInsert>)
-        .where(eq(schema.runs.id, id));
+        .where(where);
+    },
+
+    async reapExpiredRuns(now, opts) {
+      const reaped = await db
+        .update(schema.runs)
+        .set({
+          status: "errored" as RunStatus,
+          error: opts?.error ?? "lease expired",
+          endedAt: now,
+          leaseOwner: null,
+          fencingToken: sql`${schema.runs.fencingToken} + 1`,
+        })
+        .where(
+          and(
+            eq(schema.runs.status, "active"),
+            lt(schema.runs.leaseExpiresAt, now),
+          ),
+        )
+        .returning();
+      return reaped.map(rowToRun);
     },
 
     async getRun(id) {
