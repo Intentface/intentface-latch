@@ -166,6 +166,14 @@ Validated against **Flue's** shipped source (session-replay in your own DB: `flu
 
 ---
 
+## Multi-node exactly-once (ours) — atomic DB claims, no lock service
+Every "pick up work" op is an **atomic conditional claim** against the shared DB → Postgres serializes it → exactly one winner, any node count. No separate coordinator/lock service — Postgres row atomicity *is* the coordination primitive.
+- **Dispatch (one run per scheduled occurrence):** claim due schedules via `SELECT … FOR UPDATE SKIP LOCKED` (or `UPDATE … WHERE next_run_at <= now() RETURNING` that advances the clock) **+** create the run under a **UNIQUE `(schedule_id, scheduled_for)`** key → even a race can't create two runs.
+- **Execution (one driver per run):** the run lease (`UPDATE … WHERE lease free/expired RETURNING`) + heartbeat; the reaper reclaims via the same atomic claim (two reapers → one wins).
+- **Side-effects once:** tool idempotency by `tool_call_id` (+ **fencing tokens** for the brief two-owner window when strict exactly-once is required).
+
+The DB is the coordination point → multi-node-safe with **no extra infra**.
+
 ## Engine portability — keep-the-door-open invariants
 So `WorkflowAgent` (or any engine) stays a drop-in later, never violate these:
 - **`defineAgent` returns config, never an instantiated engine.** The executor builds `ToolLoopAgent` / `WorkflowAgent` from the same options (both share the constructor shape).
@@ -213,12 +221,16 @@ interface FileStore { put; signedUrl(key,ttl); getStream; delete }
 Flow: presigned **PUT direct to S3** (no proxying bytes) → `AppMessage` stores `FileUIPart` **reference only** (tenant-scoped key `org/{orgId}/chat/{chatId}/{uuid}/{file}`) → `toModelMessages` passes URL / streams bytes / uploads to provider (cache `providerReference`) per provider capability → `toClientMessages` resolves a short-TTL **signed URL**. Persist a stable ref (gateway URL or key), sign on read. Security: content-type/size limits, signed URLs, SSRF care. Interface + S3 impl live in `latch-core`. Persistence tier.
 
 ## Scheduled / triggered runs — `Scheduler` seam (ours)
-A scheduled run = a run kicked off by a timer → same `RunExecutor` + event-log path. Split timing from definition:
-- **Schedule store (DB)**: `latch_schedules (id, org_id, agent, input, cron|run_at, principal, enabled, overlap_policy: skip|queue|allow, next_run_at, last_run_at)`.
-- **Scheduler driver (pluggable)**: default = **DB schedules + tick endpoint** (`POST /internal/scheduler/tick`) any cron calls (Vercel Cron / CF Trigger / crontab / GH Action / curl) → enqueues due runs via `RunExecutor`. Zero special infra, all platforms. Swap → BullMQ repeatable / Inngest cron / Temporal schedules (own their clock).
-- **Identity**: schedule stores owning/service `principal`; context via same `context.build({ principal })` (non-HTTP path).
-- **Idempotency**: dedupe by `(scheduleId, scheduledFor)` run key (at-least-once safe).
-- Non-interactive (no client stream); results in `run_events`/`runs`, optional completion webhook. Interface + store + tick in core/server; heavy drivers optional (reuse executor infra). Persistence tier; benefits from durability.
+**End users create schedules at runtime, so schedules are DATA (DB rows), not crontabs.** A scheduled run = a run kicked off by a timer instead of a user message → same execution + persistence path, run **as the owning user**.
+
+- **Schedules = DB rows (the customer's Postgres), CRUD'd by end users via API:**
+  `latch_schedules (id, org_id, user_id, agent, input, cron_expr | run_at, timezone, principal, enabled, overlap_policy: skip|queue|allow, next_run_at, last_run_at)`. Creating a "scheduled agent" = inserting a row.
+- **Key column = `next_run_at`** — precomputed from the cron expr (DST-aware via `timezone`, e.g. `cron-parser`). The dispatcher query is a cheap indexed `WHERE enabled AND next_run_at <= now()`; it does **not** evaluate every cron each tick. Robust to downtime: overdue rows just fire on the next tick (catch-up).
+- **One coarse tick = the dispatcher, and it's the SAME cron as the T2 reaper.** A single periodic job (`POST /internal/scheduler/tick`, hit by Vercel Cron / crontab / GH Action / a worker loop) both: (a) **starts due schedules** + recomputes `next_run_at`, and (b) **re-drives interrupted runs** (expired leases). One static cron drives N dynamic user schedules — no per-user crontabs.
+- **Identity / multi-tenant safety:** each row stores the owning user's `principal` → `context.build({ principal })` → the run executes **as that user, with their permissions** (not elevated). Validate users can only schedule agents/inputs within their scope; rate-limit schedules per user/org.
+- **Idempotency / overlap (multi-node):** claim due rows atomically (`FOR UPDATE SKIP LOCKED`) + a UNIQUE `(schedule_id, scheduled_for)` run key → **exactly one run per occurrence across nodes** (see *Multi-node exactly-once*); per-schedule `skip|queue|allow`.
+- **Pluggable driver:** default = DB rows + tick endpoint (zero infra, all platforms). Swap → BullMQ repeatable / AWS EventBridge Scheduler / Temporal cron / QStash / Inngest at higher scale or sub-minute precision.
+- Non-interactive (no client stream); results land in `runs`/`messages`, optional completion webhook. **Persistence tier; durable scheduled runs use T2** (background/long → want the reaper). This is the standard "schedules-as-data + one dispatcher" pattern (Zapier/GH-Actions-style), not per-user cron.
 
 ## Documentation
 - **Server API** → **`@hono/zod-openapi`** generates OpenAPI 3.1 from our zod schemas (`/openapi.json`, no drift) + **Scalar** (`@scalar/hono-api-reference`) interactive UI at `/docs`. In `latch-server`; embed users get exported schemas to compose their own. REST surface only (chats, agents, runs, events, stop, approvals, file presign).
@@ -232,6 +244,7 @@ A scheduled run = a run kicked off by a timer → same `RunExecutor` + event-log
 - **Slash commands** — input-handling hook on the extension layer + input queue.
 - **History browsing** — API/UI over `messages`/`run_events` (data already there).
 - **Self-evolving agents** — scheduled job reads run history + **steering frequency** (signal that a prompt is off) → generates an instruction overlay stored **per-org/per-user** → injected via `defineContext`/before-agent-start hook. Composes from event-log + Scheduler + context-injection + a per-scope prompt store; no new primitives. Complements (not same as) Memory: evolution tunes *instructions*, memory recalls *facts*.
+- **Evals (early + first-class, à la Eve)** — thin `defineEval` (cases: input + assertions) → run a `defineAgent` headlessly → score with deterministic assertions + LLM-as-judge → reporter. Runs in CI/dev, **reuses the headless agent runtime** (cheap to add). Or integrate **Braintrust/Evalite/promptfoo** (Braintrust overlaps the observability adapter — one integration, evals + tracing). Bonuses: seed eval datasets from production `messages` history; **evals are the metric the self-evolving-prompts feature needs.** A consultancy differentiator ("we prove it works and keep it working").
 - **Richer extension hooks** (à la Pi: before_provider_request, etc.) as the hook layer matures.
 
 ## Resolved opens (recommended defaults — override if needed)
