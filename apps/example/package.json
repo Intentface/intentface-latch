@@ -12,6 +12,7 @@
     "smoke:resume": "tsx --conditions development src/resume.smoke.ts",
     "smoke:checkpoint": "tsx --conditions development src/checkpoint.smoke.ts",
     "smoke:scheduler": "tsx --conditions development src/scheduler.smoke.ts",
+    "smoke:vault": "tsx --conditions development src/vault.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {

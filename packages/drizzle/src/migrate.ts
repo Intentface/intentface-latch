@@ -23,6 +23,11 @@ const DDL = [
      model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
      cost REAL NOT NULL, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_usage_org_idx ON latch_usage (org_id)`,
+  `CREATE TABLE IF NOT EXISTS latch_secrets (
+     id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT, key TEXT NOT NULL,
+     ciphertext TEXT NOT NULL, iv TEXT NOT NULL, wrapped_dek TEXT NOT NULL, dek_iv TEXT NOT NULL,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_secrets_scope_idx ON latch_secrets (org_id, user_id)`,
 ];
 
 export async function migrate(client: Client): Promise<void> {

@@ -64,6 +64,25 @@ export const runs = sqliteTable(
   ],
 );
 
+/** Envelope-encrypted connection credentials. No plaintext is ever stored. */
+export const secrets = sqliteTable(
+  "latch_secrets",
+  {
+    /** `${orgId}:${userId ?? ''}:${key}` — stable composite id. */
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    userId: text("user_id"),
+    key: text("key").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    dekIv: text("dek_iv").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [index("latch_secrets_scope_idx").on(t.orgId, t.userId)],
+);
+
 export const usage = sqliteTable(
   "latch_usage",
   {
