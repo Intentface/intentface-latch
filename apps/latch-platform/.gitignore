@@ -13,3 +13,5 @@ todos.json
 
 # typescript
 *.tsbuildinfo
+
+!.env.example
