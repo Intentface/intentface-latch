@@ -195,7 +195,7 @@ export function createRuntime<RC = unknown>(
     agentName: string,
     principal: Principal,
     request?: Request,
-  ): Promise<{ cfg: AgentConfig; modelId: string }> {
+  ): Promise<{ cfg: AgentConfig; modelId: string; runtimeCtx: RC }> {
     const factory = config.agents[agentName];
     if (!factory) throw new Error(`Unknown agent: ${agentName}`);
     const runtimeCtx = await config.context.build({ principal, request });
@@ -204,7 +204,7 @@ export function createRuntime<RC = unknown>(
       typeof cfg.model === "string"
         ? cfg.model
         : ((cfg.model as { modelId?: string }).modelId ?? "unknown");
-    return { cfg, modelId };
+    return { cfg, modelId, runtimeCtx };
   }
 
   /**
@@ -222,8 +222,9 @@ export function createRuntime<RC = unknown>(
     run: RunRecord;
     lease: RunLease | undefined;
     uiMessages: AppMessage[];
+    runtimeCtx: RC;
   }): Promise<Response> {
-    const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages } =
+    const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
       args;
 
     const abort = new AbortController();
@@ -280,31 +281,50 @@ export function createRuntime<RC = unknown>(
     let outputTokens = 0;
 
     // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
-    // UI-stream `onStepEnd` — the SDK's per-step persistence hook — and a
-    // `writer` for custom data parts. Behaviour is otherwise identical.
-    const modelMessages = await convertToModelMessages(uiMessages, {
-      tools,
-    } as never);
-    const result = await agent.stream({
-      prompt: modelMessages,
-      abortSignal: dur.enabled ? abort.signal : undefined,
-      // generate-text step callback: accumulate usage across steps.
-      onStepEnd: (step: {
-        usage?: { inputTokens?: number; outputTokens?: number };
-      }) => {
-        inputTokens += step.usage?.inputTokens ?? 0;
-        outputTokens += step.usage?.outputTokens ?? 0;
-      },
-    } as unknown as Parameters<typeof agent.stream>[0]);
-
+    // UI-stream `onStepEnd` (per-step persistence) and the `writer`. The model
+    // call runs INSIDE `execute` so the writer is live during the turn — code
+    // here can write data parts (e.g. a compaction marker) before the model's
+    // output, and tools can write via `toolsContext`.
     const stream = createUIMessageStream({
       originalMessages: uiMessages,
       // Persistence mode: one stable assistant-message id per turn (else every
       // turn would upsert onto the same row — see the dup-id regression test).
       generateId: generateMessageId,
-      execute: ({ writer }: { writer: TurnWriter }) => {
-        // Fold the model's own output into the stream. The `writer` is also the
-        // seam for custom data parts (wired to tool context in a later step).
+      execute: async ({ writer }: { writer: TurnWriter }) => {
+        // (in-turn writer writes — e.g. a "compacting…" / compaction marker —
+        //  would go here, before the model output is merged in)
+        const modelMessages = await convertToModelMessages(uiMessages, {
+          tools,
+        } as never);
+        const result = await agent.stream({
+          prompt: modelMessages,
+          abortSignal: dur.enabled ? abort.signal : undefined,
+          // Shared context for hooks / prepareStep / approval policies.
+          runtimeContext: runtimeCtx,
+          // `toolsContext` is keyed BY TOOL NAME (the SDK does
+          // `toolsContext[toolName]`), so point every tool at the same context:
+          // the project's runtime context + who it's for + the run + the writer.
+          // A tool reads it as `options.context`.
+          toolsContext: Object.fromEntries(
+            Object.keys(tools).map((name) => [
+              name,
+              {
+                ...(runtimeCtx as Record<string, unknown>),
+                principal,
+                run: { id: run.id, chatId: resolvedChatId },
+                writer,
+              },
+            ]),
+          ),
+          // generate-text step callback: accumulate usage across steps.
+          onStepEnd: (step: {
+            usage?: { inputTokens?: number; outputTokens?: number };
+          }) => {
+            inputTokens += step.usage?.inputTokens ?? 0;
+            outputTokens += step.usage?.outputTokens ?? 0;
+          },
+        } as unknown as Parameters<typeof agent.stream>[0]);
+        // Fold the model's own output into the stream.
         writer.merge(
           toUIMessageStream({
             stream: result.stream,
@@ -423,7 +443,7 @@ export function createRuntime<RC = unknown>(
       }
       const resolvedChatId = chat.id;
 
-      const { cfg, modelId } = await resolveAgentConfig(
+      const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
         agentName,
         principal,
         request,
@@ -443,6 +463,7 @@ export function createRuntime<RC = unknown>(
       run,
       lease,
       uiMessages: [...prior, message],
+      runtimeCtx,
     });
   }
 
@@ -460,7 +481,7 @@ export function createRuntime<RC = unknown>(
     const principal: Principal = { orgId: chat.orgId, userId: chat.userId };
     const scope = scopeOf(principal);
 
-    const { cfg, modelId } = await resolveAgentConfig(run.agent, principal);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
     const uiMessages = await storage.loadMessages(scope, run.chatId);
     const lease: RunLease = {
       owner: dur.instanceId,
@@ -477,6 +498,7 @@ export function createRuntime<RC = unknown>(
       run,
       lease,
       uiMessages,
+      runtimeCtx,
     });
     await res.text();
 
@@ -527,7 +549,7 @@ export function createRuntime<RC = unknown>(
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
 
-    const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
     const { run, lease } = await openRun(chatId, chat.agent);
 
     return buildTurn({
@@ -538,6 +560,7 @@ export function createRuntime<RC = unknown>(
       run,
       lease,
       uiMessages: messages,
+      runtimeCtx,
     });
   }
 
