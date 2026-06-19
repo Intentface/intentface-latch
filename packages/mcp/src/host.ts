@@ -56,6 +56,8 @@ export interface McpHostConfig {
   allowedHosts: string[] | ((scope: Scope) => string[] | Promise<string[]>);
   /** Vault read-side, used for bearer auth. */
   secrets?: SecretResolver;
+  /** Observe a connection that failed to open (it's skipped, not fatal). */
+  onConnectionError?: (name: string, error: unknown) => void;
 }
 
 export interface OpenMcp {
@@ -125,22 +127,27 @@ export function createMcpHost(config: McpHostConfig): McpHost {
           () => undefined,
         );
 
-      try {
-        for (const conn of connections) {
+      for (const conn of connections) {
+        // SSRF guard is a HARD failure (security): an unlisted host throws,
+        // before any socket opens.
+        if (!("transport" in conn)) {
+          const host = new URL(conn.url).hostname;
+          if (!isHostAllowed(host, allowed)) {
+            await closeAll();
+            throw new Error(
+              `MCP host not allowed for this tenant: ${host} (connection "${conn.name}")`,
+            );
+          }
+        }
+        // A connection that can't be opened (down / bad token / no tools) is
+        // SKIPPED, not fatal — the agent degrades gracefully without it.
+        try {
           let client: MCPClient;
           if ("transport" in conn) {
-            // Developer-provided transport (in-process; trusted): use as-is.
             client = await createMCPClient({
               transport: conn.transport,
             } as Parameters<typeof createMCPClient>[0]);
           } else {
-            // SSRF guard: refuse to connect to a host this tenant isn't allowed.
-            const host = new URL(conn.url).hostname;
-            if (!isHostAllowed(host, allowed)) {
-              throw new Error(
-                `MCP host not allowed for this tenant: ${host} (connection "${conn.name}")`,
-              );
-            }
             const headers = await buildAuthHeaders(conn, scope, config.secrets);
             client = await createMCPClient({
               transport: {
@@ -153,15 +160,13 @@ export function createMcpHost(config: McpHostConfig): McpHost {
             } as Parameters<typeof createMCPClient>[0]);
           }
           clients.push(client);
-
           const serverTools = await client.tools();
           for (const [name, tool] of Object.entries(serverTools)) {
             tools[`${conn.name}_${name}`] = tool; // namespace to avoid collisions
           }
+        } catch (error) {
+          config.onConnectionError?.(conn.name, error);
         }
-      } catch (error) {
-        await closeAll(); // don't leak half-open clients on failure
-        throw error;
       }
 
       return { tools, close: closeAll };
