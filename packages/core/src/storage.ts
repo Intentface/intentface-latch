@@ -138,6 +138,8 @@ export interface StorageAdapter {
     guard?: RunLease,
   ): Promise<void>;
   getRun(id: string): Promise<RunRecord | null>;
+  /** Scoped list of the tenant's runs (joined via chats), most-recent first. */
+  listRuns(scope: Scope, opts?: { limit?: number }): Promise<RunRecord[]>;
   /**
    * Reaper: mark active runs whose lease has expired (`leaseExpiresAt < now`) as
    * `errored`, clear the owner, and bump the fencing token (invalidating any

@@ -86,6 +86,11 @@ export interface Runtime {
     principal: Principal;
     limit?: number;
   }): Promise<ChatRecord[]>;
+  /** The tenant's runs, most-recent first (status, usage, cost — for an ops view). */
+  listRuns(input: {
+    principal: Principal;
+    limit?: number;
+  }): Promise<RunRecord[]>;
   /**
    * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
    * Returns the reaped runs. No-op-safe to call on every node.
@@ -630,11 +635,22 @@ export function createRuntime<RC = unknown>(
     return storage.listChats(scopeOf(principal), { limit });
   }
 
+  async function listRuns({
+    principal,
+    limit,
+  }: {
+    principal: Principal;
+    limit?: number;
+  }): Promise<RunRecord[]> {
+    return storage.listRuns(scopeOf(principal), { limit });
+  }
+
   return {
     tick: reapTick,
     handleChat,
     loadHistory,
     listChats,
+    listRuns,
     resume: resumeRun,
     sweep,
     applyApproval,

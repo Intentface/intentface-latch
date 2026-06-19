@@ -288,6 +288,22 @@ export function createPostgresAdapter(
       return rows[0] ? rowToRun(rows[0]) : null;
     },
 
+    async listRuns(scope, opts) {
+      const rows = await db
+        .select({ run: schema.runs })
+        .from(schema.runs)
+        .innerJoin(schema.chats, eq(schema.runs.chatId, schema.chats.id))
+        .where(
+          and(
+            eq(schema.chats.orgId, scope.orgId),
+            scope.userId ? eq(schema.chats.userId, scope.userId) : undefined,
+          ),
+        )
+        .orderBy(sql`${schema.runs.startedAt} desc`)
+        .limit(opts?.limit ?? 100);
+      return rows.map((r) => rowToRun(r.run));
+    },
+
     async recordUsage(input) {
       await db.insert(schema.usage).values({
         id: newId("use"),

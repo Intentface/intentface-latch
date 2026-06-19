@@ -33,9 +33,21 @@ export function AppHeader() {
 
   return (
     <header className="flex items-center justify-between border-b px-4 py-2">
-      <Link to="/" className="font-semibold tracking-tight">
-        🔒 Latch
-      </Link>
+      <div className="flex items-center gap-4">
+        <Link to="/" className="font-semibold tracking-tight">
+          🔒 Latch
+        </Link>
+        {session && (
+          <nav className="text-muted-foreground flex gap-3 text-sm">
+            <Link to="/chat" activeProps={{ className: "text-foreground font-medium" }}>
+              Chats
+            </Link>
+            <Link to="/runs" activeProps={{ className: "text-foreground font-medium" }}>
+              Runs
+            </Link>
+          </nav>
+        )}
+      </div>
 
       {isPending ? null : session ? (
         <div className="flex items-center gap-2">

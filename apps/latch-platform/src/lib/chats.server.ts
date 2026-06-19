@@ -26,6 +26,25 @@ export const listChatsFn = createServerFn({ method: "GET" }).handler(async () =>
   }));
 });
 
+/** The tenant's runs (status, tokens, cost) for the ops panel. */
+export const listRunsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { runtime } = await getLatch();
+  const runs = await runtime.listRuns({ principal });
+  return runs.map((r) => ({
+    id: r.id,
+    chatId: r.chatId,
+    agent: r.agent,
+    status: r.status,
+    inputTokens: r.usageInputTokens ?? 0,
+    outputTokens: r.usageOutputTokens ?? 0,
+    cost: r.costTotal ?? 0,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt ?? null,
+  }));
+});
+
 /**
  * Client-projected history for one chat (used as useChat initial messages).
  * UIMessages are JSON at runtime but their `parts` carry `unknown` fields the

@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as RunsRouteImport } from './routes/runs'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
@@ -17,6 +18,11 @@ import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
 import { Route as ApiChatRouteImport } from './routes/api/chat'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
+const RunsRoute = RunsRouteImport.update({
+  id: '/runs',
+  path: '/runs',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
@@ -57,6 +63,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/chat': typeof ChatRouteWithChildren
   '/login': typeof LoginRoute
+  '/runs': typeof RunsRoute
   '/api/chat': typeof ApiChatRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat/': typeof ChatIndexRoute
@@ -65,6 +72,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/runs': typeof RunsRoute
   '/api/chat': typeof ApiChatRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat': typeof ChatIndexRoute
@@ -75,6 +83,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/chat': typeof ChatRouteWithChildren
   '/login': typeof LoginRoute
+  '/runs': typeof RunsRoute
   '/api/chat': typeof ApiChatRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat/': typeof ChatIndexRoute
@@ -86,17 +95,26 @@ export interface FileRouteTypes {
     | '/'
     | '/chat'
     | '/login'
+    | '/runs'
     | '/api/chat'
     | '/chat/$chatId'
     | '/chat/'
     | '/api/auth/$'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/api/chat' | '/chat/$chatId' | '/chat' | '/api/auth/$'
+  to:
+    | '/'
+    | '/login'
+    | '/runs'
+    | '/api/chat'
+    | '/chat/$chatId'
+    | '/chat'
+    | '/api/auth/$'
   id:
     | '__root__'
     | '/'
     | '/chat'
     | '/login'
+    | '/runs'
     | '/api/chat'
     | '/chat/$chatId'
     | '/chat/'
@@ -107,12 +125,20 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChatRoute: typeof ChatRouteWithChildren
   LoginRoute: typeof LoginRoute
+  RunsRoute: typeof RunsRoute
   ApiChatRoute: typeof ApiChatRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/runs': {
+      id: '/runs'
+      path: '/runs'
+      fullPath: '/runs'
+      preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -181,6 +207,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChatRoute: ChatRouteWithChildren,
   LoginRoute: LoginRoute,
+  RunsRoute: RunsRoute,
   ApiChatRoute: ApiChatRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
 }
