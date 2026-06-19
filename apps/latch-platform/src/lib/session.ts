@@ -4,15 +4,19 @@ import { auth } from "./auth";
 
 /**
  * The bridge: better-auth session → Latch `Principal`.
- *
- * The active organization is the tenant (`orgId`); a signed-in user with no
- * active org falls back to a personal scope so they always have a tenant.
- * Returns null when not authenticated.
+ * Active organization = tenant (`orgId`); signed-in users with no active org
+ * fall back to a personal scope. Returns null when not authenticated.
  */
-export async function getPrincipal(): Promise<Principal | null> {
-  const headers = getRequestHeaders() as unknown as Headers;
+export async function getPrincipalFromHeaders(
+  headers: Headers,
+): Promise<Principal | null> {
   const session = await auth.api.getSession({ headers });
   if (!session) return null;
   const orgId = session.session.activeOrganizationId ?? `user:${session.user.id}`;
   return { orgId, userId: session.user.id };
+}
+
+/** Ambient version (inside a server fn / route). */
+export async function getPrincipal(): Promise<Principal | null> {
+  return getPrincipalFromHeaders(getRequestHeaders() as unknown as Headers);
 }

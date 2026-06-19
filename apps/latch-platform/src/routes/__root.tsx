@@ -2,6 +2,8 @@ import { HeadContent, Scripts, createRootRoute } from "@tanstack/react-router"
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools"
 import { TanStackDevtools } from "@tanstack/react-devtools"
 
+import { AppHeader } from "@/components/app-header"
+import { Toaster } from "@/components/ui/sonner"
 import appCss from "../styles.css?url"
 
 export const Route = createRootRoute({
@@ -41,7 +43,11 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body>
-        {children}
+        <div className="flex h-screen flex-col">
+          <AppHeader />
+          <main className="min-h-0 flex-1">{children}</main>
+        </div>
+        <Toaster />
         <TanStackDevtools
           config={{
             position: "bottom-right",

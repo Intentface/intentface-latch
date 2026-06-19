@@ -16,7 +16,11 @@ const dialect = new LibsqlDialect({
   url: process.env.DATABASE_URL ?? "file:./latch.db",
 });
 
+const baseURL = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
+
 export const auth = betterAuth({
+  baseURL,
+  trustedOrigins: [baseURL],
   database: { dialect, type: "sqlite" },
   secret: process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-change-me",
   emailAndPassword: { enabled: true },
