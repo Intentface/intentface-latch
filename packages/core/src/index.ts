@@ -13,3 +13,5 @@ export * from "./agent.js";
 export * from "./runtime.js";
 export * from "./scheduler.js";
 export * from "./vault.js";
+export * from "./projections.js";
+export * from "./pricing.js";

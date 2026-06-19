@@ -1,6 +1,5 @@
 import {
   ToolLoopAgent,
-  convertToModelMessages,
   createIdGenerator,
   createUIMessageStream,
   createUIMessageStreamResponse,
@@ -10,6 +9,8 @@ import type { AppMessage } from "./message.js";
 import { type Principal, scopeOf } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
 import type { AgentConfig, AgentFactory, OpenToolSet } from "./agent.js";
+import { toClientMessages, toModelMessages } from "./projections.js";
+import { computeCost, type Pricing } from "./pricing.js";
 import type {
   RunLease,
   RunRecord,
@@ -50,6 +51,8 @@ export interface RuntimeConfig<RuntimeContext = unknown> {
   agents: Record<string, AgentFactory<RuntimeContext>>;
   secrets?: SecretResolver;
   durability?: DurabilityConfig;
+  /** Optional cost calculation. Without it, recorded cost is 0. */
+  pricing?: Pricing;
 }
 
 export interface HandleChatInput {
@@ -68,6 +71,15 @@ export interface HandleChatInput {
 export interface Runtime {
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput): Promise<Response>;
+  /**
+   * Client-projected conversation history (`toClientMessages`): the stored
+   * messages with `internal`/`redacted` ones filtered out. For rendering past
+   * turns on load.
+   */
+  loadHistory(input: {
+    chatId: string;
+    principal: Principal;
+  }): Promise<AppMessage[]>;
   /**
    * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
    * Returns the reaped runs. No-op-safe to call on every node.
@@ -293,9 +305,8 @@ export function createRuntime<RC = unknown>(
       execute: async ({ writer }: { writer: TurnWriter }) => {
         // (in-turn writer writes — e.g. a "compacting…" / compaction marker —
         //  would go here, before the model output is merged in)
-        const modelMessages = await convertToModelMessages(uiMessages, {
-          tools,
-        } as never);
+        // Model projection: drops `sendToModel:false` messages (and data-* parts).
+        const modelMessages = await toModelMessages(uiMessages, { tools });
         const result = await agent.stream({
           prompt: modelMessages,
           abortSignal: dur.enabled ? abort.signal : undefined,
@@ -354,6 +365,21 @@ export function createRuntime<RC = unknown>(
       }) => {
         stopHeartbeat();
         await closeSources();
+        // Cost for this turn (0 if no pricing configured). Stamp usage + cost
+        // onto the assistant message — the message is complete; this is metadata.
+        const cost = computeCost(
+          config.pricing?.(modelId),
+          inputTokens,
+          outputTokens,
+        );
+        const last = messages[messages.length - 1];
+        if (last?.role === "assistant") {
+          last.metadata = {
+            ...last.metadata,
+            usage: { inputTokens, outputTokens },
+            cost,
+          };
+        }
         await storage.appendMessages(resolvedChatId, messages);
         // Aborted (lease lost / client gone): don't claim completion. The
         // guarded update no-ops if the run was already reaped+reassigned.
@@ -374,6 +400,7 @@ export function createRuntime<RC = unknown>(
             status: paused ? "awaiting_input" : "completed",
             usageInputTokens: inputTokens,
             usageOutputTokens: outputTokens,
+            costTotal: cost,
             endedAt: paused ? undefined : Date.now(),
           },
           lease,
@@ -385,7 +412,7 @@ export function createRuntime<RC = unknown>(
           model: modelId,
           inputTokens,
           outputTokens,
-          cost: 0,
+          cost,
         });
       },
       onError: (error: unknown) => {
@@ -564,9 +591,21 @@ export function createRuntime<RC = unknown>(
     });
   }
 
+  async function loadHistory({
+    chatId,
+    principal,
+  }: {
+    chatId: string;
+    principal: Principal;
+  }): Promise<AppMessage[]> {
+    const messages = await storage.loadMessages(scopeOf(principal), chatId);
+    return toClientMessages(messages);
+  }
+
   return {
     tick: reapTick,
     handleChat,
+    loadHistory,
     resume: resumeRun,
     sweep,
     applyApproval,

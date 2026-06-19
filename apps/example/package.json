@@ -18,6 +18,8 @@
     "smoke:oauth": "tsx --conditions development src/oauth.smoke.ts",
     "smoke:approval": "tsx --conditions development src/approval.smoke.ts",
     "smoke:writer": "tsx --conditions development src/writer.smoke.ts",
+    "smoke:cost": "tsx --conditions development src/cost.smoke.ts",
+    "smoke:projections": "tsx --conditions development src/projections.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
