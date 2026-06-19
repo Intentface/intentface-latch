@@ -12,6 +12,7 @@ import type { AgentConfig, AgentFactory, OpenToolSet } from "./agent.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import type {
+  ChatRecord,
   RunLease,
   RunRecord,
   RunStatus,
@@ -80,6 +81,11 @@ export interface Runtime {
     chatId: string;
     principal: Principal;
   }): Promise<AppMessage[]>;
+  /** The tenant's chats, most-recent first (for a chat list / sidebar). */
+  listChats(input: {
+    principal: Principal;
+    limit?: number;
+  }): Promise<ChatRecord[]>;
   /**
    * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
    * Returns the reaped runs. No-op-safe to call on every node.
@@ -153,6 +159,16 @@ type ApprovalPart = {
   state?: string;
   approval?: { id: string; approved?: boolean; reason?: string };
 };
+
+/** The concatenated text of a message's text parts (for a chat title). */
+function firstText(message: AppMessage): string | undefined {
+  const text = (message.parts ?? [])
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join(" ")
+    .trim();
+  return text.length > 0 ? text : undefined;
+}
 
 /** True if any message has a tool part still awaiting an approval decision. */
 function hasPendingApproval(messages: AppMessage[]): boolean {
@@ -466,6 +482,8 @@ export function createRuntime<RC = unknown>(
           orgId: principal.orgId,
           userId: principal.userId,
           agent: agentName,
+          // Title from the first user message — for the chat list.
+          title: firstText(message)?.slice(0, 80),
         });
       }
       const resolvedChatId = chat.id;
@@ -602,10 +620,21 @@ export function createRuntime<RC = unknown>(
     return toClientMessages(messages);
   }
 
+  async function listChats({
+    principal,
+    limit,
+  }: {
+    principal: Principal;
+    limit?: number;
+  }): Promise<ChatRecord[]> {
+    return storage.listChats(scopeOf(principal), { limit });
+  }
+
   return {
     tick: reapTick,
     handleChat,
     loadHistory,
+    listChats,
     resume: resumeRun,
     sweep,
     applyApproval,

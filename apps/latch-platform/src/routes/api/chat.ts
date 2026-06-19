@@ -25,9 +25,11 @@ export const Route = createFileRoute("/api/chat")({
         if (!message) return new Response("No message", { status: 400 });
 
         const { runtime } = await getLatch();
+        // chatId is a client-generated uuid; tenant isolation is enforced by
+        // the storage scope (orgId on the row + scoped reads), so no prefixing.
         return runtime.handleChat({
           agent: "assistant",
-          chatId: `${principal.orgId}:${body.id ?? "default"}`,
+          chatId: body.id ?? crypto.randomUUID(),
           principal,
           message,
         });

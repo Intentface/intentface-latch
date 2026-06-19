@@ -81,6 +81,8 @@ export interface StorageAdapter {
   }): Promise<ChatRecord>;
   /** Scoped: returns null if the chat isn't in the caller's tenant. */
   getChat(scope: Scope, id: string): Promise<ChatRecord | null>;
+  /** Scoped list of the tenant's chats, most-recently-updated first. */
+  listChats(scope: Scope, opts?: { limit?: number }): Promise<ChatRecord[]>;
   /**
    * UNSCOPED system read — bypasses tenant scoping. Only for privileged
    * operations like resume/reaper that act on behalf of a run's tenant (the

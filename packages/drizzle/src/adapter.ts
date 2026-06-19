@@ -79,6 +79,21 @@ export function createSqliteAdapter(client: Client): StorageAdapter {
 
     getChat,
 
+    async listChats(scope, opts) {
+      const rows = await db
+        .select()
+        .from(schema.chats)
+        .where(
+          and(
+            eq(schema.chats.orgId, scope.orgId),
+            scope.userId ? eq(schema.chats.userId, scope.userId) : undefined,
+          ),
+        )
+        .orderBy(sql`${schema.chats.updatedAt} desc`)
+        .limit(opts?.limit ?? 100);
+      return rows.map(rowToChat);
+    },
+
     async getChatById(id) {
       const rows = await db
         .select()

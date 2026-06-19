@@ -1,18 +1,30 @@
 import { useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import { useRouter } from "@tanstack/react-router";
 import { Send } from "lucide-react";
+import type { AppMessage } from "@intentface/latch-core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-/** A minimal chat against /api/chat (the durable `assistant` agent for your org). */
-export function Chat({ chatId = "default" }: { chatId?: string }) {
+/** Chat against /api/chat — the durable `assistant` agent, scoped to your org. */
+export function Chat({
+  chatId,
+  initialMessages,
+}: {
+  chatId: string;
+  initialMessages?: AppMessage[];
+}) {
+  const router = useRouter();
   const [input, setInput] = useState("");
   const { messages, sendMessage, status } = useChat({
     id: chatId,
+    messages: initialMessages,
     transport: new DefaultChatTransport({ api: "/api/chat" }),
+    // Refresh the sidebar once a (possibly new) chat finishes a turn.
+    onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
 
@@ -20,18 +32,15 @@ export function Chat({ chatId = "default" }: { chatId?: string }) {
     <div className="flex h-full flex-col">
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
         {messages.length === 0 && (
-          <p className="text-muted-foreground text-center text-sm">
-            Ask the agent anything. Runs are persisted and durable, scoped to your org.
+          <p className="text-muted-foreground mt-12 text-center text-sm">
+            Ask the agent anything. Runs are persisted and durable.
           </p>
         )}
         {messages.map((m) => (
-          <div
-            key={m.id}
-            className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}
-          >
+          <div key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
             <div
               className={cn(
-                "max-w-[80%] rounded-lg px-3 py-2 text-sm",
+                "max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap",
                 m.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted",
               )}
             >
@@ -45,14 +54,15 @@ export function Chat({ chatId = "default" }: { chatId?: string }) {
                   const state = (part as { state?: string }).state ?? "";
                   return (
                     <Badge key={i} variant="secondary" className="my-1 mr-1">
-                      🔧 {name} {state && <span className="opacity-60">· {state}</span>}
+                      🔧 {name}
+                      {state && <span className="opacity-60"> · {state}</span>}
                     </Badge>
                   );
                 }
                 if (part.type.startsWith("data-")) {
                   return (
                     <Badge key={i} variant="outline" className="my-1 mr-1">
-                      {part.type}
+                      {part.type.replace(/^data-/, "")}
                     </Badge>
                   );
                 }

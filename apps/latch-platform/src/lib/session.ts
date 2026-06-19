@@ -1,4 +1,4 @@
-import { getRequestHeaders } from "@tanstack/react-start/server";
+import { getRequest } from "@tanstack/react-start/server";
 import type { Principal } from "@intentface/latch-core";
 import { auth } from "./auth";
 
@@ -16,7 +16,7 @@ export async function getPrincipalFromHeaders(
   return { orgId, userId: session.user.id };
 }
 
-/** Ambient version (inside a server fn / route). */
+/** Ambient version — uses the real request Headers (works during SSR). */
 export async function getPrincipal(): Promise<Principal | null> {
-  return getPrincipalFromHeaders(getRequestHeaders() as unknown as Headers);
+  return getPrincipalFromHeaders(getRequest().headers);
 }
