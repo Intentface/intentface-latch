@@ -14,6 +14,8 @@ import {
   migrate,
 } from "@intentface/latch-drizzle";
 import { anthropic } from "@ai-sdk/anthropic";
+import { tool } from "ai";
+import { z } from "zod";
 
 /**
  * The platform's Latch runtime — one durable instance over the shared libsql DB
@@ -41,7 +43,26 @@ export async function getLatch(): Promise<{ runtime: Runtime; vault: Vault }> {
   const agents = {
     assistant: defineAgent<{ orgId: string }>(() => ({
       model: anthropic("claude-sonnet-4-6"),
-      instructions: "You are Latch's helpful, concise assistant.",
+      instructions:
+        "You are Latch's helpful, concise assistant. To charge a customer, " +
+        "call chargeCustomer — it requires human approval before it runs.",
+      tools: {
+        chargeCustomer: tool({
+          description: "Charge a customer's card (sensitive — needs approval).",
+          inputSchema: z.object({
+            customer: z.string(),
+            amountUsd: z.number(),
+          }),
+          execute: async ({ customer, amountUsd }) => ({
+            charged: true,
+            customer,
+            amountUsd,
+            reference: `ch_${Math.round(amountUsd * 100)}`,
+          }),
+        }),
+      },
+      // HITL: the turn pauses (awaiting_input) until the user approves.
+      toolApproval: { chargeCustomer: "user-approval" },
     })),
   };
 

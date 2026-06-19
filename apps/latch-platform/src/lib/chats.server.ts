@@ -3,6 +3,29 @@ import type { AppMessage } from "@intentface/latch-core";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 
+/**
+ * Apply tool-approval decisions and run the continuation to completion
+ * server-side (the run executes/skips the gated tool and finishes). The client
+ * then refetches history via loadHistoryFn to show the result.
+ */
+export const applyApprovalFn = createServerFn({ method: "POST" })
+  .inputValidator(
+    (data: { chatId: string; decisions: { approvalId: string; approved: boolean }[] }) =>
+      data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { runtime } = await getLatch();
+    const res = await runtime.applyApproval({
+      chatId: data.chatId,
+      principal,
+      decisions: data.decisions,
+    });
+    await res.text(); // drive the continuation to completion + persistence
+    return { ok: true };
+  });
+
 /** Server-side auth check (sees the cookie during SSR) for route guards. */
 export const currentPrincipalFn = createServerFn({ method: "GET" }).handler(
   async () => {
