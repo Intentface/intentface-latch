@@ -96,3 +96,26 @@ export const usage = pgTable(
   },
   (t) => [index("latch_usage_owner_idx").on(t.owner)],
 );
+
+/** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
+export const schedules = pgTable(
+  "latch_schedules",
+  {
+    id: text("id").primaryKey(),
+    owner: text("owner").notNull(),
+    agent: text("agent").notNull(),
+    identity: jsonb("identity"),
+    cron: text("cron"),
+    prompt: text("prompt").notNull(),
+    nextRunAt: bigint("next_run_at", { mode: "number" }).notNull(),
+    lastRunAt: bigint("last_run_at", { mode: "number" }),
+    enabled: integer("enabled").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("latch_schedules_owner_idx").on(t.owner),
+    index("latch_schedules_due_idx").on(t.enabled, t.nextRunAt),
+  ],
+);

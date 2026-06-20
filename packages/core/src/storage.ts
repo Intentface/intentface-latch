@@ -79,6 +79,33 @@ export interface UsageRecord {
   createdAt: number;
 }
 
+/**
+ * A scheduled agent run. Like a run, it carries the opaque `identity` blob so a
+ * cron tick (no request) can rebuild the principal and run the turn. `cron` is a
+ * customer-evaluated expression (the runtime takes a `cron` evaluator); null =
+ * one-shot. A `lease` makes `claimDueSchedules` exactly-once across nodes.
+ */
+export interface ScheduleRecord {
+  id: string;
+  /** Opaque ownership key derived from the principal. */
+  owner: string;
+  agent: string;
+  /** Serialized Principal blob — rebuilt at fire time via `reconstructPrincipal`. */
+  identity?: unknown;
+  /** Cron expression (evaluated by the runtime's `cron` fn); null = one-shot. */
+  cron: string | null;
+  /** The user message to send the agent each fire. */
+  prompt: string;
+  /** Epoch ms of the next due fire. */
+  nextRunAt: number;
+  lastRunAt?: number | null;
+  enabled: boolean;
+  /** Single-fire lease (exactly-once claim), same shape as runs. */
+  leaseOwner?: string | null;
+  leaseExpiresAt?: number | null;
+  createdAt: number;
+}
+
 export interface StorageAdapter<P> {
   // chats
   createChat(
@@ -161,5 +188,28 @@ export interface StorageAdapter<P> {
   recordUsage(
     principal: P,
     input: Omit<UsageRecord, "id" | "createdAt" | "owner">,
+  ): Promise<void>;
+
+  // schedules (cron-driven agent runs)
+  /** Create a schedule owned by the caller; stores the identity blob for fire-time. */
+  createSchedule(
+    principal: P,
+    input: { agent: string; cron: string | null; prompt: string; nextRunAt: number },
+  ): Promise<ScheduleRecord>;
+  /** The caller's schedules, most-recently-created first. */
+  listSchedules(principal: P): Promise<ScheduleRecord[]>;
+  /** Delete one of the caller's schedules. */
+  deleteSchedule(principal: P, id: string): Promise<void>;
+  /**
+   * System op (no principal): atomically claim due schedules (`enabled`,
+   * `nextRunAt <= now`, lease unset/expired) for `owner`, stamping a lease so a
+   * concurrent node can't double-fire. Returns the claimed records (with
+   * `identity`). Mirrors the run reclaim transition.
+   */
+  claimDueSchedules(now: number, ttlMs: number, owner: string): Promise<ScheduleRecord[]>;
+  /** Finish a fired schedule: advance `nextRunAt`/`enabled`, set `lastRunAt`, clear the lease. */
+  completeSchedule(
+    id: string,
+    patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
   ): Promise<void>;
 }

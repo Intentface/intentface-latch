@@ -29,6 +29,13 @@ const DDL = [
      ciphertext TEXT NOT NULL, iv TEXT NOT NULL, wrapped_dek TEXT NOT NULL, dek_iv TEXT NOT NULL,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_secrets_owner_idx ON latch_secrets (owner)`,
+  `CREATE TABLE IF NOT EXISTS latch_schedules (
+     id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity TEXT,
+     cron TEXT, prompt TEXT NOT NULL, next_run_at INTEGER NOT NULL, last_run_at INTEGER,
+     enabled INTEGER NOT NULL, lease_owner TEXT, lease_expires_at INTEGER,
+     created_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_schedules_owner_idx ON latch_schedules (owner)`,
+  `CREATE INDEX IF NOT EXISTS latch_schedules_due_idx ON latch_schedules (enabled, next_run_at)`,
 ];
 
 export async function migrate(client: Client): Promise<void> {

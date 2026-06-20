@@ -22,6 +22,7 @@ import type {
   RunLease,
   RunRecord,
   RunStatus,
+  ScheduleRecord,
   StorageAdapter,
 } from "./storage.js";
 
@@ -82,6 +83,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * re-hydrate (e.g. re-fetch fresh identity) or validate on resume.
    */
   reconstructPrincipal?: ReconstructPrincipal<P>;
+  /**
+   * Next-fire evaluator for scheduled agents: given a cron expression and a
+   * lower bound (epoch ms), return the next fire time (epoch ms) or null if it
+   * never fires again. Keeps core cron-library-free — wire e.g. `croner`.
+   * Required to create recurring schedules.
+   */
+  cron?: (expr: string, afterMs: number) => number | null;
 }
 
 export interface HandleChatInput<P> {
@@ -156,6 +164,28 @@ export interface Runtime<P> {
     decisions: ApprovalDecision[];
     request?: Request;
   }): Promise<Response>;
+  /**
+   * Schedule an agent to run on a cron expression (or `cron: null` for one-shot,
+   * fired on the next `runDue`). Captures the caller's identity for fire-time.
+   * Requires `cron` in the runtime config for recurring schedules.
+   */
+  schedule(input: {
+    principal: P;
+    agent: string;
+    cron: string | null;
+    prompt: string;
+  }): Promise<ScheduleRecord>;
+  /** The caller's schedules. */
+  listSchedules(input: { principal: P }): Promise<ScheduleRecord[]>;
+  /** Delete one of the caller's schedules. */
+  unschedule(input: { principal: P; id: string }): Promise<void>;
+  /**
+   * Fire all due schedules across ALL tenants (system op — the cron entry point).
+   * Claims each exactly-once, reconstructs its principal, runs the turn in a
+   * fresh chat, and advances the schedule. Point a platform cron (or the
+   * in-process scheduler) at this.
+   */
+  runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }>;
 }
 
 /** A user's decision on one pending tool-approval request. */
@@ -695,6 +725,92 @@ export function createRuntime<P, RC = unknown>(
     return storage.listRuns(principal, { limit });
   }
 
+  /** A fresh user message from plain text (for cron-fired turns). */
+  function userMessageOf(text: string): AppMessage {
+    return {
+      id: generateMessageId(),
+      role: "user",
+      parts: [{ type: "text", text }],
+      metadata: { visibility: "user", createdAt: Date.now() },
+    } as AppMessage;
+  }
+
+  /** Run one turn to completion server-side (no client consuming the stream). */
+  async function runTurnToCompletion(
+    principal: P,
+    agentName: string,
+    message: AppMessage,
+    chatId: string,
+  ): Promise<void> {
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agentName, principal);
+    await storage.appendMessages(chatId, [message]);
+    const { run, lease } = await openRun(principal, chatId, agentName);
+    const res = await buildTurn({
+      resolvedChatId: chatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: [message],
+      runtimeCtx,
+    });
+    await res.text();
+  }
+
+  async function schedule({
+    principal,
+    agent,
+    cron,
+    prompt,
+  }: {
+    principal: P;
+    agent: string;
+    cron: string | null;
+    prompt: string;
+  }): Promise<ScheduleRecord> {
+    if (!config.agents[agent]) throw new Error(`Unknown agent: ${agent}`);
+    const now = Date.now();
+    let nextRunAt = now; // one-shot → fire on the next runDue
+    if (cron) {
+      const next = config.cron?.(cron, now);
+      if (next == null) {
+        throw new Error(
+          "Recurring schedules need a `cron` evaluator in the runtime config (or the expression never fires)",
+        );
+      }
+      nextRunAt = next;
+    }
+    return storage.createSchedule(principal, { agent, cron, prompt, nextRunAt });
+  }
+
+  async function runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }> {
+    const now = opts?.now ?? Date.now();
+    const claimed = await storage.claimDueSchedules(now, dur.leaseTtlMs, dur.instanceId);
+    let fired = 0;
+    let errors = 0;
+    for (const s of claimed) {
+      // Advance regardless of outcome so a failing schedule can't hot-loop.
+      const next = s.cron ? (config.cron?.(s.cron, now) ?? null) : null;
+      try {
+        const principal = await reconstructPrincipal(s.identity);
+        const chat = await storage.createChat(principal, {
+          agent: s.agent,
+          title: s.prompt.slice(0, 80),
+        });
+        await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+        fired++;
+      } catch {
+        errors++;
+      } finally {
+        await storage
+          .completeSchedule(s.id, { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null })
+          .catch(() => {});
+      }
+    }
+    return { fired, errors };
+  }
+
   return {
     tick: reapTick,
     handleChat,
@@ -704,5 +820,9 @@ export function createRuntime<P, RC = unknown>(
     resume: resumeRun,
     sweep,
     applyApproval,
+    schedule,
+    listSchedules: ({ principal }) => storage.listSchedules(principal),
+    unschedule: ({ principal, id }) => storage.deleteSchedule(principal, id),
+    runDue,
   };
 }

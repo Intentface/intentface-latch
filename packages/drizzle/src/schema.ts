@@ -100,3 +100,26 @@ export const usage = sqliteTable(
   },
   (t) => [index("latch_usage_owner_idx").on(t.owner)],
 );
+
+/** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
+export const schedules = sqliteTable(
+  "latch_schedules",
+  {
+    id: text("id").primaryKey(),
+    owner: text("owner").notNull(),
+    agent: text("agent").notNull(),
+    identity: text("identity", { mode: "json" }),
+    cron: text("cron"),
+    prompt: text("prompt").notNull(),
+    nextRunAt: integer("next_run_at").notNull(),
+    lastRunAt: integer("last_run_at"),
+    enabled: integer("enabled").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: integer("lease_expires_at"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    index("latch_schedules_owner_idx").on(t.owner),
+    index("latch_schedules_due_idx").on(t.enabled, t.nextRunAt),
+  ],
+);

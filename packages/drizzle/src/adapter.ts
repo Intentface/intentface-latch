@@ -1,11 +1,12 @@
 import type { Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { and, asc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type {
   AppMessage,
   ChatRecord,
   RunRecord,
   RunStatus,
+  ScheduleRecord,
   StorageAdapter,
 } from "@intentface/latch-core";
 import * as schema from "./schema.js";
@@ -62,6 +63,23 @@ export function createSqliteAdapter<P>(
     error: r.error,
     startedAt: r.startedAt,
     endedAt: r.endedAt,
+  });
+
+  const rowToSchedule = (
+    r: typeof schema.schedules.$inferSelect,
+  ): ScheduleRecord => ({
+    id: r.id,
+    owner: r.owner,
+    agent: r.agent,
+    identity: r.identity ?? undefined,
+    cron: r.cron,
+    prompt: r.prompt,
+    nextRunAt: r.nextRunAt,
+    lastRunAt: r.lastRunAt,
+    enabled: r.enabled === 1,
+    leaseOwner: r.leaseOwner,
+    leaseExpiresAt: r.leaseExpiresAt,
+    createdAt: r.createdAt,
   });
 
   async function getChat(principal: P, id: string): Promise<ChatRecord | null> {
@@ -308,6 +326,79 @@ export function createSqliteAdapter<P>(
         cost: input.cost,
         createdAt: Date.now(),
       });
+    },
+
+    async createSchedule(principal, input) {
+      const now = Date.now();
+      const row = {
+        id: newId("sch"),
+        owner: ownerKey(principal),
+        agent: input.agent,
+        identity: principal,
+        cron: input.cron,
+        prompt: input.prompt,
+        nextRunAt: input.nextRunAt,
+        lastRunAt: null,
+        enabled: 1,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        createdAt: now,
+      };
+      await db.insert(schema.schedules).values(row);
+      const got = await db
+        .select()
+        .from(schema.schedules)
+        .where(eq(schema.schedules.id, row.id));
+      return rowToSchedule(got[0]!);
+    },
+
+    async listSchedules(principal) {
+      const rows = await db
+        .select()
+        .from(schema.schedules)
+        .where(eq(schema.schedules.owner, ownerKey(principal)))
+        .orderBy(sql`${schema.schedules.createdAt} desc`);
+      return rows.map(rowToSchedule);
+    },
+
+    async deleteSchedule(principal, id) {
+      await db
+        .delete(schema.schedules)
+        .where(
+          and(eq(schema.schedules.id, id), eq(schema.schedules.owner, ownerKey(principal))),
+        );
+    },
+
+    async claimDueSchedules(now, ttlMs, owner) {
+      // Atomic exactly-once claim: stamp a lease on due, unclaimed/expired rows.
+      const claimed = await db
+        .update(schema.schedules)
+        .set({ leaseOwner: owner, leaseExpiresAt: now + ttlMs })
+        .where(
+          and(
+            eq(schema.schedules.enabled, 1),
+            lte(schema.schedules.nextRunAt, now),
+            or(
+              isNull(schema.schedules.leaseOwner),
+              lt(schema.schedules.leaseExpiresAt, now),
+            ),
+          ),
+        )
+        .returning();
+      return claimed.map(rowToSchedule);
+    },
+
+    async completeSchedule(id, patch) {
+      await db
+        .update(schema.schedules)
+        .set({
+          nextRunAt: patch.nextRunAt,
+          lastRunAt: patch.lastRunAt,
+          enabled: patch.enabled ? 1 : 0,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        })
+        .where(eq(schema.schedules.id, id));
     },
   };
 }

@@ -20,6 +20,10 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   GET  chats                          list the tenant's chats
  *   GET  chats/:id                      client-projected history for one chat
  *   GET  runs                           list the tenant's runs (usage/cost)
+ *   GET  schedules                      list the tenant's scheduled agents
+ *   POST schedules                      create one ({agent, cron, prompt})
+ *   DELETE schedules/:id                delete one
+ *   POST cron/run                       fire ALL due schedules (host-guarded, no user auth)
  *   GET  connections                    per-connection status for the tenant
  *   GET  connections/:name/authorize    begin OAuth → 302 to the IdP
  *   GET  connections/:name/callback     finish OAuth (+ resume a waiting chat)
@@ -34,6 +38,13 @@ export interface LatchHandlerConfig<P> {
   connections?: McpConnections<P>;
   /** Path prefix the handler is mounted under (e.g. "/api/latch"). Default "/". */
   basePath?: string;
+  /**
+   * Shared secret guarding `POST /cron/run` (the system-wide schedule tick).
+   * When set, the request must send it as `x-latch-cron-secret`. That route is
+   * NOT user-authed — it fires all tenants' due schedules — so guard it at the
+   * host (cron secret / network). Omit to disable the route entirely.
+   */
+  cronSecret?: string;
 }
 
 export type LatchHandler = (
@@ -230,6 +241,51 @@ export function createLatchHandler<P>(
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       return json({ runs: await runtime.listRuns({ principal }) });
+    }
+
+    // --- schedules (cron-driven agents) -----------------------------------
+    if (seg[0] === "schedules") {
+      const principal = await resolveContext(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const id = seg[1];
+      if (!id && method === "GET") {
+        return json({ schedules: await runtime.listSchedules({ principal }) });
+      }
+      if (!id && method === "POST") {
+        const body = (await request.json().catch(() => ({}))) as {
+          agent?: string;
+          cron?: string | null;
+          prompt?: string;
+        };
+        if (!body.agent || !body.prompt) {
+          return json({ error: "agent and prompt are required" }, 400);
+        }
+        try {
+          const record = await runtime.schedule({
+            principal,
+            agent: body.agent,
+            cron: body.cron ?? null,
+            prompt: body.prompt,
+          });
+          return json({ schedule: record });
+        } catch (e) {
+          return json({ error: e instanceof Error ? e.message : "schedule failed" }, 400);
+        }
+      }
+      if (id && method === "DELETE") {
+        await runtime.unschedule({ principal, id });
+        return json({ ok: true });
+      }
+    }
+
+    // POST cron/run — system-wide tick (fires ALL tenants' due schedules).
+    // Host-guarded by `cronSecret`, NOT user auth. Disabled if no secret set.
+    if (seg[0] === "cron" && seg[1] === "run" && method === "POST") {
+      if (!config.cronSecret) return json({ error: "cron route disabled" }, 404);
+      if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
+        return json({ error: "forbidden" }, 403);
+      }
+      return json(await runtime.runDue());
     }
 
     return undefined;
