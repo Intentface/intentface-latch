@@ -20,6 +20,7 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   GET  chats                          list the tenant's chats
  *   GET  chats/:id                      client-projected history for one chat
  *   GET  runs                           list the tenant's runs (usage/cost)
+ *   GET  agents                         the registered agents (for a picker)
  *   GET  schedules                      list the tenant's scheduled agents
  *   POST schedules                      create one ({agent, cron, prompt})
  *   DELETE schedules/:id                delete one
@@ -191,6 +192,10 @@ export function createLatchHandler<P>(
     if (seg[0] === "agents") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      // GET agents — the registered agents (for a picker).
+      if (!seg[1] && method === "GET") {
+        return json({ agents: runtime.listAgents() });
+      }
       const agent = seg[1];
       // Client-chosen chat id, used as-is. Tenant isolation is enforced by the
       // storage scope (orgId on the row + scoped reads), so it isn't prefixed —

@@ -8,8 +8,9 @@ import type { AppMessage } from "@intentface/latch-core";
  */
 const BASE = "/api/latch";
 
-/** The chat endpoint for `useChat`'s transport (chatId in the path). */
-export const chatApi = (chatId: string) => `${BASE}/agents/assistant/${chatId}`;
+/** The chat endpoint for `useChat`'s transport (agent + chatId in the path). */
+export const chatApi = (chatId: string, agent: string) =>
+  `${BASE}/agents/${agent}/${chatId}`;
 
 /**
  * The URL that starts a connection's OAuth. `chatId`/`approvalId` (in-chat
@@ -30,9 +31,10 @@ export function authorizeUrl(
 /** Submit approval decisions and drive the continuation to completion. */
 export async function applyApproval(
   chatId: string,
+  agent: string,
   decisions: { approvalId: string; approved: boolean }[],
 ): Promise<void> {
-  const res = await fetch(`${chatApi(chatId)}/approvals`, {
+  const res = await fetch(`${chatApi(chatId, agent)}/approvals`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ decisions }),

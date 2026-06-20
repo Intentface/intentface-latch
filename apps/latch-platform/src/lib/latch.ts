@@ -83,9 +83,10 @@ export async function getLatch(): Promise<{
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
-    // Cron evaluator for scheduled agents (croner). next fire after `afterMs`.
+    // Cron evaluator for scheduled agents (croner). Interpreted in UTC so fire
+    // times are deterministic regardless of the host's timezone.
     cron: (expr, afterMs) =>
-      new Cron(expr).nextRun(new Date(afterMs))?.getTime() ?? null,
+      new Cron(expr, { timezone: "UTC" }).nextRun(new Date(afterMs))?.getTime() ?? null,
     // Illustrative rates (USD per 1M tokens). Swap for models.dev later.
     pricing: staticPricing({
       "claude-sonnet-4-6": { inputPer1M: 3, outputPer1M: 15 },

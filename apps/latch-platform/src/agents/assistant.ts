@@ -38,4 +38,7 @@ export const assistant = defineAgent<Principal, { orgId: string }>({
   },
   // HITL: the turn pauses (awaiting_input) until the user approves.
   toolApproval: { chargeCustomer: "user-approval" },
+}, {
+  title: "Assistant",
+  description: "General-purpose assistant with Loredex knowledge base and a billing tool.",
 });

@@ -69,16 +69,37 @@ export interface AgentConfig<P> {
   smoothStream?: boolean | { delayInMs?: number; chunking?: "word" | "line" };
 }
 
-/** A factory that produces the agent's config for a given request/context. */
-export type AgentFactory<P, RuntimeContext = unknown> = (ctx: {
+/** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */
+export interface AgentMeta {
+  /** Human-friendly name for a picker (defaults to the registry key). */
+  title?: string;
+  /** Short description of what the agent does. */
+  description?: string;
+}
+
+/** An agent's identity for selection UIs: its registry key + display metadata. */
+export interface AgentInfo extends AgentMeta {
+  name: string;
+}
+
+/**
+ * A factory that produces the agent's config for a given request/context.
+ * Carries optional static `meta` (read without invoking the factory) so the
+ * runtime can list agents for a picker.
+ */
+export type AgentFactory<P, RuntimeContext = unknown> = ((ctx: {
   runtime: RuntimeContext;
   principal: P;
-}) => AgentConfig<P> | Promise<AgentConfig<P>>;
+}) => AgentConfig<P> | Promise<AgentConfig<P>>) & { meta?: AgentMeta };
 
 export function defineAgent<P, RuntimeContext = unknown>(
   def: AgentConfig<P> | AgentFactory<P, RuntimeContext>,
+  meta?: AgentMeta,
 ): AgentFactory<P, RuntimeContext> {
-  return typeof def === "function"
-    ? (def as AgentFactory<P, RuntimeContext>)
-    : () => def;
+  const factory: AgentFactory<P, RuntimeContext> =
+    typeof def === "function"
+      ? (def as AgentFactory<P, RuntimeContext>)
+      : () => def;
+  if (meta) factory.meta = meta;
+  return factory;
 }

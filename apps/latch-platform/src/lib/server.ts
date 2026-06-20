@@ -74,6 +74,14 @@ export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
   },
 );
 
+/** The registered agents (name + display metadata), for the picker. */
+export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { runtime } = await getLatch();
+  return runtime.listAgents();
+});
+
 /** The caller's scheduled agents, for the Schedules page. */
 export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();

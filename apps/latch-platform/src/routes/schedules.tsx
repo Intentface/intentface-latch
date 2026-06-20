@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
-import { currentPrincipalFn, listSchedulesFn } from "@/lib/server";
+import { currentPrincipalFn, listSchedulesFn, listAgentsFn } from "@/lib/server";
 import { createSchedule, deleteSchedule } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,7 +18,10 @@ export const Route = createFileRoute("/schedules")({
   beforeLoad: async () => {
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
-  loader: () => listSchedulesFn(),
+  loader: async () => {
+    const [schedules, agents] = await Promise.all([listSchedulesFn(), listAgentsFn()]);
+    return { schedules, agents };
+  },
   component: SchedulesPage,
 });
 
@@ -28,10 +31,11 @@ function when(ts: number | null | undefined): string {
 }
 
 function SchedulesPage() {
-  const schedules = Route.useLoaderData();
+  const { schedules, agents } = Route.useLoaderData();
   const router = useRouter();
   const [cron, setCron] = useState("*/2 * * * *");
   const [prompt, setPrompt] = useState("");
+  const [agent, setAgent] = useState(agents[0]?.name ?? "assistant");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,7 +45,7 @@ function SchedulesPage() {
     setBusy(true);
     setError(null);
     try {
-      await createSchedule({ agent: "assistant", cron: cron.trim() || null, prompt });
+      await createSchedule({ agent, cron: cron.trim() || null, prompt });
       setPrompt("");
       await router.invalidate();
     } catch (err) {
@@ -74,8 +78,20 @@ function SchedulesPage() {
         <CardContent>
           <form className="space-y-2" onSubmit={add}>
             <div className="flex gap-2">
+              <select
+                className="border-input bg-background h-9 rounded-md border px-2 text-sm"
+                value={agent}
+                onChange={(e) => setAgent(e.target.value)}
+                aria-label="Agent"
+              >
+                {agents.map((a) => (
+                  <option key={a.name} value={a.name}>
+                    {a.title ?? a.name}
+                  </option>
+                ))}
+              </select>
               <Input
-                className="max-w-[12rem] font-mono"
+                className="max-w-[10rem] font-mono"
                 value={cron}
                 onChange={(e) => setCron(e.target.value)}
                 placeholder="*/2 * * * *"
@@ -103,6 +119,7 @@ function SchedulesPage() {
             <CardContent className="flex items-center justify-between gap-3 py-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
+                  <Badge variant="outline">{s.agent}</Badge>
                   <code className="text-xs">{s.cron ?? "one-shot"}</code>
                   <Badge variant={s.enabled ? "secondary" : "outline"}>
                     {s.enabled ? "active" : "done"}

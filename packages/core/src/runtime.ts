@@ -12,6 +12,7 @@ import type { ContextDefinition, SecretResolver } from "./context.js";
 import type {
   AgentConfig,
   AgentFactory,
+  AgentInfo,
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
@@ -106,6 +107,8 @@ export interface HandleChatInput<P> {
 }
 
 export interface Runtime<P> {
+  /** The registered agents (name + display metadata) — for a picker. */
+  listAgents(): AgentInfo[];
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
@@ -812,6 +815,12 @@ export function createRuntime<P, RC = unknown>(
   }
 
   return {
+    listAgents: () =>
+      Object.entries(config.agents).map(([name, factory]) => ({
+        name,
+        title: factory.meta?.title,
+        description: factory.meta?.description,
+      })),
     tick: reapTick,
     handleChat,
     loadHistory,

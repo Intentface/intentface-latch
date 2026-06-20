@@ -43,9 +43,11 @@ function pendingConnectApprovalId(
 
 export function Chat({
   chatId,
+  agent,
   initialMessages,
 }: {
   chatId: string;
+  agent: string;
   initialMessages?: AppMessage[];
 }) {
   const router = useRouter();
@@ -54,7 +56,7 @@ export function Chat({
   const { messages, sendMessage, setMessages, status } = useChat({
     id: chatId,
     messages: initialMessages,
-    transport: new DefaultChatTransport({ api: chatApi(chatId) }),
+    transport: new DefaultChatTransport({ api: chatApi(chatId, agent) }),
     onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
@@ -62,7 +64,7 @@ export function Chat({
   async function decide(approvalId: string, approved: boolean) {
     setDeciding(true);
     try {
-      await applyApproval(chatId, [{ approvalId, approved }]);
+      await applyApproval(chatId, agent, [{ approvalId, approved }]);
       const updated = await loadHistory(chatId);
       setMessages(updated as never);
       router.invalidate();
@@ -93,6 +95,9 @@ export function Chat({
 
   return (
     <div className="flex h-full flex-col">
+      <div className="text-muted-foreground border-b px-4 py-2 text-xs">
+        Agent: <span className="text-foreground font-medium">{agent}</span>
+      </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
         {messages.length === 0 && (
           <p className="text-muted-foreground mt-12 text-center text-sm">
