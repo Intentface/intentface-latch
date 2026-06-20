@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -67,13 +68,15 @@ export function AppHeader() {
               <ChevronDown className="size-3 opacity-60" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>Organizations</DropdownMenuLabel>
-              {(orgs ?? []).map((o) => (
-                <DropdownMenuItem key={o.id} onClick={() => switchOrg(o.id)}>
-                  {o.name}
-                  {activeOrg?.id === o.id && <span className="ml-auto text-xs opacity-60">active</span>}
-                </DropdownMenuItem>
-              ))}
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Organizations</DropdownMenuLabel>
+                {(orgs ?? []).map((o) => (
+                  <DropdownMenuItem key={o.id} onClick={() => switchOrg(o.id)}>
+                    {o.name}
+                    {activeOrg?.id === o.id && <span className="ml-auto text-xs opacity-60">active</span>}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={createOrg}>
                 <Plus className="size-4" /> New organization
