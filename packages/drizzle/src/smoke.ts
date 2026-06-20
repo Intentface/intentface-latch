@@ -3,17 +3,18 @@ import type { AppMessage } from "@intentface/latch-core";
 import { migrate } from "./migrate.js";
 import { createSqliteAdapter } from "./adapter.js";
 
-/** A real run against an in-memory libsql DB: persistence + tenant isolation + run/usage. */
+/** A real run against an in-memory libsql DB: persistence + owner isolation + run/usage. */
+type P = { org: string; user?: string };
+
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const store = createSqliteAdapter(client);
-
-  const chat = await store.createChat({
-    orgId: "org_a",
-    userId: "user_1",
-    agent: "support",
+  const store = createSqliteAdapter<P>(client, {
+    owner: (p) => (p.user ? [p.org, p.user] : [p.org]),
   });
+
+  const me: P = { org: "org_a", user: "user_1" };
+  const chat = await store.createChat(me, { agent: "support" });
 
   const userMsg: AppMessage = {
     id: "msg_1",
@@ -33,10 +34,7 @@ async function main() {
   };
   await store.appendMessages(chat.id, [userMsg, asstMsg]);
 
-  const loaded = await store.loadMessages(
-    { orgId: "org_a", userId: "user_1" },
-    chat.id,
-  );
+  const loaded = await store.loadMessages(me, chat.id);
   assert(loaded.length === 2, "loads 2 messages");
   assert(
     loaded[0]!.id === "msg_1" && loaded[1]!.id === "msg_2",
@@ -47,21 +45,23 @@ async function main() {
     "parts round-trip through JSON",
   );
 
-  // Tenant isolation: a different org cannot read org_a's chat.
-  const otherOrg = await store.loadMessages({ orgId: "org_b" }, chat.id);
-  assert(otherOrg.length === 0, "tenant isolation (org_b sees nothing)");
+  // Owner isolation: a different tenant cannot read org_a's chat.
+  const otherOrg = await store.loadMessages({ org: "org_b" }, chat.id);
+  assert(otherOrg.length === 0, "owner isolation (org_b sees nothing)");
 
-  // Run + usage.
-  const run = await store.createRun({ chatId: chat.id, agent: "support" });
+  // Run + identity + usage.
+  const run = await store.createRun(me, { chatId: chat.id, agent: "support" });
+  assert(
+    JSON.stringify(run.identity) === JSON.stringify(me),
+    "run stores the identity blob (for resume)",
+  );
   await store.updateRun(run.id, {
     status: "completed",
     usageInputTokens: 5,
     usageOutputTokens: 3,
     endedAt: Date.now(),
   });
-  await store.recordUsage({
-    orgId: "org_a",
-    userId: "user_1",
+  await store.recordUsage(me, {
     runId: run.id,
     model: "mock",
     inputTokens: 5,
@@ -72,7 +72,7 @@ async function main() {
   assert(gotRun?.status === "completed", "run updated to completed");
 
   console.log(
-    "✅ smoke passed — persistence + tenant isolation + run/usage all work",
+    "✅ smoke passed — persistence + owner isolation + run/identity/usage all work",
   );
 }
 

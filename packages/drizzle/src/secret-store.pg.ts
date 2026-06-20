@@ -1,18 +1,23 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
-import type { Scope, SecretRecord, SecretStore } from "@intentface/latch-core";
+import type { SecretRecord, SecretStore } from "@intentface/latch-core";
 import * as schema from "./schema.pg.js";
+import type { SqliteSecretStoreOptions } from "./secret-store.js";
 
-const secretId = (orgId: string, userId: string | null | undefined, key: string) =>
-  `${orgId}:${userId ?? ""}:${key}`;
+function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
+  return owner(principal).map(encodeURIComponent).join("/");
+}
+
+const secretId = (ownerKey: string, key: string) => `${ownerKey}:${key}`;
 
 /** A `SecretStore` on Postgres — same contract + logic as the SQLite store. */
-export function createPostgresSecretStore(
+export function createPostgresSecretStore<P>(
   db: PgDatabase<any, any, any>,
-): SecretStore {
+  opts: SqliteSecretStoreOptions<P>,
+): SecretStore<P> {
+  const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
+
   const rowToRecord = (r: typeof schema.secrets.$inferSelect): SecretRecord => ({
-    orgId: r.orgId,
-    userId: r.userId,
     key: r.key,
     ciphertext: r.ciphertext,
     iv: r.iv,
@@ -23,13 +28,13 @@ export function createPostgresSecretStore(
   });
 
   return {
-    async put(r) {
+    async put(principal, r) {
+      const owner = ownerKey(principal);
       await db
         .insert(schema.secrets)
         .values({
-          id: secretId(r.orgId, r.userId, r.key),
-          orgId: r.orgId,
-          userId: r.userId ?? null,
+          id: secretId(owner, r.key),
+          owner,
           key: r.key,
           ciphertext: r.ciphertext,
           iv: r.iv,
@@ -50,32 +55,25 @@ export function createPostgresSecretStore(
         });
     },
 
-    async get(scope: Scope, key) {
+    async get(principal, key) {
       const rows = await db
         .select()
         .from(schema.secrets)
-        .where(eq(schema.secrets.id, secretId(scope.orgId, scope.userId, key)));
+        .where(eq(schema.secrets.id, secretId(ownerKey(principal), key)));
       return rows[0] ? rowToRecord(rows[0]) : null;
     },
 
-    async delete(scope: Scope, key) {
+    async delete(principal, key) {
       await db
         .delete(schema.secrets)
-        .where(eq(schema.secrets.id, secretId(scope.orgId, scope.userId, key)));
+        .where(eq(schema.secrets.id, secretId(ownerKey(principal), key)));
     },
 
-    async list(scope: Scope) {
+    async list(principal) {
       const rows = await db
         .select({ key: schema.secrets.key })
         .from(schema.secrets)
-        .where(
-          and(
-            eq(schema.secrets.orgId, scope.orgId),
-            scope.userId
-              ? eq(schema.secrets.userId, scope.userId)
-              : isNull(schema.secrets.userId),
-          ),
-        );
+        .where(eq(schema.secrets.owner, ownerKey(principal)));
       return rows.map((r) => r.key);
     },
   };

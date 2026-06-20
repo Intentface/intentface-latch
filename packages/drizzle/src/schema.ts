@@ -12,14 +12,14 @@ export const chats = sqliteTable(
   "latch_chats",
   {
     id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
+    /** Opaque ownership key derived from the principal (e.g. `tenant/user`). */
+    owner: text("owner").notNull(),
     agent: text("agent").notNull(),
     title: text("title"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [index("latch_chats_org_idx").on(t.orgId)],
+  (t) => [index("latch_chats_owner_idx").on(t.owner)],
 );
 
 export const messages = sqliteTable(
@@ -46,6 +46,8 @@ export const runs = sqliteTable(
     chatId: text("chat_id").notNull(),
     agent: text("agent").notNull(),
     status: text("status").notNull(),
+    /** Serialized Principal blob — rebuilt on resume/cron (no request). */
+    identity: text("identity", { mode: "json" }),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: integer("lease_expires_at"),
     fencingToken: integer("fencing_token"),
@@ -68,10 +70,10 @@ export const runs = sqliteTable(
 export const secrets = sqliteTable(
   "latch_secrets",
   {
-    /** `${orgId}:${userId ?? ''}:${key}` — stable composite id. */
+    /** `${ownerKey}:${key}` — stable composite id. */
     id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
+    /** Opaque ownership key derived from the principal. */
+    owner: text("owner").notNull(),
     key: text("key").notNull(),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
@@ -80,15 +82,15 @@ export const secrets = sqliteTable(
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [index("latch_secrets_scope_idx").on(t.orgId, t.userId)],
+  (t) => [index("latch_secrets_owner_idx").on(t.owner)],
 );
 
 export const usage = sqliteTable(
   "latch_usage",
   {
     id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
+    /** Opaque ownership key derived from the principal. */
+    owner: text("owner").notNull(),
     runId: text("run_id").notNull(),
     model: text("model").notNull(),
     inputTokens: integer("input_tokens").notNull(),
@@ -96,5 +98,5 @@ export const usage = sqliteTable(
     cost: real("cost").notNull(),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [index("latch_usage_org_idx").on(t.orgId)],
+  (t) => [index("latch_usage_owner_idx").on(t.owner)],
 );

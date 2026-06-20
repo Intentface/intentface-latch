@@ -1,36 +1,27 @@
 /**
  * Identity & tenancy primitives.
  *
- * Latch never authenticates. The customer's `ContextResolver` turns an incoming
- * request into a `Principal` (who is calling, in which org). Every storage
- * operation is then scoped by that principal — so cross-tenant access is
- * impossible by construction, not by a check someone has to remember.
+ * Latch carries NO tenancy vocabulary of its own. The customer defines their
+ * own `Principal` type (`P`) — whatever their auth produces (tenant/team/user,
+ * a workspace id, a single user id, anything). It must be JSON-serializable, so
+ * the runtime can persist it per run and rebuild it for resume/cron.
+ *
+ * The framework treats `P` as opaque: it threads it to the storage adapter,
+ * secret store, context builder, tools, and agents — but never reads a field of
+ * it. Isolation is enforced in the adapter/store (via an `owner` key derived
+ * from the principal), and authorization lives in the customer's app. There is
+ * no `Scope`, no `orgId`/`userId` — those, if they exist, live in the
+ * customer's `P` and the `owner` function they give their adapter.
  */
 
-/** The resolved identity for a request. */
-export interface Principal {
-  /** Tenant the caller belongs to. Required — everything is org-scoped. */
-  orgId: string;
-  /** The acting user, when there is one (absent for service/background runs). */
-  userId?: string;
-  /** Optional plan/tier, for gating and behaviour. */
-  plan?: string;
-  /** Optional capability scopes/roles for fine-grained authorization. */
-  scopes?: string[];
-  /** Anything else the customer wants to carry through. */
-  meta?: Record<string, unknown>;
-}
+/** Maps an incoming web request to a `Principal`. Customer-provided. Null = unauthenticated. */
+export type ContextResolver<P> = (
+  request: Request,
+) => P | null | Promise<P | null>;
 
-/** Maps an incoming web request to a `Principal`. Customer-provided. */
-export type ContextResolver = (request: Request) => Principal | Promise<Principal>;
-
-/** The tenant scope used to filter every storage query (default-safe isolation). */
-export interface Scope {
-  orgId: string;
-  userId?: string;
-}
-
-/** Narrow a `Principal` to the storage `Scope`. */
-export function scopeOf(principal: Principal): Scope {
-  return { orgId: principal.orgId, userId: principal.userId };
-}
+/**
+ * Rebuilds a `Principal` from the opaque identity blob persisted on a run, for
+ * non-interactive triggers (resume, cron) where there is no request. The mirror
+ * of `ContextResolver`. Default in the runtime is a passthrough.
+ */
+export type ReconstructPrincipal<P> = (identity: unknown) => P | Promise<P>;

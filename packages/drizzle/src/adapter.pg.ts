@@ -5,13 +5,17 @@ import type {
   ChatRecord,
   RunRecord,
   RunStatus,
-  Scope,
   StorageAdapter,
 } from "@intentface/latch-core";
 import * as schema from "./schema.pg.js";
+import type { SqliteAdapterOptions } from "./adapter.js";
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
+  return owner(principal).map(encodeURIComponent).join("/");
 }
 
 /**
@@ -19,13 +23,15 @@ function newId(prefix: string): string {
  * driver — node-postgres / postgres-js in production, or PGlite for tests.
  * Same contract + same query logic as the SQLite adapter (different dialect schema).
  */
-export function createPostgresAdapter(
+export function createPostgresAdapter<P>(
   db: PgDatabase<any, any, any>,
-): StorageAdapter {
+  opts: SqliteAdapterOptions<P>,
+): StorageAdapter<P> {
+  const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
+
   const rowToChat = (r: typeof schema.chats.$inferSelect): ChatRecord => ({
     id: r.id,
-    orgId: r.orgId,
-    userId: r.userId ?? undefined,
+    owner: r.owner,
     agent: r.agent,
     title: r.title ?? undefined,
     createdAt: r.createdAt,
@@ -37,6 +43,7 @@ export function createPostgresAdapter(
     chatId: r.chatId,
     agent: r.agent,
     status: r.status as RunStatus,
+    identity: r.identity ?? undefined,
     leaseOwner: r.leaseOwner,
     leaseExpiresAt: r.leaseExpiresAt,
     fencingToken: r.fencingToken,
@@ -50,27 +57,20 @@ export function createPostgresAdapter(
     endedAt: r.endedAt,
   });
 
-  async function getChat(scope: Scope, id: string): Promise<ChatRecord | null> {
+  async function getChat(principal: P, id: string): Promise<ChatRecord | null> {
     const rows = await db
       .select()
       .from(schema.chats)
-      .where(
-        and(
-          eq(schema.chats.id, id),
-          eq(schema.chats.orgId, scope.orgId),
-          scope.userId ? eq(schema.chats.userId, scope.userId) : undefined,
-        ),
-      );
+      .where(and(eq(schema.chats.id, id), eq(schema.chats.owner, ownerKey(principal))));
     return rows[0] ? rowToChat(rows[0]) : null;
   }
 
   return {
-    async createChat(input) {
+    async createChat(principal, input) {
       const now = Date.now();
       const row = {
         id: input.id ?? newId("chat"),
-        orgId: input.orgId,
-        userId: input.userId ?? null,
+        owner: ownerKey(principal),
         agent: input.agent,
         title: input.title ?? null,
         createdAt: now,
@@ -82,31 +82,18 @@ export function createPostgresAdapter(
 
     getChat,
 
-    async listChats(scope, opts) {
+    async listChats(principal, opts) {
       const rows = await db
         .select()
         .from(schema.chats)
-        .where(
-          and(
-            eq(schema.chats.orgId, scope.orgId),
-            scope.userId ? eq(schema.chats.userId, scope.userId) : undefined,
-          ),
-        )
+        .where(eq(schema.chats.owner, ownerKey(principal)))
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map(rowToChat);
     },
 
-    async getChatById(id) {
-      const rows = await db
-        .select()
-        .from(schema.chats)
-        .where(eq(schema.chats.id, id));
-      return rows[0] ? rowToChat(rows[0]) : null;
-    },
-
-    async loadMessages(scope, chatId) {
-      const chat = await getChat(scope, chatId);
+    async loadMessages(principal, chatId) {
+      const chat = await getChat(principal, chatId);
       if (!chat) return [];
       const rows = await db
         .select()
@@ -159,13 +146,14 @@ export function createPostgresAdapter(
       }
     },
 
-    async createRun(input) {
+    async createRun(principal, input) {
       const now = Date.now();
       const row = {
         id: newId("run"),
         chatId: input.chatId,
         agent: input.agent,
         status: "active" as RunStatus,
+        identity: principal,
         startedAt: now,
       };
       await db.insert(schema.runs).values(row);
@@ -183,6 +171,7 @@ export function createPostgresAdapter(
         chatId: input.chatId,
         agent: input.agent,
         status: "active" as RunStatus,
+        identity: input.principal,
         leaseOwner: input.owner,
         leaseExpiresAt: now + input.ttlMs,
         fencingToken: 1,
@@ -288,27 +277,21 @@ export function createPostgresAdapter(
       return rows[0] ? rowToRun(rows[0]) : null;
     },
 
-    async listRuns(scope, opts) {
+    async listRuns(principal, opts) {
       const rows = await db
         .select({ run: schema.runs })
         .from(schema.runs)
         .innerJoin(schema.chats, eq(schema.runs.chatId, schema.chats.id))
-        .where(
-          and(
-            eq(schema.chats.orgId, scope.orgId),
-            scope.userId ? eq(schema.chats.userId, scope.userId) : undefined,
-          ),
-        )
+        .where(eq(schema.chats.owner, ownerKey(principal)))
         .orderBy(sql`${schema.runs.startedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map((r) => rowToRun(r.run));
     },
 
-    async recordUsage(input) {
+    async recordUsage(principal, input) {
       await db.insert(schema.usage).values({
         id: newId("use"),
-        orgId: input.orgId,
-        userId: input.userId ?? null,
+        owner: ownerKey(principal),
         runId: input.runId,
         model: input.model,
         inputTokens: input.inputTokens,

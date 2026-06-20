@@ -1,5 +1,4 @@
 import type { LanguageModel } from "ai";
-import type { Principal, Scope } from "./principal.js";
 
 /**
  * Agent definitions.
@@ -19,25 +18,40 @@ import type { Principal, Scope } from "./principal.js";
 export interface OpenToolSet {
   tools: Record<string, unknown>;
   close(): Promise<void>;
+  /**
+   * Optional per-tool approval policy contributed by this source (merged into
+   * the agent's `toolApproval`, object form). Lets a source gate its own tools —
+   * e.g. an MCP host gating a synthetic `connect_<name>` tool so an unauthorized
+   * connection pauses the turn for OAuth instead of failing.
+   */
+  toolApproval?: Record<string, unknown>;
 }
 
 /**
  * A dynamic, per-turn tool provider (e.g. an MCP host). The runtime calls
- * `open(scope)` before the turn, merges the tools, and calls `close()` after —
- * so connections are scoped to the tenant and torn down when the turn ends.
+ * `open(principal)` before the turn, merges the tools, and calls `close()` after —
+ * so connections are scoped to the caller and torn down when the turn ends.
  * `@intentface/latch-mcp`'s `McpHost` satisfies this structurally.
  */
-export interface ToolSource {
-  open(scope: Scope): Promise<OpenToolSet>;
+export interface ToolSource<P> {
+  open(principal: P): Promise<OpenToolSet>;
 }
 
-export interface AgentConfig {
+export interface AgentConfig<P> {
   model: LanguageModel;
   instructions?: string;
   /** Static tools, available every turn. */
   tools?: Record<string, unknown>;
   /** Dynamic tool sources opened per turn and closed after (e.g. MCP). */
-  toolSources?: ToolSource[];
+  toolSources?: ToolSource<P>[];
+  /**
+   * Names of the connections (from the runtime's connection registry) this
+   * agent may use — its MCP servers / integrations. The runtime resolves these
+   * to a per-turn tool source: each authorized connection's tools, plus a gated
+   * `connect_<name>` tool for any that still need OAuth. Different agents can
+   * carry different connections. Names with no registry entry are ignored.
+   */
+  connections?: string[];
   /**
    * HITL approval policy (the SDK's `toolApproval`): per-tool `'user-approval'`,
    * an object with a reason, or a function. A gated call ends the turn with an
@@ -46,18 +60,25 @@ export interface AgentConfig {
    * complex); cast at the agent boundary.
    */
   toolApproval?: unknown;
+  /**
+   * Smooth the visible token cadence (AI SDK `smoothStream`): even out bursty
+   * deltas before they stream to the client. `true` uses the SDK defaults
+   * (~10ms, word chunking); or tune `delayInMs`/`chunking`. Presentation only —
+   * it does not change what gets persisted.
+   */
+  smoothStream?: boolean | { delayInMs?: number; chunking?: "word" | "line" };
 }
 
 /** A factory that produces the agent's config for a given request/context. */
-export type AgentFactory<RuntimeContext = unknown> = (ctx: {
+export type AgentFactory<P, RuntimeContext = unknown> = (ctx: {
   runtime: RuntimeContext;
-  principal: Principal;
-}) => AgentConfig | Promise<AgentConfig>;
+  principal: P;
+}) => AgentConfig<P> | Promise<AgentConfig<P>>;
 
-export function defineAgent<RuntimeContext = unknown>(
-  def: AgentConfig | AgentFactory<RuntimeContext>,
-): AgentFactory<RuntimeContext> {
+export function defineAgent<P, RuntimeContext = unknown>(
+  def: AgentConfig<P> | AgentFactory<P, RuntimeContext>,
+): AgentFactory<P, RuntimeContext> {
   return typeof def === "function"
-    ? (def as AgentFactory<RuntimeContext>)
+    ? (def as AgentFactory<P, RuntimeContext>)
     : () => def;
 }

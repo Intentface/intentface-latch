@@ -6,17 +6,18 @@ import { createPostgresAdapter } from "./adapter.pg.js";
 import * as schema from "./schema.pg.js";
 
 /** Same checks as the SQLite smoke, against in-memory Postgres (PGlite, WASM). */
+type P = { org: string; user?: string };
+
 async function main() {
   const pg = new PGlite();
   const db = drizzle(pg, { schema });
   await migratePostgres(db);
-  const store = createPostgresAdapter(db);
-
-  const chat = await store.createChat({
-    orgId: "org_a",
-    userId: "user_1",
-    agent: "support",
+  const store = createPostgresAdapter<P>(db, {
+    owner: (p) => (p.user ? [p.org, p.user] : [p.org]),
   });
+
+  const me: P = { org: "org_a", user: "user_1" };
+  const chat = await store.createChat(me, { agent: "support" });
 
   const userMsg: AppMessage = {
     id: "msg_1",
@@ -36,10 +37,7 @@ async function main() {
   };
   await store.appendMessages(chat.id, [userMsg, asstMsg]);
 
-  const loaded = await store.loadMessages(
-    { orgId: "org_a", userId: "user_1" },
-    chat.id,
-  );
+  const loaded = await store.loadMessages(me, chat.id);
   assert(loaded.length === 2, "loads 2 messages");
   assert(
     loaded[0]!.id === "msg_1" && loaded[1]!.id === "msg_2",
@@ -50,19 +48,17 @@ async function main() {
     "parts round-trip through jsonb",
   );
 
-  const otherOrg = await store.loadMessages({ orgId: "org_b" }, chat.id);
-  assert(otherOrg.length === 0, "tenant isolation (org_b sees nothing)");
+  const otherOrg = await store.loadMessages({ org: "org_b" }, chat.id);
+  assert(otherOrg.length === 0, "owner isolation (org_b sees nothing)");
 
-  const run = await store.createRun({ chatId: chat.id, agent: "support" });
+  const run = await store.createRun(me, { chatId: chat.id, agent: "support" });
   await store.updateRun(run.id, {
     status: "completed",
     usageInputTokens: 5,
     usageOutputTokens: 3,
     endedAt: Date.now(),
   });
-  await store.recordUsage({
-    orgId: "org_a",
-    userId: "user_1",
+  await store.recordUsage(me, {
     runId: run.id,
     model: "mock",
     inputTokens: 5,

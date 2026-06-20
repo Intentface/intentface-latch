@@ -1,13 +1,17 @@
 import type { AppMessage } from "./message.js";
-import type { Scope } from "./principal.js";
 
 /**
  * The single persistence contract.
  *
  * One adapter interface for every backend — no "SQL-only" tier. Drizzle
  * (Postgres/SQLite) is the first implementation; Mongo etc. are first-class
- * behind the same contract. Reads are scoped by `Scope` so tenant isolation is
- * enforced here, below the routes, where it can't be forgotten.
+ * behind the same contract.
+ *
+ * Isolation lives HERE, not in the framework. Per-principal methods receive the
+ * opaque customer `Principal` (`P`); the adapter scopes by it however it wants
+ * (the default adapter derives an `owner` key; a custom one can use RLS / its
+ * own schema). The framework never reads a field of `P`. System ops (the reaper
+ * / resume) act by id without a principal and recover identity from the run.
  *
  * v1 surface = the four tables in the plan: chats, messages, runs, usage.
  * `messages` is the source of truth (content + execution metadata on the row).
@@ -17,8 +21,8 @@ export type RunStatus = "active" | "awaiting_input" | "completed" | "errored";
 
 export interface ChatRecord {
   id: string;
-  orgId: string;
-  userId?: string;
+  /** Opaque ownership key the adapter scoped this row by (e.g. `tenant/user`). */
+  owner: string;
   agent: string;
   title?: string;
   createdAt: number;
@@ -30,6 +34,12 @@ export interface RunRecord {
   chatId: string;
   agent: string;
   status: RunStatus;
+  /**
+   * Opaque identity blob (the serialized `Principal`) captured when the run was
+   * created, so resume/cron — which have no request — can rebuild the principal
+   * via `reconstructPrincipal`. Never interpreted by the framework.
+   */
+  identity?: unknown;
   /** Single-writer lease (T2 durability). Null for T1 / non-durable runs. */
   leaseOwner?: string | null;
   leaseExpiresAt?: number | null;
@@ -59,8 +69,8 @@ export interface RunLease {
 
 export interface UsageRecord {
   id: string;
-  orgId: string;
-  userId?: string;
+  /** Opaque ownership key (for per-tenant billing/quota rollups). */
+  owner: string;
   runId: string;
   model: string;
   inputTokens: number;
@@ -69,42 +79,38 @@ export interface UsageRecord {
   createdAt: number;
 }
 
-export interface StorageAdapter {
+export interface StorageAdapter<P> {
   // chats
-  createChat(input: {
-    /** Optional explicit id (e.g. a tenant-namespaced client key); generated if omitted. */
-    id?: string;
-    orgId: string;
-    userId?: string;
-    agent: string;
-    title?: string;
-  }): Promise<ChatRecord>;
-  /** Scoped: returns null if the chat isn't in the caller's tenant. */
-  getChat(scope: Scope, id: string): Promise<ChatRecord | null>;
-  /** Scoped list of the tenant's chats, most-recently-updated first. */
-  listChats(scope: Scope, opts?: { limit?: number }): Promise<ChatRecord[]>;
-  /**
-   * UNSCOPED system read — bypasses tenant scoping. Only for privileged
-   * operations like resume/reaper that act on behalf of a run's tenant (the
-   * tenant is recovered from the returned record). Never call this from a
-   * request path; use `getChat(scope, id)` there.
-   */
-  getChatById(id: string): Promise<ChatRecord | null>;
+  createChat(
+    principal: P,
+    input: {
+      /** Optional explicit id (e.g. a client-chosen key); generated if omitted. */
+      id?: string;
+      agent: string;
+      title?: string;
+    },
+  ): Promise<ChatRecord>;
+  /** Scoped: returns null if the chat isn't the caller's. */
+  getChat(principal: P, id: string): Promise<ChatRecord | null>;
+  /** Scoped list of the caller's chats, most-recently-updated first. */
+  listChats(principal: P, opts?: { limit?: number }): Promise<ChatRecord[]>;
 
   // messages (the source of truth)
   /** Scoped read of the conversation, oldest first. */
-  loadMessages(scope: Scope, chatId: string): Promise<AppMessage[]>;
+  loadMessages(principal: P, chatId: string): Promise<AppMessage[]>;
   /** Upsert messages by id (incremental per-step persistence is allowed). */
   appendMessages(chatId: string, messages: AppMessage[]): Promise<void>;
 
   // runs (per-turn execution record)
-  /** T1 / non-durable: an unleased run. */
-  createRun(input: { chatId: string; agent: string }): Promise<RunRecord>;
+  /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */
+  createRun(principal: P, input: { chatId: string; agent: string }): Promise<RunRecord>;
   /**
    * T2 durable: create a run already leased to `owner` (fencingToken starts at 1,
-   * lease expires at now + ttlMs). The returned record carries the lease to hold.
+   * lease expires at now + ttlMs). `owner` here is the LEASE owner (instance id),
+   * unrelated to tenancy. Stores the identity blob for resume.
    */
   claimRun(input: {
+    principal: P;
     chatId: string;
     agent: string;
     owner: string;
@@ -120,7 +126,7 @@ export interface StorageAdapter {
    * run is not completed AND currently unowned or lease-expired — so two nodes
    * racing to resume the same run resolve to exactly one. Bumps the fencing
    * token and attempt, clears the error/end, and re-leases. Returns the
-   * re-claimed record, or null if it wasn't resumable.
+   * re-claimed record (carrying `identity`), or null if it wasn't resumable.
    */
   reclaimRun(
     id: string,
@@ -138,8 +144,8 @@ export interface StorageAdapter {
     guard?: RunLease,
   ): Promise<void>;
   getRun(id: string): Promise<RunRecord | null>;
-  /** Scoped list of the tenant's runs (joined via chats), most-recent first. */
-  listRuns(scope: Scope, opts?: { limit?: number }): Promise<RunRecord[]>;
+  /** Scoped list of the caller's runs (joined via chats), most-recent first. */
+  listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
   /**
    * Reaper: mark active runs whose lease has expired (`leaseExpiresAt < now`) as
    * `errored`, clear the owner, and bump the fencing token (invalidating any
@@ -152,5 +158,8 @@ export interface StorageAdapter {
   ): Promise<RunRecord[]>;
 
   // usage (billing/quota ledger)
-  recordUsage(input: Omit<UsageRecord, "id" | "createdAt">): Promise<void>;
+  recordUsage(
+    principal: P,
+    input: Omit<UsageRecord, "id" | "createdAt" | "owner">,
+  ): Promise<void>;
 }

@@ -3,12 +3,18 @@ import {
   createIdGenerator,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  smoothStream,
   toUIMessageStream,
 } from "ai";
 import type { AppMessage } from "./message.js";
-import { type Principal, scopeOf } from "./principal.js";
+import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
-import type { AgentConfig, AgentFactory, OpenToolSet } from "./agent.js";
+import type {
+  AgentConfig,
+  AgentFactory,
+  OpenToolSet,
+  ToolSource,
+} from "./agent.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import type {
@@ -45,33 +51,55 @@ export interface DurabilityConfig {
   instanceId?: string;
 }
 
-export interface RuntimeConfig<RuntimeContext = unknown> {
-  storage: StorageAdapter;
-  context: ContextDefinition<RuntimeContext>;
+/**
+ * A connection registry seam: resolve a set of connection names to a single
+ * per-turn tool source. `@intentface/latch-mcp`'s `McpConnections` satisfies
+ * this structurally, so `core` stays decoupled from MCP. When set on the
+ * runtime, an agent's `connections: [...]` names are resolved through it.
+ */
+export interface ConnectionRegistry<P> {
+  hostFor(names: string[]): ToolSource<P>;
+}
+
+export interface RuntimeConfig<P, RuntimeContext = unknown> {
+  storage: StorageAdapter<P>;
+  context: ContextDefinition<P, RuntimeContext>;
   /** The agent registry: name → factory (file-based or DB-driven upstream). */
-  agents: Record<string, AgentFactory<RuntimeContext>>;
-  secrets?: SecretResolver;
+  agents: Record<string, AgentFactory<P, RuntimeContext>>;
+  secrets?: SecretResolver<P>;
   durability?: DurabilityConfig;
   /** Optional cost calculation. Without it, recorded cost is 0. */
   pricing?: Pricing;
+  /**
+   * Connection registry used to resolve each agent's `connections: [...]` names
+   * into a per-turn tool source (MCP servers / integrations). Optional — without
+   * it, `connections` on an agent is ignored.
+   */
+  connections?: ConnectionRegistry<P>;
+  /**
+   * Rebuild a `Principal` from the opaque identity blob a run stored, for
+   * resume/cron (no request). Default: passthrough (`identity as P`). Override to
+   * re-hydrate (e.g. re-fetch fresh identity) or validate on resume.
+   */
+  reconstructPrincipal?: ReconstructPrincipal<P>;
 }
 
-export interface HandleChatInput {
+export interface HandleChatInput<P> {
   /** Which registered agent to run. */
   agent: string;
   /** Client-chosen chat id (create-or-continue). Omit to start a new chat. */
   chatId?: string;
-  /** Resolved by the caller's ContextResolver (tenant isolation flows from this). */
-  principal: Principal;
+  /** Resolved by the caller's ContextResolver (isolation flows from this). */
+  principal: P;
   /** The incoming user message. */
   message: AppMessage;
   /** Optional original request, passed to context.build. */
   request?: Request;
 }
 
-export interface Runtime {
+export interface Runtime<P> {
   /** Run one turn; returns a streaming UIMessage `Response`. */
-  handleChat(input: HandleChatInput): Promise<Response>;
+  handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
    * Client-projected conversation history (`toClientMessages`): the stored
    * messages with `internal`/`redacted` ones filtered out. For rendering past
@@ -79,16 +107,16 @@ export interface Runtime {
    */
   loadHistory(input: {
     chatId: string;
-    principal: Principal;
+    principal: P;
   }): Promise<AppMessage[]>;
-  /** The tenant's chats, most-recent first (for a chat list / sidebar). */
+  /** The caller's chats, most-recent first (for a chat list / sidebar). */
   listChats(input: {
-    principal: Principal;
+    principal: P;
     limit?: number;
   }): Promise<ChatRecord[]>;
-  /** The tenant's runs, most-recent first (status, usage, cost — for an ops view). */
+  /** The caller's runs, most-recent first (status, usage, cost — for an ops view). */
   listRuns(input: {
-    principal: Principal;
+    principal: P;
     limit?: number;
   }): Promise<RunRecord[]>;
   /**
@@ -124,7 +152,7 @@ export interface Runtime {
    */
   applyApproval(input: {
     chatId: string;
-    principal: Principal;
+    principal: P;
     decisions: ApprovalDecision[];
     request?: Request;
   }): Promise<Response>;
@@ -212,10 +240,12 @@ function applyDecisions(
   return changed;
 }
 
-export function createRuntime<RC = unknown>(
-  config: RuntimeConfig<RC>,
-): Runtime {
+export function createRuntime<P, RC = unknown>(
+  config: RuntimeConfig<P, RC>,
+): Runtime<P> {
   const { storage } = config;
+  const reconstructPrincipal: ReconstructPrincipal<P> =
+    config.reconstructPrincipal ?? ((identity) => identity as P);
   const dur = {
     enabled: config.durability?.enabled ?? false,
     leaseTtlMs: config.durability?.leaseTtlMs ?? 30_000,
@@ -226,9 +256,9 @@ export function createRuntime<RC = unknown>(
   /** Resolve an agent's per-request config + a display model id. */
   async function resolveAgentConfig(
     agentName: string,
-    principal: Principal,
+    principal: P,
     request?: Request,
-  ): Promise<{ cfg: AgentConfig; modelId: string; runtimeCtx: RC }> {
+  ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
     const factory = config.agents[agentName];
     if (!factory) throw new Error(`Unknown agent: ${agentName}`);
     const runtimeCtx = await config.context.build({ principal, request });
@@ -249,9 +279,9 @@ export function createRuntime<RC = unknown>(
    */
   async function buildTurn(args: {
     resolvedChatId: string;
-    principal: Principal;
+    principal: P;
     modelId: string;
-    cfg: AgentConfig;
+    cfg: AgentConfig<P>;
     run: RunRecord;
     lease: RunLease | undefined;
     uiMessages: AppMessage[];
@@ -287,10 +317,17 @@ export function createRuntime<RC = unknown>(
     // Open dynamic tool sources (e.g. MCP) for this tenant, then merge their
     // tools with the static ones. They're closed when the turn ends. If opening
     // one fails, close any already opened so we don't leak connections.
+    // Effective tool sources: the agent's own, plus a registry-resolved source
+    // for its declared `connections` (its MCP servers / integrations).
+    const sources = [...(cfg.toolSources ?? [])];
+    if (config.connections && cfg.connections && cfg.connections.length > 0) {
+      sources.push(config.connections.hostFor(cfg.connections));
+    }
+
     const opened: OpenToolSet[] = [];
     try {
-      for (const source of cfg.toolSources ?? []) {
-        opened.push(await source.open(scopeOf(principal)));
+      for (const source of sources) {
+        opened.push(await source.open(principal));
       }
     } catch (error) {
       await Promise.all(opened.map((o) => o.close().catch(() => {})));
@@ -303,11 +340,25 @@ export function createRuntime<RC = unknown>(
       );
     const tools = Object.assign({}, cfg.tools, ...opened.map((o) => o.tools));
 
+    // Merge any source-contributed approval policy (e.g. an MCP host gating its
+    // synthetic `connect_<name>` tools) into the agent's. Only when the agent's
+    // own policy is the object form (or absent); a function policy is left as-is.
+    const sourceApproval = Object.assign(
+      {},
+      ...opened.map((o) => o.toolApproval ?? {}),
+    ) as Record<string, unknown>;
+    const toolApproval =
+      cfg.toolApproval && typeof cfg.toolApproval !== "function"
+        ? { ...(cfg.toolApproval as Record<string, unknown>), ...sourceApproval }
+        : Object.keys(sourceApproval).length > 0 && !cfg.toolApproval
+          ? sourceApproval
+          : cfg.toolApproval;
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
       instructions: cfg.instructions,
       tools,
-      toolApproval: cfg.toolApproval,
+      toolApproval,
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
@@ -331,6 +382,10 @@ export function createRuntime<RC = unknown>(
         const result = await agent.stream({
           prompt: modelMessages,
           abortSignal: dur.enabled ? abort.signal : undefined,
+          // Optional: smooth the visible token cadence before deltas stream out.
+          experimental_transform: cfg.smoothStream
+            ? smoothStream(cfg.smoothStream === true ? undefined : cfg.smoothStream)
+            : undefined,
           // Shared context for hooks / prepareStep / approval policies.
           runtimeContext: runtimeCtx,
           // `toolsContext` is keyed BY TOOL NAME (the SDK does
@@ -426,9 +481,7 @@ export function createRuntime<RC = unknown>(
           },
           lease,
         );
-        await storage.recordUsage({
-          orgId: principal.orgId,
-          userId: principal.userId,
+        await storage.recordUsage(principal, {
           runId: run.id,
           model: modelId,
           inputTokens,
@@ -455,11 +508,13 @@ export function createRuntime<RC = unknown>(
 
   /** Open a run for a turn: durable → leased claim; T1 → an unleased run. */
   async function openRun(
+    principal: P,
     chatId: string,
     agentName: string,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
     if (dur.enabled) {
       const run = await storage.claimRun({
+        principal,
         chatId,
         agent: agentName,
         owner: dur.instanceId,
@@ -467,7 +522,10 @@ export function createRuntime<RC = unknown>(
       });
       return { run, lease: { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } };
     }
-    return { run: await storage.createRun({ chatId, agent: agentName }), lease: undefined };
+    return {
+      run: await storage.createRun(principal, { chatId, agent: agentName }),
+      lease: undefined,
+    };
   }
 
   async function handleChat({
@@ -476,34 +534,30 @@ export function createRuntime<RC = unknown>(
     principal,
     message,
     request,
-  }: HandleChatInput): Promise<Response> {
-    const scope = scopeOf(principal);
+  }: HandleChatInput<P>): Promise<Response> {
+    // chat: scoped create-or-continue (others' ids resolve to "not found")
+    let chat = chatId ? await storage.getChat(principal, chatId) : null;
+    if (!chat) {
+      chat = await storage.createChat(principal, {
+        id: chatId, // use the provided id (create-or-continue); generated if omitted
+        agent: agentName,
+        // Title from the first user message — for the chat list.
+        title: firstText(message)?.slice(0, 80),
+      });
+    }
+    const resolvedChatId = chat.id;
 
-      // chat: scoped create-or-continue (cross-tenant ids resolve to "not found")
-      let chat = chatId ? await storage.getChat(scope, chatId) : null;
-      if (!chat) {
-        chat = await storage.createChat({
-          id: chatId, // use the provided id (create-or-continue); generated if omitted
-          orgId: principal.orgId,
-          userId: principal.userId,
-          agent: agentName,
-          // Title from the first user message — for the chat list.
-          title: firstText(message)?.slice(0, 80),
-        });
-      }
-      const resolvedChatId = chat.id;
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      agentName,
+      principal,
+      request,
+    );
 
-      const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
-        agentName,
-        principal,
-        request,
-      );
-
-    const prior = await storage.loadMessages(scope, resolvedChatId);
+    const prior = await storage.loadMessages(principal, resolvedChatId);
 
     // persist the user message up front (crash-safe), then open the run
     await storage.appendMessages(resolvedChatId, [message]);
-    const { run, lease } = await openRun(resolvedChatId, agentName);
+    const { run, lease } = await openRun(principal, resolvedChatId, agentName);
 
     return buildTurn({
       resolvedChatId,
@@ -525,14 +579,11 @@ export function createRuntime<RC = unknown>(
     const run = await storage.reclaimRun(runId, dur.instanceId, dur.leaseTtlMs);
     if (!run) return null;
 
-    // System op: recover the tenant from the chat (no Principal on the wire).
-    const chat = await storage.getChatById(run.chatId);
-    if (!chat) return null;
-    const principal: Principal = { orgId: chat.orgId, userId: chat.userId };
-    const scope = scopeOf(principal);
+    // System op (no request): rebuild the principal from the run's identity blob.
+    const principal = await reconstructPrincipal(run.identity);
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
-    const uiMessages = await storage.loadMessages(scope, run.chatId);
+    const uiMessages = await storage.loadMessages(principal, run.chatId);
     const lease: RunLease = {
       owner: dur.instanceId,
       fencingToken: run.fencingToken ?? 1,
@@ -585,22 +636,21 @@ export function createRuntime<RC = unknown>(
     request,
   }: {
     chatId: string;
-    principal: Principal;
+    principal: P;
     decisions: ApprovalDecision[];
     request?: Request;
   }): Promise<Response> {
-    const scope = scopeOf(principal);
-    const chat = await storage.getChat(scope, chatId);
+    const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
 
     // Merge the decisions onto the persisted assistant message, then re-persist
     // only what changed. The agent continues from this updated history.
-    const messages = await storage.loadMessages(scope, chatId);
+    const messages = await storage.loadMessages(principal, chatId);
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
-    const { run, lease } = await openRun(chatId, chat.agent);
+    const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
       resolvedChatId: chatId,
@@ -619,9 +669,9 @@ export function createRuntime<RC = unknown>(
     principal,
   }: {
     chatId: string;
-    principal: Principal;
+    principal: P;
   }): Promise<AppMessage[]> {
-    const messages = await storage.loadMessages(scopeOf(principal), chatId);
+    const messages = await storage.loadMessages(principal, chatId);
     return toClientMessages(messages);
   }
 
@@ -629,20 +679,20 @@ export function createRuntime<RC = unknown>(
     principal,
     limit,
   }: {
-    principal: Principal;
+    principal: P;
     limit?: number;
   }): Promise<ChatRecord[]> {
-    return storage.listChats(scopeOf(principal), { limit });
+    return storage.listChats(principal, { limit });
   }
 
   async function listRuns({
     principal,
     limit,
   }: {
-    principal: Principal;
+    principal: P;
     limit?: number;
   }): Promise<RunRecord[]> {
-    return storage.listRuns(scopeOf(principal), { limit });
+    return storage.listRuns(principal, { limit });
   }
 
   return {

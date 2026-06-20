@@ -1,4 +1,3 @@
-import type { Scope } from "./principal.js";
 import type { SecretResolver } from "./context.js";
 
 /**
@@ -19,9 +18,6 @@ import type { SecretResolver } from "./context.js";
 
 /** The opaque encrypted record persisted by a `SecretStore`. Never holds plaintext. */
 export interface SecretRecord {
-  orgId: string;
-  /** null = org-level secret (shared across the org's users). */
-  userId?: string | null;
   key: string;
   /** base64 AES-GCM ciphertext of the value (auth tag appended by Web Crypto). */
   ciphertext: string;
@@ -35,24 +31,28 @@ export interface SecretRecord {
   updatedAt: number;
 }
 
-/** Persistence seam for encrypted secret records (Drizzle impl in latch-drizzle). */
-export interface SecretStore {
-  put(record: SecretRecord): Promise<void>;
-  get(scope: Scope, key: string): Promise<SecretRecord | null>;
-  delete(scope: Scope, key: string): Promise<void>;
-  /** Keys only — never values — for the scope. */
-  list(scope: Scope): Promise<string[]>;
+/**
+ * Persistence seam for encrypted secret records (Drizzle impl in latch-drizzle).
+ * Isolation lives here: each method receives the opaque `Principal` and the store
+ * scopes by it (the default derives an `owner` key). The framework never reads `P`.
+ */
+export interface SecretStore<P> {
+  put(principal: P, record: SecretRecord): Promise<void>;
+  get(principal: P, key: string): Promise<SecretRecord | null>;
+  delete(principal: P, key: string): Promise<void>;
+  /** Keys only — never values — for the caller. */
+  list(principal: P): Promise<string[]>;
 }
 
 /** The Vault operations. `get` returns decrypted plaintext; storage stays opaque. */
-export interface Vault {
-  set(scope: Scope, key: string, value: string): Promise<void>;
-  get(scope: Scope, key: string): Promise<string | undefined>;
-  has(scope: Scope, key: string): Promise<boolean>;
-  delete(scope: Scope, key: string): Promise<void>;
-  list(scope: Scope): Promise<string[]>;
+export interface Vault<P> {
+  set(principal: P, key: string, value: string): Promise<void>;
+  get(principal: P, key: string): Promise<string | undefined>;
+  has(principal: P, key: string): Promise<boolean>;
+  delete(principal: P, key: string): Promise<void>;
+  list(principal: P): Promise<string[]>;
   /** Read-side adapter for context/tools (a `SecretResolver`). */
-  readonly resolver: SecretResolver;
+  readonly resolver: SecretResolver<P>;
 }
 
 // --- base64 <-> bytes (no Buffer; works in Node + browsers/edge) ------------
@@ -81,10 +81,10 @@ const bs = (u: Uint8Array): BufferSource => u as unknown as BufferSource;
  * (256-bit) key — generate with `crypto.getRandomValues(new Uint8Array(32))`
  * and keep it in env/KMS, never in the database.
  */
-export function createVault(opts: {
-  store: SecretStore;
+export function createVault<P>(opts: {
+  store: SecretStore<P>;
   masterKey: string;
-}): Vault {
+}): Vault<P> {
   const { store } = opts;
   const rawKek = fromB64(opts.masterKey);
   if (rawKek.length !== 32) {
@@ -151,18 +151,16 @@ export function createVault(opts: {
     return dec.decode(plaintext);
   }
 
-  const get: Vault["get"] = async (scope, key) => {
-    const record = await store.get(scope, key);
+  const get: Vault<P>["get"] = async (principal, key) => {
+    const record = await store.get(principal, key);
     if (!record) return undefined;
     return decryptValue(record);
   };
 
   return {
-    async set(scope, key, value) {
+    async set(principal, key, value) {
       const now = Date.now();
-      await store.put({
-        orgId: scope.orgId,
-        userId: scope.userId ?? null,
+      await store.put(principal, {
         key,
         ...(await encryptValue(value)),
         createdAt: now,
@@ -170,15 +168,15 @@ export function createVault(opts: {
       });
     },
     get,
-    async has(scope, key) {
-      return (await store.get(scope, key)) != null;
+    async has(principal, key) {
+      return (await store.get(principal, key)) != null;
     },
-    async delete(scope, key) {
-      await store.delete(scope, key);
+    async delete(principal, key) {
+      await store.delete(principal, key);
     },
-    list(scope) {
-      return store.list(scope);
+    list(principal) {
+      return store.list(principal);
     },
-    resolver: (scope, key) => get(scope, key),
+    resolver: (principal, key) => get(principal, key),
   };
 }

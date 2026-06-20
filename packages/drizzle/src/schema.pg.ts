@@ -15,14 +15,13 @@ export const chats = pgTable(
   "latch_chats",
   {
     id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
+    owner: text("owner").notNull(),
     agent: text("agent").notNull(),
     title: text("title"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("latch_chats_org_idx").on(t.orgId)],
+  (t) => [index("latch_chats_owner_idx").on(t.owner)],
 );
 
 export const messages = pgTable(
@@ -47,6 +46,7 @@ export const runs = pgTable(
     chatId: text("chat_id").notNull(),
     agent: text("agent").notNull(),
     status: text("status").notNull(),
+    identity: jsonb("identity"),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),
     fencingToken: integer("fencing_token"),
@@ -70,8 +70,7 @@ export const secrets = pgTable(
   "latch_secrets",
   {
     id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
+    owner: text("owner").notNull(),
     key: text("key").notNull(),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
@@ -80,15 +79,14 @@ export const secrets = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("latch_secrets_scope_idx").on(t.orgId, t.userId)],
+  (t) => [index("latch_secrets_owner_idx").on(t.owner)],
 );
 
 export const usage = pgTable(
   "latch_usage",
   {
     id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
+    owner: text("owner").notNull(),
     runId: text("run_id").notNull(),
     model: text("model").notNull(),
     inputTokens: integer("input_tokens").notNull(),
@@ -96,5 +94,5 @@ export const usage = pgTable(
     cost: doublePrecision("cost").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("latch_usage_org_idx").on(t.orgId)],
+  (t) => [index("latch_usage_owner_idx").on(t.owner)],
 );
