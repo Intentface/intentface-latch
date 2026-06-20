@@ -73,3 +73,20 @@ export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
     return connections.status(principal);
   },
 );
+
+/** The caller's scheduled agents, for the Schedules page. */
+export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { runtime } = await getLatch();
+  const schedules = await runtime.listSchedules({ principal });
+  return schedules.map((s) => ({
+    id: s.id,
+    agent: s.agent,
+    cron: s.cron,
+    prompt: s.prompt,
+    nextRunAt: s.nextRunAt,
+    lastRunAt: s.lastRunAt ?? null,
+    enabled: s.enabled,
+  }));
+});

@@ -59,3 +59,35 @@ export async function testConnection(name: string): Promise<string[]> {
 export async function disconnectConnection(name: string): Promise<void> {
   await fetch(`${BASE}/connections/${name}/disconnect`, { method: "POST" });
 }
+
+export interface ScheduleSummary {
+  id: string;
+  agent: string;
+  cron: string | null;
+  prompt: string;
+  nextRunAt: number;
+  lastRunAt?: number | null;
+  enabled: boolean;
+}
+
+/** Create a scheduled agent run (cron null = one-shot, fires on the next tick). */
+export async function createSchedule(input: {
+  agent: string;
+  cron: string | null;
+  prompt: string;
+}): Promise<void> {
+  const res = await fetch(`${BASE}/schedules`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? "Failed to create schedule");
+  }
+}
+
+/** Delete one of the caller's schedules. */
+export async function deleteSchedule(id: string): Promise<void> {
+  await fetch(`${BASE}/schedules/${id}`, { method: "DELETE" });
+}

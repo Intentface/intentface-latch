@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as RunsRouteImport } from './routes/runs'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ConnectionsRouteImport } from './routes/connections'
@@ -19,6 +20,11 @@ import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
+const SchedulesRoute = SchedulesRouteImport.update({
+  id: '/schedules',
+  path: '/schedules',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RunsRoute = RunsRouteImport.update({
   id: '/runs',
   path: '/runs',
@@ -71,6 +77,7 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/runs': typeof RunsRoute
+  '/schedules': typeof SchedulesRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -81,6 +88,7 @@ export interface FileRoutesByTo {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/runs': typeof RunsRoute
+  '/schedules': typeof SchedulesRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -93,6 +101,7 @@ export interface FileRoutesById {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/runs': typeof RunsRoute
+  '/schedules': typeof SchedulesRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -106,6 +115,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/runs'
+    | '/schedules'
     | '/chat/$chatId'
     | '/chat/'
     | '/api/auth/$'
@@ -116,6 +126,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/runs'
+    | '/schedules'
     | '/chat/$chatId'
     | '/chat'
     | '/api/auth/$'
@@ -127,6 +138,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/runs'
+    | '/schedules'
     | '/chat/$chatId'
     | '/chat/'
     | '/api/auth/$'
@@ -139,12 +151,20 @@ export interface RootRouteChildren {
   ConnectionsRoute: typeof ConnectionsRoute
   LoginRoute: typeof LoginRoute
   RunsRoute: typeof RunsRoute
+  SchedulesRoute: typeof SchedulesRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiLatchSplatRoute: typeof ApiLatchSplatRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/schedules': {
+      id: '/schedules'
+      path: '/schedules'
+      fullPath: '/schedules'
+      preLoaderRoute: typeof SchedulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/runs': {
       id: '/runs'
       path: '/runs'
@@ -229,6 +249,7 @@ const rootRouteChildren: RootRouteChildren = {
   ConnectionsRoute: ConnectionsRoute,
   LoginRoute: LoginRoute,
   RunsRoute: RunsRoute,
+  SchedulesRoute: SchedulesRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiLatchSplatRoute: ApiLatchSplatRoute,
 }

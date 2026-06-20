@@ -13,6 +13,7 @@ import {
 } from "@intentface/latch-drizzle";
 import { createMcpConnections, type McpConnections } from "@intentface/latch-mcp";
 import { createLatchHandler, type LatchHandler } from "@intentface/latch-server";
+import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
 import { getPrincipalFromHeaders, type Principal } from "./session";
@@ -82,6 +83,9 @@ export async function getLatch(): Promise<{
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
+    // Cron evaluator for scheduled agents (croner). next fire after `afterMs`.
+    cron: (expr, afterMs) =>
+      new Cron(expr).nextRun(new Date(afterMs))?.getTime() ?? null,
     // Illustrative rates (USD per 1M tokens). Swap for models.dev later.
     pricing: staticPricing({
       "claude-sonnet-4-6": { inputPer1M: 3, outputPer1M: 15 },
@@ -93,7 +97,17 @@ export async function getLatch(): Promise<{
     connections,
     basePath: "/api/latch",
     resolveContext: (request) => getPrincipalFromHeaders(request.headers),
+    // Guards POST /api/latch/cron/run for an external cron in prod.
+    cronSecret: process.env.LATCH_CRON_SECRET ?? "dev-cron-secret",
   });
+
+  // Dev: no long-running process, so tick due schedules in-process every 30s.
+  // In prod, point a platform cron (Vercel Cron, etc.) at /api/latch/cron/run
+  // instead and drop this. Errors are swallowed — a bad tick never crashes dev.
+  const tick = setInterval(() => {
+    void runtime.runDue().catch((e) => console.warn("runDue failed:", e));
+  }, 30_000);
+  (tick as { unref?: () => void }).unref?.();
 
   cached = { runtime, connections, handler };
   return cached;
