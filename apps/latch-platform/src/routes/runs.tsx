@@ -1,5 +1,5 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { currentPrincipalFn, listRunsFn } from "@/lib/chats.server";
+import { currentPrincipalFn, listRunsFn } from "@/lib/server";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,

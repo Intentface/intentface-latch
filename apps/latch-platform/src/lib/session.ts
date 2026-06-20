@@ -1,9 +1,18 @@
 import { getRequest } from "@tanstack/react-start/server";
-import type { Principal } from "@intentface/latch-core";
 import { auth } from "./auth";
 
 /**
- * The bridge: better-auth session → Latch `Principal`.
+ * Our Principal — opaque to Latch (it's generic over whatever we put here). Must
+ * be JSON-serializable, since Latch persists it per run for resume. The `owner`
+ * fn in `latch.ts` derives the isolation key from these fields.
+ */
+export interface Principal {
+  orgId: string;
+  userId: string;
+}
+
+/**
+ * The bridge: better-auth session → our `Principal`.
  * Active organization = tenant (`orgId`); signed-in users with no active org
  * fall back to a personal scope. Returns null when not authenticated.
  */

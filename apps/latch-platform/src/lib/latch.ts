@@ -2,107 +2,85 @@ import { createClient } from "@libsql/client";
 import {
   createRuntime,
   createVault,
-  defineAgent,
   defineContext,
   staticPricing,
   type Runtime,
-  type Vault,
 } from "@intentface/latch-core";
 import {
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
 } from "@intentface/latch-drizzle";
-import type { McpHost } from "@intentface/latch-mcp";
-import { anthropic } from "@ai-sdk/anthropic";
-import { tool } from "ai";
-import { z } from "zod";
-import { createMcpHost } from "@intentface/latch-mcp";
+import { createMcpConnections, type McpConnections } from "@intentface/latch-mcp";
+import { createLatchHandler, type LatchHandler } from "@intentface/latch-server";
+import { connectionDefs } from "@/connections";
+import { agents } from "@/agents";
+import { getPrincipalFromHeaders, type Principal } from "./session";
 
-/** The Vault key holding a tenant's Loredex API token (a connection credential). */
-export const LOREDEX_TOKEN_KEY = "loredex_token";
+/** Our typed runtime context (built per turn from the principal). */
+interface Ctx {
+  orgId: string;
+}
 
 /**
- * The platform's Latch runtime — one durable instance over the shared libsql DB
- * (the same file better-auth uses). Built lazily and memoized per process.
+ * The platform's Latch composition root — built lazily, memoized per process.
+ *
+ * This is the whole integration: a runtime over the shared libsql DB, the MCP
+ * connection registry built from `connections/`, agents from `agents/`, and ONE
+ * mountable handler (`/api/latch/*`). Isolation lives in the adapter/secret-store
+ * via the `owner` key we derive from our Principal — here, per (org, user).
  */
-let cached: { runtime: Runtime; vault: Vault; mcpHost: McpHost } | undefined;
+let cached:
+  | { runtime: Runtime<Principal>; connections: McpConnections<Principal>; handler: LatchHandler }
+  | undefined;
 
 export async function getLatch(): Promise<{
-  runtime: Runtime;
-  vault: Vault;
-  mcpHost: McpHost;
+  runtime: Runtime<Principal>;
+  connections: McpConnections<Principal>;
+  handler: LatchHandler;
 }> {
   if (cached) return cached;
 
   const client = createClient({ url: process.env.DATABASE_URL ?? "file:./latch.db" });
   await migrate(client); // creates latch_* tables alongside the auth tables
 
-  const storage = createSqliteAdapter(client);
-  const vault = createVault({
-    store: createSqliteSecretStore(client),
+  // The ownership key — the isolation boundary. Per (org, user): each user sees
+  // only their own chats and uses their own credentials. Coarsen to share.
+  const owner = (p: Principal) => [p.orgId, p.userId];
+
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const vault = createVault<Principal>({
+    store: createSqliteSecretStore<Principal>(client, { owner }),
     // Dev fallback is a deterministic 32-byte key; set LATCH_VAULT_KEY in prod.
     masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
   });
 
-  const context = defineContext<{ orgId: string }>({
+  const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
 
-  // MCP: the Loredex knowledge base. Per-tenant SSRF allowlist + vault-brokered
-  // bearer token. The connection is included only once the org has saved a
-  // token; a failed connection is skipped (the agent still works without it).
-  const loredexUrl = process.env.LOREDEX_MCP_URL;
-  const mcpHost = createMcpHost({
+  // MCP connections, declared in `connections/`. SSRF allowlist derives from the
+  // connection URLs; the OAuth callback base must match the mounted handler.
+  const baseURL = process.env.PUBLIC_BASE_URL ?? "http://localhost:3000";
+  const allowedHosts = Object.values(connectionDefs).map((c) => new URL(c.url).hostname);
+
+  const connections = createMcpConnections<Principal>({
+    vault,
     secrets: vault.resolver,
-    allowedHosts: ["app.loredex.ai"],
-    connections: async (scope) => {
-      if (!loredexUrl || !(await vault.has(scope, LOREDEX_TOKEN_KEY))) return [];
-      return [
-        {
-          name: "loredex",
-          url: loredexUrl,
-          auth: { type: "bearer", vaultKey: LOREDEX_TOKEN_KEY },
-        },
-      ];
-    },
+    allowedHosts,
+    connections: connectionDefs,
+    callbackBaseUrl: `${baseURL}/api/latch/connections`,
     onConnectionError: (name, err) =>
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
-  const agents = {
-    assistant: defineAgent<{ orgId: string }>(() => ({
-      model: anthropic("claude-sonnet-4-6"),
-      instructions:
-        "You are Latch's helpful, concise assistant. To charge a customer, " +
-        "call chargeCustomer — it requires human approval before it runs. " +
-        "When Loredex knowledge-base tools (loredex_*) are available, use them " +
-        "to answer questions about the user's documents.",
-      toolSources: [mcpHost],
-      tools: {
-        chargeCustomer: tool({
-          description: "Charge a customer's card (sensitive — needs approval).",
-          inputSchema: z.object({
-            customer: z.string(),
-            amountUsd: z.number(),
-          }),
-          execute: async ({ customer, amountUsd }) => ({
-            charged: true,
-            customer,
-            amountUsd,
-            reference: `ch_${Math.round(amountUsd * 100)}`,
-          }),
-        }),
-      },
-      // HITL: the turn pauses (awaiting_input) until the user approves.
-      toolApproval: { chargeCustomer: "user-approval" },
-    })),
-  };
-
-  const runtime = createRuntime({
+  const runtime = createRuntime<Principal, Ctx>({
     storage,
     context,
     agents,
+    connections, // resolves each agent's `connections: [...]` names per turn
+    // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
+    reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
     // Illustrative rates (USD per 1M tokens). Swap for models.dev later.
     pricing: staticPricing({
@@ -110,6 +88,13 @@ export async function getLatch(): Promise<{
     }),
   });
 
-  cached = { runtime, vault, mcpHost };
+  const handler = createLatchHandler<Principal>({
+    runtime,
+    connections,
+    basePath: "/api/latch",
+    resolveContext: (request) => getPrincipalFromHeaders(request.headers),
+  });
+
+  cached = { runtime, connections, handler };
   return cached;
 }

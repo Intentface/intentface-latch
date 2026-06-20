@@ -16,7 +16,7 @@ import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
-import { Route as ApiChatRouteImport } from './routes/api/chat'
+import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
 const RunsRoute = RunsRouteImport.update({
@@ -54,9 +54,9 @@ const ChatChatIdRoute = ChatChatIdRouteImport.update({
   path: '/$chatId',
   getParentRoute: () => ChatRoute,
 } as any)
-const ApiChatRoute = ApiChatRouteImport.update({
-  id: '/api/chat',
-  path: '/api/chat',
+const ApiLatchSplatRoute = ApiLatchSplatRouteImport.update({
+  id: '/api/latch/$',
+  path: '/api/latch/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
@@ -71,20 +71,20 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/runs': typeof RunsRoute
-  '/api/chat': typeof ApiChatRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/latch/$': typeof ApiLatchSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/runs': typeof RunsRoute
-  '/api/chat': typeof ApiChatRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/latch/$': typeof ApiLatchSplatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -93,10 +93,10 @@ export interface FileRoutesById {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/runs': typeof RunsRoute
-  '/api/chat': typeof ApiChatRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/latch/$': typeof ApiLatchSplatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -106,20 +106,20 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/runs'
-    | '/api/chat'
     | '/chat/$chatId'
     | '/chat/'
     | '/api/auth/$'
+    | '/api/latch/$'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/connections'
     | '/login'
     | '/runs'
-    | '/api/chat'
     | '/chat/$chatId'
     | '/chat'
     | '/api/auth/$'
+    | '/api/latch/$'
   id:
     | '__root__'
     | '/'
@@ -127,10 +127,10 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/runs'
-    | '/api/chat'
     | '/chat/$chatId'
     | '/chat/'
     | '/api/auth/$'
+    | '/api/latch/$'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -139,8 +139,8 @@ export interface RootRouteChildren {
   ConnectionsRoute: typeof ConnectionsRoute
   LoginRoute: typeof LoginRoute
   RunsRoute: typeof RunsRoute
-  ApiChatRoute: typeof ApiChatRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
+  ApiLatchSplatRoute: typeof ApiLatchSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -194,11 +194,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatChatIdRouteImport
       parentRoute: typeof ChatRoute
     }
-    '/api/chat': {
-      id: '/api/chat'
-      path: '/api/chat'
-      fullPath: '/api/chat'
-      preLoaderRoute: typeof ApiChatRouteImport
+    '/api/latch/$': {
+      id: '/api/latch/$'
+      path: '/api/latch/$'
+      fullPath: '/api/latch/$'
+      preLoaderRoute: typeof ApiLatchSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/auth/$': {
@@ -229,8 +229,8 @@ const rootRouteChildren: RootRouteChildren = {
   ConnectionsRoute: ConnectionsRoute,
   LoginRoute: LoginRoute,
   RunsRoute: RunsRoute,
-  ApiChatRoute: ApiChatRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
+  ApiLatchSplatRoute: ApiLatchSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

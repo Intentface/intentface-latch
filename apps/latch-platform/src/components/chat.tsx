@@ -1,10 +1,15 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useRouter } from "@tanstack/react-router";
-import { Send } from "lucide-react";
+import { Loader2, Send } from "lucide-react";
 import type { AppMessage } from "@intentface/latch-core";
-import { applyApprovalFn, loadHistoryFn } from "@/lib/chats.server";
+import {
+  applyApproval,
+  authorizeUrl,
+  chatApi,
+  loadHistory,
+} from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +21,25 @@ type ToolPart = {
   output?: unknown;
   approval?: { id: string; approved?: boolean };
 };
+
+/** The approval id of a pending `connect_<name>` gate, if one is awaiting a decision. */
+function pendingConnectApprovalId(
+  msgs: AppMessage[] | undefined,
+  name: string,
+): string | undefined {
+  for (const m of msgs ?? []) {
+    for (const part of m.parts ?? []) {
+      const p = part as ToolPart & { type: string; toolName?: string };
+      const isConnect =
+        p.type === `tool-connect_${name}` ||
+        (p.type === "dynamic-tool" && p.toolName === `connect_${name}`);
+      if (isConnect && p.state === "approval-requested" && p.approval && p.approval.approved === undefined) {
+        return p.approval.id;
+      }
+    }
+  }
+  return undefined;
+}
 
 export function Chat({
   chatId,
@@ -30,7 +54,7 @@ export function Chat({
   const { messages, sendMessage, setMessages, status } = useChat({
     id: chatId,
     messages: initialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: new DefaultChatTransport({ api: chatApi(chatId) }),
     onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
@@ -38,14 +62,34 @@ export function Chat({
   async function decide(approvalId: string, approved: boolean) {
     setDeciding(true);
     try {
-      await applyApprovalFn({ data: { chatId, decisions: [{ approvalId, approved }] } });
-      const updated = await loadHistoryFn({ data: chatId });
+      await applyApproval(chatId, [{ approvalId, approved }]);
+      const updated = await loadHistory(chatId);
       setMessages(updated as never);
       router.invalidate();
     } finally {
       setDeciding(false);
     }
   }
+
+  // Returning from an OAuth connect (`?connected=<name>`): the run is paused on a
+  // `connect_<name>` approval. Approve it now — the page is already rendered, so
+  // the continuation (tool calls + answer) fills in with the working state,
+  // instead of blocking a blank redirect until the whole turn finished.
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (resumedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    if (!connected) return;
+    resumedRef.current = true;
+    // Drop the param so a refresh doesn't re-fire the approval.
+    const url = new URL(window.location.href);
+    url.searchParams.delete("connected");
+    window.history.replaceState({}, "", url);
+    const approvalId = pendingConnectApprovalId(initialMessages, connected);
+    if (approvalId) void decide(approvalId, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
@@ -75,6 +119,44 @@ export function Chat({
                       : part.type.replace(/^tool-/, "");
 
                   if (tp.state === "approval-requested" && tp.approval) {
+                    // A synthetic connect_<name> tool → render a Connect button
+                    // that starts OAuth and resumes this chat on callback.
+                    if (name?.startsWith("connect_")) {
+                      const conn = name.replace(/^connect_/, "");
+                      return (
+                        <div key={i} className="bg-background text-foreground my-1 rounded-md border p-2">
+                          {deciding ? (
+                            // Back from OAuth → auto-approving + resuming the turn.
+                            <div className="text-muted-foreground flex items-center gap-2 text-sm">
+                              <Loader2 className="size-4 animate-spin" />
+                              Connecting <span className="font-medium">{conn}</span> and resuming…
+                            </div>
+                          ) : (
+                            <>
+                              <div className="text-sm">
+                                Connect <span className="font-medium">{conn}</span> to continue.
+                              </div>
+                              <p className="text-muted-foreground my-1 text-xs">
+                                You'll authorize access, then this conversation resumes
+                                automatically.
+                              </p>
+                              <Button
+                                size="sm"
+                                onClick={() => {
+                                  window.location.href = authorizeUrl(conn, {
+                                    chatId,
+                                    approvalId: tp.approval!.id,
+                                    returnTo: `/chat/${chatId}`,
+                                  });
+                                }}
+                              >
+                                Connect {conn}
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    }
                     return (
                       <div key={i} className="bg-background text-foreground my-1 rounded-md border p-2">
                         <div className="text-sm">

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import type { AppMessage } from "@intentface/latch-core";
-import { loadHistoryFn } from "@/lib/chats.server";
+import { loadHistoryFn } from "@/lib/server";
 import { Chat } from "@/components/chat";
 
 export const Route = createFileRoute("/chat/$chatId")({

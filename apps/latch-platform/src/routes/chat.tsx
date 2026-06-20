@@ -6,7 +6,7 @@ import {
   useNavigate,
 } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
-import { currentPrincipalFn, listChatsFn } from "@/lib/chats.server";
+import { currentPrincipalFn, listChatsFn } from "@/lib/server";
 import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/chat")({

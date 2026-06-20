@@ -4,38 +4,22 @@ import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 
 /**
- * Apply tool-approval decisions and run the continuation to completion
- * server-side (the run executes/skips the gated tool and finishes). The client
- * then refetches history via loadHistoryFn to show the result.
+ * Server-only reads for SSR route loaders / auth gates. These are thin
+ * pass-throughs to the in-process runtime (the framework does the work) — the
+ * idiomatic TanStack way to render server-side, not per-endpoint Latch glue.
+ * All Latch *operations* (chat, approvals, connections) go through the mounted
+ * handler via `latch-client`, not here.
  */
-export const applyApprovalFn = createServerFn({ method: "POST" })
-  .inputValidator(
-    (data: { chatId: string; decisions: { approvalId: string; approved: boolean }[] }) =>
-      data,
-  )
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false };
-    const { runtime } = await getLatch();
-    const res = await runtime.applyApproval({
-      chatId: data.chatId,
-      principal,
-      decisions: data.decisions,
-    });
-    await res.text(); // drive the continuation to completion + persistence
-    return { ok: true };
-  });
 
-/** Server-side auth check (sees the cookie during SSR) for route guards. */
+/** Auth gate: the current principal, or null. */
 export const currentPrincipalFn = createServerFn({ method: "GET" }).handler(
   async () => {
     const p = await getPrincipal();
-    // Return only serializable fields (Principal.meta is unknown-typed).
     return p ? { orgId: p.orgId, userId: p.userId } : null;
   },
 );
 
-/** The tenant's chats for the sidebar (id, title, agent, updatedAt). */
+/** The tenant's chats for the sidebar. */
 export const listChatsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
@@ -68,13 +52,9 @@ export const listRunsFn = createServerFn({ method: "GET" }).handler(async () => 
   }));
 });
 
-/**
- * Client-projected history for one chat (used as useChat initial messages).
- * UIMessages are JSON at runtime but their `parts` carry `unknown` fields the
- * server-fn serializer can't statically verify, so we cast at the boundary.
- */
+/** Client-projected history for one chat (useChat initial messages). */
 export const loadHistoryFn = createServerFn({ method: "GET" })
-  .inputValidator((chatId: string) => chatId)
+  .validator((chatId: string) => chatId)
   .handler(async ({ data: chatId }) => {
     const principal = await getPrincipal();
     if (!principal) return [] as AppMessage[];
@@ -83,3 +63,13 @@ export const loadHistoryFn = createServerFn({ method: "GET" })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return messages as any;
   });
+
+/** Per-connection status for the Connections page. */
+export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
+  async () => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const { connections } = await getLatch();
+    return connections.status(principal);
+  },
+);
