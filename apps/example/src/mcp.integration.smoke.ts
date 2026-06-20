@@ -8,11 +8,10 @@ import {
   defineAgent,
   defineContext,
   type AppMessage,
-  type Principal,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
 import { createMcpHost } from "@intentface/latch-mcp";
-import { assert } from "./setup.js";
+import { assert, owner, type Principal } from "./setup.js";
 
 /**
  * Live MCP integration: a real (in-memory) MCP server exposes a `shout` tool;
@@ -87,21 +86,21 @@ async function main() {
   // --- a runtime whose agent uses the MCP host as a tool source ----------
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
   const agents = {
-    mcpAgent: defineAgent<{ orgId: string }>(() => ({
+    mcpAgent: defineAgent<Principal, { orgId: string }>(() => ({
       model: shoutMock(),
       instructions: "Use the available tools.",
       toolSources: [host],
     })),
   };
-  const runtime = createRuntime({ storage, context, agents });
+  const runtime = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
 
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "mcpAgent" });
+  const chat = await storage.createChat(principal, { agent: "mcpAgent" });
   const userMessage: AppMessage = {
     id: "msg_user_1",
     role: "user",

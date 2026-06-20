@@ -5,10 +5,9 @@ import {
   defineContext,
   staticPricing,
   type AppMessage,
-  type Principal,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, mockModel } from "./setup.js";
+import { assert, mockModel, owner, type Principal } from "./setup.js";
 
 /**
  * Cost calc: with a pricing table, the runtime computes cost from token usage
@@ -19,15 +18,15 @@ import { assert, mockModel } from "./setup.js";
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
   const agents = {
-    echo: defineAgent<{ orgId: string }>(() => ({
+    echo: defineAgent<Principal, { orgId: string }>(() => ({
       model: mockModel(),
       instructions: "hi",
     })),
   };
-  const runtime = createRuntime({
+  const runtime = createRuntime<Principal, { orgId: string }>({
     storage,
     context,
     agents,
@@ -36,7 +35,7 @@ async function main() {
   });
 
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "echo" });
+  const chat = await storage.createChat(principal, { agent: "echo" });
   const userMessage: AppMessage = {
     id: "m1",
     role: "user",
@@ -64,8 +63,8 @@ async function main() {
   assert(meta?.usage?.inputTokens === 7, "usage stamped on the assistant message");
 
   // no pricing → cost 0
-  const r2 = createRuntime({ storage, context, agents });
-  const chat2 = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "echo" });
+  const r2 = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
+  const chat2 = await storage.createChat(principal, { agent: "echo" });
   await (await r2.handleChat({ agent: "echo", chatId: chat2.id, principal, message: { ...userMessage, id: "m2" } })).text();
   await new Promise((r) => setTimeout(r, 50));
   const noPrice = await client.execute("SELECT cost FROM latch_usage WHERE cost = 0 LIMIT 1");

@@ -1,5 +1,5 @@
 import { createClient } from "@libsql/client";
-import { createVault, type Scope } from "@intentface/latch-core";
+import { createVault } from "@intentface/latch-core";
 import { createSqliteSecretStore, migrate } from "@intentface/latch-drizzle";
 import {
   buildAuthHeaders,
@@ -7,7 +7,7 @@ import {
   isHostAllowed,
   type McpConnection,
 } from "@intentface/latch-mcp";
-import { assert } from "./setup.js";
+import { assert, owner, type Principal } from "./setup.js";
 
 function randomKey(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));
@@ -23,7 +23,7 @@ function randomKey(): string {
  * security boundary deterministically, no sockets opened.)
  */
 async function main() {
-  const orgA: Scope = { orgId: "org_a" };
+  const orgA: Principal = { orgId: "org_a" };
 
   // --- SSRF allowlist matching -------------------------------------------
   assert(isHostAllowed("mcp.linear.app", ["mcp.linear.app"]), "exact host allowed");
@@ -35,7 +35,7 @@ async function main() {
   // --- vault-brokered bearer auth ----------------------------------------
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const vault = createVault({ store: createSqliteSecretStore(client), masterKey: randomKey() });
+  const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(client, { owner }), masterKey: randomKey() });
   await vault.set(orgA, "linear_token", "lin_api_secret");
 
   const bearerConn: McpConnection = {

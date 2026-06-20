@@ -7,10 +7,9 @@ import {
   defineAgent,
   defineContext,
   type AppMessage,
-  type Principal,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert } from "./setup.js";
+import { assert, owner, type Principal } from "./setup.js";
 
 /**
  * The writer is exposed to tools via `toolsContext` → a tool reads
@@ -47,8 +46,8 @@ function toolThenText() {
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
 
   // What the tool observed from its context — proves user + run + writer all arrive.
   let seen: { orgId?: unknown; runId?: unknown; hasWriter?: boolean } = {};
@@ -78,16 +77,16 @@ async function main() {
   });
 
   const agents = {
-    noted: defineAgent<{ orgId: string }>(() => ({
+    noted: defineAgent<Principal, { orgId: string }>(() => ({
       model: toolThenText(),
       instructions: "Use the annotate tool.",
       tools: { annotate },
     })),
   };
-  const runtime = createRuntime({ storage, context, agents });
+  const runtime = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
 
   const principal: Principal = { orgId: "org_a", userId: "u1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "u1", agent: "noted" });
+  const chat = await storage.createChat(principal, { agent: "noted" });
   const userMessage: AppMessage = {
     id: "m1",
     role: "user",
@@ -97,7 +96,7 @@ async function main() {
   await (await runtime.handleChat({ agent: "noted", chatId: chat.id, principal, message: userMessage })).text();
   await new Promise((r) => setTimeout(r, 50));
 
-  const loaded = await storage.loadMessages({ orgId: "org_a", userId: "u1" }, chat.id);
+  const loaded = await storage.loadMessages(principal, chat.id);
   const parts = (loaded.find((m) => m.role === "assistant")?.parts ?? []) as { type: string; data?: { note?: string } }[];
   const types = parts.map((p) => p.type);
 

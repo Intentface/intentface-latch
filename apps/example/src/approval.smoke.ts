@@ -7,10 +7,9 @@ import {
   defineAgent,
   defineContext,
   type AppMessage,
-  type Principal,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert } from "./setup.js";
+import { assert, owner, type Principal } from "./setup.js";
 
 /**
  * HITL tool approval — no suspension machinery, just message round-trips.
@@ -52,8 +51,8 @@ const principal: Principal = scope;
 async function runScenario(approved: boolean) {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
 
   let execCount = 0;
   const dangerousAction = tool({
@@ -66,16 +65,16 @@ async function runScenario(approved: boolean) {
   });
   const model = approvalMock(); // shared across both turns → doStream advances
   const agents = {
-    guarded: defineAgent<{ orgId: string }>(() => ({
+    guarded: defineAgent<Principal, { orgId: string }>(() => ({
       model,
       instructions: "Use tools when asked.",
       tools: { dangerousAction },
       toolApproval: { dangerousAction: "user-approval" },
     })),
   };
-  const runtime = createRuntime({ storage, context, agents });
+  const runtime = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
 
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "guarded" });
+  const chat = await storage.createChat(principal, { agent: "guarded" });
   const userMessage: AppMessage = {
     id: "msg_user_1",
     role: "user",

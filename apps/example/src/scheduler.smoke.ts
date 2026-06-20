@@ -12,7 +12,7 @@ async function main() {
   // Short lease so the stuck run becomes reapable quickly (no long waits).
   const { runtime, storage } = await makeDurableRuntime({ leaseTtlMs: 60 });
   const scope = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ ...scope, agent: "echo" });
+  const chat = await storage.createChat(scope, { agent: "echo" });
 
   // A doomed turn: user message persisted, run claimed by a node that then died.
   await storage.appendMessages(chat.id, [
@@ -24,6 +24,7 @@ async function main() {
     } satisfies AppMessage,
   ]);
   const stuck = await storage.claimRun({
+    principal: scope,
     chatId: chat.id,
     agent: "echo",
     owner: "dead_node",

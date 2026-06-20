@@ -1,5 +1,5 @@
-import type { AppMessage, Principal } from "@intentface/latch-core";
-import { assert, makeToolRuntime } from "./setup.js";
+import type { AppMessage } from "@intentface/latch-core";
+import { assert, makeToolRuntime, type Principal } from "./setup.js";
 
 /**
  * Tool loop end to end: the mock calls `getCurrentTime`, the runtime executes
@@ -10,7 +10,7 @@ import { assert, makeToolRuntime } from "./setup.js";
 async function main() {
   const { runtime, storage, client } = await makeToolRuntime();
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "clock" });
+  const chat = await storage.createChat(principal, { agent: "clock" });
 
   const userMessage: AppMessage = {
     id: "msg_user_1",
@@ -28,7 +28,7 @@ async function main() {
   await res.text();
   await new Promise((r) => setTimeout(r, 50));
 
-  const loaded = await storage.loadMessages({ orgId: "org_a", userId: "user_1" }, chat.id);
+  const loaded = await storage.loadMessages(principal, chat.id);
   assert(loaded.length === 2, `user + assistant persisted (got ${loaded.length})`);
 
   const assistant = loaded.find((m) => m.role === "assistant");

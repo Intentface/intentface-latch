@@ -4,11 +4,10 @@ import {
   defineAgent,
   defineContext,
   type AppMessage,
-  type Principal,
   type StorageAdapter,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, toolCallMock } from "./setup.js";
+import { assert, toolCallMock, owner, type Principal } from "./setup.js";
 import { tools } from "./tools.js";
 
 /**
@@ -24,11 +23,11 @@ import { tools } from "./tools.js";
 async function countAssistantAppends(durable: boolean): Promise<number> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const base = createSqliteAdapter(client);
+  const base = createSqliteAdapter<Principal>(client, { owner });
 
   // Spy: count appendMessages calls that include an assistant message.
   let assistantAppends = 0;
-  const storage: StorageAdapter = {
+  const storage: StorageAdapter<Principal> = {
     ...base,
     appendMessages: (chatId, msgs) => {
       if (msgs.some((m) => m.role === "assistant")) assistantAppends++;
@@ -36,11 +35,11 @@ async function countAssistantAppends(durable: boolean): Promise<number> {
     },
   };
 
-  const context = defineContext<{ orgId: string }>({
+  const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
   const agents = {
-    clock: defineAgent<{ orgId: string }>(() => ({
+    clock: defineAgent<Principal, { orgId: string }>(() => ({
       model: toolCallMock(),
       instructions: "Call getCurrentTime for the time.",
       tools,
@@ -54,7 +53,7 @@ async function countAssistantAppends(durable: boolean): Promise<number> {
   });
 
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "clock" });
+  const chat = await storage.createChat(principal, { agent: "clock" });
   const userMessage: AppMessage = {
     id: "msg_user_1",
     role: "user",

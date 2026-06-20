@@ -15,6 +15,13 @@ import {
 import { model } from "./models.js";
 import { tools } from "./tools.js";
 
+/** The example's Principal (opaque to Latch). `owner` keys isolation per org+user. */
+export interface Principal {
+  orgId: string;
+  userId?: string;
+}
+const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
+
 /**
  * A real-model runtime — same wiring as `setup.ts`, but the agent's `model` is
  * a live provider model (via the registry in `models.ts`) instead of the mock.
@@ -22,10 +29,13 @@ import { tools } from "./tools.js";
  * `serve.ts`. Requires `ANTHROPIC_API_KEY` (and/or `OPENAI_API_KEY`); the Vault
  * needs `LATCH_VAULT_KEY` (base64 32 bytes).
  */
-export async function makeLiveRuntime(): Promise<{ runtime: Runtime; vault: Vault }> {
+export async function makeLiveRuntime(): Promise<{
+  runtime: Runtime<Principal>;
+  vault: Vault<Principal>;
+}> {
   const client = createClient({ url: "file:./latch-dev.db" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
+  const storage = createSqliteAdapter<Principal>(client, { owner });
 
   const masterKey = process.env.LATCH_VAULT_KEY;
   if (!masterKey) {
@@ -34,14 +44,17 @@ export async function makeLiveRuntime(): Promise<{ runtime: Runtime; vault: Vaul
         '  node -e "console.log(crypto.randomBytes(32).toString(\'base64\'))"',
     );
   }
-  const vault = createVault({ store: createSqliteSecretStore(client), masterKey });
+  const vault = createVault<Principal>({
+    store: createSqliteSecretStore<Principal>(client, { owner }),
+    masterKey,
+  });
 
-  const context = defineContext<{ orgId: string }>({
+  const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
 
   const agents = {
-    assistant: defineAgent<{ orgId: string }>(() => ({
+    assistant: defineAgent<Principal, { orgId: string }>(() => ({
       model: model("latch:default"), // swap to "latch:smart" / "latch:openai" anytime
       instructions:
         "You are a concise, friendly assistant. Use tools when they help; " +
@@ -50,7 +63,7 @@ export async function makeLiveRuntime(): Promise<{ runtime: Runtime; vault: Vaul
     })),
   };
 
-  const runtime = createRuntime({
+  const runtime = createRuntime<Principal, { orgId: string }>({
     storage,
     context,
     agents,

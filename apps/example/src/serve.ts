@@ -1,12 +1,8 @@
 import { serve } from "@hono/node-server";
-import { createLatchHono } from "@intentface/latch-server";
-import {
-  createIntervalScheduler,
-  scopeOf,
-  type Principal,
-} from "@intentface/latch-core";
+import { createLatchHono } from "@intentface/latch-server/hono";
+import { createIntervalScheduler } from "@intentface/latch-core";
 import { createMcpOAuth } from "@intentface/latch-mcp";
-import { makeLiveRuntime } from "./live.js";
+import { makeLiveRuntime, type Principal } from "./live.js";
 
 /**
  * A runnable Latch server backed by a real model. Run with:
@@ -28,7 +24,7 @@ const resolveContext = (req: Request): Principal => ({
   userId: req.headers.get("x-user") ?? "user_1",
 });
 
-const app = createLatchHono({ runtime, resolveContext });
+const app = createLatchHono<Principal>({ runtime, resolveContext });
 
 // Serverless cron entry point: point a platform scheduler (Vercel Cron, etc.)
 // at this route. It does the same reap+resume as the in-process loop below.
@@ -42,7 +38,7 @@ const mcpOAuthServer = process.env.MCP_OAUTH_SERVER_URL;
 if (mcpOAuthServer) {
   const base = process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 8787}`;
   const successUrl = process.env.OAUTH_SUCCESS_URL ?? `${base}/connections/connected`;
-  const oauth = createMcpOAuth({
+  const oauth = createMcpOAuth<Principal>({
     vault,
     config: {
       name: "demo",
@@ -57,16 +53,16 @@ if (mcpOAuthServer) {
   });
 
   app.get("/connections/demo/authorize", async (c) => {
-    const scope = scopeOf(resolveContext(c.req.raw));
-    const res = await oauth.start(scope);
+    const principal = resolveContext(c.req.raw);
+    const res = await oauth.start(principal);
     return c.redirect(res.status === "redirect" ? res.authorizationUrl : successUrl);
   });
 
   app.get("/connections/demo/callback", async (c) => {
-    const scope = scopeOf(resolveContext(c.req.raw));
+    const principal = resolveContext(c.req.raw);
     const code = c.req.query("code");
     if (!code) return c.text("missing code", 400);
-    await oauth.finish(scope, { code, state: c.req.query("state") });
+    await oauth.finish(principal, { code, state: c.req.query("state") });
     return c.redirect(successUrl);
   });
 

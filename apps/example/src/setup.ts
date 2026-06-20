@@ -10,6 +10,14 @@ import {
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
 import { tools } from "./tools.js";
 
+/** The example's Principal (opaque to Latch). The `owner` fn keys isolation. */
+export interface Principal {
+  orgId: string;
+  userId?: string;
+}
+export const owner = (p: Principal) =>
+  p.userId ? [p.orgId, p.userId] : [p.orgId];
+
 /** A mock model that streams `text` and reports token usage — no API key. */
 export function mockModel(text = "Hello, world!") {
   return new MockLanguageModelV4({
@@ -89,66 +97,66 @@ export function toolCallMock() {
 
 /** A runtime whose `clock` agent calls the real `getCurrentTime` tool (mock-driven). */
 export async function makeToolRuntime(): Promise<{
-  runtime: Runtime;
-  storage: StorageAdapter;
+  runtime: Runtime<Principal>;
+  storage: StorageAdapter<Principal>;
   client: Client;
 }> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
   const agents = {
-    clock: defineAgent<{ orgId: string }>(() => ({
+    clock: defineAgent<Principal, { orgId: string }>(() => ({
       model: toolCallMock(),
       instructions: "Call getCurrentTime for the time.",
       tools,
     })),
   };
-  const runtime = createRuntime({ storage, context, agents });
+  const runtime = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
   return { runtime, storage, client };
 }
 
 /** Build a runtime over an in-memory SQLite DB with one mock-backed `echo` agent. */
 export async function makeRuntime(): Promise<{
-  runtime: Runtime;
-  storage: StorageAdapter;
+  runtime: Runtime<Principal>;
+  storage: StorageAdapter<Principal>;
   client: Client;
 }> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
   const agents = {
-    echo: defineAgent<{ orgId: string }>(() => ({
+    echo: defineAgent<Principal, { orgId: string }>(() => ({
       model: mockModel(),
       instructions: "You are a friendly assistant.",
     })),
   };
-  const runtime = createRuntime({ storage, context, agents });
+  const runtime = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
   return { runtime, storage, client };
 }
 
 /** A durable runtime (T2): leasing + heartbeat + reaper enabled, mock-backed. */
 export async function makeDurableRuntime(
   durability: { leaseTtlMs?: number; heartbeatMs?: number; instanceId?: string } = {},
-): Promise<{ runtime: Runtime; storage: StorageAdapter; client: Client }> {
+): Promise<{ runtime: Runtime<Principal>; storage: StorageAdapter<Principal>; client: Client }> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter(client);
-  const context = defineContext<{ orgId: string }>({
+  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
   const agents = {
-    echo: defineAgent<{ orgId: string }>(() => ({
+    echo: defineAgent<Principal, { orgId: string }>(() => ({
       model: mockModel(),
       instructions: "You are a friendly assistant.",
     })),
   };
-  const runtime = createRuntime({
+  const runtime = createRuntime<Principal, { orgId: string }>({
     storage,
     context,
     agents,

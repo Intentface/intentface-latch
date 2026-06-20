@@ -1,5 +1,5 @@
-import type { AppMessage, Principal } from "@intentface/latch-core";
-import { assert, makeRuntime } from "./setup.js";
+import type { AppMessage } from "@intentface/latch-core";
+import { assert, makeRuntime, type Principal } from "./setup.js";
 
 /**
  * End-to-end T1: run one turn through the Runtime with a mock model, then assert
@@ -10,11 +10,7 @@ async function main() {
   const { runtime, storage, client } = await makeRuntime();
 
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({
-    orgId: "org_a",
-    userId: "user_1",
-    agent: "echo",
-  });
+  const chat = await storage.createChat(principal, { agent: "echo" });
   const userMessage: AppMessage = {
     id: "msg_user_1",
     role: "user",

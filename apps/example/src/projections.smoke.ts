@@ -2,9 +2,8 @@ import {
   toClientMessages,
   toModelMessages,
   type AppMessage,
-  type Principal,
 } from "@intentface/latch-core";
-import { assert, makeRuntime } from "./setup.js";
+import { assert, makeRuntime, type Principal } from "./setup.js";
 
 /**
  * The two message projections + their defaults. `toClientMessages` hides
@@ -54,7 +53,7 @@ async function main() {
   // --- runtime.loadHistory applies the client projection -----------------
   const { runtime, storage } = await makeRuntime();
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "echo" });
+  const chat = await storage.createChat(principal, { agent: "echo" });
   await storage.appendMessages(chat.id, [
     msg("h1", "user", "shown", { visibility: "user" }),
     msg("h2", "assistant", "hidden summary", { visibility: "internal" }),

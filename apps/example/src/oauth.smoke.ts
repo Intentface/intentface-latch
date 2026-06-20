@@ -1,12 +1,12 @@
 import { createClient } from "@libsql/client";
-import { createVault, type Scope } from "@intentface/latch-core";
+import { createVault } from "@intentface/latch-core";
 import { createSqliteSecretStore, migrate } from "@intentface/latch-drizzle";
 import {
   createMcpOAuth,
   createVaultOAuthProvider,
   type McpOAuthConfig,
 } from "@intentface/latch-mcp";
-import { assert } from "./setup.js";
+import { assert, owner, type Principal } from "./setup.js";
 
 function randomKey(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));
@@ -25,7 +25,7 @@ function randomKey(): string {
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const vault = createVault({ store: createSqliteSecretStore(client), masterKey: randomKey() });
+  const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(client, { owner }), masterKey: randomKey() });
 
   const config: McpOAuthConfig = {
     name: "linear",
@@ -38,8 +38,8 @@ async function main() {
     allowedAuthorizationServers: ["https://auth.linear.app"],
   };
 
-  const orgA: Scope = { orgId: "org_a" };
-  const { provider, takeAuthorizationUrl } = createVaultOAuthProvider({ vault, scope: orgA, config });
+  const orgA: Principal = { orgId: "org_a" };
+  const { provider, takeAuthorizationUrl } = createVaultOAuthProvider({ vault, principal: orgA, config });
 
   // --- config getters ----------------------------------------------------
   assert(provider.redirectUrl === config.redirectUrl, "redirectUrl is configurable");
@@ -87,7 +87,7 @@ async function main() {
   assert(blocked, "a disallowed authorization server is rejected (anti-phishing)");
 
   // --- tenant isolation --------------------------------------------------
-  const orgB = createVaultOAuthProvider({ vault, scope: { orgId: "org_b" }, config }).provider;
+  const orgB = createVaultOAuthProvider({ vault, principal: { orgId: "org_b" }, config }).provider;
   assert((await orgB.tokens()) === undefined, "another tenant cannot read the tokens");
 
   // --- McpOAuth lifecycle ------------------------------------------------

@@ -1,7 +1,7 @@
 import { createClient } from "@libsql/client";
-import { createVault, type Scope } from "@intentface/latch-core";
+import { createVault } from "@intentface/latch-core";
 import { createSqliteSecretStore, migrate } from "@intentface/latch-drizzle";
-import { assert } from "./setup.js";
+import { assert, owner, type Principal } from "./setup.js";
 
 /** A random base64 256-bit key (in prod this lives in env/KMS, never the DB). */
 function randomKey(): string {
@@ -19,11 +19,11 @@ function randomKey(): string {
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const store = createSqliteSecretStore(client);
+  const store = createSqliteSecretStore<Principal>(client, { owner });
   const masterKey = randomKey();
-  const vault = createVault({ store, masterKey });
+  const vault = createVault<Principal>({ store, masterKey });
 
-  const orgA: Scope = { orgId: "org_a" };
+  const orgA: Principal = { orgId: "org_a" };
 
   // --- roundtrip ---------------------------------------------------------
   await vault.set(orgA, "clockify_token", "ck_live_123");
@@ -59,7 +59,7 @@ async function main() {
   );
 
   // --- wrong master key cannot decrypt ----------------------------------
-  const wrongVault = createVault({ store, masterKey: randomKey() });
+  const wrongVault = createVault<Principal>({ store, masterKey: randomKey() });
   let threw = false;
   try {
     await wrongVault.get(orgA, "clockify_token");

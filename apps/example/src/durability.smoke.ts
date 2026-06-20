@@ -1,5 +1,5 @@
-import type { AppMessage, Principal } from "@intentface/latch-core";
-import { assert, makeDurableRuntime } from "./setup.js";
+import type { AppMessage } from "@intentface/latch-core";
+import { assert, makeDurableRuntime, type Principal } from "./setup.js";
 
 /**
  * T2 durability primitives, end to end:
@@ -14,6 +14,7 @@ async function main() {
 
   // --- claim + heartbeat -------------------------------------------------
   const run = await storage.claimRun({
+    principal: { orgId: "t" },
     chatId: "c1",
     agent: "echo",
     owner: "node_A",
@@ -56,7 +57,7 @@ async function main() {
 
   // --- a normal durable turn still completes -----------------------------
   const principal: Principal = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ orgId: "org_a", userId: "user_1", agent: "echo" });
+  const chat = await storage.createChat(principal, { agent: "echo" });
   const userMessage: AppMessage = {
     id: "msg_user_1",
     role: "user",

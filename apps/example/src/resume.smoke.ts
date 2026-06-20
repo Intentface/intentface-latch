@@ -9,7 +9,7 @@ import { assert, makeDurableRuntime } from "./setup.js";
 async function main() {
   const { runtime, storage, client } = await makeDurableRuntime();
   const scope = { orgId: "org_a", userId: "user_1" };
-  const chat = await storage.createChat({ ...scope, agent: "echo" });
+  const chat = await storage.createChat(scope, { agent: "echo" });
 
   // The doomed original turn: it persisted the user message and claimed a run...
   const user: AppMessage = {
@@ -20,6 +20,7 @@ async function main() {
   };
   await storage.appendMessages(chat.id, [user]);
   const original = await storage.claimRun({
+    principal: scope,
     chatId: chat.id,
     agent: "echo",
     owner: "dead_node",

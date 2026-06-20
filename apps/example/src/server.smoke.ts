@@ -1,18 +1,17 @@
-import { createLatchHono } from "@intentface/latch-server";
-import type { Principal } from "@intentface/latch-core";
-import { assert, makeRuntime } from "./setup.js";
+import { createLatchHono } from "@intentface/latch-server/hono";
+import { assert, makeRuntime, type Principal } from "./setup.js";
 
 /**
  * The HTTP layer: POST through the Hono route end-to-end (no real port — Hono's
  * `app.request`), with a BYO `resolveContext`. Asserts the streamed response and
- * that the turn persisted under the tenant-namespaced chat id — and that another
- * org cannot see it.
+ * that the turn persisted under the caller's `owner` key — and that another org
+ * (a different owner) cannot see the same chat id.
  */
 async function main() {
   const { runtime, storage } = await makeRuntime();
 
   // BYO-auth: this is the only glue a customer writes.
-  const app = createLatchHono({
+  const app = createLatchHono<Principal>({
     runtime,
     resolveContext: (req): Principal => {
       const org = req.headers.get("x-org") ?? "org_a";
@@ -31,24 +30,25 @@ async function main() {
   assert(body.length > 0, "route streamed a response");
   await new Promise((r) => setTimeout(r, 50));
 
-  // persisted under the tenant-namespaced id
+  // persisted under the caller's owner key, at the raw chat id
   const loaded = await storage.loadMessages(
     { orgId: "org_a", userId: "user_1" },
-    "org_a:ticket-123",
+    "ticket-123",
   );
-  assert(loaded.length === 2, `persisted under namespaced id (got ${loaded.length})`);
+  assert(loaded.length === 2, `persisted under owner (got ${loaded.length})`);
   const text = (loaded.find((m) => m.role === "assistant")?.parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("");
   assert(text === "Hello, world!", "assistant reply persisted");
 
-  // another org hitting the SAME raw id gets a different (empty) chat
+  // another org hitting the SAME chat id gets a different (empty) chat — the
+  // owner key differs, so it's isolated.
   const otherOrg = await storage.loadMessages(
     { orgId: "org_b", userId: "user_1" },
-    "org_b:ticket-123",
+    "ticket-123",
   );
-  assert(otherOrg.length === 0, "tenant-namespaced ids isolate orgs (org_b empty)");
+  assert(otherOrg.length === 0, "owner isolates orgs (org_b empty)");
 
   console.log("✅ server smoke passed — HTTP route → runtime → persistence + isolation");
 }
