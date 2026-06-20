@@ -16,6 +16,7 @@ export const Route = createFileRoute("/api/latch/$")({
     handlers: {
       GET: ({ request }) => handle(request),
       POST: ({ request }) => handle(request),
+      DELETE: ({ request }) => handle(request),
     },
   },
 });
