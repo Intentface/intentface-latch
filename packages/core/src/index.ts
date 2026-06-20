@@ -11,6 +11,7 @@ export * from "./storage.js";
 export * from "./context.js";
 export * from "./agent.js";
 export * from "./runtime.js";
+export * from "./connections.js";
 export * from "./scheduler.js";
 export * from "./vault.js";
 export * from "./projections.js";
