@@ -90,6 +90,9 @@ importers:
       '@intentface/latch-mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@intentface/latch-server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@libsql/client':
         specifier: ^0.15.15
         version: 0.15.15
@@ -274,6 +277,9 @@ importers:
       '@intentface/latch-core':
         specifier: workspace:*
         version: link:../core
+      '@intentface/latch-mcp':
+        specifier: workspace:*
+        version: link:../mcp
     devDependencies:
       ai:
         specifier: 7.0.0-beta.178

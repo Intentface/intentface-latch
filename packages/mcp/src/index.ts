@@ -9,16 +9,41 @@ export {
   createMcpHost,
   isHostAllowed,
   buildAuthHeaders,
+  needsMcpApproval,
 } from "./host.js";
 export type {
   McpHost,
   McpHostConfig,
   McpConnection,
   McpAuth,
+  McpApprovalPolicy,
+  McpToolInfo,
   OpenMcp,
 } from "./host.js";
 export {
   createMcpOAuth,
   createVaultOAuthProvider,
+  decodeOAuthState,
 } from "./oauth.js";
 export type { McpOAuth, McpOAuthConfig, StartResult } from "./oauth.js";
+export { createOAuthDiscoveryFetch } from "./oauth-fetch.js";
+export type {
+  OAuthDiscoveryFetchOptions,
+  FetchFunction,
+} from "./oauth-fetch.js";
+export {
+  createMcpConnections,
+  defineMcpConnection,
+  none,
+  bearer,
+  headers,
+  oauth,
+} from "./connections.js";
+export type {
+  McpConnections,
+  McpConnectionsConfig,
+  McpConnectionDef,
+  McpConnectionAuth,
+  OAuthAuthOptions,
+  ConnectionStatus,
+} from "./connections.js";

@@ -14,7 +14,7 @@ It starts as thin ergonomics over the AI SDK (define an agent, stream it — run
 
 - **Define agents in a few lines** — `defineAgent` / `defineContext`: typed, lazy, engine-agnostic config over `ToolLoopAgent`. Your tenant shape flows into agents, tools, and hooks with no `any`.
 - **Persistence built in** — `chats / messages / runs / usage` via a single `StorageAdapter` (Drizzle: **SQLite & Postgres** today, same contract). `AppMessage` *is* a typed `UIMessage`, so all the stock SDK stream/persistence helpers work unchanged.
-- **Stream over HTTP or call the runtime directly** — a mountable Hono route, or use the runtime from cron / your own routes / non-HTTP triggers.
+- **Stream over HTTP or call the runtime directly** — one framework-agnostic handler you mount at a single route (TanStack/Next/Hono/serverless), or use the runtime from cron / your own routes / non-HTTP triggers.
 - **Durability without a workflow engine** — opt-in lease + heartbeat + reaper + fencing + **resume** + per-step checkpointing. A turn that dies is reclaimed and re-run, exactly once across nodes, on plain TypeScript + your DB.
 - **Scheduler seam** — an in-process reaper loop *or* a serverless `POST /cron/sweep` route; both reap-and-resume stalled runs.
 - **Tools + MCP host** — connect MCP servers as tools behind a **per-tenant SSRF allowlist** and **vault-brokered auth** (incl. **OAuth** — authorization-code + PKCE, tokens in the vault). Custom/stdio/in-memory transports supported.
@@ -44,7 +44,7 @@ MCP, vault, approvals, scheduling, and rate-limiting are independent opt-ins at 
 ```ts
 import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { createLatchHono } from "@intentface/latch-server";
+import { createLatchHandler } from "@intentface/latch-server";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createClient } from "@libsql/client";
 
@@ -63,16 +63,23 @@ const runtime = createRuntime({
   // durability: { enabled: true },   // ← tier 2, when you want resume-after-crash
 });
 
-// Mount into your existing app behind your auth, or run standalone.
-const app = createLatchHono({
+// One framework-agnostic Web handler — mount it at a single route in any host
+// (TanStack Start, Next, Bun, Deno, serverless). Auth is BYO via resolveContext.
+const handler = createLatchHandler({
   runtime,
+  basePath: "/api/latch",
   resolveContext: (req) => ({ orgId: req.headers.get("x-org") ?? "demo", userId: "u1" }),
+  // connections,  // ← pass an MCP connection registry to get OAuth routes too
 });
-// app → POST /agents/:agent/:id  (streams a UIMessage response)
+// e.g. Bun/Deno:  export default { fetch: (req) => handler(req) ?? new Response("Not found", { status: 404 }) }
+// Hono adapter:   import { createLatchHono } from "@intentface/latch-server/hono"
+
+// Serves: POST agents/:agent/:id (chat) + /approvals, GET chats[/:id], GET runs,
+//         and the generic connection OAuth (authorize/callback/status/test).
 ```
 
 ```bash
-curl -N http://localhost:8787/agents/assistant/chat-1 \
+curl -N http://localhost:8787/api/latch/agents/assistant/chat-1 \
   -H 'content-type: application/json' -H 'x-org: org_a' \
   -d '{"text":"In one sentence, what is Latch?"}'
 ```
@@ -96,7 +103,8 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 @intentface/latch-core       runtime, AppMessage + projections, durability, vault,
                              scheduler, pricing, the seams.   deps: ai, zod
 @intentface/latch-drizzle    StorageAdapter + SecretStore (SQLite & Postgres) + migrations
-@intentface/latch-server     mountable Hono routes (+ approvals, cron) — embed or standalone
+@intentface/latch-server     one mountable Web handler (chat, approvals, lists,
+                             connection OAuth) — framework-agnostic; Hono in /hono
 @intentface/latch-mcp        MCP host: SSRF allowlist, vault auth, OAuth.   deps: @ai-sdk/mcp
 
 apps/example                 runnable example + the smoke-test suite (not published)

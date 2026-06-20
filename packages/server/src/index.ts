@@ -1,10 +1,14 @@
 /**
  * @intentface/latch-server
  *
- * Hono routes for Latch. Mount `createLatchHono({ runtime, resolveContext })`
- * into your existing app, or run it standalone. The routes are a convenience —
- * the real contract is the Runtime operations, which you can also call from your
- * own routes / non-HTTP triggers.
+ * The mountable Latch HTTP surface — one framework-agnostic Web handler that
+ * exposes the whole runtime (chat, approvals, chat/run lists, history) and the
+ * generic MCP connection OAuth. Mount `createLatchHandler({ runtime, connections,
+ * resolveContext })` at a single route in any Web-standard host (TanStack Start,
+ * Next, Bun, Deno, serverless). For Hono, see `@intentface/latch-server/hono`.
+ *
+ * The routes are a convenience over the real contract — the Runtime operations —
+ * which you can still call directly from your own routes / non-HTTP triggers.
  */
-export { createLatchHono } from "./server.js";
-export type { LatchServerConfig } from "./server.js";
+export { createLatchHandler } from "./handler.js";
+export type { LatchHandlerConfig, LatchHandler } from "./handler.js";
