@@ -2,6 +2,13 @@ import { createServerFn } from "@tanstack/react-start";
 import type { AppMessage } from "@intentface/latch-core";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
+import { clockifyScope } from "@/connections/clockify";
+import type { CredentialScope } from "./credentials";
+
+/** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
+const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [
+  { name: "clockify", label: "Clockify", scope: clockifyScope },
+];
 
 /**
  * Server-only reads for SSR route loaders / auth gates. These are thin
@@ -73,6 +80,34 @@ export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
     return connections.status(principal);
   },
 );
+
+/** API-key connection status (is a key stored for the caller, at its scope). */
+export const connectionKeysFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { credentials } = await getLatch();
+  return Promise.all(
+    API_KEY_CONNECTIONS.map(async (c) => ({
+      name: c.name,
+      label: c.label,
+      scope: c.scope,
+      set: await credentials.has(principal, c.name, c.scope),
+    })),
+  );
+});
+
+/** Store an API key for a connection, at its declared scope (user/org). */
+export const setConnectionKeyFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; value: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const conn = API_KEY_CONNECTIONS.find((c) => c.name === data.name);
+    if (!conn) return { ok: false };
+    const { credentials } = await getLatch();
+    await credentials.set(principal, conn.name, conn.scope, data.value);
+    return { ok: true };
+  });
 
 /** The registered agents (name + display metadata), for the picker. */
 export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () => {

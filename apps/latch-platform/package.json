@@ -21,6 +21,7 @@
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
     "@intentface/latch-mcp": "workspace:*",
+    "@intentface/latch-openapi": "workspace:*",
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.15",
     "@libsql/kysely-libsql": "^0.4.1",

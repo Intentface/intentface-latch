@@ -8,7 +8,8 @@ import { auth } from "./auth";
  */
 export interface Principal {
   orgId: string;
-  userId: string;
+  /** Optional: omitted to address org-shared resources (e.g. an org-level credential). */
+  userId?: string;
 }
 
 /**

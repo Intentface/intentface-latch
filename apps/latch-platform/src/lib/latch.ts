@@ -3,6 +3,7 @@ import {
   createRuntime,
   createVault,
   defineContext,
+  mergeConnections,
   staticPricing,
   type Runtime,
 } from "@intentface/latch-core";
@@ -12,11 +13,14 @@ import {
   migrate,
 } from "@intentface/latch-drizzle";
 import { createMcpConnections, type McpConnections } from "@intentface/latch-mcp";
+import { createOpenApiConnections, apiKey } from "@intentface/latch-openapi";
 import { createLatchHandler, type LatchHandler } from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
+import { clockify, clockifyScope, clockifyHosts } from "@/connections/clockify";
 import { agents } from "@/agents";
 import { getPrincipalFromHeaders, type Principal } from "./session";
+import { createCredentials, type Credentials } from "./credentials";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -32,12 +36,18 @@ interface Ctx {
  * via the `owner` key we derive from our Principal — here, per (org, user).
  */
 let cached:
-  | { runtime: Runtime<Principal>; connections: McpConnections<Principal>; handler: LatchHandler }
+  | {
+      runtime: Runtime<Principal>;
+      connections: McpConnections<Principal>;
+      credentials: Credentials;
+      handler: LatchHandler;
+    }
   | undefined;
 
 export async function getLatch(): Promise<{
   runtime: Runtime<Principal>;
   connections: McpConnections<Principal>;
+  credentials: Credentials;
   handler: LatchHandler;
 }> {
   if (cached) return cached;
@@ -45,9 +55,10 @@ export async function getLatch(): Promise<{
   const client = createClient({ url: process.env.DATABASE_URL ?? "file:./latch.db" });
   await migrate(client); // creates latch_* tables alongside the auth tables
 
-  // The ownership key — the isolation boundary. Per (org, user): each user sees
-  // only their own chats and uses their own credentials. Coarsen to share.
-  const owner = (p: Principal) => [p.orgId, p.userId];
+  // The ownership key — the isolation boundary. With a userId it's per-user
+  // (`[org,user]`); a userId-stripped principal yields the org-shared owner
+  // (`[org]`) — used for org-level credentials.
+  const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
 
   const storage = createSqliteAdapter<Principal>(client, { owner });
   const vault = createVault<Principal>({
@@ -55,6 +66,7 @@ export async function getLatch(): Promise<{
     // Dev fallback is a deterministic 32-byte key; set LATCH_VAULT_KEY in prod.
     masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
   });
+  const credentials = createCredentials(vault);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -75,11 +87,31 @@ export async function getLatch(): Promise<{
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
+  // OpenAPI connections (REST APIs with no MCP server). Clockify's key is
+  // org-scoped, read from the Vault (env is a zero-config dev fallback) — it's
+  // brokered server-side and never reaches the model.
+  const openapi = createOpenApiConnections<Principal>({
+    allowedHosts: clockifyHosts,
+    connections: {
+      clockify: clockify(
+        apiKey({
+          header: "X-Api-Key",
+          getKey: async (p) =>
+            (await credentials.get(p, "clockify", clockifyScope)) ??
+            process.env.CLOCKIFY_API_KEY,
+        }),
+      ),
+    },
+    onConnectionError: (name, err) =>
+      console.warn(`OpenAPI "${name}" skipped:`, err instanceof Error ? err.message : err),
+  });
+
   const runtime = createRuntime<Principal, Ctx>({
     storage,
     context,
     agents,
-    connections, // resolves each agent's `connections: [...]` names per turn
+    // Resolve each agent's `connections: [...]` across MCP + OpenAPI.
+    connections: mergeConnections(connections, openapi),
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
@@ -110,6 +142,6 @@ export async function getLatch(): Promise<{
   }, 30_000);
   (tick as { unref?: () => void }).unref?.();
 
-  cached = { runtime, connections, handler };
+  cached = { runtime, connections, credentials, handler };
   return cached;
 }

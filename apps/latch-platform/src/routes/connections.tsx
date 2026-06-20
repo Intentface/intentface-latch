@@ -1,12 +1,18 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { currentPrincipalFn, connectionsStatusFn } from "@/lib/server";
+import {
+  currentPrincipalFn,
+  connectionsStatusFn,
+  connectionKeysFn,
+  setConnectionKeyFn,
+} from "@/lib/server";
 import {
   authorizeUrl,
   disconnectConnection,
   testConnection,
 } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -20,23 +26,81 @@ export const Route = createFileRoute("/connections")({
   beforeLoad: async () => {
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
-  loader: () => connectionsStatusFn(),
+  loader: async () => {
+    const [oauth, keys] = await Promise.all([connectionsStatusFn(), connectionKeysFn()]);
+    return { oauth, keys };
+  },
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const connections = Route.useLoaderData();
+  const { oauth, keys } = Route.useLoaderData();
 
   return (
     <div className="mx-auto max-w-xl space-y-4 p-6">
       <h1 className="text-lg font-semibold">Connections</h1>
-      {connections.length === 0 && (
+      {oauth.length === 0 && keys.length === 0 && (
         <p className="text-muted-foreground text-sm">No connections configured.</p>
       )}
-      {connections.map((c) => (
+      {oauth.map((c) => (
         <ConnectionCard key={c.name} connection={c} />
       ))}
+      {keys.map((k) => (
+        <ApiKeyCard key={k.name} conn={k} />
+      ))}
     </div>
+  );
+}
+
+function ApiKeyCard({
+  conn,
+}: {
+  conn: { name: string; label: string; scope: string; set: boolean };
+}) {
+  const router = useRouter();
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    if (!value.trim()) return;
+    setBusy(true);
+    try {
+      await setConnectionKeyFn({ data: { name: conn.name, value: value.trim() } });
+      setValue("");
+      await router.invalidate();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 capitalize">
+          {conn.label}
+          <Badge variant={conn.set ? "secondary" : "outline"}>
+            {conn.set ? "key set" : "no key"}
+          </Badge>
+          <Badge variant="outline">{conn.scope}-level</Badge>
+        </CardTitle>
+        <CardDescription>
+          REST API (OpenAPI). The API key is stored envelope-encrypted in the Vault
+          at the <span className="font-medium">{conn.scope}</span> scope and brokered
+          server-side — it never reaches the model or the browser.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex gap-2">
+        <Input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={conn.set ? "Replace API key…" : "Paste API key…"}
+        />
+        <Button disabled={busy || !value.trim()} onClick={save}>
+          Save
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
