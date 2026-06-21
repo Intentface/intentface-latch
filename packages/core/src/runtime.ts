@@ -63,6 +63,22 @@ export interface ConnectionRegistry<P> {
   hostFor(names: string[]): ToolSource<P>;
 }
 
+/**
+ * A source of agents resolved at request time (e.g. DB/UI-created), consulted
+ * when a name isn't in the static `agents` registry. Lets agents be data, not
+ * just code — scoped per `Principal`. `@intentface` platforms back this with a
+ * table; `resolve` builds the same `AgentConfig` a code agent would.
+ */
+export interface DynamicAgentStore<P> {
+  /** Build an agent's config for this caller, or undefined if not found. */
+  resolve(
+    name: string,
+    principal: P,
+  ): AgentConfig<P> | undefined | Promise<AgentConfig<P> | undefined>;
+  /** The caller's dynamic agents, for the picker. */
+  list(principal: P): AgentInfo[] | Promise<AgentInfo[]>;
+}
+
 export interface RuntimeConfig<P, RuntimeContext = unknown> {
   storage: StorageAdapter<P>;
   context: ContextDefinition<P, RuntimeContext>;
@@ -78,6 +94,11 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * it, `connections` on an agent is ignored.
    */
   connections?: ConnectionRegistry<P>;
+  /**
+   * Resolve agents not in the static `agents` registry (e.g. DB/UI-created),
+   * per caller. Optional — without it, only code-declared agents exist.
+   */
+  dynamicAgents?: DynamicAgentStore<P>;
   /**
    * Rebuild a `Principal` from the opaque identity blob a run stored, for
    * resume/cron (no request). Default: passthrough (`identity as P`). Override to
@@ -107,8 +128,8 @@ export interface HandleChatInput<P> {
 }
 
 export interface Runtime<P> {
-  /** The registered agents (name + display metadata) — for a picker. */
-  listAgents(): AgentInfo[];
+  /** The agents available to the caller (code-declared + dynamic) — for a picker. */
+  listAgents(principal: P): Promise<AgentInfo[]>;
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
@@ -292,10 +313,13 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     request?: Request,
   ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
-    const factory = config.agents[agentName];
-    if (!factory) throw new Error(`Unknown agent: ${agentName}`);
     const runtimeCtx = await config.context.build({ principal, request });
-    const cfg = await factory({ runtime: runtimeCtx, principal });
+    // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
+    const factory = config.agents[agentName];
+    const cfg = factory
+      ? await factory({ runtime: runtimeCtx, principal })
+      : await config.dynamicAgents?.resolve(agentName, principal);
+    if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
       typeof cfg.model === "string"
         ? cfg.model
@@ -772,7 +796,10 @@ export function createRuntime<P, RC = unknown>(
     cron: string | null;
     prompt: string;
   }): Promise<ScheduleRecord> {
-    if (!config.agents[agent]) throw new Error(`Unknown agent: ${agent}`);
+    // Accept code-declared or dynamic (UI-created) agents.
+    const known =
+      !!config.agents[agent] || !!(await config.dynamicAgents?.resolve(agent, principal));
+    if (!known) throw new Error(`Unknown agent: ${agent}`);
     const now = Date.now();
     let nextRunAt = now; // one-shot → fire on the next runDue
     if (cron) {
@@ -815,12 +842,15 @@ export function createRuntime<P, RC = unknown>(
   }
 
   return {
-    listAgents: () =>
-      Object.entries(config.agents).map(([name, factory]) => ({
+    listAgents: async (principal) => {
+      const stat = Object.entries(config.agents).map(([name, factory]) => ({
         name,
         title: factory.meta?.title,
         description: factory.meta?.description,
-      })),
+      }));
+      const dyn = (await config.dynamicAgents?.list(principal)) ?? [];
+      return [...stat, ...dyn];
+    },
     tick: reapTick,
     handleChat,
     loadHistory,

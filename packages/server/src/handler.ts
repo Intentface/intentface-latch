@@ -192,9 +192,9 @@ export function createLatchHandler<P>(
     if (seg[0] === "agents") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
-      // GET agents — the registered agents (for a picker).
+      // GET agents — the agents available to the caller (for a picker).
       if (!seg[1] && method === "GET") {
-        return json({ agents: runtime.listAgents() });
+        return json({ agents: await runtime.listAgents(principal) });
       }
       const agent = seg[1];
       // Client-chosen chat id, used as-is. Tenant isolation is enforced by the
