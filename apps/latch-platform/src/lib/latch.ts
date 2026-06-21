@@ -4,7 +4,6 @@ import {
   createVault,
   defineContext,
   mergeConnections,
-  staticPricing,
   type Runtime,
 } from "@intentface/latch-core";
 import {
@@ -24,7 +23,7 @@ import { createCredentials, type Credentials } from "./credentials";
 import { createConnectionStore, type ConnectionStore } from "./connection-store";
 import { createDynamicConnections } from "./dynamic-connections";
 import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
-import { modelFor } from "./models";
+import { loadModelCatalog, type ModelInfo } from "./models";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -46,6 +45,7 @@ let cached:
       credentials: Credentials;
       connectionStore: ConnectionStore;
       agentStore: AgentStore;
+      models: ModelInfo[];
       handler: LatchHandler;
     }
   | undefined;
@@ -56,6 +56,7 @@ export async function getLatch(): Promise<{
   credentials: Credentials;
   connectionStore: ConnectionStore;
   agentStore: AgentStore;
+  models: ModelInfo[];
   handler: LatchHandler;
 }> {
   if (cached) return cached;
@@ -79,8 +80,10 @@ export async function getLatch(): Promise<{
   const connectionStore = createConnectionStore(vault);
   // UI-added connections (Vault-stored, org/personal), resolved by name per turn.
   const dynamic = createDynamicConnections({ store: connectionStore });
+  // Model catalog + pricing from models.dev (filtered to Anthropic).
+  const catalog = await loadModelCatalog();
   // UI-created agents (latch_agents table, org/personal).
-  const agentStore = createAgentStore(client, modelFor);
+  const agentStore = createAgentStore(client, catalog.modelFor);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -136,10 +139,8 @@ export async function getLatch(): Promise<{
     // times are deterministic regardless of the host's timezone.
     cron: (expr, afterMs) =>
       new Cron(expr, { timezone: "UTC" }).nextRun(new Date(afterMs))?.getTime() ?? null,
-    // Illustrative rates (USD per 1M tokens). Swap for models.dev later.
-    pricing: staticPricing({
-      "claude-sonnet-4-6": { inputPer1M: 3, outputPer1M: 15 },
-    }),
+    // Rates (USD per 1M tokens) from models.dev.
+    pricing: catalog.pricing,
   });
 
   const handler = createLatchHandler<Principal>({
@@ -159,6 +160,14 @@ export async function getLatch(): Promise<{
   }, 30_000);
   (tick as { unref?: () => void }).unref?.();
 
-  cached = { runtime, connections, credentials, connectionStore, agentStore, handler };
+  cached = {
+    runtime,
+    connections,
+    credentials,
+    connectionStore,
+    agentStore,
+    models: catalog.models,
+    handler,
+  };
   return cached;
 }

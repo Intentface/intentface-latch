@@ -195,10 +195,10 @@ export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () =
   return runtime.listAgents(principal);
 });
 
-/** The model allow-list (id + label) for the agent editor's dropdown. */
+/** The model catalog (id + label) for the agent editor's dropdown (from models.dev). */
 export const listModelsFn = createServerFn({ method: "GET" }).handler(async () => {
-  const { MODELS } = await import("./models");
-  return MODELS;
+  const { models } = await getLatch();
+  return models;
 });
 
 /** Full UI-created agent records (org + personal), for the editor. */
