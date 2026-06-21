@@ -23,6 +23,8 @@ import { getPrincipalFromHeaders, type Principal } from "./session";
 import { createCredentials, type Credentials } from "./credentials";
 import { createConnectionStore, type ConnectionStore } from "./connection-store";
 import { createDynamicConnections } from "./dynamic-connections";
+import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
+import { modelFor } from "./models";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -43,6 +45,7 @@ let cached:
       connections: McpConnections<Principal>;
       credentials: Credentials;
       connectionStore: ConnectionStore;
+      agentStore: AgentStore;
       handler: LatchHandler;
     }
   | undefined;
@@ -52,12 +55,14 @@ export async function getLatch(): Promise<{
   connections: McpConnections<Principal>;
   credentials: Credentials;
   connectionStore: ConnectionStore;
+  agentStore: AgentStore;
   handler: LatchHandler;
 }> {
   if (cached) return cached;
 
   const client = createClient({ url: process.env.DATABASE_URL ?? "file:./latch.db" });
   await migrate(client); // creates latch_* tables alongside the auth tables
+  await migrateAgents(client); // latch_agents (UI-created agents)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
@@ -74,6 +79,8 @@ export async function getLatch(): Promise<{
   const connectionStore = createConnectionStore(vault);
   // UI-added connections (Vault-stored, org/personal), resolved by name per turn.
   const dynamic = createDynamicConnections({ store: connectionStore });
+  // UI-created agents (latch_agents table, org/personal).
+  const agentStore = createAgentStore(client, modelFor);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -120,6 +127,8 @@ export async function getLatch(): Promise<{
     // Resolve each agent's `connections: [...]` across code-declared MCP +
     // OpenAPI and the UI-added (Vault-stored) connections.
     connections: mergeConnections(connections, openapi, dynamic),
+    // UI-created agents (not in the static `agents` registry).
+    dynamicAgents: agentStore,
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
@@ -150,6 +159,6 @@ export async function getLatch(): Promise<{
   }, 30_000);
   (tick as { unref?: () => void }).unref?.();
 
-  cached = { runtime, connections, credentials, connectionStore, handler };
+  cached = { runtime, connections, credentials, connectionStore, agentStore, handler };
   return cached;
 }

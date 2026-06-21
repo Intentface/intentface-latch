@@ -187,13 +187,81 @@ export const removeConnectionFn = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-/** The registered agents (name + display metadata), for the picker. */
+/** The agents available to the caller (code + UI-created), for the picker. */
 export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
   const { runtime } = await getLatch();
-  return runtime.listAgents();
+  return runtime.listAgents(principal);
 });
+
+/** The model allow-list (id + label) for the agent editor's dropdown. */
+export const listModelsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const { MODELS } = await import("./models");
+  return MODELS;
+});
+
+/** Full UI-created agent records (org + personal), for the editor. */
+export const listAgentRecordsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { agentStore } = await getLatch();
+  return agentStore.listRecords(principal);
+});
+
+/** Connection names an agent can reference (code-declared + the caller's). */
+export const availableConnectionNamesFn = createServerFn({ method: "GET" }).handler(
+  async () => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const { connections, connectionStore } = await getLatch();
+    const stored = (await connectionStore.list(principal)).map((c) => c.name);
+    return Array.from(new Set([...connections.names, ...stored]));
+  },
+);
+
+/** Create or update a UI agent at its scope. */
+export const saveAgentFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      name: string;
+      title?: string;
+      description?: string;
+      modelId: string;
+      instructions: string;
+      connections: string[];
+      scope: "user" | "org";
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false, error: "unauthorized" };
+    const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!name) return { ok: false, error: "name required" };
+    if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
+    const { agentStore } = await getLatch();
+    await agentStore.upsert(principal, {
+      name,
+      title: data.title?.trim() || undefined,
+      description: data.description?.trim() || undefined,
+      modelId: data.modelId,
+      instructions: data.instructions,
+      connections: data.connections,
+      scope: data.scope,
+    });
+    return { ok: true };
+  });
+
+/** Delete a UI agent at its scope. */
+export const deleteAgentFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: "user" | "org" }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { agentStore } = await getLatch();
+    await agentStore.remove(principal, data.scope, data.name);
+    return { ok: true };
+  });
 
 /** The caller's scheduled agents, for the Schedules page. */
 export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async () => {

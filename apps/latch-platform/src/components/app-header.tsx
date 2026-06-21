@@ -46,6 +46,9 @@ export function AppHeader() {
             <Link to="/runs" activeProps={{ className: "text-foreground font-medium" }}>
               Runs
             </Link>
+            <Link to="/agents" activeProps={{ className: "text-foreground font-medium" }}>
+              Agents
+            </Link>
             <Link to="/schedules" activeProps={{ className: "text-foreground font-medium" }}>
               Schedules
             </Link>
