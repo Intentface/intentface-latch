@@ -18,7 +18,9 @@ export const assistant = defineAgent<Principal, { orgId: string }>({
     "about the user's documents, use the Loredex knowledge-base tools " +
     "(loredex_*). If those tools aren't available yet, call connect_loredex to " +
     "ask the user to connect Loredex, then continue once they have.",
-  connections: ["loredex"],
+  // `custom` is a late-bound name: it does nothing until the user adds a
+  // connection named "custom" on the Connections page (MCP or OpenAPI).
+  connections: ["loredex", "custom"],
   // Even out the visible token cadence in the chat UI (cosmetic).
   smoothStream: true,
   tools: {

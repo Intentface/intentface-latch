@@ -109,6 +109,84 @@ export const setConnectionKeyFn = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+/** UI-added connections visible to the caller (org-shared + personal). */
+export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { connectionStore } = await getLatch();
+  const conns = await connectionStore.list(principal);
+  // Never return the token to the client — just shape + whether auth is set.
+  return conns.map((c) => ({
+    name: c.name,
+    kind: c.kind,
+    scope: c.scope,
+    target: c.mcp?.url ?? c.openapi?.spec ?? "",
+    hasAuth: !!c.auth,
+  }));
+});
+
+/** Add a UI-defined connection (stored encrypted in the Vault at its scope). */
+export const addConnectionFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      name: string;
+      kind: "mcp" | "openapi";
+      scope: "user" | "org";
+      url?: string;
+      spec?: string;
+      baseUrl?: string;
+      operations?: string;
+      authHeader?: string;
+      token?: string;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false, error: "unauthorized" };
+    const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!name) return { ok: false, error: "name required" };
+    const auth = data.token?.trim()
+      ? {
+          kind: (data.authHeader?.trim() ? "header" : "bearer") as "header" | "bearer",
+          header: data.authHeader?.trim() || undefined,
+          token: data.token.trim(),
+        }
+      : undefined;
+    const { connectionStore } = await getLatch();
+    if (data.kind === "mcp") {
+      if (!data.url?.trim()) return { ok: false, error: "url required" };
+      await connectionStore.add(principal, data.scope, { kind: "mcp", name, mcp: { url: data.url.trim() }, auth });
+    } else {
+      if (!data.spec?.trim()) return { ok: false, error: "spec required" };
+      const operations = data.operations
+        ?.split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      await connectionStore.add(principal, data.scope, {
+        kind: "openapi",
+        name,
+        openapi: {
+          spec: data.spec.trim(),
+          baseUrl: data.baseUrl?.trim() || undefined,
+          operations: operations && operations.length > 0 ? operations : undefined,
+        },
+        auth,
+      });
+    }
+    return { ok: true };
+  });
+
+/** Remove a UI-defined connection at its scope. */
+export const removeConnectionFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: "user" | "org" }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { connectionStore } = await getLatch();
+    await connectionStore.remove(principal, data.scope, data.name);
+    return { ok: true };
+  });
+
 /** The registered agents (name + display metadata), for the picker. */
 export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();

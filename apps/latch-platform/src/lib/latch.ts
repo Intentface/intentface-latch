@@ -21,6 +21,8 @@ import { clockify, clockifyScope, clockifyHosts } from "@/connections/clockify";
 import { agents } from "@/agents";
 import { getPrincipalFromHeaders, type Principal } from "./session";
 import { createCredentials, type Credentials } from "./credentials";
+import { createConnectionStore, type ConnectionStore } from "./connection-store";
+import { createDynamicConnections } from "./dynamic-connections";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -40,6 +42,7 @@ let cached:
       runtime: Runtime<Principal>;
       connections: McpConnections<Principal>;
       credentials: Credentials;
+      connectionStore: ConnectionStore;
       handler: LatchHandler;
     }
   | undefined;
@@ -48,6 +51,7 @@ export async function getLatch(): Promise<{
   runtime: Runtime<Principal>;
   connections: McpConnections<Principal>;
   credentials: Credentials;
+  connectionStore: ConnectionStore;
   handler: LatchHandler;
 }> {
   if (cached) return cached;
@@ -67,6 +71,9 @@ export async function getLatch(): Promise<{
     masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
   });
   const credentials = createCredentials(vault);
+  const connectionStore = createConnectionStore(vault);
+  // UI-added connections (Vault-stored, org/personal), resolved by name per turn.
+  const dynamic = createDynamicConnections({ store: connectionStore });
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -110,8 +117,9 @@ export async function getLatch(): Promise<{
     storage,
     context,
     agents,
-    // Resolve each agent's `connections: [...]` across MCP + OpenAPI.
-    connections: mergeConnections(connections, openapi),
+    // Resolve each agent's `connections: [...]` across code-declared MCP +
+    // OpenAPI and the UI-added (Vault-stored) connections.
+    connections: mergeConnections(connections, openapi, dynamic),
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
@@ -142,6 +150,6 @@ export async function getLatch(): Promise<{
   }, 30_000);
   (tick as { unref?: () => void }).unref?.();
 
-  cached = { runtime, connections, credentials, handler };
+  cached = { runtime, connections, credentials, connectionStore, handler };
   return cached;
 }

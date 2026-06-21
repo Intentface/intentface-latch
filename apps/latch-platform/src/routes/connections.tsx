@@ -5,6 +5,9 @@ import {
   connectionsStatusFn,
   connectionKeysFn,
   setConnectionKeyFn,
+  listConnectionsFn,
+  addConnectionFn,
+  removeConnectionFn,
 } from "@/lib/server";
 import {
   authorizeUrl,
@@ -27,20 +30,36 @@ export const Route = createFileRoute("/connections")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [oauth, keys] = await Promise.all([connectionsStatusFn(), connectionKeysFn()]);
-    return { oauth, keys };
+    const [oauth, keys, dynamic] = await Promise.all([
+      connectionsStatusFn(),
+      connectionKeysFn(),
+      listConnectionsFn(),
+    ]);
+    return { oauth, keys, dynamic };
   },
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const { oauth, keys } = Route.useLoaderData();
+  const { oauth, keys, dynamic } = Route.useLoaderData();
 
   return (
     <div className="mx-auto max-w-xl space-y-4 p-6">
       <h1 className="text-lg font-semibold">Connections</h1>
-      {oauth.length === 0 && keys.length === 0 && (
-        <p className="text-muted-foreground text-sm">No connections configured.</p>
+
+      <AddConnection />
+
+      {dynamic.length > 0 && (
+        <div className="space-y-2">
+          <h2 className="text-muted-foreground text-xs font-medium uppercase">Your connections</h2>
+          {dynamic.map((c) => (
+            <DynamicCard key={`${c.scope}:${c.name}`} conn={c} />
+          ))}
+        </div>
+      )}
+
+      {(oauth.length > 0 || keys.length > 0) && (
+        <h2 className="text-muted-foreground text-xs font-medium uppercase">Built-in</h2>
       )}
       {oauth.map((c) => (
         <ConnectionCard key={c.name} connection={c} />
@@ -49,6 +68,144 @@ function ConnectionsPage() {
         <ApiKeyCard key={k.name} conn={k} />
       ))}
     </div>
+  );
+}
+
+function AddConnection() {
+  const router = useRouter();
+  const [kind, setKind] = useState<"mcp" | "openapi">("openapi");
+  const [scope, setScope] = useState<"user" | "org">("user");
+  const [name, setName] = useState("");
+  const [target, setTarget] = useState(""); // url (mcp) or spec url (openapi)
+  const [baseUrl, setBaseUrl] = useState("");
+  const [operations, setOperations] = useState("");
+  const [authHeader, setAuthHeader] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim() || !target.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await addConnectionFn({
+        data: {
+          name,
+          kind,
+          scope,
+          url: kind === "mcp" ? target : undefined,
+          spec: kind === "openapi" ? target : undefined,
+          baseUrl: baseUrl || undefined,
+          operations: operations || undefined,
+          authHeader: authHeader || undefined,
+          token: token || undefined,
+        },
+      });
+      if (!res.ok) {
+        setError(res.error ?? "Failed to add");
+        return;
+      }
+      setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
+      await router.invalidate();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const sel = "border-input bg-background h-9 rounded-md border px-2 text-sm";
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add a connection</CardTitle>
+        <CardDescription>
+          Point an agent at any MCP server or OpenAPI (REST) API. The token is
+          stored envelope-encrypted in the Vault and brokered server-side — it
+          never reaches the model. Scope it to <span className="font-medium">you</span> or
+          your whole <span className="font-medium">org</span>. An agent uses it by listing the
+          name in its connections.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="space-y-2" onSubmit={submit}>
+          <div className="flex gap-2">
+            <select className={sel} value={kind} onChange={(e) => setKind(e.target.value as never)}>
+              <option value="openapi">OpenAPI</option>
+              <option value="mcp">MCP</option>
+            </select>
+            <select className={sel} value={scope} onChange={(e) => setScope(e.target.value as never)}>
+              <option value="user">Personal</option>
+              <option value="org">Org</option>
+            </select>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
+          </div>
+          <Input
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder={kind === "mcp" ? "MCP server URL" : "OpenAPI spec URL"}
+          />
+          {kind === "openapi" && (
+            <div className="flex gap-2">
+              <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="base URL (if spec has no servers)" />
+              <Input value={operations} onChange={(e) => setOperations(e.target.value)} placeholder="operations allow-list (comma-sep, optional)" />
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Input
+              className="max-w-[12rem]"
+              value={authHeader}
+              onChange={(e) => setAuthHeader(e.target.value)}
+              placeholder="auth header (blank = Bearer)"
+            />
+            <Input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="token / API key (optional)"
+            />
+          </div>
+          {error && <p className="text-destructive text-sm">{error}</p>}
+          <Button type="submit" disabled={busy || !name.trim() || !target.trim()}>
+            Add connection
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DynamicCard({
+  conn,
+}: {
+  conn: { name: string; kind: string; scope: string; target: string; hasAuth: boolean };
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  async function remove() {
+    setBusy(true);
+    await removeConnectionFn({ data: { name: conn.name, scope: conn.scope as "user" | "org" } });
+    await router.invalidate();
+    setBusy(false);
+  }
+  return (
+    <Card>
+      <CardContent className="flex items-center justify-between gap-3 py-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">{conn.name}</span>
+            <Badge variant="secondary">{conn.kind}</Badge>
+            <Badge variant="outline">{conn.scope === "org" ? "org" : "personal"}</Badge>
+            {conn.hasAuth && <Badge variant="outline">key set</Badge>}
+          </div>
+          <p className="text-muted-foreground truncate text-xs">{conn.target}</p>
+        </div>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
+          Delete
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
