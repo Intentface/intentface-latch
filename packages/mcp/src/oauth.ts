@@ -3,6 +3,7 @@ import {
   type OAuthClientProvider,
   type OAuthClientMetadata,
   type OAuthClientInformation,
+  type OAuthAuthorizationServerInformation,
   type OAuthTokens,
 } from "@ai-sdk/mcp";
 import type { Vault } from "@intentface/latch-core";
@@ -19,15 +20,29 @@ import type { FetchFunction } from "./oauth-fetch.js";
  * sent to the model. An authorization-server allowlist stops a malicious MCP
  * server from pointing us at an attacker's IdP.
  */
-export interface McpOAuthConfig {
+export interface McpOAuthConfig<P = unknown> {
   /** Connection name — namespaces the Vault keys for this server. */
   name: string;
-  /** MCP server URL (the protected resource). */
-  serverUrl: string;
+  /**
+   * MCP server URL (the protected resource). A function defers the lookup to
+   * flow time, per caller — used by UI-added connections whose URL lives in the
+   * caller's Vault and isn't known when the OAuth client is constructed.
+   */
+  serverUrl: string | ((principal: P) => string | Promise<string>);
   /** Our callback URL, registered with the IdP. Must be exact. */
   redirectUrl: string;
   /** OAuth client metadata (DCR or pre-registered client). */
   clientMetadata: OAuthClientMetadata;
+  /**
+   * A pre-registered OAuth client. When this resolves to a value,
+   * `clientInformation()` returns it and the SDK SKIPS Dynamic Client
+   * Registration — required for auth servers without DCR (Google, etc.). A
+   * function defers the lookup per caller (e.g. UI connections whose creds live
+   * in the caller's Vault).
+   */
+  clientInformation?:
+    | OAuthClientInformation
+    | ((principal: P) => OAuthClientInformation | undefined | Promise<OAuthClientInformation | undefined>);
   /** Allowed OAuth authorization-server origins. Empty/undefined = allow any. */
   allowedAuthorizationServers?: string[];
   /** Requested scope string, if the server expects one. */
@@ -106,7 +121,7 @@ export function decodeOAuthState(
 export function createVaultOAuthProvider<P>(opts: {
   vault: Vault<P>;
   principal: P;
-  config: McpOAuthConfig;
+  config: McpOAuthConfig<P>;
   /** App context to bake into the OAuth `state` (recovered on callback). */
   stateData?: Record<string, unknown>;
 }): { provider: OAuthClientProvider; takeAuthorizationUrl: () => URL | undefined } {
@@ -141,11 +156,35 @@ export function createVaultOAuthProvider<P>(opts: {
     },
 
     async clientInformation(): Promise<OAuthClientInformation | undefined> {
+      // A pre-registered client (config) wins and skips DCR; else use the
+      // DCR-registered client stored in the Vault.
+      if (config.clientInformation) {
+        const ci =
+          typeof config.clientInformation === "function"
+            ? await config.clientInformation(principal)
+            : config.clientInformation;
+        if (ci) return ci;
+      }
       const raw = await vault.get(principal, k("client"));
       return raw ? (JSON.parse(raw) as OAuthClientInformation) : undefined;
     },
     async saveClientInformation(info) {
       await vault.set(principal, k("client"), JSON.stringify(info));
+    },
+
+    // Persist the authorization-server metadata discovered during `start` so the
+    // callback's code exchange can read it back. Required for pre-registered
+    // clients (DCR skipped): without these, the SDK would otherwise stash the AS
+    // info onto the client record, which our config-provided `clientInformation`
+    // shadows — leaving the exchange with no stored AS metadata.
+    async authorizationServerInformation(): Promise<
+      OAuthAuthorizationServerInformation | undefined
+    > {
+      const raw = await vault.get(principal, k("as_info"));
+      return raw ? (JSON.parse(raw) as OAuthAuthorizationServerInformation) : undefined;
+    },
+    async saveAuthorizationServerInformation(info) {
+      await vault.set(principal, k("as_info"), JSON.stringify(info));
     },
 
     state() {
@@ -185,7 +224,7 @@ export function createVaultOAuthProvider<P>(opts: {
     async invalidateCredentials(which) {
       const parts =
         which === "all"
-          ? ["tokens", "verifier", "state", "client"]
+          ? ["tokens", "verifier", "state", "client", "as_info"]
           : which === "tokens"
             ? ["tokens"]
             : which === "verifier"
@@ -219,9 +258,11 @@ export interface McpOAuth<P> {
 
 export function createMcpOAuth<P>(opts: {
   vault: Vault<P>;
-  config: McpOAuthConfig;
+  config: McpOAuthConfig<P>;
 }): McpOAuth<P> {
   const { vault, config } = opts;
+  const resolveServerUrl = (principal: P): string | Promise<string> =>
+    typeof config.serverUrl === "function" ? config.serverUrl(principal) : config.serverUrl;
   return {
     async isAuthorized(principal) {
       return vault.has(principal, vaultKey(config.name, "tokens"));
@@ -235,7 +276,7 @@ export function createMcpOAuth<P>(opts: {
         stateData: opts?.state,
       });
       const result = await auth(provider, {
-        serverUrl: config.serverUrl,
+        serverUrl: await resolveServerUrl(principal),
         scope: config.scope,
         fetchFn: config.fetch,
       });
@@ -252,7 +293,7 @@ export function createMcpOAuth<P>(opts: {
     async finish(principal, params) {
       const { provider } = createVaultOAuthProvider({ vault, principal, config });
       await auth(provider, {
-        serverUrl: config.serverUrl,
+        serverUrl: await resolveServerUrl(principal),
         authorizationCode: params.code,
         callbackState: params.state,
         fetchFn: config.fetch,

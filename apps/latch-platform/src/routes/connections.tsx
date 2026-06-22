@@ -79,8 +79,11 @@ function AddConnection() {
   const [target, setTarget] = useState(""); // url (mcp) or spec url (openapi)
   const [baseUrl, setBaseUrl] = useState("");
   const [operations, setOperations] = useState("");
+  const [mcpAuth, setMcpAuth] = useState<"none" | "token" | "oauth">("token");
   const [authHeader, setAuthHeader] = useState("");
   const [token, setToken] = useState("");
+  // OAuth has no static secret; the token row is irrelevant then.
+  const oauthMode = kind === "mcp" && mcpAuth === "oauth";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,8 +102,9 @@ function AddConnection() {
           spec: kind === "openapi" ? target : undefined,
           baseUrl: baseUrl || undefined,
           operations: operations || undefined,
-          authHeader: authHeader || undefined,
-          token: token || undefined,
+          authMode: kind === "mcp" ? mcpAuth : undefined,
+          authHeader: oauthMode ? undefined : authHeader || undefined,
+          token: oauthMode ? undefined : token || undefined,
         },
       });
       if (!res.ok) {
@@ -152,20 +156,38 @@ function AddConnection() {
               <Input value={operations} onChange={(e) => setOperations(e.target.value)} placeholder="operations allow-list (comma-sep, optional)" />
             </div>
           )}
-          <div className="flex gap-2">
-            <Input
-              className="max-w-[12rem]"
-              value={authHeader}
-              onChange={(e) => setAuthHeader(e.target.value)}
-              placeholder="auth header (blank = Bearer)"
-            />
-            <Input
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="token / API key (optional)"
-            />
-          </div>
+          {kind === "mcp" && (
+            <label className="text-muted-foreground flex items-center gap-2 text-xs">
+              Authentication
+              <select className={sel} value={mcpAuth} onChange={(e) => setMcpAuth(e.target.value as never)}>
+                <option value="token">Token / API key</option>
+                <option value="oauth">OAuth (authorize in browser)</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+          )}
+          {!oauthMode && (
+            <div className="flex gap-2">
+              <Input
+                className="max-w-[12rem]"
+                value={authHeader}
+                onChange={(e) => setAuthHeader(e.target.value)}
+                placeholder="auth header (blank = Bearer)"
+              />
+              <Input
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="token / API key (optional)"
+              />
+            </div>
+          )}
+          {oauthMode && (
+            <p className="text-muted-foreground text-xs">
+              No token needed — after adding, click <span className="font-medium">Connect</span> to
+              authorize. Tokens are stored per-user, envelope-encrypted in the Vault.
+            </p>
+          )}
           {error && <p className="text-destructive text-sm">{error}</p>}
           <Button type="submit" disabled={busy || !name.trim() || !target.trim()}>
             Add connection
@@ -179,13 +201,27 @@ function AddConnection() {
 function DynamicCard({
   conn,
 }: {
-  conn: { name: string; kind: string; scope: string; target: string; hasAuth: boolean };
+  conn: {
+    name: string;
+    kind: string;
+    scope: string;
+    target: string;
+    hasAuth: boolean;
+    oauth: boolean;
+    authorized: boolean;
+  };
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   async function remove() {
     setBusy(true);
     await removeConnectionFn({ data: { name: conn.name, scope: conn.scope as "user" | "org" } });
+    await router.invalidate();
+    setBusy(false);
+  }
+  async function disconnect() {
+    setBusy(true);
+    await disconnectConnection(conn.name);
     await router.invalidate();
     setBusy(false);
   }
@@ -197,13 +233,37 @@ function DynamicCard({
             <span className="text-sm font-medium">{conn.name}</span>
             <Badge variant="secondary">{conn.kind}</Badge>
             <Badge variant="outline">{conn.scope === "org" ? "org" : "personal"}</Badge>
-            {conn.hasAuth && <Badge variant="outline">key set</Badge>}
+            {conn.oauth ? (
+              <Badge variant={conn.authorized ? "secondary" : "outline"}>
+                {conn.authorized ? "connected" : "not connected"}
+              </Badge>
+            ) : (
+              conn.hasAuth && <Badge variant="outline">key set</Badge>
+            )}
           </div>
           <p className="text-muted-foreground truncate text-xs">{conn.target}</p>
         </div>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
-          Delete
-        </Button>
+        <div className="flex shrink-0 gap-1">
+          {conn.oauth &&
+            (conn.authorized ? (
+              <Button size="sm" variant="outline" disabled={busy} onClick={disconnect}>
+                Disconnect
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  window.location.href = authorizeUrl(conn.name, { returnTo: "/connections" });
+                }}
+              >
+                Connect
+              </Button>
+            ))}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
+            Delete
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

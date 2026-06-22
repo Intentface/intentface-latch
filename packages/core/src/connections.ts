@@ -12,13 +12,18 @@ export function mergeToolSources<P>(...sources: ToolSource<P>[]): ToolSource<P> 
       const opened = await Promise.all(sources.map((s) => s.open(principal)));
       const tools: Record<string, unknown> = {};
       const toolApproval: Record<string, unknown> = {};
+      const alwaysActive: string[] = [];
       for (const o of opened) {
         Object.assign(tools, o.tools);
         Object.assign(toolApproval, o.toolApproval ?? {});
+        if (o.alwaysActive) alwaysActive.push(...o.alwaysActive);
       }
       return {
         tools,
         toolApproval,
+        // Preserve each source's always-callable tools (e.g. the synthetic
+        // connect_<name> auth tools) so a tool-restricted agent keeps them.
+        alwaysActive,
         close: () =>
           Promise.all(opened.map((o) => o.close().catch(() => {}))).then(() => undefined),
       };

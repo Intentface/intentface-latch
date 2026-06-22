@@ -87,6 +87,33 @@ export interface AgentConfig<P> {
    * stay callable regardless.
    */
   enabledTools?: string[];
+  /**
+   * Give the agent a per-session sandbox (a workspace) and the filesystem/shell
+   * tools that operate on it (`bash`, `read_file`, `write_file`, `glob`,
+   * `grep`). The runtime resolves the actual `Experimental_SandboxSession` via
+   * `RuntimeConfig.sandbox` and passes it to the model; the tools come from
+   * `RuntimeConfig.harnessTools.sandbox`. Optional `provider` picks the backend
+   * (e.g. `"just-bash"` | `"daytona"`); the resolver decides the default.
+   */
+  sandbox?: boolean;
+  /** Sandbox backend hint, passed through to `RuntimeConfig.sandbox`. */
+  sandboxProvider?: string;
+  /**
+   * Add the app-runtime default harness tools (`web_fetch`, `todo`,
+   * `ask_question`) from `RuntimeConfig.harnessTools.app`. `true` adds all;
+   * an array restricts to those names. These run in the app process, not the
+   * sandbox.
+   */
+  defaultTools?: boolean | string[];
+  /** Names of harness/default tools to drop for this agent (eve-style opt-out). */
+  disableTools?: string[];
+  /**
+   * Run the agent in code-mode: the model writes JS that calls the selected
+   * tools as functions (one program instead of many round-trips). `tools` names
+   * which connection tools to expose inside code-mode (omitted → all ungated);
+   * the runtime wraps them via `RuntimeConfig.codeModeWrap`.
+   */
+  codeMode?: { tools?: string[] };
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */

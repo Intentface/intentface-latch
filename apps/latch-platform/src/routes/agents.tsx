@@ -6,9 +6,12 @@ import {
   listModelsFn,
   availableConnectionNamesFn,
   connectionToolsFn,
+  connectionsStatusFn,
+  listConnectionsFn,
   saveAgentFn,
   deleteAgentFn,
 } from "@/lib/server";
+import { authorizeUrl } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +32,13 @@ interface AgentRec {
   connections: string[];
   maxSteps?: number | "unlimited";
   tools?: { enabled: string[]; approval: Record<string, boolean> };
+  exec?: {
+    sandbox?: boolean;
+    provider?: string;
+    defaultTools?: boolean | string[];
+    disableTools?: string[];
+    codeMode?: { tools?: string[] };
+  };
   scope: "user" | "org";
 }
 
@@ -43,18 +53,25 @@ export const Route = createFileRoute("/agents")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [records, models, connections] = await Promise.all([
+    const [records, models, connections, codeStatus, dynStatus] = await Promise.all([
       listAgentRecordsFn(),
       listModelsFn(),
       availableConnectionNamesFn(),
+      connectionsStatusFn(),
+      listConnectionsFn(),
     ]);
-    return { records, models, connections };
+    // OAuth/authorized per connection (built-in + UI-added) — lets the editor
+    // offer a Connect button for an unauthorized OAuth connection.
+    const status: Record<string, { oauth: boolean; authorized: boolean }> = {};
+    for (const c of codeStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };
+    for (const c of dynStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };
+    return { records, models, connections, status };
   },
   component: AgentsPage,
 });
 
 function AgentsPage() {
-  const { records, models, connections } = Route.useLoaderData();
+  const { records, models, connections, status } = Route.useLoaderData();
   const [editing, setEditing] = useState<AgentRec | null>(null);
 
   return (
@@ -71,6 +88,7 @@ function AgentsPage() {
         key={editing ? `${editing.scope}:${editing.name}` : "new"}
         models={models}
         connections={connections}
+        status={status}
         initial={editing}
         onDone={() => setEditing(null)}
       />
@@ -90,11 +108,13 @@ function AgentsPage() {
 function AgentForm({
   models,
   connections,
+  status,
   initial,
   onDone,
 }: {
   models: { id: string; label: string }[];
   connections: string[];
+  status: Record<string, { oauth: boolean; authorized: boolean }>;
   initial: AgentRec | null;
   onDone: () => void;
 }) {
@@ -110,9 +130,16 @@ function AgentForm({
     typeof initial?.maxSteps === "number" ? String(initial.maxSteps) : "20",
   );
   const [unlimited, setUnlimited] = useState(initial?.maxSteps === "unlimited");
+  const [sandbox, setSandbox] = useState(initial?.exec?.sandbox ?? false);
+  const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
+  const [webTools, setWebTools] = useState(
+    initial?.exec?.defaultTools === true ||
+      (Array.isArray(initial?.exec?.defaultTools) && initial!.exec!.defaultTools.length > 0),
+  );
   const [toolList, setToolList] = useState<ToolInfo[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [approval, setApproval] = useState<Record<string, boolean>>({});
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -147,6 +174,32 @@ function AgentForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picked.join(",")]);
 
+  // Re-list after authorizing an OAuth connection in another tab. Preserves the
+  // current toggles and adds any newly-listable tools enabled-by-default.
+  async function refreshTools() {
+    if (picked.length === 0) return;
+    setRefreshing(true);
+    try {
+      const tools = await connectionToolsFn({ data: picked });
+      const known = new Set(toolList.map((t) => t.name));
+      setEnabled((prev) => {
+        const en = new Set(prev);
+        for (const t of tools) if (!known.has(t.name)) en.add(t.name);
+        return en;
+      });
+      setApproval((prev) => {
+        const ap = { ...prev };
+        for (const t of tools)
+          if (!known.has(t.name))
+            ap[t.name] = initial?.tools?.approval?.[t.name] ?? t.defaultApproval;
+        return ap;
+      });
+      setToolList(tools);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   const toggleEnabled = (name: string) =>
     setEnabled((p) => {
       const n = new Set(p);
@@ -167,6 +220,14 @@ function AgentForm({
         toolList.length > 0
           ? { enabled: allOn ? [] : [...enabled], approval }
           : undefined;
+      const exec =
+        sandbox || webTools
+          ? {
+              sandbox: sandbox || undefined,
+              provider: sandbox ? provider : undefined,
+              defaultTools: webTools || undefined,
+            }
+          : undefined;
       const res = await saveAgentFn({
         data: {
           name,
@@ -176,6 +237,7 @@ function AgentForm({
           connections: picked,
           maxSteps: unlimited ? "unlimited" : Number(maxSteps) || undefined,
           tools,
+          exec,
           scope,
         },
       });
@@ -194,6 +256,12 @@ function AgentForm({
   }
 
   const sel = "border-input bg-background h-9 rounded-md border px-2 text-sm";
+
+  // Picked OAuth connections not yet authorized and contributing no tools — the
+  // editor can't list their tools until the caller connects (clears on refresh).
+  const needsAuth = picked.filter(
+    (c) => status[c]?.oauth && !status[c]?.authorized && !toolList.some((t) => t.connection === c),
+  );
 
   return (
     <Card>
@@ -255,9 +323,38 @@ function AgentForm({
           )}
           {picked.length > 0 && (
             <div className="space-y-1 rounded-md border p-2">
-              <p className="text-muted-foreground text-xs">
-                Tools {toolList.length > 0 ? "(uncheck to disable; toggle approval)" : "— authorize/connect to list"}
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-muted-foreground text-xs">
+                  Tools {toolList.length > 0 ? "(uncheck to disable; toggle approval)" : "— authorize/connect to list"}
+                </p>
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground text-xs underline disabled:opacity-50"
+                  disabled={refreshing}
+                  onClick={refreshTools}
+                >
+                  {refreshing ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+              {needsAuth.map((c) => (
+                <div
+                  key={`auth-${c}`}
+                  className="flex items-center justify-between gap-2 rounded-md border border-dashed p-2 text-xs"
+                >
+                  <span>
+                    <span className="font-mono">{c}</span> isn't connected — authorize to list its tools.
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() =>
+                      window.open(authorizeUrl(c, { returnTo: "/connections" }), "_blank", "noopener")
+                    }
+                  >
+                    Connect {c}
+                  </Button>
+                </div>
+              ))}
               {toolList.map((t) => (
                 <div key={t.name} className="flex items-center justify-between text-xs">
                   <label className="flex items-center gap-1">
@@ -298,6 +395,27 @@ function AgentForm({
             <label className="text-muted-foreground flex items-center gap-1 text-xs">
               <input type="checkbox" checked={unlimited} onChange={(e) => setUnlimited(e.target.checked)} />
               run until it stops
+            </label>
+          </div>
+          <div className="space-y-2 rounded-md border p-2">
+            <p className="text-muted-foreground text-xs">Code execution</p>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={sandbox} onChange={(e) => setSandbox(e.target.checked)} />
+              Sandbox — a per-chat workspace with{" "}
+              <span className="font-mono">bash / read_file / write_file / glob / grep</span>
+            </label>
+            {sandbox && (
+              <label className="text-muted-foreground ml-6 flex items-center gap-2 text-xs">
+                backend
+                <select className={sel} value={provider} onChange={(e) => setProvider(e.target.value)}>
+                  <option value="just-bash">just-bash (in-process)</option>
+                  <option value="daytona">Daytona (VM — needs API key)</option>
+                </select>
+              </label>
+            )}
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={webTools} onChange={(e) => setWebTools(e.target.checked)} />
+              Web tools — <span className="font-mono">web_fetch</span>
             </label>
           </div>
           {error && <p className="text-destructive text-sm">{error}</p>}

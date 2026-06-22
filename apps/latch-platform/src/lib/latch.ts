@@ -22,9 +22,10 @@ import { agents } from "@/agents";
 import { getPrincipalFromHeaders, type Principal } from "./session";
 import { createCredentials, type Credentials } from "./credentials";
 import { createConnectionStore, type ConnectionStore } from "./connection-store";
-import { createDynamicConnections } from "./dynamic-connections";
+import { createDynamicConnections, type DynamicConnections } from "./dynamic-connections";
 import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
 import { loadModelCatalog, type ModelInfo } from "./models";
+import { resolveSandbox, harnessTools } from "./sandbox";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -45,6 +46,7 @@ let cached:
       connections: McpConnections<Principal>;
       credentials: Credentials;
       connectionStore: ConnectionStore;
+      dynamic: DynamicConnections;
       allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
       models: ModelInfo[];
@@ -57,6 +59,7 @@ export async function getLatch(): Promise<{
   connections: McpConnections<Principal>;
   credentials: Credentials;
   connectionStore: ConnectionStore;
+  dynamic: DynamicConnections;
   allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
   models: ModelInfo[];
@@ -81,8 +84,6 @@ export async function getLatch(): Promise<{
   });
   const credentials = createCredentials(vault);
   const connectionStore = createConnectionStore(vault);
-  // UI-added connections (Vault-stored, org/personal), resolved by name per turn.
-  const dynamic = createDynamicConnections({ store: connectionStore });
   // Model catalog + pricing from models.dev (filtered to Anthropic).
   const catalog = await loadModelCatalog();
   // UI-created agents (latch_agents table, org/personal).
@@ -96,6 +97,17 @@ export async function getLatch(): Promise<{
   // connection URLs; the OAuth callback base must match the mounted handler.
   const baseURL = process.env.PUBLIC_BASE_URL ?? "http://localhost:3000";
   const allowedHosts = Object.values(connectionDefs).map((c) => new URL(c.url).hostname);
+
+  // UI-added connections (Vault-stored, org/personal), resolved by name per
+  // turn. MCP ones can use static-token OR interactive OAuth — the callback
+  // lands on the same handler base as code connections.
+  const dynamic = createDynamicConnections({
+    store: connectionStore,
+    vault,
+    callbackBaseUrl: `${baseURL}/api/latch/connections`,
+    onConnectionError: (name, err) =>
+      console.warn(`Dynamic connection "${name}" skipped:`, err instanceof Error ? err.message : err),
+  });
 
   const connections = createMcpConnections<Principal>({
     vault,
@@ -148,11 +160,31 @@ export async function getLatch(): Promise<{
       new Cron(expr, { timezone: "UTC" }).nextRun(new Date(afterMs))?.getTime() ?? null,
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
+    // Per-session sandbox (one per chat) + the default harness tools. just-bash
+    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY.
+    sandbox: resolveSandbox,
+    harnessTools,
   });
+
+  // The connection registry the handler's OAuth/status/test routes see: code
+  // connections, plus the UI-added ones dispatched by name. So `connect`,
+  // authorize/callback, status, and test work for dynamic OAuth connections too.
+  const handlerConnections: McpConnections<Principal> = {
+    host: connections.host,
+    hostFor: (names) => connections.hostFor(names),
+    names: connections.names,
+    oauth: (name) =>
+      connections.names.includes(name) ? connections.oauth(name) : dynamic.oauth(name),
+    status: async (p) => [...(await connections.status(p)), ...(await dynamic.status(p))],
+    testTools: (name, p) =>
+      connections.names.includes(name)
+        ? connections.testTools(name, p)
+        : dynamic.testTools(name, p),
+  };
 
   const handler = createLatchHandler<Principal>({
     runtime,
-    connections,
+    connections: handlerConnections,
     basePath: "/api/latch",
     resolveContext: (request) => getPrincipalFromHeaders(request.headers),
     // Guards POST /api/latch/cron/run for an external cron in prod.
@@ -172,6 +204,7 @@ export async function getLatch(): Promise<{
     connections,
     credentials,
     connectionStore,
+    dynamic,
     allConnections,
     agentStore,
     models: catalog.models,

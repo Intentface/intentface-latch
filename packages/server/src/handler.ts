@@ -136,7 +136,15 @@ export function createLatchHandler<P>(
           chatId || approvalId || returnTo
             ? { chatId, approvalId, returnTo }
             : undefined;
-        const res = await oauth.start(principal, { state });
+        // A connection resolved as OAuth-capable but not actually configured for
+        // it (e.g. a dynamic name whose stored record isn't oauth) throws here —
+        // surface it as a 400 rather than starting an orphan flow.
+        let res;
+        try {
+          res = await oauth.start(principal, { state });
+        } catch (e) {
+          return json({ error: e instanceof Error ? e.message : "authorize failed" }, 400);
+        }
         return redirect(
           res.status === "redirect" ? res.authorizationUrl : (returnTo ?? "/"),
         );
@@ -154,7 +162,14 @@ export function createLatchHandler<P>(
         if (!code) return redirect(`${returnTo}?error=missing_code`);
         try {
           await oauth.finish(principal, { code, state: rawState ?? undefined });
-        } catch {
+        } catch (e) {
+          // Surface the real cause — token exchange failures (redirect_uri
+          // mismatch, bad secret, resource/scope rejection) are otherwise
+          // invisible behind the redirect.
+          console.warn(
+            `OAuth callback "${name}" token exchange failed:`,
+            e instanceof Error ? (e.stack ?? e.message) : e,
+          );
           return redirect(`${returnTo}?error=exchange_failed`);
         }
         // Redirect back IMMEDIATELY — don't run the resumed turn here, or the

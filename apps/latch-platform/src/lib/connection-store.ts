@@ -16,8 +16,14 @@ export interface StoredConnection {
   mcp?: { url: string };
   /** OpenAPI: spec URL (or inline), base URL, optional operation allow-list. */
   openapi?: { spec: string; baseUrl?: string; operations?: string[] };
-  /** Token/key auth. `bearer` → Authorization: Bearer; `header` → a named header. */
-  auth?: { kind: "bearer" | "header"; header?: string; token: string };
+  /**
+   * Auth strategy. `bearer`/`header` carry a static token (brokered server-side).
+   * `oauth` (MCP only) holds no secret — the per-user tokens come from the
+   * interactive OAuth flow and live under the caller's own Vault scope.
+   */
+  auth?:
+    | { kind: "bearer" | "header"; header?: string; token: string }
+    | { kind: "oauth"; scopes?: string[] };
 }
 
 /** A stored connection plus the scope it lives at (for listing/UI). */

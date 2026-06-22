@@ -35,6 +35,15 @@ export type McpConnectionAuth<P> =
 export interface OAuthAuthOptions {
   /** Requested scope string components, joined with spaces. */
   scopes?: string[];
+  /**
+   * A pre-registered OAuth client. When set, Dynamic Client Registration (DCR)
+   * is SKIPPED and this client is used directly — required for auth servers that
+   * don't support DCR (Google, GitHub, Slack, …). Register our callback URL
+   * (`<callbackBaseUrl>/<name>/callback`) as an allowed redirect URI with the
+   * provider. Omit `clientSecret` for a public PKCE client.
+   */
+  clientId?: string;
+  clientSecret?: string;
   /** Client name advertised during dynamic client registration. */
   clientName?: string;
   /** Token-endpoint auth method (default `"none"` — public PKCE client). */
@@ -209,6 +218,11 @@ export function createMcpConnections<P>(
           serverUrl: def.url,
           redirectUrl,
           clientMetadata,
+          // Pre-registered client (skips DCR) when provided — for auth servers
+          // without dynamic registration.
+          clientInformation: opts.clientId
+            ? { client_id: opts.clientId, client_secret: opts.clientSecret }
+            : undefined,
           scope: opts.scopes?.join(" "),
           fetch: normFetch,
         },

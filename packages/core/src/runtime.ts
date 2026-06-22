@@ -7,6 +7,7 @@ import {
   stepCountIs,
   toUIMessageStream,
 } from "ai";
+import type { Experimental_SandboxSession } from "ai";
 import type { AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
@@ -113,6 +114,40 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * Required to create recurring schedules.
    */
   cron?: (expr: string, afterMs: number) => number | null;
+  /**
+   * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
+   * Returns the AI SDK `Experimental_SandboxSession` passed to the model
+   * (`agent.stream({ experimental_sandbox })`) and read by sandbox tools. Keeps
+   * core free of any sandbox backend dep — the platform supplies the provider
+   * (e.g. just-bash / Daytona). The sandbox is per chat (`chatId`).
+   */
+  sandbox?: (args: {
+    principal: P;
+    chatId: string;
+    agent: string;
+    provider?: string;
+  }) => Experimental_SandboxSession | Promise<Experimental_SandboxSession>;
+  /**
+   * The default harness tools, supplied by the platform (kept out of core so we
+   * carry no sandbox/QuickJS deps). `sandbox` tools (bash/read_file/write_file/
+   * glob/grep) operate on the resolved `experimental_sandbox`; `app` tools
+   * (web_fetch/todo/ask_question) run in the app process. Merged into an agent's
+   * toolset per its `sandbox`/`defaultTools` flags.
+   */
+  harnessTools?: {
+    sandbox?: Record<string, unknown>;
+    app?: Record<string, unknown>;
+  };
+  /**
+   * Wrap a set of tools into a single code-mode tool (the model writes JS that
+   * calls them as functions). Supplied by the platform (e.g. via
+   * `experimental-ai-sdk-code-mode`), so core needs no QuickJS dep. Used when an
+   * agent sets `codeMode`.
+   */
+  codeModeWrap?: (
+    tools: Record<string, unknown>,
+    opts?: { agent: string },
+  ) => unknown;
 }
 
 export interface HandleChatInput<P> {
@@ -398,6 +433,22 @@ export function createRuntime<P, RC = unknown>(
       );
     const tools = Object.assign({}, cfg.tools, ...opened.map((o) => o.tools));
 
+    // Default harness tools (eve-mirrored), merged per the agent's flags. The
+    // platform supplies them (core carries no sandbox/QuickJS dep): `sandbox`
+    // tools (bash/read_file/write_file/glob/grep) operate on the resolved
+    // Experimental_SandboxSession; `app` tools (web_fetch/todo/ask_question) run
+    // in the app process. `disableTools` opts any of them back out.
+    const harness = config.harnessTools ?? {};
+    const wantSandbox = !!cfg.sandbox && !!config.sandbox;
+    if (wantSandbox && harness.sandbox) Object.assign(tools, harness.sandbox);
+    if (cfg.defaultTools && harness.app) {
+      const only = Array.isArray(cfg.defaultTools) ? new Set(cfg.defaultTools) : null;
+      for (const [name, t] of Object.entries(harness.app)) {
+        if (!only || only.has(name)) tools[name] = t;
+      }
+    }
+    for (const name of cfg.disableTools ?? []) delete tools[name];
+
     // Merge the source-contributed approval policy (connection defaults +
     // synthetic `connect_<name>` gates) with the agent's. The AGENT WINS for
     // tools it names — so an agent can require approval on a GET or waive it on
@@ -458,8 +509,19 @@ export function createRuntime<P, RC = unknown>(
         //  would go here, before the model output is merged in)
         // Model projection: drops `sendToModel:false` messages (and data-* parts).
         const modelMessages = await toModelMessages(uiMessages, { tools });
+        // Per-session sandbox (one per chat) for agents that declared `sandbox`.
+        // Exposed to sandbox tools as `options.experimental_sandbox`.
+        const sandbox = wantSandbox
+          ? await config.sandbox!({
+              principal,
+              chatId: resolvedChatId,
+              agent: run.agent,
+              provider: cfg.sandboxProvider,
+            })
+          : undefined;
         const result = await agent.stream({
           prompt: modelMessages,
+          experimental_sandbox: sandbox,
           abortSignal: dur.enabled ? abort.signal : undefined,
           // Optional: smooth the visible token cadence before deltas stream out.
           experimental_transform: cfg.smoothStream

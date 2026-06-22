@@ -25,6 +25,20 @@ export interface AgentRecord {
    * true → require approval, false → waive it (overrides the connection default).
    */
   tools?: { enabled: string[]; approval: Record<string, boolean> };
+  /**
+   * Code-execution capabilities (eve-style harness). `sandbox` gives a
+   * per-session workspace + the filesystem/shell tools; `provider` picks the
+   * backend ("just-bash" default | "daytona"); `defaultTools` adds the
+   * app-runtime defaults (web_fetch, …); `disableTools` opts specific defaults
+   * out; `codeMode` runs tools via a written-JS program (Phase 2).
+   */
+  exec?: {
+    sandbox?: boolean;
+    provider?: string;
+    defaultTools?: boolean | string[];
+    disableTools?: string[];
+    codeMode?: { tools?: string[] };
+  };
   scope: CredentialScope;
 }
 
@@ -50,11 +64,13 @@ export async function migrateAgents(client: Client): Promise<void> {
   await client.execute(
     `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   );
-  // Idempotent add for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
-  try {
-    await client.execute(`ALTER TABLE latch_agents ADD COLUMN max_steps INTEGER`);
-  } catch {
-    /* column already exists */
+  // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  for (const col of ["max_steps INTEGER", "exec TEXT"]) {
+    try {
+      await client.execute(`ALTER TABLE latch_agents ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
   }
 }
 
@@ -80,6 +96,7 @@ export function createAgentStore(
     tools: row.tools
       ? (JSON.parse(String(row.tools)) as { enabled: string[]; approval: Record<string, boolean> })
       : undefined,
+    exec: row.exec ? (JSON.parse(String(row.exec)) as AgentRecord["exec"]) : undefined,
     scope: String(row.scope) as CredentialScope,
   });
 
@@ -114,6 +131,12 @@ export function createAgentStore(
               approvalEntries.map(([n, req]) => [n, req ? "user-approval" : "not-applicable"]),
             )
           : undefined,
+        // Code-execution capabilities (sandbox + default harness tools).
+        sandbox: rec.exec?.sandbox || undefined,
+        sandboxProvider: rec.exec?.provider,
+        defaultTools: rec.exec?.defaultTools,
+        disableTools: rec.exec?.disableTools,
+        codeMode: rec.exec?.codeMode,
         smoothStream: true,
       };
     },
@@ -145,12 +168,12 @@ export function createAgentStore(
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_agents
-          (id, owner, name, title, description, model_id, instructions, connections, tools, max_steps, scope, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, owner, name, title, description, model_id, instructions, connections, tools, exec, max_steps, scope, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, name) DO UPDATE SET
             title=excluded.title, description=excluded.description, model_id=excluded.model_id,
             instructions=excluded.instructions, connections=excluded.connections,
-            tools=excluded.tools, max_steps=excluded.max_steps, scope=excluded.scope,
+            tools=excluded.tools, exec=excluded.exec, max_steps=excluded.max_steps, scope=excluded.scope,
             updated_at=excluded.updated_at`,
         args: [
           newId(),
@@ -162,6 +185,7 @@ export function createAgentStore(
           rec.instructions,
           JSON.stringify(rec.connections),
           rec.tools ? JSON.stringify(rec.tools) : null,
+          rec.exec ? JSON.stringify(rec.exec) : null,
           maxStepsToCol(rec.maxSteps),
           rec.scope,
           now,

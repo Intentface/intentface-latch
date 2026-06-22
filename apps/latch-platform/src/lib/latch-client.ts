@@ -1,4 +1,10 @@
+import { jsonSchema, parseJsonEventStream } from "ai";
+import type { UIMessageChunk } from "ai";
 import type { AppMessage } from "@intentface/latch-core";
+
+type ChunkParse =
+  | { success: true; value: UIMessageChunk; rawValue: unknown }
+  | { success: false; error: unknown; rawValue: unknown };
 
 /**
  * Browser-side client for the mounted Latch handler (`/api/latch`). All Latch
@@ -28,18 +34,39 @@ export function authorizeUrl(
   return `${BASE}/connections/${name}/authorize?${q}`;
 }
 
-/** Submit approval decisions and drive the continuation to completion. */
-export async function applyApproval(
+/**
+ * Submit approval decisions. Returns the continuation as a live
+ * `UIMessageChunk` stream (the same SSE the chat endpoint speaks) so the caller
+ * can render the tool result + follow-up answer as they stream — instead of
+ * blocking on the whole turn. Returns `null` when the turn stays paused (other
+ * gated calls in the step are still undecided): nothing streams, just reload.
+ */
+export async function submitApproval(
   chatId: string,
   agent: string,
   decisions: { approvalId: string; approved: boolean }[],
-): Promise<void> {
+): Promise<ReadableStream<UIMessageChunk> | null> {
   const res = await fetch(`${chatApi(chatId, agent)}/approvals`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ decisions }),
   });
-  await res.text(); // consume the stream so the server finishes + persists
+  const isStream = (res.headers.get("content-type") ?? "").includes("text/event-stream");
+  if (!res.body || !isStream) {
+    await res.text().catch(() => {}); // drain the empty 200 (still-paused) body
+    return null;
+  }
+  // Same parse the chat transport uses: SSE → JSON events → UIMessageChunk.
+  return parseJsonEventStream({
+    stream: res.body,
+    schema: jsonSchema<UIMessageChunk>({}),
+  }).pipeThrough(
+    new TransformStream<ChunkParse, UIMessageChunk>({
+      transform(part, controller) {
+        if (part.success) controller.enqueue(part.value);
+      },
+    }),
+  );
 }
 
 /** Client-projected history for a chat (used to refresh after an approval). */

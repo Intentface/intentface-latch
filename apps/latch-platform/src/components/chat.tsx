@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
 import { Loader2, Send } from "lucide-react";
 import type { AppMessage } from "@intentface/latch-core";
 import {
-  applyApproval,
   authorizeUrl,
   chatApi,
   loadHistory,
+  submitApproval,
 } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,10 +61,37 @@ export function Chat({
   });
   const busy = status === "submitted" || status === "streaming";
 
+  // Latest messages, for seeding the approval-continuation stream (a click
+  // handler / mount effect would otherwise close over a stale snapshot).
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
   async function decide(approvalId: string, approved: boolean) {
     setDeciding(true);
     try {
-      await applyApproval(chatId, agent, [{ approvalId, approved }]);
+      const stream = await submitApproval(chatId, agent, [{ approvalId, approved }]);
+      if (stream) {
+        // The continuation reuses the last assistant message's id and streams
+        // only the new parts (tool result + answer), so seed the reader with a
+        // copy of that message and let the deltas fill it in live — clone it,
+        // since the reader mutates the seed in place.
+        const last = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
+        const seed = last ? (structuredClone(last) as AppMessage) : undefined;
+        for await (const snapshot of readUIMessageStream<AppMessage>({
+          message: seed,
+          stream,
+        })) {
+          setMessages((prev) => {
+            const next = [...prev];
+            const i = next.findIndex((m) => m.id === snapshot.id);
+            if (i >= 0) next[i] = snapshot as never;
+            else next.push(snapshot as never);
+            return next;
+          });
+        }
+      }
+      // Reconcile against the authoritative server history (also covers the
+      // still-paused case where nothing streamed).
       const updated = await loadHistory(chatId);
       setMessages(updated as never);
       router.invalidate();

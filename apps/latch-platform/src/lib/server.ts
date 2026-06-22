@@ -113,15 +113,19 @@ export const setConnectionKeyFn = createServerFn({ method: "POST" })
 export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
-  const { connectionStore } = await getLatch();
+  const { connectionStore, dynamic } = await getLatch();
   const conns = await connectionStore.list(principal);
+  // OAuth status for MCP connections (whether the caller has authorized).
+  const status = new Map((await dynamic.status(principal)).map((s) => [s.name, s]));
   // Never return the token to the client — just shape + whether auth is set.
   return conns.map((c) => ({
     name: c.name,
     kind: c.kind,
     scope: c.scope,
     target: c.mcp?.url ?? c.openapi?.spec ?? "",
-    hasAuth: !!c.auth,
+    hasAuth: c.auth?.kind === "bearer" || c.auth?.kind === "header",
+    oauth: c.auth?.kind === "oauth",
+    authorized: status.get(c.name)?.authorized ?? true,
   }));
 });
 
@@ -136,6 +140,8 @@ export const addConnectionFn = createServerFn({ method: "POST" })
       spec?: string;
       baseUrl?: string;
       operations?: string;
+      /** MCP only: "oauth" uses the interactive flow (no token); else token/none. */
+      authMode?: "none" | "token" | "oauth";
       authHeader?: string;
       token?: string;
     }) => data,
@@ -145,13 +151,16 @@ export const addConnectionFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false, error: "unauthorized" };
     const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
     if (!name) return { ok: false, error: "name required" };
-    const auth = data.token?.trim()
-      ? {
-          kind: (data.authHeader?.trim() ? "header" : "bearer") as "header" | "bearer",
-          header: data.authHeader?.trim() || undefined,
-          token: data.token.trim(),
-        }
-      : undefined;
+    const auth =
+      data.kind === "mcp" && data.authMode === "oauth"
+        ? ({ kind: "oauth" } as const)
+        : data.token?.trim()
+          ? {
+              kind: (data.authHeader?.trim() ? "header" : "bearer") as "header" | "bearer",
+              header: data.authHeader?.trim() || undefined,
+              token: data.token.trim(),
+            }
+          : undefined;
     const { connectionStore } = await getLatch();
     if (data.kind === "mcp") {
       if (!data.url?.trim()) return { ok: false, error: "url required" };
@@ -259,6 +268,13 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       connections: string[];
       maxSteps?: number | "unlimited";
       tools?: { enabled: string[]; approval: Record<string, boolean> };
+      exec?: {
+        sandbox?: boolean;
+        provider?: string;
+        defaultTools?: boolean | string[];
+        disableTools?: string[];
+        codeMode?: { tools?: string[] };
+      };
       scope: "user" | "org";
     }) => data,
   )
@@ -278,6 +294,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       connections: data.connections,
       maxSteps: data.maxSteps,
       tools: data.tools,
+      exec: data.exec,
       scope: data.scope,
     });
     return { ok: true };
