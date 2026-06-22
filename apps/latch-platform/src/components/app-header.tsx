@@ -1,5 +1,7 @@
 import { Link, useRouter } from "@tanstack/react-router";
-import { Building2, ChevronDown, LogOut, Plus } from "lucide-react";
+import { Popover } from "@base-ui/react/popover";
+import { Building2, ChevronDown, LogOut, Palette, Plus } from "lucide-react";
+import { ThemeCustomizer } from "@intentface/latch-ui";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,7 +61,9 @@ export function AppHeader() {
         )}
       </div>
 
-      {isPending ? null : session ? (
+      <div className="flex items-center gap-2">
+        <ThemePopover />
+        {isPending ? null : session ? (
         <div className="flex items-center gap-2">
           {/* Org switcher = the tenant boundary */}
           <DropdownMenu>
@@ -104,6 +108,25 @@ export function AppHeader() {
           Sign in
         </Button>
       )}
+      </div>
     </header>
+  );
+}
+
+/** Theme/customizer popover (mode, presets, seed colors, contrast). */
+function ThemePopover() {
+  return (
+    <Popover.Root>
+      <Popover.Trigger render={<Button variant="ghost" size="icon" aria-label="Theme" />}>
+        <Palette className="size-4" />
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner side="bottom" align="end" sideOffset={6}>
+          <Popover.Popup className="border-primary-border bg-primary z-50 rounded-xl border p-4 shadow-lg outline-none">
+            <ThemeCustomizer />
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

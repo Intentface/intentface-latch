@@ -1,6 +1,8 @@
 import { HeadContent, Scripts, createRootRoute } from "@tanstack/react-router"
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools"
 import { TanStackDevtools } from "@tanstack/react-devtools"
+import { ThemeProvider } from "next-themes"
+import { ThemeOverridesApplier } from "@intentface/latch-ui"
 
 import { AppHeader } from "@/components/app-header"
 import { Toaster } from "@/components/ui/sonner"
@@ -38,16 +40,19 @@ export const Route = createRootRoute({
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
       <body>
-        <div className="flex h-screen flex-col">
-          <AppHeader />
-          <main className="min-h-0 flex-1">{children}</main>
-        </div>
-        <Toaster />
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+          <ThemeOverridesApplier />
+          <div className="flex h-screen flex-col">
+            <AppHeader />
+            <main className="min-h-0 flex-1">{children}</main>
+          </div>
+          <Toaster />
+        </ThemeProvider>
         <TanStackDevtools
           config={{
             position: "bottom-right",
