@@ -25,6 +25,12 @@ export interface OpenToolSet {
    * connection pauses the turn for OAuth instead of failing.
    */
   toolApproval?: Record<string, unknown>;
+  /**
+   * Tools that stay callable even when an agent restricts `enabledTools` — e.g.
+   * the synthetic `connect_<name>` auth tools, which must work so the connect
+   * flow isn't blocked by a tool allow-list.
+   */
+  alwaysActive?: string[];
 }
 
 /**
@@ -74,6 +80,13 @@ export interface AgentConfig<P> {
    * it removes the runaway-loop backstop.
    */
   maxSteps?: number | "unlimited";
+  /**
+   * Restrict which tools the model may call (the SDK's `activeTools`) — the
+   * namespaced names (e.g. `clockify_getTimeEntries`). Omitted → all available
+   * tools are active. Tools a source marks `alwaysActive` (e.g. `connect_<name>`)
+   * stay callable regardless.
+   */
+  enabledTools?: string[];
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */

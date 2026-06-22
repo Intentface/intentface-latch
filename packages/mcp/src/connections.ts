@@ -294,14 +294,16 @@ export function createMcpConnections<P>(
         for (const [key, status] of Object.entries(opened.toolApproval)) {
           if (key in tools) toolApproval[key] = status;
         }
+        const alwaysActive: string[] = [];
         for (const [name, def] of entries) {
           if (def.auth?.kind !== "oauth" || !inScope(name)) continue;
           const key = `connect_${name}`;
           tools[key] = connectTool(name, def);
           toolApproval[key] = "user-approval";
+          alwaysActive.push(key); // keep the auth tool callable under enabledTools
         }
 
-        return { tools, close: opened.close, toolApproval };
+        return { tools, close: opened.close, toolApproval, alwaysActive };
       },
     };
   }

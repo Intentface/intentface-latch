@@ -398,19 +398,29 @@ export function createRuntime<P, RC = unknown>(
       );
     const tools = Object.assign({}, cfg.tools, ...opened.map((o) => o.tools));
 
-    // Merge any source-contributed approval policy (e.g. an MCP host gating its
-    // synthetic `connect_<name>` tools) into the agent's. Only when the agent's
-    // own policy is the object form (or absent); a function policy is left as-is.
+    // Merge the source-contributed approval policy (connection defaults +
+    // synthetic `connect_<name>` gates) with the agent's. The AGENT WINS for
+    // tools it names — so an agent can require approval on a GET or waive it on
+    // a mutating op; tools it doesn't mention keep the connection default. Only
+    // for the object form (a function policy is left as-is).
     const sourceApproval = Object.assign(
       {},
       ...opened.map((o) => o.toolApproval ?? {}),
     ) as Record<string, unknown>;
     const toolApproval =
       cfg.toolApproval && typeof cfg.toolApproval !== "function"
-        ? { ...(cfg.toolApproval as Record<string, unknown>), ...sourceApproval }
+        ? { ...sourceApproval, ...(cfg.toolApproval as Record<string, unknown>) }
         : Object.keys(sourceApproval).length > 0 && !cfg.toolApproval
           ? sourceApproval
           : cfg.toolApproval;
+
+    // Which tools the model may call. If the agent restricts `enabledTools`,
+    // union in each source's `alwaysActive` (e.g. connect_<name>) so the auth
+    // flow still works. Omitted → all tools active.
+    const alwaysActive = opened.flatMap((o) => o.alwaysActive ?? []);
+    const activeTools = cfg.enabledTools
+      ? Array.from(new Set([...cfg.enabledTools, ...alwaysActive]))
+      : undefined;
 
     // Tool-loop ceiling: a number caps it; "unlimited" runs until the model
     // stops on its own; omitted → SDK default (stepCountIs(20)).
@@ -427,6 +437,7 @@ export function createRuntime<P, RC = unknown>(
       tools,
       toolApproval,
       stopWhen,
+      activeTools,
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
@@ -716,6 +727,14 @@ export function createRuntime<P, RC = unknown>(
     const messages = await storage.loadMessages(principal, chatId);
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
+
+    // If the step had several gated calls and some are still undecided, DON'T
+    // re-run yet — a tool call without a result makes convertToModelMessages
+    // throw MissingToolResultsError. Persist the decision, stay awaiting_input,
+    // and let the client submit the rest. Only continue once none are pending.
+    if (hasPendingApproval(messages)) {
+      return new Response(null, { status: 200 });
+    }
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
     const { run, lease } = await openRun(principal, chatId, chat.agent);
