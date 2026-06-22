@@ -3,6 +3,7 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
 import { Loader2, Send } from "lucide-react";
+import { Message, Thread, type AppUIMessage, type ToolPart } from "@intentface/latch-ui";
 import type { AppMessage } from "@intentface/latch-core";
 import {
   authorizeUrl,
@@ -12,13 +13,13 @@ import {
 } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
 
-type ToolPart = {
+/** Loose view of a tool part's approval fields (SDK types keep these opaque). */
+type ApprovalPart = {
+  type: string;
+  toolName?: string;
   state?: string;
   input?: unknown;
-  output?: unknown;
   approval?: { id: string; approved?: boolean };
 };
 
@@ -29,7 +30,7 @@ function pendingConnectApprovalId(
 ): string | undefined {
   for (const m of msgs ?? []) {
     for (const part of m.parts ?? []) {
-      const p = part as ToolPart & { type: string; toolName?: string };
+      const p = part as ApprovalPart;
       const isConnect =
         p.type === `tool-connect_${name}` ||
         (p.type === "dynamic-tool" && p.toolName === `connect_${name}`);
@@ -72,15 +73,11 @@ export function Chat({
       const stream = await submitApproval(chatId, agent, [{ approvalId, approved }]);
       if (stream) {
         // The continuation reuses the last assistant message's id and streams
-        // only the new parts (tool result + answer), so seed the reader with a
-        // copy of that message and let the deltas fill it in live — clone it,
-        // since the reader mutates the seed in place.
+        // only the new parts; seed the reader with a clone of that message and
+        // let the deltas fill it in live (the reader mutates the seed in place).
         const last = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
         const seed = last ? (structuredClone(last) as AppMessage) : undefined;
-        for await (const snapshot of readUIMessageStream<AppMessage>({
-          message: seed,
-          stream,
-        })) {
+        for await (const snapshot of readUIMessageStream<AppMessage>({ message: seed, stream })) {
           setMessages((prev) => {
             const next = [...prev];
             const i = next.findIndex((m) => m.id === snapshot.id);
@@ -90,8 +87,7 @@ export function Chat({
           });
         }
       }
-      // Reconcile against the authoritative server history (also covers the
-      // still-paused case where nothing streamed).
+      // Reconcile against authoritative server history (also covers the still-paused case).
       const updated = await loadHistory(chatId);
       setMessages(updated as never);
       router.invalidate();
@@ -101,9 +97,7 @@ export function Chat({
   }
 
   // Returning from an OAuth connect (`?connected=<name>`): the run is paused on a
-  // `connect_<name>` approval. Approve it now — the page is already rendered, so
-  // the continuation (tool calls + answer) fills in with the working state,
-  // instead of blocking a blank redirect until the whole turn finished.
+  // `connect_<name>` approval. Approve it now so the continuation streams in.
   const resumedRef = useRef(false);
   useEffect(() => {
     if (resumedRef.current) return;
@@ -111,7 +105,6 @@ export function Chat({
     const connected = params.get("connected");
     if (!connected) return;
     resumedRef.current = true;
-    // Drop the param so a refresh doesn't re-fire the approval.
     const url = new URL(window.location.href);
     url.searchParams.delete("connected");
     window.history.replaceState({}, "", url);
@@ -120,117 +113,91 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Approve/deny (or in-chat Connect) UI for a tool part awaiting a decision. */
+  function renderApproval(part: ToolPart) {
+    const p = part as ApprovalPart;
+    const name = p.type === "dynamic-tool" ? p.toolName : p.type.replace(/^tool-/, "");
+    const approvalId = p.approval?.id;
+    if (!approvalId) return null;
+
+    if (name?.startsWith("connect_")) {
+      const conn = name.replace(/^connect_/, "");
+      return (
+        <div className="border-primary-border bg-primary rounded-md border p-2">
+          {deciding ? (
+            <div className="text-ink-secondary flex items-center gap-2 text-sm">
+              <Loader2 className="size-4 animate-spin" />
+              Connecting <span className="font-medium">{conn}</span> and resuming…
+            </div>
+          ) : (
+            <>
+              <div className="text-sm">
+                Connect <span className="font-medium">{conn}</span> to continue.
+              </div>
+              <p className="text-ink-tertiary my-1 text-xs">
+                You'll authorize access, then this conversation resumes automatically.
+              </p>
+              <Button
+                size="sm"
+                onClick={() => {
+                  window.location.href = authorizeUrl(conn, {
+                    chatId,
+                    approvalId,
+                    returnTo: `/chat/${chatId}`,
+                  });
+                }}
+              >
+                Connect {conn}
+              </Button>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className="border-primary-border bg-primary rounded-md border p-2">
+        <div className="text-sm">
+          Approve <span className="font-medium">{name}</span>?
+        </div>
+        <pre className="text-ink-secondary my-1 overflow-x-auto text-xs">
+          {JSON.stringify(p.input, null, 2)}
+        </pre>
+        <div className="flex gap-2">
+          <Button size="sm" disabled={deciding} onClick={() => decide(approvalId, true)}>
+            Approve
+          </Button>
+          <Button size="sm" variant="outline" disabled={deciding} onClick={() => decide(approvalId, false)}>
+            Deny
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const lastId = messages.at(-1)?.id;
+
   return (
     <div className="flex h-full flex-col">
-      <div className="text-muted-foreground border-b px-4 py-2 text-xs">
-        Agent: <span className="text-foreground font-medium">{agent}</span>
+      <div className="text-ink-secondary border-b px-4 py-2 text-xs">
+        Agent: <span className="text-ink-primary font-medium">{agent}</span>
       </div>
-      <div className="flex-1 space-y-4 overflow-y-auto p-4">
+
+      <Thread>
         {messages.length === 0 && (
-          <p className="text-muted-foreground mt-12 text-center text-sm">
+          <p className="text-ink-secondary mt-12 text-center text-sm">
             Ask anything. Try: “charge customer Acme $49” to see a tool approval.
           </p>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-            <div
-              className={cn(
-                "max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap",
-                m.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted",
-              )}
-            >
-              {m.parts.map((part, i) => {
-                if (part.type === "text") return <span key={i}>{part.text}</span>;
-
-                const isTool = part.type.startsWith("tool-") || part.type === "dynamic-tool";
-                if (isTool) {
-                  const tp = part as ToolPart;
-                  const name =
-                    part.type === "dynamic-tool"
-                      ? (part as { toolName?: string }).toolName
-                      : part.type.replace(/^tool-/, "");
-
-                  if (tp.state === "approval-requested" && tp.approval) {
-                    // A synthetic connect_<name> tool → render a Connect button
-                    // that starts OAuth and resumes this chat on callback.
-                    if (name?.startsWith("connect_")) {
-                      const conn = name.replace(/^connect_/, "");
-                      return (
-                        <div key={i} className="bg-background text-foreground my-1 rounded-md border p-2">
-                          {deciding ? (
-                            // Back from OAuth → auto-approving + resuming the turn.
-                            <div className="text-muted-foreground flex items-center gap-2 text-sm">
-                              <Loader2 className="size-4 animate-spin" />
-                              Connecting <span className="font-medium">{conn}</span> and resuming…
-                            </div>
-                          ) : (
-                            <>
-                              <div className="text-sm">
-                                Connect <span className="font-medium">{conn}</span> to continue.
-                              </div>
-                              <p className="text-muted-foreground my-1 text-xs">
-                                You'll authorize access, then this conversation resumes
-                                automatically.
-                              </p>
-                              <Button
-                                size="sm"
-                                onClick={() => {
-                                  window.location.href = authorizeUrl(conn, {
-                                    chatId,
-                                    approvalId: tp.approval!.id,
-                                    returnTo: `/chat/${chatId}`,
-                                  });
-                                }}
-                              >
-                                Connect {conn}
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      );
-                    }
-                    return (
-                      <div key={i} className="bg-background text-foreground my-1 rounded-md border p-2">
-                        <div className="text-sm">
-                          Approve <span className="font-medium">{name}</span>?
-                        </div>
-                        <pre className="text-muted-foreground my-1 text-xs">
-                          {JSON.stringify(tp.input, null, 2)}
-                        </pre>
-                        <div className="flex gap-2">
-                          <Button size="sm" disabled={deciding} onClick={() => decide(tp.approval!.id, true)}>
-                            Approve
-                          </Button>
-                          <Button size="sm" variant="outline" disabled={deciding} onClick={() => decide(tp.approval!.id, false)}>
-                            Deny
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  const denied = tp.state === "approval-responded" && tp.approval?.approved === false;
-                  return (
-                    <Badge key={i} variant={denied ? "destructive" : "secondary"} className="my-1 mr-1">
-                      🔧 {name}
-                      <span className="opacity-60"> · {denied ? "denied" : (tp.state ?? "")}</span>
-                    </Badge>
-                  );
-                }
-
-                if (part.type.startsWith("data-")) {
-                  return (
-                    <Badge key={i} variant="outline" className="my-1 mr-1">
-                      {part.type.replace(/^data-/, "")}
-                    </Badge>
-                  );
-                }
-                return null;
-              })}
-            </div>
-          </div>
+          <Message
+            key={m.id}
+            message={m as unknown as AppUIMessage}
+            isStreaming={busy && m.id === lastId && m.role === "assistant"}
+            renderApproval={renderApproval}
+          />
         ))}
-      </div>
+      </Thread>
 
       <form
         className="flex gap-2 border-t p-3"

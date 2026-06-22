@@ -15,8 +15,13 @@ export type ToolLabels = Record<
 // Types
 // ---------------------------------------------------------------------------
 
-/** A tool-call part extracted from a UIMessage (any `tool-*` typed part). */
-export type ToolPart = Extract<UIMessage["parts"][number], { type: `tool-${string}` }>;
+/**
+ * A tool-call part from a UIMessage: a static `tool-*` part OR a `dynamic-tool`
+ * part (MCP / runtime-resolved connection tools, incl. `connect_<name>`).
+ */
+export type ToolPart =
+  | Extract<UIMessage["parts"][number], { type: `tool-${string}` }>
+  | Extract<UIMessage["parts"][number], { type: "dynamic-tool" }>;
 
 /** Classifies message parts into coarse groups for chronological rendering. */
 export type SegmentType = "reasoning" | "tool" | "text" | "file";
@@ -44,6 +49,7 @@ export const partSegmentType = (part: UIMessage["parts"][number]): SegmentType |
   if (part.type === "text") return "text";
   if (part.type === "file") return "file";
   if (part.type === "tool-askUser") return "tool";
+  if (part.type === "dynamic-tool") return "tool";
   if (isStaticToolUIPart(part)) return "tool";
   return null;
 };
