@@ -19,6 +19,17 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+interface AgentRec {
+  name: string;
+  title?: string;
+  description?: string;
+  modelId: string;
+  instructions: string;
+  connections: string[];
+  maxSteps?: number | "unlimited";
+  scope: "user" | "org";
+}
+
 export const Route = createFileRoute("/agents")({
   beforeLoad: async () => {
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
@@ -36,6 +47,7 @@ export const Route = createFileRoute("/agents")({
 
 function AgentsPage() {
   const { records, models, connections } = Route.useLoaderData();
+  const [editing, setEditing] = useState<AgentRec | null>(null);
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 p-6">
@@ -47,14 +59,20 @@ function AgentsPage() {
         here.)
       </p>
 
-      <AgentForm models={models} connections={connections} />
+      <AgentForm
+        key={editing ? `${editing.scope}:${editing.name}` : "new"}
+        models={models}
+        connections={connections}
+        initial={editing}
+        onDone={() => setEditing(null)}
+      />
 
       <div className="space-y-2">
         {records.length === 0 && (
           <p className="text-muted-foreground text-sm">No custom agents yet.</p>
         )}
-        {records.map((a) => (
-          <AgentCard key={`${a.scope}:${a.name}`} agent={a} />
+        {(records as AgentRec[]).map((a) => (
+          <AgentCard key={`${a.scope}:${a.name}`} agent={a} onEdit={() => setEditing(a)} />
         ))}
       </div>
     </div>
@@ -64,19 +82,26 @@ function AgentsPage() {
 function AgentForm({
   models,
   connections,
+  initial,
+  onDone,
 }: {
   models: { id: string; label: string }[];
   connections: string[];
+  initial: AgentRec | null;
+  onDone: () => void;
 }) {
   const router = useRouter();
-  const [name, setName] = useState("");
-  const [title, setTitle] = useState("");
-  const [modelId, setModelId] = useState(models[0]?.id ?? "");
-  const [instructions, setInstructions] = useState("");
-  const [picked, setPicked] = useState<string[]>([]);
-  const [scope, setScope] = useState<"user" | "org">("user");
-  const [maxSteps, setMaxSteps] = useState("20");
-  const [unlimited, setUnlimited] = useState(false);
+  const editing = !!initial;
+  const [name, setName] = useState(initial?.name ?? "");
+  const [title, setTitle] = useState(initial?.title ?? "");
+  const [modelId, setModelId] = useState(initial?.modelId ?? models[0]?.id ?? "");
+  const [instructions, setInstructions] = useState(initial?.instructions ?? "");
+  const [picked, setPicked] = useState<string[]>(initial?.connections ?? []);
+  const [scope, setScope] = useState<"user" | "org">(initial?.scope ?? "user");
+  const [maxSteps, setMaxSteps] = useState(
+    typeof initial?.maxSteps === "number" ? String(initial.maxSteps) : "20",
+  );
+  const [unlimited, setUnlimited] = useState(initial?.maxSteps === "unlimited");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -104,8 +129,11 @@ function AgentForm({
         setError(res.error ?? "Failed to save");
         return;
       }
-      setName(""); setTitle(""); setInstructions(""); setPicked([]);
+      if (!editing) {
+        setName(""); setTitle(""); setInstructions(""); setPicked([]);
+      }
       await router.invalidate();
+      onDone();
     } finally {
       setBusy(false);
     }
@@ -116,13 +144,22 @@ function AgentForm({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>New agent</CardTitle>
-        <CardDescription>Scope it to you or your whole org.</CardDescription>
+        <CardTitle>{editing ? `Edit “${initial!.name}”` : "New agent"}</CardTitle>
+        <CardDescription>
+          {editing
+            ? "Update this agent. Name and scope are fixed (they identify it)."
+            : "Scope it to you or your whole org."}
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="space-y-2" onSubmit={submit}>
           <div className="flex gap-2">
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. researcher)" />
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="name (e.g. researcher)"
+              disabled={editing}
+            />
             <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="title (optional)" />
           </div>
           <div className="flex gap-2">
@@ -131,7 +168,12 @@ function AgentForm({
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
             </select>
-            <select className={sel} value={scope} onChange={(e) => setScope(e.target.value as never)}>
+            <select
+              className={sel}
+              value={scope}
+              onChange={(e) => setScope(e.target.value as never)}
+              disabled={editing}
+            >
               <option value="user">Personal</option>
               <option value="org">Org</option>
             </select>
@@ -175,32 +217,28 @@ function AgentForm({
             </label>
           </div>
           {error && <p className="text-destructive text-sm">{error}</p>}
-          <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
-            Create agent
-          </Button>
+          <div className="flex gap-2">
+            <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
+              {editing ? "Update agent" : "Create agent"}
+            </Button>
+            {editing && (
+              <Button type="button" variant="ghost" disabled={busy} onClick={onDone}>
+                Cancel
+              </Button>
+            )}
+          </div>
         </form>
       </CardContent>
     </Card>
   );
 }
 
-function AgentCard({
-  agent,
-}: {
-  agent: {
-    name: string;
-    title?: string;
-    modelId: string;
-    connections: string[];
-    maxSteps?: number | "unlimited";
-    scope: string;
-  };
-}) {
+function AgentCard({ agent, onEdit }: { agent: AgentRec; onEdit: () => void }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   async function remove() {
     setBusy(true);
-    await deleteAgentFn({ data: { name: agent.name, scope: agent.scope as "user" | "org" } });
+    await deleteAgentFn({ data: { name: agent.name, scope: agent.scope } });
     await router.invalidate();
     setBusy(false);
   }
@@ -218,9 +256,14 @@ function AgentCard({
             {agent.maxSteps === "unlimited" ? "until done" : (agent.maxSteps ?? "default")}
           </p>
         </div>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
-          Delete
-        </Button>
+        <div className="flex shrink-0 gap-1">
+          <Button size="sm" variant="outline" disabled={busy} onClick={onEdit}>
+            Edit
+          </Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
+            Delete
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );
