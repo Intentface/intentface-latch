@@ -67,6 +67,13 @@ export interface AgentConfig<P> {
    * it does not change what gets persisted.
    */
   smoothStream?: boolean | { delayInMs?: number; chunking?: "word" | "line" };
+  /**
+   * Max tool-loop steps before the turn stops (the SDK `stopWhen` ceiling).
+   * Omitted → SDK default (20). A number caps the loop; `"unlimited"` lets it
+   * run until the model stops on its own (no more tool calls) — use with care,
+   * it removes the runaway-loop backstop.
+   */
+  maxSteps?: number | "unlimited";
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */

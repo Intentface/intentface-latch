@@ -4,6 +4,7 @@ import {
   createUIMessageStream,
   createUIMessageStreamResponse,
   smoothStream,
+  stepCountIs,
   toUIMessageStream,
 } from "ai";
 import type { AppMessage } from "./message.js";
@@ -411,11 +412,21 @@ export function createRuntime<P, RC = unknown>(
           ? sourceApproval
           : cfg.toolApproval;
 
+    // Tool-loop ceiling: a number caps it; "unlimited" runs until the model
+    // stops on its own; omitted → SDK default (stepCountIs(20)).
+    const stopWhen =
+      cfg.maxSteps === "unlimited"
+        ? stepCountIs(Number.MAX_SAFE_INTEGER)
+        : typeof cfg.maxSteps === "number"
+          ? stepCountIs(cfg.maxSteps)
+          : undefined;
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
       instructions: cfg.instructions,
       tools,
       toolApproval,
+      stopWhen,
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
