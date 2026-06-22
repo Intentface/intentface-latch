@@ -15,6 +15,32 @@
   --font-sans: "Inter Variable", sans-serif;
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+
+  /* Compatibility aliases: the platform's pages/primitives were authored against
+     shadcn token names. Map them onto the latch-ui OKLCH surfaces/ink so the
+     existing UI renders on the new theme with no per-class edits. (theme.css owns
+     --color-{primary,secondary,tertiary,quaternary,accent,base,ink-*}; we only
+     add the shadcn-only names here.) Pages can move to native OKLCH tokens over
+     time, but don't have to. */
+  --color-background: var(--base);
+  --color-foreground: var(--text-primary);
+  --color-card: var(--primary);
+  --color-card-foreground: var(--text-primary);
+  --color-popover: var(--primary);
+  --color-popover-foreground: var(--text-primary);
+  --color-muted: var(--tertiary);
+  --color-muted-foreground: var(--text-secondary);
+  --color-accent-foreground: var(--text-primary);
+  --color-secondary-foreground: var(--text-primary);
+  --color-primary-foreground: var(--text-primary);
+  --color-border: var(--primary-border);
+  --color-input: var(--primary-border);
+  --color-ring: var(--accent);
+  --color-sidebar: var(--secondary);
+  --color-sidebar-foreground: var(--text-primary);
+  --color-sidebar-border: var(--primary-border);
+  --color-sidebar-accent: var(--tertiary);
+  --color-sidebar-accent-foreground: var(--text-primary);
 }
 
 :root {
