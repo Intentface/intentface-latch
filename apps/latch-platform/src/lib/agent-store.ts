@@ -19,6 +19,12 @@ export interface AgentRecord {
   connections: string[];
   /** Tool-loop ceiling: a number caps steps; "unlimited" runs until done; undefined → default. */
   maxSteps?: number | "unlimited";
+  /**
+   * Per-tool selection over the connections' tools. `enabled` = the namespaced
+   * tool names the model may call (empty → all). `approval` = per-tool override:
+   * true → require approval, false → waive it (overrides the connection default).
+   */
+  tools?: { enabled: string[]; approval: Record<string, boolean> };
   scope: CredentialScope;
 }
 
@@ -71,6 +77,9 @@ export function createAgentStore(
     instructions: String(row.instructions),
     connections: JSON.parse(String(row.connections)) as string[],
     maxSteps: maxStepsFromCol(row.max_steps),
+    tools: row.tools
+      ? (JSON.parse(String(row.tools)) as { enabled: string[]; approval: Record<string, boolean> })
+      : undefined,
     scope: String(row.scope) as CredentialScope,
   });
 
@@ -90,11 +99,21 @@ export function createAgentStore(
     async resolve(name, principal): Promise<AgentConfig<Principal> | undefined> {
       const rec = await find(principal, name);
       if (!rec) return undefined;
+      const sel = rec.tools;
+      const approvalEntries = Object.entries(sel?.approval ?? {});
       return {
         model: modelFor(rec.modelId),
         instructions: rec.instructions,
         connections: rec.connections,
         maxSteps: rec.maxSteps,
+        // Restrict callable tools (empty/undefined → all).
+        enabledTools: sel?.enabled?.length ? sel.enabled : undefined,
+        // Per-tool approval override (agent wins): on → require, off → waive.
+        toolApproval: approvalEntries.length
+          ? Object.fromEntries(
+              approvalEntries.map(([n, req]) => [n, req ? "user-approval" : "not-applicable"]),
+            )
+          : undefined,
         smoothStream: true,
       };
     },
@@ -127,11 +146,12 @@ export function createAgentStore(
       await client.execute({
         sql: `INSERT INTO latch_agents
           (id, owner, name, title, description, model_id, instructions, connections, tools, max_steps, scope, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, name) DO UPDATE SET
             title=excluded.title, description=excluded.description, model_id=excluded.model_id,
             instructions=excluded.instructions, connections=excluded.connections,
-            max_steps=excluded.max_steps, scope=excluded.scope, updated_at=excluded.updated_at`,
+            tools=excluded.tools, max_steps=excluded.max_steps, scope=excluded.scope,
+            updated_at=excluded.updated_at`,
         args: [
           newId(),
           ownerKey(principal, rec.scope),
@@ -141,6 +161,7 @@ export function createAgentStore(
           rec.modelId,
           rec.instructions,
           JSON.stringify(rec.connections),
+          rec.tools ? JSON.stringify(rec.tools) : null,
           maxStepsToCol(rec.maxSteps),
           rec.scope,
           now,

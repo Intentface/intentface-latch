@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import {
   currentPrincipalFn,
   listAgentRecordsFn,
   listModelsFn,
   availableConnectionNamesFn,
+  connectionToolsFn,
   saveAgentFn,
   deleteAgentFn,
 } from "@/lib/server";
@@ -27,7 +28,14 @@ interface AgentRec {
   instructions: string;
   connections: string[];
   maxSteps?: number | "unlimited";
+  tools?: { enabled: string[]; approval: Record<string, boolean> };
   scope: "user" | "org";
+}
+
+interface ToolInfo {
+  name: string;
+  connection: string;
+  defaultApproval: boolean;
 }
 
 export const Route = createFileRoute("/agents")({
@@ -102,11 +110,50 @@ function AgentForm({
     typeof initial?.maxSteps === "number" ? String(initial.maxSteps) : "20",
   );
   const [unlimited, setUnlimited] = useState(initial?.maxSteps === "unlimited");
+  const [toolList, setToolList] = useState<ToolInfo[]>([]);
+  const [enabled, setEnabled] = useState<Set<string>>(new Set());
+  const [approval, setApproval] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const toggle = (c: string) =>
     setPicked((p) => (p.includes(c) ? p.filter((x) => x !== c) : [...p, c]));
+
+  // Fetch the picked connections' tools; seed enable/approval from the agent's
+  // stored selection (editing) or defaults (all enabled, GET-free/mutating-gated).
+  useEffect(() => {
+    let cancelled = false;
+    if (picked.length === 0) {
+      setToolList([]); setEnabled(new Set()); setApproval({});
+      return;
+    }
+    void connectionToolsFn({ data: picked }).then((tools) => {
+      if (cancelled) return;
+      setToolList(tools);
+      const initEnabled = initial?.tools?.enabled;
+      const en = new Set<string>();
+      const ap: Record<string, boolean> = {};
+      for (const t of tools) {
+        const on = initEnabled && initEnabled.length ? initEnabled.includes(t.name) : true;
+        if (on) en.add(t.name);
+        ap[t.name] = initial?.tools?.approval?.[t.name] ?? t.defaultApproval;
+      }
+      setEnabled(en);
+      setApproval(ap);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picked.join(",")]);
+
+  const toggleEnabled = (name: string) =>
+    setEnabled((p) => {
+      const n = new Set(p);
+      if (n.has(name)) n.delete(name);
+      else n.add(name);
+      return n;
+    });
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -114,6 +161,12 @@ function AgentForm({
     setBusy(true);
     setError(null);
     try {
+      // All tools enabled → store enabled:[] (means "all", future-proof).
+      const allOn = toolList.length > 0 && toolList.every((t) => enabled.has(t.name));
+      const tools =
+        toolList.length > 0
+          ? { enabled: allOn ? [] : [...enabled], approval }
+          : undefined;
       const res = await saveAgentFn({
         data: {
           name,
@@ -122,6 +175,7 @@ function AgentForm({
           instructions,
           connections: picked,
           maxSteps: unlimited ? "unlimited" : Number(maxSteps) || undefined,
+          tools,
           scope,
         },
       });
@@ -196,6 +250,36 @@ function AgentForm({
                 >
                   {c}
                 </button>
+              ))}
+            </div>
+          )}
+          {picked.length > 0 && (
+            <div className="space-y-1 rounded-md border p-2">
+              <p className="text-muted-foreground text-xs">
+                Tools {toolList.length > 0 ? "(uncheck to disable; toggle approval)" : "— authorize/connect to list"}
+              </p>
+              {toolList.map((t) => (
+                <div key={t.name} className="flex items-center justify-between text-xs">
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={enabled.has(t.name)}
+                      onChange={() => toggleEnabled(t.name)}
+                    />
+                    <span className="font-mono">{t.name}</span>
+                  </label>
+                  <label
+                    className={`flex items-center gap-1 ${enabled.has(t.name) ? "" : "opacity-40"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!approval[t.name]}
+                      disabled={!enabled.has(t.name)}
+                      onChange={() => setApproval((p) => ({ ...p, [t.name]: !p[t.name] }))}
+                    />
+                    needs approval
+                  </label>
+                </div>
               ))}
             </div>
           )}

@@ -220,6 +220,33 @@ export const availableConnectionNamesFn = createServerFn({ method: "GET" }).hand
   },
 );
 
+/**
+ * Enumerate the tools of the given connections for the agent editor: each
+ * real tool with whether it's gated by default (so the UI pre-seeds the
+ * GET-free / mutating-gated default). Opens the connections live — unauthorized
+ * OAuth / unreachable ones contribute nothing.
+ */
+export const connectionToolsFn = createServerFn({ method: "GET" })
+  .validator((names: string[]) => names)
+  .handler(async ({ data: names }) => {
+    const principal = await getPrincipal();
+    if (!principal || names.length === 0) return [];
+    const { allConnections } = await getLatch();
+    const opened = await allConnections.hostFor(names).open(principal);
+    try {
+      const approval = (opened.toolApproval ?? {}) as Record<string, unknown>;
+      return Object.keys(opened.tools)
+        .filter((k) => !k.startsWith("connect_"))
+        .map((name) => ({
+          name,
+          connection: names.find((n) => name.startsWith(`${n}_`)) ?? name.split("_")[0],
+          defaultApproval: !!approval[name],
+        }));
+    } finally {
+      await opened.close();
+    }
+  });
+
 /** Create or update a UI agent at its scope. */
 export const saveAgentFn = createServerFn({ method: "POST" })
   .validator(
@@ -231,6 +258,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       instructions: string;
       connections: string[];
       maxSteps?: number | "unlimited";
+      tools?: { enabled: string[]; approval: Record<string, boolean> };
       scope: "user" | "org";
     }) => data,
   )
@@ -249,6 +277,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       instructions: data.instructions,
       connections: data.connections,
       maxSteps: data.maxSteps,
+      tools: data.tools,
       scope: data.scope,
     });
     return { ok: true };

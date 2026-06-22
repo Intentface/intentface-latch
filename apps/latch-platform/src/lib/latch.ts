@@ -5,6 +5,7 @@ import {
   defineContext,
   mergeConnections,
   type Runtime,
+  type ConnectionRegistry,
 } from "@intentface/latch-core";
 import {
   createSqliteAdapter,
@@ -44,6 +45,7 @@ let cached:
       connections: McpConnections<Principal>;
       credentials: Credentials;
       connectionStore: ConnectionStore;
+      allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
       models: ModelInfo[];
       handler: LatchHandler;
@@ -55,6 +57,7 @@ export async function getLatch(): Promise<{
   connections: McpConnections<Principal>;
   credentials: Credentials;
   connectionStore: ConnectionStore;
+  allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
   models: ModelInfo[];
   handler: LatchHandler;
@@ -123,13 +126,17 @@ export async function getLatch(): Promise<{
       console.warn(`OpenAPI "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
+  // The full connection registry across kinds — also used to enumerate a
+  // connection's tools for the agent editor.
+  const allConnections = mergeConnections(connections, openapi, dynamic);
+
   const runtime = createRuntime<Principal, Ctx>({
     storage,
     context,
     agents,
     // Resolve each agent's `connections: [...]` across code-declared MCP +
     // OpenAPI and the UI-added (Vault-stored) connections.
-    connections: mergeConnections(connections, openapi, dynamic),
+    connections: allConnections,
     // UI-created agents (not in the static `agents` registry).
     dynamicAgents: agentStore,
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
@@ -165,6 +172,7 @@ export async function getLatch(): Promise<{
     connections,
     credentials,
     connectionStore,
+    allConnections,
     agentStore,
     models: catalog.models,
     handler,
