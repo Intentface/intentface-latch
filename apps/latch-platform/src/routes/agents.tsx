@@ -75,6 +75,8 @@ function AgentForm({
   const [instructions, setInstructions] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [scope, setScope] = useState<"user" | "org">("user");
+  const [maxSteps, setMaxSteps] = useState("20");
+  const [unlimited, setUnlimited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,6 +96,7 @@ function AgentForm({
           modelId,
           instructions,
           connections: picked,
+          maxSteps: unlimited ? "unlimited" : Number(maxSteps) || undefined,
           scope,
         },
       });
@@ -154,6 +157,23 @@ function AgentForm({
               ))}
             </div>
           )}
+          <div className="flex items-center gap-3">
+            <label className="text-muted-foreground flex items-center gap-1 text-xs">
+              max steps
+              <Input
+                className="h-8 w-20"
+                type="number"
+                min={1}
+                value={maxSteps}
+                disabled={unlimited}
+                onChange={(e) => setMaxSteps(e.target.value)}
+              />
+            </label>
+            <label className="text-muted-foreground flex items-center gap-1 text-xs">
+              <input type="checkbox" checked={unlimited} onChange={(e) => setUnlimited(e.target.checked)} />
+              run until it stops
+            </label>
+          </div>
           {error && <p className="text-destructive text-sm">{error}</p>}
           <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
             Create agent
@@ -172,6 +192,7 @@ function AgentCard({
     title?: string;
     modelId: string;
     connections: string[];
+    maxSteps?: number | "unlimited";
     scope: string;
   };
 }) {
@@ -193,7 +214,8 @@ function AgentCard({
             <Badge variant="secondary">{agent.modelId}</Badge>
           </div>
           <p className="text-muted-foreground truncate text-xs">
-            {agent.name} · connections: {agent.connections.join(", ") || "none"}
+            {agent.name} · connections: {agent.connections.join(", ") || "none"} · steps:{" "}
+            {agent.maxSteps === "unlimited" ? "until done" : (agent.maxSteps ?? "default")}
           </p>
         </div>
         <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>

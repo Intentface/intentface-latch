@@ -230,6 +230,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       modelId: string;
       instructions: string;
       connections: string[];
+      maxSteps?: number | "unlimited";
       scope: "user" | "org";
     }) => data,
   )
@@ -247,6 +248,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       modelId: data.modelId,
       instructions: data.instructions,
       connections: data.connections,
+      maxSteps: data.maxSteps,
       scope: data.scope,
     });
     return { ok: true };

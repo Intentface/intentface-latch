@@ -17,8 +17,16 @@ export interface AgentRecord {
   modelId: string;
   instructions: string;
   connections: string[];
+  /** Tool-loop ceiling: a number caps steps; "unlimited" runs until done; undefined → default. */
+  maxSteps?: number | "unlimited";
   scope: CredentialScope;
 }
+
+/** Column value (INTEGER) ↔ AgentConfig.maxSteps: NULL=default, 0=unlimited, N=cap. */
+const maxStepsToCol = (m: AgentRecord["maxSteps"]): number | null =>
+  m === "unlimited" ? 0 : typeof m === "number" ? m : null;
+const maxStepsFromCol = (v: unknown): AgentRecord["maxSteps"] =>
+  v == null ? undefined : Number(v) === 0 ? "unlimited" : Number(v);
 
 const ownerKey = (p: Principal, scope: CredentialScope): string =>
   (scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""])
@@ -36,6 +44,12 @@ export async function migrateAgents(client: Client): Promise<void> {
   await client.execute(
     `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   );
+  // Idempotent add for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  try {
+    await client.execute(`ALTER TABLE latch_agents ADD COLUMN max_steps INTEGER`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export interface AgentStore extends DynamicAgentStore<Principal> {
@@ -56,6 +70,7 @@ export function createAgentStore(
     modelId: String(row.model_id),
     instructions: String(row.instructions),
     connections: JSON.parse(String(row.connections)) as string[],
+    maxSteps: maxStepsFromCol(row.max_steps),
     scope: String(row.scope) as CredentialScope,
   });
 
@@ -79,6 +94,7 @@ export function createAgentStore(
         model: modelFor(rec.modelId),
         instructions: rec.instructions,
         connections: rec.connections,
+        maxSteps: rec.maxSteps,
         smoothStream: true,
       };
     },
@@ -110,12 +126,12 @@ export function createAgentStore(
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_agents
-          (id, owner, name, title, description, model_id, instructions, connections, tools, scope, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+          (id, owner, name, title, description, model_id, instructions, connections, tools, max_steps, scope, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
           ON CONFLICT(owner, name) DO UPDATE SET
             title=excluded.title, description=excluded.description, model_id=excluded.model_id,
             instructions=excluded.instructions, connections=excluded.connections,
-            scope=excluded.scope, updated_at=excluded.updated_at`,
+            max_steps=excluded.max_steps, scope=excluded.scope, updated_at=excluded.updated_at`,
         args: [
           newId(),
           ownerKey(principal, rec.scope),
@@ -125,6 +141,7 @@ export function createAgentStore(
           rec.modelId,
           rec.instructions,
           JSON.stringify(rec.connections),
+          maxStepsToCol(rec.maxSteps),
           rec.scope,
           now,
           now,
