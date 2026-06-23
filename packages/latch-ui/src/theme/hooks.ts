@@ -16,17 +16,6 @@ const CSS_VARS = [
   ["con", "--con"],
 ] as const;
 
-/** Perceived-luminance check on a #rgb/#rrggbb hex; true when the color is dark. */
-const isDarkHex = (hex: string): boolean => {
-  const h = hex.replace(/^#/, "");
-  const v = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
-  if (v.length !== 6) return false;
-  const r = parseInt(v.slice(0, 2), 16);
-  const g = parseInt(v.slice(2, 4), 16);
-  const b = parseInt(v.slice(4, 6), 16);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
-};
-
 /**
  * Applies the user's per-mode seed overrides to the document as CSS variables
  * (the whole palette recomputes from them in theme.css). Mount once near the
@@ -40,31 +29,11 @@ export const useThemeOverrides = (): void => {
     if (!resolvedTheme) return;
     const mode = (resolvedTheme === "dark" ? "dark" : "light") as ThemeMode;
     const overrides = themeOverrides[mode];
-    const defaults = getDefaultSeeds(mode);
-    const root = document.documentElement;
-    const style = root.style;
-
-    // `--bg`, `--acc`, `--con` apply verbatim (the palette recomputes from them).
+    const style = document.documentElement.style;
     for (const [key, cssVar] of CSS_VARS) {
-      if (key === "fg") continue; // foreground is handled below (contrast guard)
       const value = overrides[key];
       if (value !== undefined) style.setProperty(cssVar, String(value));
       else style.removeProperty(cssVar);
-    }
-
-    // The light/dark *formulas* in theme.css key off the `.dark` class, but the
-    // effective background comes from the seeds — they can disagree (e.g. a dark
-    // `--bg` chosen in light mode), and a custom `--fg` can fail to contrast with
-    // a custom `--bg`. Either makes foreground text collide with the surfaces
-    // (invisible card titles). Reconcile `.dark` to the real background, then
-    // only honor the `--fg` override when it actually contrasts with it —
-    // otherwise let theme.css supply the mode-appropriate (contrasting) default.
-    const bgDark = isDarkHex(overrides.bg ?? defaults.bg);
-    root.classList.toggle("dark", bgDark);
-    if (overrides.fg !== undefined && isDarkHex(overrides.fg) !== bgDark) {
-      style.setProperty("--fg", overrides.fg);
-    } else {
-      style.removeProperty("--fg");
     }
   }, [resolvedTheme, themeOverrides]);
 };
