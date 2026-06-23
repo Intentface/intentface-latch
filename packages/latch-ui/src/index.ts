@@ -9,3 +9,4 @@
 export { cn } from "./lib/utils.js";
 export * from "./theme/index.js";
 export * from "./chat/index.js";
+export * from "./shell/index.js";

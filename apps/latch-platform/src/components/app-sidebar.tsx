@@ -13,8 +13,7 @@ import {
   Plug,
   Plus,
 } from "lucide-react";
-import { ThemeCustomizer } from "@intentface/latch-ui";
-import { cn } from "@/lib/utils";
+import { Sidebar, ThemeCustomizer } from "@intentface/latch-ui";
 import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
@@ -38,7 +37,9 @@ const NAV: NavItem[] = [
   { to: "/connections", label: "Connections", icon: Plug },
 ];
 
-export function AppSidebar({ open = true }: { open?: boolean }) {
+const ACTIVE = { className: "bg-base-active text-ink-primary" };
+
+export function AppSidebar() {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
@@ -59,58 +60,62 @@ export function AppSidebar({ open = true }: { open?: boolean }) {
   }, [session, pathname]);
 
   return (
-    <aside
-      className={cn(
-        "h-screen shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
-        open ? "w-60" : "w-0",
-      )}
-    >
-      <div className="flex h-full w-60 flex-col">
-      <div className="flex items-center gap-2 px-4 py-3">
-        <Link to="/" className="text-sm font-semibold tracking-tight">
+    <Sidebar>
+      <Sidebar.Header>
+        <Link to="/" className="px-1 text-sm font-semibold tracking-tight">
           🔒 Latch
         </Link>
-      </div>
+      </Sidebar.Header>
 
-      {session && (
-        <nav className="flex flex-col gap-0.5 px-2">
-          {NAV.map(({ to, label, icon: Icon }) => (
-            <Link
-              key={to}
-              to={to}
-              className="text-ink-secondary hover:bg-primary-hover hover:text-ink-primary flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors"
-              activeProps={{ className: "bg-tertiary text-ink-primary" }}
-            >
-              <Icon className="size-4" />
-              {label}
-            </Link>
-          ))}
-        </nav>
-      )}
+      <Sidebar.Content className="px-2">
+        {session && (
+          <Sidebar.Group>
+            <Sidebar.Menu>
+              {NAV.map(({ to, label, icon: Icon }) => (
+                <Sidebar.MenuItem key={to}>
+                  <Sidebar.MenuButton
+                    render={
+                      <Link to={to} activeProps={ACTIVE}>
+                        <Icon />
+                        <span>{label}</span>
+                      </Link>
+                    }
+                  />
+                </Sidebar.MenuItem>
+              ))}
+            </Sidebar.Menu>
+          </Sidebar.Group>
+        )}
 
-      {session && chats.length > 0 && (
-        <div className="mt-3 flex min-h-0 flex-1 flex-col px-2">
-          <p className="text-ink-tertiary px-2.5 pb-1 text-xs font-medium tracking-wide uppercase">
-            Recent
-          </p>
-          <div className="flex flex-col gap-0.5 overflow-y-auto">
-            {chats.slice(0, 20).map((c) => (
-              <Link
-                key={c.id}
-                to="/chat/$chatId"
-                params={{ chatId: c.id }}
-                search={{ agent: undefined }}
-                className="text-ink-secondary hover:bg-primary-hover hover:text-ink-primary truncate rounded-md px-2.5 py-1 text-sm transition-colors"
-                activeProps={{ className: "bg-tertiary text-ink-primary" }}
-              >
-                {c.title?.trim() || c.agent}
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
+        {session && chats.length > 0 && (
+          <Sidebar.Group>
+            <Sidebar.GroupLabel>Recent</Sidebar.GroupLabel>
+            <Sidebar.GroupContent>
+              <Sidebar.Menu>
+                {chats.slice(0, 20).map((c) => (
+                  <Sidebar.MenuItem key={c.id}>
+                    <Sidebar.MenuButton
+                      size="sm"
+                      render={
+                        <Link
+                          to="/chat/$chatId"
+                          params={{ chatId: c.id }}
+                          search={{ agent: undefined }}
+                          activeProps={ACTIVE}
+                        >
+                          <span>{c.title?.trim() || c.agent}</span>
+                        </Link>
+                      }
+                    />
+                  </Sidebar.MenuItem>
+                ))}
+              </Sidebar.Menu>
+            </Sidebar.GroupContent>
+          </Sidebar.Group>
+        )}
+      </Sidebar.Content>
 
-      <div className="mt-auto flex flex-col gap-1 p-2">
+      <Sidebar.Footer>
         {isPending ? null : session ? (
           <>
             <OrgSwitcher />
@@ -127,9 +132,8 @@ export function AppSidebar({ open = true }: { open?: boolean }) {
             </Button>
           </>
         )}
-      </div>
-      </div>
-    </aside>
+      </Sidebar.Footer>
+    </Sidebar>
   );
 }
 

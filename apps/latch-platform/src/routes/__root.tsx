@@ -1,10 +1,8 @@
-import { useState } from "react"
 import { HeadContent, Scripts, createRootRoute } from "@tanstack/react-router"
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools"
 import { TanStackDevtools } from "@tanstack/react-devtools"
 import { ThemeProvider } from "next-themes"
-import { PanelLeft } from "lucide-react"
-import { ThemeOverridesApplier } from "@intentface/latch-ui"
+import { Sidebar, ThemeOverridesApplier } from "@intentface/latch-ui"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { Toaster } from "@/components/ui/sonner"
@@ -41,7 +39,6 @@ export const Route = createRootRoute({
 })
 
 function RootDocument({ children }: { children: React.ReactNode }) {
-  const [sidebarOpen, setSidebarOpen] = useState(true)
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -50,25 +47,19 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <body>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <ThemeOverridesApplier />
-          {/* Grey app canvas; the main content floats as an inset rounded panel. */}
-          <div className="bg-base flex h-screen overflow-hidden">
-            <AppSidebar open={sidebarOpen} />
-            <main className="min-h-0 flex-1 py-2 pr-2">
-              <div className="bg-secondary border-primary-border flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border shadow-sm">
-                <div className="flex h-10 shrink-0 items-center px-2">
-                  <button
-                    type="button"
-                    onClick={() => setSidebarOpen((o) => !o)}
-                    aria-label="Toggle sidebar"
-                    className="text-ink-tertiary hover:bg-primary-hover hover:text-ink-primary grid size-7 place-items-center rounded-md transition-colors"
-                  >
-                    <PanelLeft className="size-4" />
-                  </button>
+          {/* Sidebar system: grey app canvas, collapsible offcanvas sidebar, and a
+              floating white content panel (the Inset + Viewport). */}
+          <Sidebar.Provider>
+            <AppSidebar />
+            <Sidebar.Inset>
+              <Sidebar.Viewport>
+                <div className="flex h-11 shrink-0 items-center px-2">
+                  <Sidebar.Trigger />
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto">{children}</div>
-              </div>
-            </main>
-          </div>
+              </Sidebar.Viewport>
+            </Sidebar.Inset>
+          </Sidebar.Provider>
           <Toaster />
         </ThemeProvider>
         <TanStackDevtools
