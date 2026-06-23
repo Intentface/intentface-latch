@@ -225,6 +225,19 @@ export interface Runtime<P> {
     request?: Request;
   }): Promise<Response>;
   /**
+   * Resume a turn paused on a client-handled tool (no `execute`, e.g.
+   * `askUser`): record the supplied output onto the matching tool call and
+   * re-run from history. Returns the continuation stream, or an empty 200 if
+   * other client tool calls in the step still need results.
+   */
+  applyToolResult(input: {
+    chatId: string;
+    principal: P;
+    toolCallId: string;
+    output: unknown;
+    request?: Request;
+  }): Promise<Response>;
+  /**
    * Schedule an agent to run on a cron expression (or `cron: null` for one-shot,
    * fired on the next `runDue`). Captures the caller's identity for fire-time.
    * Requires `cron` in the runtime config for recurring schedules.
@@ -322,6 +335,43 @@ function applyDecisions(
         const d = byId.get(p.approval.id)!;
         p.state = "approval-responded";
         p.approval = { ...p.approval, approved: d.approved, reason: d.reason };
+        touched = true;
+      }
+    }
+    if (touched) changed.push(m);
+  }
+  return changed;
+}
+
+/** A tool/dynamic-tool UI part, narrowed to the result fields we touch. */
+type ResultPart = { type?: string; toolCallId?: string; state?: string; output?: unknown };
+
+/** True if any tool call is still awaiting a (client-supplied) result. */
+function hasPendingToolResult(messages: AppMessage[]): boolean {
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as ResultPart[]) {
+      if (p.state === "input-available" && typeof p.toolCallId === "string") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Record a tool `output` onto the matching tool call (input-available →
+ * output-available). Mutates in place and returns the messages that changed.
+ */
+function recordToolResult(
+  messages: AppMessage[],
+  toolCallId: string,
+  output: unknown,
+): AppMessage[] {
+  const changed: AppMessage[] = [];
+  for (const m of messages) {
+    let touched = false;
+    for (const p of (m.parts ?? []) as ResultPart[]) {
+      if (p.toolCallId === toolCallId && p.state === "input-available") {
+        p.state = "output-available";
+        p.output = output;
         touched = true;
       }
     }
@@ -813,6 +863,55 @@ export function createRuntime<P, RC = unknown>(
     });
   }
 
+  /**
+   * Resume a turn paused on a client-handled tool (one with no `execute`, e.g.
+   * `askUser`). Records the supplied `output` onto the matching tool call in the
+   * persisted assistant message (input-available → output-available), then
+   * re-runs the agent from history. Mirrors `applyApproval`: the result
+   * round-trips as message state, not a client-message ingest (the handler only
+   * ever accepts a fresh user message otherwise).
+   */
+  async function applyToolResult({
+    chatId,
+    principal,
+    toolCallId,
+    output,
+    request,
+  }: {
+    chatId: string;
+    principal: P;
+    toolCallId: string;
+    output: unknown;
+    request?: Request;
+  }): Promise<Response> {
+    const chat = await storage.getChat(principal, chatId);
+    if (!chat) throw new Error(`Unknown chat: ${chatId}`);
+
+    const messages = await storage.loadMessages(principal, chatId);
+    const changed = recordToolResult(messages, toolCallId, output);
+    if (changed.length > 0) await storage.appendMessages(chatId, changed);
+
+    // Another client tool call in the same step may still be awaiting a result;
+    // re-running now would throw MissingToolResultsError. Wait for the rest.
+    if (hasPendingToolResult(messages)) {
+      return new Response(null, { status: 200 });
+    }
+
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
+    const { run, lease } = await openRun(principal, chatId, chat.agent);
+
+    return buildTurn({
+      resolvedChatId: chatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: messages,
+      runtimeCtx,
+    });
+  }
+
   async function loadHistory({
     chatId,
     principal,
@@ -951,6 +1050,7 @@ export function createRuntime<P, RC = unknown>(
     resume: resumeRun,
     sweep,
     applyApproval,
+    applyToolResult,
     schedule,
     listSchedules: ({ principal }) => storage.listSchedules(principal),
     unschedule: ({ principal, id }) => storage.deleteSchedule(principal, id),

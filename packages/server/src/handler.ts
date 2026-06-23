@@ -231,6 +231,22 @@ export function createLatchHandler<P>(
         });
       }
 
+      // POST agents/:agent/:id/tool-result  (client-handled tool, e.g. askUser)
+      if (seg[3] === "tool-result" && method === "POST") {
+        const body = (await request.json().catch(() => ({}))) as {
+          toolCallId?: string;
+          output?: unknown;
+        };
+        if (!body.toolCallId) return json({ error: "toolCallId is required" }, 400);
+        return runtime.applyToolResult({
+          chatId,
+          principal,
+          toolCallId: body.toolCallId,
+          output: body.output,
+          request,
+        });
+      }
+
       // POST agents/:agent/:id
       if (!seg[3] && method === "POST") {
         const body = (await request.json().catch(() => ({}))) as Record<

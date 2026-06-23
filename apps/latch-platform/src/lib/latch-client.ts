@@ -69,6 +69,40 @@ export async function submitApproval(
   );
 }
 
+/**
+ * Submit the result for a client-handled tool (e.g. `askUser`) on a paused
+ * turn. Like {@link submitApproval}, returns the continuation as a live
+ * `UIMessageChunk` stream, or `null` when the turn stays paused (other client
+ * tool calls in the step still need results).
+ */
+export async function submitToolResult(
+  chatId: string,
+  agent: string,
+  toolCallId: string,
+  output: unknown,
+): Promise<ReadableStream<UIMessageChunk> | null> {
+  const res = await fetch(`${chatApi(chatId, agent)}/tool-result`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ toolCallId, output }),
+  });
+  const isStream = (res.headers.get("content-type") ?? "").includes("text/event-stream");
+  if (!res.body || !isStream) {
+    await res.text().catch(() => {});
+    return null;
+  }
+  return parseJsonEventStream({
+    stream: res.body,
+    schema: jsonSchema<UIMessageChunk>({}),
+  }).pipeThrough(
+    new TransformStream<ChunkParse, UIMessageChunk>({
+      transform(part, controller) {
+        if (part.success) controller.enqueue(part.value);
+      },
+    }),
+  );
+}
+
 /** Client-projected history for a chat (used to refresh after an approval). */
 export async function loadHistory(chatId: string): Promise<AppMessage[]> {
   const res = await fetch(`${BASE}/chats/${chatId}`);

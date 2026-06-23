@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import {
-  DefaultChatTransport,
-  lastAssistantMessageIsCompleteWithToolCalls,
-  readUIMessageStream,
-} from "ai";
+import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
 import { Brain, CircleDot, Loader2 } from "lucide-react";
 import {
@@ -26,7 +22,9 @@ import {
   chatApi,
   loadHistory,
   submitApproval,
+  submitToolResult,
 } from "@/lib/latch-client";
+import type { UIMessageChunk } from "ai";
 import { Button } from "@/components/ui/button";
 
 /** Loose view of a tool part's approval fields (SDK types keep these opaque). */
@@ -72,8 +70,6 @@ export function Chat({
     id: chatId,
     messages: initialMessages,
     transport: new DefaultChatTransport({ api: chatApi(chatId, agent) }),
-    // Auto-resume the run once a client-handled tool (askUser) gets its answer.
-    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
@@ -116,30 +112,48 @@ export function Chat({
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
+  // Merge a paused-turn continuation (approval / tool-result resume) into the
+  // message list as it streams, then reconcile against authoritative history.
+  async function consumeResume(stream: ReadableStream<UIMessageChunk> | null) {
+    if (stream) {
+      // The continuation reuses the last assistant message's id and streams
+      // only the new parts; seed the reader with a clone of that message and
+      // let the deltas fill it in live (the reader mutates the seed in place).
+      const last = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
+      const seed = last ? (structuredClone(last) as AppMessage) : undefined;
+      for await (const snapshot of readUIMessageStream<AppMessage>({ message: seed, stream })) {
+        setMessages((prev) => {
+          const next = [...prev];
+          const i = next.findIndex((m) => m.id === snapshot.id);
+          if (i >= 0) next[i] = snapshot as never;
+          else next.push(snapshot as never);
+          return next;
+        });
+      }
+    }
+    // Reconcile against authoritative server history (also covers the still-paused case).
+    const updated = await loadHistory(chatId);
+    setMessages(updated as never);
+    router.invalidate();
+  }
+
   async function decide(approvalId: string, approved: boolean) {
     setDeciding(true);
     try {
-      const stream = await submitApproval(chatId, agent, [{ approvalId, approved }]);
-      if (stream) {
-        // The continuation reuses the last assistant message's id and streams
-        // only the new parts; seed the reader with a clone of that message and
-        // let the deltas fill it in live (the reader mutates the seed in place).
-        const last = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
-        const seed = last ? (structuredClone(last) as AppMessage) : undefined;
-        for await (const snapshot of readUIMessageStream<AppMessage>({ message: seed, stream })) {
-          setMessages((prev) => {
-            const next = [...prev];
-            const i = next.findIndex((m) => m.id === snapshot.id);
-            if (i >= 0) next[i] = snapshot as never;
-            else next.push(snapshot as never);
-            return next;
-          });
-        }
-      }
-      // Reconcile against authoritative server history (also covers the still-paused case).
-      const updated = await loadHistory(chatId);
-      setMessages(updated as never);
-      router.invalidate();
+      await consumeResume(await submitApproval(chatId, agent, [{ approvalId, approved }]));
+    } finally {
+      setDeciding(false);
+    }
+  }
+
+  // Answer a paused `askUser` tool: persist the result server-side and stream
+  // the continuation. `addToolResult` updates the local message optimistically
+  // so the questionnaire closes and shows the answered summary right away.
+  async function answerAskUser(toolCallId: string, output: Record<string, string>) {
+    setDeciding(true);
+    try {
+      void addToolResult({ tool: "askUser", toolCallId, output });
+      await consumeResume(await submitToolResult(chatId, agent, toolCallId, output));
     } finally {
       setDeciding(false);
     }
@@ -257,14 +271,9 @@ export function Chat({
           <div className="border-primary-border bg-secondary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
             <AskUser
               ref={askRef}
+              disabled={deciding}
               questions={composerState.questions}
-              onSubmit={(answers) =>
-                void addToolResult({
-                  tool: "askUser",
-                  toolCallId: composerState.toolCallId,
-                  output: answers,
-                })
-              }
+              onSubmit={(answers) => void answerAskUser(composerState.toolCallId, answers)}
             />
           </div>
         )}
