@@ -126,7 +126,7 @@ function AddConnection() {
     }
   }
 
-  const sel = "border-input bg-background text-foreground h-8 rounded-md border px-2 text-sm";
+  const sel = "border-input bg-transparent text-foreground h-8 rounded-md border px-2 text-sm";
 
   return (
     <Card>

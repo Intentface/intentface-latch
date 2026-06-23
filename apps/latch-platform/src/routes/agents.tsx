@@ -256,7 +256,7 @@ function AgentForm({
     }
   }
 
-  const sel = "border-input bg-background text-foreground h-8 rounded-md border px-2 text-sm";
+  const sel = "border-input bg-transparent text-foreground h-8 rounded-md border px-2 text-sm";
 
   // Picked OAuth connections not yet authorized and contributing no tools — the
   // editor can't list their tools until the caller connects (clears on refresh).
@@ -302,7 +302,7 @@ function AgentForm({
             </select>
           </div>
           <textarea
-            className="border-input bg-background min-h-24 w-full rounded-md border p-2 text-sm"
+            className="border-input bg-transparent min-h-24 w-full rounded-md border p-2 text-sm"
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
             placeholder="System prompt / instructions…"
@@ -315,7 +315,7 @@ function AgentForm({
                   type="button"
                   key={c}
                   onClick={() => toggle(c)}
-                  className={`rounded-full border px-2 py-0.5 text-xs ${picked.includes(c) ? "bg-primary text-primary-foreground" : "bg-background"}`}
+                  className={`rounded-full border px-2 py-0.5 text-xs ${picked.includes(c) ? "border-accent bg-accent text-white" : "border-input bg-transparent"}`}
                 >
                   {c}
                 </button>
