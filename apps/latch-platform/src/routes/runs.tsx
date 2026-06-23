@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/table";
 
 export const Route = createFileRoute("/runs")({
+  head: () => ({ meta: [{ title: "Runs · Latch" }] }),
   beforeLoad: async () => {
     const principal = await currentPrincipalFn();
     if (!principal) throw redirect({ to: "/login" });

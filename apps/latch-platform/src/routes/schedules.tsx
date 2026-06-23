@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/card";
 
 export const Route = createFileRoute("/schedules")({
+  head: () => ({ meta: [{ title: "Schedules · Latch" }] }),
   beforeLoad: async () => {
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },

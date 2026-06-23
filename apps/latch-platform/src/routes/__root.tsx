@@ -11,22 +11,26 @@ import appCss from "../styles.css?url"
 export const Route = createRootRoute({
   head: () => ({
     meta: [
+      { charSet: "utf-8" },
+      { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { title: "Latch" },
       {
-        charSet: "utf-8",
+        name: "description",
+        content:
+          "Latch — agents, MCP & OpenAPI connections, and scheduled runs on one AI backend.",
       },
+      { name: "theme-color", content: "#111111" },
+      { property: "og:title", content: "Latch" },
       {
-        name: "viewport",
-        content: "width=device-width, initial-scale=1",
+        property: "og:description",
+        content: "Agents, MCP & OpenAPI connections, and scheduled runs on one AI backend.",
       },
-      {
-        title: "TanStack Start Starter",
-      },
+      { property: "og:type", content: "website" },
     ],
     links: [
-      {
-        rel: "stylesheet",
-        href: appCss,
-      },
+      { rel: "stylesheet", href: appCss },
+      { rel: "icon", href: "/favicon.ico" },
+      { rel: "manifest", href: "/manifest.json" },
     ],
   }),
   notFoundComponent: () => (

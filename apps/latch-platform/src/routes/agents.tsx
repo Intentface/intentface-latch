@@ -52,6 +52,7 @@ interface ToolInfo {
 }
 
 export const Route = createFileRoute("/agents")({
+  head: () => ({ meta: [{ title: "Agents · Latch" }] }),
   beforeLoad: async () => {
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },

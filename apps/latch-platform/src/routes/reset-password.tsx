@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/card";
 
 export const Route = createFileRoute("/reset-password")({
+  head: () => ({ meta: [{ title: "Reset password · Latch" }] }),
   // better-auth appends `?token=…` (and `error=…` on an invalid/expired link).
   validateSearch: (search: Record<string, unknown>) => ({
     token: typeof search.token === "string" ? search.token : undefined,

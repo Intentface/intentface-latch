@@ -4,6 +4,7 @@ import { loadHistoryFn } from "@/lib/server";
 import { Chat } from "@/components/chat";
 
 export const Route = createFileRoute("/chat/$chatId")({
+  head: () => ({ meta: [{ title: "Chat · Latch" }] }),
   // `?agent=<name>` carries the picked agent for a brand-new chat (existing
   // chats resolve their agent from the persisted record instead).
   validateSearch: (search: Record<string, unknown>) => ({

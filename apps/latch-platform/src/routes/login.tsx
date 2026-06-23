@@ -12,7 +12,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-export const Route = createFileRoute("/login")({ component: LoginPage });
+export const Route = createFileRoute("/login")({
+  head: () => ({ meta: [{ title: "Sign in · Latch" }] }),
+  component: LoginPage,
+});
 
 function LoginPage() {
   const navigate = useNavigate();

@@ -2,6 +2,7 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { currentPrincipalFn, listChatsFn, listAgentsFn } from "@/lib/server";
 
 export const Route = createFileRoute("/chat")({
+  head: () => ({ meta: [{ title: "Chats · Latch" }] }),
   // Server-side auth gate (sees the cookie during SSR, unlike the client hook).
   beforeLoad: async () => {
     const principal = await currentPrincipalFn();

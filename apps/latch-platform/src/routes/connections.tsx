@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/card";
 
 export const Route = createFileRoute("/connections")({
+  head: () => ({ meta: [{ title: "Connections · Latch" }] }),
   beforeLoad: async () => {
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
