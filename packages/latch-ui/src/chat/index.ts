@@ -10,6 +10,7 @@ export { Thread } from "./thread.js";
 export { Composer } from "./composer.js";
 export { ProgressiveBlur } from "./progressive-blur.js";
 export { StepQueue } from "./step-queue.js";
+export { ComposerPanel, ComposerPanelGroup } from "./composer-panel.js";
 export { TextShimmer } from "./text-shimmer.js";
 export {
   useComposerState,

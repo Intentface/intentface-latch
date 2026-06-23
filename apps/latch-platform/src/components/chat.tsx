@@ -7,6 +7,8 @@ import {
   AskUser,
   cn,
   Composer,
+  ComposerPanel,
+  ComposerPanelGroup,
   Message,
   StepQueue,
   Thread,
@@ -267,39 +269,41 @@ export function Chat({
       </Thread.Viewport>
       <Thread.Composer>
         <Thread.ScrollButton />
-        {composerState.type === "ask-user" && (
-          <div className="border-primary-border bg-secondary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
-            <AskUser
-              ref={askRef}
-              disabled={deciding}
-              questions={composerState.questions}
-              onSubmit={(answers) => void answerAskUser(composerState.toolCallId, answers)}
-            />
-          </div>
-        )}
-        {composerState.type === "active" && (
-          <div className="border-primary-border bg-primary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
-            <StepQueue>
-              {composerState.steps.map((step, i) => {
-                const active = i === composerState.steps.length - 1;
-                return (
-                  <StepQueue.Item key={step.key}>
-                    <StepQueue.Icon>
-                      {step.kind === "thinking" ? (
-                        <Brain className={cn("size-3.5", active && "animate-pulse")} />
-                      ) : active ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                      ) : (
-                        <CircleDot className="size-3.5" />
-                      )}
-                    </StepQueue.Icon>
-                    <StepQueue.Label active={active}>{step.label}</StepQueue.Label>
-                  </StepQueue.Item>
-                );
-              })}
-            </StepQueue>
-          </div>
-        )}
+        <ComposerPanelGroup>
+          {composerState.type === "ask-user" && (
+            <ComposerPanel key="ask">
+              <AskUser
+                ref={askRef}
+                disabled={deciding}
+                questions={composerState.questions}
+                onSubmit={(answers) => void answerAskUser(composerState.toolCallId, answers)}
+              />
+            </ComposerPanel>
+          )}
+          {composerState.type === "active" && (
+            <ComposerPanel key="active">
+              <StepQueue>
+                {composerState.steps.map((step, i) => {
+                  const active = i === composerState.steps.length - 1;
+                  return (
+                    <StepQueue.Item key={step.key}>
+                      <StepQueue.Icon>
+                        {step.kind === "thinking" ? (
+                          <Brain className={cn("size-3.5", active && "animate-pulse")} />
+                        ) : active ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <CircleDot className="size-3.5" />
+                        )}
+                      </StepQueue.Icon>
+                      <StepQueue.Label active={active}>{step.label}</StepQueue.Label>
+                    </StepQueue.Item>
+                  );
+                })}
+              </StepQueue>
+            </ComposerPanel>
+          )}
+        </ComposerPanelGroup>
         <Composer
           disabled={busy}
           capture={composerState.type === "ask-user"}
