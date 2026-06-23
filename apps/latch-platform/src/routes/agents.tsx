@@ -256,7 +256,8 @@ function AgentForm({
     }
   }
 
-  const sel = "border-input bg-transparent text-foreground h-8 rounded-md border px-2 text-sm";
+  const sel =
+    "border-input bg-transparent dark:bg-input/30 text-foreground h-8 rounded-lg border px-2.5 text-sm";
 
   // Picked OAuth connections not yet authorized and contributing no tools — the
   // editor can't list their tools until the caller connects (clears on refresh).
@@ -302,7 +303,7 @@ function AgentForm({
             </select>
           </div>
           <textarea
-            className="border-input bg-transparent min-h-24 w-full rounded-md border p-2 text-sm"
+            className="border-input bg-transparent dark:bg-input/30 min-h-24 w-full rounded-lg border p-2 text-sm"
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
             placeholder="System prompt / instructions…"

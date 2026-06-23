@@ -79,7 +79,7 @@ function SchedulesPage() {
           <form className="space-y-2" onSubmit={add}>
             <div className="flex gap-2">
               <select
-                className="border-input bg-transparent text-foreground h-8 rounded-md border px-2 text-sm"
+                className="border-input bg-transparent dark:bg-input/30 text-foreground h-8 rounded-lg border px-2.5 text-sm"
                 value={agent}
                 onChange={(e) => setAgent(e.target.value)}
                 aria-label="Agent"
