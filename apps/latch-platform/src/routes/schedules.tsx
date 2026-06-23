@@ -5,6 +5,7 @@ import { currentPrincipalFn, listSchedulesFn, listAgentsFn } from "@/lib/server"
 import { createSchedule, deleteSchedule } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -78,18 +79,13 @@ function SchedulesPage() {
         <CardContent>
           <form className="space-y-2" onSubmit={add}>
             <div className="flex gap-2">
-              <select
-                className="border-input bg-transparent dark:bg-input/30 text-foreground h-8 rounded-lg border px-2.5 text-sm"
-                value={agent}
-                onChange={(e) => setAgent(e.target.value)}
-                aria-label="Agent"
-              >
+              <Select value={agent} onChange={(e) => setAgent(e.target.value)} aria-label="Agent">
                 {agents.map((a) => (
                   <option key={a.name} value={a.name}>
                     {a.title ?? a.name}
                   </option>
                 ))}
-              </select>
+              </Select>
               <Input
                 className="max-w-[10rem] font-mono"
                 value={cron}

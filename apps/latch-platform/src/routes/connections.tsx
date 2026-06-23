@@ -18,6 +18,7 @@ import {
 } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -126,8 +127,6 @@ function AddConnection() {
     }
   }
 
-  const sel =
-    "border-input bg-transparent dark:bg-input/30 text-foreground h-8 rounded-lg border px-2.5 text-sm";
 
   return (
     <Card>
@@ -144,14 +143,14 @@ function AddConnection() {
       <CardContent>
         <form className="space-y-2" onSubmit={submit}>
           <div className="flex gap-2">
-            <select className={sel} value={kind} onChange={(e) => setKind(e.target.value as never)}>
+            <Select value={kind} onChange={(e) => setKind(e.target.value as never)}>
               <option value="openapi">OpenAPI</option>
               <option value="mcp">MCP</option>
-            </select>
-            <select className={sel} value={scope} onChange={(e) => setScope(e.target.value as never)}>
+            </Select>
+            <Select value={scope} onChange={(e) => setScope(e.target.value as never)}>
               <option value="user">Personal</option>
               <option value="org">Org</option>
-            </select>
+            </Select>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
           </div>
           <Input
@@ -168,11 +167,11 @@ function AddConnection() {
           {kind === "mcp" && (
             <label className="text-muted-foreground flex items-center gap-2 text-xs">
               Authentication
-              <select className={sel} value={mcpAuth} onChange={(e) => setMcpAuth(e.target.value as never)}>
+              <Select value={mcpAuth} onChange={(e) => setMcpAuth(e.target.value as never)}>
                 <option value="token">Token / API key</option>
                 <option value="oauth">OAuth (authorize in browser)</option>
                 <option value="none">None</option>
-              </select>
+              </Select>
             </label>
           )}
           {!oauthMode && (

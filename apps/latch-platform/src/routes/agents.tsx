@@ -15,6 +15,8 @@ import {
 import { authorizeUrl } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -256,9 +258,6 @@ function AgentForm({
     }
   }
 
-  const sel =
-    "border-input bg-transparent dark:bg-input/30 text-foreground h-8 rounded-lg border px-2.5 text-sm";
-
   // Picked OAuth connections not yet authorized and contributing no tools — the
   // editor can't list their tools until the caller connects (clears on refresh).
   const needsAuth = picked.filter(
@@ -287,23 +286,21 @@ function AgentForm({
             <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="title (optional)" />
           </div>
           <div className="flex gap-2">
-            <select className={sel} value={modelId} onChange={(e) => setModelId(e.target.value)}>
+            <Select value={modelId} onChange={(e) => setModelId(e.target.value)}>
               {models.map((m) => (
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
-            </select>
-            <select
-              className={sel}
+            </Select>
+            <Select
               value={scope}
               onChange={(e) => setScope(e.target.value as never)}
               disabled={editing}
             >
               <option value="user">Personal</option>
               <option value="org">Org</option>
-            </select>
+            </Select>
           </div>
-          <textarea
-            className="border-input bg-transparent dark:bg-input/30 min-h-24 w-full rounded-lg border p-2 text-sm"
+          <Textarea
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
             placeholder="System prompt / instructions…"
@@ -409,10 +406,10 @@ function AgentForm({
             {sandbox && (
               <label className="text-muted-foreground ml-6 flex items-center gap-2 text-xs">
                 backend
-                <select className={sel} value={provider} onChange={(e) => setProvider(e.target.value)}>
+                <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
                   <option value="just-bash">just-bash (in-process)</option>
                   <option value="daytona">Daytona (VM — needs API key)</option>
-                </select>
+                </Select>
               </label>
             )}
             <label className="flex items-center gap-2 text-xs">
