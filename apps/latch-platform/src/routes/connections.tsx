@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { Braces, Plug, Trash2 } from "lucide-react";
+import { Braces, KeyRound, Plug, Plus, Trash2 } from "lucide-react";
+import { Dialog } from "@intentface/latch-ui";
 import { cn } from "@/lib/utils";
 import {
   currentPrincipalFn,
@@ -20,13 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 
 export const Route = createFileRoute("/connections")({
   head: () => ({ meta: [{ title: "Connections · Latch" }] }),
@@ -46,42 +41,76 @@ export const Route = createFileRoute("/connections")({
 
 function ConnectionsPage() {
   const { oauth, keys, dynamic } = Route.useLoaderData();
+  const [addOpen, setAddOpen] = useState(false);
+  const empty = dynamic.length === 0 && oauth.length === 0 && keys.length === 0;
 
   return (
-    <div className="mx-auto max-w-2xl space-y-5 p-6">
-      <div>
-        <h1 className="text-lg font-semibold">Connections</h1>
-        <p className="text-ink-secondary text-sm">
-          MCP servers and REST (OpenAPI) APIs your agents can use. Tokens are stored
-          envelope-encrypted in the Vault and brokered server-side.
-        </p>
+    <div className="mx-auto max-w-2xl space-y-6 p-6">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-ink-primary text-lg font-semibold tracking-tight">Connections</h1>
+          <p className="text-ink-secondary mt-0.5 text-sm">
+            MCP servers and REST (OpenAPI) APIs your agents can use. Tokens are stored
+            envelope-encrypted in the Vault and brokered server-side.
+          </p>
+        </div>
+        <Dialog open={addOpen} onOpenChange={setAddOpen}>
+          <Dialog.Trigger render={<Button className="shrink-0 gap-1.5" />}>
+            <Plus className="size-4" /> Add
+          </Dialog.Trigger>
+          <Dialog.Content className="max-w-md">
+            <Dialog.Title>Add a connection</Dialog.Title>
+            <Dialog.Description>
+              Point an agent at any MCP server or OpenAPI (REST) API. The token is stored
+              envelope-encrypted in the Vault and brokered server-side — it never reaches the
+              model. Scope it to you or your whole org.
+            </Dialog.Description>
+            <div className="mt-4">
+              <AddConnection onDone={() => setAddOpen(false)} />
+            </div>
+          </Dialog.Content>
+        </Dialog>
       </div>
 
-      <AddConnection />
-
       {dynamic.length > 0 && (
-        <div className="space-y-2">
-          <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">Your connections</h2>
+        <Section label="Your connections">
           {dynamic.map((c) => (
             <DynamicCard key={`${c.scope}:${c.name}`} conn={c} />
           ))}
-        </div>
+        </Section>
       )}
 
       {(oauth.length > 0 || keys.length > 0) && (
-        <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">Built-in</h2>
+        <Section label="Built-in">
+          {oauth.map((c) => (
+            <ConnectionCard key={c.name} connection={c} />
+          ))}
+          {keys.map((k) => (
+            <ApiKeyCard key={k.name} conn={k} />
+          ))}
+        </Section>
       )}
-      {oauth.map((c) => (
-        <ConnectionCard key={c.name} connection={c} />
-      ))}
-      {keys.map((k) => (
-        <ApiKeyCard key={k.name} conn={k} />
-      ))}
+
+      {empty && (
+        <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">
+          <Plug className="size-6 opacity-60" />
+          <p className="text-sm">No connections yet. Add one to give your agents tools.</p>
+        </div>
+      )}
     </div>
   );
 }
 
-function AddConnection() {
+function Section({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-2">
+      <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">{label}</h2>
+      {children}
+    </div>
+  );
+}
+
+function AddConnection({ onDone }: { onDone?: () => void }) {
   const router = useRouter();
   const [kind, setKind] = useState<"mcp" | "openapi">("openapi");
   const [scope, setScope] = useState<"user" | "org">("user");
@@ -123,27 +152,15 @@ function AddConnection() {
       }
       setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
       await router.invalidate();
+      onDone?.();
     } finally {
       setBusy(false);
     }
   }
 
-
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Add a connection</CardTitle>
-        <CardDescription>
-          Point an agent at any MCP server or OpenAPI (REST) API. The token is
-          stored envelope-encrypted in the Vault and brokered server-side — it
-          never reaches the model. Scope it to <span className="font-medium">you</span> or
-          your whole <span className="font-medium">org</span>. An agent uses it by listing the
-          name in its connections.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form className="space-y-2" onSubmit={submit}>
-          <div className="flex gap-2">
+    <form className="space-y-2" onSubmit={submit}>
+      <div className="flex gap-2">
             <Select value={kind} onChange={(e) => setKind(e.target.value as never)}>
               <option value="openapi">OpenAPI</option>
               <option value="mcp">MCP</option>
@@ -198,12 +215,10 @@ function AddConnection() {
             </p>
           )}
           {error && <p className="text-destructive text-sm">{error}</p>}
-          <Button type="submit" disabled={busy || !name.trim() || !target.trim()}>
-            Add connection
-          </Button>
-        </form>
-      </CardContent>
-    </Card>
+      <Button type="submit" className="w-full" disabled={busy || !name.trim() || !target.trim()}>
+        Add connection
+      </Button>
+    </form>
   );
 }
 
@@ -308,31 +323,36 @@ function ApiKeyCard({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 capitalize">
-          {conn.label}
-          <Badge variant={conn.set ? "secondary" : "outline"}>
-            {conn.set ? "key set" : "no key"}
-          </Badge>
-          <Badge variant="outline">{conn.scope}-level</Badge>
-        </CardTitle>
-        <CardDescription>
-          REST API (OpenAPI). The API key is stored envelope-encrypted in the Vault
-          at the <span className="font-medium">{conn.scope}</span> scope and brokered
-          server-side — it never reaches the model or the browser.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex gap-2">
-        <Input
-          type="password"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={conn.set ? "Replace API key…" : "Paste API key…"}
-        />
-        <Button disabled={busy || !value.trim()} onClick={save}>
-          Save
-        </Button>
+    <Card size="sm">
+      <CardContent className="space-y-2 py-3">
+        <div className="flex items-center gap-3">
+          <div className="bg-tertiary border-primary-border text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg border">
+            <KeyRound className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-sm font-medium capitalize">{conn.label}</span>
+              <Badge variant={conn.set ? "secondary" : "outline"}>
+                {conn.set ? "key set" : "no key"}
+              </Badge>
+              <Badge variant="outline" className="ml-auto">{conn.scope}-level</Badge>
+            </div>
+            <p className="text-ink-tertiary truncate text-xs">
+              REST API — key stored envelope-encrypted in the Vault, brokered server-side.
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Input
+            type="password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={conn.set ? "Replace API key…" : "Paste API key…"}
+          />
+          <Button size="sm" disabled={busy || !value.trim()} onClick={save}>
+            Save
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );
@@ -376,51 +396,55 @@ function ConnectionCard({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 capitalize">
-          {connection.name}
-          <Badge variant={connection.authorized ? "secondary" : "outline"}>
-            {connection.authorized ? "connected" : "not connected"}
-          </Badge>
-        </CardTitle>
-        <CardDescription>
-          {connection.description ?? "MCP connection."}{" "}
-          {connection.oauth &&
-            "Tokens are stored envelope-encrypted in the Vault, scoped to this org, and brokered server-side — they never reach the model or the browser."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {connection.authorized ? (
-          <div className="flex gap-2">
-            <Button variant="outline" disabled={busy} onClick={test}>
-              Test &amp; list tools
-            </Button>
-            {connection.oauth && (
-              <Button variant="destructive" disabled={busy} onClick={disconnect}>
-                Disconnect
+    <Card size="sm">
+      <CardContent className="space-y-3 py-3">
+        <div className="flex items-center gap-3">
+          <div className="bg-tertiary border-primary-border text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg border">
+            <Plug className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-sm font-medium capitalize">{connection.name}</span>
+              <span className="flex items-center gap-1 text-xs">
+                <span className={cn("size-1.5 rounded-full", connection.authorized ? "bg-emerald-500" : "bg-amber-500")} />
+                <span className="text-ink-tertiary">{connection.authorized ? "connected" : "not connected"}</span>
+              </span>
+              <Badge variant="outline" className="ml-auto">built-in</Badge>
+            </div>
+            <p className="text-ink-tertiary truncate text-xs">
+              {connection.description ?? "MCP connection."}
+            </p>
+          </div>
+          <div className="flex shrink-0 gap-1">
+            {connection.authorized ? (
+              <>
+                <Button size="sm" variant="outline" disabled={busy} onClick={test}>
+                  Test
+                </Button>
+                {connection.oauth && (
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={disconnect}>
+                    Disconnect
+                  </Button>
+                )}
+              </>
+            ) : (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  window.location.href = authorizeUrl(connection.name, { returnTo: "/connections" });
+                }}
+              >
+                Connect
               </Button>
             )}
           </div>
-        ) : (
-          <Button
-            disabled={busy}
-            onClick={() => {
-              window.location.href = authorizeUrl(connection.name, {
-                returnTo: "/connections",
-              });
-            }}
-          >
-            Connect {connection.name}
-          </Button>
-        )}
+        </div>
 
-        {error && <p className="text-destructive text-sm">{error}</p>}
+        {error && <p className="text-destructive text-xs">{error}</p>}
         {tools && tools.length > 0 && (
           <div className="space-y-1">
-            <p className="text-muted-foreground text-xs">
-              {tools.length} tools available to the agent:
-            </p>
+            <p className="text-ink-tertiary text-xs">{tools.length} tools available:</p>
             <div className="flex flex-wrap gap-1">
               {tools.map((t) => (
                 <Badge key={t} variant="secondary">

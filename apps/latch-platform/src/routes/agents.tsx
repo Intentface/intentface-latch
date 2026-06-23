@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { Bot, TerminalSquare, Trash2 } from "lucide-react";
+import { Bot, Plus, TerminalSquare, Trash2 } from "lucide-react";
+import { Dialog } from "@intentface/latch-ui";
 import {
   currentPrincipalFn,
   listAgentRecordsFn,
@@ -18,13 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 
 interface AgentRec {
   name: string;
@@ -77,34 +72,65 @@ export const Route = createFileRoute("/agents")({
 function AgentsPage() {
   const { records, models, connections, status } = Route.useLoaderData();
   const [editing, setEditing] = useState<AgentRec | null>(null);
+  const [open, setOpen] = useState(false);
+
+  const openNew = () => {
+    setEditing(null);
+    setOpen(true);
+  };
+  const openEdit = (a: AgentRec) => {
+    setEditing(a);
+    setOpen(true);
+  };
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">Agents</h1>
-      <p className="text-muted-foreground text-sm">
-        Create an agent: a name, a system prompt, a model, and the connections it
-        can use. It shows up in the chat picker and can be scheduled. (Code-defined
-        agents like Assistant and Weekly Brief live in the repo and aren't listed
-        here.)
-      </p>
-
-      <AgentForm
-        key={editing ? `${editing.scope}:${editing.name}` : "new"}
-        models={models}
-        connections={connections}
-        status={status}
-        initial={editing}
-        onDone={() => setEditing(null)}
-      />
-
-      <div className="space-y-2">
-        {records.length === 0 && (
-          <p className="text-muted-foreground text-sm">No custom agents yet.</p>
-        )}
-        {(records as AgentRec[]).map((a) => (
-          <AgentCard key={`${a.scope}:${a.name}`} agent={a} onEdit={() => setEditing(a)} />
-        ))}
+    <div className="mx-auto max-w-2xl space-y-6 p-6">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-ink-primary text-lg font-semibold tracking-tight">Agents</h1>
+          <p className="text-ink-secondary mt-0.5 text-sm">
+            A name, a system prompt, a model, and the connections it can use. Agents show up in
+            the chat picker and can be scheduled. (Code-defined agents live in the repo.)
+          </p>
+        </div>
+        <Button onClick={openNew} className="shrink-0 gap-1.5">
+          <Plus className="size-4" /> New agent
+        </Button>
       </div>
+
+      {records.length === 0 ? (
+        <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">
+          <Bot className="size-6 opacity-60" />
+          <p className="text-sm">No custom agents yet. Create one to get started.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {(records as AgentRec[]).map((a) => (
+            <AgentCard key={`${a.scope}:${a.name}`} agent={a} onEdit={() => openEdit(a)} />
+          ))}
+        </div>
+      )}
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <Dialog.Content className="max-h-[85vh] max-w-lg overflow-y-auto">
+          <Dialog.Title>{editing ? `Edit “${editing.name}”` : "New agent"}</Dialog.Title>
+          <Dialog.Description>
+            {editing
+              ? "Update this agent. Name and scope are fixed (they identify it)."
+              : "Scope it to you or your whole org."}
+          </Dialog.Description>
+          <div className="mt-4">
+            <AgentForm
+              key={editing ? `${editing.scope}:${editing.name}` : "new"}
+              models={models}
+              connections={connections}
+              status={status}
+              initial={editing}
+              onDone={() => setOpen(false)}
+            />
+          </div>
+        </Dialog.Content>
+      </Dialog>
     </div>
   );
 }
@@ -266,17 +292,7 @@ function AgentForm({
   );
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{editing ? `Edit “${initial!.name}”` : "New agent"}</CardTitle>
-        <CardDescription>
-          {editing
-            ? "Update this agent. Name and scope are fixed (they identify it)."
-            : "Scope it to you or your whole org."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form className="space-y-2" onSubmit={submit}>
+    <form className="space-y-2" onSubmit={submit}>
           <div className="flex gap-2">
             <Input
               value={name}
@@ -423,15 +439,11 @@ function AgentForm({
             <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
               {editing ? "Update agent" : "Create agent"}
             </Button>
-            {editing && (
-              <Button type="button" variant="ghost" disabled={busy} onClick={onDone}>
-                Cancel
-              </Button>
-            )}
+            <Button type="button" variant="ghost" disabled={busy} onClick={onDone}>
+              Cancel
+            </Button>
           </div>
         </form>
-      </CardContent>
-    </Card>
   );
 }
 
