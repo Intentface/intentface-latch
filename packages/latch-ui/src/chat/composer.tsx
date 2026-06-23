@@ -1,4 +1,4 @@
-import { type ReactNode, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { ArrowUp, File as FileIcon, Paperclip, X } from "lucide-react";
 import type { FileUIPart } from "ai";
 import { cn } from "../lib/utils.js";
@@ -44,6 +44,8 @@ export function Composer({
   accept = DEFAULT_ACCEPT,
   maxFiles = 5,
   maxSizeMB = 10,
+  capture = false,
+  onCaptureKey,
 }: {
   onSubmit: (text: string, files?: FileUIPart[]) => void;
   disabled?: boolean;
@@ -54,6 +56,13 @@ export function Composer({
   accept?: string;
   maxFiles?: number;
   maxSizeMB?: number;
+  /**
+   * Capture mode: focus stays here but the input is inert for text — keystrokes
+   * are routed to `onCaptureKey` instead (used to drive the ask-user
+   * questionnaire). The attach/send controls are hidden while active.
+   */
+  capture?: boolean;
+  onCaptureKey?: (e: KeyboardEvent<HTMLTextAreaElement>) => boolean;
 }) {
   const [value, setValue] = useState("");
   const [files, setFiles] = useState<Draft[]>([]);
@@ -61,6 +70,12 @@ export function Composer({
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
+
+  // Keep focus on the input while capture mode is active so it drives the
+  // questionnaire from the keyboard.
+  useEffect(() => {
+    if (capture) ref.current?.focus();
+  }, [capture]);
 
   const resize = (el: HTMLTextAreaElement) => {
     el.style.height = "auto";
@@ -145,15 +160,17 @@ export function Composer({
       <textarea
         ref={ref}
         rows={1}
-        value={value}
+        value={capture ? "" : value}
         disabled={disabled}
+        readOnly={capture}
         placeholder={placeholder}
         onChange={(e) => {
+          if (capture) return;
           setValue(e.target.value);
           resize(e.target);
         }}
         onPaste={(e) => {
-          if (!allowAttachments) return;
+          if (capture || !allowAttachments) return;
           const pasted = [...e.clipboardData.items]
             .filter((i) => i.kind === "file")
             .map((i) => i.getAsFile())
@@ -164,6 +181,10 @@ export function Composer({
           }
         }}
         onKeyDown={(e) => {
+          if (capture) {
+            if (onCaptureKey?.(e)) e.preventDefault();
+            return;
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             void send();
@@ -172,6 +193,7 @@ export function Composer({
         className="text-ink-primary placeholder:text-ink-tertiary max-h-48 w-full resize-none bg-transparent px-4 pt-3.5 text-sm outline-none"
       />
 
+      {!capture && (
       <div className="flex items-center gap-2 p-2">
         {allowAttachments && (
           <>
@@ -214,6 +236,7 @@ export function Composer({
           <ArrowUp className="size-4" />
         </button>
       </div>
+      )}
     </div>
   );
 }

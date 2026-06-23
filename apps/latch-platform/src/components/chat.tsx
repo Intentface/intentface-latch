@@ -17,6 +17,7 @@ import {
   useComposerState,
   useSettingsStore,
   type AppUIMessage,
+  type AskUserHandle,
   type ToolPart,
 } from "@intentface/latch-ui";
 import type { AppMessage } from "@intentface/latch-core";
@@ -78,6 +79,37 @@ export function Chat({
   const busy = status === "submitted" || status === "streaming";
   const scrollMode = useSettingsStore((s) => s.scrollMode);
   const composerState = useComposerState(messages, status);
+  const askRef = useRef<AskUserHandle>(null);
+
+  // Map composer keystrokes onto the ask-user questionnaire while it's open, so
+  // the user can answer entirely from the keyboard without leaving the input.
+  function handleAskKey(e: React.KeyboardEvent): boolean {
+    const h = askRef.current;
+    if (!h) return false;
+    switch (e.key) {
+      case "ArrowUp":
+        h.navigate(-1);
+        return true;
+      case "ArrowDown":
+        h.navigate(1);
+        return true;
+      case "ArrowLeft":
+        h.prev();
+        return true;
+      case "ArrowRight":
+        h.next();
+        return true;
+      case "Enter":
+        h.enter();
+        return true;
+      default:
+        if (/^[1-9]$/.test(e.key)) {
+          h.pickIndex(Number(e.key) - 1);
+          return true;
+        }
+        return true; // swallow other keys in capture mode
+    }
+  }
 
   // Latest messages, for seeding the approval-continuation stream (a click
   // handler / mount effect would otherwise close over a stale snapshot).
@@ -224,6 +256,7 @@ export function Chat({
         {composerState.type === "ask-user" && (
           <div className="border-primary-border bg-secondary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
             <AskUser
+              ref={askRef}
               questions={composerState.questions}
               onSubmit={(answers) =>
                 void addToolResult({
@@ -259,9 +292,13 @@ export function Chat({
           </div>
         )}
         <Composer
-          disabled={busy || composerState.type === "ask-user"}
+          disabled={busy}
+          capture={composerState.type === "ask-user"}
+          onCaptureKey={handleAskKey}
           placeholder={
-            composerState.type === "ask-user" ? "Answer above to continue…" : "Message the agent…"
+            composerState.type === "ask-user"
+              ? "Use ↑↓ and Enter to answer…"
+              : "Message the agent…"
           }
           onSubmit={(text, files) => sendMessage({ text, files })}
         />
