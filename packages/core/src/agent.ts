@@ -88,6 +88,12 @@ export interface AgentConfig<P> {
    */
   enabledTools?: string[];
   /**
+   * Per-tool description overrides (by namespaced tool name). The runtime
+   * replaces the resolved tool's `description` with this text before the model
+   * sees it — e.g. to tailor a connection tool's guidance for this agent.
+   */
+  toolDescriptions?: Record<string, string>;
+  /**
    * Give the agent a per-session sandbox (a workspace) and the filesystem/shell
    * tools that operate on it (`bash`, `read_file`, `write_file`, `glob`,
    * `grep`). The runtime resolves the actual `Experimental_SandboxSession` via

@@ -55,6 +55,10 @@ function AgentEditor() {
   const [toolList, setToolList] = useState<ToolInfo[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [approval, setApproval] = useState<Record<string, boolean>>({});
+  // Per-tool description overrides (only the ones the user actually customized).
+  const [descriptions, setDescriptions] = useState<Record<string, string>>(
+    initial?.tools?.descriptions ?? {},
+  );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -141,8 +145,22 @@ function AgentEditor() {
     setError(null);
     try {
       const allOn = toolList.length > 0 && toolList.every((t) => enabled.has(t.name));
+      // Keep only overrides that differ from the tool's own description.
+      const descOverrides: Record<string, string> = {};
+      for (const t of toolList) {
+        const v = descriptions[t.name];
+        if (v != null && v.trim() && v.trim() !== (t.description ?? "").trim()) {
+          descOverrides[t.name] = v.trim();
+        }
+      }
       const tools =
-        toolList.length > 0 ? { enabled: allOn ? [] : [...enabled], approval } : undefined;
+        toolList.length > 0
+          ? {
+              enabled: allOn ? [] : [...enabled],
+              approval,
+              descriptions: Object.keys(descOverrides).length ? descOverrides : undefined,
+            }
+          : undefined;
       const exec =
         sandbox || webTools
           ? {
@@ -280,10 +298,12 @@ function AgentEditor() {
                   tools={toolList.filter((t) => t.connection === c)}
                   enabled={enabled}
                   approval={approval}
+                  descriptions={descriptions}
                   onToggleOn={() => toggle(c)}
                   onToggleOpen={() => toggleExpand(c)}
                   onToggleTool={toggleEnabled}
                   onToggleApproval={(n) => setApproval((p) => ({ ...p, [n]: !p[n] }))}
+                  onDescribe={(n, v) => setDescriptions((p) => ({ ...p, [n]: v }))}
                 />
               ))}
             </div>
@@ -356,10 +376,12 @@ function ConnectionRow({
   tools,
   enabled,
   approval,
+  descriptions,
   onToggleOn,
   onToggleOpen,
   onToggleTool,
   onToggleApproval,
+  onDescribe,
 }: {
   name: string;
   on: boolean;
@@ -368,10 +390,12 @@ function ConnectionRow({
   tools: ToolInfo[];
   enabled: Set<string>;
   approval: Record<string, boolean>;
+  descriptions: Record<string, string>;
   onToggleOn: () => void;
   onToggleOpen: () => void;
   onToggleTool: (n: string) => void;
   onToggleApproval: (n: string) => void;
+  onDescribe: (n: string, v: string) => void;
 }) {
   const needsAuth = on && status?.oauth && !status.authorized && tools.length === 0;
   return (
@@ -425,36 +449,56 @@ function ConnectionRow({
           ) : tools.length === 0 ? (
             <p className="text-ink-tertiary text-xs">No tools listed yet — try Refresh.</p>
           ) : (
-            tools.map((t) => (
-              <div key={t.name} className="flex items-start gap-3 py-1">
-                <Switch
-                  className="mt-0.5"
-                  checked={enabled.has(t.name)}
-                  onCheckedChange={() => onToggleTool(t.name)}
-                  aria-label={`Enable ${t.name}`}
-                />
-                <div className={cn("min-w-0 flex-1", !enabled.has(t.name) && "opacity-50")}>
-                  <span className="text-ink-primary font-mono text-xs">{t.name}</span>
-                  {t.description && (
-                    <p className="text-ink-tertiary text-xs leading-snug">{t.description}</p>
-                  )}
+            tools.map((t) => {
+              const off = !enabled.has(t.name);
+              const desc = descriptions[t.name] ?? t.description ?? "";
+              const overridden =
+                descriptions[t.name] != null &&
+                descriptions[t.name].trim() !== (t.description ?? "").trim();
+              return (
+                <div key={t.name} className={cn("flex flex-col gap-1.5 py-1.5", off && "opacity-50")}>
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      checked={!off}
+                      onCheckedChange={() => onToggleTool(t.name)}
+                      aria-label={`Enable ${t.name}`}
+                    />
+                    <span className="text-ink-primary min-w-0 flex-1 truncate font-mono text-xs">
+                      {t.name}
+                    </span>
+                    <label className="text-ink-secondary flex shrink-0 items-center gap-1.5 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={!!approval[t.name]}
+                        disabled={off}
+                        onChange={() => onToggleApproval(t.name)}
+                      />
+                      approval
+                    </label>
+                  </div>
+                  <div className="ml-12 flex items-start gap-1.5">
+                    <Textarea
+                      className="min-h-0 resize-none py-1.5 text-xs leading-snug"
+                      rows={2}
+                      value={desc}
+                      disabled={off}
+                      onChange={(e) => onDescribe(t.name, e.target.value)}
+                      placeholder="Tool description (shown to the model)"
+                    />
+                    {overridden && (
+                      <button
+                        type="button"
+                        onClick={() => onDescribe(t.name, t.description ?? "")}
+                        title="Reset to the provider's description"
+                        className="text-ink-tertiary hover:text-ink-primary mt-1.5 shrink-0 text-[10px] underline"
+                      >
+                        reset
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <label
-                  className={cn(
-                    "text-ink-secondary flex shrink-0 items-center gap-1.5 text-xs",
-                    !enabled.has(t.name) && "opacity-50",
-                  )}
-                >
-                  <input
-                    type="checkbox"
-                    checked={!!approval[t.name]}
-                    disabled={!enabled.has(t.name)}
-                    onChange={() => onToggleApproval(t.name)}
-                  />
-                  approval
-                </label>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       )}

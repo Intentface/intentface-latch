@@ -500,6 +500,15 @@ export function createRuntime<P, RC = unknown>(
     }
     for (const name of cfg.disableTools ?? []) delete tools[name];
 
+    // Per-agent tool description overrides — swap the resolved tool's
+    // description so the model sees the agent's custom guidance.
+    if (cfg.toolDescriptions) {
+      for (const [name, description] of Object.entries(cfg.toolDescriptions)) {
+        const t = tools[name];
+        if (t && description) tools[name] = { ...(t as object), description };
+      }
+    }
+
     // Merge the source-contributed approval policy (connection defaults +
     // synthetic `connect_<name>` gates) with the agent's. The AGENT WINS for
     // tools it names — so an agent can require approval on a GET or waive it on

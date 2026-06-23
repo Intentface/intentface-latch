@@ -16,7 +16,11 @@ export interface AgentRec {
   instructions: string;
   connections: string[];
   maxSteps?: number | "unlimited";
-  tools?: { enabled: string[]; approval: Record<string, boolean> };
+  tools?: {
+    enabled: string[];
+    approval: Record<string, boolean>;
+    descriptions?: Record<string, string>;
+  };
   exec?: {
     sandbox?: boolean;
     provider?: string;

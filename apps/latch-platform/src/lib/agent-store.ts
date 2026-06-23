@@ -24,7 +24,12 @@ export interface AgentRecord {
    * tool names the model may call (empty → all). `approval` = per-tool override:
    * true → require approval, false → waive it (overrides the connection default).
    */
-  tools?: { enabled: string[]; approval: Record<string, boolean> };
+  tools?: {
+    enabled: string[];
+    approval: Record<string, boolean>;
+    /** Per-tool description overrides (by namespaced tool name). */
+    descriptions?: Record<string, string>;
+  };
   /**
    * Code-execution capabilities (eve-style harness). `sandbox` gives a
    * per-session workspace + the filesystem/shell tools; `provider` picks the
@@ -94,7 +99,7 @@ export function createAgentStore(
     connections: JSON.parse(String(row.connections)) as string[],
     maxSteps: maxStepsFromCol(row.max_steps),
     tools: row.tools
-      ? (JSON.parse(String(row.tools)) as { enabled: string[]; approval: Record<string, boolean> })
+      ? (JSON.parse(String(row.tools)) as AgentRecord["tools"])
       : undefined,
     exec: row.exec ? (JSON.parse(String(row.exec)) as AgentRecord["exec"]) : undefined,
     scope: String(row.scope) as CredentialScope,
@@ -125,6 +130,9 @@ export function createAgentStore(
         maxSteps: rec.maxSteps,
         // Restrict callable tools (empty/undefined → all).
         enabledTools: sel?.enabled?.length ? sel.enabled : undefined,
+        // Per-tool description overrides → applied to the resolved tools.
+        toolDescriptions:
+          sel?.descriptions && Object.keys(sel.descriptions).length ? sel.descriptions : undefined,
         // Per-tool approval override (agent wins): on → require, off → waive.
         toolApproval: approvalEntries.length
           ? Object.fromEntries(
