@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as RunsRouteImport } from './routes/runs'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ConnectionsRouteImport } from './routes/connections'
 import { Route as ChatRouteImport } from './routes/chat'
@@ -29,6 +30,11 @@ const SchedulesRoute = SchedulesRouteImport.update({
 const RunsRoute = RunsRouteImport.update({
   id: '/runs',
   path: '/runs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -83,6 +89,7 @@ export interface FileRoutesByFullPath {
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
   '/chat/$chatId': typeof ChatChatIdRoute
@@ -95,6 +102,7 @@ export interface FileRoutesByTo {
   '/agents': typeof AgentsRoute
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
   '/chat/$chatId': typeof ChatChatIdRoute
@@ -109,6 +117,7 @@ export interface FileRoutesById {
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
   '/chat/$chatId': typeof ChatChatIdRoute
@@ -124,6 +133,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/connections'
     | '/login'
+    | '/reset-password'
     | '/runs'
     | '/schedules'
     | '/chat/$chatId'
@@ -136,6 +146,7 @@ export interface FileRouteTypes {
     | '/agents'
     | '/connections'
     | '/login'
+    | '/reset-password'
     | '/runs'
     | '/schedules'
     | '/chat/$chatId'
@@ -149,6 +160,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/connections'
     | '/login'
+    | '/reset-password'
     | '/runs'
     | '/schedules'
     | '/chat/$chatId'
@@ -163,6 +175,7 @@ export interface RootRouteChildren {
   ChatRoute: typeof ChatRouteWithChildren
   ConnectionsRoute: typeof ConnectionsRoute
   LoginRoute: typeof LoginRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
@@ -183,6 +196,13 @@ declare module '@tanstack/react-router' {
       path: '/runs'
       fullPath: '/runs'
       preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -269,6 +289,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRouteWithChildren,
   ConnectionsRoute: ConnectionsRoute,
   LoginRoute: LoginRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,

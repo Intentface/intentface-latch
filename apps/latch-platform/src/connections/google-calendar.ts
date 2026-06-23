@@ -14,8 +14,11 @@ export default defineMcpConnection({
   url: process.env.GOOGLE_CALENDAR_MCP_URL ?? "https://calendarmcp.googleapis.com/mcp/v1",
   description: "Google Calendar — read and manage the user's calendar events.",
   auth: oauth({
-    clientId: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    // Distinct from GOOGLE_CLIENT_ID (the better-auth Google *login* client) —
+    // the Calendar MCP needs its own OAuth client with the calendar redirect
+    // URI + scopes registered.
+    clientId: process.env.GOOGLE_CALENDAR_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET,
     // The Calendar MCP server requires these SPECIFIC scopes (the broad
     // `auth/calendar` is rejected → "caller does not have permission"). They
     // must also be added to the OAuth consent screen's Data Access.

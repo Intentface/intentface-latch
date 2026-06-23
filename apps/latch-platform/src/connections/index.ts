@@ -11,5 +11,6 @@ import googleCalendar from "./google-calendar";
 export const connectionDefs: Record<string, McpConnectionDef> = {
   ...(loredex.url ? { loredex } : {}),
   // Google needs a pre-registered client (no DCR) — only load when configured.
-  ...(process.env.GOOGLE_CLIENT_ID ? { google_calendar: googleCalendar } : {}),
+  // Its own client (GOOGLE_CALENDAR_*), separate from the Google login client.
+  ...(process.env.GOOGLE_CALENDAR_CLIENT_ID ? { google_calendar: googleCalendar } : {}),
 };
