@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
+import { Braces, Plug, Trash2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   currentPrincipalFn,
   connectionsStatusFn,
@@ -44,14 +46,20 @@ function ConnectionsPage() {
   const { oauth, keys, dynamic } = Route.useLoaderData();
 
   return (
-    <div className="mx-auto max-w-xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">Connections</h1>
+    <div className="mx-auto max-w-2xl space-y-5 p-6">
+      <div>
+        <h1 className="text-lg font-semibold">Connections</h1>
+        <p className="text-ink-secondary text-sm">
+          MCP servers and REST (OpenAPI) APIs your agents can use. Tokens are stored
+          envelope-encrypted in the Vault and brokered server-side.
+        </p>
+      </div>
 
       <AddConnection />
 
       {dynamic.length > 0 && (
         <div className="space-y-2">
-          <h2 className="text-muted-foreground text-xs font-medium uppercase">Your connections</h2>
+          <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">Your connections</h2>
           {dynamic.map((c) => (
             <DynamicCard key={`${c.scope}:${c.name}`} conn={c} />
           ))}
@@ -59,7 +67,7 @@ function ConnectionsPage() {
       )}
 
       {(oauth.length > 0 || keys.length > 0) && (
-        <h2 className="text-muted-foreground text-xs font-medium uppercase">Built-in</h2>
+        <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">Built-in</h2>
       )}
       {oauth.map((c) => (
         <ConnectionCard key={c.name} connection={c} />
@@ -225,23 +233,31 @@ function DynamicCard({
     await router.invalidate();
     setBusy(false);
   }
+  const Icon = conn.kind === "mcp" ? Plug : Braces;
   return (
-    <Card>
-      <CardContent className="flex items-center justify-between gap-3 py-3">
-        <div className="min-w-0">
+    <Card size="sm">
+      <CardContent className="flex items-center gap-3 py-3">
+        <div className="bg-tertiary border-primary-border text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg border">
+          <Icon className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{conn.name}</span>
-            <Badge variant="secondary">{conn.kind}</Badge>
-            <Badge variant="outline">{conn.scope === "org" ? "org" : "personal"}</Badge>
+            <span className="truncate text-sm font-medium">{conn.name}</span>
             {conn.oauth ? (
-              <Badge variant={conn.authorized ? "secondary" : "outline"}>
-                {conn.authorized ? "connected" : "not connected"}
-              </Badge>
+              <span className="flex items-center gap-1 text-xs">
+                <span className={cn("size-1.5 rounded-full", conn.authorized ? "bg-emerald-500" : "bg-amber-500")} />
+                <span className="text-ink-tertiary">{conn.authorized ? "connected" : "not connected"}</span>
+              </span>
             ) : (
               conn.hasAuth && <Badge variant="outline">key set</Badge>
             )}
+            <Badge variant="outline" className="ml-auto">
+              {conn.scope === "org" ? "org" : "personal"}
+            </Badge>
           </div>
-          <p className="text-muted-foreground truncate text-xs">{conn.target}</p>
+          <p className="text-ink-tertiary truncate text-xs">
+            {conn.kind.toUpperCase()} · {conn.target}
+          </p>
         </div>
         <div className="flex shrink-0 gap-1">
           {conn.oauth &&
@@ -260,8 +276,8 @@ function DynamicCard({
                 Connect
               </Button>
             ))}
-          <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
-            Delete
+          <Button size="sm" variant="ghost" disabled={busy} onClick={remove} aria-label="Delete">
+            <Trash2 className="size-4" />
           </Button>
         </div>
       </CardContent>
