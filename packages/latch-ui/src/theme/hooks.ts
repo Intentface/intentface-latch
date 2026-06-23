@@ -16,6 +16,17 @@ const CSS_VARS = [
   ["con", "--con"],
 ] as const;
 
+/** Perceived-luminance check on a #rgb/#rrggbb hex; true when the color is dark. */
+const isDarkHex = (hex: string): boolean => {
+  const h = hex.replace(/^#/, "");
+  const v = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  if (v.length !== 6) return false;
+  const r = parseInt(v.slice(0, 2), 16);
+  const g = parseInt(v.slice(2, 4), 16);
+  const b = parseInt(v.slice(4, 6), 16);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+};
+
 /**
  * Applies the user's per-mode seed overrides to the document as CSS variables
  * (the whole palette recomputes from them in theme.css). Mount once near the
@@ -29,12 +40,21 @@ export const useThemeOverrides = (): void => {
     if (!resolvedTheme) return;
     const mode = (resolvedTheme === "dark" ? "dark" : "light") as ThemeMode;
     const overrides = themeOverrides[mode];
-    const style = document.documentElement.style;
+    const root = document.documentElement;
+    const style = root.style;
     for (const [key, cssVar] of CSS_VARS) {
       const value = overrides[key];
       if (value !== undefined) style.setProperty(cssVar, String(value));
       else style.removeProperty(cssVar);
     }
+    // The light/dark *formulas* in theme.css key off the `.dark` class, but the
+    // effective background comes from the seeds — which can disagree (e.g. a
+    // dark `--bg` chosen in light mode). If they desync, light-mode formulas run
+    // on a dark canvas and the foreground (`--fg`) collides with the surfaces
+    // (invisible card titles). Reconcile `.dark` to the actual background so the
+    // matching formula set always runs.
+    const bg = overrides.bg ?? getDefaultSeeds(mode).bg;
+    root.classList.toggle("dark", isDarkHex(bg));
   }, [resolvedTheme, themeOverrides]);
 };
 
