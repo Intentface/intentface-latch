@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./ask-user.js";
+export { AskUser } from "./ask-user-card.js";
 export * from "./message-utils.js";
 export { Markdown } from "./markdown.js";
 export { Reasoning } from "./reasoning.js";

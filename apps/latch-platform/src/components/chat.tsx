@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, readUIMessageStream } from "ai";
+import {
+  DefaultChatTransport,
+  lastAssistantMessageIsCompleteWithToolCalls,
+  readUIMessageStream,
+} from "ai";
 import { useRouter } from "@tanstack/react-router";
 import { Brain, CircleDot, Loader2 } from "lucide-react";
 import {
+  AskUser,
   cn,
   Composer,
   Message,
@@ -62,10 +67,12 @@ export function Chat({
 }) {
   const router = useRouter();
   const [deciding, setDeciding] = useState(false);
-  const { messages, sendMessage, setMessages, status } = useChat({
+  const { messages, sendMessage, setMessages, status, addToolResult } = useChat({
     id: chatId,
     messages: initialMessages,
     transport: new DefaultChatTransport({ api: chatApi(chatId, agent) }),
+    // Auto-resume the run once a client-handled tool (askUser) gets its answer.
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
@@ -211,6 +218,20 @@ export function Chat({
       </Thread.Viewport>
       <Thread.Composer>
         <Thread.ScrollButton />
+        {composerState.type === "ask-user" && (
+          <div className="border-primary-border bg-secondary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
+            <AskUser
+              questions={composerState.questions}
+              onSubmit={(answers) =>
+                void addToolResult({
+                  tool: "askUser",
+                  toolCallId: composerState.toolCallId,
+                  output: answers,
+                })
+              }
+            />
+          </div>
+        )}
         {composerState.type === "active" && (
           <div className="border-primary-border bg-primary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
             <StepQueue>
@@ -235,8 +256,10 @@ export function Chat({
           </div>
         )}
         <Composer
-          disabled={busy}
-          placeholder="Message the agent…"
+          disabled={busy || composerState.type === "ask-user"}
+          placeholder={
+            composerState.type === "ask-user" ? "Answer above to continue…" : "Message the agent…"
+          }
           onSubmit={(text, files) => sendMessage({ text, files })}
         />
       </Thread.Composer>

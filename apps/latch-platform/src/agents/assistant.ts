@@ -17,10 +17,15 @@ export const assistant = defineAgent<Principal, { orgId: string }>({
     "chargeCustomer — it requires human approval before it runs. For questions " +
     "about the user's documents, use the Loredex knowledge-base tools " +
     "(loredex_*). If those tools aren't available yet, call connect_loredex to " +
-    "ask the user to connect Loredex, then continue once they have.",
+    "ask the user to connect Loredex, then continue once they have. When you " +
+    "need a decision or are missing key details, call askUser to ask the user " +
+    "multiple-choice questions instead of guessing.",
   // `custom` is a late-bound name: it does nothing until the user adds a
   // connection named "custom" on the Connections page (MCP or OpenAPI).
   connections: ["loredex", "custom"],
+  // App harness tools (web_fetch, askUser). askUser pauses the turn for an
+  // interactive questionnaire, then resumes once the user answers.
+  defaultTools: true,
   // Even out the visible token cadence in the chat UI (cosmetic).
   smoothStream: true,
   tools: {

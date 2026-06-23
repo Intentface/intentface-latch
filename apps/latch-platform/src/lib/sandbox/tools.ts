@@ -193,7 +193,61 @@ const web_fetch = tool({
   },
 });
 
+/**
+ * Ask the user one or more multiple-choice questions and wait for their answer.
+ * Has NO `execute`: the SDK leaves the call in `input-available`, the turn
+ * pauses, and the client renders a questionnaire and supplies the result via
+ * `addToolResult` (output = a JSON object mapping each question → the picked
+ * answer), which resumes the run. Mirrors intentface-chat's `askUser`.
+ */
+const askUser = tool({
+  description:
+    "Ask the user one or more multiple-choice questions when you need a " +
+    "decision or clarification before continuing. The conversation pauses " +
+    "until the user answers. Prefer this over guessing.",
+  inputSchema: jsonSchema<{
+    questions: {
+      question: string;
+      header?: string;
+      multiSelect?: boolean;
+      options: { label: string; description: string }[];
+    }[];
+  }>({
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            header: { type: "string" },
+            multiSelect: { type: "boolean" },
+            options: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string" },
+                  description: { type: "string" },
+                },
+                required: ["label", "description"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["question", "options"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["questions"],
+    additionalProperties: false,
+  }),
+  // No `execute` — client-handled. The answer comes back via addToolResult.
+});
+
 /** Sandbox-backed tools (need an agent with `sandbox: true`). */
 export const sandboxTools = { bash, read_file, write_file, glob, grep } as Record<string, unknown>;
 /** App-runtime default tools (no sandbox needed). */
-export const appTools = { web_fetch } as Record<string, unknown>;
+export const appTools = { web_fetch, askUser } as Record<string, unknown>;
