@@ -309,7 +309,8 @@ export function Chat({
                 <Composer.AskUserContinue />
               </Composer.Actions>
             ) : (
-              <Composer.Actions className="flex items-center justify-end">
+              <Composer.Actions className="flex items-center justify-between">
+                <Composer.AttachmentTrigger />
                 <Composer.Submit isGenerating={busy} onStop={stop} />
               </Composer.Actions>
             )}
