@@ -256,7 +256,7 @@ function AgentForm({
     }
   }
 
-  const sel = "border-input bg-background h-9 rounded-md border px-2 text-sm";
+  const sel = "border-input bg-background text-foreground h-8 rounded-md border px-2 text-sm";
 
   // Picked OAuth connections not yet authorized and contributing no tools — the
   // editor can't list their tools until the caller connects (clears on refresh).
