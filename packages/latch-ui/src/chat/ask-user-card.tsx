@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useMemo, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { Check, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import type { AskUserQuestion } from "./ask-user.js";
@@ -40,6 +40,13 @@ export const AskUser = forwardRef<
   const [step, setStep] = useState(0);
   const [highlight, setHighlight] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Take focus when mounted / when the question changes so the keyboard drives
+  // the questionnaire immediately (no click needed).
+  useEffect(() => {
+    rootRef.current?.focus();
+  }, [step]);
 
   const total = questions.length;
   const q = questions[step];
@@ -100,10 +107,39 @@ export const AskUser = forwardRef<
     [q, multi, highlight, step, answers],
   );
 
+  const onKey = (e: React.KeyboardEvent) => {
+    switch (e.key) {
+      case "ArrowUp":
+        setHighlight((h) => Math.max(0, h - 1));
+        break;
+      case "ArrowDown":
+        setHighlight((h) => Math.min((q?.options.length ?? 1) - 1, h + 1));
+        break;
+      case "ArrowLeft":
+        goto(step - 1);
+        break;
+      case "ArrowRight":
+        next();
+        break;
+      case "Enter":
+        pick(highlight);
+        break;
+      default:
+        if (/^[1-9]$/.test(e.key)) pick(Number(e.key) - 1);
+        else return; // let other keys pass through
+    }
+    e.preventDefault();
+  };
+
   if (!q) return null;
 
   return (
-    <div className={cn("flex flex-col gap-3 p-3", className)}>
+    <div
+      ref={rootRef}
+      tabIndex={0}
+      onKeyDown={onKey}
+      className={cn("flex flex-col gap-3 p-3 outline-none", className)}
+    >
       <div className="flex items-center gap-2">
         {q.header && (
           <span className="text-ink-tertiary text-[10px] font-medium tracking-wide uppercase">
@@ -134,6 +170,7 @@ export const AskUser = forwardRef<
             <button
               key={opt.label}
               type="button"
+              tabIndex={-1}
               disabled={disabled}
               onMouseMove={() => setHighlight(i)}
               onClick={() => pick(i)}

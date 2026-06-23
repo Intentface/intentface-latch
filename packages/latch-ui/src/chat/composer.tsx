@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useRef, useState } from "react";
 import { ArrowUp, File as FileIcon, Paperclip, X } from "lucide-react";
 import type { FileUIPart } from "ai";
 import { cn } from "../lib/utils.js";
@@ -70,12 +70,6 @@ export function Composer({
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
-
-  // Keep focus on the input while capture mode is active so it drives the
-  // questionnaire from the keyboard.
-  useEffect(() => {
-    if (capture) ref.current?.focus();
-  }, [capture]);
 
   const resize = (el: HTMLTextAreaElement) => {
     el.style.height = "auto";
