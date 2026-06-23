@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
+import { Bot, TerminalSquare, Trash2 } from "lucide-react";
 import {
   currentPrincipalFn,
   listAgentRecordsFn,
@@ -445,25 +446,37 @@ function AgentCard({ agent, onEdit }: { agent: AgentRec; onEdit: () => void }) {
     setBusy(false);
   }
   return (
-    <Card>
-      <CardContent className="flex items-center justify-between gap-3 py-3">
-        <div className="min-w-0">
+    <Card size="sm">
+      <CardContent className="flex items-center gap-3 py-3">
+        <div className="bg-tertiary border-primary-border text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg border">
+          <Bot className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{agent.title ?? agent.name}</span>
-            <Badge variant="outline">{agent.scope === "org" ? "org" : "personal"}</Badge>
-            <Badge variant="secondary">{agent.modelId}</Badge>
+            <span className="truncate text-sm font-medium">{agent.title ?? agent.name}</span>
+            {agent.exec?.sandbox && (
+              <span className="text-ink-tertiary flex items-center gap-1 text-xs">
+                <TerminalSquare className="size-3.5" /> sandbox
+              </span>
+            )}
+            <Badge variant="outline" className="ml-auto">
+              {agent.scope === "org" ? "org" : "personal"}
+            </Badge>
           </div>
-          <p className="text-muted-foreground truncate text-xs">
-            {agent.name} · connections: {agent.connections.join(", ") || "none"} · steps:{" "}
-            {agent.maxSteps === "unlimited" ? "until done" : (agent.maxSteps ?? "default")}
+          <p className="text-ink-tertiary truncate text-xs">
+            <span className="font-mono">{agent.modelId}</span>
+            {" · "}
+            {agent.connections.length ? agent.connections.join(", ") : "no connections"}
+            {" · "}
+            {agent.maxSteps === "unlimited" ? "until done" : `${agent.maxSteps ?? "default"} steps`}
           </p>
         </div>
         <div className="flex shrink-0 gap-1">
           <Button size="sm" variant="outline" disabled={busy} onClick={onEdit}>
             Edit
           </Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>
-            Delete
+          <Button size="sm" variant="ghost" disabled={busy} onClick={remove} aria-label="Delete">
+            <Trash2 className="size-4" />
           </Button>
         </div>
       </CardContent>
