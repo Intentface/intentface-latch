@@ -4,18 +4,15 @@ import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
 import { Brain, CircleDot, Loader2 } from "lucide-react";
 import {
-  AskUser,
   cn,
   Composer,
-  ComposerPanel,
-  ComposerPanelGroup,
   Message,
   StepQueue,
   Thread,
   useComposerState,
   useSettingsStore,
   type AppUIMessage,
-  type AskUserHandle,
+  type ComposerSubmitData,
   type ToolPart,
 } from "@intentface/latch-ui";
 import type { AppMessage } from "@intentface/latch-core";
@@ -68,7 +65,7 @@ export function Chat({
 }) {
   const router = useRouter();
   const [deciding, setDeciding] = useState(false);
-  const { messages, sendMessage, setMessages, status, addToolResult, regenerate } = useChat({
+  const { messages, sendMessage, setMessages, status, addToolResult, regenerate, stop } = useChat({
     id: chatId,
     messages: initialMessages,
     transport: new DefaultChatTransport({ api: chatApi(chatId, agent) }),
@@ -77,36 +74,29 @@ export function Chat({
   const busy = status === "submitted" || status === "streaming";
   const scrollMode = useSettingsStore((s) => s.scrollMode);
   const composerState = useComposerState(messages, status);
-  const askRef = useRef<AskUserHandle>(null);
+  const isAskUser = composerState.type === "ask-user";
+  const activeSteps = composerState.type === "active" ? composerState.steps : [];
 
-  // Map composer keystrokes onto the ask-user questionnaire while it's open, so
-  // the user can answer entirely from the keyboard without leaving the input.
-  function handleAskKey(e: React.KeyboardEvent): boolean {
-    const h = askRef.current;
-    if (!h) return false;
-    switch (e.key) {
-      case "ArrowUp":
-        h.navigate(-1);
-        return true;
-      case "ArrowDown":
-        h.navigate(1);
-        return true;
-      case "ArrowLeft":
-        h.prev();
-        return true;
-      case "ArrowRight":
-        h.next();
-        return true;
-      case "Enter":
-        h.enter();
-        return true;
-      default:
-        if (/^[1-9]$/.test(e.key)) {
-          h.pickIndex(Number(e.key) - 1);
-          return true;
-        }
-        return true; // swallow other keys in capture mode
+  // The composer reports either a message (text + files) or ask-user answers.
+  async function handleSubmit(data: ComposerSubmitData) {
+    if (data.kind === "answers") {
+      if (composerState.type !== "ask-user") return;
+      // Flatten the composer's answer entries into question → picked text.
+      const out: Record<string, string> = {};
+      for (const a of data.answers) {
+        out[a.question] =
+          "option" in a
+            ? a.option
+            : "options" in a
+              ? [...(a.options ?? []), a.text].filter(Boolean).join(", ")
+              : "text" in a
+                ? a.text
+                : "";
+      }
+      await answerAskUser(composerState.toolCallId, out);
+      return;
     }
+    sendMessage({ text: data.text, files: data.files });
   }
 
   // Latest messages, for seeding the approval-continuation stream (a click
@@ -269,22 +259,18 @@ export function Chat({
       </Thread.Viewport>
       <Thread.Composer>
         <Thread.ScrollButton />
-        <ComposerPanelGroup>
-          {composerState.type === "ask-user" && (
-            <ComposerPanel key="ask">
-              <AskUser
-                ref={askRef}
-                disabled={deciding}
-                questions={composerState.questions}
-                onSubmit={(answers) => void answerAskUser(composerState.toolCallId, answers)}
-              />
-            </ComposerPanel>
-          )}
-          {composerState.type === "active" && (
-            <ComposerPanel key="active">
+        <Composer
+          onSubmit={handleSubmit}
+          isSubmitting={busy}
+          questions={isAskUser ? composerState.questions : undefined}
+        >
+          <Composer.Panel
+            value={composerState.type === "active" ? "active" : isAskUser ? "ask-user" : undefined}
+          >
+            <Composer.PanelItem value="active">
               <StepQueue>
-                {composerState.steps.map((step, i) => {
-                  const active = i === composerState.steps.length - 1;
+                {activeSteps.map((step, i) => {
+                  const active = i === activeSteps.length - 1;
                   return (
                     <StepQueue.Item key={step.key}>
                       <StepQueue.Icon>
@@ -301,20 +287,34 @@ export function Chat({
                   );
                 })}
               </StepQueue>
-            </ComposerPanel>
-          )}
-        </ComposerPanelGroup>
-        <Composer
-          disabled={busy}
-          capture={composerState.type === "ask-user"}
-          onCaptureKey={handleAskKey}
-          placeholder={
-            composerState.type === "ask-user"
-              ? "Use ↑↓ and Enter to answer…"
-              : "Message the agent…"
-          }
-          onSubmit={(text, files) => sendMessage({ text, files })}
-        />
+            </Composer.PanelItem>
+            <Composer.PanelItem value="ask-user">
+              <Composer.AskUser />
+            </Composer.PanelItem>
+          </Composer.Panel>
+
+          <Composer.Container>
+            <Composer.Attachments />
+            <Composer.Textarea autoFocus>
+              <Composer.Placeholder
+                placeholder={
+                  isAskUser ? "Or type your own answer…" : busy ? "Thinking…" : "Message the agent…"
+                }
+              />
+            </Composer.Textarea>
+            {isAskUser ? (
+              <Composer.Actions className="flex items-center justify-end">
+                <Composer.AskUserHints />
+                <Composer.AskUserDismiss />
+                <Composer.AskUserContinue />
+              </Composer.Actions>
+            ) : (
+              <Composer.Actions className="flex items-center justify-end">
+                <Composer.Submit isGenerating={busy} onStop={stop} />
+              </Composer.Actions>
+            )}
+          </Composer.Container>
+        </Composer>
       </Thread.Composer>
       <Thread.Overlay direction="bottom" />
     </Thread>

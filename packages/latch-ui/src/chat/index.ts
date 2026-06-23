@@ -8,6 +8,7 @@ export { Steps } from "./steps.js";
 export { Message } from "./message.js";
 export { Thread } from "./thread.js";
 export { Composer } from "./composer.js";
+export type { ComposerSubmitData, ComposerAnswerEntry } from "./composer.js";
 export { ProgressiveBlur } from "./progressive-blur.js";
 export { StepQueue } from "./step-queue.js";
 export { ComposerPanel, ComposerPanelGroup } from "./composer-panel.js";
