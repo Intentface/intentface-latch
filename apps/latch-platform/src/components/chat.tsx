@@ -23,6 +23,7 @@ import {
   submitApproval,
   submitToolResult,
 } from "@/lib/latch-client";
+import { chatGeneratingFn } from "@/lib/server";
 import type { UIMessageChunk } from "ai";
 import { Button } from "@/components/ui/button";
 
@@ -75,7 +76,40 @@ export function Chat({
   const scrollMode = useSettingsStore((s) => s.scrollMode);
   const composerState = useComposerState(messages, status);
   const isAskUser = composerState.type === "ask-user";
-  const activeSteps = composerState.type === "active" ? composerState.steps : [];
+
+  // On reload, a turn may still be running server-side (we now drain it to
+  // completion regardless of the client). Poll for that: show a "Generating…"
+  // indicator and refresh history so the answer fills in as it lands — until
+  // the run is no longer active.
+  const [resuming, setResuming] = useState(false);
+  useEffect(() => {
+    if (status !== "ready") return; // a live local stream is already showing
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      const gen = await chatGeneratingFn({ data: chatId }).catch(() => false);
+      if (cancelled) return;
+      setResuming(gen);
+      const updated = await loadHistory(chatId).catch(() => null);
+      if (cancelled) return;
+      if (updated) setMessages(updated as never);
+      if (gen) timer = setTimeout(poll, 2000);
+    }
+    void poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
+
+  const showActive = composerState.type === "active" || resuming;
+  const activeSteps =
+    composerState.type === "active"
+      ? composerState.steps
+      : resuming
+        ? [{ key: "gen", label: "Generating…", kind: "thinking" as const }]
+        : [];
 
   // The composer reports either a message (text + files) or ask-user answers.
   async function handleSubmit(data: ComposerSubmitData) {
@@ -264,9 +298,7 @@ export function Chat({
           isSubmitting={busy}
           questions={isAskUser ? composerState.questions : undefined}
         >
-          <Composer.Panel
-            value={composerState.type === "active" ? "active" : isAskUser ? "ask-user" : undefined}
-          >
+          <Composer.Panel value={showActive ? "active" : isAskUser ? "ask-user" : undefined}>
             <Composer.PanelItem value="active">
               <StepQueue>
                 {activeSteps.map((step, i) => {

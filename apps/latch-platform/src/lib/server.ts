@@ -71,6 +71,18 @@ export const loadHistoryFn = createServerFn({ method: "GET" })
     return messages as any;
   });
 
+/** Whether a chat has an in-flight (server-side) turn — drives the "generating"
+ * indicator when a page reload lands on a still-running turn. */
+export const chatGeneratingFn = createServerFn({ method: "GET" })
+  .validator((chatId: string) => chatId)
+  .handler(async ({ data: chatId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return false;
+    const { runtime } = await getLatch();
+    const runs = await runtime.listRuns({ principal });
+    return runs.some((r) => r.chatId === chatId && r.status === "active");
+  });
+
 /** Per-connection status for the Connections page. */
 export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
   async () => {
