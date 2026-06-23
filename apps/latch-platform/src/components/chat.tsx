@@ -67,7 +67,7 @@ export function Chat({
 }) {
   const router = useRouter();
   const [deciding, setDeciding] = useState(false);
-  const { messages, sendMessage, setMessages, status, addToolResult } = useChat({
+  const { messages, sendMessage, setMessages, status, addToolResult, regenerate } = useChat({
     id: chatId,
     messages: initialMessages,
     transport: new DefaultChatTransport({ api: chatApi(chatId, agent) }),
@@ -212,6 +212,9 @@ export function Chat({
               message={m as unknown as AppUIMessage}
               isStreaming={busy && m.id === lastId && m.role === "assistant"}
               renderApproval={renderApproval}
+              onRegenerate={
+                m.role === "assistant" && !busy ? () => regenerate({ messageId: m.id }) : undefined
+              }
             />
           ))
         )}

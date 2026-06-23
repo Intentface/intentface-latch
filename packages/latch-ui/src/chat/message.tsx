@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from "react";
 import { motion } from "motion/react";
-import { Check, Copy, FileText } from "lucide-react";
+import { Check, Copy, FileText, RotateCcw } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
@@ -28,12 +28,15 @@ export function Message({
   isStreaming,
   toolLabels,
   renderApproval,
+  onRegenerate,
   className,
 }: {
   message: AppUIMessage;
   isStreaming?: boolean;
   toolLabels?: ToolLabels;
   renderApproval?: (part: ToolPart) => ReactNode;
+  /** Called when the user clicks the regenerate action (assistant messages). */
+  onRegenerate?: () => void;
   className?: string;
 }) {
   const isUser = message.role === "user";
@@ -149,9 +152,19 @@ export function Message({
         </div>
       )}
 
-      {!isUser && !isStreaming && copyText && (
+      {!isUser && !isStreaming && (copyText || onRegenerate) && (
         <div className="pointer-events-none flex items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
-          <CopyButton text={copyText} />
+          {copyText && <CopyButton text={copyText} />}
+          {onRegenerate && (
+            <button
+              type="button"
+              aria-label="Regenerate"
+              onClick={onRegenerate}
+              className="text-ink-tertiary hover:text-ink-primary hover:bg-primary-hover grid size-7 place-items-center rounded-md transition-colors"
+            >
+              <RotateCcw className="size-3.5" />
+            </button>
+          )}
         </div>
       )}
     </motion.div>
