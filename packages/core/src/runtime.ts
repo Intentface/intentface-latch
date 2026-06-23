@@ -1,5 +1,6 @@
 import {
   ToolLoopAgent,
+  consumeStream,
   createIdGenerator,
   createUIMessageStream,
   createUIMessageStreamResponse,
@@ -687,7 +688,13 @@ export function createRuntime<P, RC = unknown>(
       },
     } as Parameters<typeof createUIMessageStream>[0]);
 
-    return createUIMessageStreamResponse({ stream });
+    // Drain the stream server-side regardless of the client. If the browser
+    // closes mid-turn, the response stops being pulled — without this the
+    // generation stalls/cuts short and a refresh shows a partial answer. With
+    // it, the agent runs to completion in the background and onFinish persists
+    // the full message (the model's abort is tied to the lease, not the
+    // request, so a disconnect doesn't cancel generation).
+    return createUIMessageStreamResponse({ stream, consumeSseStream: consumeStream });
   }
 
   async function reapTick(opts?: { now?: number; error?: string }) {
