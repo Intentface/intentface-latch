@@ -18,7 +18,9 @@ import { Route as ChatRouteImport } from './routes/chat'
 import { Route as AgentsRouteImport } from './routes/agents'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
+import { Route as AgentsIndexRouteImport } from './routes/agents.index'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
+import { Route as AgentsEditRouteImport } from './routes/agents.edit'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
@@ -67,10 +69,20 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ChatRoute,
 } as any)
+const AgentsIndexRoute = AgentsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AgentsRoute,
+} as any)
 const ChatChatIdRoute = ChatChatIdRouteImport.update({
   id: '/$chatId',
   path: '/$chatId',
   getParentRoute: () => ChatRoute,
+} as any)
+const AgentsEditRoute = AgentsEditRouteImport.update({
+  id: '/edit',
+  path: '/edit',
+  getParentRoute: () => AgentsRoute,
 } as any)
 const ApiLatchSplatRoute = ApiLatchSplatRouteImport.update({
   id: '/api/latch/$',
@@ -85,27 +97,30 @@ const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/agents': typeof AgentsRoute
+  '/agents': typeof AgentsRouteWithChildren
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
+  '/agents/edit': typeof AgentsEditRoute
   '/chat/$chatId': typeof ChatChatIdRoute
+  '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/agents': typeof AgentsRoute
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
+  '/agents/edit': typeof AgentsEditRoute
   '/chat/$chatId': typeof ChatChatIdRoute
+  '/agents': typeof AgentsIndexRoute
   '/chat': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
@@ -113,14 +128,16 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/agents': typeof AgentsRoute
+  '/agents': typeof AgentsRouteWithChildren
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
+  '/agents/edit': typeof AgentsEditRoute
   '/chat/$chatId': typeof ChatChatIdRoute
+  '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
@@ -136,20 +153,23 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/runs'
     | '/schedules'
+    | '/agents/edit'
     | '/chat/$chatId'
+    | '/agents/'
     | '/chat/'
     | '/api/auth/$'
     | '/api/latch/$'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/agents'
     | '/connections'
     | '/login'
     | '/reset-password'
     | '/runs'
     | '/schedules'
+    | '/agents/edit'
     | '/chat/$chatId'
+    | '/agents'
     | '/chat'
     | '/api/auth/$'
     | '/api/latch/$'
@@ -163,7 +183,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/runs'
     | '/schedules'
+    | '/agents/edit'
     | '/chat/$chatId'
+    | '/agents/'
     | '/chat/'
     | '/api/auth/$'
     | '/api/latch/$'
@@ -171,7 +193,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AgentsRoute: typeof AgentsRoute
+  AgentsRoute: typeof AgentsRouteWithChildren
   ChatRoute: typeof ChatRouteWithChildren
   ConnectionsRoute: typeof ConnectionsRoute
   LoginRoute: typeof LoginRoute
@@ -247,12 +269,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/agents/': {
+      id: '/agents/'
+      path: '/'
+      fullPath: '/agents/'
+      preLoaderRoute: typeof AgentsIndexRouteImport
+      parentRoute: typeof AgentsRoute
+    }
     '/chat/$chatId': {
       id: '/chat/$chatId'
       path: '/$chatId'
       fullPath: '/chat/$chatId'
       preLoaderRoute: typeof ChatChatIdRouteImport
       parentRoute: typeof ChatRoute
+    }
+    '/agents/edit': {
+      id: '/agents/edit'
+      path: '/edit'
+      fullPath: '/agents/edit'
+      preLoaderRoute: typeof AgentsEditRouteImport
+      parentRoute: typeof AgentsRoute
     }
     '/api/latch/$': {
       id: '/api/latch/$'
@@ -271,6 +307,19 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AgentsRouteChildren {
+  AgentsEditRoute: typeof AgentsEditRoute
+  AgentsIndexRoute: typeof AgentsIndexRoute
+}
+
+const AgentsRouteChildren: AgentsRouteChildren = {
+  AgentsEditRoute: AgentsEditRoute,
+  AgentsIndexRoute: AgentsIndexRoute,
+}
+
+const AgentsRouteWithChildren =
+  AgentsRoute._addFileChildren(AgentsRouteChildren)
+
 interface ChatRouteChildren {
   ChatChatIdRoute: typeof ChatChatIdRoute
   ChatIndexRoute: typeof ChatIndexRoute
@@ -285,7 +334,7 @@ const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AgentsRoute: AgentsRoute,
+  AgentsRoute: AgentsRouteWithChildren,
   ChatRoute: ChatRouteWithChildren,
   ConnectionsRoute: ConnectionsRoute,
   LoginRoute: LoginRoute,

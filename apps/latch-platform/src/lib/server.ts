@@ -262,6 +262,8 @@ export const connectionToolsFn = createServerFn({ method: "GET" })
           name,
           connection: names.find((n) => name.startsWith(`${n}_`)) ?? name.split("_")[0],
           defaultApproval: !!approval[name],
+          description:
+            (opened.tools[name] as { description?: string } | undefined)?.description ?? undefined,
         }));
     } finally {
       await opened.close();
