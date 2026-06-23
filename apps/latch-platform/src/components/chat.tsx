@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
-import { Loader2 } from "lucide-react";
+import { Brain, CircleDot, Loader2 } from "lucide-react";
 import {
+  cn,
   Composer,
   Message,
+  StepQueue,
   Thread,
+  useComposerState,
   useSettingsStore,
   type AppUIMessage,
   type ToolPart,
@@ -67,6 +70,7 @@ export function Chat({
   });
   const busy = status === "submitted" || status === "streaming";
   const scrollMode = useSettingsStore((s) => s.scrollMode);
+  const composerState = useComposerState(messages, status);
 
   // Latest messages, for seeding the approval-continuation stream (a click
   // handler / mount effect would otherwise close over a stale snapshot).
@@ -207,10 +211,33 @@ export function Chat({
       </Thread.Viewport>
       <Thread.Composer>
         <Thread.ScrollButton />
+        {composerState.type === "active" && (
+          <div className="border-primary-border bg-primary mb-2 w-full overflow-hidden rounded-2xl border shadow-xs [corner-shape:squircle]">
+            <StepQueue>
+              {composerState.steps.map((step, i) => {
+                const active = i === composerState.steps.length - 1;
+                return (
+                  <StepQueue.Item key={step.key}>
+                    <StepQueue.Icon>
+                      {step.kind === "thinking" ? (
+                        <Brain className={cn("size-3.5", active && "animate-pulse")} />
+                      ) : active ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <CircleDot className="size-3.5" />
+                      )}
+                    </StepQueue.Icon>
+                    <StepQueue.Label active={active}>{step.label}</StepQueue.Label>
+                  </StepQueue.Item>
+                );
+              })}
+            </StepQueue>
+          </div>
+        )}
         <Composer
           disabled={busy}
-          placeholder={busy ? "Thinking…" : "Message the agent…"}
-          onSubmit={(text) => sendMessage({ text })}
+          placeholder="Message the agent…"
+          onSubmit={(text, files) => sendMessage({ text, files })}
         />
       </Thread.Composer>
       <Thread.Overlay direction="bottom" />

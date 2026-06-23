@@ -8,3 +8,10 @@ export { Message } from "./message.js";
 export { Thread } from "./thread.js";
 export { Composer } from "./composer.js";
 export { ProgressiveBlur } from "./progressive-blur.js";
+export { StepQueue } from "./step-queue.js";
+export { TextShimmer } from "./text-shimmer.js";
+export {
+  useComposerState,
+  type ComposerPanelState,
+  type ComposerStepItem,
+} from "./use-composer-state.js";
