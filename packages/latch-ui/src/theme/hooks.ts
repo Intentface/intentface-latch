@@ -40,21 +40,32 @@ export const useThemeOverrides = (): void => {
     if (!resolvedTheme) return;
     const mode = (resolvedTheme === "dark" ? "dark" : "light") as ThemeMode;
     const overrides = themeOverrides[mode];
+    const defaults = getDefaultSeeds(mode);
     const root = document.documentElement;
     const style = root.style;
+
+    // `--bg`, `--acc`, `--con` apply verbatim (the palette recomputes from them).
     for (const [key, cssVar] of CSS_VARS) {
+      if (key === "fg") continue; // foreground is handled below (contrast guard)
       const value = overrides[key];
       if (value !== undefined) style.setProperty(cssVar, String(value));
       else style.removeProperty(cssVar);
     }
+
     // The light/dark *formulas* in theme.css key off the `.dark` class, but the
-    // effective background comes from the seeds — which can disagree (e.g. a
-    // dark `--bg` chosen in light mode). If they desync, light-mode formulas run
-    // on a dark canvas and the foreground (`--fg`) collides with the surfaces
-    // (invisible card titles). Reconcile `.dark` to the actual background so the
-    // matching formula set always runs.
-    const bg = overrides.bg ?? getDefaultSeeds(mode).bg;
-    root.classList.toggle("dark", isDarkHex(bg));
+    // effective background comes from the seeds — they can disagree (e.g. a dark
+    // `--bg` chosen in light mode), and a custom `--fg` can fail to contrast with
+    // a custom `--bg`. Either makes foreground text collide with the surfaces
+    // (invisible card titles). Reconcile `.dark` to the real background, then
+    // only honor the `--fg` override when it actually contrasts with it —
+    // otherwise let theme.css supply the mode-appropriate (contrasting) default.
+    const bgDark = isDarkHex(overrides.bg ?? defaults.bg);
+    root.classList.toggle("dark", bgDark);
+    if (overrides.fg !== undefined && isDarkHex(overrides.fg) !== bgDark) {
+      style.setProperty("--fg", overrides.fg);
+    } else {
+      style.removeProperty("--fg");
+    }
   }, [resolvedTheme, themeOverrides]);
 };
 
