@@ -1,5 +1,5 @@
-import type { ComponentType } from "react";
-import { Link, useRouter } from "@tanstack/react-router";
+import { type ComponentType, useEffect, useState } from "react";
+import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import { Popover } from "@base-ui/react/popover";
 import {
   Activity,
@@ -14,6 +14,7 @@ import {
   Plus,
 } from "lucide-react";
 import { ThemeCustomizer } from "@intentface/latch-ui";
+import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,6 +39,23 @@ const NAV: NavItem[] = [
 
 export function AppSidebar() {
   const { data: session, isPending } = useSession();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
+
+  // Recent threads for the sidebar; refetch on navigation so new chats appear.
+  useEffect(() => {
+    if (!session) {
+      setChats([]);
+      return;
+    }
+    let cancelled = false;
+    void listChatsFn()
+      .then((c) => !cancelled && setChats(c as typeof chats))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [session, pathname]);
 
   return (
     <aside className="bg-secondary border-primary-border flex h-screen w-56 shrink-0 flex-col border-r">
@@ -61,6 +79,28 @@ export function AppSidebar() {
             </Link>
           ))}
         </nav>
+      )}
+
+      {session && chats.length > 0 && (
+        <div className="mt-3 flex min-h-0 flex-1 flex-col px-2">
+          <p className="text-ink-tertiary px-2.5 pb-1 text-xs font-medium tracking-wide uppercase">
+            Recent
+          </p>
+          <div className="flex flex-col gap-0.5 overflow-y-auto">
+            {chats.slice(0, 20).map((c) => (
+              <Link
+                key={c.id}
+                to="/chat/$chatId"
+                params={{ chatId: c.id }}
+                search={{ agent: undefined }}
+                className="text-ink-secondary hover:bg-primary-hover hover:text-ink-primary truncate rounded-md px-2.5 py-1 text-sm transition-colors"
+                activeProps={{ className: "bg-tertiary text-ink-primary" }}
+              >
+                {c.title?.trim() || c.agent}
+              </Link>
+            ))}
+          </div>
+        </div>
       )}
 
       <div className="mt-auto flex flex-col gap-1 p-2">
