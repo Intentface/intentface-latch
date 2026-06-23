@@ -72,10 +72,16 @@ export const auth = betterAuth({
   },
   ...(googleProvider ? { socialProviders: googleProvider } : {}),
   // Link a Google sign-in to an existing same-email account automatically.
-  // Safe because Google verifies the email, so the sign-in proves ownership
-  // (otherwise an existing email/password user gets `account_not_linked`).
+  // Safe because Google verifies the email, so the sign-in proves ownership.
+  // `requireLocalEmailVerified: false` is required too — our email/password
+  // accounts aren't email-verified (emailVerified=0), and better-auth defaults
+  // that gate ON, which otherwise refuses the link as `account_not_linked`.
   account: {
-    accountLinking: { enabled: true, trustedProviders: ["google"] },
+    accountLinking: {
+      enabled: true,
+      trustedProviders: ["google"],
+      requireLocalEmailVerified: false,
+    },
   },
   // Restrict email/password sign-up + sign-in to the allowed domain with a
   // clean error (social sign-ups are caught at user creation below).
