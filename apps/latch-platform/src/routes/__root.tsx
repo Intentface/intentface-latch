@@ -4,7 +4,7 @@ import { TanStackDevtools } from "@tanstack/react-devtools"
 import { ThemeProvider } from "next-themes"
 import { ThemeOverridesApplier } from "@intentface/latch-ui"
 
-import { AppHeader } from "@/components/app-header"
+import { AppSidebar } from "@/components/app-sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import appCss from "../styles.css?url"
 
@@ -47,9 +47,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <body>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <ThemeOverridesApplier />
-          <div className="flex h-screen flex-col">
-            <AppHeader />
-            <main className="min-h-0 flex-1">{children}</main>
+          <div className="flex h-screen">
+            <AppSidebar />
+            <main className="min-h-0 flex-1 overflow-auto">{children}</main>
           </div>
           <Toaster />
         </ThemeProvider>
