@@ -1,6 +1,5 @@
 import { type ComponentType, useEffect, useState } from "react";
 import { Link, useRouter, useRouterState } from "@tanstack/react-router";
-import { Popover } from "@base-ui/react/popover";
 import {
   Activity,
   Bot,
@@ -9,11 +8,17 @@ import {
   ChevronsUpDown,
   LogOut,
   MessageSquare,
-  Palette,
   Plug,
   Plus,
+  Settings as SettingsIcon,
 } from "lucide-react";
-import { Sidebar, ThemeCustomizer } from "@intentface/latch-ui";
+import {
+  Dialog,
+  Sidebar,
+  ThemeCustomizer,
+  useSettingsStore,
+  type ThreadAutoScrollMode,
+} from "@intentface/latch-ui";
 import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
@@ -120,13 +125,13 @@ export function AppSidebar() {
           <>
             <OrgSwitcher />
             <div className="flex items-center gap-1">
-              <ThemePopover />
+              <SettingsDialog />
               <UserMenu email={session.user.email} />
             </div>
           </>
         ) : (
           <>
-            <ThemePopover />
+            <SettingsDialog />
             <Button render={<Link to="/login" />} size="sm" className="w-full">
               Sign in
             </Button>
@@ -199,20 +204,43 @@ function UserMenu({ email }: { email: string }) {
   );
 }
 
-/** Theme/customizer popover (mode, presets, seed colors, contrast). */
-function ThemePopover() {
+const SCROLL_MODES: { value: ThreadAutoScrollMode; label: string }[] = [
+  { value: "follow", label: "Follow — land at top, stick while streaming" },
+  { value: "bottom", label: "Bottom — always stick to the latest" },
+  { value: "jump", label: "Jump — land at top, no auto-follow" },
+  { value: "off", label: "Off — manual scrolling" },
+];
+
+/** Settings modal: theme customizer + chat scroll behavior. */
+function SettingsDialog() {
+  const scrollMode = useSettingsStore((s) => s.scrollMode);
+  const setScrollMode = useSettingsStore((s) => s.setScrollMode);
   return (
-    <Popover.Root>
-      <Popover.Trigger render={<Button variant="ghost" size="icon" aria-label="Theme" />}>
-        <Palette className="size-4" />
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Positioner side="top" align="start" sideOffset={6}>
-          <Popover.Popup className="border-primary-border bg-primary z-50 rounded-xl border p-4 shadow-lg outline-none">
-            <ThemeCustomizer />
-          </Popover.Popup>
-        </Popover.Positioner>
-      </Popover.Portal>
-    </Popover.Root>
+    <Dialog>
+      <Dialog.Trigger render={<Button variant="ghost" size="icon" aria-label="Settings" />}>
+        <SettingsIcon className="size-4" />
+      </Dialog.Trigger>
+      <Dialog.Content className="max-w-md">
+        <Dialog.Title>Settings</Dialog.Title>
+        <Dialog.Description>Theme and chat preferences.</Dialog.Description>
+        <div className="mt-5 space-y-6">
+          <ThemeCustomizer className="w-full" />
+          <div className="space-y-2">
+            <label className="text-ink-secondary text-xs font-medium">Auto-scroll</label>
+            <select
+              value={scrollMode}
+              onChange={(e) => setScrollMode(e.target.value as ThreadAutoScrollMode)}
+              className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-sm"
+            >
+              {SCROLL_MODES.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </Dialog.Content>
+    </Dialog>
   );
 }

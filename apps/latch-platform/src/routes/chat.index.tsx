@@ -1,9 +1,103 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link, useLoaderData, useNavigate } from "@tanstack/react-router";
+import { Bot, MessageSquare, Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export const Route = createFileRoute("/chat/")({
-  component: () => (
-    <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-      Select a chat, or start a new one.
-    </div>
-  ),
+  component: ChatIndex,
 });
+
+/** Human-friendly relative time ("just now", "3h ago", "Apr 2"). */
+function ago(value: string | number | Date | undefined): string {
+  if (!value) return "";
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) return "";
+  const diff = Date.now() - then;
+  const min = Math.round(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function ChatIndex() {
+  const { chats, agents } = useLoaderData({ from: "/chat" });
+  const navigate = useNavigate();
+
+  const newChat = (agent: string) =>
+    navigate({
+      to: "/chat/$chatId",
+      params: { chatId: crypto.randomUUID() },
+      search: { agent },
+    });
+
+  return (
+    <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto px-6 py-8">
+      <div className="mb-6 flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-ink-primary text-lg font-semibold tracking-tight">Chats</h1>
+          <p className="text-ink-tertiary text-sm">Your conversations across agents.</p>
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<Button size="sm" className="gap-1.5" />}>
+            <Plus className="size-4" /> New chat
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            {agents.map((a) => (
+              <DropdownMenuItem key={a.name} onClick={() => newChat(a.name)}>
+                <div className="flex flex-col">
+                  <span className="text-sm">{a.title ?? a.name}</span>
+                  {a.description && (
+                    <span className="text-ink-tertiary text-xs">{a.description}</span>
+                  )}
+                </div>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {chats.length === 0 ? (
+        <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">
+          <MessageSquare className="size-6 opacity-60" />
+          <p className="text-sm">No chats yet. Start one to get going.</p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {chats.map((c) => (
+            <Link
+              key={c.id}
+              to="/chat/$chatId"
+              params={{ chatId: c.id }}
+              search={{ agent: undefined }}
+              className="group border-primary-border bg-secondary hover:border-accent-border flex items-start gap-3 rounded-xl border p-4 shadow-sm transition-colors"
+            >
+              <div className="bg-base text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg">
+                <MessageSquare className="size-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-ink-primary truncate text-sm font-medium">
+                  {c.title?.trim() || "Untitled chat"}
+                </div>
+                <div className="text-ink-tertiary mt-1 flex items-center gap-1.5 text-xs">
+                  <Bot className="size-3" />
+                  <span className="truncate">{c.agent}</span>
+                  <span aria-hidden>·</span>
+                  <span className="shrink-0">{ago(c.updatedAt)}</span>
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

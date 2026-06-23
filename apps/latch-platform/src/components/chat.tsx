@@ -3,7 +3,14 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
 import { Loader2 } from "lucide-react";
-import { Composer, Message, Thread, type AppUIMessage, type ToolPart } from "@intentface/latch-ui";
+import {
+  Composer,
+  Message,
+  Thread,
+  useSettingsStore,
+  type AppUIMessage,
+  type ToolPart,
+} from "@intentface/latch-ui";
 import type { AppMessage } from "@intentface/latch-core";
 import {
   authorizeUrl,
@@ -59,6 +66,7 @@ export function Chat({
     onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
+  const scrollMode = useSettingsStore((s) => s.scrollMode);
 
   // Latest messages, for seeding the approval-continuation stream (a click
   // handler / mount effect would otherwise close over a stale snapshot).
@@ -176,34 +184,36 @@ export function Chat({
   const lastId = messages.at(-1)?.id;
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="text-ink-secondary border-b px-4 py-2 text-xs">
-        Agent: <span className="text-ink-primary font-medium">{agent}</span>
-      </div>
-
-      <Thread>
-        {messages.length === 0 && (
-          <p className="text-ink-secondary mt-12 text-center text-sm">
-            Ask anything. Try: “charge customer Acme $49” to see a tool approval.
-          </p>
+    <Thread autoScroll={scrollMode}>
+      <Thread.Overlay direction="top" />
+      <Thread.Viewport>
+        {messages.length === 0 ? (
+          <Thread.Placeholder>
+            <p className="text-ink-primary text-sm font-medium">{agent}</p>
+            <p className="text-ink-tertiary text-sm">
+              Ask anything. Try “charge customer Acme $49” to see a tool approval.
+            </p>
+          </Thread.Placeholder>
+        ) : (
+          messages.map((m) => (
+            <Message
+              key={m.id}
+              message={m as unknown as AppUIMessage}
+              isStreaming={busy && m.id === lastId && m.role === "assistant"}
+              renderApproval={renderApproval}
+            />
+          ))
         )}
-        {messages.map((m) => (
-          <Message
-            key={m.id}
-            message={m as unknown as AppUIMessage}
-            isStreaming={busy && m.id === lastId && m.role === "assistant"}
-            renderApproval={renderApproval}
-          />
-        ))}
-      </Thread>
-
-      <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+      </Thread.Viewport>
+      <Thread.Composer>
+        <Thread.ScrollButton />
         <Composer
           disabled={busy}
           placeholder={busy ? "Thinking…" : "Message the agent…"}
           onSubmit={(text) => sendMessage({ text })}
         />
-      </div>
-    </div>
+      </Thread.Composer>
+      <Thread.Overlay direction="bottom" />
+    </Thread>
   );
 }

@@ -38,8 +38,9 @@ export function Composer({
 
   return (
     <div
+      data-slot="composer-container"
       className={cn(
-        "border-primary-border bg-secondary focus-within:border-accent-border flex flex-col gap-2 rounded-2xl border p-2.5 shadow-sm transition-colors",
+        "border-primary-border bg-secondary focus-within:border-accent-border flex w-full flex-col gap-2 rounded-2xl border p-2.5 shadow-sm transition-colors",
         className,
       )}
     >

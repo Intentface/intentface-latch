@@ -10,6 +10,7 @@ import {
   getPresetsForMode,
 } from "./presets.js";
 import { type InterfaceThemeMode, useInterfaceTheme } from "./hooks.js";
+import { Scaler } from "../shell/scaler.js";
 
 /**
  * Live theme customizer in intentface-chat's row-based "Settings" layout: mode
@@ -122,14 +123,14 @@ export function ThemeCustomizer({ className }: { className?: string }) {
         ))}
 
         <Row label="Contrast" desc="Surface elevation strength">
-          <input
-            type="range"
+          <Scaler
+            className="w-56"
             min={CONTRAST_MIN}
             max={CONTRAST_MAX}
             step={CONTRAST_STEP}
+            tickStep={(CONTRAST_MAX - CONTRAST_MIN) / 8}
             value={seeds.con}
-            onChange={(e) => setSeed("con", Number(e.target.value) as never)}
-            className="accent-accent w-32"
+            onValueChange={(v) => setSeed("con", v as never)}
           />
         </Row>
       </div>
