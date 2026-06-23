@@ -127,7 +127,9 @@ const SidebarRoot = ({ className, children, ...props }: ComponentProps<"div">) =
         )}
         {...props}
       >
-        <div className="bg-sidebar flex h-full w-full flex-col gap-2 py-2 pl-2">{children}</div>
+        {/* Transparent: the sidebar blends with the app canvas (bg-base); only
+            the main content Viewport is a distinct (white) surface. */}
+        <div className="flex h-full w-full flex-col gap-2 py-2 pl-2">{children}</div>
       </div>
     </div>
   );
