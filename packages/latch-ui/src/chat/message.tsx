@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { motion } from "motion/react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
@@ -31,7 +32,12 @@ export function Message({
   const segments = getSegmentedParts(message.parts);
 
   return (
-    <div className={cn("flex", isUser ? "justify-end" : "justify-start", className)}>
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
+      className={cn("flex", isUser ? "justify-end" : "justify-start", className)}
+    >
       <div
         className={cn(
           "min-w-0 space-y-2 text-sm",
@@ -82,6 +88,6 @@ export function Message({
           return null;
         })}
       </div>
-    </div>
+    </motion.div>
   );
 }

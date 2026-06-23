@@ -14,6 +14,7 @@ import {
   Plus,
 } from "lucide-react";
 import { ThemeCustomizer } from "@intentface/latch-ui";
+import { cn } from "@/lib/utils";
 import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
@@ -37,7 +38,7 @@ const NAV: NavItem[] = [
   { to: "/connections", label: "Connections", icon: Plug },
 ];
 
-export function AppSidebar() {
+export function AppSidebar({ open = true }: { open?: boolean }) {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
@@ -58,7 +59,13 @@ export function AppSidebar() {
   }, [session, pathname]);
 
   return (
-    <aside className="bg-secondary border-primary-border flex h-screen w-56 shrink-0 flex-col border-r">
+    <aside
+      className={cn(
+        "h-screen shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
+        open ? "w-60" : "w-0",
+      )}
+    >
+      <div className="flex h-full w-60 flex-col">
       <div className="flex items-center gap-2 px-4 py-3">
         <Link to="/" className="text-sm font-semibold tracking-tight">
           🔒 Latch
@@ -120,6 +127,7 @@ export function AppSidebar() {
             </Button>
           </>
         )}
+      </div>
       </div>
     </aside>
   );
