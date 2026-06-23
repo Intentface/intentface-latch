@@ -48,7 +48,7 @@ export const partSegmentType = (part: UIMessage["parts"][number]): SegmentType |
   if (part.type === "reasoning") return "reasoning";
   if (part.type === "text") return "text";
   if (part.type === "file") return "file";
-  if (part.type === "tool-askUser") return "tool";
+  if (part.type === "tool-askUser") return null; // rendered separately (questionnaire / answered summary)
   if (part.type === "dynamic-tool") return "tool";
   if (isStaticToolUIPart(part)) return "tool";
   return null;
@@ -215,14 +215,17 @@ export const getAskUserInfo = (allParts: UIMessage["parts"]): AskUserInfo => {
     .filter((p) => p.state === "output-available")
     .map((p) => {
       const input = p.input as AskUserInput | undefined;
+      // The output may arrive as an object (addToolResult) or a JSON string.
       let answers: Record<string, string> = {};
-      try {
-        answers = JSON.parse(p.output as string) as Record<string, string>;
-      } catch (error) {
-        console.error("Failed to parse askUser output", {
-          output: p.output,
-          error,
-        });
+      const out = p.output as unknown;
+      if (out && typeof out === "object") {
+        answers = out as Record<string, string>;
+      } else if (typeof out === "string") {
+        try {
+          answers = JSON.parse(out) as Record<string, string>;
+        } catch {
+          // leave empty
+        }
       }
       return {
         toolCallId: p.toolCallId,

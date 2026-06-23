@@ -1,11 +1,13 @@
 import { type ReactNode, useState } from "react";
+import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "motion/react";
-import { Check, Copy, FileText, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Copy, FileText, RotateCcw } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
 import { Steps } from "./steps.js";
 import {
+  getAskUserInfo,
   getSegmentedParts,
   getSourcesInfo,
   getTextInfo,
@@ -43,6 +45,7 @@ export function Message({
   const segments = getSegmentedParts(message.parts);
   const { sources, hasSources } = getSourcesInfo(message.parts);
   const { text: copyText } = getTextInfo(segments);
+  const { answered } = getAskUserInfo(message.parts);
 
   return (
     <motion.div
@@ -128,6 +131,27 @@ export function Message({
           return null;
         })}
       </div>
+
+      {!isUser &&
+        answered.map((a) => (
+          <Collapsible.Root key={a.toolCallId} className="group/ask w-full">
+            <Collapsible.Trigger className="text-ink-secondary hover:text-ink-primary flex items-center gap-1.5 text-xs transition-colors">
+              <CircleHelp className="size-3.5 shrink-0" />
+              <span>
+                Answered {a.questions.length} {a.questions.length === 1 ? "question" : "questions"}
+              </span>
+              <ChevronDown className="size-3.5 shrink-0 transition-transform group-data-[panel-open]/ask:rotate-180" />
+            </Collapsible.Trigger>
+            <Collapsible.Panel className="border-primary-border mt-2 flex flex-col gap-2 border-l-2 pl-3">
+              {a.questions.map((q) => (
+                <div key={q.question} className="flex flex-col gap-0.5">
+                  <span className="text-ink-primary text-xs font-medium">{q.question}</span>
+                  <span className="text-ink-secondary text-xs">{a.answers[q.question] ?? "—"}</span>
+                </div>
+              ))}
+            </Collapsible.Panel>
+          </Collapsible.Root>
+        ))}
 
       {!isUser && hasSources && (
         <div className="flex flex-wrap gap-1.5">
