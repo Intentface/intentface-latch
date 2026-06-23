@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
-import { Loader2, Send } from "lucide-react";
-import { Message, Thread, type AppUIMessage, type ToolPart } from "@intentface/latch-ui";
+import { Loader2 } from "lucide-react";
+import { Composer, Message, Thread, type AppUIMessage, type ToolPart } from "@intentface/latch-ui";
 import type { AppMessage } from "@intentface/latch-core";
 import {
   authorizeUrl,
@@ -12,7 +12,6 @@ import {
   submitApproval,
 } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 
 /** Loose view of a tool part's approval fields (SDK types keep these opaque). */
 type ApprovalPart = {
@@ -52,7 +51,6 @@ export function Chat({
   initialMessages?: AppMessage[];
 }) {
   const router = useRouter();
-  const [input, setInput] = useState("");
   const [deciding, setDeciding] = useState(false);
   const { messages, sendMessage, setMessages, status } = useChat({
     id: chatId,
@@ -199,25 +197,13 @@ export function Chat({
         ))}
       </Thread>
 
-      <form
-        className="flex gap-2 border-t p-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!input.trim() || busy) return;
-          sendMessage({ text: input });
-          setInput("");
-        }}
-      >
-        <Input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={busy ? "Thinking…" : "Message the agent…"}
+      <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+        <Composer
           disabled={busy}
+          placeholder={busy ? "Thinking…" : "Message the agent…"}
+          onSubmit={(text) => sendMessage({ text })}
         />
-        <Button type="submit" size="icon" disabled={busy || !input.trim()}>
-          <Send className="size-4" />
-        </Button>
-      </form>
+      </div>
     </div>
   );
 }

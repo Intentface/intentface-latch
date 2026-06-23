@@ -6,3 +6,4 @@ export { Reasoning } from "./reasoning.js";
 export { Steps } from "./steps.js";
 export { Message } from "./message.js";
 export { Thread } from "./thread.js";
+export { Composer } from "./composer.js";
