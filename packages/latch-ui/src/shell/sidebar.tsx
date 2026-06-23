@@ -194,7 +194,7 @@ const SidebarViewport = ({ className, children, ...props }: ComponentProps<"div"
   <div
     data-slot="sidebar-viewport"
     className={cn(
-      "bg-secondary flex h-full min-h-0 flex-1 flex-col overflow-hidden border border-transparent",
+      "bg-secondary relative flex h-full min-h-0 flex-1 flex-col overflow-hidden border border-transparent",
       "group-data-expanded/sidebar-inset:border-secondary-border group-data-expanded/sidebar-inset:rounded-xl",
       className,
     )}

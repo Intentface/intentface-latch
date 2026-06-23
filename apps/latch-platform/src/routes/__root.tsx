@@ -53,13 +53,14 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             <AppSidebar />
             <Sidebar.Inset>
               <Sidebar.Viewport>
+                {/* Floating trigger — overlays the top-left of the white panel so
+                    the full content area scrolls to the very top (no fixed bar).
+                    Inside the Viewport so it insets from the panel edge. */}
+                <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center p-2">
+                  <Sidebar.Trigger className="pointer-events-auto" />
+                </header>
                 <div className="h-full overflow-auto">{children}</div>
               </Sidebar.Viewport>
-              {/* Floating trigger — overlays the top-left of the white panel so
-                  the full content area scrolls to the very top (no fixed bar). */}
-              <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center p-2">
-                <Sidebar.Trigger className="pointer-events-auto" />
-              </header>
             </Sidebar.Inset>
           </Sidebar.Provider>
           <Toaster />
