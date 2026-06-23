@@ -1,6 +1,5 @@
 export * from "./types.js";
 export * from "./ask-user.js";
-export { AskUser, type AskUserHandle } from "./ask-user-card.js";
 export * from "./message-utils.js";
 export { Markdown } from "./markdown.js";
 export { Reasoning } from "./reasoning.js";
@@ -11,7 +10,6 @@ export { Composer } from "./composer.js";
 export type { ComposerSubmitData, ComposerAnswerEntry } from "./composer.js";
 export { ProgressiveBlur } from "./progressive-blur.js";
 export { StepQueue } from "./step-queue.js";
-export { ComposerPanel, ComposerPanelGroup } from "./composer-panel.js";
 export { TextShimmer } from "./text-shimmer.js";
 export {
   useComposerState,
