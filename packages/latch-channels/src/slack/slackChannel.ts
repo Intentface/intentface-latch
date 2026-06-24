@@ -152,12 +152,19 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         const link = auth.linkUrl ? ` <${auth.linkUrl}|Link your Latch account>` : "";
         const text = (auth.message ?? "Link your Latch account to use this agent.") + link;
         console.log(`[slack] refused user=${userId}; posting link notice`);
-        // A normal (visible) threaded reply — ephemeral notices are easy to miss
-        // and can fail silently, which left users staring at nothing.
+        // Keep the notice PRIVATE: the link is signed for this Slack user, so a
+        // publicly-clickable link could let someone else bind this identity to
+        // their own account. Ephemeral first; DM fallback (never public/silent).
         try {
-          await api.postMessage({ channel, thread_ts: root, text: `<@${userId}> ${text}`, ...identity });
+          await api.postEphemeral({ channel, user: userId, thread_ts: root, text });
         } catch (e) {
-          console.error("[slack] failed to post link notice:", e);
+          console.error("[slack] ephemeral link notice failed, trying DM:", e);
+          try {
+            const dm = await api.openDm(userId);
+            if (dm) await api.postMessage({ channel: dm, text });
+          } catch (e2) {
+            console.error("[slack] DM link notice failed:", e2);
+          }
         }
         return;
       }

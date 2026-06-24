@@ -1,16 +1,44 @@
-import { useState } from "react";
-import { createFileRoute, Link, useLoaderData, useRouter } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import {
+  createFileRoute,
+  Link,
+  useLoaderData,
+  useNavigate,
+  useRouter,
+} from "@tanstack/react-router";
 import { Bot, Plus, TerminalSquare, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { deleteAgentFn } from "@/lib/server";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import type { AgentRec } from "./agents";
 
-export const Route = createFileRoute("/agents/")({ component: AgentsList });
+export const Route = createFileRoute("/agents/")({
+  // Slack link/install flows redirect back here with ?slack=… to toast.
+  validateSearch: (s: Record<string, unknown>): { slack?: string } =>
+    typeof s.slack === "string" ? { slack: s.slack } : {},
+  component: AgentsList,
+});
+
+const SLACK_TOASTS: Record<string, { kind: "success" | "error"; msg: string }> = {
+  linked: { kind: "success", msg: "Slack account linked — you can use the bot now." },
+  connected: { kind: "success", msg: "Slack app connected." },
+  link_error: { kind: "error", msg: "Couldn't link your Slack account — try the link again." },
+};
 
 function AgentsList() {
   const { records } = useLoaderData({ from: "/agents" });
+  const { slack } = Route.useSearch();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!slack) return;
+    const t = SLACK_TOASTS[slack];
+    if (t) toast[t.kind](t.msg);
+    // Clear the param so the toast doesn't re-fire on refresh/back.
+    void navigate({ to: "/agents", search: {}, replace: true });
+  }, [slack, navigate]);
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
