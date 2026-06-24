@@ -52,6 +52,15 @@ async function handleOauth(request: Request): Promise<Response> {
         userId: app.userId,
         botName: app.botName,
       });
+      // Auto-link the installer (the owner) so they can use the bot right away.
+      if (res.authedUserId && app.userId) {
+        await slackStore.linkIdentity({
+          teamId: res.teamId,
+          slackUserId: res.authedUserId,
+          userId: app.userId,
+          orgId: app.orgId,
+        });
+      }
     }
   } catch {
     return back("error");

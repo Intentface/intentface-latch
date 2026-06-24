@@ -25,6 +25,15 @@ export async function migrateSlack(client: Client): Promise<void> {
     event_id TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL
   )`);
+  // Slack user → platform user link: who in Slack is allowed to drive agents.
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_slack_identity (
+    team_id TEXT NOT NULL,
+    slack_user_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (team_id, slack_user_id)
+  )`);
 }
 
 /** Vault credential key names for a Slack app's secrets (stored at org scope). */
@@ -112,6 +121,37 @@ export function createSlackStore(client: Client) {
 
     async unbind(appId: string): Promise<void> {
       await client.execute({ sql: `DELETE FROM latch_slack_app WHERE app_id = ?`, args: [appId] });
+    },
+
+    /** Link a Slack user to a platform user (so they may drive agents). */
+    async linkIdentity(input: {
+      teamId: string;
+      slackUserId: string;
+      userId: string;
+      orgId: string;
+    }): Promise<void> {
+      await client.execute({
+        sql: `INSERT INTO latch_slack_identity
+                (team_id, slack_user_id, user_id, org_id, created_at)
+              VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(team_id, slack_user_id) DO UPDATE SET
+                user_id = excluded.user_id, org_id = excluded.org_id`,
+        args: [input.teamId, input.slackUserId, input.userId, input.orgId, Date.now()],
+      });
+    },
+
+    /** The platform user linked to a Slack identity, or null if unlinked. */
+    async resolveIdentity(
+      teamId: string,
+      slackUserId: string,
+    ): Promise<{ userId: string; orgId: string } | null> {
+      const res = await client.execute({
+        sql: `SELECT user_id, org_id FROM latch_slack_identity
+              WHERE team_id = ? AND slack_user_id = ? LIMIT 1`,
+        args: [teamId, slackUserId],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      return r ? { userId: String(r.user_id), orgId: String(r.org_id) } : null;
     },
 
     /**

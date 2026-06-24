@@ -73,7 +73,13 @@ export async function oauthAccess(opts: {
   clientSecret: string;
   code: string;
   redirectUri: string;
-}): Promise<{ botToken: string; teamId?: string; appId?: string; botUserId?: string }> {
+}): Promise<{
+  botToken: string;
+  teamId?: string;
+  appId?: string;
+  botUserId?: string;
+  authedUserId?: string;
+}> {
   const r = await post("oauth.v2.access", {
     client_id: opts.clientId,
     client_secret: opts.clientSecret,
@@ -86,5 +92,6 @@ export async function oauthAccess(opts: {
     teamId: (r.team as { id?: string } | undefined)?.id,
     appId: r.app_id ? String(r.app_id) : undefined,
     botUserId: r.bot_user_id ? String(r.bot_user_id) : undefined,
+    authedUserId: (r.authed_user as { id?: string } | undefined)?.id,
   };
 }

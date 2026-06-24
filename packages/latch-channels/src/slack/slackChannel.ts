@@ -59,6 +59,16 @@ export interface SlackChannelConfig<P> {
       approvalId: string;
     },
   ) => string;
+  /**
+   * Gate inbound users: given the triggering Slack identity, decide whether to
+   * run. Return `{ allowed: false, linkUrl }` to refuse and prompt the user to
+   * link their platform account (posted ephemerally). Omitted → everyone in the
+   * channel may use the bot. The turn still runs as `principal` (the owner).
+   */
+  authorizeUser?: (user: {
+    teamId: string;
+    userId: string;
+  }) => Promise<{ allowed: boolean; linkUrl?: string; message?: string }>;
   /** Per-agent display identity (defaults applied by the bot user). */
   botName?: string;
   iconEmoji?: string;
@@ -111,13 +121,28 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
   const chatIdFor = (channel: string, root: string) => `slack_${channel}_${root}`;
 
   // ── Drive one turn and render it ──────────────────────────────────────────
-  async function runTurn(ev: SlackEvent): Promise<void> {
+  async function runTurn(ev: SlackEvent, teamId: string): Promise<void> {
     const channel = ev.channel!;
     const root = ev.thread_ts ?? ev.ts!;
     const chatId = chatIdFor(channel, root);
     const userId = ev.user ?? "";
     const prompt = stripMentions(ev.text ?? "");
     if (!prompt) return;
+
+    // Gate: only linked platform users may drive the agent.
+    if (config.authorizeUser) {
+      const auth = await config.authorizeUser({ teamId, userId });
+      if (!auth.allowed) {
+        const link = auth.linkUrl ? ` <${auth.linkUrl}|Link your Latch account>` : "";
+        await api.postEphemeral({
+          channel,
+          user: userId,
+          thread_ts: root,
+          text: (auth.message ?? "Link your Latch account to use this agent.") + link,
+        });
+        return;
+      }
+    }
 
     await api.setStatus({ channel_id: channel, thread_ts: root, status: "is thinking…" });
 
@@ -303,6 +328,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       type?: string;
       challenge?: string;
       event_id?: string;
+      team_id?: string;
       event?: SlackEvent;
     };
 
@@ -322,7 +348,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       const isDm = ev.type === "message" && ev.channel_type === "im";
       const fromBot = Boolean(ev.bot_id) || ev.subtype === "bot_message";
       if ((isMention || isDm) && !fromBot && ev.channel && ev.ts) {
-        defer(runTurn(ev));
+        defer(runTurn(ev, body.team_id ?? ""));
       }
       return ok();
     }

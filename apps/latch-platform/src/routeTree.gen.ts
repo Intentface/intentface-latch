@@ -21,6 +21,7 @@ import { Route as AcceptInvitationRouteImport } from './routes/accept-invitation
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
+import { Route as SlackLinkRouteImport } from './routes/slack.link'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
 import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ApiCronRouteImport } from './routes/api/cron'
@@ -89,6 +90,11 @@ const AgentsIndexRoute = AgentsIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AgentsRoute,
 } as any)
+const SlackLinkRoute = SlackLinkRouteImport.update({
+  id: '/slack/link',
+  path: '/slack/link',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ChatChatIdRoute = ChatChatIdRouteImport.update({
   id: '/$chatId',
   path: '/$chatId',
@@ -140,6 +146,7 @@ export interface FileRoutesByFullPath {
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
+  '/slack/link': typeof SlackLinkRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -159,6 +166,7 @@ export interface FileRoutesByTo {
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
+  '/slack/link': typeof SlackLinkRoute
   '/agents': typeof AgentsIndexRoute
   '/chat': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -181,6 +189,7 @@ export interface FileRoutesById {
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
+  '/slack/link': typeof SlackLinkRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -204,6 +213,7 @@ export interface FileRouteTypes {
     | '/api/cron'
     | '/api/slack'
     | '/chat/$chatId'
+    | '/slack/link'
     | '/agents/'
     | '/chat/'
     | '/api/auth/$'
@@ -223,6 +233,7 @@ export interface FileRouteTypes {
     | '/api/cron'
     | '/api/slack'
     | '/chat/$chatId'
+    | '/slack/link'
     | '/agents'
     | '/chat'
     | '/api/auth/$'
@@ -244,6 +255,7 @@ export interface FileRouteTypes {
     | '/api/cron'
     | '/api/slack'
     | '/chat/$chatId'
+    | '/slack/link'
     | '/agents/'
     | '/chat/'
     | '/api/auth/$'
@@ -264,6 +276,7 @@ export interface RootRouteChildren {
   SchedulesRoute: typeof SchedulesRoute
   ApiCronRoute: typeof ApiCronRoute
   ApiSlackRoute: typeof ApiSlackRouteWithChildren
+  SlackLinkRoute: typeof SlackLinkRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiLatchSplatRoute: typeof ApiLatchSplatRoute
 }
@@ -353,6 +366,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/agents/'
       preLoaderRoute: typeof AgentsIndexRouteImport
       parentRoute: typeof AgentsRoute
+    }
+    '/slack/link': {
+      id: '/slack/link'
+      path: '/slack/link'
+      fullPath: '/slack/link'
+      preLoaderRoute: typeof SlackLinkRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/chat/$chatId': {
       id: '/chat/$chatId'
@@ -456,6 +476,7 @@ const rootRouteChildren: RootRouteChildren = {
   SchedulesRoute: SchedulesRoute,
   ApiCronRoute: ApiCronRoute,
   ApiSlackRoute: ApiSlackRouteWithChildren,
+  SlackLinkRoute: SlackLinkRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiLatchSplatRoute: ApiLatchSplatRoute,
 }

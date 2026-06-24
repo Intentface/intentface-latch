@@ -3,6 +3,7 @@ import { waitUntil } from "@vercel/functions";
 import { slackChannel } from "@intentface/latch-channels/slack";
 import { getLatch } from "@/lib/latch";
 import { slackVaultKeys } from "@/lib/slack-store";
+import { buildLinkUrl } from "@/lib/slack-link";
 import type { Principal } from "@/lib/session";
 
 /**
@@ -69,6 +70,18 @@ async function handleSlack(request: Request): Promise<Response> {
       handleChat: (i) => runtime.handleChat(i),
       applyApproval: (i) => runtime.applyApproval(i),
       loadHistory: (i) => runtime.loadHistory(i),
+    },
+    // Only platform users who've linked their Slack identity may drive the
+    // agent (it runs with the owner's credentials, so randos can't use it).
+    authorizeUser: async ({ teamId, userId }) => {
+      const team = teamId || app.teamId || "";
+      const linked = await slackStore.resolveIdentity(team, userId);
+      if (linked) return { allowed: true };
+      return {
+        allowed: false,
+        message: "You need a Latch account to use this agent.",
+        linkUrl: buildLinkUrl(baseUrl(), team, userId),
+      };
     },
     // Keep the serverless function alive for the background turn after we ACK.
     waitUntil: (p) => waitUntil(p),
