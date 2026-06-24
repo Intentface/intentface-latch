@@ -16,3 +16,4 @@ todos.json
 *.tsbuildinfo
 
 !.env.example
+.vercel
