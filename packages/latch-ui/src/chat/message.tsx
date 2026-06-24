@@ -17,6 +17,7 @@ import {
 import type { AppUIMessage } from "./types.js";
 
 const stateOf = (p: ToolPart) => (p as { state?: string }).state;
+const isSpawnAgent = (p: ToolPart) => p.type === "tool-spawn_agent";
 
 /**
  * Renders one message, styled after intentface-chat: user text in a bordered
@@ -30,6 +31,7 @@ export function Message({
   isStreaming,
   toolLabels,
   renderApproval,
+  renderSubagent,
   onRegenerate,
   className,
 }: {
@@ -37,6 +39,8 @@ export function Message({
   isStreaming?: boolean;
   toolLabels?: ToolLabels;
   renderApproval?: (part: ToolPart) => ReactNode;
+  /** Render a `spawn_agent` tool call (e.g. an expandable subagent thread). */
+  renderSubagent?: (part: ToolPart) => ReactNode;
   /** Called when the user clicks the regenerate action (assistant messages). */
   onRegenerate?: () => void;
   className?: string;
@@ -84,10 +88,16 @@ export function Message({
             const approvals = renderApproval
               ? seg.parts.filter((p) => stateOf(p) === "approval-requested")
               : [];
-            const rest = seg.parts.filter((p) => stateOf(p) !== "approval-requested");
+            const spawns = renderSubagent ? seg.parts.filter(isSpawnAgent) : [];
+            const rest = seg.parts.filter(
+              (p) => stateOf(p) !== "approval-requested" && !(renderSubagent && isSpawnAgent(p)),
+            );
             return (
               <div key={i} className="space-y-2">
                 <Steps tools={rest} labels={toolLabels} />
+                {spawns.map((p) => (
+                  <div key={p.toolCallId}>{renderSubagent?.(p)}</div>
+                ))}
                 {approvals.map((p) => (
                   <div key={p.toolCallId}>{renderApproval?.(p)}</div>
                 ))}

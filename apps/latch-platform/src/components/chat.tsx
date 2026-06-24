@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
-import { Brain, CircleDot, Loader2 } from "lucide-react";
+import { Bot, Brain, ChevronDown, CircleDot, Loader2 } from "lucide-react";
 import {
   cn,
   Composer,
@@ -284,6 +284,7 @@ export function Chat({
               message={m as unknown as AppUIMessage}
               isStreaming={busy && m.id === lastId && m.role === "assistant"}
               renderApproval={renderApproval}
+              renderSubagent={(part) => <SubagentThread part={part} />}
               onRegenerate={
                 m.role === "assistant" && !busy ? () => regenerate({ messageId: m.id }) : undefined
               }
@@ -351,5 +352,68 @@ export function Chat({
       </Thread.Composer>
       <Thread.Overlay direction="bottom" />
     </Thread>
+  );
+}
+
+/** A `spawn_agent` tool call: header + lazy-expandable subagent conversation. */
+function SubagentThread({ part }: { part: ToolPart }) {
+  const p = part as {
+    state?: string;
+    input?: { agent?: string; threadId?: string };
+    output?: { threadId?: string; answer?: string };
+  };
+  const agent = p.input?.agent ?? "agent";
+  const threadId = p.output?.threadId ?? p.input?.threadId;
+  const running = p.state === "input-streaming" || p.state === "input-available";
+
+  const [open, setOpen] = useState(false);
+  const [msgs, setMsgs] = useState<AppMessage[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && !msgs && threadId) {
+      setLoading(true);
+      const h = await loadHistory(threadId).catch(() => [] as AppMessage[]);
+      setMsgs(h);
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="border-primary-border overflow-hidden rounded-lg border">
+      <button
+        type="button"
+        onClick={toggle}
+        disabled={!threadId}
+        className="hover:bg-primary-hover flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors disabled:opacity-60"
+      >
+        <Bot className="text-ink-secondary size-4 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          Delegated to <span className="font-medium">{agent}</span>
+        </span>
+        {running ? (
+          <Loader2 className="text-ink-tertiary size-3.5 shrink-0 animate-spin" />
+        ) : (
+          threadId && (
+            <ChevronDown
+              className={cn("text-ink-tertiary size-4 shrink-0 transition-transform", open && "rotate-180")}
+            />
+          )
+        )}
+      </button>
+      {open && (
+        <div className="border-primary-border bg-base/40 space-y-3 border-t p-3">
+          {loading ? (
+            <p className="text-ink-tertiary text-xs">Loading…</p>
+          ) : msgs && msgs.length > 0 ? (
+            msgs.map((m) => <Message key={m.id} message={m as unknown as AppUIMessage} />)
+          ) : (
+            <p className="text-ink-tertiary text-xs">No messages.</p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
