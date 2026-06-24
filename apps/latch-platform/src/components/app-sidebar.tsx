@@ -13,6 +13,7 @@ import {
   Plus,
   Settings as SettingsIcon,
   UserPlus,
+  Users,
 } from "lucide-react";
 import {
   Dialog,
@@ -44,6 +45,7 @@ const NAV: NavItem[] = [
   { to: "/runs", label: "Runs", icon: Activity },
   { to: "/schedules", label: "Schedules", icon: CalendarClock },
   { to: "/connections", label: "Connections", icon: Plug },
+  { to: "/members", label: "Members", icon: Users },
 ];
 
 const ACTIVE = { className: "bg-base-active text-ink-primary" };
@@ -286,7 +288,13 @@ function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
     setBusy(true);
     setError(null);
     setNotice(null);
-    const res = await authClient.organization.inviteMember({ email: email.trim(), role });
+    const res = await authClient.organization.inviteMember({
+      email: email.trim(),
+      role,
+      // Pin to the active org explicitly so the invite can never land on the
+      // wrong tenant if the session's active org is mid-sync.
+      organizationId: activeOrg?.id,
+    });
     setBusy(false);
     if (res.error) setError(res.error.message ?? "Couldn't send the invite.");
     else {
