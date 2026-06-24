@@ -131,15 +131,28 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
 
     // Gate: only linked platform users may drive the agent.
     if (config.authorizeUser) {
-      const auth = await config.authorizeUser({ teamId, userId });
+      let auth: { allowed: boolean; linkUrl?: string; message?: string };
+      try {
+        auth = await config.authorizeUser({ teamId, userId });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await api
+          .postMessage({ channel, thread_ts: root, text: `:warning: auth check failed: ${msg}` })
+          .catch(() => {});
+        return;
+      }
       if (!auth.allowed) {
         const link = auth.linkUrl ? ` <${auth.linkUrl}|Link your Latch account>` : "";
-        await api.postEphemeral({
-          channel,
-          user: userId,
-          thread_ts: root,
-          text: (auth.message ?? "Link your Latch account to use this agent.") + link,
-        });
+        const text = (auth.message ?? "Link your Latch account to use this agent.") + link;
+        // Prefer an ephemeral notice; if that can't post, fall back to a normal
+        // reply so the user always learns they need to link (never silent).
+        try {
+          await api.postEphemeral({ channel, user: userId, thread_ts: root, text });
+        } catch {
+          await api
+            .postMessage({ channel, thread_ts: root, text: `<@${userId}> ${text}` })
+            .catch(() => {});
+        }
         return;
       }
     }
