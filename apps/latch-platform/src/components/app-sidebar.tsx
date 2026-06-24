@@ -5,6 +5,7 @@ import {
   Bot,
   Building2,
   CalendarClock,
+  Check,
   ChevronsUpDown,
   LogOut,
   MessageSquare,
@@ -22,6 +23,7 @@ import {
 import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -48,6 +50,7 @@ export function AppSidebar() {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Recent threads for the sidebar; refetch on navigation so new chats appear.
   useEffect(() => {
@@ -122,27 +125,30 @@ export function AppSidebar() {
 
       <Sidebar.Footer>
         {isPending ? null : session ? (
-          <>
-            <OrgSwitcher />
-            <div className="flex items-center gap-1">
-              <SettingsDialog />
-              <UserMenu email={session.user.email} />
-            </div>
-          </>
+          <AccountMenu email={session.user.email} onSettings={() => setSettingsOpen(true)} />
         ) : (
-          <>
-            <SettingsDialog />
-            <Button render={<Link to="/login" />} size="sm" className="w-full">
+          <div className="flex items-center gap-1">
+            <Button render={<Link to="/login" />} size="sm" className="min-w-0 flex-1">
               Sign in
             </Button>
-          </>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <SettingsIcon className="size-4" />
+            </Button>
+          </div>
         )}
+        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       </Sidebar.Footer>
     </Sidebar>
   );
 }
 
-function OrgSwitcher() {
+/** One menu for the account: org switch, settings, sign out. */
+function AccountMenu({ email, onSettings }: { email: string; onSettings: () => void }) {
   const router = useRouter();
   const { data: orgs } = authClient.useListOrganizations();
   const { data: activeOrg } = authClient.useActiveOrganization();
@@ -163,39 +169,37 @@ function OrgSwitcher() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        render={<Button variant="outline" size="sm" className="w-full justify-start gap-2" />}
+        render={<Button variant="ghost" className="h-auto w-full justify-start gap-2 py-1.5" />}
       >
-        <Building2 className="size-4" />
-        <span className="truncate">{activeOrg?.name ?? "Personal"}</span>
-        <ChevronsUpDown className="ml-auto size-3.5 opacity-60" />
+        <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
+          <Building2 className="size-3.5" />
+        </div>
+        <div className="min-w-0 flex-1 text-left">
+          <div className="text-ink-primary truncate text-sm font-medium">
+            {activeOrg?.name ?? "Personal"}
+          </div>
+          <div className="text-ink-tertiary truncate text-xs">{email}</div>
+        </div>
+        <ChevronsUpDown className="size-3.5 shrink-0 opacity-60" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-52">
+      <DropdownMenuContent align="start" className="w-56">
         <DropdownMenuGroup>
           <DropdownMenuLabel>Organizations</DropdownMenuLabel>
           {(orgs ?? []).map((o) => (
             <DropdownMenuItem key={o.id} onClick={() => switchOrg(o.id)}>
-              {o.name}
-              {activeOrg?.id === o.id && <span className="ml-auto text-xs opacity-60">active</span>}
+              <Building2 className="size-4" />
+              <span className="truncate">{o.name}</span>
+              {activeOrg?.id === o.id && <Check className="ml-auto size-3.5" />}
             </DropdownMenuItem>
           ))}
+          <DropdownMenuItem onClick={createOrg}>
+            <Plus className="size-4" /> New organization
+          </DropdownMenuItem>
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={createOrg}>
-          <Plus className="size-4" /> New organization
+        <DropdownMenuItem onClick={onSettings}>
+          <SettingsIcon className="size-4" /> Settings
         </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function UserMenu({ email }: { email: string }) {
-  const router = useRouter();
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger render={<Button variant="ghost" size="sm" className="min-w-0 flex-1 justify-start" />}>
-        <span className="truncate">{email}</span>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
         <DropdownMenuItem onClick={() => signOut().then(() => router.invalidate())}>
           <LogOut className="size-4" /> Sign out
         </DropdownMenuItem>
@@ -211,15 +215,12 @@ const SCROLL_MODES: { value: ThreadAutoScrollMode; label: string }[] = [
   { value: "off", label: "Off — manual scrolling" },
 ];
 
-/** Settings modal: theme customizer + chat scroll behavior. */
-function SettingsDialog() {
+/** Settings modal: theme customizer + chat scroll behavior. Controlled. */
+function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const scrollMode = useSettingsStore((s) => s.scrollMode);
   const setScrollMode = useSettingsStore((s) => s.setScrollMode);
   return (
-    <Dialog>
-      <Dialog.Trigger render={<Button variant="ghost" size="icon" aria-label="Settings" />}>
-        <SettingsIcon className="size-4" />
-      </Dialog.Trigger>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className="max-w-md">
         <Dialog.Title>Settings</Dialog.Title>
         <Dialog.Description>Theme and chat preferences.</Dialog.Description>
@@ -227,17 +228,17 @@ function SettingsDialog() {
           <ThemeCustomizer className="w-full" />
           <div className="space-y-2">
             <label className="text-ink-secondary text-xs font-medium">Auto-scroll</label>
-            <select
+            <Select
+              className="w-full"
               value={scrollMode}
               onChange={(e) => setScrollMode(e.target.value as ThreadAutoScrollMode)}
-              className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-sm"
             >
               {SCROLL_MODES.map((m) => (
                 <option key={m.value} value={m.value}>
                   {m.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
         </div>
       </Dialog.Content>
