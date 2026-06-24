@@ -152,14 +152,12 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         const link = auth.linkUrl ? ` <${auth.linkUrl}|Link your Latch account>` : "";
         const text = (auth.message ?? "Link your Latch account to use this agent.") + link;
         console.log(`[slack] refused user=${userId}; posting link notice`);
-        // Prefer an ephemeral notice; if that can't post, fall back to a normal
-        // reply so the user always learns they need to link (never silent).
+        // A normal (visible) threaded reply — ephemeral notices are easy to miss
+        // and can fail silently, which left users staring at nothing.
         try {
-          await api.postEphemeral({ channel, user: userId, thread_ts: root, text });
-        } catch {
-          await api
-            .postMessage({ channel, thread_ts: root, text: `<@${userId}> ${text}` })
-            .catch(() => {});
+          await api.postMessage({ channel, thread_ts: root, text: `<@${userId}> ${text}`, ...identity });
+        } catch (e) {
+          console.error("[slack] failed to post link notice:", e);
         }
         return;
       }
