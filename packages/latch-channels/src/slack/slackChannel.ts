@@ -127,7 +127,13 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     const chatId = chatIdFor(channel, root);
     const userId = ev.user ?? "";
     const prompt = stripMentions(ev.text ?? "");
-    if (!prompt) return;
+    console.log(
+      `[slack] runTurn type=${ev.type} user=${userId} team=${teamId} chan=${channel} promptLen=${prompt.length}`,
+    );
+    if (!prompt) {
+      console.log("[slack] empty prompt — nothing to do");
+      return;
+    }
 
     // Gate: only linked platform users may drive the agent.
     if (config.authorizeUser) {
@@ -141,9 +147,11 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           .catch(() => {});
         return;
       }
+      console.log(`[slack] gate allowed=${auth.allowed} user=${userId}`);
       if (!auth.allowed) {
         const link = auth.linkUrl ? ` <${auth.linkUrl}|Link your Latch account>` : "";
         const text = (auth.message ?? "Link your Latch account to use this agent.") + link;
+        console.log(`[slack] refused user=${userId}; posting link notice`);
         // Prefer an ephemeral notice; if that can't post, fall back to a normal
         // reply so the user always learns they need to link (never silent).
         try {
@@ -175,6 +183,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       });
       await renderRun(res, { channel, root, userId, chatId });
     } catch (e) {
+      console.error("[slack] runTurn failed:", e);
       const msg = e instanceof Error ? e.message : String(e);
       await api
         .postMessage({ channel, thread_ts: root, text: `:warning: ${msg.slice(0, 2900)}`, ...identity })
@@ -209,6 +218,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         }
       }
     } catch (e) {
+      console.error("[slack] renderRun stream failed:", e);
       errorMsg = e instanceof Error ? e.message : String(e);
     }
 
@@ -354,14 +364,22 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
 
     if (body.type === "event_callback" && body.event) {
       // Dedupe Slack's retries before doing any work.
-      if (body.event_id && config.seen && (await config.seen(body.event_id))) return ok();
+      if (body.event_id && config.seen && (await config.seen(body.event_id))) {
+        console.log(`[slack] duplicate event ${body.event_id} — dropped`);
+        return ok();
+      }
 
       const ev = body.event;
       const isMention = ev.type === "app_mention";
       const isDm = ev.type === "message" && ev.channel_type === "im";
       const fromBot = Boolean(ev.bot_id) || ev.subtype === "bot_message";
+      console.log(
+        `[slack] event type=${ev.type} channel_type=${ev.channel_type} fromBot=${fromBot} mention=${isMention} dm=${isDm}`,
+      );
       if ((isMention || isDm) && !fromBot && ev.channel && ev.ts) {
         defer(runTurn(ev, body.team_id ?? ""));
+      } else {
+        console.log("[slack] event not dispatched (not a mention/DM, or from bot)");
       }
       return ok();
     }
