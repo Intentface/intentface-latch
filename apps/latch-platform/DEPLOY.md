@@ -12,12 +12,13 @@ work. Use a hosted libsql (Turso) or Postgres. For Turso:
 - Create a Turso DB, then set env:
   - `DATABASE_URL=libsql://<db>.turso.io`
   - `TURSO_AUTH_TOKEN=<token>`
-- Latch tables self-create (idempotent `CREATE TABLE IF NOT EXISTS`) on first
-  request. **better-auth tables must be created explicitly** — run once against
-  the prod DB:
+- Run the migration script once against the prod DB (creates all Latch **and**
+  better-auth tables). With the prod `DATABASE_URL`/`TURSO_AUTH_TOKEN` in env:
   ```
-  npx @better-auth/cli migrate
+  pnpm build && pnpm --filter latch-platform db:migrate
   ```
+  (It's idempotent — safe to re-run. Tables also self-create lazily on first
+  request, but running this up front avoids a cold-start race.)
 
 ## 2. Environment variables (Vercel → Settings → Environment Variables)
 
