@@ -13,11 +13,9 @@ import {
   migrate,
 } from "@intentface/latch-drizzle";
 import { createMcpConnections, type McpConnections } from "@intentface/latch-mcp";
-import { createOpenApiConnections, apiKey } from "@intentface/latch-openapi";
 import { createLatchHandler, type LatchHandler } from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
-import { clockify, clockifyScope, clockifyHosts } from "@/connections/clockify";
 import { agents } from "@/agents";
 import { getPrincipalFromHeaders, type Principal } from "./session";
 import { createCredentials, type Credentials } from "./credentials";
@@ -123,28 +121,9 @@ export async function getLatch(): Promise<{
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
-  // OpenAPI connections (REST APIs with no MCP server). Clockify's key is
-  // org-scoped, read from the Vault (env is a zero-config dev fallback) — it's
-  // brokered server-side and never reaches the model.
-  const openapi = createOpenApiConnections<Principal>({
-    allowedHosts: clockifyHosts,
-    connections: {
-      clockify: clockify(
-        apiKey({
-          header: "X-Api-Key",
-          getKey: async (p) =>
-            (await credentials.get(p, "clockify", clockifyScope)) ??
-            process.env.CLOCKIFY_API_KEY,
-        }),
-      ),
-    },
-    onConnectionError: (name, err) =>
-      console.warn(`OpenAPI "${name}" skipped:`, err instanceof Error ? err.message : err),
-  });
-
   // The full connection registry across kinds — also used to enumerate a
   // connection's tools for the agent editor.
-  const allConnections = mergeConnections(connections, openapi, dynamic);
+  const allConnections = mergeConnections(connections, dynamic);
 
   const runtime = createRuntime<Principal, Ctx>({
     storage,

@@ -2,13 +2,10 @@ import { createServerFn } from "@tanstack/react-start";
 import type { AppMessage } from "@intentface/latch-core";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
-import { clockifyScope } from "@/connections/clockify";
 import type { CredentialScope } from "./credentials";
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
-const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [
-  { name: "clockify", label: "Clockify", scope: clockifyScope },
-];
+const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
 
 /**
  * Server-only reads for SSR route loaders / auth gates. These are thin

@@ -9,9 +9,9 @@ import type { Principal } from "@/lib/session";
  * micromanagement. The marquee cron use case (schedule it Mondays 06:30 UTC to
  * pre-build the brief).
  *
- * Connections: Loredex today. The real data sources (Clockify billable, Zero
- * CRM pipeline, Google Calendar holidays, Circleback prior action items) get
- * added as connections later — the agent picks them up with no change here.
+ * Connections: Loredex today. The real data sources (billable hours, Zero CRM
+ * pipeline, Google Calendar holidays, Circleback prior action items) get added
+ * as connections later — the agent picks them up with no change here.
  */
 export const weekly = defineAgent<Principal, { orgId: string }>(
   () => ({
@@ -30,16 +30,15 @@ export const weekly = defineAgent<Principal, { orgId: string }>(
       "3. Allocations & R&D capacity — over/under-allocations; R&D = what's left",
       "   over client work + leave, and whether it's spec'd (not idle).",
       "4. Sales pipeline — deals moving, events, missing contracts.",
-      "5. Admin & holidays — leave overlaps and staffing; Clockify/calendar hygiene.",
+      "5. Admin & holidays — leave overlaps and staffing; leave/calendar hygiene.",
       "Finish with concrete action items, each with an owner.",
       "",
-      "Use available connection tools to gather data: clockify_* for billable",
-      "hours / time entries / projects, and loredex_* for documented context",
-      "(prior notes, policies). The CRM/calendar sources aren't connected yet —",
-      "clearly note where live data is unavailable. The brief is a basis for",
-      "discussion, not a verdict.",
+      "Use available connection tools to gather data: loredex_* for documented",
+      "context (prior notes, policies). Billable/CRM/calendar sources aren't",
+      "connected yet — clearly note where live data is unavailable. The brief is",
+      "a basis for discussion, not a verdict.",
     ].join("\n"),
-    connections: ["loredex", "clockify"],
+    connections: ["loredex"],
     smoothStream: true,
   }),
   {
