@@ -162,8 +162,14 @@ function AccountMenu({ email, onSettings }: { email: string; onSettings: () => v
     router.invalidate();
   }
   async function switchOrg(organizationId: string) {
-    await authClient.organization.setActive({ organizationId });
-    router.invalidate();
+    const res = await authClient.organization.setActive({ organizationId });
+    if (res?.error) {
+      console.error("[org] setActive failed", res.error);
+      window.alert(`Couldn't switch org: ${res.error.message ?? "unknown error"}`);
+      return;
+    }
+    // Full reload so every org-scoped loader + the session re-resolve cleanly.
+    window.location.reload();
   }
 
   return (
