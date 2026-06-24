@@ -32,12 +32,16 @@ export const listChatsFn = createServerFn({ method: "GET" }).handler(async () =>
   if (!principal) return [];
   const { runtime } = await getLatch();
   const chats = await runtime.listChats({ principal });
-  return chats.map((c) => ({
-    id: c.id,
-    title: c.title ?? null,
-    agent: c.agent,
-    updatedAt: c.updatedAt,
-  }));
+  // Subagent threads (`sub_…`) are nested under their parent's spawn_agent tool
+  // calls, not top-level chats — keep them out of the list.
+  return chats
+    .filter((c) => !c.id.startsWith("sub_"))
+    .map((c) => ({
+      id: c.id,
+      title: c.title ?? null,
+      agent: c.agent,
+      updatedAt: c.updatedAt,
+    }));
 });
 
 /** The tenant's runs (status, tokens, cost) for the ops panel. */
@@ -293,6 +297,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         disableTools?: string[];
         codeMode?: { tools?: string[] };
       };
+      subagents?: string[];
       scope: "user" | "org";
     }) => data,
   )
@@ -313,6 +318,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       maxSteps: data.maxSteps,
       tools: data.tools,
       exec: data.exec,
+      subagents: data.subagents,
       scope: data.scope,
     });
     return { ok: true };

@@ -25,7 +25,7 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 }
 
 function AgentEditor() {
-  const { records, models, connections, status } = useLoaderData({ from: "/agents" });
+  const { records, allAgents, models, connections, status } = useLoaderData({ from: "/agents" });
   const { name: editName, scope: editScope } = Route.useSearch();
   const navigate = useNavigate();
 
@@ -52,6 +52,9 @@ function AgentEditor() {
     initial?.exec?.defaultTools === true ||
       (Array.isArray(initial?.exec?.defaultTools) && initial!.exec!.defaultTools.length > 0),
   );
+  const [subagents, setSubagents] = useState<string[]>(initial?.subagents ?? []);
+  const toggleSubagent = (n: string) =>
+    setSubagents((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
   const [toolList, setToolList] = useState<ToolInfo[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [approval, setApproval] = useState<Record<string, boolean>>({});
@@ -180,6 +183,7 @@ function AgentEditor() {
           maxSteps: unlimited ? "unlimited" : Number(maxSteps) || undefined,
           tools,
           exec,
+          subagents: subagents.length ? subagents : undefined,
           scope,
         },
       });
@@ -306,6 +310,39 @@ function AgentEditor() {
                   onDescribe={(n, v) => setDescriptions((p) => ({ ...p, [n]: v }))}
                 />
               ))}
+            </div>
+          </div>
+        )}
+
+        {allAgents.filter((a) => a.name !== name).length > 0 && (
+          <div className="space-y-2">
+            <FieldLabel>Subagents</FieldLabel>
+            <p className="text-ink-tertiary text-xs">
+              Agents this one may delegate to via a <span className="font-mono">spawn_agent</span>{" "}
+              tool. Subagents run autonomously (their tools are auto-approved) in their own thread.
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {allAgents
+                .filter((a) => a.name !== name)
+                .map((a) => {
+                  const on = subagents.includes(a.name);
+                  return (
+                    <button
+                      key={a.name}
+                      type="button"
+                      onClick={() => toggleSubagent(a.name)}
+                      title={a.description ?? a.title ?? a.name}
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                        on
+                          ? "border-accent bg-accent text-white"
+                          : "border-input bg-transparent hover:border-accent-border/60",
+                      )}
+                    >
+                      {a.title ?? a.name}
+                    </button>
+                  );
+                })}
             </div>
           </div>
         )}

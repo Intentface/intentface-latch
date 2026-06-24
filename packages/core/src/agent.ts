@@ -94,6 +94,14 @@ export interface AgentConfig<P> {
    */
   toolDescriptions?: Record<string, string>;
   /**
+   * Agents this one may delegate to. The runtime adds a `spawn_agent` tool that
+   * runs one of these as a subagent (a normal agent, run autonomously — its
+   * tools are auto-approved) and returns its final answer. Each subagent run is
+   * its own persisted thread; pass the returned `threadId` back to continue the
+   * same subagent with full context.
+   */
+  subagents?: string[];
+  /**
    * Give the agent a per-session sandbox (a workspace) and the filesystem/shell
    * tools that operate on it (`bash`, `read_file`, `write_file`, `glob`,
    * `grep`). The runtime resolves the actual `Experimental_SandboxSession` via

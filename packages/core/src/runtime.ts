@@ -4,8 +4,10 @@ import {
   createIdGenerator,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  jsonSchema,
   smoothStream,
   stepCountIs,
+  tool,
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession } from "ai";
@@ -287,6 +289,11 @@ export interface TurnWriter {
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
+/** Sub-thread chat ids start with `sub_` so the host can keep them out of the
+ * main chat list (they're nested under the parent's spawn_agent tool calls). */
+const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
+/** Recursion ceiling for subagent delegation. */
+const MAX_SUBAGENT_DEPTH = 4;
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
 
@@ -430,9 +437,15 @@ export function createRuntime<P, RC = unknown>(
     lease: RunLease | undefined;
     uiMessages: AppMessage[];
     runtimeCtx: RC;
+    /** Subagent runs: waive approvals + drop OAuth `connect_` gates (no human). */
+    autoApprove?: boolean;
+    /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
+    depth?: number;
   }): Promise<Response> {
     const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
       args;
+    const autoApprove = args.autoApprove ?? false;
+    const depth = args.depth ?? 0;
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -509,6 +522,47 @@ export function createRuntime<P, RC = unknown>(
       }
     }
 
+    // Subagent delegation: one `spawn_agent` tool that runs another agent and
+    // returns its final answer. Skipped past the recursion ceiling.
+    if (cfg.subagents?.length && depth < MAX_SUBAGENT_DEPTH) {
+      const allowed = new Set(cfg.subagents);
+      const infos = await agentInfos(principal);
+      const lines = cfg.subagents
+        .map((n) => {
+          const i = infos.find((a) => a.name === n);
+          return `- ${n}: ${i?.description ?? i?.title ?? "(no description)"}`;
+        })
+        .join("\n");
+      tools.spawn_agent = tool({
+        description:
+          "Delegate a sub-task to one of your agents and get its final answer.\n" +
+          `Available agents:\n${lines}\n\n` +
+          "Omit threadId to start a new conversation; pass the threadId returned by a " +
+          "previous call to continue with the SAME agent (it keeps full context). " +
+          "Returns { threadId, answer }.",
+        inputSchema: jsonSchema<{ agent: string; prompt: string; threadId?: string }>({
+          type: "object",
+          properties: {
+            agent: { type: "string", description: "One of the available agent names above." },
+            prompt: { type: "string", description: "The task / message for the subagent." },
+            threadId: { type: "string", description: "Continue an existing subagent thread." },
+          },
+          required: ["agent", "prompt"],
+          additionalProperties: false,
+        }),
+        execute: async ({ agent, prompt, threadId }) => {
+          if (!allowed.has(agent)) return { error: `Not an allowed subagent: ${agent}` };
+          return runSubagent({ principal, agent, prompt, threadId, depth: depth + 1 });
+        },
+      });
+    }
+
+    // Subagent runs are autonomous — there's no human to authorize, so waive
+    // approvals and drop the OAuth `connect_` gates (they'd pause forever).
+    if (autoApprove) {
+      for (const k of Object.keys(tools)) if (k.startsWith("connect_")) delete tools[k];
+    }
+
     // Merge the source-contributed approval policy (connection defaults +
     // synthetic `connect_<name>` gates) with the agent's. The AGENT WINS for
     // tools it names — so an agent can require approval on a GET or waive it on
@@ -518,8 +572,9 @@ export function createRuntime<P, RC = unknown>(
       {},
       ...opened.map((o) => o.toolApproval ?? {}),
     ) as Record<string, unknown>;
-    const toolApproval =
-      cfg.toolApproval && typeof cfg.toolApproval !== "function"
+    const toolApproval = autoApprove
+      ? undefined
+      : cfg.toolApproval && typeof cfg.toolApproval !== "function"
         ? { ...sourceApproval, ...(cfg.toolApproval as Record<string, unknown>) }
         : Object.keys(sourceApproval).length > 0 && !cfg.toolApproval
           ? sourceApproval
@@ -992,6 +1047,79 @@ export function createRuntime<P, RC = unknown>(
     await res.text();
   }
 
+  /** Merged agent directory (code-declared + dynamic) — name/title/description. */
+  async function agentInfos(principal: P): Promise<AgentInfo[]> {
+    const stat = Object.entries(config.agents).map(([name, factory]) => ({
+      name,
+      title: factory.meta?.title,
+      description: factory.meta?.description,
+    }));
+    const dyn = (await config.dynamicAgents?.list(principal)) ?? [];
+    return [...stat, ...dyn];
+  }
+
+  /** Concatenated text of the last assistant message in a chat (subagent answer). */
+  function lastAssistantText(messages: AppMessage[]): string {
+    const last = [...messages].reverse().find((m) => m.role === "assistant");
+    if (!last) return "";
+    return (last.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => (p as { type?: string }).type === "text")
+      .map((p) => p.text)
+      .join("");
+  }
+
+  /**
+   * Run another agent as an autonomous subagent in its own persisted thread and
+   * return its final answer. `threadId` omitted → a fresh `sub_…` thread;
+   * supplied → continue that thread with full prior context. Approvals are
+   * waived (autonomous). Returns `{ threadId, answer }`.
+   */
+  async function runSubagent({
+    principal,
+    agent,
+    prompt,
+    threadId,
+    depth,
+  }: {
+    principal: P;
+    agent: string;
+    prompt: string;
+    threadId?: string;
+    depth: number;
+  }): Promise<{ threadId: string; answer: string }> {
+    const subChatId = threadId ?? generateSubchatId();
+    let chat = await storage.getChat(principal, subChatId);
+    if (!chat) {
+      chat = await storage.createChat(principal, {
+        id: subChatId,
+        agent,
+        title: prompt.slice(0, 80),
+      });
+    }
+    const prior = await storage.loadMessages(principal, subChatId);
+    const message = userMessageOf(prompt);
+    await storage.appendMessages(subChatId, [message]);
+
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agent, principal);
+    const { run, lease } = await openRun(principal, subChatId, agent);
+    const res = await buildTurn({
+      resolvedChatId: subChatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: [...prior, message],
+      runtimeCtx,
+      autoApprove: true,
+      depth,
+    });
+    await res.text();
+
+    const answer = lastAssistantText(await storage.loadMessages(principal, subChatId));
+    return { threadId: subChatId, answer };
+  }
+
   async function schedule({
     principal,
     agent,
@@ -1049,15 +1177,7 @@ export function createRuntime<P, RC = unknown>(
   }
 
   return {
-    listAgents: async (principal) => {
-      const stat = Object.entries(config.agents).map(([name, factory]) => ({
-        name,
-        title: factory.meta?.title,
-        description: factory.meta?.description,
-      }));
-      const dyn = (await config.dynamicAgents?.list(principal)) ?? [];
-      return [...stat, ...dyn];
-    },
+    listAgents: agentInfos,
     tick: reapTick,
     handleChat,
     loadHistory,

@@ -44,6 +44,8 @@ export interface AgentRecord {
     disableTools?: string[];
     codeMode?: { tools?: string[] };
   };
+  /** Agents this one may delegate to via the `spawn_agent` tool. */
+  subagents?: string[];
   scope: CredentialScope;
 }
 
@@ -70,7 +72,7 @@ export async function migrateAgents(client: Client): Promise<void> {
     `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   );
   // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
-  for (const col of ["max_steps INTEGER", "exec TEXT"]) {
+  for (const col of ["max_steps INTEGER", "exec TEXT", "subagents TEXT"]) {
     try {
       await client.execute(`ALTER TABLE latch_agents ADD COLUMN ${col}`);
     } catch {
@@ -102,6 +104,7 @@ export function createAgentStore(
       ? (JSON.parse(String(row.tools)) as AgentRecord["tools"])
       : undefined,
     exec: row.exec ? (JSON.parse(String(row.exec)) as AgentRecord["exec"]) : undefined,
+    subagents: row.subagents ? (JSON.parse(String(row.subagents)) as string[]) : undefined,
     scope: String(row.scope) as CredentialScope,
   });
 
@@ -133,6 +136,8 @@ export function createAgentStore(
         // Per-tool description overrides → applied to the resolved tools.
         toolDescriptions:
           sel?.descriptions && Object.keys(sel.descriptions).length ? sel.descriptions : undefined,
+        // Agents this one may delegate to (→ the runtime's spawn_agent tool).
+        subagents: rec.subagents?.length ? rec.subagents : undefined,
         // Per-tool approval override (agent wins): on → require, off → waive.
         toolApproval: approvalEntries.length
           ? Object.fromEntries(
@@ -176,12 +181,13 @@ export function createAgentStore(
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_agents
-          (id, owner, name, title, description, model_id, instructions, connections, tools, exec, max_steps, scope, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, owner, name, title, description, model_id, instructions, connections, tools, exec, subagents, max_steps, scope, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, name) DO UPDATE SET
             title=excluded.title, description=excluded.description, model_id=excluded.model_id,
             instructions=excluded.instructions, connections=excluded.connections,
-            tools=excluded.tools, exec=excluded.exec, max_steps=excluded.max_steps, scope=excluded.scope,
+            tools=excluded.tools, exec=excluded.exec, subagents=excluded.subagents,
+            max_steps=excluded.max_steps, scope=excluded.scope,
             updated_at=excluded.updated_at`,
         args: [
           newId(),
@@ -194,6 +200,7 @@ export function createAgentStore(
           JSON.stringify(rec.connections),
           rec.tools ? JSON.stringify(rec.tools) : null,
           rec.exec ? JSON.stringify(rec.exec) : null,
+          rec.subagents?.length ? JSON.stringify(rec.subagents) : null,
           maxStepsToCol(rec.maxSteps),
           rec.scope,
           now,

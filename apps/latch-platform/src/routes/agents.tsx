@@ -2,6 +2,7 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import {
   currentPrincipalFn,
   listAgentRecordsFn,
+  listAgentsFn,
   listModelsFn,
   availableConnectionNamesFn,
   connectionsStatusFn,
@@ -28,6 +29,7 @@ export interface AgentRec {
     disableTools?: string[];
     codeMode?: { tools?: string[] };
   };
+  subagents?: string[];
   scope: "user" | "org";
 }
 
@@ -47,8 +49,9 @@ export const Route = createFileRoute("/agents")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [records, models, connections, codeStatus, dynStatus] = await Promise.all([
+    const [records, allAgents, models, connections, codeStatus, dynStatus] = await Promise.all([
       listAgentRecordsFn(),
+      listAgentsFn(),
       listModelsFn(),
       availableConnectionNamesFn(),
       connectionsStatusFn(),
@@ -57,7 +60,7 @@ export const Route = createFileRoute("/agents")({
     const status: ConnStatus = {};
     for (const c of codeStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };
     for (const c of dynStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };
-    return { records, models, connections, status };
+    return { records, allAgents, models, connections, status };
   },
   component: () => <Outlet />,
 });
