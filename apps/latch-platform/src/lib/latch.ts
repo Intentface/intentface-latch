@@ -22,6 +22,7 @@ import { createCredentials, type Credentials } from "./credentials";
 import { createConnectionStore, type ConnectionStore } from "./connection-store";
 import { createDynamicConnections, type DynamicConnections } from "./dynamic-connections";
 import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
+import { createSlackStore, migrateSlack, type SlackStore } from "./slack-store";
 import { loadModelCatalog, type ModelInfo } from "./models";
 import { resolveSandbox, harnessTools } from "./sandbox";
 
@@ -47,6 +48,7 @@ let cached:
       dynamic: DynamicConnections;
       allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
+      slackStore: SlackStore;
       models: ModelInfo[];
       handler: LatchHandler;
     }
@@ -60,6 +62,7 @@ export async function getLatch(): Promise<{
   dynamic: DynamicConnections;
   allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
+  slackStore: SlackStore;
   models: ModelInfo[];
   handler: LatchHandler;
 }> {
@@ -72,6 +75,7 @@ export async function getLatch(): Promise<{
   });
   await migrate(client); // creates latch_* tables alongside the auth tables
   await migrateAgents(client); // latch_agents (UI-created agents)
+  await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
@@ -90,6 +94,7 @@ export async function getLatch(): Promise<{
   const catalog = await loadModelCatalog();
   // UI-created agents (latch_agents table, org/personal).
   const agentStore = createAgentStore(client, catalog.modelFor);
+  const slackStore = createSlackStore(client);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -193,6 +198,7 @@ export async function getLatch(): Promise<{
     dynamic,
     allConnections,
     agentStore,
+    slackStore,
     models: catalog.models,
     handler,
   };

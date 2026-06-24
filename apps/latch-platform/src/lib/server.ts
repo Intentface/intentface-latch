@@ -1,8 +1,17 @@
 import { createServerFn } from "@tanstack/react-start";
 import type { AppMessage } from "@intentface/latch-core";
+import { slackManifest, createFromManifestUrl } from "@intentface/latch-channels/slack";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
+import { slackVaultKeys } from "./slack-store";
 import type { CredentialScope } from "./credentials";
+
+/** The app's canonical base URL (matches the Slack webhook route). */
+function baseUrl(): string {
+  if (process.env.BETTER_AUTH_URL) return process.env.BETTER_AUTH_URL;
+  const prod = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  return prod ? `https://${prod}` : "http://localhost:3000";
+}
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
@@ -348,3 +357,83 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async (
     enabled: s.enabled,
   }));
 });
+
+// ── Slack channel: per-agent app onboarding ─────────────────────────────────
+
+/**
+ * Generate the Slack app manifest for an agent + the "Create from manifest"
+ * deep-link. Used by the editor's Slack section for the manual (B) flow; the
+ * one-button (C) flow posts the same manifest to `apps.manifest.create`.
+ */
+export const slackManifestFn = createServerFn({ method: "GET" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { runtime } = await getLatch();
+    const info = (await runtime.listAgents(principal)).find((a) => a.name === agent);
+    if (!info) return null;
+    const manifest = slackManifest({
+      displayName: info.title ?? agent,
+      description: info.description,
+      requestUrl: `${baseUrl()}/api/slack`,
+      redirectUrl: `${baseUrl()}/api/slack/oauth`,
+    });
+    return {
+      manifestJson: JSON.stringify(manifest, null, 2),
+      createUrl: createFromManifestUrl(manifest),
+    };
+  });
+
+/**
+ * Bind a (manually created) Slack app to an agent: store its bot token +
+ * signing secret in the Vault and record the app→agent+owner mapping. After
+ * this, messages to that app's bot run the agent as the caller.
+ */
+export const bindSlackAppFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      appId: string;
+      agent: string;
+      botToken: string;
+      signingSecret: string;
+      teamId?: string;
+      botName?: string;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { slackStore, credentials } = await getLatch();
+    const keys = slackVaultKeys(data.appId);
+    await credentials.set(principal, keys.botToken, "org", data.botToken);
+    await credentials.set(principal, keys.signingSecret, "org", data.signingSecret);
+    await slackStore.bind({
+      appId: data.appId,
+      teamId: data.teamId,
+      agent: data.agent,
+      orgId: principal.orgId,
+      userId: principal.userId,
+      botName: data.botName,
+    });
+    return { ok: true };
+  });
+
+/** The caller's org's bound Slack apps (for the editor's status view). */
+export const listSlackAppsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { slackStore } = await getLatch();
+  return slackStore.listForOrg(principal.orgId);
+});
+
+/** Unbind a Slack app from its agent (leaves the Slack app itself untouched). */
+export const unbindSlackAppFn = createServerFn({ method: "POST" })
+  .validator((appId: string) => appId)
+  .handler(async ({ data: appId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { slackStore } = await getLatch();
+    await slackStore.unbind(appId);
+    return { ok: true };
+  });

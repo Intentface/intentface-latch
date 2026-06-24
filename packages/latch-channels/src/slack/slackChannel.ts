@@ -1,0 +1,313 @@
+import type { AppMessage } from "@intentface/latch-core";
+import { consumeRun, pendingApprovals } from "../render.js";
+import { slackApi, type SlackToken } from "./api.js";
+import { verifySlackSignature } from "./verify.js";
+import {
+  approvalBlocks,
+  approvalResolvedBlocks,
+  connectBlocks,
+  decodeApprovalAction,
+  textBlocks,
+} from "./blocks.js";
+
+/**
+ * The subset of the Latch runtime a channel drives. Structural so the package
+ * stays decoupled from the concrete app (and could even target a remote Latch).
+ */
+export interface SlackRunOps<P> {
+  handleChat(input: {
+    agent: string;
+    chatId?: string;
+    principal: P;
+    message: AppMessage;
+  }): Promise<Response>;
+  applyApproval(input: {
+    chatId: string;
+    principal: P;
+    decisions: { approvalId: string; approved: boolean }[];
+  }): Promise<Response>;
+  loadHistory(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
+}
+
+export interface SlackChannelConfig<P> {
+  /** The agent this app serves (own-app-per-agent), and the owner to run as. */
+  agent: string;
+  principal: P;
+  /** Vault-backed in practice: `() => vault.get(principal, "slack_bot_token")`. */
+  botToken: SlackToken;
+  signingSecret: string | (() => string | Promise<string>);
+  runtime: SlackRunOps<P>;
+  /**
+   * Host hook to keep a serverless function alive for background work after we
+   * ACK Slack (Slack's 3s timeout). On Vercel: `waitUntil` from `@vercel/functions`.
+   * Without it we await inline (fine for long-running / non-serverless hosts).
+   */
+  waitUntil?: (p: Promise<unknown>) => void;
+  /**
+   * Persistent dedupe: return true if this Slack `event_id` was already handled.
+   * Slack re-delivers events; an in-process Set is not enough on serverless.
+   */
+  seen?: (eventId: string) => Promise<boolean>;
+  /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
+  authorizeUrl?: (
+    connectionName: string,
+    ctx: {
+      chatId: string;
+      channelId: string;
+      threadTs: string;
+      userId: string;
+      approvalId: string;
+    },
+  ) => string;
+  /** Per-agent display identity (defaults applied by the bot user). */
+  botName?: string;
+  iconEmoji?: string;
+}
+
+type SlackEvent = {
+  type?: string;
+  text?: string;
+  user?: string;
+  channel?: string;
+  channel_type?: string;
+  ts?: string;
+  thread_ts?: string;
+  bot_id?: string;
+  subtype?: string;
+};
+
+const ok = () => new Response(null, { status: 200 });
+
+/** Strip leading bot @-mentions from an app_mention's text. */
+function stripMentions(text: string): string {
+  return text.replace(/^(\s*<@[^>]+>\s*)+/, "").trim();
+}
+
+function newId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `m_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+}
+
+/**
+ * One agent's Slack app. The host wires `handleRequest` to a single webhook
+ * route (events + interactivity + slash all post here). We verify, ACK fast,
+ * and run the turn in the background, translating the run's `RenderEvent`s into
+ * Slack posts + approval buttons.
+ */
+export function slackChannel<P>(config: SlackChannelConfig<P>) {
+  const api = slackApi(config.botToken);
+
+  async function resolveSigningSecret(): Promise<string> {
+    return typeof config.signingSecret === "function"
+      ? config.signingSecret()
+      : config.signingSecret;
+  }
+
+  const defer = (p: Promise<unknown>) =>
+    config.waitUntil ? config.waitUntil(p) : p;
+
+  const identity = { username: config.botName, icon_emoji: config.iconEmoji };
+
+  /** chatId for a Slack thread — anchors a Latch conversation to the thread. */
+  const chatIdFor = (channel: string, root: string) => `slack_${channel}_${root}`;
+
+  // ── Drive one turn and render it ──────────────────────────────────────────
+  async function runTurn(ev: SlackEvent): Promise<void> {
+    const channel = ev.channel!;
+    const root = ev.thread_ts ?? ev.ts!;
+    const chatId = chatIdFor(channel, root);
+    const userId = ev.user ?? "";
+    const prompt = stripMentions(ev.text ?? "");
+    if (!prompt) return;
+
+    await api.setStatus({ channel_id: channel, thread_ts: root, status: "is thinking…" });
+
+    const message: AppMessage = {
+      id: newId(),
+      role: "user",
+      parts: [{ type: "text", text: prompt }],
+      metadata: { visibility: "user", createdAt: Date.now() },
+    };
+
+    const res = await config.runtime.handleChat({
+      agent: config.agent,
+      chatId,
+      principal: config.principal,
+      message,
+    });
+
+    await renderRun(res, { channel, root, userId, chatId });
+  }
+
+  /** Fold a run Response into Slack posts (status + final text), then approvals. */
+  async function renderRun(
+    res: Response,
+    ctx: { channel: string; root: string; userId: string; chatId: string },
+  ): Promise<void> {
+    let text = "";
+    for await (const ev of consumeRun(res)) {
+      switch (ev.type) {
+        case "text-delta":
+          text += ev.text;
+          break;
+        case "tool-start":
+          await api.setStatus({
+            channel_id: ctx.channel,
+            thread_ts: ctx.root,
+            status: `is using ${ev.toolName}…`,
+          });
+          break;
+        case "status":
+          if (ev.status === "error")
+            await api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "hit an error" });
+          break;
+      }
+    }
+
+    if (text.trim()) {
+      await api.postMessage({
+        channel: ctx.channel,
+        thread_ts: ctx.root,
+        blocks: textBlocks(text),
+        text: text.slice(0, 3000),
+        ...identity,
+      });
+    }
+    await api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "" });
+
+    // Approvals are message state, not stream chunks — check fresh history.
+    const history = await config.runtime.loadHistory({
+      chatId: ctx.chatId,
+      principal: config.principal,
+    });
+    for (const pa of pendingApprovals(history)) {
+      if (pa.isConnect && pa.connectionName && config.authorizeUrl) {
+        const url = config.authorizeUrl(pa.connectionName, {
+          chatId: ctx.chatId,
+          channelId: ctx.channel,
+          threadTs: ctx.root,
+          userId: ctx.userId,
+          approvalId: pa.approvalId,
+        });
+        await api.postEphemeral({
+          channel: ctx.channel,
+          user: ctx.userId,
+          thread_ts: ctx.root,
+          blocks: connectBlocks(pa.connectionName, url),
+          text: `Connect ${pa.connectionName} to continue.`,
+        });
+      } else {
+        await api.postMessage({
+          channel: ctx.channel,
+          thread_ts: ctx.root,
+          blocks: approvalBlocks(
+            { chatId: ctx.chatId, agent: config.agent, approvalId: pa.approvalId },
+            pa.toolName,
+            pa.input,
+          ),
+          text: `Approve ${pa.toolName}?`,
+          ...identity,
+        });
+      }
+    }
+  }
+
+  // ── Approve/Deny button → resume the run ──────────────────────────────────
+  async function runInteraction(payload: {
+    actions?: { action_id: string; value?: string }[];
+    channel?: { id: string };
+    message?: { ts: string; thread_ts?: string };
+    user?: { id: string };
+  }): Promise<void> {
+    const action = payload.actions?.[0];
+    if (!action) return;
+    const decoded = decodeApprovalAction(action.action_id, action.value);
+    if (!decoded) return;
+
+    const channel = payload.channel?.id ?? "";
+    const ts = payload.message?.ts ?? "";
+    const root = payload.message?.thread_ts ?? ts;
+
+    // Resolve the approval; collapse the buttons into a settled card.
+    const res = await config.runtime.applyApproval({
+      chatId: decoded.ref.chatId,
+      principal: config.principal,
+      decisions: [{ approvalId: decoded.ref.approvalId, approved: decoded.approved }],
+    });
+    if (ts) {
+      await api.update({
+        channel,
+        ts,
+        blocks: approvalResolvedBlocks(decoded.ref.toolName ?? "tool", decoded.approved),
+        text: decoded.approved ? "Approved" : "Denied",
+      });
+    }
+    // Continue rendering whatever the resume produced (incl. chained approvals).
+    await renderRun(res, {
+      channel,
+      root,
+      userId: payload.user?.id ?? "",
+      chatId: decoded.ref.chatId,
+    });
+  }
+
+  // ── The single webhook entrypoint ─────────────────────────────────────────
+  async function handleRequest(request: Request): Promise<Response> {
+    const raw = await request.text();
+    const validSig = verifySlackSignature({
+      signingSecret: await resolveSigningSecret(),
+      rawBody: raw,
+      signature: request.headers.get("x-slack-signature"),
+      timestamp: request.headers.get("x-slack-request-timestamp"),
+    });
+    if (!validSig) return new Response("invalid signature", { status: 401 });
+
+    const contentType = request.headers.get("content-type") ?? "";
+
+    // Interactivity (block_actions): form-encoded `payload=<json>`.
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      const params = new URLSearchParams(raw);
+      const payloadStr = params.get("payload");
+      if (payloadStr) {
+        const payload = JSON.parse(payloadStr) as { type?: string };
+        if (payload.type === "block_actions") {
+          defer(runInteraction(payload as never));
+          return ok();
+        }
+      }
+      return ok(); // slash commands etc. — not handled yet
+    }
+
+    // Events API (JSON).
+    const body = JSON.parse(raw || "{}") as {
+      type?: string;
+      challenge?: string;
+      event_id?: string;
+      event?: SlackEvent;
+    };
+
+    if (body.type === "url_verification") {
+      return new Response(body.challenge ?? "", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+
+    if (body.type === "event_callback" && body.event) {
+      // Dedupe Slack's retries before doing any work.
+      if (body.event_id && config.seen && (await config.seen(body.event_id))) return ok();
+
+      const ev = body.event;
+      const isMention = ev.type === "app_mention";
+      const isDm = ev.type === "message" && ev.channel_type === "im";
+      const fromBot = Boolean(ev.bot_id) || ev.subtype === "bot_message";
+      if ((isMention || isDm) && !fromBot && ev.channel && ev.ts) {
+        defer(runTurn(ev));
+      }
+      return ok();
+    }
+
+    return ok();
+  }
+
+  return { handleRequest };
+}

@@ -12,6 +12,7 @@ import { createClient } from "@libsql/client";
 import { migrate } from "@intentface/latch-drizzle";
 import { getMigrations } from "better-auth/db/migration";
 import { migrateAgents } from "../lib/agent-store";
+import { migrateSlack } from "../lib/slack-store";
 import { auth } from "../lib/auth";
 
 async function main() {
@@ -23,6 +24,8 @@ async function main() {
   await migrate(client);
   // …UI-created agents…
   await migrateAgents(client);
+  // …Slack channel (app bindings + event dedupe)…
+  await migrateSlack(client);
   console.log("[migrate] latch tables ✓");
 
   // …and better-auth tables (user / session / account / organization / member).

@@ -1,0 +1,40 @@
+{
+  "name": "@intentface/latch-channels",
+  "version": "0.0.0",
+  "description": "Latch channels — bring a Latch agent to chat platforms (Slack first). A generic run→render-event projection plus per-platform adapters, reusing the core runtime, storage and durability (no separate state store).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./slack": {
+      "development": "./src/slack/index.ts",
+      "types": "./dist/slack/index.d.ts",
+      "import": "./dist/slack/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@intentface/latch-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "ai": ">=7.0.0-beta.178"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "ai": "7.0.0-beta.178",
+    "typescript": "^5.7.0"
+  }
+}

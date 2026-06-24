@@ -22,6 +22,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
+import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as AgentsEditRouteImport } from './routes/agents.edit'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
@@ -92,6 +93,11 @@ const ChatChatIdRoute = ChatChatIdRouteImport.update({
   path: '/$chatId',
   getParentRoute: () => ChatRoute,
 } as any)
+const ApiSlackRoute = ApiSlackRouteImport.update({
+  id: '/api/slack',
+  path: '/api/slack',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiCronRoute = ApiCronRouteImport.update({
   id: '/api/cron',
   path: '/api/cron',
@@ -126,6 +132,7 @@ export interface FileRoutesByFullPath {
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
+  '/api/slack': typeof ApiSlackRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
@@ -143,6 +150,7 @@ export interface FileRoutesByTo {
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
+  '/api/slack': typeof ApiSlackRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents': typeof AgentsIndexRoute
   '/chat': typeof ChatIndexRoute
@@ -163,6 +171,7 @@ export interface FileRoutesById {
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
+  '/api/slack': typeof ApiSlackRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
@@ -184,6 +193,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/agents/edit'
     | '/api/cron'
+    | '/api/slack'
     | '/chat/$chatId'
     | '/agents/'
     | '/chat/'
@@ -201,6 +211,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/agents/edit'
     | '/api/cron'
+    | '/api/slack'
     | '/chat/$chatId'
     | '/agents'
     | '/chat'
@@ -220,6 +231,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/agents/edit'
     | '/api/cron'
+    | '/api/slack'
     | '/chat/$chatId'
     | '/agents/'
     | '/chat/'
@@ -239,6 +251,7 @@ export interface RootRouteChildren {
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
   ApiCronRoute: typeof ApiCronRoute
+  ApiSlackRoute: typeof ApiSlackRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiLatchSplatRoute: typeof ApiLatchSplatRoute
 }
@@ -336,6 +349,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatChatIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/api/slack': {
+      id: '/api/slack'
+      path: '/api/slack'
+      fullPath: '/api/slack'
+      preLoaderRoute: typeof ApiSlackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/cron': {
       id: '/api/cron'
       path: '/api/cron'
@@ -404,6 +424,7 @@ const rootRouteChildren: RootRouteChildren = {
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,
   ApiCronRoute: ApiCronRoute,
+  ApiSlackRoute: ApiSlackRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiLatchSplatRoute: ApiLatchSplatRoute,
 }

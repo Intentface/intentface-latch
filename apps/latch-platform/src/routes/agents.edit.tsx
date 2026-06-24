@@ -1,7 +1,25 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createFileRoute, Link, useLoaderData, useNavigate } from "@tanstack/react-router";
-import { Bot, ChevronDown, ChevronLeft, Plug, RefreshCw, TriangleAlert } from "lucide-react";
-import { connectionToolsFn, saveAgentFn } from "@/lib/server";
+import {
+  Bot,
+  ChevronDown,
+  ChevronLeft,
+  Check,
+  Copy,
+  Hash,
+  Plug,
+  RefreshCw,
+  TriangleAlert,
+  Trash2,
+} from "lucide-react";
+import {
+  bindSlackAppFn,
+  connectionToolsFn,
+  listSlackAppsFn,
+  saveAgentFn,
+  slackManifestFn,
+  unbindSlackAppFn,
+} from "@/lib/server";
 import { authorizeUrl } from "@/lib/latch-client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -416,7 +434,190 @@ function AgentEditor() {
           </Button>
         </div>
       </form>
+
+      {editing && <SlackSection agent={name} />}
     </div>
+  );
+}
+
+/**
+ * Turn this agent into its own Slack bot (own-app-per-agent). The manual flow:
+ * copy the generated manifest → create the app in Slack → install it → paste
+ * the bot token + signing secret back here. Once bound, the agent answers in
+ * Slack as its own @-handle. (One-button automation is a later upgrade.)
+ */
+function SlackSection({ agent }: { agent: string }) {
+  const [apps, setApps] = useState<{ appId: string; botName?: string }[]>([]);
+  const [manifest, setManifest] = useState<{ manifestJson: string; createUrl: string } | null>(null);
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [appId, setAppId] = useState("");
+  const [botToken, setBotToken] = useState("");
+  const [signingSecret, setSigningSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const [all, man] = await Promise.all([
+      listSlackAppsFn(),
+      slackManifestFn({ data: agent }),
+    ]);
+    setApps(all.filter((a) => a.agent === agent).map((a) => ({ appId: a.appId, botName: a.botName })));
+    setManifest(man);
+  }, [agent]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function copyManifest() {
+    if (!manifest) return;
+    await navigator.clipboard.writeText(manifest.manifestJson).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  async function connect(e: React.FormEvent) {
+    e.preventDefault();
+    if (!appId.trim() || !botToken.trim() || !signingSecret.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await bindSlackAppFn({
+      data: {
+        appId: appId.trim(),
+        agent,
+        botToken: botToken.trim(),
+        signingSecret: signingSecret.trim(),
+      },
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setError("Couldn't connect the Slack app.");
+      return;
+    }
+    setAppId("");
+    setBotToken("");
+    setSigningSecret("");
+    setOpen(false);
+    await load();
+  }
+
+  async function disconnect(id: string) {
+    await unbindSlackAppFn({ data: id });
+    await load();
+  }
+
+  return (
+    <section className="border-primary-border space-y-3 rounded-lg border p-4">
+      <div className="flex items-center gap-2">
+        <Hash className="text-ink-secondary size-4" />
+        <h2 className="text-ink-primary text-sm font-semibold">Slack</h2>
+      </div>
+      <p className="text-ink-tertiary text-xs">
+        Give this agent its own Slack app and @-handle. Mention it or DM it, and it answers as this
+        agent — tool approvals show up as buttons right in the thread.
+      </p>
+
+      {apps.length > 0 && (
+        <div className="space-y-2">
+          {apps.map((a) => (
+            <div
+              key={a.appId}
+              className="border-primary-border flex items-center gap-3 rounded-lg border p-3"
+            >
+              <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
+                <Hash className="size-3.5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-ink-primary truncate text-sm font-medium">
+                  {a.botName ?? "Slack bot"}
+                </div>
+                <p className="text-ink-tertiary truncate font-mono text-xs">{a.appId}</p>
+              </div>
+              <Button type="button" variant="ghost" size="sm" onClick={() => disconnect(a.appId)}>
+                <Trash2 className="size-3.5" /> Disconnect
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!open ? (
+        <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
+          {apps.length ? "Add another Slack bot" : "Create Slack bot"}
+        </Button>
+      ) : (
+        <div className="border-primary-border space-y-4 rounded-lg border p-3">
+          {/* Step 1 — manifest */}
+          <div className="space-y-1.5">
+            <FieldLabel>1 · Create the app from this manifest</FieldLabel>
+            <div className="relative">
+              <pre className="bg-tertiary text-ink-secondary max-h-40 overflow-auto rounded-md p-2 font-mono text-[11px]">
+                {manifest?.manifestJson ?? "Loading…"}
+              </pre>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="absolute right-1 top-1"
+                onClick={copyManifest}
+              >
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              </Button>
+            </div>
+            {manifest && (
+              <a
+                href={manifest.createUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent inline-flex items-center gap-1 text-xs hover:underline"
+              >
+                Open Slack “Create from manifest” ↗
+              </a>
+            )}
+          </div>
+
+          {/* Step 2 — install */}
+          <div className="space-y-1">
+            <FieldLabel>2 · Install it to your workspace</FieldLabel>
+            <p className="text-ink-tertiary text-xs">
+              In the new app → <span className="font-mono">Install App</span> → Allow. Then copy its{" "}
+              <span className="font-mono">Bot User OAuth Token</span> (Install App) and{" "}
+              <span className="font-mono">Signing Secret</span> (Basic Information).
+            </p>
+          </div>
+
+          {/* Step 3 — bind */}
+          <form className="space-y-2" onSubmit={connect}>
+            <FieldLabel>3 · Connect it here</FieldLabel>
+            <Input
+              placeholder="App ID (e.g. A0123ABCD)"
+              value={appId}
+              onChange={(e) => setAppId(e.target.value)}
+            />
+            <Input
+              placeholder="Bot User OAuth Token (xoxb-…)"
+              value={botToken}
+              onChange={(e) => setBotToken(e.target.value)}
+            />
+            <Input
+              placeholder="Signing Secret"
+              value={signingSecret}
+              onChange={(e) => setSigningSecret(e.target.value)}
+            />
+            {error && <p className="text-destructive text-xs">{error}</p>}
+            <div className="flex gap-2">
+              <Button type="submit" size="sm" disabled={busy}>
+                {busy ? "Connecting…" : "Connect"}
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        </div>
+      )}
+    </section>
   );
 }
 
