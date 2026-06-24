@@ -128,14 +128,21 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       metadata: { visibility: "user", createdAt: Date.now() },
     };
 
-    const res = await config.runtime.handleChat({
-      agent: config.agent,
-      chatId,
-      principal: config.principal,
-      message,
-    });
-
-    await renderRun(res, { channel, root, userId, chatId });
+    try {
+      const res = await config.runtime.handleChat({
+        agent: config.agent,
+        chatId,
+        principal: config.principal,
+        message,
+      });
+      await renderRun(res, { channel, root, userId, chatId });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await api
+        .postMessage({ channel, thread_ts: root, text: `:warning: ${msg.slice(0, 2900)}`, ...identity })
+        .catch(() => {});
+      await api.setStatus({ channel_id: channel, thread_ts: root, status: "" }).catch(() => {});
+    }
   }
 
   /** Fold a run Response into Slack posts (status + final text), then approvals. */
@@ -144,23 +151,27 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     ctx: { channel: string; root: string; userId: string; chatId: string },
   ): Promise<void> {
     let text = "";
-    for await (const ev of consumeRun(res)) {
-      switch (ev.type) {
-        case "text-delta":
-          text += ev.text;
-          break;
-        case "tool-start":
-          await api.setStatus({
-            channel_id: ctx.channel,
-            thread_ts: ctx.root,
-            status: `is using ${ev.toolName}…`,
-          });
-          break;
-        case "status":
-          if (ev.status === "error")
-            await api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "hit an error" });
-          break;
+    let errorMsg: string | null = null;
+    try {
+      for await (const ev of consumeRun(res)) {
+        switch (ev.type) {
+          case "text-delta":
+            text += ev.text;
+            break;
+          case "tool-start":
+            await api.setStatus({
+              channel_id: ctx.channel,
+              thread_ts: ctx.root,
+              status: `is using ${ev.toolName}…`,
+            });
+            break;
+          case "error":
+            errorMsg = ev.message;
+            break;
+        }
       }
+    } catch (e) {
+      errorMsg = e instanceof Error ? e.message : String(e);
     }
 
     if (text.trim()) {
@@ -172,7 +183,17 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         ...identity,
       });
     }
+    // Surface failures in-thread so the user is never left with just a status.
+    if (errorMsg && !text.trim()) {
+      await api.postMessage({
+        channel: ctx.channel,
+        thread_ts: ctx.root,
+        text: `:warning: ${errorMsg.slice(0, 2900)}`,
+        ...identity,
+      });
+    }
     await api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "" });
+    if (errorMsg) return; // don't look for approvals on a failed turn
 
     // Approvals are message state, not stream chunks — check fresh history.
     const history = await config.runtime.loadHistory({

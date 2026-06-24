@@ -71,7 +71,7 @@ export async function* consumeRun(response: Response): AsyncGenerator<RenderEven
           };
           break;
         case "error":
-          yield { type: "status", status: "error" };
+          yield { type: "error", message: chunk.errorText || "The run failed." };
           break;
       }
     }

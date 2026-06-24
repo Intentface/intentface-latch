@@ -27,6 +27,8 @@ export type RenderEvent =
       output?: unknown;
       error?: string;
     }
+  /** The run failed; `message` is the error text to surface to the user. */
+  | { type: "error"; message: string }
   /** The streamed turn ended (may still be paused awaiting approval — see status). */
   | { type: "finish" };
 
