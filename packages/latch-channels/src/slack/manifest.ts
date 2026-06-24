@@ -19,7 +19,7 @@ export interface SlackManifestInput {
 }
 
 /** Bot scopes for the supported feature set (mentions, DMs, posting, status). */
-const BOT_SCOPES = [
+export const SLACK_BOT_SCOPES = [
   "app_mentions:read",
   "chat:write",
   "chat:write.customize",
@@ -29,6 +29,7 @@ const BOT_SCOPES = [
   "assistant:write",
   "commands",
 ];
+const BOT_SCOPES = SLACK_BOT_SCOPES;
 
 /** Build the Slack manifest object (JSON-serializable). */
 export function slackManifest(input: SlackManifestInput): Record<string, unknown> {

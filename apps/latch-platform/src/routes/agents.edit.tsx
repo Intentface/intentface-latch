@@ -13,9 +13,9 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  bindSlackAppFn,
   connectionToolsFn,
   createSlackAppFn,
+  installSlackAppFn,
   listSlackAppsFn,
   saveAgentFn,
   setSlackConfigTokenFn,
@@ -460,7 +460,8 @@ function SlackSection({ agent }: { agent: string }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [appId, setAppId] = useState("");
-  const [botToken, setBotToken] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -524,29 +525,27 @@ function SlackSection({ agent }: { agent: string }) {
     setTimeout(() => setCopied(false), 1500);
   }
 
-  async function connect(e: React.FormEvent) {
+  async function install(e: React.FormEvent) {
     e.preventDefault();
-    if (!appId.trim() || !botToken.trim() || !signingSecret.trim() || busy) return;
+    if (!appId.trim() || !clientId.trim() || !clientSecret.trim() || !signingSecret.trim() || busy)
+      return;
     setBusy(true);
     setError(null);
-    const res = await bindSlackAppFn({
+    const res = await installSlackAppFn({
       data: {
         appId: appId.trim(),
         agent,
-        botToken: botToken.trim(),
+        clientId: clientId.trim(),
+        clientSecret: clientSecret.trim(),
         signingSecret: signingSecret.trim(),
       },
     });
-    setBusy(false);
-    if (!res.ok) {
-      setError("Couldn't connect the Slack app.");
+    if (res.ok) {
+      window.location.href = res.authorizeUrl; // → Slack install → /api/slack/oauth (bot token)
       return;
     }
-    setAppId("");
-    setBotToken("");
-    setSigningSecret("");
-    setOpen(false);
-    await load();
+    setBusy(false);
+    setError(res.error ?? "Couldn't start the install.");
   }
 
   async function disconnect(id: string) {
@@ -673,28 +672,35 @@ function SlackSection({ agent }: { agent: string }) {
             )}
           </div>
 
-          {/* Step 2 — install */}
+          {/* Step 2 — copy static creds (no install needed yet) */}
           <div className="space-y-1">
-            <FieldLabel>2 · Install it to your workspace</FieldLabel>
+            <FieldLabel>2 · Copy the app credentials</FieldLabel>
             <p className="text-ink-tertiary text-xs">
-              In the new app → <span className="font-mono">Install App</span> → Allow. Then copy its{" "}
-              <span className="font-mono">Bot User OAuth Token</span> (Install App) and{" "}
-              <span className="font-mono">Signing Secret</span> (Basic Information).
+              In the new app → <span className="font-mono">Basic Information</span> → App
+              Credentials: copy the <span className="font-mono">App ID</span>,{" "}
+              <span className="font-mono">Client ID</span>,{" "}
+              <span className="font-mono">Client Secret</span>, and{" "}
+              <span className="font-mono">Signing Secret</span>. (No install needed — we do it next.)
             </p>
           </div>
 
-          {/* Step 3 — bind */}
-          <form className="space-y-2" onSubmit={connect}>
-            <FieldLabel>3 · Connect it here</FieldLabel>
+          {/* Step 3 — install (OAuth captures the bot token automatically) */}
+          <form className="space-y-2" onSubmit={install}>
+            <FieldLabel>3 · Install — we grab the bot token for you</FieldLabel>
             <Input
               placeholder="App ID (e.g. A0123ABCD)"
               value={appId}
               onChange={(e) => setAppId(e.target.value)}
             />
             <Input
-              placeholder="Bot User OAuth Token (xoxb-…)"
-              value={botToken}
-              onChange={(e) => setBotToken(e.target.value)}
+              placeholder="Client ID"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+            />
+            <Input
+              placeholder="Client Secret"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
             />
             <Input
               placeholder="Signing Secret"
@@ -704,7 +710,7 @@ function SlackSection({ agent }: { agent: string }) {
             {error && <p className="text-destructive text-xs">{error}</p>}
             <div className="flex gap-2">
               <Button type="submit" size="sm" disabled={busy}>
-                {busy ? "Connecting…" : "Connect"}
+                {busy ? "Starting…" : "Install to Slack"}
               </Button>
               <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
                 Cancel

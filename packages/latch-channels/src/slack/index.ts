@@ -7,7 +7,7 @@
  */
 export { slackChannel } from "./slackChannel.js";
 export type { SlackChannelConfig, SlackRunOps } from "./slackChannel.js";
-export { slackManifest, createFromManifestUrl } from "./manifest.js";
+export { slackManifest, createFromManifestUrl, SLACK_BOT_SCOPES } from "./manifest.js";
 export type { SlackManifestInput } from "./manifest.js";
 export { verifySlackSignature } from "./verify.js";
 export { slackApi } from "./api.js";

@@ -1,6 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import type { AppMessage } from "@intentface/latch-core";
-import { slackManifest, createFromManifestUrl } from "@intentface/latch-channels/slack";
+import {
+  slackManifest,
+  createFromManifestUrl,
+  SLACK_BOT_SCOPES,
+} from "@intentface/latch-channels/slack";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 import {
@@ -391,37 +395,49 @@ export const slackManifestFn = createServerFn({ method: "GET" })
   });
 
 /**
- * Bind a (manually created) Slack app to an agent: store its bot token +
- * signing secret in the Vault and record the app→agent+owner mapping. After
- * this, messages to that app's bot run the agent as the caller.
+ * Bind a (manually created) Slack app by its STATIC credentials — client id +
+ * secret + signing secret, all on the app's Basic Information page right after
+ * you create it from the manifest (no install needed). We stash them in the
+ * Vault, pre-bind the app→agent+owner, and return the "Add to Slack" install
+ * URL. The OAuth callback then captures the bot token automatically — so no bot
+ * token is ever pasted by hand.
  */
-export const bindSlackAppFn = createServerFn({ method: "POST" })
+export const installSlackAppFn = createServerFn({ method: "POST" })
   .validator(
     (data: {
       appId: string;
       agent: string;
-      botToken: string;
+      clientId: string;
+      clientSecret: string;
       signingSecret: string;
-      teamId?: string;
-      botName?: string;
     }) => data,
   )
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
-    if (!principal) return { ok: false };
-    const { slackStore, credentials } = await getLatch();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime, slackStore, credentials } = await getLatch();
+
     const keys = slackVaultKeys(data.appId);
-    await credentials.set(principal, keys.botToken, "org", data.botToken);
+    await credentials.set(principal, keys.clientId, "org", data.clientId);
+    await credentials.set(principal, keys.clientSecret, "org", data.clientSecret);
     await credentials.set(principal, keys.signingSecret, "org", data.signingSecret);
+
+    const botName =
+      (await runtime.listAgents(principal)).find((a) => a.name === data.agent)?.title ?? data.agent;
     await slackStore.bind({
       appId: data.appId,
-      teamId: data.teamId,
       agent: data.agent,
       orgId: principal.orgId,
       userId: principal.userId,
-      botName: data.botName,
+      botName,
     });
-    return { ok: true };
+
+    const authorizeUrl =
+      `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(data.clientId)}` +
+      `&scope=${encodeURIComponent(SLACK_BOT_SCOPES.join(","))}` +
+      `&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}` +
+      `&state=${encodeURIComponent(data.appId)}`;
+    return { ok: true as const, authorizeUrl };
   });
 
 /** The caller's org's bound Slack apps (for the editor's status view). */
