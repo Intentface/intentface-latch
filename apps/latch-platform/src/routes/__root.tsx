@@ -42,12 +42,19 @@ export const Route = createRootRoute({
   shellComponent: RootDocument,
 })
 
-/** Auth routes render full-screen, without the app shell (sidebar/canvas). */
-const AUTH_ROUTES = ["/login", "/reset-password"];
+/**
+ * Routes that render full-screen, without the app shell (sidebar/canvas):
+ * the logged-out landing (`/`) and the standalone auth screens. `/` only ever
+ * shows logged-out (it redirects to /chat once signed in), so the shell never
+ * appears until you're in.
+ */
+const SHELL_LESS_ROUTES = ["/", "/login", "/reset-password", "/accept-invitation"];
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const isAuthRoute = AUTH_ROUTES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  const isAuthRoute = SHELL_LESS_ROUTES.some(
+    (p) => pathname === p || (p !== "/" && pathname.startsWith(`${p}/`)),
+  );
 
   return (
     <html lang="en" suppressHydrationWarning>

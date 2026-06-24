@@ -12,6 +12,7 @@ import {
   Plug,
   Plus,
   Settings as SettingsIcon,
+  UserPlus,
 } from "lucide-react";
 import {
   Dialog,
@@ -23,6 +24,7 @@ import {
 import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import {
   DropdownMenu,
@@ -51,6 +53,7 @@ export function AppSidebar() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
 
   // Recent threads for the sidebar; refetch on navigation so new chats appear.
   useEffect(() => {
@@ -125,7 +128,11 @@ export function AppSidebar() {
 
       <Sidebar.Footer>
         {isPending ? null : session ? (
-          <AccountMenu email={session.user.email} onSettings={() => setSettingsOpen(true)} />
+          <AccountMenu
+            email={session.user.email}
+            onSettings={() => setSettingsOpen(true)}
+            onInvite={() => setInviteOpen(true)}
+          />
         ) : (
           <div className="flex items-center gap-1">
             <Button render={<Link to="/login" />} size="sm" className="min-w-0 flex-1">
@@ -142,13 +149,22 @@ export function AppSidebar() {
           </div>
         )}
         <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+        {session && <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />}
       </Sidebar.Footer>
     </Sidebar>
   );
 }
 
-/** One menu for the account: org switch, settings, sign out. */
-function AccountMenu({ email, onSettings }: { email: string; onSettings: () => void }) {
+/** One menu for the account: org switch, invite, settings, sign out. */
+function AccountMenu({
+  email,
+  onSettings,
+  onInvite,
+}: {
+  email: string;
+  onSettings: () => void;
+  onInvite: () => void;
+}) {
   const router = useRouter();
   const { data: orgs } = authClient.useListOrganizations();
   const { data: activeOrg } = authClient.useActiveOrganization();
@@ -201,6 +217,9 @@ function AccountMenu({ email, onSettings }: { email: string; onSettings: () => v
           <DropdownMenuItem onClick={createOrg}>
             <Plus className="size-4" /> New organization
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={onInvite}>
+            <UserPlus className="size-4" /> Invite member
+          </DropdownMenuItem>
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={onSettings}>
@@ -247,6 +266,67 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
             </Select>
           </div>
         </div>
+      </Dialog.Content>
+    </Dialog>
+  );
+}
+
+/** Invite someone to the active org by email (better-auth org invitation). */
+function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  const { data: activeOrg } = authClient.useActiveOrganization();
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"member" | "admin" | "owner">("member");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function invite(e: React.FormEvent) {
+    e.preventDefault();
+    if (!email.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    const res = await authClient.organization.inviteMember({ email: email.trim(), role });
+    setBusy(false);
+    if (res.error) setError(res.error.message ?? "Couldn't send the invite.");
+    else {
+      setNotice(`Invite sent to ${email.trim()}.`);
+      setEmail("");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className="max-w-md">
+        <Dialog.Title>Invite member</Dialog.Title>
+        <Dialog.Description>
+          {activeOrg
+            ? `Invite someone to ${activeOrg.name} by email. They'll get a link to join.`
+            : "Switch to an organization first, then invite members to it."}
+        </Dialog.Description>
+        {activeOrg && (
+          <form className="mt-4 space-y-3" onSubmit={invite}>
+            <div className="flex gap-2">
+              <Input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@intentface.com"
+                required
+              />
+              <Select value={role} onChange={(e) => setRole(e.target.value as never)}>
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+                <option value="owner">Owner</option>
+              </Select>
+            </div>
+            {error && <p className="text-destructive text-sm">{error}</p>}
+            {notice && <p className="text-ink-secondary text-sm">{notice}</p>}
+            <Button type="submit" className="w-full" disabled={busy || !email.trim()}>
+              {busy ? "…" : "Send invite"}
+            </Button>
+          </form>
+        )}
       </Dialog.Content>
     </Dialog>
   );

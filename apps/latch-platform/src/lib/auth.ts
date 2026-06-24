@@ -127,5 +127,20 @@ export const auth = betterAuth({
       },
     },
   },
-  plugins: [organization(), tanstackStartCookies()],
+  plugins: [
+    organization({
+      // Email an accept link (via Resend) when a member is invited.
+      sendInvitationEmail: async ({ id, email, organization, inviter }) => {
+        const url = `${baseURL}/accept-invitation?id=${id}`;
+        const who = inviter.user.name || inviter.user.email;
+        void sendEmail({
+          to: email,
+          subject: `You're invited to ${organization.name} on Latch`,
+          text: `${who} invited you to join "${organization.name}".\n\nAccept: ${url}`,
+          html: `<p><strong>${who}</strong> invited you to join <strong>${organization.name}</strong> on Latch.</p><p><a href="${url}">Accept invitation</a></p>`,
+        });
+      },
+    }),
+    tanstackStartCookies(),
+  ],
 });

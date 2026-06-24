@@ -16,6 +16,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as ConnectionsRouteImport } from './routes/connections'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as AgentsRouteImport } from './routes/agents'
+import { Route as AcceptInvitationRouteImport } from './routes/accept-invitation'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
@@ -58,6 +59,11 @@ const ChatRoute = ChatRouteImport.update({
 const AgentsRoute = AgentsRouteImport.update({
   id: '/agents',
   path: '/agents',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AcceptInvitationRoute = AcceptInvitationRouteImport.update({
+  id: '/accept-invitation',
+  path: '/accept-invitation',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -103,6 +109,7 @@ const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/accept-invitation': typeof AcceptInvitationRoute
   '/agents': typeof AgentsRouteWithChildren
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
@@ -120,6 +127,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/accept-invitation': typeof AcceptInvitationRoute
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -136,6 +144,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/accept-invitation': typeof AcceptInvitationRoute
   '/agents': typeof AgentsRouteWithChildren
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
@@ -155,6 +164,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/accept-invitation'
     | '/agents'
     | '/chat'
     | '/connections'
@@ -172,6 +182,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/accept-invitation'
     | '/connections'
     | '/login'
     | '/reset-password'
@@ -187,6 +198,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/accept-invitation'
     | '/agents'
     | '/chat'
     | '/connections'
@@ -205,6 +217,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AcceptInvitationRoute: typeof AcceptInvitationRoute
   AgentsRoute: typeof AgentsRouteWithChildren
   ChatRoute: typeof ChatRouteWithChildren
   ConnectionsRoute: typeof ConnectionsRoute
@@ -266,6 +279,13 @@ declare module '@tanstack/react-router' {
       path: '/agents'
       fullPath: '/agents'
       preLoaderRoute: typeof AgentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accept-invitation': {
+      id: '/accept-invitation'
+      path: '/accept-invitation'
+      fullPath: '/accept-invitation'
+      preLoaderRoute: typeof AcceptInvitationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -354,6 +374,7 @@ const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AcceptInvitationRoute: AcceptInvitationRoute,
   AgentsRoute: AgentsRouteWithChildren,
   ChatRoute: ChatRouteWithChildren,
   ConnectionsRoute: ConnectionsRoute,
