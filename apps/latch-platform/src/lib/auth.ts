@@ -37,7 +37,27 @@ const dialect = new LibsqlDialect({
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
-const baseURL = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
+// Vercel exposes two hostnames (no scheme): VERCEL_PROJECT_PRODUCTION_URL is the
+// stable production alias (e.g. intentface-latch.vercel.app — same on every
+// deploy), VERCEL_URL is the per-deployment/preview host. Prefer an explicit
+// BETTER_AUTH_URL, else fall back to the production alias, else localhost.
+const vercelProdUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+const vercelUrl = process.env.VERCEL_URL;
+const baseURL =
+  process.env.BETTER_AUTH_URL ??
+  (vercelProdUrl ? `https://${vercelProdUrl}` : "http://localhost:3000");
+
+// Allow the canonical baseURL plus the production alias and the current preview
+// deployment, so logins work on prod AND preview URLs without per-deploy config.
+const trustedOrigins = [
+  ...new Set(
+    [
+      baseURL,
+      vercelProdUrl && `https://${vercelProdUrl}`,
+      vercelUrl && `https://${vercelUrl}`,
+    ].filter((o): o is string => Boolean(o)),
+  ),
+];
 
 // Direct client for the session hook below (the Kysely dialect above is
 // better-auth's; this is just a small lookup against the same DB file).
@@ -58,7 +78,7 @@ async function firstOrgFor(userId: string): Promise<string | undefined> {
 
 export const auth = betterAuth({
   baseURL,
-  trustedOrigins: [baseURL],
+  trustedOrigins,
   database: { dialect, type: "sqlite" },
   secret: process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-change-me",
   emailAndPassword: {
