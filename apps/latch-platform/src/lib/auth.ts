@@ -34,13 +34,17 @@ const googleProvider = process.env.GOOGLE_CLIENT_ID
  */
 const dialect = new LibsqlDialect({
   url: process.env.DATABASE_URL ?? "file:./latch.db",
+  authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
 const baseURL = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
 
 // Direct client for the session hook below (the Kysely dialect above is
 // better-auth's; this is just a small lookup against the same DB file).
-const db = createClient({ url: process.env.DATABASE_URL ?? "file:./latch.db" });
+const db = createClient({
+  url: process.env.DATABASE_URL ?? "file:./latch.db",
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
 
 /** The user's earliest org membership — their default tenant. */
 async function firstOrgFor(userId: string): Promise<string | undefined> {

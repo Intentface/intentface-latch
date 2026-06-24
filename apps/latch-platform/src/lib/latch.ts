@@ -67,7 +67,11 @@ export async function getLatch(): Promise<{
 }> {
   if (cached) return cached;
 
-  const client = createClient({ url: process.env.DATABASE_URL ?? "file:./latch.db" });
+  // Local dev → a file DB; prod → a hosted libsql (Turso) URL + auth token.
+  const client = createClient({
+    url: process.env.DATABASE_URL ?? "file:./latch.db",
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  });
   await migrate(client); // creates latch_* tables alongside the auth tables
   await migrateAgents(client); // latch_agents (UI-created agents)
 
@@ -191,13 +195,16 @@ export async function getLatch(): Promise<{
     cronSecret: process.env.LATCH_CRON_SECRET ?? "dev-cron-secret",
   });
 
-  // Dev: no long-running process, so tick due schedules in-process every 30s.
-  // In prod, point a platform cron (Vercel Cron, etc.) at /api/latch/cron/run
-  // instead and drop this. Errors are swallowed — a bad tick never crashes dev.
-  const tick = setInterval(() => {
-    void runtime.runDue().catch((e) => console.warn("runDue failed:", e));
-  }, 30_000);
-  (tick as { unref?: () => void }).unref?.();
+  // Dev only: no long-running process, so tick due schedules in-process every
+  // 30s. In prod (Vercel), the platform cron hits `/api/cron` instead (which
+  // also sweeps crashed runs), so skip this — serverless wouldn't run it
+  // reliably anyway. Errors are swallowed — a bad tick never crashes dev.
+  if (!process.env.VERCEL) {
+    const tick = setInterval(() => {
+      void runtime.runDue().catch((e) => console.warn("runDue failed:", e));
+    }, 30_000);
+    (tick as { unref?: () => void }).unref?.();
+  }
 
   cached = {
     runtime,

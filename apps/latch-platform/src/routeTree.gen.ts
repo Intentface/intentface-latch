@@ -20,6 +20,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
+import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as AgentsEditRouteImport } from './routes/agents.edit'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
@@ -79,6 +80,11 @@ const ChatChatIdRoute = ChatChatIdRouteImport.update({
   path: '/$chatId',
   getParentRoute: () => ChatRoute,
 } as any)
+const ApiCronRoute = ApiCronRouteImport.update({
+  id: '/api/cron',
+  path: '/api/cron',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsEditRoute = AgentsEditRouteImport.update({
   id: '/edit',
   path: '/edit',
@@ -105,6 +111,7 @@ export interface FileRoutesByFullPath {
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
+  '/api/cron': typeof ApiCronRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
@@ -119,6 +126,7 @@ export interface FileRoutesByTo {
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
+  '/api/cron': typeof ApiCronRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents': typeof AgentsIndexRoute
   '/chat': typeof ChatIndexRoute
@@ -136,6 +144,7 @@ export interface FileRoutesById {
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
+  '/api/cron': typeof ApiCronRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
@@ -154,6 +163,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/schedules'
     | '/agents/edit'
+    | '/api/cron'
     | '/chat/$chatId'
     | '/agents/'
     | '/chat/'
@@ -168,6 +178,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/schedules'
     | '/agents/edit'
+    | '/api/cron'
     | '/chat/$chatId'
     | '/agents'
     | '/chat'
@@ -184,6 +195,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/schedules'
     | '/agents/edit'
+    | '/api/cron'
     | '/chat/$chatId'
     | '/agents/'
     | '/chat/'
@@ -200,6 +212,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
+  ApiCronRoute: typeof ApiCronRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiLatchSplatRoute: typeof ApiLatchSplatRoute
 }
@@ -283,6 +296,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatChatIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/api/cron': {
+      id: '/api/cron'
+      path: '/api/cron'
+      fullPath: '/api/cron'
+      preLoaderRoute: typeof ApiCronRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/edit': {
       id: '/agents/edit'
       path: '/edit'
@@ -341,6 +361,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,
+  ApiCronRoute: ApiCronRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiLatchSplatRoute: ApiLatchSplatRoute,
 }
