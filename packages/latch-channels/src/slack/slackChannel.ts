@@ -68,7 +68,16 @@ export interface SlackChannelConfig<P> {
   authorizeUser?: (user: {
     teamId: string;
     userId: string;
+    channelId: string;
+    threadRoot: string;
+    prompt: string;
   }) => Promise<{ allowed: boolean; linkUrl?: string; message?: string }>;
+  /**
+   * For thread-following: is this thread one the bot is already active in (so a
+   * plain message — no @-mention — should be handled)? Omitted → only mentions
+   * and DMs trigger the bot.
+   */
+  isFollowedThread?: (chatId: string) => Promise<boolean>;
   /** Per-agent display identity (defaults applied by the bot user). */
   botName?: string;
   iconEmoji?: string;
@@ -139,7 +148,13 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     if (config.authorizeUser) {
       let auth: { allowed: boolean; linkUrl?: string; message?: string };
       try {
-        auth = await config.authorizeUser({ teamId, userId });
+        auth = await config.authorizeUser({
+          teamId,
+          userId,
+          channelId: channel,
+          threadRoot: root,
+          prompt,
+        });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         await api
@@ -172,12 +187,27 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       }
     }
 
-    await api.setStatus({ channel_id: channel, thread_ts: root, status: "is thinking…" });
+    await runMessage({ channel, root, userId, prompt });
+  }
+
+  /**
+   * Run one user message against the agent and render it — WITHOUT the auth
+   * gate (callers gate first). Reused by the gated turn, the post-link resume,
+   * and thread follow-ups.
+   */
+  async function runMessage(ctx: {
+    channel: string;
+    root: string;
+    userId: string;
+    prompt: string;
+  }): Promise<void> {
+    const chatId = chatIdFor(ctx.channel, ctx.root);
+    await api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "is thinking…" });
 
     const message: AppMessage = {
       id: newId(),
       role: "user",
-      parts: [{ type: "text", text: prompt }],
+      parts: [{ type: "text", text: ctx.prompt }],
       metadata: { visibility: "user", createdAt: Date.now() },
     };
 
@@ -188,14 +218,21 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         principal: config.principal,
         message,
       });
-      await renderRun(res, { channel, root, userId, chatId });
+      await renderRun(res, { channel: ctx.channel, root: ctx.root, userId: ctx.userId, chatId });
     } catch (e) {
-      console.error("[slack] runTurn failed:", e);
+      console.error("[slack] runMessage failed:", e);
       const msg = e instanceof Error ? e.message : String(e);
       await api
-        .postMessage({ channel, thread_ts: root, text: `:warning: ${msg.slice(0, 2900)}`, ...identity })
+        .postMessage({
+          channel: ctx.channel,
+          thread_ts: ctx.root,
+          text: `:warning: ${msg.slice(0, 2900)}`,
+          ...identity,
+        })
         .catch(() => {});
-      await api.setStatus({ channel_id: channel, thread_ts: root, status: "" }).catch(() => {});
+      await api
+        .setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "" })
+        .catch(() => {});
     }
   }
 
@@ -385,8 +422,28 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       );
       if ((isMention || isDm) && !fromBot && ev.channel && ev.ts) {
         defer(runTurn(ev, body.team_id ?? ""));
+      } else if (
+        // Thread-following: a plain message (no @-mention — those arrive as
+        // app_mention and are handled above, avoiding a double-run) in a thread
+        // the bot is already active in.
+        ev.type === "message" &&
+        ev.channel_type !== "im" &&
+        !fromBot &&
+        !ev.subtype &&
+        ev.channel &&
+        ev.thread_ts &&
+        !(ev.text ?? "").includes("<@") &&
+        config.isFollowedThread
+      ) {
+        const chatId = chatIdFor(ev.channel, ev.thread_ts);
+        if (await config.isFollowedThread(chatId)) {
+          console.log(`[slack] following thread ${chatId}`);
+          defer(runTurn(ev, body.team_id ?? ""));
+        } else {
+          console.log(`[slack] thread ${chatId} not followed — ignoring`);
+        }
       } else {
-        console.log("[slack] event not dispatched (not a mention/DM, or from bot)");
+        console.log("[slack] event not dispatched (not a mention/DM/followed thread)");
       }
       return ok();
     }
@@ -394,5 +451,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     return ok();
   }
 
-  return { handleRequest };
+  // `runMessage` is exposed so the post-link resume can continue a stashed
+  // conversation (the gate already passed by linking).
+  return { handleRequest, runMessage };
 }

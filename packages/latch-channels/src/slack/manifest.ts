@@ -26,6 +26,8 @@ export const SLACK_BOT_SCOPES = [
   "im:history",
   "im:read",
   "im:write",
+  "channels:history",
+  "groups:history",
   "assistant:write",
   "commands",
 ];
@@ -62,7 +64,15 @@ export function slackManifest(input: SlackManifestInput): Record<string, unknown
     settings: {
       event_subscriptions: {
         request_url: input.requestUrl,
-        bot_events: ["app_mention", "message.im", "assistant_thread_started"],
+        // message.channels/groups power thread-following (continue without
+        // re-@-mentioning); mentions still come via app_mention.
+        bot_events: [
+          "app_mention",
+          "message.im",
+          "message.channels",
+          "message.groups",
+          "assistant_thread_started",
+        ],
       },
       interactivity: { is_enabled: true, request_url: input.requestUrl },
       org_deploy_enabled: false,

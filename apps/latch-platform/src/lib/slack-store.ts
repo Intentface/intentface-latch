@@ -34,6 +34,17 @@ export async function migrateSlack(client: Client): Promise<void> {
     created_at INTEGER NOT NULL,
     PRIMARY KEY (team_id, slack_user_id)
   )`);
+  // A message held while an unlinked user links, replayed after they link.
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_slack_pending (
+    team_id TEXT NOT NULL,
+    slack_user_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    thread_root TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (team_id, slack_user_id)
+  )`);
 }
 
 /** Vault credential key names for a Slack app's secrets (stored at org scope). */
@@ -152,6 +163,59 @@ export function createSlackStore(client: Client) {
       });
       const r = res.rows[0] as Record<string, unknown> | undefined;
       return r ? { userId: String(r.user_id), orgId: String(r.org_id) } : null;
+    },
+
+    /** Hold the message that triggered a link prompt, to replay after linking. */
+    async setPending(input: {
+      teamId: string;
+      slackUserId: string;
+      appId: string;
+      channel: string;
+      threadRoot: string;
+      prompt: string;
+    }): Promise<void> {
+      await client.execute({
+        sql: `INSERT INTO latch_slack_pending
+                (team_id, slack_user_id, app_id, channel, thread_root, prompt, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(team_id, slack_user_id) DO UPDATE SET
+                app_id = excluded.app_id, channel = excluded.channel,
+                thread_root = excluded.thread_root, prompt = excluded.prompt,
+                created_at = excluded.created_at`,
+        args: [
+          input.teamId,
+          input.slackUserId,
+          input.appId,
+          input.channel,
+          input.threadRoot,
+          input.prompt,
+          Date.now(),
+        ],
+      });
+    },
+
+    /** Fetch and clear a held message (replay-once). */
+    async takePending(
+      teamId: string,
+      slackUserId: string,
+    ): Promise<{ appId: string; channel: string; threadRoot: string; prompt: string } | null> {
+      const res = await client.execute({
+        sql: `SELECT app_id, channel, thread_root, prompt FROM latch_slack_pending
+              WHERE team_id = ? AND slack_user_id = ? LIMIT 1`,
+        args: [teamId, slackUserId],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      if (!r) return null;
+      await client.execute({
+        sql: `DELETE FROM latch_slack_pending WHERE team_id = ? AND slack_user_id = ?`,
+        args: [teamId, slackUserId],
+      });
+      return {
+        appId: String(r.app_id),
+        channel: String(r.channel),
+        threadRoot: String(r.thread_root),
+        prompt: String(r.prompt),
+      };
     },
 
     /**

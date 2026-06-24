@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { waitUntil } from "@vercel/functions";
 import { getLatch } from "@/lib/latch";
+import { getSlackChannelForApp } from "@/lib/slack-channel";
 import { getPrincipalFromHeaders } from "@/lib/session";
 import { verifyLink } from "@/lib/slack-link";
 
@@ -35,6 +37,24 @@ async function handleLink(request: Request): Promise<Response> {
     userId: principal.userId,
     orgId: principal.orgId,
   });
+
+  // Continue the conversation: replay the message that triggered the link.
+  const pending = await slackStore.takePending(teamId, slackUserId);
+  if (pending) {
+    const resolved = await getSlackChannelForApp(pending.appId);
+    if (resolved) {
+      waitUntil(
+        resolved.channel
+          .runMessage({
+            channel: pending.channel,
+            root: pending.threadRoot,
+            userId: slackUserId,
+            prompt: pending.prompt,
+          })
+          .catch((e) => console.error("[slack] post-link replay failed:", e)),
+      );
+    }
+  }
   return redirect("/agents?slack=linked");
 }
 
