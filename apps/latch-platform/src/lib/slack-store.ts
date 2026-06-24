@@ -31,7 +31,13 @@ export async function migrateSlack(client: Client): Promise<void> {
 export const slackVaultKeys = (appId: string) => ({
   botToken: `slack_bot_token:${appId}`,
   signingSecret: `slack_signing_secret:${appId}`,
+  clientId: `slack_client_id:${appId}`,
+  clientSecret: `slack_client_secret:${appId}`,
 });
+
+/** Org-scoped Slack App-Configuration token (one-button create) + its refresh. */
+export const SLACK_CONFIG_TOKEN_KEY = "slack_config_token";
+export const SLACK_CONFIG_REFRESH_KEY = "slack_config_refresh";
 
 export interface SlackApp {
   appId: string;

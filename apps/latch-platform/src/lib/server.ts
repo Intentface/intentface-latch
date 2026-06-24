@@ -3,7 +3,12 @@ import type { AppMessage } from "@intentface/latch-core";
 import { slackManifest, createFromManifestUrl } from "@intentface/latch-channels/slack";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
-import { slackVaultKeys } from "./slack-store";
+import {
+  slackVaultKeys,
+  SLACK_CONFIG_TOKEN_KEY,
+  SLACK_CONFIG_REFRESH_KEY,
+} from "./slack-store";
+import { createAppFromManifest } from "./slack-admin";
 import type { CredentialScope } from "./credentials";
 
 /** The app's canonical base URL (matches the Slack webhook route). */
@@ -436,4 +441,88 @@ export const unbindSlackAppFn = createServerFn({ method: "POST" })
     const { slackStore } = await getLatch();
     await slackStore.unbind(appId);
     return { ok: true };
+  });
+
+// ── C: one-button create via org App-Configuration token ────────────────────
+
+/** Whether this org has a Slack config token stored (enables one-button create). */
+export const slackConfigStatusFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return { configured: false };
+  const { credentials } = await getLatch();
+  return { configured: await credentials.has(principal, SLACK_CONFIG_TOKEN_KEY, "org") };
+});
+
+/** Store the org's Slack App-Configuration token (+ refresh) in the Vault. */
+export const setSlackConfigTokenFn = createServerFn({ method: "POST" })
+  .validator((data: { token: string; refreshToken: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { credentials } = await getLatch();
+    await credentials.set(principal, SLACK_CONFIG_TOKEN_KEY, "org", data.token);
+    await credentials.set(principal, SLACK_CONFIG_REFRESH_KEY, "org", data.refreshToken);
+    return { ok: true };
+  });
+
+/**
+ * One-button: create this agent's Slack app from its manifest (config token),
+ * stash its secrets in the Vault, pre-bind it, and return the install URL. The
+ * browser is then redirected there; the OAuth callback finishes by storing the
+ * bot token. No tokens are ever pasted by hand.
+ */
+export const createSlackAppFn = createServerFn({ method: "POST" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime, slackStore, credentials } = await getLatch();
+
+    const configToken = await credentials.get(principal, SLACK_CONFIG_TOKEN_KEY, "org");
+    if (!configToken) return { ok: false as const, error: "no_config_token" };
+    const refreshToken =
+      (await credentials.get(principal, SLACK_CONFIG_REFRESH_KEY, "org")) ?? undefined;
+
+    const info = (await runtime.listAgents(principal)).find((a) => a.name === agent);
+    if (!info) return { ok: false as const, error: "unknown_agent" };
+    const displayName = info.title ?? agent;
+
+    const manifest = slackManifest({
+      displayName,
+      description: info.description,
+      requestUrl: `${baseUrl()}/api/slack`,
+      redirectUrl: `${baseUrl()}/api/slack/oauth`,
+    });
+
+    let created;
+    try {
+      created = await createAppFromManifest({
+        configToken,
+        refreshToken,
+        manifest,
+        onRotate: async (rot) => {
+          await credentials.set(principal, SLACK_CONFIG_TOKEN_KEY, "org", rot.token);
+          await credentials.set(principal, SLACK_CONFIG_REFRESH_KEY, "org", rot.refreshToken);
+        },
+      });
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : "create_failed" };
+    }
+
+    const keys = slackVaultKeys(created.appId);
+    await credentials.set(principal, keys.signingSecret, "org", created.signingSecret);
+    await credentials.set(principal, keys.clientId, "org", created.clientId);
+    await credentials.set(principal, keys.clientSecret, "org", created.clientSecret);
+    await slackStore.bind({
+      appId: created.appId,
+      agent,
+      orgId: principal.orgId,
+      userId: principal.userId,
+      botName: displayName,
+    });
+
+    // Send the installer to Slack; we carry the app id back via `state`.
+    const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
+    const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(created.appId)}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
+    return { ok: true as const, authorizeUrl };
   });

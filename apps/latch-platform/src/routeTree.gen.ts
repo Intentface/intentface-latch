@@ -25,6 +25,7 @@ import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
 import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as AgentsEditRouteImport } from './routes/agents.edit'
+import { Route as ApiSlackOauthRouteImport } from './routes/api/slack.oauth'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
@@ -108,6 +109,11 @@ const AgentsEditRoute = AgentsEditRouteImport.update({
   path: '/edit',
   getParentRoute: () => AgentsRoute,
 } as any)
+const ApiSlackOauthRoute = ApiSlackOauthRouteImport.update({
+  id: '/oauth',
+  path: '/oauth',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
 const ApiLatchSplatRoute = ApiLatchSplatRouteImport.update({
   id: '/api/latch/$',
   path: '/api/latch/$',
@@ -132,12 +138,13 @@ export interface FileRoutesByFullPath {
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
-  '/api/slack': typeof ApiSlackRoute
+  '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
+  '/api/slack/oauth': typeof ApiSlackOauthRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -150,12 +157,13 @@ export interface FileRoutesByTo {
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
-  '/api/slack': typeof ApiSlackRoute
+  '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents': typeof AgentsIndexRoute
   '/chat': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
+  '/api/slack/oauth': typeof ApiSlackOauthRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -171,12 +179,13 @@ export interface FileRoutesById {
   '/schedules': typeof SchedulesRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
-  '/api/slack': typeof ApiSlackRoute
+  '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
+  '/api/slack/oauth': typeof ApiSlackOauthRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -199,6 +208,7 @@ export interface FileRouteTypes {
     | '/chat/'
     | '/api/auth/$'
     | '/api/latch/$'
+    | '/api/slack/oauth'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -217,6 +227,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/api/auth/$'
     | '/api/latch/$'
+    | '/api/slack/oauth'
   id:
     | '__root__'
     | '/'
@@ -237,6 +248,7 @@ export interface FileRouteTypes {
     | '/chat/'
     | '/api/auth/$'
     | '/api/latch/$'
+    | '/api/slack/oauth'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -251,7 +263,7 @@ export interface RootRouteChildren {
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
   ApiCronRoute: typeof ApiCronRoute
-  ApiSlackRoute: typeof ApiSlackRoute
+  ApiSlackRoute: typeof ApiSlackRouteWithChildren
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiLatchSplatRoute: typeof ApiLatchSplatRoute
 }
@@ -370,6 +382,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsEditRouteImport
       parentRoute: typeof AgentsRoute
     }
+    '/api/slack/oauth': {
+      id: '/api/slack/oauth'
+      path: '/oauth'
+      fullPath: '/api/slack/oauth'
+      preLoaderRoute: typeof ApiSlackOauthRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
     '/api/latch/$': {
       id: '/api/latch/$'
       path: '/api/latch/$'
@@ -412,6 +431,18 @@ const ChatRouteChildren: ChatRouteChildren = {
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
+interface ApiSlackRouteChildren {
+  ApiSlackOauthRoute: typeof ApiSlackOauthRoute
+}
+
+const ApiSlackRouteChildren: ApiSlackRouteChildren = {
+  ApiSlackOauthRoute: ApiSlackOauthRoute,
+}
+
+const ApiSlackRouteWithChildren = ApiSlackRoute._addFileChildren(
+  ApiSlackRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AcceptInvitationRoute: AcceptInvitationRoute,
@@ -424,7 +455,7 @@ const rootRouteChildren: RootRouteChildren = {
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,
   ApiCronRoute: ApiCronRoute,
-  ApiSlackRoute: ApiSlackRoute,
+  ApiSlackRoute: ApiSlackRouteWithChildren,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiLatchSplatRoute: ApiLatchSplatRoute,
 }

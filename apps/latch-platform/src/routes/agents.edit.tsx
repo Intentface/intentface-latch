@@ -15,8 +15,11 @@ import {
 import {
   bindSlackAppFn,
   connectionToolsFn,
+  createSlackAppFn,
   listSlackAppsFn,
   saveAgentFn,
+  setSlackConfigTokenFn,
+  slackConfigStatusFn,
   slackManifestFn,
   unbindSlackAppFn,
 } from "@/lib/server";
@@ -449,6 +452,11 @@ function AgentEditor() {
 function SlackSection({ agent }: { agent: string }) {
   const [apps, setApps] = useState<{ appId: string; botName?: string }[]>([]);
   const [manifest, setManifest] = useState<{ manifestJson: string; createUrl: string } | null>(null);
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [cfgToken, setCfgToken] = useState("");
+  const [cfgRefresh, setCfgRefresh] = useState("");
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [appId, setAppId] = useState("");
@@ -458,17 +466,56 @@ function SlackSection({ agent }: { agent: string }) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [all, man] = await Promise.all([
+    const [all, man, cfg] = await Promise.all([
       listSlackAppsFn(),
       slackManifestFn({ data: agent }),
+      slackConfigStatusFn(),
     ]);
     setApps(all.filter((a) => a.agent === agent).map((a) => ({ appId: a.appId, botName: a.botName })));
     setManifest(man);
+    setConfigured(cfg.configured);
   }, [agent]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // One-button: create + install the agent's Slack app via the org config token.
+  async function createBot() {
+    if (!configured) {
+      setSetupOpen(true);
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    const res = await createSlackAppFn({ data: agent });
+    if (res.ok) {
+      window.location.href = res.authorizeUrl; // → Slack install → /api/slack/oauth
+      return;
+    }
+    setCreating(false);
+    if (res.error === "no_config_token") setSetupOpen(true);
+    else setError(res.error ?? "Couldn't create the Slack app.");
+  }
+
+  async function saveConfig(e: React.FormEvent) {
+    e.preventDefault();
+    if (!cfgToken.trim() || !cfgRefresh.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await setSlackConfigTokenFn({
+      data: { token: cfgToken.trim(), refreshToken: cfgRefresh.trim() },
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setError("Couldn't save the config token.");
+      return;
+    }
+    setCfgToken("");
+    setCfgRefresh("");
+    setSetupOpen(false);
+    setConfigured(true);
+  }
 
   async function copyManifest() {
     if (!manifest) return;
@@ -542,11 +589,60 @@ function SlackSection({ agent }: { agent: string }) {
         </div>
       )}
 
-      {!open ? (
-        <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
-          {apps.length ? "Add another Slack bot" : "Create Slack bot"}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button type="button" size="sm" onClick={createBot} disabled={creating}>
+          {creating ? "Creating…" : apps.length ? "Add another Slack bot" : "Create Slack bot"}
         </Button>
-      ) : (
+        <button
+          type="button"
+          className="text-ink-tertiary hover:text-ink-secondary text-xs underline"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Hide manual setup" : "Set up manually"}
+        </button>
+      </div>
+      {error && !open && <p className="text-destructive text-xs">{error}</p>}
+
+      {/* One-time: org Slack config token → enables the one-button create. */}
+      {setupOpen && (
+        <form className="border-primary-border space-y-2 rounded-lg border p-3" onSubmit={saveConfig}>
+          <FieldLabel>One-time: connect your Slack workspace</FieldLabel>
+          <p className="text-ink-tertiary text-xs">
+            Generate an{" "}
+            <a
+              href="https://api.slack.com/apps"
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline"
+            >
+              App Configuration token
+            </a>{" "}
+            (Slack → Your Apps → “Your App Configuration Tokens”) and paste it + its refresh token.
+            It can only create/manage apps — never read your messages — and is stored in the Vault.
+          </p>
+          <Input
+            placeholder="Config token (xoxe.xoxp-…)"
+            value={cfgToken}
+            onChange={(e) => setCfgToken(e.target.value)}
+          />
+          <Input
+            placeholder="Refresh token (xoxe-…)"
+            value={cfgRefresh}
+            onChange={(e) => setCfgRefresh(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <Button type="submit" size="sm" disabled={busy}>
+              {busy ? "Saving…" : "Save & enable one-button"}
+            </Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setSetupOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {/* Manual (B) fallback: create-from-manifest + paste tokens. */}
+      {open && (
         <div className="border-primary-border space-y-4 rounded-lg border p-3">
           {/* Step 1 — manifest */}
           <div className="space-y-1.5">
