@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link, useLoaderData, useNavigate } from "@tanstack/react-router";
-import { ChevronDown, ChevronLeft, Plug, RefreshCw } from "lucide-react";
+import { Bot, ChevronDown, ChevronLeft, Plug, RefreshCw, TriangleAlert } from "lucide-react";
 import { connectionToolsFn, saveAgentFn } from "@/lib/server";
 import { authorizeUrl } from "@/lib/latch-client";
 import { cn } from "@/lib/utils";
@@ -319,28 +319,43 @@ function AgentEditor() {
             <FieldLabel>Subagents</FieldLabel>
             <p className="text-ink-tertiary text-xs">
               Agents this one may delegate to via a <span className="font-mono">spawn_agent</span>{" "}
-              tool. Subagents run autonomously (their tools are auto-approved) in their own thread.
+              tool, each in its own thread.
             </p>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
+              <span className="text-ink-secondary">
+                Subagents run <span className="font-medium">autonomously</span> — their tools are
+                auto-approved (no human-in-the-loop) and OAuth gates are skipped. Only delegate to
+                agents you trust.
+              </span>
+            </div>
+            <div className="space-y-2">
               {allAgents
                 .filter((a) => a.name !== name)
                 .map((a) => {
                   const on = subagents.includes(a.name);
                   return (
-                    <button
+                    <div
                       key={a.name}
-                      type="button"
-                      onClick={() => toggleSubagent(a.name)}
-                      title={a.description ?? a.title ?? a.name}
-                      className={cn(
-                        "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                        on
-                          ? "border-accent bg-accent text-white"
-                          : "border-input bg-transparent hover:border-accent-border/60",
-                      )}
+                      className="border-primary-border flex items-center gap-3 rounded-lg border p-3"
                     >
-                      {a.title ?? a.name}
-                    </button>
+                      <Switch
+                        checked={on}
+                        onCheckedChange={() => toggleSubagent(a.name)}
+                        aria-label={`Delegate to ${a.name}`}
+                      />
+                      <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
+                        <Bot className="size-3.5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-ink-primary truncate text-sm font-medium">
+                          {a.title ?? a.name}
+                        </div>
+                        {a.description && (
+                          <p className="text-ink-tertiary truncate text-xs">{a.description}</p>
+                        )}
+                      </div>
+                    </div>
                   );
                 })}
             </div>
