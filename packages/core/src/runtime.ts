@@ -502,13 +502,23 @@ export function createRuntime<P, RC = unknown>(
     // tools (bash/read_file/write_file/glob/grep) operate on the resolved
     // Experimental_SandboxSession; `app` tools (web_fetch/todo/ask_question) run
     // in the app process. `disableTools` opts any of them back out.
+    // Names that must stay callable even when `enabledTools` restricts the set
+    // (it only restricts *connection* tools): the agent's own declared tools,
+    // the harness tools, and `spawn_agent` are capabilities, not connection picks.
+    const capabilityTools: string[] = Object.keys(cfg.tools ?? {});
     const harness = config.harnessTools ?? {};
     const wantSandbox = !!cfg.sandbox && !!config.sandbox;
-    if (wantSandbox && harness.sandbox) Object.assign(tools, harness.sandbox);
+    if (wantSandbox && harness.sandbox) {
+      Object.assign(tools, harness.sandbox);
+      capabilityTools.push(...Object.keys(harness.sandbox));
+    }
     if (cfg.defaultTools && harness.app) {
       const only = Array.isArray(cfg.defaultTools) ? new Set(cfg.defaultTools) : null;
       for (const [name, t] of Object.entries(harness.app)) {
-        if (!only || only.has(name)) tools[name] = t;
+        if (!only || only.has(name)) {
+          tools[name] = t;
+          capabilityTools.push(name);
+        }
       }
     }
     for (const name of cfg.disableTools ?? []) delete tools[name];
@@ -555,6 +565,7 @@ export function createRuntime<P, RC = unknown>(
           return runSubagent({ principal, agent, prompt, threadId, depth: depth + 1 });
         },
       });
+      capabilityTools.push("spawn_agent");
     }
 
     // Subagent runs are autonomous — there's no human to authorize, so waive
@@ -580,12 +591,14 @@ export function createRuntime<P, RC = unknown>(
           ? sourceApproval
           : cfg.toolApproval;
 
-    // Which tools the model may call. If the agent restricts `enabledTools`,
-    // union in each source's `alwaysActive` (e.g. connect_<name>) so the auth
-    // flow still works. Omitted → all tools active.
+    // Which tools the model may call. `enabledTools` restricts only CONNECTION
+    // tools, so union in each source's `alwaysActive` (e.g. connect_<name>) AND
+    // the capability tools (the agent's own tools, harness web_fetch/sandbox,
+    // spawn_agent) — otherwise picking specific connection tools would hide the
+    // harness. Omitted → all tools active.
     const alwaysActive = opened.flatMap((o) => o.alwaysActive ?? []);
     const activeTools = cfg.enabledTools
-      ? Array.from(new Set([...cfg.enabledTools, ...alwaysActive]))
+      ? Array.from(new Set([...cfg.enabledTools, ...alwaysActive, ...capabilityTools]))
       : undefined;
 
     // Tool-loop ceiling: a number caps it; "unlimited" runs until the model
