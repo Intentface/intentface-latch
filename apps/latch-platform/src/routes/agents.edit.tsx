@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { createFileRoute, Link, useLoaderData, useNavigate } from "@tanstack/react-router";
+import {
+  createFileRoute,
+  Link,
+  useLoaderData,
+  useNavigate,
+  useRouter,
+} from "@tanstack/react-router";
 import {
   Bot,
   ChevronDown,
@@ -60,6 +66,7 @@ function AgentEditor() {
   const { records, allAgents, models, connections, status } = useLoaderData({ from: "/agents" });
   const { name: editName, scope: editScope } = Route.useSearch();
   const navigate = useNavigate();
+  const router = useRouter();
 
   const initial =
     editName != null
@@ -223,6 +230,9 @@ function AgentEditor() {
         setError(res.error ?? "Failed to save");
         return;
       }
+      // Re-run the /agents loader so the list (and a re-open of this editor)
+      // shows the just-saved values instead of stale cached loader data.
+      await router.invalidate();
       navigate({ to: "/agents" });
     } finally {
       setBusy(false);
