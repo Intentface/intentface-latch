@@ -128,6 +128,13 @@ export interface AgentConfig<P> {
    * the runtime wraps them via `RuntimeConfig.codeModeWrap`.
    */
   codeMode?: { tools?: string[] };
+  /**
+   * Use the model provider's NATIVE web tools (server-side web search/fetch)
+   * when available, supplied by `RuntimeConfig.resolveProviderTools(modelId)`.
+   * Provider-specific: e.g. Anthropic exposes web_search + web_fetch, OpenAI
+   * web_search only. No-op on providers without native web tools.
+   */
+  providerWebTools?: boolean;
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */

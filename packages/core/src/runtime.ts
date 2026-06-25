@@ -143,6 +143,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     app?: Record<string, unknown>;
   };
   /**
+   * Resolve the model provider's NATIVE web tools (server-side search/fetch) for
+   * a model id — kept out of core so it carries no provider SDK dep. Merged into
+   * an agent's toolset when it sets `providerWebTools`. Return `{}` for providers
+   * without native web tools.
+   */
+  resolveProviderTools?: (modelId: string) => Record<string, unknown>;
+  /**
    * Wrap a set of tools into a single code-mode tool (the model writes JS that
    * calls them as functions). Supplied by the platform (e.g. via
    * `experimental-ai-sdk-code-mode`), so core needs no QuickJS dep. Used when an
@@ -522,6 +529,14 @@ export function createRuntime<P, RC = unknown>(
           tools[name] = t;
           capabilityTools.push(name);
         }
+      }
+    }
+    // Provider-native web tools (server-side search/fetch), if the agent opts in
+    // and the platform supplies a resolver for this model's provider.
+    if (cfg.providerWebTools && config.resolveProviderTools) {
+      for (const [name, t] of Object.entries(config.resolveProviderTools(modelId))) {
+        tools[name] = t;
+        capabilityTools.push(name);
       }
     }
     for (const name of cfg.disableTools ?? []) delete tools[name];

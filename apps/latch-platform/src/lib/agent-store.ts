@@ -43,6 +43,8 @@ export interface AgentRecord {
     defaultTools?: boolean | string[];
     disableTools?: string[];
     codeMode?: { tools?: string[] };
+    /** Use the model provider's native web search/fetch tools. */
+    providerWebTools?: boolean;
   };
   /** Agents this one may delegate to via the `spawn_agent` tool. */
   subagents?: string[];
@@ -150,6 +152,7 @@ export function createAgentStore(
         defaultTools: rec.exec?.defaultTools,
         disableTools: rec.exec?.disableTools,
         codeMode: rec.exec?.codeMode,
+        providerWebTools: rec.exec?.providerWebTools || undefined,
         smoothStream: true,
       };
     },

@@ -28,6 +28,7 @@ export interface AgentRec {
     defaultTools?: boolean | string[];
     disableTools?: string[];
     codeMode?: { tools?: string[] };
+    providerWebTools?: boolean;
   };
   subagents?: string[];
   scope: "user" | "org";

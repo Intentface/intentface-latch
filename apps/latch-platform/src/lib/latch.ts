@@ -25,6 +25,7 @@ import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store"
 import { createSlackStore, migrateSlack, type SlackStore } from "./slack-store";
 import { loadModelCatalog, type ModelInfo } from "./models";
 import { resolveSandbox, harnessTools } from "./sandbox";
+import { resolveProviderTools } from "./provider-tools";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -162,6 +163,8 @@ export async function getLatch(): Promise<{
     // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY.
     sandbox: resolveSandbox,
     harnessTools,
+    // Native provider web tools (search/fetch) for agents that opt in.
+    resolveProviderTools,
   });
 
   // The connection registry the handler's OAuth/status/test routes see: code

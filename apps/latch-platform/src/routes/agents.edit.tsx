@@ -91,6 +91,9 @@ function AgentEditor() {
     initial?.exec?.defaultTools === true ||
       (Array.isArray(initial?.exec?.defaultTools) && initial!.exec!.defaultTools.length > 0),
   );
+  const [providerWebTools, setProviderWebTools] = useState(
+    initial?.exec?.providerWebTools ?? false,
+  );
   const [subagents, setSubagents] = useState<string[]>(initial?.subagents ?? []);
   const toggleSubagent = (n: string) =>
     setSubagents((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
@@ -204,11 +207,12 @@ function AgentEditor() {
             }
           : undefined;
       const exec =
-        sandbox || webTools
+        sandbox || webTools || providerWebTools
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
               defaultTools: webTools || undefined,
+              providerWebTools: providerWebTools || undefined,
             }
           : undefined;
       const res = await saveAgentFn({
@@ -443,7 +447,18 @@ function AgentEditor() {
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
             <span>
-              Web tools — <span className="font-mono">web_fetch</span>
+              Web tools — <span className="font-mono">web_fetch</span> (built-in, any model)
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch
+              checked={providerWebTools}
+              onCheckedChange={() => setProviderWebTools((v) => !v)}
+            />
+            <span>
+              Provider web tools — native <span className="font-mono">web_search</span> /{" "}
+              <span className="font-mono">web_fetch</span>, run by the model provider (Anthropic =
+              search + fetch, OpenAI = search). No-op on providers without them.
             </span>
           </label>
         </div>
