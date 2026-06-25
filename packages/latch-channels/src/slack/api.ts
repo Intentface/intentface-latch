@@ -78,6 +78,22 @@ export function slackApi(token: SlackToken) {
       await call(token, "chat.postEphemeral", input);
     },
 
+    /** Fetch a thread's messages (oldest first) — for seeding prior context. */
+    async threadReplies(
+      channel: string,
+      ts: string,
+      limit = 50,
+    ): Promise<{ userId?: string; text: string; isBot: boolean; ts: string }[]> {
+      const r = await call(token, "conversations.replies", { channel, ts, limit: String(limit) });
+      const msgs = (r.messages as Record<string, unknown>[] | undefined) ?? [];
+      return msgs.map((m) => ({
+        userId: m.user ? String(m.user) : undefined,
+        text: typeof m.text === "string" ? m.text : "",
+        isBot: Boolean(m.bot_id) || m.subtype === "bot_message",
+        ts: String(m.ts),
+      }));
+    },
+
     /** Open (or fetch) a DM channel with a user; returns the IM channel id. */
     async openDm(user: string): Promise<string> {
       const r = await call(token, "conversations.open", { users: user });

@@ -187,7 +187,33 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       }
     }
 
-    await runMessage({ channel, root, userId, prompt });
+    // First time the bot engages a thread that already had human chat: seed the
+    // prior thread messages as context, so it knows what "this" refers to.
+    let context: string | undefined;
+    if (ev.thread_ts) {
+      try {
+        const existing = await config.runtime.loadHistory({
+          chatId: chatIdFor(channel, root),
+          principal: config.principal,
+        });
+        if (existing.length === 0) {
+          const replies = await api.threadReplies(channel, ev.thread_ts);
+          const prior = replies
+            .filter((m) => m.ts !== ev.ts && !m.isBot && m.text.trim())
+            .slice(-30); // cap context to the most recent messages
+          if (prior.length) {
+            const lines = prior
+              .map((m) => `${m.userId ? `<@${m.userId}>` : "user"}: ${stripMentions(m.text)}`)
+              .join("\n");
+            context = `Earlier messages in this Slack thread (for context):\n${lines}`;
+          }
+        }
+      } catch (e) {
+        console.error("[slack] thread context fetch failed:", e);
+      }
+    }
+
+    await runMessage({ channel, root, userId, prompt, context });
   }
 
   /**
@@ -200,14 +226,19 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     root: string;
     userId: string;
     prompt: string;
+    /** Optional prior-thread context to prepend (seeded on first engagement). */
+    context?: string;
   }): Promise<void> {
     const chatId = chatIdFor(ctx.channel, ctx.root);
     await api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "is thinking…" });
 
+    const text = ctx.context
+      ? `${ctx.context}\n\nThe message addressed to you:\n${ctx.prompt}`
+      : ctx.prompt;
     const message: AppMessage = {
       id: newId(),
       role: "user",
-      parts: [{ type: "text", text: ctx.prompt }],
+      parts: [{ type: "text", text }],
       metadata: { visibility: "user", createdAt: Date.now() },
     };
 
