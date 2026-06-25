@@ -11,21 +11,44 @@
 export interface ModelPrice {
   inputPer1M: number;
   outputPer1M: number;
+  /** Cached-prompt READ rate (much cheaper). Falls back to the input rate. */
+  cacheReadPer1M?: number;
+  /** Cache WRITE/creation rate (Anthropic charges a premium). Falls back to input. */
+  cacheWritePer1M?: number;
+}
+
+/** A turn's token usage, split so cached input can be priced separately. */
+export interface UsageBreakdown {
+  /** Total prompt tokens (cached + non-cached). */
+  inputTokens: number;
+  outputTokens: number;
+  /** Cached prompt tokens READ (billed at `cacheReadPer1M`). */
+  cacheReadTokens?: number;
+  /** Cache-creation tokens WRITTEN (billed at `cacheWritePer1M`). */
+  cacheWriteTokens?: number;
 }
 
 /** Resolve a model id to its price, or undefined if unknown (→ cost 0). */
 export type Pricing = (model: string) => ModelPrice | undefined;
 
-/** Cost for a turn's token usage under a price (0 if no price). */
-export function computeCost(
-  price: ModelPrice | undefined,
-  inputTokens: number,
-  outputTokens: number,
-): number {
+/**
+ * Cost for a turn's token usage under a price (0 if no price). Cached prompt
+ * tokens are billed at the cache read/write rates (providers auto-cache repeated
+ * prefixes — e.g. a tool loop re-sending context — so cache reads are far
+ * cheaper than fresh input). `inputTokens` is the TOTAL; the non-cached
+ * remainder bills at the full input rate.
+ */
+export function computeCost(price: ModelPrice | undefined, usage: UsageBreakdown): number {
   if (!price) return 0;
+  const cacheRead = usage.cacheReadTokens ?? 0;
+  const cacheWrite = usage.cacheWriteTokens ?? 0;
+  const nonCached = Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
+  const per = (n: number, rate: number) => (n / 1_000_000) * rate;
   return (
-    (inputTokens / 1_000_000) * price.inputPer1M +
-    (outputTokens / 1_000_000) * price.outputPer1M
+    per(nonCached, price.inputPer1M) +
+    per(cacheRead, price.cacheReadPer1M ?? price.inputPer1M) +
+    per(cacheWrite, price.cacheWritePer1M ?? price.inputPer1M) +
+    per(usage.outputTokens, price.outputPer1M)
   );
 }
 

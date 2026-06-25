@@ -639,6 +639,8 @@ export function createRuntime<P, RC = unknown>(
 
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
 
     // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
     // UI-stream `onStepEnd` (per-step persistence) and the `writer`. The model
@@ -690,12 +692,19 @@ export function createRuntime<P, RC = unknown>(
               },
             ]),
           ),
-          // generate-text step callback: accumulate usage across steps.
+          // generate-text step callback: accumulate usage across steps,
+          // including the cached-prompt breakdown so cost reflects cache reads.
           onStepEnd: (step: {
-            usage?: { inputTokens?: number; outputTokens?: number };
+            usage?: {
+              inputTokens?: number;
+              outputTokens?: number;
+              inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+            };
           }) => {
             inputTokens += step.usage?.inputTokens ?? 0;
             outputTokens += step.usage?.outputTokens ?? 0;
+            cacheReadTokens += step.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
+            cacheWriteTokens += step.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
         // Fold the model's own output into the stream.
@@ -730,16 +739,22 @@ export function createRuntime<P, RC = unknown>(
         await closeSources();
         // Cost for this turn (0 if no pricing configured). Stamp usage + cost
         // onto the assistant message — the message is complete; this is metadata.
-        const cost = computeCost(
-          config.pricing?.(modelId),
+        const cost = computeCost(config.pricing?.(modelId), {
           inputTokens,
           outputTokens,
-        );
+          cacheReadTokens,
+          cacheWriteTokens,
+        });
         const last = messages[messages.length - 1];
         if (last?.role === "assistant") {
           last.metadata = {
             ...last.metadata,
-            usage: { inputTokens, outputTokens },
+            usage: {
+              inputTokens,
+              outputTokens,
+              ...(cacheReadTokens ? { cacheReadTokens } : {}),
+              ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+            },
             cost,
           };
         }

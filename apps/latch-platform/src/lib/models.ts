@@ -48,7 +48,13 @@ const FALLBACK: ModelCatalog = {
 
 interface MdProvider {
   env?: string[];
-  models?: Record<string, { name?: string; cost?: { input?: number; output?: number } }>;
+  models?: Record<
+    string,
+    {
+      name?: string;
+      cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+    }
+  >;
 }
 
 let cached: Promise<ModelCatalog> | undefined;
@@ -63,7 +69,10 @@ export function loadModelCatalog(): Promise<ModelCatalog> {
       const all = (await res.json()) as Record<string, MdProvider>;
 
       const list: ModelInfo[] = [];
-      const rates: Record<string, { inputPer1M: number; outputPer1M: number }> = {};
+      const rates: Record<
+        string,
+        { inputPer1M: number; outputPer1M: number; cacheReadPer1M?: number; cacheWritePer1M?: number }
+      > = {};
       const idToProvider = new Map<string, string>();
 
       for (const provider of Object.keys(PROVIDERS)) {
@@ -75,7 +84,12 @@ export function loadModelCatalog(): Promise<ModelCatalog> {
           list.push({ id, label: m.name ?? id, provider });
           idToProvider.set(id, provider);
           if (m.cost?.input != null && m.cost?.output != null) {
-            rates[id] = { inputPer1M: m.cost.input, outputPer1M: m.cost.output };
+            rates[id] = {
+              inputPer1M: m.cost.input,
+              outputPer1M: m.cost.output,
+              ...(m.cost.cache_read != null ? { cacheReadPer1M: m.cost.cache_read } : {}),
+              ...(m.cost.cache_write != null ? { cacheWritePer1M: m.cost.cache_write } : {}),
+            };
           }
         }
       }

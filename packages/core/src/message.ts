@@ -26,8 +26,13 @@ export interface AppMetadata {
   sendToModel?: boolean;
   /** Resolved model id for this message (e.g. "anthropic/claude-sonnet-4-6"). */
   model?: string;
-  /** Token usage attributed to producing this message. */
-  usage?: { inputTokens?: number; outputTokens?: number };
+  /** Token usage attributed to producing this message (incl. cached-prompt split). */
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
   /** Computed cost in the account's currency unit. */
   cost?: number;
   /** Finish reason from the producing step. */
