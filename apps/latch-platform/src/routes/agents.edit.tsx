@@ -45,6 +45,17 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   return <label className="text-ink-secondary text-xs font-medium">{children}</label>;
 }
 
+// Default model for a NEW agent: first preferred id present in the catalog, else
+// the first non-image/embedding model, else the first. (models.dev includes
+// image/embedding models and the list is label-sorted, so models[0] is a poor
+// default.) Kept inline (client-safe) to avoid importing the server model lib.
+const PREFERRED_DEFAULT_MODELS = ["gpt-5.5", "claude-sonnet-4-6", "gpt-5", "gpt-4o"];
+const NON_CHAT_MODEL = /image|embed|whisper|tts|dall|audio|realtime|moderation|transcribe|sora/i;
+function defaultModelId(models: { id: string }[]): string {
+  for (const id of PREFERRED_DEFAULT_MODELS) if (models.some((m) => m.id === id)) return id;
+  return models.find((m) => !NON_CHAT_MODEL.test(m.id))?.id ?? models[0]?.id ?? "";
+}
+
 function AgentEditor() {
   const { records, allAgents, models, connections, status } = useLoaderData({ from: "/agents" });
   const { name: editName, scope: editScope } = Route.useSearch();
@@ -59,7 +70,7 @@ function AgentEditor() {
   const [name, setName] = useState(initial?.name ?? "");
   const [title, setTitle] = useState(initial?.title ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
-  const [modelId, setModelId] = useState(initial?.modelId ?? models[0]?.id ?? "");
+  const [modelId, setModelId] = useState(initial?.modelId ?? defaultModelId(models));
   const [instructions, setInstructions] = useState(initial?.instructions ?? "");
   const [picked, setPicked] = useState<string[]>(initial?.connections ?? []);
   const [scope, setScope] = useState<"user" | "org">(initial?.scope ?? "user");
