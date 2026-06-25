@@ -28,9 +28,15 @@ function ago(value: string | number | Date | undefined): string {
   return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** Format a USD cost compactly (sub-cent precision for small amounts). */
+function fmtCost(n: number): string {
+  return `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}`;
+}
+
 function ChatIndex() {
   const { chats, agents } = useLoaderData({ from: "/chat" });
   const navigate = useNavigate();
+  const total = chats.reduce((s, c) => s + (c.cost ?? 0), 0);
 
   const newChat = (agent: string) =>
     navigate({
@@ -44,7 +50,10 @@ function ChatIndex() {
       <div className="mb-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-ink-primary text-lg font-semibold tracking-tight">Chats</h1>
-          <p className="text-ink-tertiary text-sm">Your conversations across agents.</p>
+          <p className="text-ink-tertiary text-sm">
+            Your conversations across agents
+            {total > 0 && <> · {fmtCost(total)} total</>}.
+          </p>
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button size="sm" className="gap-1.5" />}>
@@ -94,6 +103,11 @@ function ChatIndex() {
                   <span className="shrink-0">{ago(c.updatedAt)}</span>
                 </div>
               </div>
+              {c.cost > 0 && (
+                <div className="text-ink-tertiary shrink-0 text-xs tabular-nums">
+                  {fmtCost(c.cost)}
+                </div>
+              )}
             </Link>
           ))}
         </div>

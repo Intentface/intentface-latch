@@ -47,6 +47,12 @@ export const listChatsFn = createServerFn({ method: "GET" }).handler(async () =>
   if (!principal) return [];
   const { runtime } = await getLatch();
   const chats = await runtime.listChats({ principal });
+  // Sum each chat's run costs (incl. nested sub_… runs) for a per-chat total.
+  const runs = await runtime.listRuns({ principal, limit: 1000 });
+  const costByChat = new Map<string, number>();
+  for (const r of runs) {
+    costByChat.set(r.chatId, (costByChat.get(r.chatId) ?? 0) + (r.costTotal ?? 0));
+  }
   // Subagent threads (`sub_…`) are nested under their parent's spawn_agent tool
   // calls, not top-level chats — keep them out of the list.
   return chats
@@ -56,6 +62,7 @@ export const listChatsFn = createServerFn({ method: "GET" }).handler(async () =>
       title: c.title ?? null,
       agent: c.agent,
       updatedAt: c.updatedAt,
+      cost: costByChat.get(c.id) ?? 0,
     }));
 });
 
