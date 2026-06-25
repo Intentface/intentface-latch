@@ -150,10 +150,12 @@ export async function getLatch(): Promise<{
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
-    // Cron evaluator for scheduled agents (croner). Interpreted in UTC so fire
-    // times are deterministic regardless of the host's timezone.
-    cron: (expr, afterMs) =>
-      new Cron(expr, { timezone: "UTC" }).nextRun(new Date(afterMs))?.getTime() ?? null,
+    // Cron evaluator for scheduled agents (croner). Interpreted in the
+    // schedule's timezone (IANA) so "9am daily" means the user's 9am; defaults
+    // to UTC when none is set.
+    cron: (expr, afterMs, timezone) =>
+      new Cron(expr, { timezone: timezone || "UTC" }).nextRun(new Date(afterMs))?.getTime() ??
+      null,
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash

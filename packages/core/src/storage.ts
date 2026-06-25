@@ -94,6 +94,8 @@ export interface ScheduleRecord {
   identity?: unknown;
   /** Cron expression (evaluated by the runtime's `cron` fn); null = one-shot. */
   cron: string | null;
+  /** IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"); UTC if unset. */
+  timezone?: string;
   /** The user message to send the agent each fire. */
   prompt: string;
   /** Epoch ms of the next due fire. */
@@ -194,7 +196,13 @@ export interface StorageAdapter<P> {
   /** Create a schedule owned by the caller; stores the identity blob for fire-time. */
   createSchedule(
     principal: P,
-    input: { agent: string; cron: string | null; prompt: string; nextRunAt: number },
+    input: {
+      agent: string;
+      cron: string | null;
+      timezone?: string;
+      prompt: string;
+      nextRunAt: number;
+    },
   ): Promise<ScheduleRecord>;
   /** The caller's schedules, most-recently-created first. */
   listSchedules(principal: P): Promise<ScheduleRecord[]>;

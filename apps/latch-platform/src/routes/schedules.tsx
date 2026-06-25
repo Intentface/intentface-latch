@@ -1,11 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
 import { currentPrincipalFn, listSchedulesFn, listAgentsFn } from "@/lib/server";
 import { createSchedule, deleteSchedule } from "@/lib/latch-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
+
+/** All IANA zones if the runtime supports it, else a small fallback. */
+const TIMEZONES: string[] =
+  typeof Intl.supportedValuesOf === "function"
+    ? Intl.supportedValuesOf("timeZone")
+    : ["UTC", "Europe/Helsinki", "Europe/London", "America/New_York", "America/Los_Angeles"];
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -38,8 +45,15 @@ function SchedulesPage() {
   const [cron, setCron] = useState("*/2 * * * *");
   const [prompt, setPrompt] = useState("");
   const [agent, setAgent] = useState(agents[0]?.name ?? "assistant");
+  const [timezone, setTimezone] = useState("UTC");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Default to the viewer's timezone (set after mount to avoid SSR mismatch).
+  useEffect(() => {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) setTimezone(tz);
+  }, []);
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
@@ -47,7 +61,7 @@ function SchedulesPage() {
     setBusy(true);
     setError(null);
     try {
-      await createSchedule({ agent, cron: cron.trim() || null, prompt });
+      await createSchedule({ agent, cron: cron.trim() || null, timezone, prompt });
       setPrompt("");
       await router.invalidate();
     } catch (err) {
@@ -79,7 +93,7 @@ function SchedulesPage() {
         </CardHeader>
         <CardContent>
           <form className="space-y-2" onSubmit={add}>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Select value={agent} onChange={(e) => setAgent(e.target.value)} aria-label="Agent">
                 {agents.map((a) => (
                   <option key={a.name} value={a.name}>
@@ -88,21 +102,43 @@ function SchedulesPage() {
                 ))}
               </Select>
               <Input
-                className="max-w-[10rem] font-mono"
+                className="max-w-[9rem] font-mono"
                 value={cron}
                 onChange={(e) => setCron(e.target.value)}
                 placeholder="*/2 * * * *"
+                aria-label="Cron expression"
               />
-              <Input
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="What should the agent do? e.g. summarize today's Loredex updates"
-              />
+              <Select
+                className="max-w-[14rem]"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                aria-label="Timezone"
+              >
+                {TIMEZONES.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <Textarea
+              className="min-h-24"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="What should the agent do? e.g. summarize today's updates and post the highlights"
+            />
+            <div className="flex items-center justify-between">
+              {error ? (
+                <p className="text-destructive text-sm">{error}</p>
+              ) : (
+                <span className="text-ink-tertiary text-xs">
+                  Cron is interpreted in the selected timezone.
+                </span>
+              )}
               <Button type="submit" disabled={busy || !prompt.trim()}>
-                Add
+                Add schedule
               </Button>
             </div>
-            {error && <p className="text-destructive text-sm">{error}</p>}
           </form>
         </CardContent>
       </Card>

@@ -110,6 +110,7 @@ export const schedules = sqliteTable(
     agent: text("agent").notNull(),
     identity: text("identity", { mode: "json" }),
     cron: text("cron"),
+    timezone: text("timezone"),
     prompt: text("prompt").notNull(),
     nextRunAt: integer("next_run_at").notNull(),
     lastRunAt: integer("last_run_at"),

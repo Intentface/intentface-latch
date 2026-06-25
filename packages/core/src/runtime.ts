@@ -111,12 +111,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   reconstructPrincipal?: ReconstructPrincipal<P>;
   /**
-   * Next-fire evaluator for scheduled agents: given a cron expression and a
-   * lower bound (epoch ms), return the next fire time (epoch ms) or null if it
-   * never fires again. Keeps core cron-library-free — wire e.g. `croner`.
-   * Required to create recurring schedules.
+   * Next-fire evaluator for scheduled agents: given a cron expression, a lower
+   * bound (epoch ms), and an optional IANA timezone the expression is
+   * interpreted in, return the next fire time (epoch ms) or null if it never
+   * fires again. Keeps core cron-library-free — wire e.g. `croner`. Required to
+   * create recurring schedules.
    */
-  cron?: (expr: string, afterMs: number) => number | null;
+  cron?: (expr: string, afterMs: number, timezone?: string) => number | null;
   /**
    * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
    * Returns the AI SDK `Experimental_SandboxSession` passed to the model
@@ -249,6 +250,8 @@ export interface Runtime<P> {
     principal: P;
     agent: string;
     cron: string | null;
+    /** IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"). */
+    timezone?: string;
     prompt: string;
   }): Promise<ScheduleRecord>;
   /** The caller's schedules. */
@@ -1137,11 +1140,13 @@ export function createRuntime<P, RC = unknown>(
     principal,
     agent,
     cron,
+    timezone,
     prompt,
   }: {
     principal: P;
     agent: string;
     cron: string | null;
+    timezone?: string;
     prompt: string;
   }): Promise<ScheduleRecord> {
     // Accept code-declared or dynamic (UI-created) agents.
@@ -1151,7 +1156,7 @@ export function createRuntime<P, RC = unknown>(
     const now = Date.now();
     let nextRunAt = now; // one-shot → fire on the next runDue
     if (cron) {
-      const next = config.cron?.(cron, now);
+      const next = config.cron?.(cron, now, timezone);
       if (next == null) {
         throw new Error(
           "Recurring schedules need a `cron` evaluator in the runtime config (or the expression never fires)",
@@ -1159,7 +1164,7 @@ export function createRuntime<P, RC = unknown>(
       }
       nextRunAt = next;
     }
-    return storage.createSchedule(principal, { agent, cron, prompt, nextRunAt });
+    return storage.createSchedule(principal, { agent, cron, timezone, prompt, nextRunAt });
   }
 
   async function runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }> {
@@ -1169,7 +1174,7 @@ export function createRuntime<P, RC = unknown>(
     let errors = 0;
     for (const s of claimed) {
       // Advance regardless of outcome so a failing schedule can't hot-loop.
-      const next = s.cron ? (config.cron?.(s.cron, now) ?? null) : null;
+      const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
       try {
         const principal = await reconstructPrincipal(s.identity);
         const chat = await storage.createChat(principal, {

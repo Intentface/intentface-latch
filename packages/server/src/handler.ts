@@ -291,6 +291,7 @@ export function createLatchHandler<P>(
         const body = (await request.json().catch(() => ({}))) as {
           agent?: string;
           cron?: string | null;
+          timezone?: string;
           prompt?: string;
         };
         if (!body.agent || !body.prompt) {
@@ -301,6 +302,7 @@ export function createLatchHandler<P>(
             principal,
             agent: body.agent,
             cron: body.cron ?? null,
+            timezone: body.timezone,
             prompt: body.prompt,
           });
           return json({ schedule: record });

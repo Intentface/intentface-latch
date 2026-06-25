@@ -137,6 +137,8 @@ export interface ScheduleSummary {
 export async function createSchedule(input: {
   agent: string;
   cron: string | null;
+  /** IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"). */
+  timezone?: string;
   prompt: string;
 }): Promise<void> {
   const res = await fetch(`${BASE}/schedules`, {
