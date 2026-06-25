@@ -8,6 +8,7 @@ import type {
 import {
   createMcpHost,
   createMcpOAuth,
+  createOAuthDiscoveryFetch,
   type McpAuth,
   type McpOAuth,
   type ConnectionStatus,
@@ -93,6 +94,12 @@ export function createDynamicConnections(opts: {
   const { store, vault, onConnectionError } = opts;
   const callbackBase = opts.callbackBaseUrl.replace(/\/$/, "");
 
+  // Normalize non-conformant OAuth discovery from proxied MCP servers: force the
+  // https scheme (servers behind TLS-terminating proxies advertise http) and
+  // strip the issuer's trailing slash (the SDK's RFC 8414 check is strict).
+  // Same shared fetch goes to both the OAuth flow and the host (on-401 re-auth).
+  const discoveryFetch = createOAuthDiscoveryFetch({ forceScheme: "https" });
+
   // Cache the OpenAPI registry per (name+spec+baseUrl) so the spec is fetched
   // and dereferenced once, not every turn.
   const openapiCache = new Map<
@@ -132,6 +139,7 @@ export function createDynamicConnections(opts: {
             response_types: ["code"],
             token_endpoint_auth_method: "none",
           },
+          fetch: discoveryFetch,
         },
       });
       oauthCache.set(name, o);
@@ -184,7 +192,9 @@ export function createDynamicConnections(opts: {
         return createMcpHost<Principal>({
           allowedHosts: [hostOf(url)],
           onConnectionError,
-          connections: [{ name: conn.name, url, authProvider: o.provider(principal) }],
+          connections: [
+            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch },
+          ],
         }).open(principal);
       },
     };
