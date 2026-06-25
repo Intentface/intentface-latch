@@ -1,5 +1,6 @@
 import { tool, jsonSchema } from "ai";
 import type { Experimental_SandboxSession } from "ai";
+import { webFetch } from "@/lib/web-fetch";
 
 /**
  * The default harness tools, mirroring eve's set but implemented as thin
@@ -149,47 +150,35 @@ const grep = tool({
 });
 
 /** Block obvious SSRF targets (loopback/private/link-local literals). Best-effort. */
-function isBlockedHost(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === "localhost" || h.endsWith(".local") || h === "[::1]" || h === "::1") return true;
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    if (a === 127 || a === 10 || a === 0) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-  }
-  return false;
-}
-
 const web_fetch = tool({
   description:
-    "Fetch a public http(s) URL and return its text content (truncated). Runs " +
-    "in the app, not the sandbox; private/loopback hosts are blocked.",
-  inputSchema: jsonSchema<{ url: string }>({
+    "Fetch a public http(s) URL and return its content. HTML is converted to " +
+    "clean markdown (default) or text — not raw markup — so it's compact and " +
+    "readable. Runs in the app, not the sandbox; private/loopback hosts blocked.",
+  inputSchema: jsonSchema<{ url: string; format?: "markdown" | "text" | "html"; timeout?: number }>({
     type: "object",
-    properties: { url: { type: "string" } },
+    properties: {
+      url: { type: "string", description: "Fully-formed http(s) URL to fetch." },
+      format: {
+        type: "string",
+        enum: ["markdown", "text", "html"],
+        description: 'Output format; HTML is converted to it. Defaults to "markdown".',
+      },
+      timeout: { type: "number", description: "Timeout in seconds (default 30, max 120)." },
+    },
     required: ["url"],
     additionalProperties: false,
   }),
-  execute: async ({ url }) => {
-    let u: URL;
-    try {
-      u = new URL(url);
-    } catch {
-      return { ok: false as const, error: "Invalid URL." };
-    }
-    if (u.protocol !== "http:" && u.protocol !== "https:") {
-      return { ok: false as const, error: "Only http(s) URLs are allowed." };
-    }
-    if (isBlockedHost(u.hostname)) {
-      return { ok: false as const, error: "Host is not allowed." };
-    }
-    const res = await fetch(u, { redirect: "follow" });
-    const body = await res.text();
-    const { text, truncated } = tail(body, 1000, 50_000);
-    return { ok: true as const, status: res.status, body: text, truncated };
+  execute: async ({ url, format, timeout }) => {
+    const r = await webFetch({ url, format, timeout });
+    if (!r.ok) return { ok: false as const, error: r.error };
+    return {
+      ok: true as const,
+      status: r.status,
+      contentType: r.contentType,
+      body: r.content,
+      truncated: r.truncated,
+    };
   },
 });
 
