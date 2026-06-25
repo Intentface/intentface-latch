@@ -55,6 +55,8 @@ export const runs = sqliteTable(
     attempt: integer("attempt"),
     usageInputTokens: integer("usage_input_tokens"),
     usageOutputTokens: integer("usage_output_tokens"),
+    usageCacheReadTokens: integer("usage_cache_read_tokens"),
+    usageCacheWriteTokens: integer("usage_cache_write_tokens"),
     costTotal: real("cost_total"),
     error: text("error"),
     startedAt: integer("started_at").notNull(),

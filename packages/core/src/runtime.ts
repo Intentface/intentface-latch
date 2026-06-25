@@ -778,6 +778,8 @@ export function createRuntime<P, RC = unknown>(
             status: paused ? "awaiting_input" : "completed",
             usageInputTokens: inputTokens,
             usageOutputTokens: outputTokens,
+            usageCacheReadTokens: cacheReadTokens || undefined,
+            usageCacheWriteTokens: cacheWriteTokens || undefined,
             costTotal: cost,
             endedAt: paused ? undefined : Date.now(),
           },

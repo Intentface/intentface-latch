@@ -15,7 +15,8 @@ const DDL = [
      identity TEXT,
      lease_owner TEXT, lease_expires_at INTEGER, fencing_token INTEGER, heartbeat_at INTEGER,
      attempt INTEGER, usage_input_tokens INTEGER,
-     usage_output_tokens INTEGER, cost_total REAL, error TEXT,
+     usage_output_tokens INTEGER, usage_cache_read_tokens INTEGER, usage_cache_write_tokens INTEGER,
+     cost_total REAL, error TEXT,
      started_at INTEGER NOT NULL, ended_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS latch_runs_chat_idx ON latch_runs (chat_id)`,
   `CREATE INDEX IF NOT EXISTS latch_runs_reaper_idx ON latch_runs (status, lease_expires_at)`,
@@ -39,7 +40,11 @@ const DDL = [
 ];
 
 /** Idempotent column adds for DBs created before a column existed. */
-const ALTERS = [`ALTER TABLE latch_schedules ADD COLUMN timezone TEXT`];
+const ALTERS = [
+  `ALTER TABLE latch_schedules ADD COLUMN timezone TEXT`,
+  `ALTER TABLE latch_runs ADD COLUMN usage_cache_read_tokens INTEGER`,
+  `ALTER TABLE latch_runs ADD COLUMN usage_cache_write_tokens INTEGER`,
+];
 
 export async function migrate(client: Client): Promise<void> {
   for (const stmt of DDL) await client.execute(stmt);

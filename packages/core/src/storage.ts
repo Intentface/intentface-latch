@@ -51,6 +51,8 @@ export interface RunRecord {
   attempt?: number | null;
   usageInputTokens?: number;
   usageOutputTokens?: number;
+  usageCacheReadTokens?: number;
+  usageCacheWriteTokens?: number;
   costTotal?: number;
   error?: string | null;
   startedAt: number;

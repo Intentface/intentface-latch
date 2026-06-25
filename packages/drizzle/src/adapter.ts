@@ -59,6 +59,8 @@ export function createSqliteAdapter<P>(
     attempt: r.attempt,
     usageInputTokens: r.usageInputTokens ?? undefined,
     usageOutputTokens: r.usageOutputTokens ?? undefined,
+    usageCacheReadTokens: r.usageCacheReadTokens ?? undefined,
+    usageCacheWriteTokens: r.usageCacheWriteTokens ?? undefined,
     costTotal: r.costTotal ?? undefined,
     error: r.error,
     startedAt: r.startedAt,

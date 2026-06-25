@@ -79,6 +79,8 @@ export const listRunsFn = createServerFn({ method: "GET" }).handler(async () => 
     status: r.status,
     inputTokens: r.usageInputTokens ?? 0,
     outputTokens: r.usageOutputTokens ?? 0,
+    cacheReadTokens: r.usageCacheReadTokens ?? 0,
+    cacheWriteTokens: r.usageCacheWriteTokens ?? 0,
     cost: r.costTotal ?? 0,
     startedAt: r.startedAt,
     endedAt: r.endedAt ?? null,

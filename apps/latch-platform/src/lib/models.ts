@@ -1,7 +1,7 @@
 import { anthropic } from "@ai-sdk/anthropic";
 import { openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
-import { staticPricing, type Pricing } from "@intentface/latch-core";
+import { staticPricing, type Pricing, type ModelPrice } from "@intentface/latch-core";
 
 /**
  * The model catalog, sourced from models.dev (the public model registry). We
@@ -46,13 +46,21 @@ const FALLBACK: ModelCatalog = {
     id.startsWith("gpt") || id.startsWith("o") ? openai(id) : anthropic(DEFAULT_MODEL),
 };
 
+interface MdCost {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+}
 interface MdProvider {
   env?: string[];
   models?: Record<
     string,
     {
       name?: string;
-      cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+      cost?: MdCost & {
+        tiers?: Array<MdCost & { tier?: { type?: string; size?: number } }>;
+      };
     }
   >;
 }
@@ -69,10 +77,7 @@ export function loadModelCatalog(): Promise<ModelCatalog> {
       const all = (await res.json()) as Record<string, MdProvider>;
 
       const list: ModelInfo[] = [];
-      const rates: Record<
-        string,
-        { inputPer1M: number; outputPer1M: number; cacheReadPer1M?: number; cacheWritePer1M?: number }
-      > = {};
+      const rates: Record<string, ModelPrice> = {};
       const idToProvider = new Map<string, string>();
 
       for (const provider of Object.keys(PROVIDERS)) {
@@ -90,6 +95,19 @@ export function loadModelCatalog(): Promise<ModelCatalog> {
               ...(m.cost.cache_read != null ? { cacheReadPer1M: m.cost.cache_read } : {}),
               ...(m.cost.cache_write != null ? { cacheWritePer1M: m.cost.cache_write } : {}),
             };
+            // Long-context tier (higher rates above a context size).
+            const ct = (m.cost.tiers ?? []).find(
+              (t) => t.tier?.type === "context" && t.tier?.size && t.input != null && t.output != null,
+            );
+            if (ct?.tier?.size) {
+              rates[id].tier = {
+                thresholdTokens: ct.tier.size,
+                inputPer1M: ct.input!,
+                outputPer1M: ct.output!,
+                ...(ct.cache_read != null ? { cacheReadPer1M: ct.cache_read } : {}),
+                ...(ct.cache_write != null ? { cacheWritePer1M: ct.cache_write } : {}),
+              };
+            }
           }
         }
       }

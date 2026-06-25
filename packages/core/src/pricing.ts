@@ -15,6 +15,18 @@ export interface ModelPrice {
   cacheReadPer1M?: number;
   /** Cache WRITE/creation rate (Anthropic charges a premium). Falls back to input. */
   cacheWritePer1M?: number;
+  /**
+   * Higher rates that apply to the WHOLE turn once its input exceeds
+   * `thresholdTokens` (long-context pricing, e.g. OpenAI's >200k tier). Cache
+   * rates fall back to the tier's input rate when absent.
+   */
+  tier?: {
+    thresholdTokens: number;
+    inputPer1M: number;
+    outputPer1M: number;
+    cacheReadPer1M?: number;
+    cacheWritePer1M?: number;
+  };
 }
 
 /** A turn's token usage, split so cached input can be priced separately. */
@@ -40,15 +52,20 @@ export type Pricing = (model: string) => ModelPrice | undefined;
  */
 export function computeCost(price: ModelPrice | undefined, usage: UsageBreakdown): number {
   if (!price) return 0;
+  // Long-context tier: once input crosses the threshold, the whole turn bills
+  // at the higher rates (cache rates fall back to that tier's input rate).
+  const useTier = !!price.tier && usage.inputTokens > price.tier.thresholdTokens;
+  const r = useTier && price.tier ? price.tier : price;
+  const inputRate = r.inputPer1M;
   const cacheRead = usage.cacheReadTokens ?? 0;
   const cacheWrite = usage.cacheWriteTokens ?? 0;
   const nonCached = Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
   const per = (n: number, rate: number) => (n / 1_000_000) * rate;
   return (
-    per(nonCached, price.inputPer1M) +
-    per(cacheRead, price.cacheReadPer1M ?? price.inputPer1M) +
-    per(cacheWrite, price.cacheWritePer1M ?? price.inputPer1M) +
-    per(usage.outputTokens, price.outputPer1M)
+    per(nonCached, inputRate) +
+    per(cacheRead, r.cacheReadPer1M ?? inputRate) +
+    per(cacheWrite, r.cacheWritePer1M ?? inputRate) +
+    per(usage.outputTokens, r.outputPer1M)
   );
 }
 
