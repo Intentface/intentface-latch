@@ -102,7 +102,15 @@ export async function getLatch(): Promise<{
 
   // MCP connections, declared in `connections/`. SSRF allowlist derives from the
   // connection URLs; the OAuth callback base must match the mounted handler.
-  const baseURL = process.env.PUBLIC_BASE_URL ?? "http://localhost:3000";
+  // Resolve the public origin like auth.ts: explicit override → better-auth URL
+  // → Vercel's prod domain → localhost. (Without this, OAuth callbacks pointed
+  // at localhost in production.)
+  const baseURL =
+    process.env.PUBLIC_BASE_URL ??
+    process.env.BETTER_AUTH_URL ??
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL
+      ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+      : "http://localhost:3000");
   const allowedHosts = Object.values(connectionDefs).map((c) => new URL(c.url).hostname);
 
   // UI-added connections (Vault-stored, org/personal), resolved by name per
