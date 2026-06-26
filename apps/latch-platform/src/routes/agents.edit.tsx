@@ -94,6 +94,7 @@ function AgentEditor() {
   const [providerWebTools, setProviderWebTools] = useState(
     initial?.exec?.providerWebTools ?? false,
   );
+  const [codeMode, setCodeMode] = useState(!!initial?.exec?.codeMode);
   const [subagents, setSubagents] = useState<string[]>(initial?.subagents ?? []);
   const toggleSubagent = (n: string) =>
     setSubagents((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
@@ -207,12 +208,13 @@ function AgentEditor() {
             }
           : undefined;
       const exec =
-        sandbox || webTools || providerWebTools
+        sandbox || webTools || providerWebTools || codeMode
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
               defaultTools: webTools || undefined,
               providerWebTools: providerWebTools || undefined,
+              codeMode: codeMode ? {} : undefined,
             }
           : undefined;
       const res = await saveAgentFn({
@@ -459,6 +461,15 @@ function AgentEditor() {
               Provider web tools — native <span className="font-mono">web_search</span> /{" "}
               <span className="font-mono">web_fetch</span>, run by the model provider (Anthropic =
               search + fetch, OpenAI = search). No-op on providers without them.
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={codeMode} onCheckedChange={() => setCodeMode((v) => !v)} />
+            <span>
+              Code mode — the agent writes a JS program that calls its connection tools as
+              functions (one <span className="font-mono">run_code</span> call instead of many
+              round-trips). Approval-gated tools stay top-level. Good for multi-step
+              orchestration.
             </span>
           </label>
         </div>

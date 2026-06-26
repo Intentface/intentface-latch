@@ -558,10 +558,26 @@ export function createRuntime<P, RC = unknown>(
     // the model reaches them only through code.
     if (cfg.codeMode && config.codeModeWrap) {
       const pick = cfg.codeMode.tools ? new Set(cfg.codeMode.tools) : null;
+      // Boundary approval (SECURITY): a tool that requires approval must NOT be
+      // reachable from inside code — the bridge calls `execute` directly, which
+      // would bypass the SDK's approval gate. Keep such tools top-level (where
+      // the gate applies). Gated set = connection defaults + the agent's
+      // object-form policy (truthy = gated; the agent can waive by setting falsy).
+      const approvalGated = new Set<string>();
+      for (const o of opened) {
+        for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) approvalGated.add(k);
+      }
+      if (cfg.toolApproval && typeof cfg.toolApproval !== "function") {
+        for (const [k, v] of Object.entries(cfg.toolApproval as Record<string, unknown>)) {
+          if (v) approvalGated.add(k);
+          else approvalGated.delete(k);
+        }
+      }
       const connNames = new Set(opened.flatMap((o) => Object.keys(o.tools)));
       const wrapped: Record<string, unknown> = {};
       for (const name of connNames) {
-        if (name.startsWith("connect_")) continue;
+        if (name.startsWith("connect_")) continue; // OAuth gates stay top-level
+        if (approvalGated.has(name)) continue; // approval tools stay top-level
         if (pick && !pick.has(name)) continue;
         if (name in tools) {
           wrapped[name] = tools[name];
