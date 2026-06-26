@@ -158,7 +158,7 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   codeModeWrap?: (
     tools: Record<string, unknown>,
     opts?: { agent: string },
-  ) => unknown;
+  ) => Record<string, unknown>;
 }
 
 export interface HandleChatInput<P> {
@@ -547,6 +547,30 @@ export function createRuntime<P, RC = unknown>(
       for (const [name, description] of Object.entries(cfg.toolDescriptions)) {
         const t = tools[name];
         if (t && description) tools[name] = { ...(t as object), description };
+      }
+    }
+
+    // Code mode: fold the chosen connection tools into a single `run_code` tool
+    // (the model writes JS that calls them as functions, one program instead of
+    // many round-trips). `codeMode.tools` names which to expose (omitted → all);
+    // OAuth `connect_` gates stay top-level. The platform supplies the wrapper
+    // (core carries no QuickJS dep). Wrapped tools leave the top-level set, so
+    // the model reaches them only through code.
+    if (cfg.codeMode && config.codeModeWrap) {
+      const pick = cfg.codeMode.tools ? new Set(cfg.codeMode.tools) : null;
+      const connNames = new Set(opened.flatMap((o) => Object.keys(o.tools)));
+      const wrapped: Record<string, unknown> = {};
+      for (const name of connNames) {
+        if (name.startsWith("connect_")) continue;
+        if (pick && !pick.has(name)) continue;
+        if (name in tools) {
+          wrapped[name] = tools[name];
+          delete tools[name];
+        }
+      }
+      if (Object.keys(wrapped).length > 0) {
+        Object.assign(tools, config.codeModeWrap(wrapped, { agent: run.agent }));
+        capabilityTools.push("run_code");
       }
     }
 

@@ -27,6 +27,7 @@ import { baseUrl } from "./base-url";
 import { loadModelCatalog, type ModelInfo } from "./models";
 import { resolveSandbox, harnessTools } from "./sandbox";
 import { resolveProviderTools } from "./provider-tools";
+import { codeModeWrap } from "./code-mode";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -159,6 +160,9 @@ export async function getLatch(): Promise<{
     harnessTools,
     // Native provider web tools (search/fetch) for agents that opt in.
     resolveProviderTools,
+    // Code mode: agents with `codeMode` get a single `run_code` tool that runs
+    // model-written JS calling their connection tools as functions (QuickJS).
+    codeModeWrap,
   });
 
   // The connection registry the handler's OAuth/status/test routes see: code
