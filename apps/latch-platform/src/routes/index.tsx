@@ -15,8 +15,8 @@ function Home() {
   if (session) return <Navigate to="/chat" />;
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-      <LatchLogo className="h-12 w-auto" />
+    <div className="flex h-full flex-col items-center justify-center gap-6 p-8 text-center">
+      <LatchLogo className="h-9 w-auto" />
       <p className="text-muted-foreground max-w-md">
         Run durable, multi-tenant agents and try every Latch feature. Sign in to start.
       </p>
