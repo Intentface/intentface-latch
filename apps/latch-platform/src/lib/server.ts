@@ -35,7 +35,24 @@ export const currentPrincipalFn = createServerFn({ method: "GET" }).handler(
   },
 );
 
-/** The tenant's chats for the sidebar. */
+/**
+ * Recent chats for the sidebar — deliberately lightweight: a capped `listChats`
+ * with NO per-chat cost (the run scan below is what made this slow, and the
+ * sidebar only renders title/agent). Buffer a few extra rows so subagent
+ * threads (`sub_…`) can be filtered out and still leave ~10 real chats.
+ */
+export const recentChatsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { runtime } = await getLatch();
+  const chats = await runtime.listChats({ principal, limit: 25 });
+  return chats
+    .filter((c) => !c.id.startsWith("sub_"))
+    .slice(0, 10)
+    .map((c) => ({ id: c.id, title: c.title ?? null, agent: c.agent }));
+});
+
+/** The tenant's chats for the chat-list page (includes per-chat cost totals). */
 export const listChatsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];

@@ -22,7 +22,7 @@ import {
   useSettingsStore,
   type ThreadAutoScrollMode,
 } from "@intentface/latch-ui";
-import { listChatsFn } from "@/lib/server";
+import { recentChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { LatchLogo } from "@/components/latch-logo";
 import { Button } from "@/components/ui/button";
@@ -58,20 +58,23 @@ export function AppSidebar() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
 
-  // Recent threads for the sidebar; refetch on navigation so new chats appear.
+  // Recent threads. The list only changes while in the chat area (new chats,
+  // renamed titles), so key the refetch on the chat path — navigating among
+  // other pages (/agents, /runs, …) collapses to one key and skips the fetch.
+  const chatKey = pathname.startsWith("/chat") ? pathname : "other";
   useEffect(() => {
     if (!session) {
       setChats([]);
       return;
     }
     let cancelled = false;
-    void listChatsFn()
+    void recentChatsFn()
       .then((c) => !cancelled && setChats(c as typeof chats))
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [session, pathname]);
+  }, [session, chatKey]);
 
   return (
     <Sidebar>
@@ -106,7 +109,7 @@ export function AppSidebar() {
             <Sidebar.GroupLabel>Recent</Sidebar.GroupLabel>
             <Sidebar.GroupContent>
               <Sidebar.Menu>
-                {chats.slice(0, 20).map((c) => (
+                {chats.map((c) => (
                   <Sidebar.MenuItem key={c.id}>
                     <Sidebar.MenuButton
                       size="sm"
