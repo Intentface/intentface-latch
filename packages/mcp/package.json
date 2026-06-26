@@ -14,9 +14,13 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -25,12 +29,12 @@
     "@intentface/latch-core": "workspace:*"
   },
   "peerDependencies": {
-    "@ai-sdk/mcp": ">=2.0.0-beta.66",
-    "ai": ">=7.0.0-beta.178"
+    "@ai-sdk/mcp": ">=2.0.0",
+    "ai": ">=7.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/mcp": "2.0.0-beta.66",
-    "ai": "7.0.0-beta.178",
+    "@ai-sdk/mcp": "^2.0.0",
+    "ai": "^7.0.2",
     "typescript": "^5.7.0"
   }
 }

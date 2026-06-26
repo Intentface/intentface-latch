@@ -15,9 +15,16 @@
     },
     "./theme.css": "./src/theme.css"
   },
-  "files": ["dist", "src/theme.css"],
-  "sideEffects": ["*.css"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist",
+    "src/theme.css"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -42,20 +49,20 @@
     "zustand": "^5.0.11"
   },
   "peerDependencies": {
-    "@ai-sdk/react": ">=4.0.0-beta",
+    "@ai-sdk/react": ">=4.0.0",
     "@base-ui/react": ">=1.2.0",
-    "ai": ">=7.0.0-beta.178",
+    "ai": ">=7.0.0",
     "lucide-react": ">=0.5.0",
     "next-themes": ">=0.4.0",
     "react": ">=19",
     "react-dom": ">=19"
   },
   "devDependencies": {
-    "@ai-sdk/react": "4.0.0-beta.186",
+    "@ai-sdk/react": "^4.0.2",
     "@base-ui/react": "^1.6.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "ai": "7.0.0-beta.182",
+    "ai": "^7.0.2",
     "lucide-react": "^1.21.0",
     "next-themes": "^0.4.6",
     "react": "^19.2.6",
