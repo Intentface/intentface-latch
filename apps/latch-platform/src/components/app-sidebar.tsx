@@ -80,7 +80,7 @@ export function AppSidebar() {
     <Sidebar>
       <Sidebar.Header>
         <Link to="/" className="inline-flex px-1">
-          <LatchLogo className="h-4 w-auto" />
+          <LatchLogo className="h-7 w-auto" />
         </Link>
       </Sidebar.Header>
 

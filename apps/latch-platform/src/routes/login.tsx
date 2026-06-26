@@ -77,7 +77,7 @@ function LoginPage() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-8 p-4">
-      <LatchLogo className="h-6 w-auto" />
+      <LatchLogo className="h-12 w-auto" />
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>{mode === "signin" ? "Sign in" : "Create account"}</CardTitle>
