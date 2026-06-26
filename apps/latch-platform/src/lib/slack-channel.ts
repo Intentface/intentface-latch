@@ -3,14 +3,8 @@ import { slackChannel } from "@intentface/latch-channels/slack";
 import { getLatch } from "./latch";
 import { slackVaultKeys } from "./slack-store";
 import { buildLinkUrl } from "./slack-link";
+import { baseUrl } from "./base-url";
 import type { Principal } from "./session";
-
-/** The app's canonical base URL (for link + authorize URLs). */
-function baseUrl(): string {
-  if (process.env.BETTER_AUTH_URL) return process.env.BETTER_AUTH_URL;
-  const prod = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-  return prod ? `https://${prod}` : "http://localhost:3000";
-}
 
 /**
  * Build the Slack channel for one app (resolved by `api_app_id`), wired to the

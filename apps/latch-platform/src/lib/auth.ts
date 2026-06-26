@@ -4,6 +4,7 @@ import { organization } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import { LibsqlDialect } from "@libsql/kysely-libsql";
 import { createClient } from "@libsql/client";
+import { baseUrl } from "./base-url";
 import { sendEmail } from "./email";
 
 /** Sign-in/up is restricted to this email domain (org policy). */
@@ -37,24 +38,26 @@ const dialect = new LibsqlDialect({
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
-// Vercel exposes two hostnames (no scheme): VERCEL_PROJECT_PRODUCTION_URL is the
-// stable production alias (e.g. intentface-latch.vercel.app — same on every
-// deploy), VERCEL_URL is the per-deployment/preview host. Prefer an explicit
-// BETTER_AUTH_URL, else fall back to the production alias, else localhost.
+// Canonical origin (shared resolver: PUBLIC_BASE_URL → BETTER_AUTH_URL →
+// VERCEL_PROJECT_PRODUCTION_URL → localhost) so auth agrees with the rest of the app.
+const baseURL = baseUrl();
+
+// Trust the canonical baseURL, the Vercel prod alias + current preview host, and
+// any extra origins listed in TRUSTED_ORIGINS (comma-separated) — so logins work
+// across a custom domain, the *.vercel.app alias, and preview deploys.
 const vercelProdUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL;
 const vercelUrl = process.env.VERCEL_URL;
-const baseURL =
-  process.env.BETTER_AUTH_URL ??
-  (vercelProdUrl ? `https://${vercelProdUrl}` : "http://localhost:3000");
-
-// Allow the canonical baseURL plus the production alias and the current preview
-// deployment, so logins work on prod AND preview URLs without per-deploy config.
+const extraOrigins = (process.env.TRUSTED_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const trustedOrigins = [
   ...new Set(
     [
       baseURL,
       vercelProdUrl && `https://${vercelProdUrl}`,
       vercelUrl && `https://${vercelUrl}`,
+      ...extraOrigins,
     ].filter((o): o is string => Boolean(o)),
   ),
 ];

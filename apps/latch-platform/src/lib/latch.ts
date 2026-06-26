@@ -23,6 +23,7 @@ import { createConnectionStore, type ConnectionStore } from "./connection-store"
 import { createDynamicConnections, type DynamicConnections } from "./dynamic-connections";
 import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
 import { createSlackStore, migrateSlack, type SlackStore } from "./slack-store";
+import { baseUrl } from "./base-url";
 import { loadModelCatalog, type ModelInfo } from "./models";
 import { resolveSandbox, harnessTools } from "./sandbox";
 import { resolveProviderTools } from "./provider-tools";
@@ -103,15 +104,8 @@ export async function getLatch(): Promise<{
 
   // MCP connections, declared in `connections/`. SSRF allowlist derives from the
   // connection URLs; the OAuth callback base must match the mounted handler.
-  // Resolve the public origin like auth.ts: explicit override → better-auth URL
-  // → Vercel's prod domain → localhost. (Without this, OAuth callbacks pointed
-  // at localhost in production.)
-  const baseURL =
-    process.env.PUBLIC_BASE_URL ??
-    process.env.BETTER_AUTH_URL ??
-    (process.env.VERCEL_PROJECT_PRODUCTION_URL
-      ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
-      : "http://localhost:3000");
+  // Shared canonical origin so connection callbacks agree with auth + Slack.
+  const baseURL = baseUrl();
   const allowedHosts = Object.values(connectionDefs).map((c) => new URL(c.url).hostname);
 
   // UI-added connections (Vault-stored, org/personal), resolved by name per

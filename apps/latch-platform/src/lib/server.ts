@@ -13,14 +13,8 @@ import {
   SLACK_CONFIG_REFRESH_KEY,
 } from "./slack-store";
 import { createAppFromManifest } from "./slack-admin";
+import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
-
-/** The app's canonical base URL (matches the Slack webhook route). */
-function baseUrl(): string {
-  if (process.env.BETTER_AUTH_URL) return process.env.BETTER_AUTH_URL;
-  const prod = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-  return prod ? `https://${prod}` : "http://localhost:3000";
-}
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];

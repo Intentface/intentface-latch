@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { getLatch } from "@/lib/latch";
 import { slackVaultKeys } from "@/lib/slack-store";
 import { oauthAccess } from "@/lib/slack-admin";
+import { baseUrl } from "@/lib/base-url";
 import type { Principal } from "@/lib/session";
 
 /**
@@ -10,11 +11,6 @@ import type { Principal } from "@/lib/session";
  * resolve the app's owner + client creds, exchange the code for the bot token,
  * and store it in the Vault — completing the bind with zero token pasting.
  */
-function baseUrl(): string {
-  if (process.env.BETTER_AUTH_URL) return process.env.BETTER_AUTH_URL;
-  const prod = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-  return prod ? `https://${prod}` : "http://localhost:3000";
-}
 
 const back = (status: string) =>
   new Response(null, { status: 302, headers: { location: `/agents?slack=${status}` } });
