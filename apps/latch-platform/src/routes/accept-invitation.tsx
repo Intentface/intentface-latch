@@ -68,9 +68,9 @@ function AcceptInvitation() {
           ) : !session ? (
             <div className="space-y-3">
               <p className="text-ink-secondary text-sm">
-                Sign in (or create your account), then open this link again to accept.
+                Sign in or create your account to accept this invitation.
               </p>
-              <Button render={<Link to="/login" />} className="w-full">
+              <Button render={<Link to="/login" search={{ invite: id }} />} className="w-full">
                 Sign in
               </Button>
             </div>

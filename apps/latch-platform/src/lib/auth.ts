@@ -79,6 +79,39 @@ async function firstOrgFor(userId: string): Promise<string | undefined> {
   return id ? String(id) : undefined;
 }
 
+/**
+ * Ensure a user has a real "Personal" organization, idempotently. The org id is
+ * pinned to `user:<userId>` — the exact key the Latch `owner` derives for the
+ * personal scope (see session.ts / latch.ts) — so any data already created under
+ * the synthetic personal tenant belongs to this real, switchable org with no
+ * reassignment. Used by the signup hook (new users) and the backfill script
+ * (existing ones). Returns the org id.
+ */
+export async function ensurePersonalOrg(userId: string): Promise<string> {
+  const orgId = `user:${userId}`;
+  const now = new Date().toISOString();
+
+  const org = await db.execute({ sql: `SELECT id FROM organization WHERE id = ?`, args: [orgId] });
+  if (org.rows.length === 0) {
+    await db.execute({
+      sql: `INSERT INTO organization (id, name, slug, createdAt) VALUES (?, ?, ?, ?)`,
+      args: [orgId, "Personal", `personal-${userId}`, now],
+    });
+  }
+
+  const member = await db.execute({
+    sql: `SELECT id FROM member WHERE organizationId = ? AND userId = ?`,
+    args: [orgId, userId],
+  });
+  if (member.rows.length === 0) {
+    await db.execute({
+      sql: `INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)`,
+      args: [crypto.randomUUID(), orgId, userId, "owner", now],
+    });
+  }
+  return orgId;
+}
+
 export const auth = betterAuth({
   baseURL,
   trustedOrigins,
@@ -136,6 +169,17 @@ export const auth = betterAuth({
             throw new APIError("FORBIDDEN", { message: DOMAIN_ERROR });
           }
           return undefined;
+        },
+        // Give every new user a real "Personal" org (id = `user:<id>`) so they
+        // always have a stable, switchable tenant from signup — the session hook
+        // below then pins it as active. Best-effort: a failure here must not
+        // block account creation (the synthetic personal fallback still covers).
+        after: async (user) => {
+          try {
+            await ensurePersonalOrg((user as { id: string }).id);
+          } catch (e) {
+            console.warn("ensurePersonalOrg failed for new user:", e instanceof Error ? e.message : e);
+          }
         },
       },
     },

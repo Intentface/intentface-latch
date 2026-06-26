@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { authClient, signIn, signUp } from "@/lib/auth-client";
 import { LatchLogo } from "@/components/latch-logo";
 import { Button } from "@/components/ui/button";
@@ -15,11 +15,20 @@ import {
 
 export const Route = createFileRoute("/login")({
   head: () => ({ meta: [{ title: "Sign in · Latch" }] }),
+  // Carry a pending invitation id (and any post-login redirect) across sign-in,
+  // so a new invitee who lands on /login goes straight back to accept the invite.
+  validateSearch: (s: Record<string, unknown>): { invite?: string } =>
+    typeof s.invite === "string" ? { invite: s.invite } : {},
   component: LoginPage,
 });
 
 function LoginPage() {
-  const navigate = useNavigate();
+  const { invite } = Route.useSearch();
+  // Where to land after auth: back to the invite-accept page if we arrived with
+  // a pending invitation, otherwise the app root.
+  const afterAuth = invite
+    ? `/accept-invitation?id=${encodeURIComponent(invite)}`
+    : "/";
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -39,12 +48,14 @@ function LoginPage() {
         : await signUp.email({ email, password, name });
     setBusy(false);
     if (res.error) setError(res.error.message ?? "Something went wrong");
-    else navigate({ to: "/" });
+    // Full navigation (not router push) so the invite-accept page mounts fresh
+    // with the new session resolved.
+    else window.location.href = afterAuth;
   }
 
   async function google() {
     setError(null);
-    await signIn.social({ provider: "google", callbackURL: "/" });
+    await signIn.social({ provider: "google", callbackURL: afterAuth });
   }
 
   async function forgotPassword() {
