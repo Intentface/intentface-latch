@@ -4,9 +4,9 @@
   "description": "Agents, MCP & OpenAPI connections, and scheduled runs on one AI backend.",
   "icons": [
     {
-      "src": "favicon.ico",
-      "sizes": "64x64 32x32 24x24 16x16",
-      "type": "image/x-icon"
+      "src": "latch-face.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
     }
   ],
   "start_url": ".",

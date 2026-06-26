@@ -29,7 +29,8 @@ export const Route = createRootRoute({
     ],
     links: [
       { rel: "stylesheet", href: appCss },
-      { rel: "icon", href: "/favicon.ico" },
+      // The Latch face as an SVG favicon (modern browsers).
+      { rel: "icon", type: "image/svg+xml", href: "/latch-face.svg" },
       { rel: "manifest", href: "/manifest.json" },
     ],
   }),

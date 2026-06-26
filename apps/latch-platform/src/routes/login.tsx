@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { authClient, signIn, signUp } from "@/lib/auth-client";
+import { LatchLogo } from "@/components/latch-logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -65,7 +66,7 @@ function LoginPage() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 p-4">
-      <div className="text-ink-primary text-lg font-semibold tracking-tight">🔒 Latch</div>
+      <LatchLogo className="h-8 w-auto" />
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>{mode === "signin" ? "Sign in" : "Create account"}</CardTitle>

@@ -1,5 +1,6 @@
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { useSession } from "@/lib/auth-client";
+import { LatchLogo } from "@/components/latch-logo";
 import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/")({ component: Home });
@@ -15,7 +16,7 @@ function Home() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-      <h1 className="text-2xl font-semibold">🔒 Latch Platform</h1>
+      <LatchLogo className="h-12 w-auto" />
       <p className="text-muted-foreground max-w-md">
         Run durable, multi-tenant agents and try every Latch feature. Sign in to start.
       </p>

@@ -24,6 +24,7 @@ import {
 } from "@intentface/latch-ui";
 import { listChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
+import { LatchLogo } from "@/components/latch-logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -75,8 +76,8 @@ export function AppSidebar() {
   return (
     <Sidebar>
       <Sidebar.Header>
-        <Link to="/" className="px-1 text-sm font-semibold tracking-tight">
-          🔒 Latch
+        <Link to="/" className="inline-flex px-1">
+          <LatchLogo className="h-5 w-auto" />
         </Link>
       </Sidebar.Header>
 
