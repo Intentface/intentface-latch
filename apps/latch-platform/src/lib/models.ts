@@ -1,4 +1,5 @@
 import { anthropic } from "@ai-sdk/anthropic";
+import { google } from "@ai-sdk/google";
 import { openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { staticPricing, type Pricing, type ModelPrice } from "@intentface/latch-core";
@@ -27,6 +28,7 @@ export interface ModelCatalog {
 /** Providers we can actually run (factory). Inclusion also requires the key env (per models.dev). */
 const PROVIDERS: Record<string, (id: string) => LanguageModel> = {
   anthropic: (id) => anthropic(id),
+  google: (id) => google(id),
   openai: (id) => openai(id),
 };
 

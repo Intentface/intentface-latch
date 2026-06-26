@@ -6,6 +6,7 @@
     "dev": "vite dev --port 3000",
     "build": "vite build",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/scripts/migrate.ts",
+    "backfill:personal-orgs": "node --env-file-if-exists=.env --import tsx src/scripts/backfill-personal-orgs.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "lint": "eslint",
@@ -15,6 +16,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/google": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
     "@ai-sdk/react": "^4.0.2",
     "@base-ui/react": "^1.6.0",
