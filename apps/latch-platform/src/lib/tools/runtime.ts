@@ -221,16 +221,27 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
   const deadline = Date.now() + caps.timeoutMs;
   ctx.runtime.setMemoryLimit(caps.memBytes);
   ctx.runtime.setInterruptHandler(() => Date.now() > deadline);
-  // Set once disposed so a late host-fetch resume can't touch a freed context.
-  let disposed = false;
 
   try {
     // Host `__host_fetch`: asyncify lets the guest `await` this real async call.
+    // It must NEVER reject — Emscripten asyncify can't resume a suspended call
+    // whose host promise rejected (it hangs until the wall-clock timeout). So
+    // catch everything and always return a string handle (an error envelope).
     const fetchFn = ctx.newAsyncifiedFunction("__host_fetch", async (argHandle) => {
-      const argJson = ctx.getString(argHandle);
-      const resJson = await hostFetch(argJson, allowedHosts, caps);
-      if (disposed) return ctx.undefined;
-      return ctx.newString(resJson);
+      let resJson: string;
+      try {
+        const argJson = ctx.getString(argHandle);
+        resJson = await hostFetch(argJson, allowedHosts, caps);
+      } catch (e) {
+        resJson = JSON.stringify({ error: stringifyErr(e) });
+      }
+      try {
+        return ctx.newString(resJson);
+      } catch {
+        // Context disposed mid-flight (timeout teardown) — the run already
+        // returned, so nothing awaits this; return undefined without rejecting.
+        return ctx.undefined;
+      }
     });
     ctx.setProp(ctx.global, "__host_fetch", fetchFn);
     fetchFn.dispose();
@@ -240,10 +251,10 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
 
     // Wall-clock timeout guards against an await-stall the interrupt handler
     // can't break (it only fires during JS execution, not while awaiting a host
-    // promise) — so a hung fetch/never-settling promise can't hang the request.
+    // promise) — so a hung fetch/never-settling promise can't run past the cap.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("tool run timed out")), caps.timeoutMs + 1000);
+      timer = setTimeout(() => reject(new Error("tool run timed out")), caps.timeoutMs);
       (timer as { unref?: () => void }).unref?.();
     });
 
@@ -291,7 +302,6 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
   } catch (e) {
     return { status: "error", error: stringifyErr(e) };
   } finally {
-    disposed = true; // block any late host-fetch resume from touching the context
     try {
       ctx.dispose();
     } catch {
