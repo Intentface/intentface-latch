@@ -1,13 +1,13 @@
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { QuickJS } from "quickjs-wasi";
 import { transform } from "sucrase";
+import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
+import type { QuickJSAsyncWASMModule } from "quickjs-emscripten-core";
+import variant from "@jitl/quickjs-singlefile-mjs-release-asyncify";
 import { isBlockedHost } from "../web-fetch";
 
 /**
  * The tool-authoring runtime: runs a (human- or agent-) authored JS program in a
- * locked-down QuickJS-NG VM (via quickjs-wasi), returning its `return` value. The
- * program is deterministic compute over two host capabilities:
+ * locked-down QuickJS VM, returning its `return` value. The program is
+ * deterministic compute over two host capabilities:
  *
  *  - `globalThis.input` — the call arguments.
  *  - `globalThis.fetch(url, opts)` — a host-mediated HTTP(S) fetch, restricted to
@@ -16,9 +16,12 @@ import { isBlockedHost } from "../web-fetch";
  *    the response is JSON, else null). Credentials never enter the sandbox.
  *
  * Ambient authority is denied by construction (no process/require/raw network);
- * only the injected globals reach the outside. The engine is `quickjs-wasi`
- * (snapshot-capable) so durable pause/resume can be layered on LATER without an
- * engine migration — but this runtime runs to completion, no snapshots.
+ * only the injected globals reach the outside. Engine: `quickjs-emscripten` with
+ * a SINGLEFILE asyncify variant — the wasm is inlined in the JS, so it bundles
+ * cleanly on serverless (Vercel) with no runtime file resolution; asyncify lets
+ * the async host `fetch` be awaited from the guest. Runs to completion — no
+ * snapshots (durable pause/resume is a deferred future, would need a different
+ * engine build).
  */
 
 export interface ToolCaps {
@@ -49,19 +52,11 @@ export interface ToolRunOpts {
   caps?: ToolCaps;
 }
 
-let wasmBytes: Promise<Uint8Array> | undefined;
-function loadWasm(): Promise<Uint8Array> {
-  if (!wasmBytes) {
-    const require = createRequire(import.meta.url);
-    let p: string;
-    try {
-      p = require.resolve("quickjs-wasi/quickjs.wasm");
-    } catch {
-      p = require.resolve("quickjs-wasi").replace(/dist[\\/].*$/, "quickjs.wasm");
-    }
-    wasmBytes = readFile(p);
-  }
-  return wasmBytes;
+// The wasm is inlined in the variant module → no file resolution. A fresh module
+// (and runtime/context) per call keeps each run fully isolated — the asyncify
+// build doesn't reliably support reusing one module across sequential contexts.
+function newModule(): Promise<QuickJSAsyncWASMModule> {
+  return newQuickJSAsyncWASMModuleFromVariant(variant);
 }
 
 // Guest-side globals. `fetch` round-trips through the async host fn and reshapes
@@ -213,83 +208,107 @@ async function hostFetch(argJson: string, allowedHosts: string[], caps: ToolCaps
 export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<ToolResult> {
   const caps = opts.caps ?? DEFAULT_TOOL_CAPS;
   const allowedHosts = opts.allowedHosts ?? [];
-  const wasm = await loadWasm();
-  const deadline = Date.now() + caps.timeoutMs;
-  const vm = (await QuickJS.create({
-    wasm,
-    memoryLimit: caps.memBytes,
-    interruptHandler: () => Date.now() > deadline,
-  }));
-  const v = vm as unknown as {
-    global: unknown;
-    newFunction: (name: string, fn: (a: unknown) => unknown) => unknown;
-    setProp: (obj: unknown, key: string, val: unknown) => void;
-    newString: (s: string) => unknown;
-    newPromise: () => { handle: unknown; resolve: (h: unknown) => void };
-    dump: (h: unknown) => unknown;
-    evalCode: (code: string, file?: string) => unknown;
-    resolvePromise: (h: unknown) => Promise<{ value?: unknown; error?: unknown }>;
-    executePendingJobs: () => void;
-  };
-  // Set once the VM is disposed (on timeout/return) so an in-flight host fetch
-  // that settles afterward doesn't call into a freed VM (use-after-free crash).
-  let disposed = false;
-  try {
-    // Host `__host_fetch`: kick the real fetch on a microtask, resolve the
-    // guest promise with the JSON envelope, then pump the guest forward.
-    const asyncFetch = (a: unknown) => {
-      const argJson = String(v.dump(a));
-      const d = v.newPromise();
-      Promise.resolve()
-        .then(() => hostFetch(argJson, allowedHosts, caps))
-        .then((res) => {
-          if (!disposed) d.resolve(v.newString(res));
-        })
-        .catch((e) => {
-          if (!disposed) d.resolve(v.newString(JSON.stringify({ error: stringifyErr(e) })));
-        })
-        .finally(() => {
-          if (!disposed) v.executePendingJobs();
-        });
-      return d.handle;
-    };
-    v.setProp(v.global, "__host_fetch", v.newFunction("__host_fetch", asyncFetch));
 
-    let assigned: string;
-    try {
-      assigned = compile(code); // TS→JS (also fine for JS) + the `__run` IIFE
-    } catch (e) {
-      return { status: "error", error: `compile error: ${stringifyErr(e)}` };
-    }
+  let assigned: string;
+  try {
+    assigned = compile(code); // TS→JS (also fine for JS) + the `__run` IIFE
+  } catch (e) {
+    return { status: "error", error: `compile error: ${stringifyErr(e)}` };
+  }
+
+  const mod = await newModule();
+  const ctx = mod.newContext();
+  const deadline = Date.now() + caps.timeoutMs;
+  ctx.runtime.setMemoryLimit(caps.memBytes);
+  ctx.runtime.setInterruptHandler(() => Date.now() > deadline);
+
+  try {
+    // Host `__host_fetch`: asyncify lets the guest `await` this real async call.
+    // It must NEVER reject — Emscripten asyncify can't resume a suspended call
+    // whose host promise rejected (it hangs until the wall-clock timeout). So
+    // catch everything and always return a string handle (an error envelope).
+    const fetchFn = ctx.newAsyncifiedFunction("__host_fetch", async (argHandle) => {
+      let resJson: string;
+      try {
+        const argJson = ctx.getString(argHandle);
+        resJson = await hostFetch(argJson, allowedHosts, caps);
+      } catch (e) {
+        resJson = JSON.stringify({ error: stringifyErr(e) });
+      }
+      try {
+        return ctx.newString(resJson);
+      } catch {
+        // Context disposed mid-flight (timeout teardown) — the run already
+        // returned, so nothing awaits this; return undefined without rejecting.
+        return ctx.undefined;
+      }
+    });
+    ctx.setProp(ctx.global, "__host_fetch", fetchFn);
+    fetchFn.dispose();
+
     const inputDecl = `globalThis.input = ${JSON.stringify(opts.input ?? null)};\n`;
     const program = `${GUEST_SHIM}${inputDecl}${assigned}`;
-    v.evalCode(program, "tool.js");
 
-    // Race the settle against a wall-clock timeout. The VM `interruptHandler`
-    // only fires while JS is executing, so it can't break an await-stall (a
-    // program that returns a never-settling promise, or a stalled host bridge);
-    // this guarantees the run can't hang the request forever.
+    // Wall-clock timeout guards against an await-stall the interrupt handler
+    // can't break (it only fires during JS execution, not while awaiting a host
+    // promise) — so a hung fetch/never-settling promise can't run past the cap.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("tool run timed out")), caps.timeoutMs + 1000);
+      timer = setTimeout(() => reject(new Error("tool run timed out")), caps.timeoutMs);
       (timer as { unref?: () => void }).unref?.();
     });
-    let settled: { value?: unknown; error?: unknown };
+
+    // Evaluate, then drive the guest's async IIFE to completion: pump pending
+    // jobs (executePendingJobs is async when an asyncified host call suspends —
+    // await it) until none remain, then read the resolved `__run` value.
+    const drive = async (): Promise<ToolResult> => {
+      const evalRes = await ctx.evalCodeAsync(program, "tool.js");
+      if (evalRes.error) {
+        const msg = stringifyErr(ctx.dump(evalRes.error));
+        evalRes.error.dispose();
+        return { status: "error", error: msg };
+      }
+      evalRes.value.dispose();
+
+      const runHandle = ctx.getProp(ctx.global, "__run");
+      const settledPromise = ctx.resolvePromise(runHandle);
+      runHandle.dispose();
+      for (let i = 0; i < 1_000_000; i++) {
+        const r = ctx.runtime.executePendingJobs() as
+          | { value?: number }
+          | Promise<unknown>;
+        if (typeof (r as Promise<unknown>).then === "function") {
+          await r; // asyncified host call suspended — resume after it settles
+          continue;
+        }
+        if (((r as { value?: number }).value ?? 0) === 0) break; // no work left
+      }
+      const settled = await settledPromise;
+      if (settled.error) {
+        const msg = stringifyErr(ctx.dump(settled.error));
+        settled.error.dispose();
+        return { status: "error", error: msg };
+      }
+      const value = ctx.dump(settled.value);
+      settled.value.dispose();
+      return { status: "completed", result: truncate(value, caps.maxResultBytes) };
+    };
+
     try {
-      settled = await Promise.race([v.resolvePromise(v.evalCode("globalThis.__run")), timeout]);
+      return await Promise.race([drive(), timeout]);
     } finally {
       if (timer) clearTimeout(timer);
     }
-    if ("error" in settled) {
-      return { status: "error", error: stringifyErr(v.dump(settled.error)) };
-    }
-    return { status: "completed", result: truncate(v.dump(settled.value), caps.maxResultBytes) };
   } catch (e) {
     return { status: "error", error: stringifyErr(e) };
   } finally {
-    disposed = true; // block any late host-fetch callback from touching the VM
     try {
-      (vm as unknown as { dispose?: () => void }).dispose?.();
+      ctx.dispose();
+    } catch {
+      /* already disposed */
+    }
+    try {
+      (mod as unknown as { dispose?: () => void }).dispose?.();
     } catch {
       /* already disposed */
     }
