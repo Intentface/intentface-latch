@@ -111,6 +111,9 @@ importers:
       '@intentface/latch-ui':
         specifier: workspace:*
         version: link:../../packages/latch-ui
+      '@jitl/quickjs-singlefile-mjs-release-asyncify':
+        specifier: ^0.32.0
+        version: 0.32.0
       '@libsql/client':
         specifier: ^0.15.15
         version: 0.15.15
@@ -177,9 +180,9 @@ importers:
       nitro:
         specifier: 3.0.260610-beta
         version: 3.0.260610-beta(@electric-sql/pglite@0.2.17)(@libsql/client@0.15.15)(@vercel/functions@3.7.3(@aws-sdk/credential-provider-web-identity@3.972.54)(ws@8.21.0))(better-sqlite3@12.11.1)(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.38.4(@electric-sql/pglite@0.2.17)(@libsql/client@0.15.15)(@opentelemetry/api@1.9.1)(@prisma/client@5.22.0)(@types/pg@8.20.0)(@types/react@19.2.17)(better-sqlite3@12.11.1)(kysely@0.29.2)(pg@8.22.0)(react@19.2.7)(sql.js@1.14.1))(giget@3.3.0)(jiti@2.7.0)(lru-cache@11.5.1)(vite@8.0.16(@types/node@22.19.21)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-      quickjs-wasi:
-        specifier: 3.0.1
-        version: 3.0.1
+      quickjs-emscripten-core:
+        specifier: ^0.32.0
+        version: 0.32.0
       react:
         specifier: ^19.2.6
         version: 19.2.7
@@ -1384,6 +1387,9 @@ packages:
 
   '@jitl/quickjs-ffi-types@0.32.0':
     resolution: {integrity: sha512-v9T+GQpmk43VDJ7d72sf0Nexhk+ArvtUihW27dy7lqAl0zBObFKtSBBIm5RBjwIhE8VwsPPm9PNuvPvNqLWUEg==}
+
+  '@jitl/quickjs-singlefile-mjs-release-asyncify@0.32.0':
+    resolution: {integrity: sha512-i5o5tV5JTItMqWAlxydlfFySyg4LpcGtOYk8e1vcVzTvGMKasrMKlJSjrleNdcIeDvi1KuPGrX49UV79MEbNzw==}
 
   '@jitl/quickjs-wasmfile-debug-asyncify@0.32.0':
     resolution: {integrity: sha512-EX8zbXwGqCgAE764M+qvkHtyXDi/FUoMBea0JnES7vCM3P7a2+EOZOjGv85wtZ2sJhI1oJ+nekmqpOODFDY+hw==}
@@ -6010,9 +6016,6 @@ packages:
     resolution: {integrity: sha512-So0Sqw869y/S2oE3Nuc0uT3Dhqgvsj8FSrwBdsuTosVsG8ME5/OcudU1GxsrIFdFABgy17GHnTVO9TYV/bLQcA==}
     engines: {node: '>=16.0.0'}
 
-  quickjs-wasi@3.0.1:
-    resolution: {integrity: sha512-WNRgnIOpZgzrv6ea3Hl7ewH+mV7krKGYX1jpjpk4vmwtwl0x4OCNOl9CgOj9hrTtEd9aiRii5fG5ZVxWL6X2mA==}
-
   range-parser@1.2.1:
     resolution: {integrity: sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==}
     engines: {node: '>= 0.6'}
@@ -8237,6 +8240,10 @@ snapshots:
       minipass: 7.1.3
 
   '@jitl/quickjs-ffi-types@0.32.0': {}
+
+  '@jitl/quickjs-singlefile-mjs-release-asyncify@0.32.0':
+    dependencies:
+      '@jitl/quickjs-ffi-types': 0.32.0
 
   '@jitl/quickjs-wasmfile-debug-asyncify@0.32.0':
     dependencies:
@@ -12964,8 +12971,6 @@ snapshots:
       '@jitl/quickjs-wasmfile-release-asyncify': 0.32.0
       '@jitl/quickjs-wasmfile-release-sync': 0.32.0
       quickjs-emscripten-core: 0.32.0
-
-  quickjs-wasi@3.0.1: {}
 
   range-parser@1.2.1: {}
 
