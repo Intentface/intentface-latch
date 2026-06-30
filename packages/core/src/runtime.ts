@@ -150,6 +150,17 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   resolveProviderTools?: (modelId: string) => Record<string, unknown>;
   /**
+   * Resolve an agent's `effort` to provider-specific reasoning options for a
+   * model id — kept out of core (no provider SDK dep). Returns the
+   * `providerOptions` (keyed by provider id) and an optional `maxOutputTokens`
+   * (token-budget providers need the budget to stay under the model's max).
+   * Return `undefined` to leave the provider default (e.g. non-reasoning model).
+   */
+  resolveReasoningOptions?: (
+    modelId: string,
+    effort: string,
+  ) => { providerOptions?: Record<string, unknown>; maxOutputTokens?: number } | undefined;
+  /**
    * Wrap a set of tools into a single code-mode tool (the model writes JS that
    * calls them as functions). Supplied by the platform (e.g. via
    * `experimental-ai-sdk-code-mode`), so core needs no QuickJS dep. Used when an
@@ -179,6 +190,20 @@ export interface Runtime<P> {
   listAgents(principal: P): Promise<AgentInfo[]>;
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
+  /**
+   * Run one agent to completion once, autonomously, in an isolated throwaway
+   * thread (no streaming) — for programmatic use like the Agent Builder testing
+   * an agent it just created. `blockGated` (default true) stubs approval-gated
+   * (mutating) tools so a test run has no real side effects; pass false for a
+   * true end-to-end run. Returns the throwaway threadId + the final answer.
+   */
+  runAgent(input: {
+    principal: P;
+    agent: string;
+    prompt: string;
+    threadId?: string;
+    blockGated?: boolean;
+  }): Promise<{ threadId: string; answer: string }>;
   /**
    * Client-projected conversation history (`toClientMessages`): the stored
    * messages with `internal`/`redacted` ones filtered out. For rendering past
@@ -325,6 +350,19 @@ function firstText(message: AppMessage): string | undefined {
 }
 
 /** True if any message has a tool part still awaiting an approval decision. */
+/**
+ * Thrown by `handleChat` when a new message arrives while the previous turn is
+ * still awaiting an approval decision. Carries a stable `code` so the handler
+ * can map it to a 409 and the client can prompt the user to decide first.
+ */
+export class PendingApprovalError extends Error {
+  readonly code = "pending_approval";
+  constructor(message: string) {
+    super(message);
+    this.name = "PendingApprovalError";
+  }
+}
+
 function hasPendingApproval(messages: AppMessage[]): boolean {
   for (const m of messages) {
     for (const p of (m.parts ?? []) as ApprovalPart[]) {
@@ -449,12 +487,19 @@ export function createRuntime<P, RC = unknown>(
     runtimeCtx: RC;
     /** Subagent runs: waive approvals + drop OAuth `connect_` gates (no human). */
     autoApprove?: boolean;
+    /**
+     * Test runs: instead of executing approval-gated (mutating) tools, stub them
+     * to return a "blocked" result — so a trial run has no real side effects.
+     * Only meaningful with `autoApprove` (an autonomous run).
+     */
+    blockGated?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
   }): Promise<Response> {
     const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
       args;
     const autoApprove = args.autoApprove ?? false;
+    const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
 
     const abort = new AbortController();
@@ -590,6 +635,38 @@ export function createRuntime<P, RC = unknown>(
     // approvals and drop the OAuth `connect_` gates (they'd pause forever).
     if (autoApprove) {
       for (const k of Object.keys(tools)) if (k.startsWith("connect_")) delete tools[k];
+      // Test runs: stub the approval-gated (mutating) tools so a trial has no
+      // real side effects. Gated set = connection defaults + the agent's policy.
+      if (blockGated) {
+        const gated = new Set<string>();
+        for (const o of opened) {
+          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
+        }
+        if (cfg.toolApproval && typeof cfg.toolApproval !== "function") {
+          for (const [k, v] of Object.entries(cfg.toolApproval as Record<string, unknown>)) {
+            if (v) gated.add(k);
+            else gated.delete(k);
+          }
+        } else if (typeof cfg.toolApproval === "function") {
+          // A function policy can't be enumerated — it may gate any tool. To keep
+          // the test side-effect-free, conservatively block every connection tool.
+          for (const o of opened) for (const k of Object.keys(o.tools)) gated.add(k);
+        }
+        for (const name of gated) {
+          const t = tools[name] as { execute?: unknown } | undefined;
+          if (t && typeof t.execute === "function") {
+            tools[name] = {
+              ...(t as object),
+              execute: async (input: unknown) => ({
+                __blocked: true,
+                tool: name,
+                input,
+                reason: "approval-gated tool blocked during test run (no real side effects)",
+              }),
+            };
+          }
+        }
+      }
     }
 
     // Merge the source-contributed approval policy (connection defaults +
@@ -628,6 +705,14 @@ export function createRuntime<P, RC = unknown>(
           ? stepCountIs(cfg.maxSteps)
           : undefined;
 
+    // Reasoning/thinking effort → provider-specific options (the platform maps
+    // it per provider + gates to reasoning-capable models). Omitted/unsupported
+    // → provider default.
+    const reasoning =
+      cfg.effort && config.resolveReasoningOptions
+        ? config.resolveReasoningOptions(modelId, cfg.effort)
+        : undefined;
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
       instructions: cfg.instructions,
@@ -635,6 +720,8 @@ export function createRuntime<P, RC = unknown>(
       toolApproval,
       stopWhen,
       activeTools,
+      ...(reasoning?.providerOptions ? { providerOptions: reasoning.providerOptions } : {}),
+      ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
@@ -864,6 +951,16 @@ export function createRuntime<P, RC = unknown>(
     );
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
+
+    // Don't start a new turn while the last one is still awaiting an approval
+    // decision: that would abandon the gated tool call (a `tool_use` with no
+    // result), forcing the model view to fabricate one. Make the client resolve
+    // the approval first (or the caller can submit a decision via applyApproval).
+    if (hasPendingApproval(prior)) {
+      throw new PendingApprovalError(
+        "This chat is awaiting an approval decision — respond to the pending request before sending a new message.",
+      );
+    }
 
     // persist the user message up front (crash-safe), then open the run
     await storage.appendMessages(resolvedChatId, [message]);
@@ -1128,12 +1225,14 @@ export function createRuntime<P, RC = unknown>(
     prompt,
     threadId,
     depth,
+    blockGated,
   }: {
     principal: P;
     agent: string;
     prompt: string;
     threadId?: string;
     depth: number;
+    blockGated?: boolean;
   }): Promise<{ threadId: string; answer: string }> {
     const subChatId = threadId ?? generateSubchatId();
     let chat = await storage.getChat(principal, subChatId);
@@ -1160,6 +1259,7 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: [...prior, message],
       runtimeCtx,
       autoApprove: true,
+      blockGated,
       depth,
     });
     await res.text();
@@ -1230,6 +1330,8 @@ export function createRuntime<P, RC = unknown>(
     listAgents: agentInfos,
     tick: reapTick,
     handleChat,
+    runAgent: ({ principal, agent, prompt, threadId, blockGated = true }) =>
+      runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated }),
     loadHistory,
     listChats,
     listRuns,

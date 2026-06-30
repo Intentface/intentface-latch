@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as RunsRouteImport } from './routes/runs'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
@@ -30,6 +31,11 @@ import { Route as ApiSlackOauthRouteImport } from './routes/api/slack.oauth'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
+const ToolsRoute = ToolsRouteImport.update({
+  id: '/tools',
+  path: '/tools',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SchedulesRoute = SchedulesRouteImport.update({
   id: '/schedules',
   path: '/schedules',
@@ -142,6 +148,7 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
+  '/tools': typeof ToolsRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
@@ -162,6 +169,7 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
+  '/tools': typeof ToolsRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
@@ -185,6 +193,7 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
+  '/tools': typeof ToolsRoute
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
@@ -209,6 +218,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/runs'
     | '/schedules'
+    | '/tools'
     | '/agents/edit'
     | '/api/cron'
     | '/api/slack'
@@ -229,6 +239,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/runs'
     | '/schedules'
+    | '/tools'
     | '/agents/edit'
     | '/api/cron'
     | '/api/slack'
@@ -251,6 +262,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/runs'
     | '/schedules'
+    | '/tools'
     | '/agents/edit'
     | '/api/cron'
     | '/api/slack'
@@ -274,6 +286,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
+  ToolsRoute: typeof ToolsRoute
   ApiCronRoute: typeof ApiCronRoute
   ApiSlackRoute: typeof ApiSlackRouteWithChildren
   SlackLinkRoute: typeof SlackLinkRoute
@@ -283,6 +296,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/tools': {
+      id: '/tools'
+      path: '/tools'
+      fullPath: '/tools'
+      preLoaderRoute: typeof ToolsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/schedules': {
       id: '/schedules'
       path: '/schedules'
@@ -474,6 +494,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,
+  ToolsRoute: ToolsRoute,
   ApiCronRoute: ApiCronRoute,
   ApiSlackRoute: ApiSlackRouteWithChildren,
   SlackLinkRoute: SlackLinkRoute,

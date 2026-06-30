@@ -7,6 +7,7 @@ import {
 } from "@intentface/latch-channels/slack";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
+import { normalizeAgentName } from "./agent-store";
 import {
   slackVaultKeys,
   SLACK_CONFIG_TOKEN_KEY,
@@ -332,6 +333,8 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         disableTools?: string[];
         codeMode?: { tools?: string[] };
         providerWebTools?: boolean;
+        authoredTools?: string[];
+        effort?: "minimal" | "low" | "medium" | "high";
       };
       subagents?: string[];
       scope: "user" | "org";
@@ -340,7 +343,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
-    const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+    const name = normalizeAgentName(data.name);
     if (!name) return { ok: false, error: "name required" };
     if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
     const { agentStore } = await getLatch();
@@ -562,4 +565,108 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
     const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(created.appId)}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
     return { ok: true as const, authorizeUrl };
+  });
+
+// ── Authored tools (latch_tools): sandboxed JS/TS programs over input + fetch ──
+
+/** The caller's authored tools — for the Tools page (code + schema editable). */
+export const listAuthoredToolsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { authoredTools } = await getLatch();
+  const tools = await authoredTools.store.list(authoredTools.ownerKey(principal));
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    code: t.code,
+    // JSON string — editable directly + serializer-safe.
+    inputSchema: JSON.stringify(t.inputSchema ?? { type: "object" }, null, 2),
+    allowedHosts: t.allowedHosts,
+    updatedAt: t.updatedAt,
+  }));
+});
+
+/** Lightweight names (+ descriptions) for the agent editor's tool picker. */
+export const listAuthoredToolNamesFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { authoredTools } = await getLatch();
+  const tools = await authoredTools.store.list(authoredTools.ownerKey(principal));
+  return tools.map((t) => ({ name: t.name, description: t.description }));
+});
+
+/** Create or update an authored tool from the UI. Rename = delete old + insert. */
+export const saveAuthoredToolFn = createServerFn({ method: "POST" })
+  .validator(
+    (t: {
+      name: string;
+      description: string;
+      inputSchema?: string;
+      code: string;
+      allowedHosts?: string[];
+      originalName?: string;
+    }) => t,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "not authenticated" };
+    const { authoredTools } = await getLatch();
+    const name = authoredTools.cleanName(data.name);
+    if (!name) return { ok: false as const, error: "invalid name" };
+    if (!data.code.trim()) return { ok: false as const, error: "code is empty" };
+    let inputSchema: unknown = { type: "object" };
+    if (data.inputSchema != null && data.inputSchema.trim()) {
+      try {
+        inputSchema = JSON.parse(data.inputSchema);
+      } catch {
+        return { ok: false as const, error: "input schema is not valid JSON" };
+      }
+    }
+    const owner = authoredTools.ownerKey(principal);
+    const original = data.originalName ? authoredTools.cleanName(data.originalName) : undefined;
+    const isRename = !!original && original !== name;
+    // A rename must not silently clobber a different existing tool.
+    if (isRename && (await authoredTools.store.get(owner, name))) {
+      return { ok: false as const, error: `A tool named "${name}" already exists.` };
+    }
+    // Save the new record FIRST, then drop the old name — so a failed save can
+    // never lose the original (no transaction across the two writes).
+    await authoredTools.store.save({
+      owner,
+      name,
+      description: String(data.description ?? ""),
+      inputSchema,
+      code: data.code,
+      allowedHosts: (data.allowedHosts ?? []).map((h) => String(h).trim()).filter(Boolean),
+    });
+    if (isRename) await authoredTools.store.delete(owner, original!);
+    return { ok: true as const, name };
+  });
+
+/** Run an authored program once against the caller's allowlist — the Test panel. */
+export const testAuthoredToolFn = createServerFn({ method: "POST" })
+  .validator((t: { code: string; input?: unknown; allowedHosts?: string[] }) => t)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { status: "error" as const, error: "not authenticated" };
+    const { authoredTools } = await getLatch();
+    const r = await authoredTools.run({
+      code: data.code,
+      input: data.input ?? null,
+      allowedHosts: data.allowedHosts,
+    });
+    return r.status === "completed"
+      ? { status: "completed" as const, result: JSON.stringify(r.result ?? null, null, 2) }
+      : { status: "error" as const, error: r.error };
+  });
+
+/** Delete an authored tool by name. */
+export const deleteAuthoredToolFn = createServerFn({ method: "POST" })
+  .validator((name: string) => name)
+  .handler(async ({ data: name }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { authoredTools } = await getLatch();
+    await authoredTools.store.delete(authoredTools.ownerKey(principal), authoredTools.cleanName(name));
+    return { ok: true };
   });

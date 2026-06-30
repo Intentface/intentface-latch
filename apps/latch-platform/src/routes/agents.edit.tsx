@@ -63,7 +63,9 @@ function defaultModelId(models: { id: string }[]): string {
 }
 
 function AgentEditor() {
-  const { records, allAgents, models, connections, status } = useLoaderData({ from: "/agents" });
+  const { records, allAgents, models, connections, status, authoredTools } = useLoaderData({
+    from: "/agents",
+  });
   const { name: editName, scope: editScope } = Route.useSearch();
   const navigate = useNavigate();
   const router = useRouter();
@@ -94,6 +96,11 @@ function AgentEditor() {
   const [providerWebTools, setProviderWebTools] = useState(
     initial?.exec?.providerWebTools ?? false,
   );
+  const [authoredSel, setAuthoredSel] = useState<string[]>(initial?.exec?.authoredTools ?? []);
+  const toggleAuthored = (n: string) =>
+    setAuthoredSel((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
+  const [effort, setEffort] = useState<string>(initial?.exec?.effort ?? "");
+  const modelSupportsReasoning = !!models.find((m) => m.id === modelId)?.reasoning;
   const [subagents, setSubagents] = useState<string[]>(initial?.subagents ?? []);
   const toggleSubagent = (n: string) =>
     setSubagents((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
@@ -206,13 +213,16 @@ function AgentEditor() {
               descriptions: Object.keys(descOverrides).length ? descOverrides : undefined,
             }
           : undefined;
+      const useEffort = effort && modelSupportsReasoning ? effort : undefined;
       const exec =
-        sandbox || webTools || providerWebTools
+        sandbox || webTools || providerWebTools || authoredSel.length || useEffort
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
               defaultTools: webTools || undefined,
               providerWebTools: providerWebTools || undefined,
+              authoredTools: authoredSel.length ? authoredSel : undefined,
+              effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,
             }
           : undefined;
       const res = await saveAgentFn({
@@ -312,6 +322,22 @@ function AgentEditor() {
             </Select>
           </div>
         </div>
+
+        {modelSupportsReasoning && (
+          <div className="space-y-1.5">
+            <FieldLabel>Reasoning effort</FieldLabel>
+            <Select className="w-full" value={effort} onChange={(e) => setEffort(e.target.value)}>
+              <option value="">Default (provider decides)</option>
+              <option value="minimal">Minimal — fastest, least thinking</option>
+              <option value="low">Low — small thinking budget</option>
+              <option value="medium">Medium</option>
+              <option value="high">High — most thinking</option>
+            </Select>
+            <p className="text-ink-tertiary text-xs">
+              How much the model thinks before answering. Lower = faster + cheaper.
+            </p>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <FieldLabel>System prompt</FieldLabel>
@@ -461,6 +487,37 @@ function AgentEditor() {
               search + fetch, OpenAI = search). No-op on providers without them.
             </span>
           </label>
+          {authoredTools.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-ink-secondary text-xs font-medium">
+                Authored tools{" "}
+                <span className="text-ink-tertiary font-normal">
+                  — sandboxed tools (from the Tools page) this agent can call
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {authoredTools.map((t) => {
+                  const on = authoredSel.includes(t.name);
+                  return (
+                    <button
+                      key={t.name}
+                      type="button"
+                      onClick={() => toggleAuthored(t.name)}
+                      title={t.description}
+                      className={cn(
+                        "rounded-md border px-2 py-1 font-mono text-xs transition-colors",
+                        on
+                          ? "border-ring bg-base-active text-ink-primary"
+                          : "border-input text-ink-secondary hover:bg-input/40",
+                      )}
+                    >
+                      {t.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {error && <p className="text-destructive text-sm">{error}</p>}

@@ -14,6 +14,7 @@ import {
   Settings as SettingsIcon,
   UserPlus,
   Users,
+  Wrench,
 } from "lucide-react";
 import {
   Dialog,
@@ -46,6 +47,7 @@ const NAV: NavItem[] = [
   { to: "/runs", label: "Runs", icon: Activity },
   { to: "/schedules", label: "Schedules", icon: CalendarClock },
   { to: "/connections", label: "Connections", icon: Plug },
+  { to: "/tools", label: "Tools", icon: Wrench },
   { to: "/members", label: "Members", icon: Users },
 ];
 

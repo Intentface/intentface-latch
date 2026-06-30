@@ -14,14 +14,58 @@ export function toClientMessages(messages: AppMessage[]): AppMessage[] {
 }
 
 /**
- * Model projection: drop `sendToModel === false`, then convert to model
- * messages. (`data-*` parts — e.g. a compaction marker — are dropped by the
- * SDK during conversion, so they never reach the model regardless.)
+ * Close any tool call left without a result — an undecided `approval-requested`
+ * part, or a tool that was still running when the turn was interrupted (e.g. the
+ * user sent a new message before it finished). `convertToModelMessages` throws
+ * (and Anthropic rejects) on a `tool_use` with no following `tool_result`, so we
+ * give such parts a synthetic terminal output. Projection-only — the stored
+ * history is untouched; the synthetic result just keeps the model view valid.
+ */
+function closeDanglingToolCalls(messages: AppMessage[]): AppMessage[] {
+  return messages.map((m) => {
+    const parts = (m as { parts?: Record<string, unknown>[] }).parts;
+    if (m.role !== "assistant" || !Array.isArray(parts)) return m;
+    let changed = false;
+    const next = parts.map((p) => {
+      const type = typeof p.type === "string" ? p.type : "";
+      const isToolCall = type === "dynamic-tool" || type.startsWith("tool-");
+      if (!isToolCall) return p;
+      const state = p.state as string | undefined;
+      const approval = p.approval as { approved?: boolean } | undefined;
+      // Close ONLY calls that nothing will resolve:
+      //  - an interrupted execution (a call with no result, no approval flow), or
+      //  - an UN-decided approval (abandoned by a new message instead of a decision).
+      // Leave decided approvals (`approval-responded` / approved|denied) alone —
+      // the re-run executes or denies them, producing the real result.
+      const interrupted = state === "input-available" || state === "input-streaming";
+      const undecidedApproval =
+        state === "approval-requested" && (!approval || approval.approved === undefined);
+      if (!interrupted && !undecidedApproval) return p;
+      changed = true;
+      return {
+        ...p,
+        state: "output-available",
+        output: p.output ?? {
+          interrupted: true,
+          reason: "Not completed — superseded by a new message before this tool finished.",
+        },
+      };
+    });
+    return changed ? ({ ...m, parts: next } as AppMessage) : m;
+  });
+}
+
+/**
+ * Model projection: drop `sendToModel === false`, close any dangling tool calls,
+ * then convert to model messages. (`data-*` parts — e.g. a compaction marker —
+ * are dropped by the SDK during conversion, so they never reach the model.)
  */
 export async function toModelMessages(
   messages: AppMessage[],
   opts?: { tools?: Record<string, unknown> },
 ): Promise<ModelMessage[]> {
-  const forModel = messages.filter((m) => m.metadata?.sendToModel !== false);
+  const forModel = closeDanglingToolCalls(
+    messages.filter((m) => m.metadata?.sendToModel !== false),
+  );
   return convertToModelMessages(forModel as never, (opts ?? {}) as never);
 }

@@ -16,6 +16,10 @@ export interface ModelInfo {
   id: string;
   label: string;
   provider: string;
+  /** Whether the model supports reasoning/thinking (gates the effort knob). */
+  reasoning?: boolean;
+  /** Max output tokens (models.dev `limit.output`) — bounds the thinking budget. */
+  maxOutput?: number;
 }
 
 export interface ModelCatalog {
@@ -37,8 +41,8 @@ const DEFAULT_PROVIDER = "anthropic";
 
 const FALLBACK: ModelCatalog = {
   models: [
-    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "anthropic" },
-    { id: "gpt-4o", label: "GPT-4o", provider: "openai" },
+    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "anthropic", reasoning: true, maxOutput: 64000 },
+    { id: "gpt-4o", label: "GPT-4o", provider: "openai", reasoning: false, maxOutput: 16384 },
   ],
   pricing: staticPricing({
     "claude-sonnet-4-6": { inputPer1M: 3, outputPer1M: 15 },
@@ -60,6 +64,8 @@ interface MdProvider {
     string,
     {
       name?: string;
+      reasoning?: boolean;
+      limit?: { output?: number };
       cost?: MdCost & {
         tiers?: Array<MdCost & { tier?: { type?: string; size?: number } }>;
       };
@@ -88,7 +94,7 @@ export function loadModelCatalog(): Promise<ModelCatalog> {
         const keyed = (p?.env ?? []).some((e) => !!process.env[e]);
         if (!p?.models || !keyed) continue;
         for (const [id, m] of Object.entries(p.models)) {
-          list.push({ id, label: m.name ?? id, provider });
+          list.push({ id, label: m.name ?? id, provider, reasoning: m.reasoning, maxOutput: m.limit?.output });
           idToProvider.set(id, provider);
           if (m.cost?.input != null && m.cost?.output != null) {
             rates[id] = {

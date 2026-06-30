@@ -45,6 +45,10 @@ export interface AgentRecord {
     codeMode?: { tools?: string[] };
     /** Use the model provider's native web search/fetch tools. */
     providerWebTools?: boolean;
+    /** Names of authored tools (latch_tools) attached to this agent. */
+    authoredTools?: string[];
+    /** Reasoning/thinking effort (gated to reasoning-capable models). */
+    effort?: "minimal" | "low" | "medium" | "high";
   };
   /** Agents this one may delegate to via the `spawn_agent` tool. */
   subagents?: string[];
@@ -63,6 +67,14 @@ const ownerKey = (p: Principal, scope: CredentialScope): string =>
     .join("/");
 
 const newId = () => `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+
+/**
+ * Canonical agent-name normalization — used by BOTH writers (the editor's
+ * saveAgentFn and the Agent Builder's save_agent) so the same intended name
+ * always maps to one record. Lowercased kebab, underscores allowed.
+ */
+export const normalizeAgentName = (s: string): string =>
+  s.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
 
 export async function migrateAgents(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_agents (
@@ -93,6 +105,15 @@ export interface AgentStore extends DynamicAgentStore<Principal> {
 export function createAgentStore(
   client: Client,
   modelFor: (id: string) => LanguageModel,
+  /**
+   * Resolve the named authored tools (latch_tools) into executable tools for a
+   * caller — supplied by the composition root (which owns the tool store). When
+   * omitted, an agent's `authoredTools` are simply not attached.
+   */
+  loadAuthoredTools?: (
+    principal: Principal,
+    names: string[],
+  ) => Promise<Record<string, unknown>>,
 ): AgentStore {
   const recordOf = (row: Record<string, unknown>): AgentRecord => ({
     name: String(row.name),
@@ -128,10 +149,32 @@ export function createAgentStore(
       if (!rec) return undefined;
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
+      // Authored tools (latch_tools) attached to this agent, resolved per caller
+      // into a tool source. Marked alwaysActive so an `enabledTools` restriction
+      // on connection tools never hides them (they're capabilities, not picks).
+      const authored = rec.exec?.authoredTools?.length ? rec.exec.authoredTools : undefined;
+      const toolSources =
+        authored && loadAuthoredTools
+          ? [
+              {
+                async open(p: Principal) {
+                  // Never let attached-tool resolution fail the whole turn.
+                  try {
+                    const tools = await loadAuthoredTools(p, authored);
+                    return { tools, alwaysActive: Object.keys(tools), close: async () => {} };
+                  } catch (e) {
+                    console.warn("Authored-tools attach failed; running without them:", e);
+                    return { tools: {}, close: async () => {} };
+                  }
+                },
+              },
+            ]
+          : undefined;
       return {
         model: modelFor(rec.modelId),
         instructions: rec.instructions,
         connections: rec.connections,
+        toolSources,
         maxSteps: rec.maxSteps,
         // Restrict callable tools (empty/undefined → all).
         enabledTools: sel?.enabled?.length ? sel.enabled : undefined,
@@ -153,6 +196,7 @@ export function createAgentStore(
         disableTools: rec.exec?.disableTools,
         codeMode: rec.exec?.codeMode,
         providerWebTools: rec.exec?.providerWebTools || undefined,
+        effort: rec.exec?.effort,
         smoothStream: true,
       };
     },
