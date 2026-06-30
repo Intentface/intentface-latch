@@ -207,6 +207,7 @@ export function createAuthoredTools(opts: {
             const clean = cleanName(name);
             if (!clean) return { error: "invalid name" };
             if (RESERVED.has(clean)) return { error: `"${clean}" is reserved` };
+            if (!String(code).trim()) return { error: "code is empty" };
             const toolScope: ToolScope = scope === "org" ? "org" : "user";
             await store.save({
               owner: ownerKey(principal, toolScope),

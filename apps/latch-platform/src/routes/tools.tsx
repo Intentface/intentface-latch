@@ -234,8 +234,9 @@ function ToolEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Name</Label>
+        <Label htmlFor="tool-name">Name</Label>
         <Input
+          id="tool-name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="get_ranked_windows"
@@ -245,8 +246,9 @@ function ToolEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Description</Label>
+        <Label htmlFor="tool-description">Description</Label>
         <Input
+          id="tool-description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="What the tool does and its inputs (the model reads this)."
@@ -254,8 +256,8 @@ function ToolEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Scope</Label>
-        <Select value={scope} onChange={(e) => setScope(e.target.value as ToolScope)} className="w-full">
+        <Label htmlFor="tool-scope">Scope</Label>
+        <Select id="tool-scope" value={scope} onChange={(e) => setScope(e.target.value as ToolScope)} className="w-full">
           <option value="user">Personal — only you</option>
           <option value="org">Org — shared with everyone in the org</option>
         </Select>
@@ -265,8 +267,9 @@ function ToolEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Allowed hosts</Label>
+        <Label htmlFor="tool-hosts">Allowed hosts</Label>
         <Input
+          id="tool-hosts"
           value={allowedHosts}
           onChange={(e) => setAllowedHosts(e.target.value)}
           placeholder="api.open-meteo.com, api.example.com"
@@ -279,8 +282,9 @@ function ToolEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Input schema (JSON Schema)</Label>
+        <Label htmlFor="tool-schema">Input schema (JSON Schema)</Label>
         <Textarea
+          id="tool-schema"
           value={inputSchema}
           onChange={(e) => setInputSchema(e.target.value)}
           className="min-h-24 font-mono text-xs"

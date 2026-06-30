@@ -510,6 +510,7 @@ function AgentEditor() {
                     <button
                       key={t.scope + t.name}
                       type="button"
+                      aria-pressed={on}
                       onClick={() => toggleAuthored(t.name)}
                       title={t.description}
                       className={cn(
