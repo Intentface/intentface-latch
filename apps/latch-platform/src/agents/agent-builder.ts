@@ -3,7 +3,8 @@ import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
-import { type AgentRecord, normalizeAgentName } from "@/lib/agent-store";
+import {  normalizeAgentName } from "@/lib/agent-store";
+import type {AgentRecord} from "@/lib/agent-store";
 
 /**
  * The Agent Builder — a meta-agent that designs, creates, and updates other
@@ -71,7 +72,14 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       authoredTools: authored?.length ? authored : undefined,
       effort,
     };
-    return Object.values(exec).some((v) => v != null) ? exec : undefined;
+    const hasAny =
+      !!c?.sandbox ||
+      !!c?.defaultTools ||
+      !!c?.providerWebTools ||
+      !!c?.codeMode ||
+      !!authored?.length ||
+      effort !== undefined;
+    return hasAny ? exec : undefined;
   };
 
   return {
@@ -191,6 +199,23 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (!models.some((m) => m.id === input.modelId)) {
           return { error: `Unknown modelId "${input.modelId}". Call list_models and use one of those.` };
         }
+        // Reject hallucinated references — only names the discovery tools return.
+        const stored = await connectionStore.list(principal);
+        const knownConnections = new Set([...connections.names, ...stored.map((c) => c.name)]);
+        const badConn = (input.connections ?? []).filter((n) => !knownConnections.has(n));
+        if (badConn.length) {
+          return { error: `Unknown connection(s): ${badConn.join(", ")}. Use list_connections.` };
+        }
+        const knownAgents = new Set((await runtime.listAgents(principal)).map((a) => a.name));
+        const badSub = (input.subagents ?? []).filter((n) => !knownAgents.has(n) && n !== name);
+        if (badSub.length) {
+          return { error: `Unknown subagent(s): ${badSub.join(", ")}. Use list_agents.` };
+        }
+        const ownedTools = new Set((await authoredTools.store.list(authoredTools.ownerKey(principal))).map((t) => t.name));
+        const badTools = (input.authoredTools ?? []).filter((n) => !ownedTools.has(n));
+        if (badTools.length) {
+          return { error: `Unknown authored tool(s): ${badTools.join(", ")}. Use list_tools (author them first).` };
+        }
         const rec: AgentRecord = {
           name,
           title: input.title,
@@ -243,7 +268,11 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             if (!type) continue;
             if (type === "dynamic-tool" || type.startsWith("tool-")) {
               const toolName =
-                (p.toolName as string) ?? (type.startsWith("tool-") ? type.slice(5) : "unknown");
+                typeof p.toolName === "string"
+                  ? p.toolName
+                  : type.startsWith("tool-")
+                    ? type.slice(5)
+                    : "unknown";
               const blocked = (p.output as { __blocked?: boolean } | undefined)?.__blocked;
               toolCalls.push({ tool: toolName, blocked: blocked || undefined });
             }

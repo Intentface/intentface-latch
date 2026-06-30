@@ -89,7 +89,7 @@ function compile(code: string): string {
 
 function stringifyErr(v: unknown): string {
   if (typeof v === "string") return v;
-  if (v && typeof v === "object" && "message" in v) return String((v as { message: unknown }).message);
+  if (v && typeof v === "object" && "message" in v) return String((v).message);
   try {
     return JSON.stringify(v);
   } catch {
@@ -104,6 +104,9 @@ function truncate(value: unknown, maxBytes: number): unknown {
   } catch {
     return { __unserializable: true };
   }
+  // JSON.stringify returns undefined for undefined/function/symbol inputs (the
+  // type omits this) — the guard is real at runtime.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (json === undefined) return value;
   if (Buffer.byteLength(json) <= maxBytes) return value;
   return { __truncated: true, bytes: Buffer.byteLength(json), preview: json.slice(0, maxBytes) };
@@ -206,9 +209,6 @@ async function hostFetch(argJson: string, allowedHosts: string[], caps: ToolCaps
   });
 }
 
-// quickjs-wasi VM handle (loose — the package's helper types vary).
-type VM = Awaited<ReturnType<typeof QuickJS.create>>;
-
 /** Run an authored program to completion in a fresh sandboxed VM. */
 export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<ToolResult> {
   const caps = opts.caps ?? DEFAULT_TOOL_CAPS;
@@ -219,7 +219,7 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
     wasm,
     memoryLimit: caps.memBytes,
     interruptHandler: () => Date.now() > deadline,
-  } as never)) as VM;
+  }));
   const v = vm as unknown as {
     global: unknown;
     newFunction: (name: string, fn: (a: unknown) => unknown) => unknown;
@@ -231,6 +231,9 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
     resolvePromise: (h: unknown) => Promise<{ value?: unknown; error?: unknown }>;
     executePendingJobs: () => void;
   };
+  // Set once the VM is disposed (on timeout/return) so an in-flight host fetch
+  // that settles afterward doesn't call into a freed VM (use-after-free crash).
+  let disposed = false;
   try {
     // Host `__host_fetch`: kick the real fetch on a microtask, resolve the
     // guest promise with the JSON envelope, then pump the guest forward.
@@ -239,9 +242,15 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
       const d = v.newPromise();
       Promise.resolve()
         .then(() => hostFetch(argJson, allowedHosts, caps))
-        .then((res) => d.resolve(v.newString(res)))
-        .catch((e) => d.resolve(v.newString(JSON.stringify({ error: stringifyErr(e) }))))
-        .finally(() => v.executePendingJobs());
+        .then((res) => {
+          if (!disposed) d.resolve(v.newString(res));
+        })
+        .catch((e) => {
+          if (!disposed) d.resolve(v.newString(JSON.stringify({ error: stringifyErr(e) })));
+        })
+        .finally(() => {
+          if (!disposed) v.executePendingJobs();
+        });
       return d.handle;
     };
     v.setProp(v.global, "__host_fetch", v.newFunction("__host_fetch", asyncFetch));
@@ -271,13 +280,14 @@ export async function runTool(code: string, opts: ToolRunOpts = {}): Promise<Too
     } finally {
       if (timer) clearTimeout(timer);
     }
-    if (settled && "error" in settled) {
+    if ("error" in settled) {
       return { status: "error", error: stringifyErr(v.dump(settled.error)) };
     }
     return { status: "completed", result: truncate(v.dump(settled.value), caps.maxResultBytes) };
   } catch (e) {
     return { status: "error", error: stringifyErr(e) };
   } finally {
+    disposed = true; // block any late host-fetch callback from touching the VM
     try {
       (vm as unknown as { dispose?: () => void }).dispose?.();
     } catch {

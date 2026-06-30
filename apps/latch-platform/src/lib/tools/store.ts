@@ -21,10 +21,10 @@ export interface AuthoredTool {
 }
 
 export interface ToolStore {
-  list(owner: string): Promise<AuthoredTool[]>;
-  get(owner: string, name: string): Promise<AuthoredTool | null>;
-  save(rec: Omit<AuthoredTool, "createdAt" | "updatedAt">): Promise<void>;
-  delete(owner: string, name: string): Promise<void>;
+  list: (owner: string) => Promise<AuthoredTool[]>;
+  get: (owner: string, name: string) => Promise<AuthoredTool | null>;
+  save: (rec: Omit<AuthoredTool, "createdAt" | "updatedAt">) => Promise<void>;
+  delete: (owner: string, name: string) => Promise<void>;
 }
 
 export async function migrateAuthoredTools(client: Client): Promise<void> {
@@ -57,7 +57,11 @@ const rowToTool = (r: Record<string, unknown>): AuthoredTool => ({
   description: String(r.description),
   inputSchema: safeParse<unknown>(r.input_schema, { type: "object" }),
   code: String(r.code),
-  allowedHosts: safeParse<string[]>(r.allowed_hosts, []),
+  // Guard the shape too — a corrupt non-array value must not break `.map`/`.some`.
+  allowedHosts: (() => {
+    const v = safeParse<unknown>(r.allowed_hosts, []);
+    return Array.isArray(v) ? v.map(String) : [];
+  })(),
   createdAt: Number(r.created_at),
   updatedAt: Number(r.updated_at),
 });
@@ -96,7 +100,7 @@ export function createToolStore(client: Client): ToolStore {
           rec.description,
           JSON.stringify(rec.inputSchema ?? { type: "object" }),
           rec.code,
-          JSON.stringify(rec.allowedHosts ?? []),
+          JSON.stringify(rec.allowedHosts),
           now,
           now,
         ],

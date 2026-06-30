@@ -24,13 +24,6 @@ export interface ReasoningResolution {
   maxOutputTokens?: number;
 }
 
-const providerFromId = (id: string): string =>
-  id.startsWith("gpt") || id.startsWith("o")
-    ? "openai"
-    : id.startsWith("gemini") || id.startsWith("gemma")
-      ? "google"
-      : "anthropic";
-
 /**
  * Build the `RuntimeConfig.resolveReasoningOptions` hook over the model catalog.
  * Returns `providerOptions` (keyed by provider id) plus a safe `maxOutputTokens`
@@ -46,7 +39,7 @@ export function makeResolveReasoningOptions(models: ModelInfo[]) {
     // Only emit for models known to support reasoning — avoids API errors on
     // non-thinking models. Unknown (offline/fallback) → skip to stay safe.
     if (!info?.reasoning) return undefined;
-    const provider = info.provider ?? providerFromId(modelId);
+    const provider = info.provider;
 
     if (provider === "openai") {
       return { providerOptions: { openai: { reasoningEffort: eff } } };

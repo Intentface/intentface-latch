@@ -3,30 +3,42 @@ import {
   createRuntime,
   createVault,
   defineContext,
-  mergeConnections,
-  type Runtime,
-  type ConnectionRegistry,
+  mergeConnections
+  
+  
 } from "@intentface/latch-core";
+import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
 } from "@intentface/latch-drizzle";
-import { createMcpConnections, type McpConnections } from "@intentface/latch-mcp";
-import { createLatchHandler, type LatchHandler } from "@intentface/latch-server";
+import { createMcpConnections  } from "@intentface/latch-mcp";
+import type {McpConnections} from "@intentface/latch-mcp";
+import { createLatchHandler  } from "@intentface/latch-server";
+import type {LatchHandler} from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
-import { getPrincipalFromHeaders, type Principal } from "./session";
-import { createCredentials, type Credentials } from "./credentials";
-import { createConnectionStore, type ConnectionStore } from "./connection-store";
-import { createDynamicConnections, type DynamicConnections } from "./dynamic-connections";
-import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
-import { createSlackStore, migrateSlack, type SlackStore } from "./slack-store";
-import { createToolStore, migrateAuthoredTools, type ToolStore } from "./tools/store";
-import { createAuthoredTools, type AuthoredToolsApi } from "./tools";
+import { getPrincipalFromHeaders  } from "./session";
+import type {Principal} from "./session";
+import { createCredentials  } from "./credentials";
+import type {Credentials} from "./credentials";
+import { createConnectionStore  } from "./connection-store";
+import type {ConnectionStore} from "./connection-store";
+import { createDynamicConnections  } from "./dynamic-connections";
+import type {DynamicConnections} from "./dynamic-connections";
+import { createAgentStore, migrateAgents  } from "./agent-store";
+import type {AgentStore} from "./agent-store";
+import { createSlackStore, migrateSlack  } from "./slack-store";
+import type {SlackStore} from "./slack-store";
+import { createToolStore, migrateAuthoredTools  } from "./tools/store";
+import type {ToolStore} from "./tools/store";
+import { createAuthoredTools  } from "./tools";
+import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
-import { loadModelCatalog, type ModelInfo } from "./models";
+import { loadModelCatalog  } from "./models";
+import type {ModelInfo} from "./models";
 import { resolveSandbox, harnessTools } from "./sandbox";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";

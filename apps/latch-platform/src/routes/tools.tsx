@@ -13,15 +13,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { CodeEditor } from "@/components/code-editor";
 
-type AuthoredTool = {
-  name: string;
-  description: string;
-  code: string;
-  inputSchema: string;
-  allowedHosts: string[];
-  updatedAt: number;
-};
-
 type Draft = {
   originalName?: string;
   name: string;
@@ -49,7 +40,7 @@ export const Route = createFileRoute("/tools")({
 });
 
 function ToolsPage() {
-  const tools = Route.useLoaderData() as AuthoredTool[];
+  const tools = Route.useLoaderData();
   const router = useRouter();
   const [editing, setEditing] = useState<Draft | null>(null);
   const [busy, setBusy] = useState<string | null>(null);

@@ -107,7 +107,7 @@ export const loadHistoryFn = createServerFn({ method: "GET" })
     if (!principal) return [] as AppMessage[];
     const { runtime } = await getLatch();
     const messages = await runtime.loadHistory({ chatId, principal });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     return messages as any;
   });
 
@@ -295,7 +295,7 @@ export const connectionToolsFn = createServerFn({ method: "GET" })
     const { allConnections } = await getLatch();
     const opened = await allConnections.hostFor(names).open(principal);
     try {
-      const approval = (opened.toolApproval ?? {}) as Record<string, unknown>;
+      const approval = (opened.toolApproval ?? {});
       return Object.keys(opened.tools)
         .filter((k) => !k.startsWith("connect_"))
         .map((name) => ({
@@ -613,6 +613,9 @@ export const saveAuthoredToolFn = createServerFn({ method: "POST" })
     const { authoredTools } = await getLatch();
     const name = authoredTools.cleanName(data.name);
     if (!name) return { ok: false as const, error: "invalid name" };
+    if (authoredTools.isReserved(name)) {
+      return { ok: false as const, error: `"${name}" is a reserved tool name — pick another.` };
+    }
     if (!data.code.trim()) return { ok: false as const, error: "code is empty" };
     let inputSchema: unknown = { type: "object" };
     if (data.inputSchema != null && data.inputSchema.trim()) {
@@ -634,12 +637,14 @@ export const saveAuthoredToolFn = createServerFn({ method: "POST" })
     await authoredTools.store.save({
       owner,
       name,
-      description: String(data.description ?? ""),
+      description: String(data.description),
       inputSchema,
       code: data.code,
-      allowedHosts: (data.allowedHosts ?? []).map((h) => String(h).trim()).filter(Boolean),
+      // Normalize hosts the same way save_tool does (drop scheme/path) so the
+      // stored allowlist matches what the runtime checks.
+      allowedHosts: (data.allowedHosts ?? []).map(authoredTools.cleanHost).filter(Boolean),
     });
-    if (isRename) await authoredTools.store.delete(owner, original!);
+    if (isRename) await authoredTools.store.delete(owner, original);
     return { ok: true as const, name };
   });
 

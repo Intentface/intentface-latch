@@ -648,9 +648,10 @@ export function createRuntime<P, RC = unknown>(
             else gated.delete(k);
           }
         } else if (typeof cfg.toolApproval === "function") {
-          // A function policy can't be enumerated — it may gate any tool. To keep
-          // the test side-effect-free, conservatively block every connection tool.
-          for (const o of opened) for (const k of Object.keys(o.tools)) gated.add(k);
+          // A function policy can't be enumerated — it may gate ANY tool. To keep
+          // the test side-effect-free, conservatively block every executable tool
+          // (connection, authored, and harness — `connect_` is already dropped).
+          for (const k of Object.keys(tools)) gated.add(k);
         }
         for (const name of gated) {
           const t = tools[name] as { execute?: unknown } | undefined;

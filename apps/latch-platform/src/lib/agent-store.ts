@@ -97,9 +97,9 @@ export async function migrateAgents(client: Client): Promise<void> {
 
 export interface AgentStore extends DynamicAgentStore<Principal> {
   /** Full records visible to the caller (org + personal), for the editor. */
-  listRecords(p: Principal): Promise<(AgentRecord & { scope: CredentialScope })[]>;
-  upsert(p: Principal, rec: AgentRecord): Promise<void>;
-  remove(p: Principal, scope: CredentialScope, name: string): Promise<void>;
+  listRecords: (p: Principal) => Promise<(AgentRecord & { scope: CredentialScope })[]>;
+  upsert: (p: Principal, rec: AgentRecord) => Promise<void>;
+  remove: (p: Principal, scope: CredentialScope, name: string) => Promise<void>;
 }
 
 export function createAgentStore(

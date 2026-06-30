@@ -38,7 +38,10 @@ export function isBlockedHost(host: string): boolean {
   if (h.includes(":")) {
     // IPv6 loopback / ULA (fc00::/7) / link-local (fe80::/10).
     if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true;
-    // IPv4-mapped (::ffff:127.0.0.1) → fall through to the IPv4 check.
+    // IPv4-mapped (::ffff:127.0.0.1 or hex ::ffff:7f00:1) — block conservatively;
+    // these only ever point at a v4 address, which an allowlist shouldn't need.
+    if (h.startsWith("::ffff:")) return true;
+    // Any remaining embedded dotted IPv4 → fall through to the IPv4 check.
     const mapped = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
     if (mapped) h = mapped[1];
     else return false;

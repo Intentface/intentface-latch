@@ -1,5 +1,6 @@
 import { tool, jsonSchema } from "ai";
-import { runTool, type ToolResult } from "./runtime";
+import { runTool  } from "./runtime";
+import type {ToolResult} from "./runtime";
 import type { ToolStore } from "./store";
 
 /**
@@ -23,15 +24,19 @@ const cleanHost = (h: string): string =>
 
 export interface AuthoredToolsApi {
   /** The owner's authored tools as executable AI-SDK tools (filtered to `names` if given). */
-  executableTools(principal: unknown, names?: string[]): Promise<Record<string, unknown>>;
+  executableTools: (principal: unknown, names?: string[]) => Promise<Record<string, unknown>>;
   /** Run a program once (Test panel / test_tool) without persisting it. */
-  run(args: { code: string; allowedHosts?: string[]; input?: unknown }): Promise<ToolResult>;
+  run: (args: { code: string; allowedHosts?: string[]; input?: unknown }) => Promise<ToolResult>;
   /** Authoring meta-tools for a builder agent. */
-  authoringTools(principal: unknown): Record<string, unknown>;
+  authoringTools: (principal: unknown) => Record<string, unknown>;
   /** The owner key for a principal — so callers (server fns) key the store identically. */
-  ownerKey(principal: unknown): string;
+  ownerKey: (principal: unknown) => string;
   /** Normalize a name the same way save_tool does (letters/digits/underscore). */
-  cleanName(name: string): string;
+  cleanName: (name: string) => string;
+  /** Normalize a host entry to a bare hostname (drop scheme/path) — for save paths. */
+  cleanHost: (host: string) => string;
+  /** Whether a (cleaned) name collides with a reserved meta-tool. */
+  isReserved: (name: string) => boolean;
   store: ToolStore;
 }
 
@@ -49,6 +54,8 @@ export function createAuthoredTools(opts: {
     run,
     ownerKey,
     cleanName,
+    cleanHost,
+    isReserved: (name) => RESERVED.has(name),
 
     async executableTools(principal, names) {
       const owner = ownerKey(principal);

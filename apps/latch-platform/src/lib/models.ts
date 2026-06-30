@@ -2,7 +2,8 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { google } from "@ai-sdk/google";
 import { openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
-import { staticPricing, type Pricing, type ModelPrice } from "@intentface/latch-core";
+import { staticPricing   } from "@intentface/latch-core";
+import type {Pricing, ModelPrice} from "@intentface/latch-core";
 
 /**
  * The model catalog, sourced from models.dev (the public model registry). We

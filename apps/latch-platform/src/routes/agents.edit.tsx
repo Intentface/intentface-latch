@@ -91,7 +91,7 @@ function AgentEditor() {
   const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
   const [webTools, setWebTools] = useState(
     initial?.exec?.defaultTools === true ||
-      (Array.isArray(initial?.exec?.defaultTools) && initial!.exec!.defaultTools.length > 0),
+      (Array.isArray(initial?.exec?.defaultTools) && initial.exec.defaultTools.length > 0),
   );
   const [providerWebTools, setProviderWebTools] = useState(
     initial?.exec?.providerWebTools ?? false,
@@ -263,7 +263,7 @@ function AgentEditor() {
           <ChevronLeft className="size-4" /> Agents
         </Link>
         <h1 className="text-ink-primary text-lg font-semibold tracking-tight">
-          {editing ? `Edit “${initial!.name}”` : "New agent"}
+          {editing ? `Edit “${initial.name}”` : "New agent"}
         </h1>
         <p className="text-ink-secondary text-sm">
           {editing
