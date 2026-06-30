@@ -7,6 +7,7 @@ import {
 } from "@intentface/latch-channels/slack";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
+import { normalizeAgentName } from "./agent-store";
 import {
   slackVaultKeys,
   SLACK_CONFIG_TOKEN_KEY,
@@ -106,7 +107,7 @@ export const loadHistoryFn = createServerFn({ method: "GET" })
     if (!principal) return [] as AppMessage[];
     const { runtime } = await getLatch();
     const messages = await runtime.loadHistory({ chatId, principal });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     return messages as any;
   });
 
@@ -294,7 +295,7 @@ export const connectionToolsFn = createServerFn({ method: "GET" })
     const { allConnections } = await getLatch();
     const opened = await allConnections.hostFor(names).open(principal);
     try {
-      const approval = (opened.toolApproval ?? {}) as Record<string, unknown>;
+      const approval = (opened.toolApproval ?? {});
       return Object.keys(opened.tools)
         .filter((k) => !k.startsWith("connect_"))
         .map((name) => ({
@@ -332,6 +333,8 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         disableTools?: string[];
         codeMode?: { tools?: string[] };
         providerWebTools?: boolean;
+        authoredTools?: string[];
+        effort?: "minimal" | "low" | "medium" | "high";
       };
       subagents?: string[];
       scope: "user" | "org";
@@ -340,10 +343,25 @@ export const saveAgentFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
-    const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+    const name = normalizeAgentName(data.name);
     if (!name) return { ok: false, error: "name required" };
     if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
-    const { agentStore } = await getLatch();
+    const { agentStore, authoredTools } = await getLatch();
+    // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
+    // resolve for other members. Validate before persisting.
+    const attached = data.exec?.authoredTools ?? [];
+    if (data.scope === "org" && attached.length) {
+      const orgTools = new Set(
+        (await authoredTools.listFor(principal)).filter((t) => t.scope === "org").map((t) => t.name),
+      );
+      const personal = attached.filter((n) => !orgTools.has(n));
+      if (personal.length) {
+        return {
+          ok: false,
+          error: `Org agents can only use org-scoped tools. Make these org-scoped first: ${personal.join(", ")}.`,
+        };
+      }
+    }
     await agentStore.upsert(principal, {
       name,
       title: data.title?.trim() || undefined,
@@ -562,4 +580,115 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
     const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(created.appId)}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
     return { ok: true as const, authorizeUrl };
+  });
+
+// ── Authored tools (latch_tools): sandboxed JS/TS programs over input + fetch ──
+
+/** The caller's authored tools — for the Tools page (code + schema editable). */
+export const listAuthoredToolsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { authoredTools } = await getLatch();
+  const tools = await authoredTools.listFor(principal);
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    code: t.code,
+    // JSON string — editable directly + serializer-safe.
+    inputSchema: JSON.stringify(t.inputSchema ?? { type: "object" }, null, 2),
+    allowedHosts: t.allowedHosts,
+    scope: t.scope,
+    updatedAt: t.updatedAt,
+  }));
+});
+
+/** Lightweight names (+ scope) for the agent editor's tool picker. */
+export const listAuthoredToolNamesFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { authoredTools } = await getLatch();
+  const tools = await authoredTools.listFor(principal);
+  return tools.map((t) => ({ name: t.name, description: t.description, scope: t.scope }));
+});
+
+/** Create or update an authored tool from the UI. Rename / scope-change = move. */
+export const saveAuthoredToolFn = createServerFn({ method: "POST" })
+  .validator(
+    (t: {
+      name: string;
+      description: string;
+      inputSchema?: string;
+      code: string;
+      allowedHosts?: string[];
+      scope?: "user" | "org";
+      originalName?: string;
+      originalScope?: "user" | "org";
+    }) => t,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "not authenticated" };
+    const { authoredTools } = await getLatch();
+    const name = authoredTools.cleanName(data.name);
+    if (!name) return { ok: false as const, error: "invalid name" };
+    if (authoredTools.isReserved(name)) {
+      return { ok: false as const, error: `"${name}" is a reserved tool name — pick another.` };
+    }
+    if (!data.code.trim()) return { ok: false as const, error: "code is empty" };
+    let inputSchema: unknown = { type: "object" };
+    if (data.inputSchema != null && data.inputSchema.trim()) {
+      try {
+        inputSchema = JSON.parse(data.inputSchema);
+      } catch {
+        return { ok: false as const, error: "input schema is not valid JSON" };
+      }
+    }
+    const scope = data.scope === "org" ? "org" : "user";
+    const original = data.originalName ? authoredTools.cleanName(data.originalName) : undefined;
+    const originalScope = data.originalScope === "org" ? "org" : "user";
+    const moved = !!original && (original !== name || originalScope !== scope);
+    // A rename/scope-change must not silently clobber a different existing tool.
+    if (moved && (await authoredTools.getFor(principal, scope, name))) {
+      return { ok: false as const, error: `A ${scope} tool named "${name}" already exists.` };
+    }
+    // Save the new record FIRST, then drop the old one — so a failed save can
+    // never lose the original (no transaction across the two writes).
+    await authoredTools.saveFor(principal, scope, {
+      name,
+      description: String(data.description),
+      inputSchema,
+      // Normalize hosts the same way save_tool does (drop scheme/path).
+      allowedHosts: (data.allowedHosts ?? []).map(authoredTools.cleanHost).filter(Boolean),
+      code: data.code,
+    });
+    if (moved && original) await authoredTools.deleteFor(principal, originalScope, original);
+    return { ok: true as const, name, scope };
+  });
+
+/** Run an authored program once against the caller's allowlist — the Test panel. */
+export const testAuthoredToolFn = createServerFn({ method: "POST" })
+  .validator((t: { code: string; input?: unknown; allowedHosts?: string[] }) => t)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { status: "error" as const, error: "not authenticated" };
+    const { authoredTools } = await getLatch();
+    const r = await authoredTools.run({
+      code: data.code,
+      input: data.input ?? null,
+      allowedHosts: data.allowedHosts,
+    });
+    return r.status === "completed"
+      ? { status: "completed" as const, result: JSON.stringify(r.result ?? null, null, 2) }
+      : { status: "error" as const, error: r.error };
+  });
+
+/** Delete an authored tool by name + scope. */
+export const deleteAuthoredToolFn = createServerFn({ method: "POST" })
+  .validator((t: { name: string; scope?: "user" | "org" }) => t)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { authoredTools } = await getLatch();
+    await authoredTools.deleteFor(principal, data.scope === "org" ? "org" : "user", authoredTools.cleanName(data.name));
+    return { ok: true };
   });

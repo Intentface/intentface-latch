@@ -25,13 +25,34 @@ export type WebFetchResult =
   | { ok: true; status: number; contentType: string; content: string; truncated: boolean }
   | { ok: false; error: string };
 
-/** Block private/loopback hosts (SSRF guard for the in-process fetch). */
-function isBlockedHost(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === "localhost" || h.endsWith(".local") || h === "[::1]" || h === "::1") return true;
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
+/**
+ * Block private/loopback hosts (SSRF guard). Covers the common bypass vectors:
+ * trailing-dot, bracketed IPv6 (loopback/ULA/link-local + IPv4-mapped), bare
+ * integer / hex encodings of IPv4 (e.g. 2130706433 = 127.0.0.1), and short
+ * dotted forms (127.1). Best-effort but conservative — strictly more blocking.
+ */
+export function isBlockedHost(host: string): boolean {
+  let h = host.toLowerCase().replace(/\.$/, ""); // drop a trailing dot
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1); // unwrap IPv6 literal
+  if (h === "localhost" || h.endsWith(".local") || h === "::1" || h === "::") return true;
+  if (h.includes(":")) {
+    // IPv6 loopback / ULA (fc00::/7) / link-local (fe80::/10).
+    if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true;
+    // IPv4-mapped (::ffff:127.0.0.1 or hex ::ffff:7f00:1) — block conservatively;
+    // these only ever point at a v4 address, which an allowlist shouldn't need.
+    if (h.startsWith("::ffff:")) return true;
+    // Any remaining embedded dotted IPv4 → fall through to the IPv4 check.
+    const mapped = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped) h = mapped[1];
+    else return false;
+  }
+  // Bare integer or hex host = an encoded IPv4 (e.g. 2130706433, 0x7f000001).
+  if (/^\d+$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true;
+  // Dotted IPv4, including short forms (127.1, 10.0.1).
+  const parts = h.split(".");
+  if (parts.length >= 2 && parts.length <= 4 && parts.every((p) => /^\d{1,3}$/.test(p))) {
+    const a = Number(parts[0]);
+    const b = Number(parts[1] ?? 0);
     if (a === 127 || a === 10 || a === 0) return true;
     if (a === 192 && b === 168) return true;
     if (a === 169 && b === 254) return true;

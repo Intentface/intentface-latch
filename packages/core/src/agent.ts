@@ -135,6 +135,13 @@ export interface AgentConfig<P> {
    * web_search only. No-op on providers without native web tools.
    */
   providerWebTools?: boolean;
+  /**
+   * Reasoning/thinking effort for this agent. Mapped to provider-specific
+   * options by `RuntimeConfig.resolveReasoningOptions` (OpenAI effort enum vs
+   * Anthropic/Google thinking-token budget) and gated to reasoning-capable
+   * models. Omitted → the provider default.
+   */
+  effort?: "minimal" | "low" | "medium" | "high";
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */

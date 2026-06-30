@@ -7,6 +7,7 @@ import {
   availableConnectionNamesFn,
   connectionsStatusFn,
   listConnectionsFn,
+  listAuthoredToolNamesFn,
 } from "@/lib/server";
 
 export interface AgentRec {
@@ -29,6 +30,8 @@ export interface AgentRec {
     disableTools?: string[];
     codeMode?: { tools?: string[] };
     providerWebTools?: boolean;
+    authoredTools?: string[];
+    effort?: "minimal" | "low" | "medium" | "high";
   };
   subagents?: string[];
   scope: "user" | "org";
@@ -50,18 +53,20 @@ export const Route = createFileRoute("/agents")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [records, allAgents, models, connections, codeStatus, dynStatus] = await Promise.all([
-      listAgentRecordsFn(),
-      listAgentsFn(),
-      listModelsFn(),
-      availableConnectionNamesFn(),
-      connectionsStatusFn(),
-      listConnectionsFn(),
-    ]);
+    const [records, allAgents, models, connections, codeStatus, dynStatus, authoredTools] =
+      await Promise.all([
+        listAgentRecordsFn(),
+        listAgentsFn(),
+        listModelsFn(),
+        availableConnectionNamesFn(),
+        connectionsStatusFn(),
+        listConnectionsFn(),
+        listAuthoredToolNamesFn(),
+      ]);
     const status: ConnStatus = {};
     for (const c of codeStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };
     for (const c of dynStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };
-    return { records, allAgents, models, connections, status };
+    return { records, allAgents, models, connections, status, authoredTools };
   },
   component: () => <Outlet />,
 });

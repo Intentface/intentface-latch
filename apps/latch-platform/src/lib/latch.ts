@@ -3,30 +3,45 @@ import {
   createRuntime,
   createVault,
   defineContext,
-  mergeConnections,
-  type Runtime,
-  type ConnectionRegistry,
+  mergeConnections
+  
+  
 } from "@intentface/latch-core";
+import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
 } from "@intentface/latch-drizzle";
-import { createMcpConnections, type McpConnections } from "@intentface/latch-mcp";
-import { createLatchHandler, type LatchHandler } from "@intentface/latch-server";
+import { createMcpConnections  } from "@intentface/latch-mcp";
+import type {McpConnections} from "@intentface/latch-mcp";
+import { createLatchHandler  } from "@intentface/latch-server";
+import type {LatchHandler} from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
-import { getPrincipalFromHeaders, type Principal } from "./session";
-import { createCredentials, type Credentials } from "./credentials";
-import { createConnectionStore, type ConnectionStore } from "./connection-store";
-import { createDynamicConnections, type DynamicConnections } from "./dynamic-connections";
-import { createAgentStore, migrateAgents, type AgentStore } from "./agent-store";
-import { createSlackStore, migrateSlack, type SlackStore } from "./slack-store";
+import { getPrincipalFromHeaders  } from "./session";
+import type {Principal} from "./session";
+import { createCredentials  } from "./credentials";
+import type {Credentials} from "./credentials";
+import { createConnectionStore  } from "./connection-store";
+import type {ConnectionStore} from "./connection-store";
+import { createDynamicConnections  } from "./dynamic-connections";
+import type {DynamicConnections} from "./dynamic-connections";
+import { createAgentStore, migrateAgents  } from "./agent-store";
+import type {AgentStore} from "./agent-store";
+import { createSlackStore, migrateSlack  } from "./slack-store";
+import type {SlackStore} from "./slack-store";
+import { createToolStore, migrateAuthoredTools  } from "./tools/store";
+import type {ToolStore} from "./tools/store";
+import { createAuthoredTools  } from "./tools";
+import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
-import { loadModelCatalog, type ModelInfo } from "./models";
+import { loadModelCatalog  } from "./models";
+import type {ModelInfo} from "./models";
 import { resolveSandbox, harnessTools } from "./sandbox";
 import { resolveProviderTools } from "./provider-tools";
+import { makeResolveReasoningOptions } from "./reasoning";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -51,6 +66,8 @@ let cached:
       allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
       slackStore: SlackStore;
+      toolStore: ToolStore;
+      authoredTools: AuthoredToolsApi;
       models: ModelInfo[];
       handler: LatchHandler;
     }
@@ -65,6 +82,8 @@ export async function getLatch(): Promise<{
   allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
   slackStore: SlackStore;
+  toolStore: ToolStore;
+  authoredTools: AuthoredToolsApi;
   models: ModelInfo[];
   handler: LatchHandler;
 }> {
@@ -78,6 +97,7 @@ export async function getLatch(): Promise<{
   await migrate(client); // creates latch_* tables alongside the auth tables
   await migrateAgents(client); // latch_agents (UI-created agents)
   await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
+  await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
@@ -94,8 +114,23 @@ export async function getLatch(): Promise<{
   const connectionStore = createConnectionStore(vault);
   // Model catalog + pricing from models.dev (filtered to Anthropic).
   const catalog = await loadModelCatalog();
-  // UI-created agents (latch_agents table, org/personal).
-  const agentStore = createAgentStore(client, catalog.modelFor);
+  // Authored tools: sandboxed JS/TS programs over `input` + an allowlisted fetch.
+  // Scoped personal (per org+user) or org (shared), mirroring agents/connections.
+  const toolStore = createToolStore(client);
+  const authoredTools = createAuthoredTools({
+    store: toolStore,
+    ownerKey: (p, scope) => {
+      const pr = p as Principal;
+      const parts = scope === "org" ? [pr.orgId] : [pr.orgId, pr.userId ?? ""];
+      return parts.map(encodeURIComponent).join("/");
+    },
+  });
+  // UI-created agents (latch_agents table, org/personal) — may attach authored
+  // tools, resolved per caller at turn time. An org agent resolves only org
+  // tools (so every member gets them); a personal agent merges org + personal.
+  const agentStore = createAgentStore(client, catalog.modelFor, (p, names, scope) =>
+    authoredTools.executableTools(p, names, scope),
+  );
   const slackStore = createSlackStore(client);
 
   const context = defineContext<Principal, Ctx>({
@@ -159,6 +194,8 @@ export async function getLatch(): Promise<{
     harnessTools,
     // Native provider web tools (search/fetch) for agents that opt in.
     resolveProviderTools,
+    // Per-agent reasoning effort → provider options (gated to reasoning models).
+    resolveReasoningOptions: makeResolveReasoningOptions(catalog.models),
   });
 
   // The connection registry the handler's OAuth/status/test routes see: code
@@ -206,6 +243,8 @@ export async function getLatch(): Promise<{
     allConnections,
     agentStore,
     slackStore,
+    toolStore,
+    authoredTools,
     models: catalog.models,
     handler,
   };

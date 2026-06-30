@@ -1,5 +1,6 @@
 import { assistant } from "./assistant";
 import { weekly } from "./weekly";
+import { agentBuilder } from "./agent-builder";
 
 /**
  * The platform's agents, keyed by name. Each agent file is a self-contained
@@ -10,4 +11,5 @@ import { weekly } from "./weekly";
 export const agents = {
   assistant,
   weekly,
+  "agent-builder": agentBuilder,
 };
