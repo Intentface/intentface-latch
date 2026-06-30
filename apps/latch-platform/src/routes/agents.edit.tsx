@@ -101,6 +101,13 @@ function AgentEditor() {
     setAuthoredSel((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
   const [effort, setEffort] = useState<string>(initial?.exec?.effort ?? "");
   const modelSupportsReasoning = !!models.find((m) => m.id === modelId)?.reasoning;
+  // Org agents may only attach org-scoped tools (a personal tool wouldn't resolve
+  // for other members); personal agents see all (dedup by name, personal wins).
+  const visibleAuthored =
+    scope === "org"
+      ? authoredTools.filter((t) => t.scope === "org")
+      : [...new Map(authoredTools.map((t) => [t.name, t])).values()];
+  const validAuthoredSel = authoredSel.filter((n) => visibleAuthored.some((t) => t.name === n));
   const [subagents, setSubagents] = useState<string[]>(initial?.subagents ?? []);
   const toggleSubagent = (n: string) =>
     setSubagents((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
@@ -215,13 +222,13 @@ function AgentEditor() {
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
       const exec =
-        sandbox || webTools || providerWebTools || authoredSel.length || useEffort
+        sandbox || webTools || providerWebTools || validAuthoredSel.length || useEffort
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
               defaultTools: webTools || undefined,
               providerWebTools: providerWebTools || undefined,
-              authoredTools: authoredSel.length ? authoredSel : undefined,
+              authoredTools: validAuthoredSel.length ? validAuthoredSel : undefined,
               effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,
             }
           : undefined;
@@ -487,20 +494,21 @@ function AgentEditor() {
               search + fetch, OpenAI = search). No-op on providers without them.
             </span>
           </label>
-          {authoredTools.length > 0 && (
+          {visibleAuthored.length > 0 && (
             <div className="space-y-1.5">
               <div className="text-ink-secondary text-xs font-medium">
                 Authored tools{" "}
                 <span className="text-ink-tertiary font-normal">
                   — sandboxed tools (from the Tools page) this agent can call
+                  {scope === "org" ? " (org-shared only)" : ""}
                 </span>
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {authoredTools.map((t) => {
+                {visibleAuthored.map((t) => {
                   const on = authoredSel.includes(t.name);
                   return (
                     <button
-                      key={t.name}
+                      key={t.scope + t.name}
                       type="button"
                       onClick={() => toggleAuthored(t.name)}
                       title={t.description}
@@ -512,6 +520,7 @@ function AgentEditor() {
                       )}
                     >
                       {t.name}
+                      {t.scope === "org" ? " ·org" : ""}
                     </button>
                   );
                 })}

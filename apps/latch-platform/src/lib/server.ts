@@ -346,7 +346,22 @@ export const saveAgentFn = createServerFn({ method: "POST" })
     const name = normalizeAgentName(data.name);
     if (!name) return { ok: false, error: "name required" };
     if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
-    const { agentStore } = await getLatch();
+    const { agentStore, authoredTools } = await getLatch();
+    // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
+    // resolve for other members. Validate before persisting.
+    const attached = data.exec?.authoredTools ?? [];
+    if (data.scope === "org" && attached.length) {
+      const orgTools = new Set(
+        (await authoredTools.listFor(principal)).filter((t) => t.scope === "org").map((t) => t.name),
+      );
+      const personal = attached.filter((n) => !orgTools.has(n));
+      if (personal.length) {
+        return {
+          ok: false,
+          error: `Org agents can only use org-scoped tools. Make these org-scoped first: ${personal.join(", ")}.`,
+        };
+      }
+    }
     await agentStore.upsert(principal, {
       name,
       title: data.title?.trim() || undefined,
@@ -574,7 +589,7 @@ export const listAuthoredToolsFn = createServerFn({ method: "GET" }).handler(asy
   const principal = await getPrincipal();
   if (!principal) return [];
   const { authoredTools } = await getLatch();
-  const tools = await authoredTools.store.list(authoredTools.ownerKey(principal));
+  const tools = await authoredTools.listFor(principal);
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
@@ -582,20 +597,21 @@ export const listAuthoredToolsFn = createServerFn({ method: "GET" }).handler(asy
     // JSON string — editable directly + serializer-safe.
     inputSchema: JSON.stringify(t.inputSchema ?? { type: "object" }, null, 2),
     allowedHosts: t.allowedHosts,
+    scope: t.scope,
     updatedAt: t.updatedAt,
   }));
 });
 
-/** Lightweight names (+ descriptions) for the agent editor's tool picker. */
+/** Lightweight names (+ scope) for the agent editor's tool picker. */
 export const listAuthoredToolNamesFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
   const { authoredTools } = await getLatch();
-  const tools = await authoredTools.store.list(authoredTools.ownerKey(principal));
-  return tools.map((t) => ({ name: t.name, description: t.description }));
+  const tools = await authoredTools.listFor(principal);
+  return tools.map((t) => ({ name: t.name, description: t.description, scope: t.scope }));
 });
 
-/** Create or update an authored tool from the UI. Rename = delete old + insert. */
+/** Create or update an authored tool from the UI. Rename / scope-change = move. */
 export const saveAuthoredToolFn = createServerFn({ method: "POST" })
   .validator(
     (t: {
@@ -604,7 +620,9 @@ export const saveAuthoredToolFn = createServerFn({ method: "POST" })
       inputSchema?: string;
       code: string;
       allowedHosts?: string[];
+      scope?: "user" | "org";
       originalName?: string;
+      originalScope?: "user" | "org";
     }) => t,
   )
   .handler(async ({ data }) => {
@@ -625,27 +643,26 @@ export const saveAuthoredToolFn = createServerFn({ method: "POST" })
         return { ok: false as const, error: "input schema is not valid JSON" };
       }
     }
-    const owner = authoredTools.ownerKey(principal);
+    const scope = data.scope === "org" ? "org" : "user";
     const original = data.originalName ? authoredTools.cleanName(data.originalName) : undefined;
-    const isRename = !!original && original !== name;
-    // A rename must not silently clobber a different existing tool.
-    if (isRename && (await authoredTools.store.get(owner, name))) {
-      return { ok: false as const, error: `A tool named "${name}" already exists.` };
+    const originalScope = data.originalScope === "org" ? "org" : "user";
+    const moved = !!original && (original !== name || originalScope !== scope);
+    // A rename/scope-change must not silently clobber a different existing tool.
+    if (moved && (await authoredTools.getFor(principal, scope, name))) {
+      return { ok: false as const, error: `A ${scope} tool named "${name}" already exists.` };
     }
-    // Save the new record FIRST, then drop the old name — so a failed save can
+    // Save the new record FIRST, then drop the old one — so a failed save can
     // never lose the original (no transaction across the two writes).
-    await authoredTools.store.save({
-      owner,
+    await authoredTools.saveFor(principal, scope, {
       name,
       description: String(data.description),
       inputSchema,
-      code: data.code,
-      // Normalize hosts the same way save_tool does (drop scheme/path) so the
-      // stored allowlist matches what the runtime checks.
+      // Normalize hosts the same way save_tool does (drop scheme/path).
       allowedHosts: (data.allowedHosts ?? []).map(authoredTools.cleanHost).filter(Boolean),
+      code: data.code,
     });
-    if (isRename) await authoredTools.store.delete(owner, original);
-    return { ok: true as const, name };
+    if (moved && original) await authoredTools.deleteFor(principal, originalScope, original);
+    return { ok: true as const, name, scope };
   });
 
 /** Run an authored program once against the caller's allowlist — the Test panel. */
@@ -665,13 +682,13 @@ export const testAuthoredToolFn = createServerFn({ method: "POST" })
       : { status: "error" as const, error: r.error };
   });
 
-/** Delete an authored tool by name. */
+/** Delete an authored tool by name + scope. */
 export const deleteAuthoredToolFn = createServerFn({ method: "POST" })
-  .validator((name: string) => name)
-  .handler(async ({ data: name }) => {
+  .validator((t: { name: string; scope?: "user" | "org" }) => t)
+  .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
     const { authoredTools } = await getLatch();
-    await authoredTools.store.delete(authoredTools.ownerKey(principal), authoredTools.cleanName(name));
+    await authoredTools.deleteFor(principal, data.scope === "org" ? "org" : "user", authoredTools.cleanName(data.name));
     return { ok: true };
   });

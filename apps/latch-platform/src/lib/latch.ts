@@ -115,16 +115,21 @@ export async function getLatch(): Promise<{
   // Model catalog + pricing from models.dev (filtered to Anthropic).
   const catalog = await loadModelCatalog();
   // Authored tools: sandboxed JS/TS programs over `input` + an allowlisted fetch.
-  // Owner-scoped (per org+user), matching the adapter's isolation key.
+  // Scoped personal (per org+user) or org (shared), mirroring agents/connections.
   const toolStore = createToolStore(client);
   const authoredTools = createAuthoredTools({
     store: toolStore,
-    ownerKey: (p) => owner(p as Principal).map(encodeURIComponent).join("/"),
+    ownerKey: (p, scope) => {
+      const pr = p as Principal;
+      const parts = scope === "org" ? [pr.orgId] : [pr.orgId, pr.userId ?? ""];
+      return parts.map(encodeURIComponent).join("/");
+    },
   });
   // UI-created agents (latch_agents table, org/personal) — may attach authored
-  // tools, resolved per caller into executable tools at turn time.
-  const agentStore = createAgentStore(client, catalog.modelFor, (p, names) =>
-    authoredTools.executableTools(p, names),
+  // tools, resolved per caller at turn time. An org agent resolves only org
+  // tools (so every member gets them); a personal agent merges org + personal.
+  const agentStore = createAgentStore(client, catalog.modelFor, (p, names, scope) =>
+    authoredTools.executableTools(p, names, scope),
   );
   const slackStore = createSlackStore(client);
 

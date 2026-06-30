@@ -211,10 +211,20 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (badSub.length) {
           return { error: `Unknown subagent(s): ${badSub.join(", ")}. Use list_agents.` };
         }
-        const ownedTools = new Set((await authoredTools.store.list(authoredTools.ownerKey(principal))).map((t) => t.name));
-        const badTools = (input.authoredTools ?? []).filter((n) => !ownedTools.has(n));
+        const owned = await authoredTools.listFor(principal);
+        const ownedNames = new Set(owned.map((t) => t.name));
+        const badTools = (input.authoredTools ?? []).filter((n) => !ownedNames.has(n));
         if (badTools.length) {
           return { error: `Unknown authored tool(s): ${badTools.join(", ")}. Use list_tools (author them first).` };
+        }
+        // An org agent can only use org-scoped tools (else they're missing for
+        // other members). Tell the builder to re-save them with scope:"org".
+        if (input.scope === "org") {
+          const orgNames = new Set(owned.filter((t) => t.scope === "org").map((t) => t.name));
+          const personal = (input.authoredTools ?? []).filter((n) => !orgNames.has(n));
+          if (personal.length) {
+            return { error: `Org agents can only use org-scoped tools. Re-save these with scope:"org": ${personal.join(", ")}.` };
+          }
         }
         const rec: AgentRecord = {
           name,
@@ -317,6 +327,8 @@ There is NOTHING else — no console, no require/import, no process/fs/timers. T
 Keep results compact: do the filtering/aggregation IN CODE and return only what the model needs (results over ~64KB are truncated; a run times out at ~15s).
 
 Design principle: keep ALL fetching, math, unit conversion, ranking, and safety rules IN THE TOOL'S CODE; the agent that uses it only phrases the result and makes judgment calls. The tool returns clean, already-computed data (not raw API JSON) so the model never has to calculate.
+
+SCOPE: a tool is personal (default) or org-shared (scope:"org"). Match it to the agent you're building — an ORG agent can ONLY attach org-scoped tools (a personal tool wouldn't resolve for other members), so author its tools with scope:"org". A personal agent may use personal or org tools.
 
 Flow: write the program → call test_tool (pass sample \`input\` and the same allowedHosts) to confirm it runs and its fetches resolve — a compile error, thrown error, or fetch failure comes back in the result, so fix and re-test until correct → save_tool with a clear name, a description covering its inputs/output, an input JSON Schema, and allowedHosts. Then attach it to an agent via save_agent's authoredTools. Saved tools are visible and editable by the user on the Tools page.
 

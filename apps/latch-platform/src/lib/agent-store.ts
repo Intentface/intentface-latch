@@ -113,6 +113,7 @@ export function createAgentStore(
   loadAuthoredTools?: (
     principal: Principal,
     names: string[],
+    agentScope: CredentialScope,
   ) => Promise<Record<string, unknown>>,
 ): AgentStore {
   const recordOf = (row: Record<string, unknown>): AgentRecord => ({
@@ -160,7 +161,9 @@ export function createAgentStore(
                 async open(p: Principal) {
                   // Never let attached-tool resolution fail the whole turn.
                   try {
-                    const tools = await loadAuthoredTools(p, authored);
+                    // Resolve under the AGENT's scope: an org agent gets org
+                    // tools (shared with every member), not the caller's personal.
+                    const tools = await loadAuthoredTools(p, authored, rec.scope);
                     return { tools, alwaysActive: Object.keys(tools), close: async () => {} };
                   } catch (e) {
                     console.warn("Authored-tools attach failed; running without them:", e);

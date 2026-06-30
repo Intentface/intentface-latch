@@ -11,15 +11,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { CodeEditor } from "@/components/code-editor";
+
+type ToolScope = "user" | "org";
 
 type Draft = {
   originalName?: string;
+  originalScope?: ToolScope;
   name: string;
   description: string;
   inputSchema: string;
   code: string;
   allowedHosts: string;
+  scope: ToolScope;
 };
 
 const BLANK: Draft = {
@@ -28,6 +33,7 @@ const BLANK: Draft = {
   inputSchema: '{\n  "type": "object",\n  "properties": {}\n}',
   code: "// `input` = the call args; `fetch(url)` returns { ok, status, json, text }.\n// const r = await fetch(`https://api.example.com/x?q=${input.q}`);\n// return r.json;\nreturn { ok: true };",
   allowedHosts: "",
+  scope: "user",
 };
 
 export const Route = createFileRoute("/tools")({
@@ -45,10 +51,10 @@ function ToolsPage() {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  async function remove(name: string) {
-    if (!window.confirm(`Delete the tool "${name}"?`)) return;
-    setBusy(name);
-    await deleteAuthoredToolFn({ data: name }).catch(() => {});
+  async function remove(name: string, scope: ToolScope) {
+    if (!window.confirm(`Delete the ${scope} tool "${name}"?`)) return;
+    setBusy(scope + name);
+    await deleteAuthoredToolFn({ data: { name, scope } }).catch(() => {});
     setBusy(null);
     router.invalidate();
   }
@@ -90,10 +96,15 @@ function ToolsPage() {
       ) : (
         <div className="space-y-3">
           {tools.map((t) => (
-            <div key={t.name} className="border-primary-border rounded-md border p-3">
+            <div key={t.scope + t.name} className="border-primary-border rounded-md border p-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="font-mono text-sm font-medium">{t.name}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-sm font-medium">{t.name}</span>
+                    <span className="border-primary-border text-ink-tertiary rounded border px-1.5 py-0.5 text-[10px] uppercase">
+                      {t.scope === "org" ? "Org" : "Personal"}
+                    </span>
+                  </div>
                   <div className="text-ink-secondary text-sm">{t.description}</div>
                   {t.allowedHosts.length > 0 && (
                     <div className="text-ink-tertiary mt-1 text-xs">
@@ -108,11 +119,13 @@ function ToolsPage() {
                     onClick={() =>
                       setEditing({
                         originalName: t.name,
+                        originalScope: t.scope,
                         name: t.name,
                         description: t.description,
                         inputSchema: t.inputSchema,
                         code: t.code,
                         allowedHosts: t.allowedHosts.join(", "),
+                        scope: t.scope,
                       })
                     }
                   >
@@ -121,10 +134,10 @@ function ToolsPage() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={busy === t.name}
-                    onClick={() => remove(t.name)}
+                    disabled={busy === t.scope + t.name}
+                    onClick={() => remove(t.name, t.scope)}
                   >
-                    {busy === t.name ? "…" : "Delete"}
+                    {busy === t.scope + t.name ? "…" : "Delete"}
                   </Button>
                 </div>
               </div>
@@ -156,6 +169,7 @@ function ToolEditor({
   const [inputSchema, setInputSchema] = useState(draft.inputSchema);
   const [code, setCode] = useState(draft.code);
   const [allowedHosts, setAllowedHosts] = useState(draft.allowedHosts);
+  const [scope, setScope] = useState<ToolScope>(draft.scope);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -175,7 +189,9 @@ function ToolEditor({
         inputSchema,
         code,
         allowedHosts: parseHosts(allowedHosts),
+        scope,
         originalName: draft.originalName,
+        originalScope: draft.originalScope,
       },
     }).catch((e) => ({ ok: false as const, error: (e as Error).message }));
     setSaving(false);
@@ -235,6 +251,17 @@ function ToolEditor({
           onChange={(e) => setDescription(e.target.value)}
           placeholder="What the tool does and its inputs (the model reads this)."
         />
+      </div>
+
+      <div className="space-y-1.5">
+        <Label>Scope</Label>
+        <Select value={scope} onChange={(e) => setScope(e.target.value as ToolScope)} className="w-full">
+          <option value="user">Personal — only you</option>
+          <option value="org">Org — shared with everyone in the org</option>
+        </Select>
+        <p className="text-ink-tertiary text-xs">
+          Org-scoped tools are the only ones an org-shared agent can use.
+        </p>
       </div>
 
       <div className="space-y-1.5">
