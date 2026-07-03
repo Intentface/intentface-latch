@@ -1,5 +1,6 @@
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
-import { cva, type VariantProps } from "class-variance-authority"
+import { cva } from "class-variance-authority"
+import type { VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 
@@ -8,7 +9,7 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-accent text-white hover:bg-accent-hover",
+        default: "bg-accent text-accent-foreground hover:bg-accent-hover",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:

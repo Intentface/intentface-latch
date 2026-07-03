@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { RichSelect } from "@/components/ui/rich-select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -126,6 +127,16 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Spell out exactly what the current scope + auth choice means — scope decides
+  // WHO sees the connection; for org connections the auth type decides WHOSE
+  // token is used (shared static key vs each member's own OAuth login).
+  const scopeHelp =
+    scope === "user"
+      ? "Personal — only you can see and use this connection, with your own token."
+      : oauthMode
+        ? "Org — everyone in your org sees it, but each person authorizes with their own account (per-user tokens; no shared secret)."
+        : "Org — shared with everyone in your org, all using the one token/key you enter here.";
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !target.trim() || busy) return;
@@ -165,12 +176,26 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
               <option value="openapi">OpenAPI</option>
               <option value="mcp">MCP</option>
             </Select>
-            <Select value={scope} onChange={(e) => setScope(e.target.value as never)}>
-              <option value="user">Personal</option>
-              <option value="org">Org</option>
-            </Select>
+            <RichSelect
+              value={scope}
+              onValueChange={(v) => setScope(v as "user" | "org")}
+              className="min-w-[8rem]"
+              options={[
+                {
+                  value: "user",
+                  label: "Personal",
+                  description: "Only you can see and use this connection, with your own token.",
+                },
+                {
+                  value: "org",
+                  label: "Org",
+                  description: "Everyone in your org can use it — one shared token, or per-user with OAuth.",
+                },
+              ]}
+            />
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
           </div>
+          <p className="text-ink-tertiary text-xs">{scopeHelp}</p>
           <Input
             value={target}
             onChange={(e) => setTarget(e.target.value)}
@@ -185,11 +210,16 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
           {kind === "mcp" && (
             <label className="text-muted-foreground flex items-center gap-2 text-xs">
               Authentication
-              <Select value={mcpAuth} onChange={(e) => setMcpAuth(e.target.value as never)}>
-                <option value="token">Token / API key</option>
-                <option value="oauth">OAuth (authorize in browser)</option>
-                <option value="none">None</option>
-              </Select>
+              <RichSelect
+                value={mcpAuth}
+                onValueChange={(v) => setMcpAuth(v as "none" | "token" | "oauth")}
+                className="min-w-[11rem]"
+                options={[
+                  { value: "token", label: "Token / API key", description: "Static token (org = one shared key)" },
+                  { value: "oauth", label: "OAuth", description: "Authorize in browser (per-user tokens)" },
+                  { value: "none", label: "None", description: "No authentication" },
+                ]}
+              />
             </label>
           )}
           {!oauthMode && (
