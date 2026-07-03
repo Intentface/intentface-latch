@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { RichSelect } from "@/components/ui/rich-select";
 import { CodeEditor } from "@/components/code-editor";
 
 type ToolScope = "user" | "org";
@@ -257,13 +257,16 @@ function ToolEditor({
 
       <div className="space-y-1.5">
         <Label htmlFor="tool-scope">Scope</Label>
-        <Select id="tool-scope" value={scope} onChange={(e) => setScope(e.target.value as ToolScope)} className="w-full">
-          <option value="user">Personal — only you</option>
-          <option value="org">Org — shared with everyone in the org</option>
-        </Select>
-        <p className="text-ink-tertiary text-xs">
-          Org-scoped tools are the only ones an org-shared agent can use.
-        </p>
+        <RichSelect
+          id="tool-scope"
+          value={scope}
+          onValueChange={(v) => setScope(v as ToolScope)}
+          className="w-full"
+          options={[
+            { value: "user", label: "Personal", description: "Only you can use it" },
+            { value: "org", label: "Org", description: "Shared org-wide — the only kind an org agent can attach" },
+          ]}
+        />
       </div>
 
       <div className="space-y-1.5">

@@ -30,9 +30,12 @@
   --color-popover-foreground: var(--text-primary);
   --color-muted: var(--tertiary);
   --color-muted-foreground: var(--text-secondary);
-  --color-accent-foreground: var(--text-primary);
+  /* Contrast-aware text to place ON accent/primary fills (filled buttons,
+     selected items). Values set at runtime by <ThemeContrast/> from the live
+     accent/surface; falls back to dark ink if it hasn't run yet. */
+  --color-accent-foreground: var(--accent-foreground, var(--text-primary));
   --color-secondary-foreground: var(--text-primary);
-  --color-primary-foreground: var(--text-primary);
+  --color-primary-foreground: var(--primary-foreground, var(--text-primary));
   --color-border: var(--primary-border);
   --color-input: var(--primary-border);
   --color-ring: var(--accent);
@@ -46,10 +49,19 @@
 :root {
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
+  /* First-paint defaults for the on-fill text, correct for the default seeds
+     (dark accent → white, light surface → dark ink). <ThemeContrast/> overrides
+     these from the live accent/surface, incl. customized seeds. Prevents a
+     dark-on-accent flash before that effect runs. */
+  --accent-foreground: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.18 0 0);
 }
 .dark {
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.985 0 0);
+  /* Dark mode flips: the lighter dark-accent takes dark ink, dark surface white. */
+  --accent-foreground: oklch(0.18 0 0);
+  --primary-foreground: oklch(0.985 0 0);
 }
 
 @layer base {

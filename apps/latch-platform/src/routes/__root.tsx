@@ -6,6 +6,7 @@ import { Sidebar, ThemeOverridesApplier } from "@intentface/latch-ui"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { Toaster } from "@/components/ui/sonner"
+import { ThemeContrast } from "@/components/theme-contrast"
 import appCss from "../styles.css?url"
 
 export const Route = createRootRoute({
@@ -65,6 +66,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <body>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <ThemeOverridesApplier />
+          <ThemeContrast />
           {isAuthRoute ? (
             // Standalone auth screens: full-viewport canvas, no sidebar.
             <div className="bg-base h-svh w-full">{children}</div>

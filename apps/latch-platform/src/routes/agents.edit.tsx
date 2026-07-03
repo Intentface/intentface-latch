@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { RichSelect } from "@/components/ui/rich-select";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import type { AgentRec, ToolInfo } from "./agents";
@@ -318,31 +319,34 @@ function AgentEditor() {
           </div>
           <div className="space-y-1.5">
             <FieldLabel>Scope</FieldLabel>
-            <Select
+            <RichSelect
               className="w-full"
               value={scope}
-              onChange={(e) => setScope(e.target.value as never)}
+              onValueChange={(v) => setScope(v as "user" | "org")}
               disabled={editing}
-            >
-              <option value="user">Personal</option>
-              <option value="org">Org</option>
-            </Select>
+              options={[
+                { value: "user", label: "Personal", description: "Only you can run it" },
+                { value: "org", label: "Org", description: "Shared with everyone in your org" },
+              ]}
+            />
           </div>
         </div>
 
         {modelSupportsReasoning && (
           <div className="space-y-1.5">
             <FieldLabel>Reasoning effort</FieldLabel>
-            <Select className="w-full" value={effort} onChange={(e) => setEffort(e.target.value)}>
-              <option value="">Default (provider decides)</option>
-              <option value="minimal">Minimal — fastest, least thinking</option>
-              <option value="low">Low — small thinking budget</option>
-              <option value="medium">Medium</option>
-              <option value="high">High — most thinking</option>
-            </Select>
-            <p className="text-ink-tertiary text-xs">
-              How much the model thinks before answering. Lower = faster + cheaper.
-            </p>
+            <RichSelect
+              className="w-full"
+              value={effort}
+              onValueChange={setEffort}
+              options={[
+                { value: "", label: "Default", description: "Let the provider decide" },
+                { value: "minimal", label: "Minimal", description: "Fastest, least thinking" },
+                { value: "low", label: "Low", description: "Small thinking budget" },
+                { value: "medium", label: "Medium", description: "Balanced" },
+                { value: "high", label: "High", description: "Most thinking, slowest" },
+              ]}
+            />
           </div>
         )}
 
