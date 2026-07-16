@@ -1,6 +1,7 @@
 import { tool, jsonSchema } from "ai";
 import type { Experimental_SandboxSession } from "ai";
 import { webFetch } from "@/lib/web-fetch";
+import { renderFetch, renderFetchConfigured } from "@/lib/render-fetch";
 
 /**
  * The default harness tools, mirroring eve's set but implemented as thin
@@ -183,6 +184,49 @@ const web_fetch = tool({
 });
 
 /**
+ * The JS-page rung of the fetch ladder: renders the URL in a real headless
+ * browser via the render service (packages/renderer). Sibling of web_fetch —
+ * same guard, same app-process execution.
+ */
+const render_fetch = tool({
+  description:
+    "Fetch a URL in a real headless browser (JavaScript is executed) and " +
+    "return the rendered visible text plus any schema.org JSON-LD (products, " +
+    "prices, offers) and page links. Use when plain web_fetch returns a " +
+    "JS-app shell, a cookie wall, an 'enable JavaScript' notice, or " +
+    "navigation without the data. Slower and heavier than web_fetch — try " +
+    "web_fetch first. Prefer the jsonLd in the result when present; it " +
+    "carries exact structured data.",
+  inputSchema: jsonSchema<{
+    url: string;
+    include?: string;
+    waitFor?: string;
+    clickSelector?: string;
+  }>({
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Fully-formed https URL to render." },
+      include: {
+        type: "string",
+        description:
+          'Comma-separated subset of: text, jsonLd, links. Default all. Use e.g. "jsonLd" to save tokens when structured data suffices, or "links" to discover subpages.',
+      },
+      waitFor: {
+        type: "string",
+        description: "CSS selector to wait for before extracting (data that loads late).",
+      },
+      clickSelector: {
+        type: "string",
+        description: "CSS selector to click once before extracting (e.g. cookie-consent accept).",
+      },
+    },
+    required: ["url"],
+    additionalProperties: false,
+  }),
+  execute: async (args) => renderFetch(args),
+});
+
+/**
  * Ask the user one or more multiple-choice questions and wait for their answer.
  * Has NO `execute`: the SDK leaves the call in `input-available`, the turn
  * pauses, and the client renders a questionnaire and supplies the result via
@@ -238,5 +282,10 @@ const askUser = tool({
 
 /** Sandbox-backed tools (need an agent with `sandbox: true`). */
 export const sandboxTools = { bash, read_file, write_file, glob, grep } as Record<string, unknown>;
-/** App-runtime default tools (no sandbox needed). */
-export const appTools = { web_fetch, askUser } as Record<string, unknown>;
+/** App-runtime default tools (no sandbox needed). `render_fetch` joins only
+ * when the render service is configured, so agents never see a dead tool. */
+export const appTools = {
+  web_fetch,
+  ...(renderFetchConfigured() ? { render_fetch } : {}),
+  askUser,
+} as Record<string, unknown>;
