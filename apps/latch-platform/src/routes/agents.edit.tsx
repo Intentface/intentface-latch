@@ -92,7 +92,13 @@ function AgentEditor() {
   const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
   const [webTools, setWebTools] = useState(
     initial?.exec?.defaultTools === true ||
-      (Array.isArray(initial?.exec?.defaultTools) && initial.exec.defaultTools.length > 0),
+      (Array.isArray(initial?.exec?.defaultTools) &&
+        initial.exec.defaultTools.includes("web_fetch")),
+  );
+  const [renderTool, setRenderTool] = useState(
+    initial?.exec?.defaultTools === true ||
+      (Array.isArray(initial?.exec?.defaultTools) &&
+        initial.exec.defaultTools.includes("render_fetch")),
   );
   const [providerWebTools, setProviderWebTools] = useState(
     initial?.exec?.providerWebTools ?? false,
@@ -222,12 +228,24 @@ function AgentEditor() {
             }
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
+      // Both on → `true` (the full built-in set, incl. askUser); a subset →
+      // an explicit name list (askUser rides along so agents can still ask).
+      const defaultTools =
+        webTools && renderTool
+          ? true
+          : webTools || renderTool
+            ? [
+                ...(webTools ? ["web_fetch"] : []),
+                ...(renderTool ? ["render_fetch"] : []),
+                "askUser",
+              ]
+            : undefined;
       const exec =
-        sandbox || webTools || providerWebTools || validAuthoredSel.length || useEffort
+        sandbox || webTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
-              defaultTools: webTools || undefined,
+              defaultTools,
               providerWebTools: providerWebTools || undefined,
               authoredTools: validAuthoredSel.length ? validAuthoredSel : undefined,
               effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,
@@ -484,9 +502,15 @@ function AgentEditor() {
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
             <span>
-              Web tools — <span className="font-mono">web_fetch</span> +{" "}
-              <span className="font-mono">render_fetch</span> (headless browser for JS pages;
-              active when the renderer is configured). Built-in, any model.
+              Web tools — <span className="font-mono">web_fetch</span> (built-in, any model)
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={renderTool} onCheckedChange={() => setRenderTool((v) => !v)} />
+            <span>
+              Render tool — <span className="font-mono">render_fetch</span>: fetches JS-rendered
+              pages in a headless browser (rendered text + schema.org JSON-LD). Active when the
+              renderer service is configured.
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">
