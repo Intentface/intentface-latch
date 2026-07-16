@@ -484,7 +484,9 @@ function AgentEditor() {
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
             <span>
-              Web tools — <span className="font-mono">web_fetch</span> (built-in, any model)
+              Web tools — <span className="font-mono">web_fetch</span> +{" "}
+              <span className="font-mono">render_fetch</span> (headless browser for JS pages;
+              active when the renderer is configured). Built-in, any model.
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">
