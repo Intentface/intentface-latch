@@ -16,14 +16,36 @@ import { isBlockedHost } from "./web-fetch";
 const DEFAULT_TIMEOUT_MS = 90_000; // a render can be slow: real browser + network idle
 const MAX_RESULT_BYTES = 60_000; // cap rendered text handed to the model
 
+/** One scripted pre-extraction action (mirrors the service's Step). */
+export interface RenderStep {
+  /** CSS or `text=Label` selector to click. */
+  click?: string;
+  /** Selector to wait for before continuing. */
+  waitFor?: string;
+  /** Scroll to the bottom to trigger lazy-loaded content. */
+  scroll?: boolean;
+  /** Fixed pause in ms (capped service-side). */
+  waitMs?: number;
+}
+
 export interface RenderFetchArgs {
   url: string;
-  /** Comma-separated subset of: text, jsonLd, links. Default all. */
+  /** Comma-separated subset of: text, jsonLd, links, clickables, html. Default text,jsonLd,links. */
   include?: string;
   /** CSS selector to wait for before extracting. */
   waitFor?: string;
   /** CSS selector to click once before extracting (e.g. cookie consent). */
   clickSelector?: string;
+  /** Ordered actions run in the single render pass, before extraction. */
+  steps?: RenderStep[];
+  /** Auto-scroll to the bottom before extracting (lazy-loaded content). */
+  scroll?: boolean;
+}
+
+interface Clickable {
+  kind: "button" | "link" | "input";
+  text: string;
+  selector: string;
 }
 
 export type RenderFetchResult =
@@ -34,6 +56,8 @@ export type RenderFetchResult =
       jsonLd?: unknown[];
       text?: string;
       links?: { text?: string; href?: string }[];
+      clickables?: Clickable[];
+      html?: string;
       truncated: boolean;
       warnings?: string[];
     }
@@ -46,6 +70,8 @@ interface ServiceResponse {
   jsonLd?: unknown[];
   text?: string;
   links?: { text?: string; href?: string }[];
+  clickables?: Clickable[];
+  html?: string;
   truncated?: boolean;
   warnings?: string[];
   error?: string;
@@ -97,6 +123,8 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
   if (args.include) endpoint.searchParams.set("include", args.include);
   if (args.waitFor) endpoint.searchParams.set("waitFor", args.waitFor);
   if (args.clickSelector) endpoint.searchParams.set("clickSelector", args.clickSelector);
+  if (args.steps?.length) endpoint.searchParams.set("steps", JSON.stringify(args.steps));
+  if (args.scroll) endpoint.searchParams.set("scroll", "true");
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
@@ -119,6 +147,7 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
       };
     }
     const text = data.text ? capText(data.text, MAX_RESULT_BYTES) : undefined;
+    const html = data.html ? capText(data.html, MAX_RESULT_BYTES) : undefined;
     return {
       ok: true,
       url: data.url,
@@ -126,7 +155,9 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
       ...(data.jsonLd?.length ? { jsonLd: data.jsonLd } : {}),
       ...(text ? { text: text.text } : {}),
       ...(data.links?.length ? { links: data.links } : {}),
-      truncated: Boolean(data.truncated || text?.capped),
+      ...(data.clickables?.length ? { clickables: data.clickables } : {}),
+      ...(html ? { html: html.text } : {}),
+      truncated: Boolean(data.truncated || text?.capped || html?.capped),
       ...(data.warnings?.length ? { warnings: data.warnings } : {}),
     };
   } catch (e) {
