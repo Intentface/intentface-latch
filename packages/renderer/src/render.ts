@@ -1,4 +1,5 @@
 import { chromium, type Browser, type Page } from "playwright";
+import { isBlockedHost, isBlockedResolved } from "./ssrf.js";
 
 /**
  * The render core: one stateless pass over a page in headless Chromium —
@@ -170,25 +171,30 @@ async function extract(page: Page, opts: RenderOptions, result: RenderResult, wa
   }
   if (include.has("clickables")) {
     const els = await page.evaluate(() => {
-      const out: { kind: "button" | "link" | "input"; text: string; id: string }[] = [];
+      // Build the id selector here, in the page, where CSS.escape exists — a
+      // bare `#${id}` breaks on valid ids with :, ., spaces, or leading digits,
+      // which would make the clickables → steps.click workflow fail.
+      const idSel = (el: Element) => (el.id ? `#${CSS.escape(el.id)}` : "");
+      const out: { kind: "button" | "link" | "input"; text: string; idSel: string }[] = [];
       const label = (el: Element) =>
         ((el as HTMLElement).innerText || el.getAttribute("aria-label") || el.getAttribute("value") || el.getAttribute("placeholder") || "")
           .trim()
           .replace(/\s+/g, " ")
           .slice(0, 80);
       for (const b of document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]'))
-        out.push({ kind: "button", text: label(b), id: b.id });
+        out.push({ kind: "button", text: label(b), idSel: idSel(b) });
       for (const a of document.querySelectorAll<HTMLAnchorElement>("a[href]"))
-        out.push({ kind: "link", text: label(a), id: a.id });
+        out.push({ kind: "link", text: label(a), idSel: idSel(a) });
       for (const i of document.querySelectorAll("input:not([type=submit]):not([type=button]), select, textarea"))
-        out.push({ kind: "input", text: label(i) || i.getAttribute("name") || "", id: i.id });
+        out.push({ kind: "input", text: label(i) || i.getAttribute("name") || "", idSel: idSel(i) });
       return out;
     });
     const seen = new Set<string>();
     const clickables: Clickable[] = [];
     for (const e of els) {
-      if (!e.text && !e.id) continue;
-      const selector = e.id ? `#${e.id}` : `text=${e.text}`;
+      if (!e.text && !e.idSel) continue;
+      // Prefer the (escaped) id selector; else a text= selector Playwright can use.
+      const selector = e.idSel || `text=${e.text}`;
       if (seen.has(selector)) continue;
       seen.add(selector);
       clickables.push({ kind: e.kind, text: e.text, selector });
@@ -220,6 +226,30 @@ export async function render(url: string, opts: RenderOptions): Promise<RenderRe
   try {
     const page = await context.newPage();
     const warnings: string[] = [];
+
+    // SSRF, everywhere — not just the initial URL. The server validates the
+    // FIRST host, but a public page can 3xx-redirect, script-navigate, or pull
+    // subresources toward a private/loopback/metadata address (169.254.169.254).
+    // Intercept EVERY request the browser makes: string blocklist on all (cheap,
+    // catches literal private IPs incl. cloud metadata), DNS-resolution backstop
+    // on navigations (defeats a public name that resolves private, incl. after a
+    // redirect). A blocked request is aborted, not followed.
+    await context.route("**/*", async (route) => {
+      const req = route.request();
+      let host: string;
+      try {
+        host = new URL(req.url()).hostname;
+      } catch {
+        return route.continue(); // data:/about: etc. — no host to attack
+      }
+      if (!host) return route.continue();
+      if (isBlockedHost(host)) return route.abort("blockedbyclient");
+      if (req.isNavigationRequest() && (await isBlockedResolved(host))) {
+        return route.abort("blockedbyclient");
+      }
+      return route.continue();
+    });
+
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
     await page.waitForLoadState("networkidle", { timeout: NAV_TIMEOUT_MS }).catch(() => {});
     await page.waitForTimeout(SETTLE_MS); // let late JS (price widgets) settle

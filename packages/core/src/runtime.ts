@@ -141,6 +141,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   harnessTools?: {
     sandbox?: Record<string, unknown>;
     app?: Record<string, unknown>;
+    /**
+     * Platform render tool(s) — attached only when an agent sets
+     * `renderTools: true`, never by `defaultTools`. Kept a separate capability
+     * (like `sandbox`) because it's platform-specific (needs a deployed render
+     * service) and should be opted into explicitly.
+     */
+    render?: Record<string, unknown>;
   };
   /**
    * Resolve the model provider's NATIVE web tools (server-side search/fetch) for
@@ -575,6 +582,12 @@ export function createRuntime<P, RC = unknown>(
           capabilityTools.push(name);
         }
       }
+    }
+    // Render tools — a separate capability (like sandbox), opted into via
+    // `renderTools: true`, never granted by `defaultTools`.
+    if (cfg.renderTools && harness.render) {
+      Object.assign(tools, harness.render);
+      capabilityTools.push(...Object.keys(harness.render));
     }
     // Provider-native web tools (server-side search/fetch), if the agent opts in
     // and the platform supplies a resolver for this model's provider.

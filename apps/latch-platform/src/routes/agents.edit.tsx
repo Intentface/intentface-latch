@@ -95,11 +95,9 @@ function AgentEditor() {
       (Array.isArray(initial?.exec?.defaultTools) &&
         initial.exec.defaultTools.includes("web_fetch")),
   );
-  const [renderTool, setRenderTool] = useState(
-    initial?.exec?.defaultTools === true ||
-      (Array.isArray(initial?.exec?.defaultTools) &&
-        initial.exec.defaultTools.includes("render_fetch")),
-  );
+  // render_fetch is its own capability flag (like sandbox), not a defaultTools
+  // member — so `defaultTools: true` never implies it.
+  const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
   const [providerWebTools, setProviderWebTools] = useState(
     initial?.exec?.providerWebTools ?? false,
   );
@@ -228,24 +226,26 @@ function AgentEditor() {
             }
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
-      // Both on → `true` (the full built-in set, incl. askUser); a subset →
-      // an explicit name list (askUser rides along so agents can still ask).
-      const defaultTools =
-        webTools && renderTool
-          ? true
-          : webTools || renderTool
-            ? [
-                ...(webTools ? ["web_fetch"] : []),
-                ...(renderTool ? ["render_fetch"] : []),
-                "askUser",
-              ]
-            : undefined;
+      // Save an explicit defaultTools name list (never bare `true`): the Web
+      // tools toggle sets web_fetch, and any OTHER default-tool names the agent
+      // already had (e.g. askUser) are preserved. render_fetch is NOT here — it
+      // is its own capability (`renderTools` below), like sandbox. Keeps the
+      // grant least-privilege and avoids dropping/force-adding askUser.
+      const prevDefault = initial?.exec?.defaultTools;
+      const preserved = Array.isArray(prevDefault)
+        ? prevDefault.filter((n) => n !== "web_fetch" && n !== "render_fetch")
+        : prevDefault === true
+          ? ["askUser"]
+          : [];
+      const toolNames = [...(webTools ? ["web_fetch"] : []), ...preserved];
+      const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
       const exec =
-        sandbox || webTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort
+        sandbox || defaultTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
               defaultTools,
+              renderTools: renderTool || undefined,
               providerWebTools: providerWebTools || undefined,
               authoredTools: validAuthoredSel.length ? validAuthoredSel : undefined,
               effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,

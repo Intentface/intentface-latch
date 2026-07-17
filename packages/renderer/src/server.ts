@@ -24,22 +24,31 @@ import {
 
 const PORT = Number(process.env.PORT ?? 80);
 const TOKEN = process.env.RENDER_FETCH_TOKEN;
+const ON_VERCEL = !!process.env.VERCEL;
+// Explicit acknowledgement that running WITHOUT a token is intentional — e.g.
+// the deployment is edge-gated by mandatory Vercel Deployment Protection.
+const ALLOW_UNAUTH = process.env.RENDER_FETCH_ALLOW_UNAUTHENTICATED === "true";
 
 /**
- * Own auth is OPTIONAL: with RENDER_FETCH_TOKEN unset, all requests pass —
- * safe only when an edge gate (mandatory Vercel Deployment Protection) already
- * rejects unauthenticated traffic before it reaches this server. Set the env
- * to re-enable app-level auth (accepted via `Authorization: Bearer`, the
- * `x-vercel-protection-bypass` header, or `?token=` for curl).
+ * Auth is HEADER-ONLY (`Authorization: Bearer` or the `x-vercel-protection-bypass`
+ * header). Query-param tokens were dropped — they leak into logs, proxies, and
+ * caches, and the real caller (the platform's render_fetch tool) sends headers.
+ *
+ * FAIL CLOSED when no token is configured on a deployment: an unset
+ * RENDER_FETCH_TOKEN used to mean "allow all", which silently turns a
+ * misconfigured deploy into a public browser-fetch proxy. Now, with no token:
+ *  - locally (not on Vercel) → allowed, for zero-config dev;
+ *  - on Vercel → refused UNLESS RENDER_FETCH_ALLOW_UNAUTHENTICATED=true, the
+ *    explicit opt-in for the edge-gated (Deployment Protection) case.
  */
-function isAuthorized(req: IncomingMessage, requestUrl: URL): boolean {
-  if (!TOKEN) return true; // edge-gated deployment; see note above
-  if (req.headers.authorization === `Bearer ${TOKEN}`) return true;
-  if (req.headers["x-vercel-protection-bypass"] === TOKEN) return true;
-  return (
-    requestUrl.searchParams.get("token") === TOKEN ||
-    requestUrl.searchParams.get("x-vercel-protection-bypass") === TOKEN
-  );
+function isAuthorized(req: IncomingMessage): boolean {
+  if (TOKEN) {
+    return (
+      req.headers.authorization === `Bearer ${TOKEN}` ||
+      req.headers["x-vercel-protection-bypass"] === TOKEN
+    );
+  }
+  return !ON_VERCEL || ALLOW_UNAUTH;
 }
 
 const isIncludePart = (p: string): p is IncludePart => (INCLUDE_PARTS as readonly string[]).includes(p);
@@ -53,8 +62,13 @@ const server = http.createServer(async (req, res) => {
 
   if (requestUrl.pathname === "/healthz") return respond(200, { ok: true });
   if (requestUrl.pathname !== "/render") return respond(404, { ok: false, error: "Not found. Use /render?url=..." });
-  if (!isAuthorized(req, requestUrl)) {
-    return respond(401, { ok: false, error: "Missing or invalid token." });
+  if (!isAuthorized(req)) {
+    return respond(401, {
+      ok: false,
+      error: TOKEN
+        ? "Missing or invalid token."
+        : "Service refuses unauthenticated requests: set RENDER_FETCH_TOKEN, or RENDER_FETCH_ALLOW_UNAUTHENTICATED=true if edge-gated.",
+    });
   }
 
   // Distinguish "missing" from "malformed" — a client that drops the url param
@@ -125,7 +139,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`latch-renderer listening on :${PORT}`));
+server.listen(PORT, () => {
+  console.log(`latch-renderer listening on :${PORT}`);
+  if (!TOKEN && (ALLOW_UNAUTH || !ON_VERCEL)) {
+    console.warn(
+      "latch-renderer: serving WITHOUT app-level auth (no RENDER_FETCH_TOKEN). " +
+        (ON_VERCEL
+          ? "RENDER_FETCH_ALLOW_UNAUTHENTICATED=true — ensure edge Deployment Protection is on."
+          : "Local/dev mode."),
+    );
+  }
+});
 
 // Vercel scale-in sends SIGTERM with a 30 s grace period.
 process.on("SIGTERM", async () => {

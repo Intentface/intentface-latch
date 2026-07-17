@@ -311,10 +311,13 @@ const askUser = tool({
 
 /** Sandbox-backed tools (need an agent with `sandbox: true`). */
 export const sandboxTools = { bash, read_file, write_file, glob, grep } as Record<string, unknown>;
-/** App-runtime default tools (no sandbox needed). `render_fetch` joins only
- * when the render service is configured, so agents never see a dead tool. */
-export const appTools = {
-  web_fetch,
-  ...(renderFetchConfigured() ? { render_fetch } : {}),
-  askUser,
-} as Record<string, unknown>;
+/** App-runtime default tools (granted by `defaultTools`; no sandbox needed). */
+export const appTools = { web_fetch, askUser } as Record<string, unknown>;
+/**
+ * Render tool(s) — a separate capability (agent flag `renderTools: true`), NOT
+ * part of `defaultTools`, so `defaultTools: true` never sweeps it in. Present
+ * only when the render service is configured, so agents never see a dead tool.
+ */
+export const renderTools = (
+  renderFetchConfigured() ? { render_fetch } : {}
+) as Record<string, unknown>;

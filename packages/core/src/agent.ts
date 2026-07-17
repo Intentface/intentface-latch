@@ -119,6 +119,15 @@ export interface AgentConfig<P> {
    * sandbox.
    */
   defaultTools?: boolean | string[];
+  /**
+   * Give the agent the platform's render tool(s) from
+   * `RuntimeConfig.harnessTools.render` — a headless-browser fetch for
+   * JS-rendered pages. A separate capability flag (like `sandbox`) rather than
+   * a `defaultTools` member: the platform supplies it (needs a deployed render
+   * service) and it must be opted into explicitly, never swept in by
+   * `defaultTools: true`.
+   */
+  renderTools?: boolean;
   /** Names of harness/default tools to drop for this agent (eve-style opt-out). */
   disableTools?: string[];
   /**

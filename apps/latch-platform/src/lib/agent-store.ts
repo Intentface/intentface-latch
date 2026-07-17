@@ -45,6 +45,8 @@ export interface AgentRecord {
     codeMode?: { tools?: string[] };
     /** Use the model provider's native web search/fetch tools. */
     providerWebTools?: boolean;
+    /** Give the agent the render tool(s) (headless-browser fetch); separate capability. */
+    renderTools?: boolean;
     /** Names of authored tools (latch_tools) attached to this agent. */
     authoredTools?: string[];
     /** Reasoning/thinking effort (gated to reasoning-capable models). */
@@ -199,6 +201,7 @@ export function createAgentStore(
         disableTools: rec.exec?.disableTools,
         codeMode: rec.exec?.codeMode,
         providerWebTools: rec.exec?.providerWebTools || undefined,
+        renderTools: rec.exec?.renderTools || undefined,
         effort: rec.exec?.effort,
         smoothStream: true,
       };
