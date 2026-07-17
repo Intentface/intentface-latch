@@ -262,13 +262,28 @@ export async function render(url: string, opts: RenderOptions): Promise<RenderRe
     const page = await context.newPage();
     const warnings: string[] = [];
 
-    // SSRF, everywhere — not just the initial URL. The server validates the
-    // FIRST host, but a public page can 3xx-redirect, script-navigate, or pull
-    // subresources toward a private/loopback/metadata address (169.254.169.254).
-    // Intercept EVERY request the browser makes: string blocklist on all (cheap,
-    // catches literal private IPs incl. cloud metadata), DNS-resolution backstop
-    // on navigations (defeats a public name that resolves private, incl. after a
-    // redirect). A blocked request is aborted, not followed.
+    // SSRF, on EVERY request the browser makes — not just the initial URL or
+    // navigations. The server validates the FIRST host, but a public page can
+    // 3xx-redirect, script-navigate, or pull subresources toward a private/
+    // loopback/metadata address (169.254.169.254). Two layers per request:
+    //   - string blocklist (cheap, catches literal private IPs incl. metadata);
+    //   - DNS-resolution check on ALL requests (defeats a public name that
+    //     resolves private — including subresources, not just navigations).
+    // A per-render cache keeps this to one lookup per unique host (pages reuse
+    // a handful of CDN hosts), and the OS resolver caches on top.
+    // Residual: this resolves at route time, so a TOCTOU DNS-rebinding race vs
+    // Chromium's own connect-time resolution isn't fully closed — that needs
+    // connection-time egress enforcement (a proxy/firewall), a deploy-level
+    // control, not something this in-process hook can guarantee.
+    const resolvedCache = new Map<string, Promise<boolean>>();
+    const blockedResolved = (host: string): Promise<boolean> => {
+      let p = resolvedCache.get(host);
+      if (!p) {
+        p = isBlockedResolved(host);
+        resolvedCache.set(host, p);
+      }
+      return p;
+    };
     await context.route("**/*", async (route) => {
       const req = route.request();
       let host: string;
@@ -279,9 +294,7 @@ export async function render(url: string, opts: RenderOptions): Promise<RenderRe
       }
       if (!host) return route.continue();
       if (isBlockedHost(host)) return route.abort("blockedbyclient");
-      if (req.isNavigationRequest() && (await isBlockedResolved(host))) {
-        return route.abort("blockedbyclient");
-      }
+      if (await blockedResolved(host)) return route.abort("blockedbyclient");
       return route.continue();
     });
 
