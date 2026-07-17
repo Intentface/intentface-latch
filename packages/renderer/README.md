@@ -35,9 +35,16 @@ RENDER_FETCH_URL=https://<renderer-deployment>
 RENDER_FETCH_TOKEN=<token>        # same value in both projects
 ```
 
-Auth: with `RENDER_FETCH_TOKEN` unset the service accepts all requests —
-safe only behind mandatory Vercel Deployment Protection (the token is then
-your protection-bypass secret). Set the env to enforce app-level bearer auth.
+Auth (header-only — `Authorization: Bearer` or `x-vercel-protection-bypass`):
+
+- **Token set** → every request must present it.
+- **Token unset, on Vercel** → the service **fails closed** (rejects all
+  requests) unless `RENDER_FETCH_ALLOW_UNAUTHENTICATED=true` is set to
+  acknowledge an edge-gated deploy — so a forgotten token can't silently turn
+  this into a public browser-fetch proxy. When unset+acknowledged the token is
+  effectively your Deployment Protection bypass secret.
+- **Token unset, off Vercel (local dev)** → all requests allowed, for
+  zero-config local runs.
 
 ## Local dev
 

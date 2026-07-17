@@ -119,6 +119,22 @@ const server = http.createServer(async (req, res) => {
     }
     if (!Array.isArray(parsed)) return respond(400, { ok: false, error: "steps must be a JSON array." });
     if (parsed.length > MAX_STEPS) return respond(400, { ok: false, error: `steps: at most ${MAX_STEPS} actions per request.` });
+    // Validate every entry before it reaches interact() — a bad type (e.g. a
+    // non-finite waitMs → page.waitForTimeout(NaN)) would otherwise surface as
+    // an opaque 502 instead of a clear 400.
+    for (const [i, s] of parsed.entries()) {
+      if (typeof s !== "object" || s === null || Array.isArray(s))
+        return respond(400, { ok: false, error: `steps[${i}] must be an object.` });
+      const step = s as Record<string, unknown>;
+      if ("click" in step && typeof step.click !== "string")
+        return respond(400, { ok: false, error: `steps[${i}].click must be a string.` });
+      if ("waitFor" in step && typeof step.waitFor !== "string")
+        return respond(400, { ok: false, error: `steps[${i}].waitFor must be a string.` });
+      if ("scroll" in step && typeof step.scroll !== "boolean")
+        return respond(400, { ok: false, error: `steps[${i}].scroll must be a boolean.` });
+      if ("waitMs" in step && (typeof step.waitMs !== "number" || !Number.isFinite(step.waitMs)))
+        return respond(400, { ok: false, error: `steps[${i}].waitMs must be a finite number.` });
+    }
     steps = parsed as Step[];
   }
   const scroll = requestUrl.searchParams.get("scroll") === "true";
@@ -151,9 +167,12 @@ server.listen(PORT, () => {
   }
 });
 
-// Vercel scale-in sends SIGTERM with a 30 s grace period.
-process.on("SIGTERM", async () => {
-  server.close();
-  await closeBrowser();
-  process.exit(0);
+// Vercel scale-in sends SIGTERM with a 30 s grace period. Drain in-flight
+// requests (stop accepting new ones, wait for active renders) BEFORE tearing
+// down Chromium, so a render in progress isn't killed mid-flight.
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await closeBrowser();
+    process.exit(0);
+  });
 });

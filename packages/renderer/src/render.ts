@@ -15,6 +15,20 @@ const MAX_TEXT_BYTES = 100 * 1024;
 const MAX_HTML_BYTES = 300 * 1024;
 const MAX_LINKS = 100;
 const MAX_CLICKABLES = 80;
+const MAX_JSONLD_BLOCKS = 50;
+const MAX_JSONLD_BYTES = 300 * 1024;
+
+/** Truncate a string to at most `maxBytes` UTF-8 bytes (not UTF-16 code units),
+ * without splitting a multi-byte character. Returns whether it was cut. */
+function truncateBytes(s: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(s) <= maxBytes) return { text: s, truncated: false };
+  const buf = Buffer.from(s, "utf8").subarray(0, maxBytes);
+  // Drop a trailing partial multi-byte sequence.
+  let end = buf.length;
+  while (end > 0 && (buf[end - 1]! & 0b1100_0000) === 0b1000_0000) end--;
+  if (end > 0 && (buf[end - 1]! & 0b1000_0000) !== 0) end--;
+  return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
+}
 
 /** Max scripted actions per request (request-contract constant; server validates). */
 export const MAX_STEPS = 10;
@@ -88,15 +102,23 @@ export async function closeBrowser(): Promise<void> {
   await (await browserPromise?.catch(() => undefined))?.close().catch(() => {});
 }
 
-/** Scroll to the bottom in increments so lazy-loaded content fires, then settle. */
+/** Scroll to the bottom in increments so lazy-loaded content fires, then settle.
+ * Bounded by iteration count AND elapsed time so an infinite-scroll page (whose
+ * scrollHeight keeps growing) can't keep the evaluate pending forever. */
 async function autoScroll(page: Page): Promise<void> {
   await page.evaluate(async () => {
+    const MAX_STEPS = 60; // ~48k px of scroll
+    const MAX_MS = 8_000;
     await new Promise<void>((resolve) => {
+      const start = Date.now();
       let y = 0;
+      let steps = 0;
       const step = () => {
         window.scrollTo(0, y);
         y += 800;
-        if (y < document.body.scrollHeight) setTimeout(step, 150);
+        steps += 1;
+        if (y < document.body.scrollHeight && steps < MAX_STEPS && Date.now() - start < MAX_MS)
+          setTimeout(step, 150);
         else resolve();
       };
       step();
@@ -143,14 +165,27 @@ async function interact(page: Page, opts: RenderOptions, warnings: string[]): Pr
 async function extract(page: Page, opts: RenderOptions, result: RenderResult, warnings: string[]): Promise<void> {
   const { include } = opts;
   if (include.has("jsonLd")) {
-    result.jsonLd = await page.evaluate(() =>
-      [...document.querySelectorAll('script[type="application/ld+json"]')].flatMap((s) => {
-        try {
-          return [JSON.parse(s.textContent ?? "")];
-        } catch {
-          return [];
+    // Bound how much JSON-LD a page can push at us: cap the number of blocks
+    // and the cumulative source bytes parsed, so a hostile/broken page with
+    // hundreds of huge ld+json scripts can't blow memory or the response.
+    result.jsonLd = await page.evaluate(
+      ({ maxBlocks, maxBytes }) => {
+        const out: unknown[] = [];
+        let bytes = 0;
+        for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+          if (out.length >= maxBlocks) break;
+          const src = s.textContent ?? "";
+          bytes += src.length;
+          if (bytes > maxBytes) break;
+          try {
+            out.push(JSON.parse(src));
+          } catch {
+            /* skip invalid JSON */
+          }
         }
-      }),
+        return out;
+      },
+      { maxBlocks: MAX_JSONLD_BLOCKS, maxBytes: MAX_JSONLD_BYTES },
     );
   }
   if (include.has("links")) {
@@ -203,20 +238,20 @@ async function extract(page: Page, opts: RenderOptions, result: RenderResult, wa
     result.clickables = clickables;
   }
   if (include.has("html")) {
-    let html = await page.content();
-    if (Buffer.byteLength(html) > MAX_HTML_BYTES) {
-      html = html.slice(0, MAX_HTML_BYTES);
-      result.truncated = true;
-    }
+    // Byte-aware cap: `.slice(n)` counts UTF-16 units, so multi-byte chars
+    // (e.g. Finnish ä/ö = 2 bytes) let a char-sliced string exceed the byte
+    // limit the check just measured. truncateBytes cuts on the real byte count.
+    const { text: html, truncated } = truncateBytes(await page.content(), MAX_HTML_BYTES);
     result.html = html;
+    if (truncated) result.truncated = true;
   }
   if (include.has("text")) {
-    let text = await page.evaluate(() => document.body?.innerText ?? "");
-    if (Buffer.byteLength(text) > MAX_TEXT_BYTES) {
-      text = text.slice(0, MAX_TEXT_BYTES);
-      result.truncated = true;
-    }
+    const { text, truncated } = truncateBytes(
+      await page.evaluate(() => document.body?.innerText ?? ""),
+      MAX_TEXT_BYTES,
+    );
     result.text = text;
+    if (truncated) result.truncated = true;
   }
 }
 

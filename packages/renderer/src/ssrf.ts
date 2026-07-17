@@ -18,6 +18,9 @@ export function isPrivateV4(ip: string): boolean {
   if (a === 192 && b === 168) return true;
   if (a === 169 && b === 254) return true; // link-local incl. 169.254.169.254 (cloud metadata)
   if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64.0.0/10 (carrier / internal)
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking 198.18.0.0/15
+  if (a >= 224) return true; // multicast 224/4 + reserved/broadcast 240/4 (incl. 255.255.255.255)
   return false;
 }
 

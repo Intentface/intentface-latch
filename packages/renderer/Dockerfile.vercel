@@ -16,5 +16,10 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npx tsc -p tsconfig.json && npm prune --omit=dev
 
+# Drop root: the service renders untrusted pages, so run as the base image's
+# unprivileged `node` user. Make the app + browser files readable by it first.
+RUN chown -R node:node /app /ms-playwright
+USER node
+
 # Vercel routes traffic to $PORT (default 80).
 CMD ["node", "dist/server.js"]

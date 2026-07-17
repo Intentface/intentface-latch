@@ -707,7 +707,12 @@ export function createRuntime<P, RC = unknown>(
     // harness. Omitted → all tools active.
     const alwaysActive = opened.flatMap((o) => o.alwaysActive ?? []);
     const activeTools = cfg.enabledTools
-      ? Array.from(new Set([...cfg.enabledTools, ...alwaysActive, ...capabilityTools]))
+      ? // Exclude capability names that `disableTools` removed from `tools` (they
+        // were pushed to capabilityTools before the delete) — never list a tool
+        // in activeTools that isn't in the resolved toolset.
+        Array.from(new Set([...cfg.enabledTools, ...alwaysActive, ...capabilityTools])).filter(
+          (n) => n in tools,
+        )
       : undefined;
 
     // Tool-loop ceiling: a number caps it; "unlimited" runs until the model

@@ -118,7 +118,12 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
     return { ok: false, error: "URL blocked (private/loopback hosts are not allowed)." };
   }
 
-  const endpoint = new URL(base + "/render");
+  let endpoint: URL;
+  try {
+    endpoint = new URL(base + "/render");
+  } catch {
+    return { ok: false, error: `Render service URL is malformed (RENDER_FETCH_URL=${JSON.stringify(base)}).` };
+  }
   endpoint.searchParams.set("url", target.href);
   if (args.include) endpoint.searchParams.set("include", args.include);
   if (args.waitFor) endpoint.searchParams.set("waitFor", args.waitFor);
