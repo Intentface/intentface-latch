@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
 import type { AppMessage } from "@intentface/latch-core";
 import {
@@ -5,6 +6,8 @@ import {
   createFromManifestUrl,
   SLACK_BOT_SCOPES,
 } from "@intentface/latch-channels/slack";
+import { telegramApi } from "@intentface/latch-channels/telegram";
+import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 import { normalizeAgentName } from "./agent-store";
@@ -14,6 +17,8 @@ import {
   SLACK_CONFIG_REFRESH_KEY,
 } from "./slack-store";
 import { createAppFromManifest } from "./slack-admin";
+import { telegramVaultKeys } from "./telegram-store";
+import { whatsappVaultKeys } from "./whatsapp-store";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
 
@@ -690,5 +695,240 @@ export const deleteAuthoredToolFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false };
     const { authoredTools } = await getLatch();
     await authoredTools.deleteFor(principal, data.scope === "org" ? "org" : "user", authoredTools.cleanName(data.name));
+    return { ok: true };
+  });
+
+// ── Telegram channel: per-agent bot onboarding ───────────────────────────────
+
+/** The caller's org's Telegram bots (for the editor's status view). */
+export const listTelegramBotsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { telegramStore } = await getLatch();
+  const bots = await telegramStore.listForOrg(principal.orgId);
+  return bots.map((b) => ({ ...b, eventsUrl: `${baseUrl()}/api/telegram/${b.id}/events` }));
+});
+
+/** Create a Telegram bot row for an agent (token pasted in a second step). */
+export const createTelegramBotFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; handle: string; displayName?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { telegramStore } = await getLatch();
+    const id = crypto.randomUUID();
+    try {
+      await telegramStore.create({
+        id,
+        agent: data.agent,
+        orgId: principal.orgId,
+        userId: principal.userId,
+        handle: data.handle.trim(),
+        displayName: data.displayName?.trim() || undefined,
+      });
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      return {
+        ok: false as const,
+        error: m.includes("UNIQUE") ? "handle already taken" : m,
+      };
+    }
+    return { ok: true as const, botId: id };
+  });
+
+/**
+ * Save a BotFather token: validate it against Telegram's `getMe`, store it in
+ * the Vault along with a fresh server-generated webhook secret (a token save
+ * always requires a webhook re-register — the secret rotated).
+ */
+export const saveTelegramTokenFn = createServerFn({ method: "POST" })
+  .validator((data: { botId: string; botToken: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { telegramStore, credentials } = await getLatch();
+    const bot = await telegramStore.get(data.botId);
+    if (!bot || bot.orgId !== principal.orgId) return { ok: false as const, error: "not found" };
+
+    let me: { username: string };
+    try {
+      me = await telegramApi(data.botToken.trim()).getMe();
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+    }
+
+    const keys = telegramVaultKeys(data.botId);
+    await credentials.set(principal, keys.botToken, "org", data.botToken.trim());
+    await credentials.set(principal, keys.webhookSecret, "org", randomBytes(24).toString("base64url"));
+    await telegramStore.setBotUsername(data.botId, me.username);
+    return { ok: true as const, botUsername: me.username };
+  });
+
+/** Register (or re-register) the bot's webhook with Telegram. */
+export const registerTelegramWebhookFn = createServerFn({ method: "POST" })
+  .validator((botId: string) => botId)
+  .handler(async ({ data: botId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { telegramStore, credentials } = await getLatch();
+    const bot = await telegramStore.get(botId);
+    if (!bot || bot.orgId !== principal.orgId) return { ok: false as const, error: "not found" };
+
+    const keys = telegramVaultKeys(botId);
+    const token = await credentials.get(principal, keys.botToken, "org");
+    const secret = await credentials.get(principal, keys.webhookSecret, "org");
+    if (!token || !secret) return { ok: false as const, error: "save the bot token first" };
+
+    try {
+      await telegramApi(token).setWebhook({
+        url: `${baseUrl()}/api/telegram/${botId}/events`,
+        secretToken: secret,
+      });
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+    }
+    await telegramStore.markWebhookRegistered(botId);
+    return { ok: true as const };
+  });
+
+/** Telegram's view of the bot's webhook (URL, backlog, last error). */
+export const telegramWebhookStatusFn = createServerFn({ method: "GET" })
+  .validator((botId: string) => botId)
+  .handler(async ({ data: botId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { telegramStore, credentials } = await getLatch();
+    const bot = await telegramStore.get(botId);
+    if (!bot || bot.orgId !== principal.orgId) return null;
+    const token = await credentials.get(principal, telegramVaultKeys(botId).botToken, "org");
+    if (!token) return null;
+    try {
+      return await telegramApi(token).getWebhookInfo();
+    } catch {
+      return null;
+    }
+  });
+
+/** Delete a Telegram bot binding (best-effort webhook removal first). */
+export const deleteTelegramBotFn = createServerFn({ method: "POST" })
+  .validator((botId: string) => botId)
+  .handler(async ({ data: botId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { telegramStore, credentials } = await getLatch();
+    const bot = await telegramStore.get(botId);
+    if (!bot || bot.orgId !== principal.orgId) return { ok: false };
+    const token = await credentials.get(principal, telegramVaultKeys(botId).botToken, "org");
+    if (token) await telegramApi(token).deleteWebhook().catch(() => {});
+    await telegramStore.remove(botId);
+    return { ok: true };
+  });
+
+// ── WhatsApp channel: per-agent business-number onboarding ───────────────────
+
+/** The caller's org's WhatsApp bots (for the editor's status view). */
+export const listWhatsappBotsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { whatsappStore } = await getLatch();
+  const bots = await whatsappStore.listForOrg(principal.orgId);
+  return bots.map((b) => ({ ...b, callbackUrl: `${baseUrl()}/api/whatsapp/${b.id}/events` }));
+});
+
+/** Create a WhatsApp bot row for an agent (credentials pasted in a second step). */
+export const createWhatsappBotFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; handle: string; displayName?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { whatsappStore } = await getLatch();
+    const id = crypto.randomUUID();
+    try {
+      await whatsappStore.create({
+        id,
+        agent: data.agent,
+        orgId: principal.orgId,
+        userId: principal.userId,
+        handle: data.handle.trim(),
+        displayName: data.displayName?.trim() || undefined,
+      });
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      return {
+        ok: false as const,
+        error: m.includes("UNIQUE") ? "handle already taken" : m,
+      };
+    }
+    return { ok: true as const, botId: id };
+  });
+
+/**
+ * Save the Meta credentials: validate against the Graph API (fetch the phone
+ * number object), store them in the Vault, and generate a webhook verify token
+ * if the bot doesn't have one yet (kept stable across saves — the Meta
+ * dashboard config keeps working after a token rotation).
+ */
+export const saveWhatsappCredentialsFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { botId: string; accessToken: string; phoneNumberId: string; appSecret: string }) =>
+      data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { whatsappStore, credentials } = await getLatch();
+    const bot = await whatsappStore.get(data.botId);
+    if (!bot || bot.orgId !== principal.orgId) return { ok: false as const, error: "not found" };
+
+    const accessToken = data.accessToken.trim();
+    const phoneNumberId = data.phoneNumberId.trim();
+    let check: { displayPhoneNumber?: string };
+    try {
+      check = await whatsappApi({ accessToken, phoneNumberId }).checkCredentials();
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+    }
+
+    const keys = whatsappVaultKeys(data.botId);
+    await credentials.set(principal, keys.accessToken, "org", accessToken);
+    await credentials.set(principal, keys.phoneNumberId, "org", phoneNumberId);
+    await credentials.set(principal, keys.appSecret, "org", data.appSecret.trim());
+    if (!(await credentials.has(principal, keys.verifyToken, "org"))) {
+      await credentials.set(principal, keys.verifyToken, "org", randomBytes(24).toString("base64url"));
+    }
+    await whatsappStore.setPhoneNumberId(data.botId, phoneNumberId);
+    return { ok: true as const, displayPhoneNumber: check.displayPhoneNumber ?? null };
+  });
+
+/** What the Meta dashboard needs: the callback URL + verify token pair. */
+export const whatsappWebhookInfoFn = createServerFn({ method: "GET" })
+  .validator((botId: string) => botId)
+  .handler(async ({ data: botId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { whatsappStore, credentials } = await getLatch();
+    const bot = await whatsappStore.get(botId);
+    if (!bot || bot.orgId !== principal.orgId) return null;
+    const verifyToken = await credentials.get(
+      principal,
+      whatsappVaultKeys(botId).verifyToken,
+      "org",
+    );
+    return {
+      callbackUrl: `${baseUrl()}/api/whatsapp/${botId}/events`,
+      verifyToken: verifyToken ?? null,
+    };
+  });
+
+/** Delete a WhatsApp bot binding (the Meta app itself is untouched). */
+export const deleteWhatsappBotFn = createServerFn({ method: "POST" })
+  .validator((botId: string) => botId)
+  .handler(async ({ data: botId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { whatsappStore } = await getLatch();
+    const bot = await whatsappStore.get(botId);
+    if (!bot || bot.orgId !== principal.orgId) return { ok: false };
+    await whatsappStore.remove(botId);
     return { ok: true };
   });
