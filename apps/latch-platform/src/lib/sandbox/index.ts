@@ -3,7 +3,7 @@ import type { Experimental_SandboxSession } from "ai";
 import type { Principal } from "../session";
 import { createJustBashSession, workspaceDir } from "./just-bash";
 import { createDaytonaSession } from "./daytona";
-import { sandboxTools, appTools } from "./tools";
+import { sandboxTools, appTools, renderTools } from "./tools";
 
 /**
  * The sandbox seam wired for the platform: a per-session `SandboxSession`
@@ -33,4 +33,4 @@ export async function resolveSandbox(args: {
   });
 }
 
-export const harnessTools = { sandbox: sandboxTools, app: appTools };
+export const harnessTools = { sandbox: sandboxTools, app: appTools, render: renderTools };

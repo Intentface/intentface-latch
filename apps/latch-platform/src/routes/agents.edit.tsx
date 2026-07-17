@@ -92,8 +92,12 @@ function AgentEditor() {
   const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
   const [webTools, setWebTools] = useState(
     initial?.exec?.defaultTools === true ||
-      (Array.isArray(initial?.exec?.defaultTools) && initial.exec.defaultTools.length > 0),
+      (Array.isArray(initial?.exec?.defaultTools) &&
+        initial.exec.defaultTools.includes("web_fetch")),
   );
+  // render_fetch is its own capability flag (like sandbox), not a defaultTools
+  // member — so `defaultTools: true` never implies it.
+  const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
   const [providerWebTools, setProviderWebTools] = useState(
     initial?.exec?.providerWebTools ?? false,
   );
@@ -222,12 +226,26 @@ function AgentEditor() {
             }
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
+      // Save an explicit defaultTools name list (never bare `true`): the Web
+      // tools toggle sets web_fetch, and any OTHER default-tool names the agent
+      // already had (e.g. askUser) are preserved. render_fetch is NOT here — it
+      // is its own capability (`renderTools` below), like sandbox. Keeps the
+      // grant least-privilege and avoids dropping/force-adding askUser.
+      const prevDefault = initial?.exec?.defaultTools;
+      const preserved = Array.isArray(prevDefault)
+        ? prevDefault.filter((n) => n !== "web_fetch" && n !== "render_fetch")
+        : prevDefault === true
+          ? ["askUser"]
+          : [];
+      const toolNames = [...(webTools ? ["web_fetch"] : []), ...preserved];
+      const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
       const exec =
-        sandbox || webTools || providerWebTools || validAuthoredSel.length || useEffort
+        sandbox || defaultTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
-              defaultTools: webTools || undefined,
+              defaultTools,
+              renderTools: renderTool || undefined,
               providerWebTools: providerWebTools || undefined,
               authoredTools: validAuthoredSel.length ? validAuthoredSel : undefined,
               effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,
@@ -485,6 +503,14 @@ function AgentEditor() {
             <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
             <span>
               Web tools — <span className="font-mono">web_fetch</span> (built-in, any model)
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={renderTool} onCheckedChange={() => setRenderTool((v) => !v)} />
+            <span>
+              Render tool — <span className="font-mono">render_fetch</span>: fetches JS-rendered
+              pages in a headless browser (rendered text + schema.org JSON-LD). Active when the
+              renderer service is configured.
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">

@@ -30,6 +30,7 @@ export interface AgentRec {
     disableTools?: string[];
     codeMode?: { tools?: string[] };
     providerWebTools?: boolean;
+    renderTools?: boolean;
     authoredTools?: string[];
     effort?: "minimal" | "low" | "medium" | "high";
   };

@@ -1,6 +1,7 @@
 import { tool, jsonSchema } from "ai";
 import type { Experimental_SandboxSession } from "ai";
 import { webFetch } from "@/lib/web-fetch";
+import { renderFetch, renderFetchConfigured } from "@/lib/render-fetch";
 
 /**
  * The default harness tools, mirroring eve's set but implemented as thin
@@ -183,6 +184,78 @@ const web_fetch = tool({
 });
 
 /**
+ * The JS-page rung of the fetch ladder: renders the URL in a real headless
+ * browser via the render service (packages/renderer). Sibling of web_fetch —
+ * same guard, same app-process execution.
+ */
+const render_fetch = tool({
+  description:
+    "Fetch a URL in a real headless browser (JavaScript is executed) and " +
+    "return the rendered visible text plus any schema.org JSON-LD (products, " +
+    "prices, offers) and page links. Use when plain web_fetch returns a " +
+    "JS-app shell, a cookie wall, an 'enable JavaScript' notice, or " +
+    "navigation without the data. Slower and heavier than web_fetch — try " +
+    "web_fetch first. Prefer the jsonLd in the result when present; it " +
+    "carries exact structured data. For pages that need interaction before " +
+    "the data appears (cookie wall, a tab to open, lazy content), drive it " +
+    "with waitFor/clickSelector or an ordered `steps` script in the same " +
+    "render pass.",
+  inputSchema: jsonSchema<{
+    url: string;
+    include?: string;
+    waitFor?: string;
+    clickSelector?: string;
+    steps?: {
+      click?: string;
+      waitFor?: string;
+      scroll?: boolean;
+      waitMs?: number;
+    }[];
+    scroll?: boolean;
+  }>({
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Fully-formed https URL to render." },
+      include: {
+        type: "string",
+        description:
+          'Comma-separated subset of: text, jsonLd, links, clickables, html. Default "text,jsonLd,links". Use "jsonLd" alone to save tokens when structured data suffices, "links" to discover subpages, "clickables" to see the buttons/inputs you can target in `steps`, "html" for raw markup.',
+      },
+      waitFor: {
+        type: "string",
+        description: "CSS selector to wait for before extracting (data that loads late).",
+      },
+      clickSelector: {
+        type: "string",
+        description: "CSS selector to click once before extracting (e.g. cookie-consent accept).",
+      },
+      steps: {
+        type: "array",
+        description:
+          "Ordered actions run in the SINGLE render pass before extraction — for multi-step navigation (accept cookies → click a tab → scroll → read). Still one stateless render, not a live session. Use `include: \"clickables\"` first to discover selectors to target.",
+        items: {
+          type: "object",
+          properties: {
+            click: { type: "string", description: "CSS or text=Label selector to click." },
+            waitFor: { type: "string", description: "Selector to wait for before continuing." },
+            scroll: { type: "boolean", description: "Scroll to the bottom (lazy-loaded content)." },
+            waitMs: { type: "number", description: "Fixed pause in ms (capped server-side)." },
+          },
+          additionalProperties: false,
+        },
+      },
+      scroll: {
+        type: "boolean",
+        description: "Auto-scroll to the bottom once before extracting (triggers lazy content).",
+      },
+    },
+    required: ["url"],
+    additionalProperties: false,
+  }),
+  execute: async (args) => renderFetch(args),
+});
+
+/**
  * Ask the user one or more multiple-choice questions and wait for their answer.
  * Has NO `execute`: the SDK leaves the call in `input-available`, the turn
  * pauses, and the client renders a questionnaire and supplies the result via
@@ -238,5 +311,13 @@ const askUser = tool({
 
 /** Sandbox-backed tools (need an agent with `sandbox: true`). */
 export const sandboxTools = { bash, read_file, write_file, glob, grep } as Record<string, unknown>;
-/** App-runtime default tools (no sandbox needed). */
+/** App-runtime default tools (granted by `defaultTools`; no sandbox needed). */
 export const appTools = { web_fetch, askUser } as Record<string, unknown>;
+/**
+ * Render tool(s) — a separate capability (agent flag `renderTools: true`), NOT
+ * part of `defaultTools`, so `defaultTools: true` never sweeps it in. Present
+ * only when the render service is configured, so agents never see a dead tool.
+ */
+export const renderTools = (
+  renderFetchConfigured() ? { render_fetch } : {}
+) as Record<string, unknown>;
