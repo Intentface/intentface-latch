@@ -1,4 +1,5 @@
 import type { AppMessage } from "@intentface/latch-core";
+import type { ChannelRunOps } from "../types.js";
 import { consumeRun, pendingApprovals } from "../render.js";
 import { slackApi, type SlackToken } from "./api.js";
 import { verifySlackSignature } from "./verify.js";
@@ -10,24 +11,8 @@ import {
   textBlocks,
 } from "./blocks.js";
 
-/**
- * The subset of the Latch runtime a channel drives. Structural so the package
- * stays decoupled from the concrete app (and could even target a remote Latch).
- */
-export interface SlackRunOps<P> {
-  handleChat(input: {
-    agent: string;
-    chatId?: string;
-    principal: P;
-    message: AppMessage;
-  }): Promise<Response>;
-  applyApproval(input: {
-    chatId: string;
-    principal: P;
-    decisions: { approvalId: string; approved: boolean }[];
-  }): Promise<Response>;
-  loadHistory(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
-}
+/** @deprecated Use `ChannelRunOps` from `../types.js` — same shape, channel-agnostic. */
+export type SlackRunOps<P> = ChannelRunOps<P>;
 
 export interface SlackChannelConfig<P> {
   /** The agent this app serves (own-app-per-agent), and the owner to run as. */
