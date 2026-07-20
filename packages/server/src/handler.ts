@@ -32,7 +32,14 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   POST connections/:name/test         open the connection, list its tools
  */
 export interface LatchHandlerConfig<P> {
-  runtime: Runtime<P>;
+  /**
+   * The runtime, or a per-principal resolver. A resolver enables DB-per-tenant
+   * isolation (a separate runtime/DB per tenant, e.g. one SQLite file per
+   * workspace) — it's called after `resolveContext` yields the principal. A
+   * single `Runtime` value fits column-scoped (`owner`) tenancy. Note: `POST
+   * cron/run` (no principal) requires a static runtime.
+   */
+  runtime: Runtime<P> | ((principal: P) => Runtime<P> | Promise<Runtime<P>>);
   /** Map a request to a Principal (your existing auth). Null → 401. */
   resolveContext: (request: Request) => P | null | Promise<P | null>;
   /** Connection registry (enables the connection routes). */
@@ -101,6 +108,11 @@ export function createLatchHandler<P>(
 ): LatchHandler {
   const { runtime, resolveContext, connections } = config;
   const basePath = config.basePath ?? "/";
+  /** Resolve the runtime for this request's principal (static value or per-principal resolver). */
+  const resolveRuntime = (principal: P): Runtime<P> | Promise<Runtime<P>> =>
+    typeof runtime === "function"
+      ? (runtime as (p: P) => Runtime<P> | Promise<Runtime<P>>)(principal)
+      : runtime;
 
   return async (request) => {
     const url = new URL(request.url);
@@ -207,9 +219,10 @@ export function createLatchHandler<P>(
     if (seg[0] === "agents") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
       // GET agents — the agents available to the caller (for a picker).
       if (!seg[1] && method === "GET") {
-        return json({ agents: await runtime.listAgents(principal) });
+        return json({ agents: await rt.listAgents(principal) });
       }
       const agent = seg[1];
       // Client-chosen chat id, used as-is. Tenant isolation is enforced by the
@@ -223,7 +236,7 @@ export function createLatchHandler<P>(
         const body = (await request.json().catch(() => ({}))) as {
           decisions?: ApprovalDecision[];
         };
-        return runtime.applyApproval({
+        return rt.applyApproval({
           chatId,
           principal,
           decisions: Array.isArray(body.decisions) ? body.decisions : [],
@@ -238,7 +251,7 @@ export function createLatchHandler<P>(
           output?: unknown;
         };
         if (!body.toolCallId) return json({ error: "toolCallId is required" }, 400);
-        return runtime.applyToolResult({
+        return rt.applyToolResult({
           chatId,
           principal,
           toolCallId: body.toolCallId,
@@ -253,7 +266,7 @@ export function createLatchHandler<P>(
           string,
           unknown
         >;
-        return runtime.handleChat({
+        return rt.handleChat({
           agent,
           chatId,
           principal,
@@ -266,26 +279,29 @@ export function createLatchHandler<P>(
     if (seg[0] === "chats" && method === "GET") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
       const id = seg[1];
       if (id) {
-        return json({ messages: await runtime.loadHistory({ chatId: id, principal }) });
+        return json({ messages: await rt.loadHistory({ chatId: id, principal }) });
       }
-      return json({ chats: await runtime.listChats({ principal }) });
+      return json({ chats: await rt.listChats({ principal }) });
     }
 
     if (seg[0] === "runs" && method === "GET") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
-      return json({ runs: await runtime.listRuns({ principal }) });
+      const rt = await resolveRuntime(principal);
+      return json({ runs: await rt.listRuns({ principal }) });
     }
 
     // --- schedules (cron-driven agents) -----------------------------------
     if (seg[0] === "schedules") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
       const id = seg[1];
       if (!id && method === "GET") {
-        return json({ schedules: await runtime.listSchedules({ principal }) });
+        return json({ schedules: await rt.listSchedules({ principal }) });
       }
       if (!id && method === "POST") {
         const body = (await request.json().catch(() => ({}))) as {
@@ -298,7 +314,7 @@ export function createLatchHandler<P>(
           return json({ error: "agent and prompt are required" }, 400);
         }
         try {
-          const record = await runtime.schedule({
+          const record = await rt.schedule({
             principal,
             agent: body.agent,
             cron: body.cron ?? null,
@@ -311,7 +327,7 @@ export function createLatchHandler<P>(
         }
       }
       if (id && method === "DELETE") {
-        await runtime.unschedule({ principal, id });
+        await rt.unschedule({ principal, id });
         return json({ ok: true });
       }
     }
@@ -322,6 +338,14 @@ export function createLatchHandler<P>(
       if (!config.cronSecret) return json({ error: "cron route disabled" }, 404);
       if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
         return json({ error: "forbidden" }, 403);
+      }
+      // No principal here → can't resolve a per-tenant runtime. A resolver-based
+      // (DB-per-tenant) setup must sweep tenants app-side instead of this route.
+      if (typeof runtime === "function") {
+        return json(
+          { error: "cron/run requires a static runtime; sweep tenants app-side" },
+          400,
+        );
       }
       return json(await runtime.runDue());
     }
