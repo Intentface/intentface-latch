@@ -365,6 +365,21 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (empty.length) {
           return { error: `Case(s) with no checks (would always pass): ${empty.map((c) => c.name).join(", ")}.` };
         }
+        // Blank check values are as bad as none: `contains: [""]` matches every
+        // answer. Reject any blank/whitespace assertion string or tool name.
+        const blank = cases.filter((c) => {
+          const a = c.expected.assertions;
+          return [
+            ...(a?.contains ?? []),
+            ...(a?.notContains ?? []),
+            ...(a?.regex ?? []),
+            ...(c.expected.forbiddenTools ?? []),
+            ...(c.expected.toolCalls ?? []).map((t) => t.tool),
+          ].some((s) => s.trim().length === 0);
+        });
+        if (blank.length) {
+          return { error: `Blank assertion value or tool name in case(s): ${blank.map((c) => c.name).join(", ")}.` };
+        }
         // Reject unsafe/invalid assertion regexes at save time (ReDoS guard) —
         // the grader also refuses them, but failing here lets you fix the case.
         const badRegex = cases.filter((c) =>

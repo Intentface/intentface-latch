@@ -36,7 +36,7 @@ export async function runEvalCases({
       });
       const history = await runtime.loadHistory({ chatId: threadId, principal });
       const toolCalls = extractToolCalls(history);
-      const { pass, reasons } = gradeCase(c, answer, toolCalls);
+      const { pass, reasons } = await gradeCase(c, answer, toolCalls);
       return {
         caseId: c.id,
         caseName: c.name,

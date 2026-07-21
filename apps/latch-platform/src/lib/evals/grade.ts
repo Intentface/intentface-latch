@@ -1,34 +1,76 @@
 import type { EvalCase, EvalToolCall } from "./store";
 
 /**
- * Conservative ReDoS guard for author-supplied assertion regexes: reject a
+ * Static ReDoS pre-filter for author-supplied assertion regexes: reject a
  * quantified group whose body itself contains a quantifier or alternation —
  * the repetition-of-repetition shape behind catastrophic backtracking (e.g.
- * `(a+)+$`, `(a|aa)*`). Errs on the safe side (some harmless patterns are
- * rejected); eval assertions rarely need nesting, and authors can restructure.
- * Applied at save-time (save_eval_set rejects) AND at grade time (defense in
- * depth for pre-existing stored patterns).
+ * `(a+)+$`, `(a?)*`, `(a|aa)*`). Errs on the safe side (some harmless patterns
+ * are rejected); eval assertions rarely need nesting, and authors can
+ * restructure. Heuristic only — the HARD bound is `safeRegexTest`, which runs
+ * every match in a worker with a kill timeout. Used at save-time
+ * (save_eval_set rejects with a fix-it message) and as a grade-time fast path.
  */
 export function isRiskyRegex(source: string): boolean {
   if (source.length > 200) return true;
-  const quantifiedGroup = /\((?:[^()\\]|\\.)*[+*{|](?:[^()\\]|\\.)*\)\??[+*{]/;
+  const quantifiedGroup = /\((?:[^()\\]|\\.)*[+*{|?](?:[^()\\]|\\.)*\)\??[+*{]/;
   return quantifiedGroup.test(source);
 }
 
-/** Regexes only see a bounded slice — with nesting rejected, matching stays cheap. */
+/** Regexes only see a bounded slice of the answer. */
 const REGEX_INPUT_CAP = 5_000;
+/** Hard wall-clock bound for one regex match (worker is terminated past it). */
+const REGEX_TIMEOUT_MS = 200;
+
+/**
+ * Execute `new RegExp(pattern).test(input)` with a HARD execution bound: the
+ * match runs in a throwaway worker thread that is terminated on timeout, so
+ * catastrophic backtracking can never block the event loop (the static
+ * pre-filter alone cannot guarantee that). Grading runs a handful of these per
+ * eval case, so the ~ms worker spawn cost is irrelevant.
+ */
+export async function safeRegexTest(
+  pattern: string,
+  input: string,
+): Promise<boolean | "timeout" | "invalid"> {
+  try {
+    new RegExp(pattern); // syntax check without executing a match
+  } catch {
+    return "invalid";
+  }
+  const { Worker } = await import("node:worker_threads");
+  return new Promise((resolve) => {
+    const worker = new Worker(
+      `const { workerData, parentPort } = require("node:worker_threads");
+       parentPort.postMessage(new RegExp(workerData.pattern).test(workerData.input));`,
+      { eval: true, workerData: { pattern, input } },
+    );
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      resolve("timeout");
+    }, REGEX_TIMEOUT_MS);
+    worker.once("message", (matched: unknown) => {
+      clearTimeout(timer);
+      void worker.terminate();
+      resolve(!!matched);
+    });
+    worker.once("error", () => {
+      clearTimeout(timer);
+      resolve("invalid");
+    });
+  });
+}
 
 /**
  * Deterministic grading for one eval case: answer assertions (contains /
  * notContains / regex) + tool-call expectations (called with matching args,
- * didn't call forbidden ones). Pure — no I/O, no model calls (an LLM judge is
- * a later grader tier).
+ * didn't call forbidden ones). No model calls (an LLM judge is a later grader
+ * tier); async only because regex assertions run in a time-boxed worker.
  */
-export function gradeCase(
+export async function gradeCase(
   c: EvalCase,
   answer: string,
   calls: EvalToolCall[],
-): { pass: boolean; reasons: string[] } {
+): Promise<{ pass: boolean; reasons: string[] }> {
   const reasons: string[] = [];
   const lower = answer.toLowerCase();
   const a = c.expected.assertions;
@@ -40,19 +82,16 @@ export function gradeCase(
     if (lower.includes(s.toLowerCase())) reasons.push(`answer must not contain "${s}"`);
   }
   for (const r of a?.regex ?? []) {
-    // Author-supplied patterns: refuse the catastrophic-backtracking shape,
-    // bound the input, and never let a bad pattern throw.
+    // Author-supplied patterns: static pre-filter, bounded input, and a
+    // worker-isolated match with a kill timeout as the hard bound.
     if (isRiskyRegex(r)) {
       reasons.push(`unsafe regex (too long or nested quantifiers): ${r.slice(0, 40)}`);
       continue;
     }
-    try {
-      if (!new RegExp(r).test(answer.slice(0, REGEX_INPUT_CAP))) {
-        reasons.push(`answer doesn't match /${r}/`);
-      }
-    } catch {
-      reasons.push(`invalid regex /${r}/`);
-    }
+    const result = await safeRegexTest(r, answer.slice(0, REGEX_INPUT_CAP));
+    if (result === "invalid") reasons.push(`invalid regex /${r}/`);
+    else if (result === "timeout") reasons.push(`regex timed out (catastrophic backtracking?): /${r}/`);
+    else if (!result) reasons.push(`answer doesn't match /${r}/`);
   }
 
   for (const exp of c.expected.toolCalls ?? []) {
