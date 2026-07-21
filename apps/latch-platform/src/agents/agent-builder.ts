@@ -6,6 +6,7 @@ import type { TurnWriter } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
+import { isRiskyRegex } from "@/lib/evals/grade";
 import { runEvalCases } from "@/lib/evals/run";
 import { compactResult } from "@/lib/evals/store";
 import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
@@ -349,11 +350,40 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (!known.has(agent)) {
           return { error: `Unknown agent "${agent}". Use list_agents.` };
         }
-        const empty = cases.filter(
-          (c) => !c.expected.assertions && !c.expected.toolCalls?.length && !c.expected.forbiddenTools?.length,
-        );
+        // A case must carry at least one POPULATED check — `assertions: {}` or
+        // empty arrays would create an always-pass case.
+        const empty = cases.filter((c) => {
+          const a = c.expected.assertions;
+          return !(
+            a?.contains?.length ||
+            a?.notContains?.length ||
+            a?.regex?.length ||
+            c.expected.toolCalls?.length ||
+            c.expected.forbiddenTools?.length
+          );
+        });
         if (empty.length) {
           return { error: `Case(s) with no checks (would always pass): ${empty.map((c) => c.name).join(", ")}.` };
+        }
+        // Reject unsafe/invalid assertion regexes at save time (ReDoS guard) —
+        // the grader also refuses them, but failing here lets you fix the case.
+        const badRegex = cases.filter((c) =>
+          (c.expected.assertions?.regex ?? []).some((r) => {
+            if (isRiskyRegex(r)) return true;
+            try {
+              new RegExp(r);
+              return false;
+            } catch {
+              return true;
+            }
+          }),
+        );
+        if (badRegex.length) {
+          return {
+            error:
+              `Unsafe or invalid regex in case(s): ${badRegex.map((c) => c.name).join(", ")}. ` +
+              "Max 200 chars, no nested quantifiers (e.g. (a+)+); prefer simple patterns or contains.",
+          };
         }
         // Stable ids: keep provided ones, slug the rest, dedupe with a suffix.
         const seen = new Set<string>();

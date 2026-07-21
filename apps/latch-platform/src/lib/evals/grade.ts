@@ -1,6 +1,24 @@
 import type { EvalCase, EvalToolCall } from "./store";
 
 /**
+ * Conservative ReDoS guard for author-supplied assertion regexes: reject a
+ * quantified group whose body itself contains a quantifier or alternation —
+ * the repetition-of-repetition shape behind catastrophic backtracking (e.g.
+ * `(a+)+$`, `(a|aa)*`). Errs on the safe side (some harmless patterns are
+ * rejected); eval assertions rarely need nesting, and authors can restructure.
+ * Applied at save-time (save_eval_set rejects) AND at grade time (defense in
+ * depth for pre-existing stored patterns).
+ */
+export function isRiskyRegex(source: string): boolean {
+  if (source.length > 200) return true;
+  const quantifiedGroup = /\((?:[^()\\]|\\.)*[+*{|](?:[^()\\]|\\.)*\)\??[+*{]/;
+  return quantifiedGroup.test(source);
+}
+
+/** Regexes only see a bounded slice — with nesting rejected, matching stays cheap. */
+const REGEX_INPUT_CAP = 5_000;
+
+/**
  * Deterministic grading for one eval case: answer assertions (contains /
  * notContains / regex) + tool-call expectations (called with matching args,
  * didn't call forbidden ones). Pure — no I/O, no model calls (an LLM judge is
@@ -22,13 +40,16 @@ export function gradeCase(
     if (lower.includes(s.toLowerCase())) reasons.push(`answer must not contain "${s}"`);
   }
   for (const r of a?.regex ?? []) {
-    // Author-supplied patterns: cap length and never let a bad one throw.
-    if (r.length > 200) {
-      reasons.push(`regex too long (max 200 chars): ${r.slice(0, 40)}…`);
+    // Author-supplied patterns: refuse the catastrophic-backtracking shape,
+    // bound the input, and never let a bad pattern throw.
+    if (isRiskyRegex(r)) {
+      reasons.push(`unsafe regex (too long or nested quantifiers): ${r.slice(0, 40)}`);
       continue;
     }
     try {
-      if (!new RegExp(r).test(answer)) reasons.push(`answer doesn't match /${r}/`);
+      if (!new RegExp(r).test(answer.slice(0, REGEX_INPUT_CAP))) {
+        reasons.push(`answer doesn't match /${r}/`);
+      }
     } catch {
       reasons.push(`invalid regex /${r}/`);
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gradeCase } from "./grade";
+import { gradeCase, isRiskyRegex } from "./grade";
 import type { EvalCase, EvalToolCall } from "./store";
 
 const mk = (expected: EvalCase["expected"]): EvalCase => ({
@@ -31,6 +31,16 @@ describe("gradeCase", () => {
     const bad = gradeCase(mk({ assertions: { regex: ["([)"] } }), "anything", []);
     expect(bad.pass).toBe(false);
     expect(bad.reasons[0]).toContain("invalid regex");
+  });
+
+  it("refuses catastrophic-backtracking regex shapes (ReDoS guard)", () => {
+    for (const pattern of ["(a+)+$", "(a|aa)*b", "([a-z]*)+x", "a".repeat(201)]) {
+      const r = gradeCase(mk({ assertions: { regex: [pattern] } }), "aaaaaaaaaaaaaaaaaaaaaaaaaaa!", []);
+      expect(r.pass, `should refuse /${pattern.slice(0, 30)}/`).toBe(false);
+      expect(r.reasons[0]).toContain("unsafe regex");
+    }
+    expect(isRiskyRegex("(abc)+")).toBe(false); // no inner quantifier — fine
+    expect(isRiskyRegex("^hello \\d{1,3} world$")).toBe(false);
   });
 
   it("requires expected tool calls", () => {

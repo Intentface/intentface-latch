@@ -39,7 +39,9 @@ These are the repo's first tests — vitest was configured but unused.
 - `run_evals` is approval-gated (costs one agent run per case) and always safe-mode
   (`blockGated: true`); case transcripts live in hidden `sub_` threads.
 - Case ids are stable slugs so history stays comparable across set edits.
-- LLM-judge rubric grading, live streaming progress, and promote-from-chat deferred to v2.
+- LLM-judge rubric grading and promote-from-chat deferred to v2. (Live progress
+  streaming was originally deferred too, but shipped in v1 after the freeze
+  report — see the fix entries below.)
 
 **Not yet manually smoke-tested** in the running app (needs dev server + API key):
 build an agent in the builder chat, save an eval set, run it, expand a failing case.
