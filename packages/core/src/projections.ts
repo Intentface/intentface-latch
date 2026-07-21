@@ -22,9 +22,13 @@ export function toClientMessages(messages: AppMessage[]): AppMessage[] {
  * history is untouched; the synthetic result just keeps the model view valid.
  */
 function closeDanglingToolCalls(messages: AppMessage[]): AppMessage[] {
-  return messages.map((m) => {
+  const lastIndex = messages.length - 1;
+  return messages.map((m, i) => {
     const parts = (m as { parts?: Record<string, unknown>[] }).parts;
     if (m.role !== "assistant" || !Array.isArray(parts)) return m;
+    // Tail = the final message of the history: the continuation the tool loop
+    // re-runs. Only there will an approved-but-unexecuted call actually execute.
+    const isTail = i === lastIndex;
     let changed = false;
     const next = parts.map((p) => {
       const type = typeof p.type === "string" ? p.type : "";
@@ -33,14 +37,22 @@ function closeDanglingToolCalls(messages: AppMessage[]): AppMessage[] {
       const state = p.state as string | undefined;
       const approval = p.approval as { approved?: boolean } | undefined;
       // Close ONLY calls that nothing will resolve:
-      //  - an interrupted execution (a call with no result, no approval flow), or
-      //  - an UN-decided approval (abandoned by a new message instead of a decision).
-      // Leave decided approvals (`approval-responded` / approved|denied) alone —
-      // the re-run executes or denies them, producing the real result.
+      //  - an interrupted execution (a call with no result, no approval flow),
+      //  - an UN-decided approval (abandoned by a new message instead of a decision), or
+      //  - an APPROVED call with no result that is no longer the tail — its
+      //    continuation was interrupted (crash/restart mid-execution) and a later
+      //    message buried it, so no re-run will ever execute it.
+      // Leave tail-position approved calls and denied approvals alone — the
+      // re-run executes the former; the SDK synthesizes a denial result for the latter.
       const interrupted = state === "input-available" || state === "input-streaming";
       const undecidedApproval =
         state === "approval-requested" && (!approval || approval.approved === undefined);
-      if (!interrupted && !undecidedApproval) return p;
+      const buriedApproved =
+        !isTail &&
+        state === "approval-responded" &&
+        approval?.approved === true &&
+        p.output == null;
+      if (!interrupted && !undecidedApproval && !buriedApproved) return p;
       changed = true;
       return {
         ...p,
