@@ -17,6 +17,7 @@
     "smoke:mcp-integration": "tsx --conditions development src/mcp.integration.smoke.ts",
     "smoke:oauth": "tsx --conditions development src/oauth.smoke.ts",
     "smoke:approval": "tsx --conditions development src/approval.smoke.ts",
+    "smoke:subagent-approval": "tsx --conditions development src/subagent-approval.smoke.ts",
     "smoke:writer": "tsx --conditions development src/writer.smoke.ts",
     "smoke:cost": "tsx --conditions development src/cost.smoke.ts",
     "smoke:observability": "tsx --conditions development src/observability.smoke.ts",
