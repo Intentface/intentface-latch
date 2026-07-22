@@ -29,9 +29,12 @@ export function sharedReadTools(
       description: "Get the full config of one of the user's agents (instructions, connections, capabilities).",
       inputSchema: z.object({ name: z.string() }),
       execute: async ({ name }) => {
+        // Stored names are normalized (save_agent does it) — normalize the
+        // lookup too so casing/spacing variants still resolve.
+        const target = normalizeAgentName(name);
         const records = await agentStore.listRecords(principal);
-        const rec = records.find((r) => r.name === name);
-        if (!rec) return { error: `No editable agent named "${name}".` };
+        const rec = records.find((r) => r.name === target);
+        if (!rec) return { error: `No editable agent named "${target}".` };
         return rec;
       },
     }),

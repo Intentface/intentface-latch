@@ -125,9 +125,25 @@ export async function gradeCase(
       reasons.push(`${exp.tool} called ${candidates.length}× (max ${exp.maxCalls})`);
     }
     if (exp.args) {
-      const risky = collectMatcherPatterns(exp.args).find((p) => isRiskyRegex(p));
+      // Same distinction as answer regexes: unsafe / invalid patterns get
+      // their own reason instead of collapsing into a generic args mismatch
+      // (the eval-author diagnoses from these reasons).
+      const patterns = collectMatcherPatterns(exp.args);
+      const risky = patterns.find((p) => isRiskyRegex(p));
       if (risky != null) {
         reasons.push(`unsafe regex matcher (too long or nested quantifiers): ${risky.slice(0, 40)}`);
+        continue;
+      }
+      const invalid = patterns.find((p) => {
+        try {
+          new RegExp(p);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      if (invalid != null) {
+        reasons.push(`invalid regex matcher /${invalid.slice(0, 40)}/`);
         continue;
       }
       let matched = false;

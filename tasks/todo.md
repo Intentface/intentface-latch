@@ -127,7 +127,7 @@ builder briefed eval-author via spawn_agent ("Delegated to eval-author" thread i
 UI) → strict-JSON cases came back with REAL tool names (runner-kn_orient, self-
 discovered via get_agent) → curation table → approved save_eval_set → run_evals
 live card 4/5 → builder auto-delegated diagnosis to the SAME eval-author thread
-(DB: one sub_ chat, 6 messages across author + 2 diagnose rounds) → get_eval_run
+(DB: one `sub_` chat, 6 messages across author + 2 diagnose rounds) → get_eval_run
 + read_transcript used live → verdict fixTarget:"case" (false-positive "I can't")
 applied + saved → re-run → 3/5 (real agent bug: web_fetch instead of orient) →
 verdict fixTarget:"agent" → builder proposed save_agent instruction fix (left
@@ -174,8 +174,8 @@ for a real motivating failure.
   - Touches: EVAL_EXPECTED, grade/run/store, EvalRunCard (judge reasons shown
     distinctly), builder EVALS prompt + eval-author (AUTHOR drafts rubric;
     DIAGNOSE gains fixTarget:"rubric")
-
-Original context: /tmp/handoff-eval-grader-tiers.md
+- [ ] 4. (later) Multi-turn cases — deliberately deferred until a real
+  multi-turn failure motivates the design
 
 ### Review (2026-07-22)
 
@@ -231,13 +231,3 @@ Integration test asserts progress chunks on the wire before the tool result.
 Verified live in the browser: brief visible mid-run, auto-collapse on finish,
 post-completion expand loads history. NOTE: core changed — rebuild
 packages/core + dev-server restart required (done).
-- [ ] 4. (later) Multi-turn cases — wait for a real multi-turn failure
-builder briefed eval-author via spawn_agent ("Delegated to eval-author" thread in
-UI) → strict-JSON cases came back with REAL tool names (runner-kn_orient, self-
-discovered via get_agent) → curation table → approved save_eval_set → run_evals
-live card 4/5 → builder auto-delegated diagnosis to the SAME eval-author thread
-(DB: one sub_ chat, 6 messages across author + 2 diagnose rounds) → get_eval_run
-+ read_transcript used live → verdict fixTarget:"case" (false-positive "I can't")
-applied + saved → re-run → 3/5 (real agent bug: web_fetch instead of orient) →
-verdict fixTarget:"agent" → builder proposed save_agent instruction fix (left
-pending for the user). 25 vitest tests green, tsc green.

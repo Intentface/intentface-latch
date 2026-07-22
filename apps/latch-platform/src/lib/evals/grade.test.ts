@@ -126,6 +126,16 @@ describe("gradeCase", () => {
     expect(r.reasons[0]).toContain("unsafe regex matcher");
   });
 
+  it("reports an invalid {$regex} matcher distinctly, not as a generic args mismatch", async () => {
+    const r = await gradeCase(
+      mk({ toolCalls: [{ tool: "t", args: { v: { $regex: "([)" } } }] }),
+      "",
+      [{ tool: "t", args: { v: "aaa" } }],
+    );
+    expect(r.pass).toBe(false);
+    expect(r.reasons[0]).toContain("invalid regex matcher");
+  });
+
   it("enforces per-tool maxCalls", async () => {
     const calls: EvalToolCall[] = [{ tool: "web_fetch" }, { tool: "web_fetch" }, { tool: "web_fetch" }];
     expect((await gradeCase(mk({ toolCalls: [{ tool: "web_fetch", maxCalls: 3 }] }), "", calls)).pass).toBe(true);
