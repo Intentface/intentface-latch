@@ -23,4 +23,5 @@ export {
   splitWhatsappText,
   type WhatsappAuthResult,
   type WhatsappChannelConfig,
+  type WaMediaRef,
 } from "./whatsappChannel.js";

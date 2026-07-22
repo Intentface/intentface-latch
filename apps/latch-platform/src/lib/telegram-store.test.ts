@@ -110,17 +110,49 @@ describe("telegram store: pending replay", () => {
     expect(await store.takePending("b1", "5")).toEqual({ telegramChatId: "5", text: "two" });
     expect(await store.takePending("b1", "5")).toBeNull(); // replay-once
   });
+
+  it("preserves media refs across the stash/replay round-trip", async () => {
+    const media = [{ ref: { file_id: "f1", file_size: 9 }, mediaType: "image/jpeg", name: "photo.jpg" }];
+    await store.setPending({
+      botId: "b1",
+      telegramUserId: "5",
+      telegramChatId: "5",
+      text: "look",
+      media,
+    });
+    expect(await store.takePending("b1", "5")).toEqual({
+      telegramChatId: "5",
+      text: "look",
+      media,
+    });
+  });
 });
 
 describe("telegram store: turn leases", () => {
   it("claims once per chat, releases, and reclaims after expiry", async () => {
-    expect(await store.claimTurn("telegram_b1_5")).toBe(true);
-    expect(await store.claimTurn("telegram_b1_5")).toBe(false);
-    await store.releaseTurn("telegram_b1_5");
-    expect(await store.claimTurn("telegram_b1_5")).toBe(true);
+    const t1 = await store.claimTurn("telegram_b1_5");
+    expect(t1).toBeTruthy();
+    expect(await store.claimTurn("telegram_b1_5")).toBeNull();
+    await store.releaseTurn("telegram_b1_5", t1!);
+    expect(await store.claimTurn("telegram_b1_5")).toBeTruthy();
 
     vi.useFakeTimers();
     vi.setSystemTime(Date.now() + 6 * 60 * 1000); // past the 5-min lease
-    expect(await store.claimTurn("telegram_b1_5")).toBe(true); // crash-safe reclaim
+    expect(await store.claimTurn("telegram_b1_5")).toBeTruthy(); // crash-safe reclaim
+  });
+
+  it("release is fenced on the claimant token", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000);
+    const stale = await store.claimTurn("telegram_b1_5");
+    vi.setSystemTime(1_000_000_000 + 6 * 60 * 1000); // stale lease expires…
+    const fresh = await store.claimTurn("telegram_b1_5"); // …a new turn reclaims
+    expect(fresh).toBeTruthy();
+
+    await store.releaseTurn("telegram_b1_5", stale!); // outlived turn finishes late
+    expect(await store.claimTurn("telegram_b1_5")).toBeNull(); // fresh lease survives
+
+    await store.releaseTurn("telegram_b1_5", fresh!);
+    expect(await store.claimTurn("telegram_b1_5")).toBeTruthy();
   });
 });

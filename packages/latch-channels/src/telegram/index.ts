@@ -32,4 +32,5 @@ export {
   decodeApprovalCallback,
   type TelegramAuthResult,
   type TelegramChannelConfig,
+  type TgFileRef,
 } from "./telegramChannel.js";

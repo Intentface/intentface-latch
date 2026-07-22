@@ -64,17 +64,20 @@ export interface TelegramChannelConfig<P> {
    */
   seen?: (deliveryKey: string) => Promise<boolean>;
   /**
-   * Host-backed one-turn-per-chat guard. Return false if a turn is already
-   * running for this chatId → the user gets a "still working" reply.
+   * Host-backed one-turn-per-chat guard. Return a claimant token when the
+   * lease was acquired, or null if a turn is already running for this chatId
+   * → the user gets a "still working" reply. The token fences the release: a
+   * turn that outlives its lease must not delete a NEWER claimant's lease.
    */
-  claimTurn?: (chatId: string) => Promise<boolean>;
-  releaseTurn?: (chatId: string) => Promise<void>;
+  claimTurn?: (chatId: string) => Promise<string | null>;
+  releaseTurn?: (chatId: string, token: string) => Promise<void>;
   /** Stash the message that triggered a link prompt, to replay after linking. */
   stashPending?: (input: {
     telegramUserId: string;
     username?: string;
     telegramChatId: string;
     text: string;
+    media?: { ref: TgFileRef; mediaType: string; name: string }[];
   }) => Promise<void>;
   /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
   authorizeUrl?: (
@@ -95,7 +98,7 @@ interface TgUser {
   username?: string;
 }
 
-interface TgFileRef {
+export interface TgFileRef {
   file_id: string;
   file_size?: number;
   mime_type?: string;
@@ -230,6 +233,7 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
           ...(from.username ? { username: from.username } : {}),
           telegramChatId,
           text,
+          ...(media.length ? { media } : {}),
         })
         .catch((e) => console.error("[telegram] stashPending failed:", e));
       const base = auth.message ?? "You need a Latch account to use this agent.";
@@ -248,11 +252,16 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     }
 
     const chatId = chatIdFor(telegramUserId);
-    if (config.claimTurn && !(await config.claimTurn(chatId))) {
-      await api
-        .sendMessage({ chat_id: msg.chat.id, text: STILL_WORKING_MESSAGE })
-        .catch(() => {});
-      return;
+    let lease: string | undefined;
+    if (config.claimTurn) {
+      const token = await config.claimTurn(chatId);
+      if (!token) {
+        await api
+          .sendMessage({ chat_id: msg.chat.id, text: STILL_WORKING_MESSAGE })
+          .catch(() => {});
+        return;
+      }
+      lease = token;
     }
     try {
       await runMessage({
@@ -263,7 +272,7 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
         principal: auth.principal,
       });
     } finally {
-      await config.releaseTurn?.(chatId).catch(() => {});
+      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
     }
   }
 
@@ -340,6 +349,38 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       await api
         .sendMessage({ chat_id: ctx.telegramChatId, text: `⚠️ ${m.slice(0, 3000)}` })
         .catch(() => {});
+    }
+  }
+
+  /**
+   * Replay one message under the turn lease — the post-link resume path. The
+   * auth gate already passed (the user just linked), but the lease must still
+   * be honored: without it a fresh webhook message racing the replay would
+   * start a second concurrent run against the same history.
+   */
+  async function replayMessage(ctx: {
+    telegramUserId: string;
+    telegramChatId: string;
+    text: string;
+    media?: { ref: TgFileRef; mediaType: string; name: string }[];
+    principal: P;
+  }): Promise<void> {
+    const chatId = chatIdFor(ctx.telegramUserId);
+    let lease: string | undefined;
+    if (config.claimTurn) {
+      const token = await config.claimTurn(chatId);
+      if (!token) {
+        await api
+          .sendMessage({ chat_id: ctx.telegramChatId, text: STILL_WORKING_MESSAGE })
+          .catch(() => {});
+        return;
+      }
+      lease = token;
+    }
+    try {
+      await runMessage(ctx);
+    } finally {
+      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
     }
   }
 
@@ -482,7 +523,7 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     return ok();
   }
 
-  // `runMessage` is exposed so the host's post-link resume can replay a stashed
-  // message (the gate already passed by linking).
-  return { handleRequest, runMessage, api };
+  // `replayMessage` is exposed so the host's post-link resume can replay a
+  // stashed message (the gate already passed by linking; the lease is claimed).
+  return { handleRequest, runMessage, replayMessage, api };
 }

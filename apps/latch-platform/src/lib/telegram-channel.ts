@@ -1,6 +1,7 @@
 import { waitUntil } from "@vercel/functions";
 import { telegramChannel } from "@intentface/latch-channels/telegram";
 import { getLatch } from "./latch";
+import { isOrgMember } from "./auth";
 import { telegramVaultKeys, type TelegramBot } from "./telegram-store";
 import { buildTelegramLinkUrl } from "./telegram-link";
 import { baseUrl } from "./base-url";
@@ -26,7 +27,10 @@ export async function getTelegramChannelForBot(botId: string) {
   const keys = telegramVaultKeys(botId);
 
   const channel = telegramChannel<Principal>({
-    agent: bot.agent,
+    // Scope-pinned agent ref (agent-store.ts): the binding runs the record it
+    // was created for — a linked member's same-named personal agent can never
+    // shadow an org binding. Unpinned = code-registry agent.
+    agent: bot.agentScope ? `${bot.agentScope}:${bot.agent}` : bot.agent,
     botRef: botId,
     botToken: async () => (await credentials.get(owner, keys.botToken, "org")) ?? "",
     webhookSecret: async () => (await credentials.get(owner, keys.webhookSecret, "org")) ?? "",
@@ -38,12 +42,28 @@ export async function getTelegramChannelForBot(botId: string) {
     waitUntil: (p) => waitUntil(p),
     seen: (key) => telegramStore.seenDelivery(key),
     claimTurn: (chatId) => telegramStore.claimTurn(chatId),
-    releaseTurn: (chatId) => telegramStore.releaseTurn(chatId),
+    releaseTurn: (chatId, token) => telegramStore.releaseTurn(chatId, token),
     // Only linked platform users may drive the agent; refusals get a signed
     // link, and the triggering message is stashed for post-link replay.
     authorizeUser: async ({ telegramUserId }) => {
       const identity = await telegramStore.resolveIdentity(botId, telegramUserId);
       if (identity) {
+        // Identity rows outlive org membership — revalidate before minting a
+        // principal, or a removed member keeps channel access to org agents.
+        if (!(await isOrgMember(identity.userId, bot.orgId))) {
+          return {
+            allowed: false,
+            message: "Your Latch account is no longer a member of this agent's organization.",
+          };
+        }
+        // A personal-agent binding resolves the CREATOR's record; any other
+        // member would resolve their own same-named agent (or nothing).
+        if (bot.agentScope === "user" && identity.userId !== bot.userId) {
+          return {
+            allowed: false,
+            message: "This bot serves a personal agent — only its owner can use it.",
+          };
+        }
         return { allowed: true, principal: { orgId: bot.orgId, userId: identity.userId } };
       }
       return {
@@ -59,6 +79,7 @@ export async function getTelegramChannelForBot(botId: string) {
         telegramChatId: input.telegramChatId,
         username: input.username,
         text: input.text,
+        media: input.media,
       }),
     authorizeUrl: (name, ctx) => {
       const q = new URLSearchParams({

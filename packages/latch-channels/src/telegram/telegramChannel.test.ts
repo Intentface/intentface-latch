@@ -163,17 +163,17 @@ describe("telegramChannel.handleRequest", () => {
   });
 
   it("replies 'still working' when the chat's turn is already claimed", async () => {
-    const h = harness({ claimTurn: async () => false });
+    const h = harness({ claimTurn: async () => null });
     await h.channel.handleRequest(webhookRequest(dm("another")));
     await h.flush();
     expect(h.runtime.handleChat).not.toHaveBeenCalled();
     expect(String(h.of("sendMessage")[0]!.body.text)).toContain("still working");
   });
 
-  it("releases the turn claim even when the run fails", async () => {
+  it("releases the turn claim with ITS token even when the run fails", async () => {
     const releaseTurn = vi.fn(async () => {});
     const h = harness({
-      claimTurn: async () => true,
+      claimTurn: async () => "lease-1",
       releaseTurn,
       runtime: {
         handleChat: vi.fn(async () => {
@@ -185,8 +185,52 @@ describe("telegramChannel.handleRequest", () => {
     });
     await h.channel.handleRequest(webhookRequest(dm("hi")));
     await h.flush();
-    expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5");
+    expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-1");
     expect(String(h.of("sendMessage").at(-1)!.body.text)).toContain("kaboom");
+  });
+
+  it("stashes media refs with the pending message for unlinked users", async () => {
+    const stashPending = vi.fn(async () => {});
+    const h = harness({
+      authorizeUser: async () => ({ allowed: false, linkUrl: "https://x/telegram/link?s=1" }),
+      stashPending,
+    });
+    const photo = [{ file_id: "f1", file_size: 10 }];
+    await h.channel.handleRequest(webhookRequest(dm("", { text: undefined, caption: "look", photo })));
+    await h.flush();
+    expect(stashPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "look",
+        media: [{ ref: photo[0], mediaType: "image/jpeg", name: "photo.jpg" }],
+      }),
+    );
+  });
+
+  it("replayMessage claims and releases the turn lease around the run", async () => {
+    const claimTurn = vi.fn(async () => "lease-2");
+    const releaseTurn = vi.fn(async () => {});
+    const h = harness({ claimTurn, releaseTurn });
+    await h.channel.replayMessage({
+      telegramUserId: "5",
+      telegramChatId: "5",
+      text: "replayed",
+      principal: { userId: "u1" },
+    });
+    expect(claimTurn).toHaveBeenCalledWith("telegram_bot1_5");
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-2");
+  });
+
+  it("replayMessage backs off with 'still working' when the lease is held", async () => {
+    const h = harness({ claimTurn: async () => null });
+    await h.channel.replayMessage({
+      telegramUserId: "5",
+      telegramChatId: "5",
+      text: "replayed",
+      principal: { userId: "u1" },
+    });
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(String(h.of("sendMessage")[0]!.body.text)).toContain("still working");
   });
 
   it("prompts pending approvals with Approve/Deny inline buttons", async () => {

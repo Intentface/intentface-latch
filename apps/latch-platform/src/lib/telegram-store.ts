@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import type { TgFileRef } from "@intentface/latch-channels/telegram";
 
 /**
  * Persistence for the Telegram channel (own-bot-per-agent):
@@ -23,6 +24,7 @@ export async function migrateTelegram(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_telegram_bot (
     id TEXT PRIMARY KEY,
     agent TEXT NOT NULL,
+    agent_scope TEXT,
     org_id TEXT NOT NULL,
     user_id TEXT,
     handle TEXT NOT NULL UNIQUE,
@@ -52,13 +54,27 @@ export async function migrateTelegram(client: Client): Promise<void> {
     telegram_chat_id TEXT NOT NULL,
     username TEXT,
     text TEXT NOT NULL,
+    media TEXT,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (bot_id, telegram_user_id)
   )`);
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_channel_turn (
     chat_id TEXT PRIMARY KEY,
+    token TEXT NOT NULL DEFAULT '',
     expires_at INTEGER NOT NULL
   )`);
+  // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  for (const [table, col] of [
+    ["latch_telegram_bot", "agent_scope TEXT"],
+    ["latch_telegram_pending", "media TEXT"],
+    ["latch_channel_turn", "token TEXT NOT NULL DEFAULT ''"],
+  ] as const) {
+    try {
+      await client.execute(`ALTER TABLE ${table} ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
 }
 
 /** Vault credential key names for a Telegram bot's secrets (stored at org scope). */
@@ -70,6 +86,13 @@ export const telegramVaultKeys = (botId: string) => ({
 export interface TelegramBot {
   id: string;
   agent: string;
+  /**
+   * The scope the bound agent record had at binding time — webhook turns pin
+   * resolution to it (`org:`/`user:` prefixed names, see agent-store.ts) so a
+   * same-named personal agent can never shadow an org binding (and vice
+   * versa). Undefined = a code-registry agent (unambiguous by construction).
+   */
+  agentScope?: "org" | "user";
   orgId: string;
   userId?: string;
   handle: string;
@@ -79,10 +102,19 @@ export interface TelegramBot {
   webhookRegisteredAt?: number;
 }
 
+/** A media attachment held with a pending message (Telegram file refs stay downloadable). */
+export interface PendingTelegramMedia {
+  ref: TgFileRef;
+  mediaType: string;
+  name: string;
+}
+
 function rowToBot(r: Record<string, unknown>): TelegramBot {
   return {
     id: String(r.id),
     agent: String(r.agent),
+    agentScope:
+      r.agent_scope === "org" || r.agent_scope === "user" ? r.agent_scope : undefined,
     orgId: String(r.org_id),
     userId: r.user_id ? String(r.user_id) : undefined,
     handle: String(r.handle),
@@ -103,6 +135,7 @@ export function createTelegramStore(client: Client) {
     async create(bot: {
       id: string;
       agent: string;
+      agentScope?: "org" | "user";
       orgId: string;
       userId?: string;
       handle: string;
@@ -111,11 +144,12 @@ export function createTelegramStore(client: Client) {
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_telegram_bot
-                (id, agent, org_id, user_id, handle, display_name, status, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+                (id, agent, agent_scope, org_id, user_id, handle, display_name, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
         args: [
           bot.id,
           bot.agent,
+          bot.agentScope ?? null,
           bot.orgId,
           bot.userId ?? null,
           bot.handle,
@@ -183,7 +217,9 @@ export function createTelegramStore(client: Client) {
     /**
      * Link a Telegram user to a platform user. An existing link to a DIFFERENT
      * platform user is refused ("conflict") — re-linking must be deliberate;
-     * the same user re-linking just refreshes the cached username.
+     * the same user re-linking just refreshes the cached username. Atomic:
+     * insert-if-absent, then a user_id-fenced update — two accounts opening
+     * the same link concurrently can never overwrite each other.
      */
     async linkIdentity(input: {
       botId: string;
@@ -192,20 +228,11 @@ export function createTelegramStore(client: Client) {
       orgId: string;
       username?: string;
     }): Promise<"linked" | "conflict"> {
-      const existing = await client.execute({
-        sql: `SELECT user_id FROM latch_telegram_identity
-              WHERE bot_id = ? AND telegram_user_id = ? LIMIT 1`,
-        args: [input.botId, input.telegramUserId],
-      });
-      const row = existing.rows[0] as Record<string, unknown> | undefined;
-      if (row && String(row.user_id) !== input.userId) return "conflict";
-      await client.execute({
+      const inserted = await client.execute({
         sql: `INSERT INTO latch_telegram_identity
                 (bot_id, telegram_user_id, user_id, org_id, username, created_at)
               VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(bot_id, telegram_user_id) DO UPDATE SET
-                user_id = excluded.user_id, org_id = excluded.org_id,
-                username = excluded.username`,
+              ON CONFLICT(bot_id, telegram_user_id) DO NOTHING`,
         args: [
           input.botId,
           input.telegramUserId,
@@ -215,7 +242,19 @@ export function createTelegramStore(client: Client) {
           Date.now(),
         ],
       });
-      return "linked";
+      if (inserted.rowsAffected === 1) return "linked";
+      const refreshed = await client.execute({
+        sql: `UPDATE latch_telegram_identity SET username = ?, org_id = ?
+              WHERE bot_id = ? AND telegram_user_id = ? AND user_id = ?`,
+        args: [
+          input.username ?? null,
+          input.orgId,
+          input.botId,
+          input.telegramUserId,
+          input.userId,
+        ],
+      });
+      return refreshed.rowsAffected === 1 ? "linked" : "conflict";
     },
 
     /** The platform user linked to a (bot, Telegram user), or null if unlinked. */
@@ -257,21 +296,23 @@ export function createTelegramStore(client: Client) {
       telegramChatId: string;
       username?: string;
       text: string;
+      media?: PendingTelegramMedia[];
     }): Promise<void> {
       await client.execute({
         sql: `INSERT INTO latch_telegram_pending
-                (bot_id, telegram_user_id, telegram_chat_id, username, text, created_at)
-              VALUES (?, ?, ?, ?, ?, ?)
+                (bot_id, telegram_user_id, telegram_chat_id, username, text, media, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(bot_id, telegram_user_id) DO UPDATE SET
                 telegram_chat_id = excluded.telegram_chat_id,
                 username = excluded.username, text = excluded.text,
-                created_at = excluded.created_at`,
+                media = excluded.media, created_at = excluded.created_at`,
         args: [
           input.botId,
           input.telegramUserId,
           input.telegramChatId,
           input.username ?? null,
           input.text,
+          input.media?.length ? JSON.stringify(input.media) : null,
           Date.now(),
         ],
       });
@@ -281,9 +322,9 @@ export function createTelegramStore(client: Client) {
     async takePending(
       botId: string,
       telegramUserId: string,
-    ): Promise<{ telegramChatId: string; text: string } | null> {
+    ): Promise<{ telegramChatId: string; text: string; media?: PendingTelegramMedia[] } | null> {
       const res = await client.execute({
-        sql: `SELECT telegram_chat_id, text FROM latch_telegram_pending
+        sql: `SELECT telegram_chat_id, text, media FROM latch_telegram_pending
               WHERE bot_id = ? AND telegram_user_id = ? LIMIT 1`,
         args: [botId, telegramUserId],
       });
@@ -293,28 +334,40 @@ export function createTelegramStore(client: Client) {
         sql: `DELETE FROM latch_telegram_pending WHERE bot_id = ? AND telegram_user_id = ?`,
         args: [botId, telegramUserId],
       });
-      return { telegramChatId: String(r.telegram_chat_id), text: String(r.text) };
+      let media: PendingTelegramMedia[] | undefined;
+      try {
+        media = r.media ? (JSON.parse(String(r.media)) as PendingTelegramMedia[]) : undefined;
+      } catch {
+        media = undefined; // corrupt media never blocks the text replay
+      }
+      return { telegramChatId: String(r.telegram_chat_id), text: String(r.text), media };
     },
 
-    /** One-turn-per-chat lease; expired leases are reclaimed (crash safety). */
-    async claimTurn(chatId: string): Promise<boolean> {
+    /**
+     * One-turn-per-chat lease; expired leases are reclaimed (crash safety).
+     * Returns a claimant token, or null when the chat's turn is taken. The
+     * release is fenced on the token: a turn that outlives its 5-min lease
+     * can't delete the lease a NEWER turn now holds.
+     */
+    async claimTurn(chatId: string): Promise<string | null> {
       const now = Date.now();
       await client.execute({
         sql: `DELETE FROM latch_channel_turn WHERE expires_at < ?`,
         args: [now],
       });
+      const token = crypto.randomUUID();
       const res = await client.execute({
-        sql: `INSERT INTO latch_channel_turn (chat_id, expires_at) VALUES (?, ?)
+        sql: `INSERT INTO latch_channel_turn (chat_id, token, expires_at) VALUES (?, ?, ?)
               ON CONFLICT(chat_id) DO NOTHING`,
-        args: [chatId, now + TURN_LEASE_MS],
+        args: [chatId, token, now + TURN_LEASE_MS],
       });
-      return res.rowsAffected === 1;
+      return res.rowsAffected === 1 ? token : null;
     },
 
-    async releaseTurn(chatId: string): Promise<void> {
+    async releaseTurn(chatId: string, token: string): Promise<void> {
       await client.execute({
-        sql: `DELETE FROM latch_channel_turn WHERE chat_id = ?`,
-        args: [chatId],
+        sql: `DELETE FROM latch_channel_turn WHERE chat_id = ? AND token = ?`,
+        args: [chatId, token],
       });
     },
   };

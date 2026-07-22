@@ -712,6 +712,24 @@ const canManageBot = (
   principal: { orgId: string; userId?: string },
 ): boolean => bot.orgId === principal.orgId && !!bot.userId && bot.userId === principal.userId;
 
+/**
+ * The scope of the agent record a new channel binding will serve — personal
+ * wins on a name clash, mirroring turn-time resolution (agent-store `find`).
+ * Persisted on the bot row so webhook turns pin resolution to this exact
+ * record. Undefined = not in the store (a code-registry agent).
+ */
+const boundAgentScope = async (
+  agentStore: { listRecords: (p: { orgId: string; userId?: string }) => Promise<{ name: string; scope: string }[]> },
+  principal: { orgId: string; userId?: string },
+  agent: string,
+): Promise<"org" | "user" | undefined> => {
+  const records = await agentStore.listRecords(principal);
+  const match =
+    records.find((r) => r.name === agent && r.scope === "user") ??
+    records.find((r) => r.name === agent);
+  return match?.scope === "org" || match?.scope === "user" ? match.scope : undefined;
+};
+
 /** The caller's Telegram bots (for the editor's status view). */
 export const listTelegramBotsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
@@ -729,12 +747,13 @@ export const createTelegramBotFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { telegramStore } = await getLatch();
+    const { telegramStore, agentStore } = await getLatch();
     const id = crypto.randomUUID();
     try {
       await telegramStore.create({
         id,
         agent: data.agent,
+        agentScope: await boundAgentScope(agentStore, principal, data.agent),
         orgId: principal.orgId,
         userId: principal.userId,
         handle: data.handle.trim(),
@@ -764,15 +783,23 @@ export const saveTelegramTokenFn = createServerFn({ method: "POST" })
     const bot = await telegramStore.get(data.botId);
     if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
 
+    const newToken = data.botToken.trim();
     let me: { username: string };
     try {
-      me = await telegramApi(data.botToken.trim()).getMe();
+      me = await telegramApi(newToken).getMe();
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
     }
 
     const keys = telegramVaultKeys(data.botId);
-    await credentials.set(principal, keys.botToken, "org", data.botToken.trim());
+    // "Replace token" flow: the OLD bot account may still have its webhook
+    // pointed at this endpoint — once its token is overwritten it can never be
+    // cleaned up (it would just collect 401s), so best-effort remove it first.
+    const oldToken = await credentials.get(principal, keys.botToken, "org");
+    if (oldToken && oldToken !== newToken) {
+      await telegramApi(oldToken).deleteWebhook().catch(() => {});
+    }
+    await credentials.set(principal, keys.botToken, "org", newToken);
     await credentials.set(principal, keys.webhookSecret, "org", randomBytes(24).toString("base64url"));
     await telegramStore.setBotUsername(data.botId, me.username);
     return { ok: true as const, botUsername: me.username };
@@ -857,12 +884,13 @@ export const createWhatsappBotFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { whatsappStore } = await getLatch();
+    const { whatsappStore, agentStore } = await getLatch();
     const id = crypto.randomUUID();
     try {
       await whatsappStore.create({
         id,
         agent: data.agent,
+        agentScope: await boundAgentScope(agentStore, principal, data.agent),
         orgId: principal.orgId,
         userId: principal.userId,
         handle: data.handle.trim(),

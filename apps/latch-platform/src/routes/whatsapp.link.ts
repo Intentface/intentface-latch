@@ -43,15 +43,17 @@ async function handleLink(request: Request): Promise<Response> {
   });
   if (outcome === "conflict") return redirect("/agents?whatsapp=link_conflict");
 
+  // Replay text + any held media under the turn lease (see telegram.link.ts).
   const pending = await whatsappStore.takePending(botId, waId);
   if (pending) {
     const resolved = await getWhatsappChannelForBot(botId);
     if (resolved) {
       waitUntil(
         resolved.channel
-          .runMessage({
+          .replayMessage({
             waId,
             text: pending.text,
+            media: pending.media,
             principal: { orgId: bot.orgId, userId: principal.userId },
           })
           .catch((e) => console.error("[whatsapp] post-link replay failed:", e)),

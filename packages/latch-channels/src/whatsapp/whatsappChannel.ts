@@ -49,13 +49,19 @@ export interface WhatsappChannelConfig<P> {
   }) => Promise<WhatsappAuthResult<P>>;
   /** Persistent dedupe on `<botRef>:<waId>:<wamid>` (Meta re-delivers webhooks). */
   seen?: (deliveryKey: string) => Promise<boolean>;
-  claimTurn?: (chatId: string) => Promise<boolean>;
-  releaseTurn?: (chatId: string) => Promise<void>;
+  /**
+   * Host-backed one-turn-per-chat guard: a claimant token when the lease was
+   * acquired, null when a turn is already running. The token fences the
+   * release against a newer claimant (see the Telegram channel).
+   */
+  claimTurn?: (chatId: string) => Promise<string | null>;
+  releaseTurn?: (chatId: string, token: string) => Promise<void>;
   /** Stash the message that triggered a link prompt, to replay after linking. */
   stashPending?: (input: {
     waId: string;
     profileName?: string;
     text: string;
+    media?: { ref: WaMediaRef; mediaType: string; name: string }[];
   }) => Promise<void>;
   /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
   authorizeUrl?: (
@@ -69,7 +75,7 @@ export interface WhatsappChannelConfig<P> {
 
 // ── Webhook payload shapes (the slice we read) ──────────────────────────────
 
-interface WaMediaRef {
+export interface WaMediaRef {
   id: string;
   mime_type?: string;
   filename?: string;
@@ -90,6 +96,7 @@ interface WaMessage {
 
 interface WaChangeValue {
   messaging_product?: string;
+  metadata?: { phone_number_id?: string; display_phone_number?: string };
   contacts?: { wa_id: string; profile?: { name?: string } }[];
   messages?: WaMessage[];
 }
@@ -278,6 +285,34 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     }
   }
 
+  /**
+   * Replay one message under the turn lease — the post-link resume path. The
+   * auth gate already passed (the user just linked), but the lease must still
+   * be honored so a racing webhook message can't start a concurrent run.
+   */
+  async function replayMessage(ctx: {
+    waId: string;
+    text: string;
+    media?: { ref: WaMediaRef; mediaType: string; name: string }[];
+    principal: P;
+  }): Promise<void> {
+    const chatId = chatIdFor(ctx.waId);
+    let lease: string | undefined;
+    if (config.claimTurn) {
+      const token = await config.claimTurn(chatId);
+      if (!token) {
+        await api.sendText(ctx.waId, STILL_WORKING_MESSAGE).catch(() => {});
+        return;
+      }
+      lease = token;
+    }
+    try {
+      await runMessage(ctx);
+    } finally {
+      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
+    }
+  }
+
   // ── Inbound message → one agent turn ───────────────────────────────────────
   async function runTurn(msg: WaMessage, value: WaChangeValue): Promise<void> {
     const waId = msg.from;
@@ -316,7 +351,12 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
 
     if (!auth.allowed || auth.principal === undefined) {
       await config
-        .stashPending?.({ waId, ...(profileName ? { profileName } : {}), text })
+        .stashPending?.({
+          waId,
+          ...(profileName ? { profileName } : {}),
+          text,
+          ...(media.length ? { media } : {}),
+        })
         .catch((e) => console.error("[whatsapp] stashPending failed:", e));
       const base = auth.message ?? "You need a Latch account to use this agent.";
       const body = auth.linkUrl ? `${base}\n\nLink your Latch account: ${auth.linkUrl}` : base;
@@ -325,14 +365,19 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     }
 
     const chatId = chatIdFor(waId);
-    if (config.claimTurn && !(await config.claimTurn(chatId))) {
-      await api.sendText(waId, STILL_WORKING_MESSAGE).catch(() => {});
-      return;
+    let lease: string | undefined;
+    if (config.claimTurn) {
+      const token = await config.claimTurn(chatId);
+      if (!token) {
+        await api.sendText(waId, STILL_WORKING_MESSAGE).catch(() => {});
+        return;
+      }
+      lease = token;
     }
     try {
       await runMessage({ waId, text, media, principal: auth.principal });
     } finally {
-      await config.releaseTurn?.(chatId).catch(() => {});
+      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
     }
   }
 
@@ -396,9 +441,21 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     }
     if (body.object !== "whatsapp_business_account") return ok();
 
+    // One Meta app/WABA can deliver events for MULTIPLE registered numbers to
+    // the same endpoint — only dispatch changes addressed to OUR number, or a
+    // message for a sibling number would run this bot's agent and reply
+    // through this binding.
+    const ourPhoneNumberId = await resolveLazy(config.phoneNumberId);
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {
         if (change.field !== "messages" || !change.value) continue;
+        const recipient = change.value.metadata?.phone_number_id;
+        if (recipient && recipient !== ourPhoneNumberId) {
+          console.log(
+            `[whatsapp] change for phone_number_id ${recipient} ignored (bot ${config.botRef} serves ${ourPhoneNumberId})`,
+          );
+          continue;
+        }
         for (const msg of change.value.messages ?? []) {
           defer(runTurn(msg, change.value));
         }
@@ -408,7 +465,7 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     return ok();
   }
 
-  // `runMessage` is exposed so the host's post-link resume can replay a stashed
-  // message (the gate already passed by linking).
-  return { handleRequest, runMessage, api };
+  // `replayMessage` is exposed so the host's post-link resume can replay a
+  // stashed message (the gate already passed by linking; the lease is claimed).
+  return { handleRequest, runMessage, replayMessage, api };
 }

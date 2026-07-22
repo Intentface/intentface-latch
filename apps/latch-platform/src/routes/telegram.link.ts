@@ -46,17 +46,20 @@ async function handleLink(request: Request): Promise<Response> {
   });
   if (outcome === "conflict") return redirect("/agents?telegram=link_conflict");
 
-  // Continue the conversation: replay the message that triggered the link.
+  // Continue the conversation: replay the message (text + any held media)
+  // that triggered the link. `replayMessage` claims the turn lease — a fresh
+  // webhook message racing the replay must not start a concurrent run.
   const pending = await telegramStore.takePending(botId, telegramUserId);
   if (pending) {
     const resolved = await getTelegramChannelForBot(botId);
     if (resolved) {
       waitUntil(
         resolved.channel
-          .runMessage({
+          .replayMessage({
             telegramUserId,
             telegramChatId: pending.telegramChatId,
             text: pending.text,
+            media: pending.media,
             principal: { orgId: bot.orgId, userId: principal.userId },
           })
           .catch((e) => console.error("[telegram] post-link replay failed:", e)),

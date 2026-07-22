@@ -67,7 +67,7 @@ function signedPost(body: unknown, secret = APP_SECRET): Request {
   });
 }
 
-const inbound = (msg: Record<string, unknown>) => ({
+const inbound = (msg: Record<string, unknown>, value: Record<string, unknown> = {}) => ({
   object: "whatsapp_business_account",
   entry: [
     {
@@ -77,6 +77,7 @@ const inbound = (msg: Record<string, unknown>) => ({
           value: {
             contacts: [{ wa_id: "358401234567", profile: { name: "Aleksi" } }],
             messages: [{ from: "358401234567", id: "wamid.in1", type: "text", ...msg }],
+            ...value,
           },
         },
       ],
@@ -129,6 +130,30 @@ describe("whatsappChannel.handleRequest", () => {
     expect((sends[0]!.text as { body: string }).body).toBe("Answer!");
   });
 
+  it("processes changes addressed to the configured phone number id", async () => {
+    const h = harness();
+    await h.channel.handleRequest(
+      signedPost(
+        inbound({ text: { body: "hi" } }, { metadata: { phone_number_id: "555000" } }),
+      ),
+    );
+    await h.flush();
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores changes addressed to a DIFFERENT registered number", async () => {
+    // One Meta app can deliver events for several numbers to the same endpoint.
+    const h = harness();
+    await h.channel.handleRequest(
+      signedPost(
+        inbound({ text: { body: "hi" } }, { metadata: { phone_number_id: "999111" } }),
+      ),
+    );
+    await h.flush();
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(h.sends()).toHaveLength(0); // never replies through the wrong binding
+  });
+
   it("drops duplicate wamids via seen()", async () => {
     const seen = vi.fn(async () => true);
     const h = harness({ seen });
@@ -152,6 +177,37 @@ describe("whatsappChannel.handleRequest", () => {
       text: "do it",
     });
     expect((h.sends()[0]!.text as { body: string }).body).toContain("https://x/whatsapp/link?s=1");
+  });
+
+  it("stashes media refs with the pending message for unlinked users", async () => {
+    const stashPending = vi.fn(async () => {});
+    const h = harness({
+      authorizeUser: async () => ({ allowed: false, linkUrl: "https://x/whatsapp/link?s=1" }),
+      stashPending,
+    });
+    const image = { id: "media1", mime_type: "image/png", caption: "look" };
+    await h.channel.handleRequest(signedPost(inbound({ type: "image", image })));
+    await h.flush();
+    expect(stashPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "look",
+        media: [{ ref: image, mediaType: "image/png", name: "photo.jpg" }],
+      }),
+    );
+  });
+
+  it("replayMessage claims and releases the turn lease around the run", async () => {
+    const claimTurn = vi.fn(async () => "lease-9");
+    const releaseTurn = vi.fn(async () => {});
+    const h = harness({ claimTurn, releaseTurn });
+    await h.channel.replayMessage({
+      waId: "358401234567",
+      text: "replayed",
+      principal: { userId: "u1" },
+    });
+    expect(claimTurn).toHaveBeenCalledWith("whatsapp_wb1_358401234567");
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    expect(releaseTurn).toHaveBeenCalledWith("whatsapp_wb1_358401234567", "lease-9");
   });
 
   it("splits a long answer across sequential messages", async () => {

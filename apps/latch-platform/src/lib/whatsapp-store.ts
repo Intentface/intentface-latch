@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import type { WaMediaRef } from "@intentface/latch-channels/whatsapp";
 
 /**
  * Persistence for the WhatsApp channel (own-number-per-agent), mirroring
@@ -19,6 +20,7 @@ export async function migrateWhatsapp(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_whatsapp_bot (
     id TEXT PRIMARY KEY,
     agent TEXT NOT NULL,
+    agent_scope TEXT,
     org_id TEXT NOT NULL,
     user_id TEXT,
     handle TEXT NOT NULL UNIQUE,
@@ -46,13 +48,27 @@ export async function migrateWhatsapp(client: Client): Promise<void> {
     wa_user_id TEXT NOT NULL,
     profile_name TEXT,
     text TEXT NOT NULL,
+    media TEXT,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (bot_id, wa_user_id)
   )`);
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_channel_turn (
     chat_id TEXT PRIMARY KEY,
+    token TEXT NOT NULL DEFAULT '',
     expires_at INTEGER NOT NULL
   )`);
+  // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  for (const [table, col] of [
+    ["latch_whatsapp_bot", "agent_scope TEXT"],
+    ["latch_whatsapp_pending", "media TEXT"],
+    ["latch_channel_turn", "token TEXT NOT NULL DEFAULT ''"],
+  ] as const) {
+    try {
+      await client.execute(`ALTER TABLE ${table} ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
 }
 
 /** Vault credential key names for a WhatsApp bot's secrets (stored at org scope). */
@@ -66,6 +82,8 @@ export const whatsappVaultKeys = (botId: string) => ({
 export interface WhatsappBot {
   id: string;
   agent: string;
+  /** Scope pin for agent resolution — see TelegramBot.agentScope. */
+  agentScope?: "org" | "user";
   orgId: string;
   userId?: string;
   handle: string;
@@ -74,10 +92,19 @@ export interface WhatsappBot {
   status: "active" | "disabled";
 }
 
+/** A media attachment held with a pending message (Meta media ids stay valid ~30 days). */
+export interface PendingWhatsappMedia {
+  ref: WaMediaRef;
+  mediaType: string;
+  name: string;
+}
+
 function rowToBot(r: Record<string, unknown>): WhatsappBot {
   return {
     id: String(r.id),
     agent: String(r.agent),
+    agentScope:
+      r.agent_scope === "org" || r.agent_scope === "user" ? r.agent_scope : undefined,
     orgId: String(r.org_id),
     userId: r.user_id ? String(r.user_id) : undefined,
     handle: String(r.handle),
@@ -92,6 +119,7 @@ export function createWhatsappStore(client: Client) {
     async create(bot: {
       id: string;
       agent: string;
+      agentScope?: "org" | "user";
       orgId: string;
       userId?: string;
       handle: string;
@@ -100,11 +128,12 @@ export function createWhatsappStore(client: Client) {
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_whatsapp_bot
-                (id, agent, org_id, user_id, handle, display_name, status, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+                (id, agent, agent_scope, org_id, user_id, handle, display_name, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
         args: [
           bot.id,
           bot.agent,
+          bot.agentScope ?? null,
           bot.orgId,
           bot.userId ?? null,
           bot.handle,
@@ -159,7 +188,10 @@ export function createWhatsappStore(client: Client) {
       });
     },
 
-    /** Same conflict rule as Telegram: a link to a different user is refused. */
+    /**
+     * Same conflict rule as Telegram: a link to a different user is refused.
+     * Atomic insert-if-absent + user_id-fenced refresh (see telegram-store.ts).
+     */
     async linkIdentity(input: {
       botId: string;
       waId: string;
@@ -167,20 +199,11 @@ export function createWhatsappStore(client: Client) {
       orgId: string;
       profileName?: string;
     }): Promise<"linked" | "conflict"> {
-      const existing = await client.execute({
-        sql: `SELECT user_id FROM latch_whatsapp_identity
-              WHERE bot_id = ? AND wa_user_id = ? LIMIT 1`,
-        args: [input.botId, input.waId],
-      });
-      const row = existing.rows[0] as Record<string, unknown> | undefined;
-      if (row && String(row.user_id) !== input.userId) return "conflict";
-      await client.execute({
+      const inserted = await client.execute({
         sql: `INSERT INTO latch_whatsapp_identity
                 (bot_id, wa_user_id, user_id, org_id, profile_name, created_at)
               VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(bot_id, wa_user_id) DO UPDATE SET
-                user_id = excluded.user_id, org_id = excluded.org_id,
-                profile_name = excluded.profile_name`,
+              ON CONFLICT(bot_id, wa_user_id) DO NOTHING`,
         args: [
           input.botId,
           input.waId,
@@ -190,7 +213,13 @@ export function createWhatsappStore(client: Client) {
           Date.now(),
         ],
       });
-      return "linked";
+      if (inserted.rowsAffected === 1) return "linked";
+      const refreshed = await client.execute({
+        sql: `UPDATE latch_whatsapp_identity SET profile_name = ?, org_id = ?
+              WHERE bot_id = ? AND wa_user_id = ? AND user_id = ?`,
+        args: [input.profileName ?? null, input.orgId, input.botId, input.waId, input.userId],
+      });
+      return refreshed.rowsAffected === 1 ? "linked" : "conflict";
     },
 
     async resolveIdentity(
@@ -225,21 +254,32 @@ export function createWhatsappStore(client: Client) {
       waId: string;
       profileName?: string;
       text: string;
+      media?: PendingWhatsappMedia[];
     }): Promise<void> {
       await client.execute({
         sql: `INSERT INTO latch_whatsapp_pending
-                (bot_id, wa_user_id, profile_name, text, created_at)
-              VALUES (?, ?, ?, ?, ?)
+                (bot_id, wa_user_id, profile_name, text, media, created_at)
+              VALUES (?, ?, ?, ?, ?, ?)
               ON CONFLICT(bot_id, wa_user_id) DO UPDATE SET
                 profile_name = excluded.profile_name, text = excluded.text,
-                created_at = excluded.created_at`,
-        args: [input.botId, input.waId, input.profileName ?? null, input.text, Date.now()],
+                media = excluded.media, created_at = excluded.created_at`,
+        args: [
+          input.botId,
+          input.waId,
+          input.profileName ?? null,
+          input.text,
+          input.media?.length ? JSON.stringify(input.media) : null,
+          Date.now(),
+        ],
       });
     },
 
-    async takePending(botId: string, waId: string): Promise<{ text: string } | null> {
+    async takePending(
+      botId: string,
+      waId: string,
+    ): Promise<{ text: string; media?: PendingWhatsappMedia[] } | null> {
       const res = await client.execute({
-        sql: `SELECT text FROM latch_whatsapp_pending
+        sql: `SELECT text, media FROM latch_whatsapp_pending
               WHERE bot_id = ? AND wa_user_id = ? LIMIT 1`,
         args: [botId, waId],
       });
@@ -249,27 +289,35 @@ export function createWhatsappStore(client: Client) {
         sql: `DELETE FROM latch_whatsapp_pending WHERE bot_id = ? AND wa_user_id = ?`,
         args: [botId, waId],
       });
-      return { text: String(r.text) };
+      let media: PendingWhatsappMedia[] | undefined;
+      try {
+        media = r.media ? (JSON.parse(String(r.media)) as PendingWhatsappMedia[]) : undefined;
+      } catch {
+        media = undefined; // corrupt media never blocks the text replay
+      }
+      return { text: String(r.text), media };
     },
 
-    async claimTurn(chatId: string): Promise<boolean> {
+    /** Token-fenced one-turn-per-chat lease — see telegram-store.ts claimTurn. */
+    async claimTurn(chatId: string): Promise<string | null> {
       const now = Date.now();
       await client.execute({
         sql: `DELETE FROM latch_channel_turn WHERE expires_at < ?`,
         args: [now],
       });
+      const token = crypto.randomUUID();
       const res = await client.execute({
-        sql: `INSERT INTO latch_channel_turn (chat_id, expires_at) VALUES (?, ?)
+        sql: `INSERT INTO latch_channel_turn (chat_id, token, expires_at) VALUES (?, ?, ?)
               ON CONFLICT(chat_id) DO NOTHING`,
-        args: [chatId, now + TURN_LEASE_MS],
+        args: [chatId, token, now + TURN_LEASE_MS],
       });
-      return res.rowsAffected === 1;
+      return res.rowsAffected === 1 ? token : null;
     },
 
-    async releaseTurn(chatId: string): Promise<void> {
+    async releaseTurn(chatId: string, token: string): Promise<void> {
       await client.execute({
-        sql: `DELETE FROM latch_channel_turn WHERE chat_id = ?`,
-        args: [chatId],
+        sql: `DELETE FROM latch_channel_turn WHERE chat_id = ? AND token = ?`,
+        args: [chatId, token],
       });
     },
   };

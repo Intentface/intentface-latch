@@ -1,6 +1,7 @@
 import { waitUntil } from "@vercel/functions";
 import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
 import { getLatch } from "./latch";
+import { isOrgMember } from "./auth";
 import { whatsappVaultKeys, type WhatsappBot } from "./whatsapp-store";
 import { buildWhatsappLinkUrl } from "./whatsapp-link";
 import { baseUrl } from "./base-url";
@@ -22,7 +23,8 @@ export async function getWhatsappChannelForBot(botId: string) {
     (await credentials.get(owner, key, "org")) ?? "";
 
   const channel = whatsappChannel<Principal>({
-    agent: bot.agent,
+    // Scope-pinned agent ref — see telegram-channel.ts.
+    agent: bot.agentScope ? `${bot.agentScope}:${bot.agent}` : bot.agent,
     botRef: botId,
     accessToken: cred(keys.accessToken),
     phoneNumberId: cred(keys.phoneNumberId),
@@ -36,10 +38,26 @@ export async function getWhatsappChannelForBot(botId: string) {
     waitUntil: (p) => waitUntil(p),
     seen: (key) => whatsappStore.seenDelivery(key),
     claimTurn: (chatId) => whatsappStore.claimTurn(chatId),
-    releaseTurn: (chatId) => whatsappStore.releaseTurn(chatId),
+    releaseTurn: (chatId, token) => whatsappStore.releaseTurn(chatId, token),
     authorizeUser: async ({ waId }) => {
       const identity = await whatsappStore.resolveIdentity(botId, waId);
       if (identity) {
+        // Identity rows outlive org membership — revalidate before minting a
+        // principal, or a removed member keeps channel access to org agents.
+        if (!(await isOrgMember(identity.userId, bot.orgId))) {
+          return {
+            allowed: false,
+            message: "Your Latch account is no longer a member of this agent's organization.",
+          };
+        }
+        // A personal-agent binding resolves the CREATOR's record; any other
+        // member would resolve their own same-named agent (or nothing).
+        if (bot.agentScope === "user" && identity.userId !== bot.userId) {
+          return {
+            allowed: false,
+            message: "This bot serves a personal agent — only its owner can use it.",
+          };
+        }
         return { allowed: true, principal: { orgId: bot.orgId, userId: identity.userId } };
       }
       return {
@@ -54,6 +72,7 @@ export async function getWhatsappChannelForBot(botId: string) {
         waId: input.waId,
         profileName: input.profileName,
         text: input.text,
+        media: input.media,
       }),
     authorizeUrl: (name, ctx) => {
       const q = new URLSearchParams({
