@@ -204,6 +204,21 @@ the legit rubric + repeats:2 remain on nutrition-mid-race-fueling.
 Open product question (from the pre-commit review): eval-author appears in the
 user-facing agent picker; its instructions handle direct chats, but if it
 should be hidden an internal-only flag on AgentMeta is the likely shape.
+
+## Live subagent streaming (2026-07-22)
+
+User request: the "Delegated to …" element only showed the sub-conversation
+after the fact. Now it streams live: buildTurn gained `observeStream` (tees
+the turn's UI chunk stream), runSubagent forwards progressive snapshots via
+`readUIMessageStream`, and spawn_agent writes a `data-subagent-progress` part
+through the parent's writer (reconciled by id; first write carries the
+pre-generated sub-thread id, re-writes throttled to 250ms). SubagentThread
+renders the exchange live (expanded by default while running, collapsible),
+then reverts to the lazy persisted-history view once the result lands.
+Integration test asserts progress chunks on the wire before the tool result.
+Verified live in the browser: brief visible mid-run, auto-collapse on finish,
+post-completion expand loads history. NOTE: core changed — rebuild
+packages/core + dev-server restart required (done).
 - [ ] 4. (later) Multi-turn cases — wait for a real multi-turn failure
 builder briefed eval-author via spawn_agent ("Delegated to eval-author" thread in
 UI) → strict-JSON cases came back with REAL tool names (runner-kn_orient, self-

@@ -16,7 +16,7 @@ import {
   
 } from "@intentface/latch-ui";
 import type {AppUIMessage, ComposerSubmitData, ToolPart} from "@intentface/latch-ui";
-import type { AppMessage } from "@intentface/latch-core";
+import type { AppMessage, SubagentProgressData } from "@intentface/latch-core";
 import {
   authorizeUrl,
   chatApi,
@@ -54,6 +54,26 @@ function evalProgressFor(
   for (const msg of messages) {
     for (const p of (msg.parts ?? []) as { type: string; data?: EvalProgressData }[]) {
       if (p.type !== "data-eval-progress" || !p.data) continue;
+      if (!p.data.toolCallId || p.data.toolCallId === callId) found = p.data;
+    }
+  }
+  return found;
+}
+
+/**
+ * The streamed `data-subagent-progress` part for a spawn_agent tool call, if
+ * any — same reconciled-by-id pattern (and cross-message search) as
+ * `evalProgressFor`.
+ */
+function subagentProgressFor(
+  messages: readonly { parts?: unknown[] }[],
+  part: ToolPart,
+): SubagentProgressData | undefined {
+  const callId = (part as { toolCallId?: string }).toolCallId;
+  let found: SubagentProgressData | undefined;
+  for (const msg of messages) {
+    for (const p of (msg.parts ?? []) as { type: string; data?: SubagentProgressData }[]) {
+      if (p.type !== "data-subagent-progress" || !p.data) continue;
       if (!p.data.toolCallId || p.data.toolCallId === callId) found = p.data;
     }
   }
@@ -350,7 +370,9 @@ export function Chat({
               message={m as unknown as AppUIMessage}
               isStreaming={busy && m.id === lastId && m.role === "assistant"}
               renderApproval={renderApproval}
-              renderSubagent={(part) => <SubagentThread part={part} />}
+              renderSubagent={(part) => (
+                <SubagentThread part={part} progress={subagentProgressFor(messages, part)} />
+              )}
               renderTool={(part) =>
                 part.type === "tool-run_evals" ? (
                   <EvalRunCard part={part} progress={evalProgressFor(messages, part)} />
@@ -426,22 +448,33 @@ export function Chat({
   );
 }
 
-/** A `spawn_agent` tool call: header + lazy-expandable subagent conversation. */
-function SubagentThread({ part }: { part: ToolPart }) {
+/**
+ * A `spawn_agent` tool call: header + the subagent conversation. While the
+ * subagent runs, the streamed `data-subagent-progress` part renders the
+ * delegated exchange LIVE (expanded by default, collapsible); once the tool
+ * result lands, it reverts to the lazy-expandable persisted thread.
+ */
+function SubagentThread({ part, progress }: { part: ToolPart; progress?: SubagentProgressData }) {
   const p = part as {
     state?: string;
     input?: { agent?: string; threadId?: string };
     output?: { threadId?: string; answer?: string };
   };
-  const agent = p.input?.agent ?? "agent";
-  const threadId = p.output?.threadId ?? p.input?.threadId;
+  const agent = p.input?.agent ?? progress?.agent ?? "agent";
+  const threadId = p.output?.threadId ?? p.input?.threadId ?? progress?.threadId;
   const running = p.state === "input-streaming" || p.state === "input-available";
+  const live = running && progress ? progress : undefined;
 
   const [open, setOpen] = useState(false);
+  const [liveCollapsed, setLiveCollapsed] = useState(false);
   const [msgs, setMsgs] = useState<AppMessage[] | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function toggle() {
+    if (live) {
+      setLiveCollapsed((c) => !c);
+      return;
+    }
     const next = !open;
     setOpen(next);
     if (next && !msgs && threadId) {
@@ -452,31 +485,41 @@ function SubagentThread({ part }: { part: ToolPart }) {
     }
   }
 
+  const expanded = live ? !liveCollapsed : open;
+
   return (
     <div className="border-primary-border overflow-hidden rounded-lg border">
       <button
         type="button"
         onClick={toggle}
-        disabled={!threadId}
+        disabled={!live && !threadId}
         className="hover:bg-primary-hover flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors disabled:opacity-60"
       >
         <Bot className="text-ink-secondary size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
           Delegated to <span className="font-medium">{agent}</span>
         </span>
-        {running ? (
-          <Loader2 className="text-ink-tertiary size-3.5 shrink-0 animate-spin" />
-        ) : (
-          threadId && (
-            <ChevronDown
-              className={cn("text-ink-tertiary size-4 shrink-0 transition-transform", open && "rotate-180")}
-            />
-          )
+        {running && <Loader2 className="text-ink-tertiary size-3.5 shrink-0 animate-spin" />}
+        {(live || threadId) && (
+          <ChevronDown
+            className={cn(
+              "text-ink-tertiary size-4 shrink-0 transition-transform",
+              expanded && "rotate-180",
+            )}
+          />
         )}
       </button>
-      {open && (
+      {expanded && (
         <div className="border-primary-border bg-base/40 space-y-3 border-t p-3">
-          {loading ? (
+          {live ? (
+            live.messages.length > 0 ? (
+              live.messages.map((m) => (
+                <Message key={m.id} message={m as unknown as AppUIMessage} />
+              ))
+            ) : (
+              <p className="text-ink-tertiary text-xs">Starting…</p>
+            )
+          ) : loading ? (
             <p className="text-ink-tertiary text-xs">Loading…</p>
           ) : msgs && msgs.length > 0 ? (
             msgs.map((m) => <Message key={m.id} message={m as unknown as AppUIMessage} />)

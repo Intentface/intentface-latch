@@ -1,8 +1,10 @@
 import { createClient } from "@libsql/client";
+import { jsonSchema, parseJsonEventStream } from "ai";
+import type { UIMessageChunk } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
-import type { Runtime } from "@intentface/latch-core";
+import type { Runtime, SubagentProgressData } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
 
 /**
@@ -100,6 +102,16 @@ async function drain(res: Response) {
   if (res.body) for await (const _ of res.body as unknown as AsyncIterable<unknown>) void _;
 }
 
+async function readChunks(res: Response): Promise<UIMessageChunk[]> {
+  const out: UIMessageChunk[] = [];
+  const parsed = parseJsonEventStream({
+    stream: res.body!,
+    schema: jsonSchema<UIMessageChunk>({}),
+  }) as unknown as AsyncIterable<{ success: boolean; value: UIMessageChunk }>;
+  for await (const part of parsed) if (part.success) out.push(part.value);
+  return out;
+}
+
 type SpawnOutput = { threadId: string; answer: string };
 
 async function lastSpawnOutput(runtime: Runtime<P>, chatId: string): Promise<SpawnOutput> {
@@ -129,8 +141,11 @@ describe("builder → eval-author delegation over spawn_agent", () => {
   it("round-trips the JSON answer and continues the same sub-thread for diagnosis", async () => {
     const chatId = "chat_delegation";
 
-    // Turn 1 — authoring: parent spawns the author with a brief.
-    await drain(
+    // Turn 1 — authoring: parent spawns the author with a brief. Capture the
+    // wire: spawn_agent streams `data-subagent-progress` parts LIVE into the
+    // parent turn (threadId up front, then the author's streaming exchange),
+    // all before the tool result lands.
+    const chunks = await readChunks(
       await runtime.handleChat({
         agent: "parent",
         chatId,
@@ -141,6 +156,23 @@ describe("builder → eval-author delegation over spawn_agent", () => {
     const first = await lastSpawnOutput(runtime, chatId);
     expect(first.threadId).toMatch(/^sub_/);
     expect(first.answer).toBe(CASES_JSON);
+
+    const types = chunks.map((c) => (c as { type: string }).type);
+    const progressIdx = types.indexOf("data-subagent-progress");
+    const resultIdx = types.indexOf("tool-output-available");
+    expect(progressIdx).toBeGreaterThanOrEqual(0);
+    expect(resultIdx).toBeGreaterThan(progressIdx);
+    const progress = chunks
+      .filter((c) => (c as { type: string }).type === "data-subagent-progress")
+      .map((c) => (c as unknown as { data: SubagentProgressData }).data);
+    // First write: the sub-thread id is known before any output streams.
+    expect(progress[0].agent).toBe("author");
+    expect(progress[0].threadId).toBe(first.threadId);
+    expect(progress[0].messages).toEqual([]);
+    // A later snapshot carries the live exchange (the brief is there; the
+    // assistant snapshot follows as it streams — throttling may batch it).
+    const last = progress.at(-1)!;
+    expect(JSON.stringify(last.messages)).toContain("AUTHOR brief: lead-qualifier");
 
     // The sub-thread is a real, readable chat: brief in, JSON out.
     const subHistory = await runtime.loadHistory({ chatId: first.threadId, principal });
