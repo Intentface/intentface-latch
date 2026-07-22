@@ -108,3 +108,70 @@ observed: 12/14 run → builder diagnosed failures → patched instructions →
 re-ran → 14/14. Plus integration test `eval-approval-stream.integration.test.ts`
 (real runtime + mock model: progress chunks on the wire before the tool result,
 client reader materializes them). 19 tests green, tsc green.
+
+---
+
+## Eval-author subagent (plan: ~/.claude/plans/cuddly-hopping-prism.md)
+
+- [x] evalStore.getRun(owner, id)
+- [x] shared-read-tools.ts (get_agent, list_eval_sets, list_connection_tools extracted)
+- [x] agents/eval-author.ts (read-only tools + get_eval_run + read_transcript; AUTHOR/DIAGNOSE JSON contract)
+- [x] register in agents/index.ts
+- [x] agent-builder: subagents:["eval-author"], RESERVED_NAMES, EVALS section rewrite (always delegate)
+- [x] tests: getRun round-trip, spawn_agent delegation integration, get_eval_run/read_transcript
+- [x] pnpm typecheck + pnpm test green (from apps/latch-platform)
+- [x] live browser verification (fresh builder chat; nutrition set)
+
+Verified end-to-end IN THE RUNNING APP (fresh builder chat, running-coach agent):
+builder briefed eval-author via spawn_agent ("Delegated to eval-author" thread in
+UI) → strict-JSON cases came back with REAL tool names (runner-kn_orient, self-
+discovered via get_agent) → curation table → approved save_eval_set → run_evals
+live card 4/5 → builder auto-delegated diagnosis to the SAME eval-author thread
+(DB: one sub_ chat, 6 messages across author + 2 diagnose rounds) → get_eval_run
++ read_transcript used live → verdict fixTarget:"case" (false-positive "I can't")
+applied + saved → re-run → 3/5 (real agent bug: web_fetch instead of orient) →
+verdict fixTarget:"agent" → builder proposed save_agent instruction fix (left
+pending for the user). 25 vitest tests green, tsc green.
+
+---
+
+## Grader tiers roadmap (grilled + approved 2026-07-22)
+
+Order: commit eval-author work first, then 1 → 2 → 3. Item 4 (multi-turn) waits
+for a real motivating failure.
+
+- [ ] 0. Ship pending eval-author work: code review, commit, push to PR #6
+- [ ] 1. Richer deterministic trajectory checks (grade.ts + schemas, no deps)
+  - `expected.toolOrder: string[]` (relative order), arg matchers (`$regex` via
+    isRiskyRegex/safeRegexTest), `maxCalls` per tool, optional step/token budget
+- [ ] 2. Flakiness as a number (run.ts + store + card)
+  - per-case `repeats: N` opt-in + pass threshold; persist per-repeat results;
+    report pass RATE; delta compares rates
+- [ ] 3. LLM-judge rubric tier — design settled in grill session 2026-07-22:
+  - Pass semantics: rubric criterion fail = CASE FAIL (one honest verdict);
+    verdicts in a distinct result field; judge INFRA errors never fail a case;
+    deterministic fail always fails regardless of rubric
+  - Judge model: code-pinned Haiku-class constant, resolved via catalog with an
+    explicit existence check (no silent modelFor fallback), temperature 0,
+    `judgeModelId` recorded on every run row
+  - Call structure: ONE JUDGE CALL PER CRITERION, strict JSON {pass, reason}
+  - Judge context: case input + FULL answer + compact tool-name list (no args)
+  - Cost: no extra gate; save_eval_set caps rubric at ~5 criteria per case
+  - Errors: one strict-JSON retry, then judge-error marker on the criterion
+    (case verdict unaffected; card shows warning)
+  - Meta-eval: mocked unit tests (MockLanguageModelV3) for plumbing + small
+    live fixture suite vs the real pinned judge behind LIVE_JUDGE=1
+  - Touches: EVAL_EXPECTED, grade/run/store, EvalRunCard (judge reasons shown
+    distinctly), builder EVALS prompt + eval-author (AUTHOR drafts rubric;
+    DIAGNOSE gains fixTarget:"rubric")
+
+Original context: /tmp/handoff-eval-grader-tiers.md
+builder briefed eval-author via spawn_agent ("Delegated to eval-author" thread in
+UI) → strict-JSON cases came back with REAL tool names (runner-kn_orient, self-
+discovered via get_agent) → curation table → approved save_eval_set → run_evals
+live card 4/5 → builder auto-delegated diagnosis to the SAME eval-author thread
+(DB: one sub_ chat, 6 messages across author + 2 diagnose rounds) → get_eval_run
++ read_transcript used live → verdict fixTarget:"case" (false-positive "I can't")
+applied + saved → re-run → 3/5 (real agent bug: web_fetch instead of orient) →
+verdict fixTarget:"agent" → builder proposed save_agent instruction fix (left
+pending for the user). 25 vitest tests green, tsc green.

@@ -10,6 +10,7 @@ import { isRiskyRegex } from "@/lib/evals/grade";
 import { runEvalCases } from "@/lib/evals/run";
 import { compactResult } from "@/lib/evals/store";
 import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
+import { personalOwner, sharedReadTools } from "./shared-read-tools";
 
 /**
  * The Agent Builder — a meta-agent that designs, creates, and updates other
@@ -23,7 +24,7 @@ import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
  */
 
 /** Built-in (code-declared) agents — names the builder must not try to overwrite. */
-const RESERVED_NAMES = new Set(["assistant", "weekly", "agent-builder"]);
+const RESERVED_NAMES = new Set(["assistant", "weekly", "agent-builder", "eval-author"]);
 
 const SCOPE = z.enum(["user", "org"]);
 
@@ -89,10 +90,6 @@ const EVAL_CASE_INPUT = z.object({
   expected: EVAL_EXPECTED.describe("At least one of assertions / toolCalls / forbiddenTools."),
 });
 
-/** Personal owner key — same derivation as agent-store's ownerKey(p, "user"). */
-const personalOwner = (p: Principal): string =>
-  [p.orgId, p.userId ?? ""].map(encodeURIComponent).join("/");
-
 /** The slice of a tool call's options we use: its id + the turn's stream writer. */
 type ToolCallEnv = { toolCallId?: string; context?: { writer?: TurnWriter } };
 
@@ -127,6 +124,10 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
   };
 
   return {
+    // get_agent / list_connection_tools / list_eval_sets — shared with the
+    // Eval Author subagent so the two can't drift.
+    ...sharedReadTools(principal, { agentStore, allConnections, evalStore }),
+
     list_agents: tool({
       description: "List the user's own (editable) agents plus the names of all available agents.",
       inputSchema: z.object({}),
@@ -146,17 +147,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           allAgentNames: all.map((a) => a.name),
           note: "Only 'yourAgents' can be edited. Other names are built-in, read-only references.",
         };
-      },
-    }),
-
-    get_agent: tool({
-      description: "Get the full config of one of the user's agents (instructions, connections, capabilities).",
-      inputSchema: z.object({ name: z.string() }),
-      execute: async ({ name }) => {
-        const records = await agentStore.listRecords(principal);
-        const rec = records.find((r) => r.name === name);
-        if (!rec) return { error: `No editable agent named "${name}".` };
-        return rec;
       },
     }),
 
@@ -180,26 +170,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           kind: stored.find((c) => c.name === name)?.kind ?? "mcp",
           authorized: status.get(name)?.authorized ?? true,
         }));
-      },
-    }),
-
-    list_connection_tools: tool({
-      description: "Enumerate the tools a set of connections exposes (to understand their capabilities).",
-      inputSchema: z.object({ connections: z.array(z.string()) }),
-      execute: async ({ connections: names }) => {
-        if (names.length === 0) return [];
-        const opened = await allConnections.hostFor(names).open(principal);
-        try {
-          return Object.keys(opened.tools)
-            .filter((k) => !k.startsWith("connect_"))
-            .map((toolName) => ({
-              name: toolName,
-              description:
-                (opened.tools[toolName] as { description?: string } | undefined)?.description ?? "",
-            }));
-        } finally {
-          await opened.close();
-        }
       },
     }),
 
@@ -420,18 +390,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       },
     }),
 
-    list_eval_sets: tool({
-      description: "The user's eval sets (optionally for one agent), with their full cases — read before editing a set.",
-      inputSchema: z.object({ agentName: z.string().optional() }),
-      execute: async ({ agentName }) => {
-        const sets = await evalStore.listSets(
-          personalOwner(principal),
-          agentName ? normalizeAgentName(agentName) : undefined,
-        );
-        return sets.map((s) => ({ agentName: s.agentName, setName: s.name, cases: s.cases }));
-      },
-    }),
-
     run_evals: tool({
       description:
         "Run an agent's eval set: every case runs in an isolated safe-mode thread (approval-gated tools stubbed, other tools execute for real) and is graded deterministically. Returns per-case pass/fail with reasons plus the delta vs the previous run. Costs one full agent run per case — pauses for the user's approval.",
@@ -580,13 +538,14 @@ SCOPE: a tool is personal (default) or org-shared (scope:"org"). Match it to the
 
 Flow: write the program → call test_tool (pass sample \`input\` and the same allowedHosts) to confirm it runs and its fetches resolve — a compile error, thrown error, or fetch failure comes back in the result, so fix and re-test until correct → save_tool with a clear name, a description covering its inputs/output, an input JSON Schema, and allowedHosts. Then attach it to an agent via save_agent's authoredTools. Saved tools are visible and editable by the user on the Tools page.
 
-EVALS (save_eval_set / run_evals / list_eval_sets / list_eval_runs):
+EVALS (save_eval_set / run_evals / list_eval_sets / list_eval_runs + the eval-author subagent):
 test_agent is one ad-hoc trial; an EVAL SET is the repeatable version — the agent's regression suite. Use it to prove a change helped instead of eyeballing one answer.
 - A case = a name, one user message (input), and deterministic checks (expected): assertions on the answer (contains / notContains / regex), toolCalls the agent must make (optionally with an args subset), and forbiddenTools it must not touch. Every case needs at least one check.
-- DRAFT THE SET YOURSELF from the build conversation: ~5–15 cases covering happy paths, edge cases, ambiguous inputs, and things the agent should refuse or escalate. Prefer tool-call checks for tool-using agents (most reliable) and short, distinctive contains-strings over long exact phrases (models rephrase). Show the user the cases and let them adjust before saving.
-- Keep case ids STABLE across edits (save_eval_set defaults id to a slug of name) — run history is only comparable when ids persist. Read the current cases with list_eval_sets before editing a set.
+- DRAFTING IS DELEGATED — never draft cases inline. Call spawn_agent(agent: "eval-author") with a compact brief distilled from this conversation: the target agent's name, its purpose, expected behaviors, edge cases, refusal/escalation rules, and anything the user said should be tested. The eval-author reads the agent's config, existing sets, and connection tools itself, and answers with ONLY a JSON array of cases matching save_eval_set's schema. Show those cases to the user, apply their edits, then save_eval_set (its validation catches empty checks and bad regexes). If the answer isn't valid JSON, re-prompt the SAME threadId to reply with only the corrected JSON.
+- Keep case ids STABLE across edits (save_eval_set defaults id to a slug of name) — run history is only comparable when ids persist. When a set already exists, tell the eval-author it's an EDIT so it preserves existing ids.
 - run_evals runs every case in an isolated safe-mode thread (approval-gated tools stubbed; other tools run for real) and returns per-case pass/fail with reasons plus the score delta vs the previous run. It costs one full agent run per case. The user watches live per-case progress in an in-chat card while it runs — don't re-list every case afterwards; go straight to the failures and what you'll change.
-- THE LOOP: after a run, read the failures — the reasons and answerPreviews tell you what to fix. Refine the instructions, save_agent, run_evals again, and report the delta ("8/12 → 11/12"). Iterate until the set passes or the user is satisfied. Grades are heuristics: if a case fails on phrasing while the behavior is right, fix the CASE, not the agent.
+- DIAGNOSIS IS DELEGATED TOO — never read failure transcripts yourself. Continue the SAME eval-author thread (pass its threadId to spawn_agent) with the runId and which cases failed; it reads the transcripts and answers a JSON array of verdicts {caseId, cause, fixTarget: "agent"|"case", suggestion}. Apply them: fixTarget "agent" → fold the suggestion into the instructions and save_agent; fixTarget "case" → update that case and save_eval_set. Then run_evals again and report the delta ("8/12 → 11/12"). Iterate until the set passes or the user is satisfied.
+- Keep ONE eval-author thread per agent's eval work — reuse the threadId from the first spawn_agent for edits and diagnoses, so the eval-author remembers why each check exists.
 
 WORKFLOW:
 1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).
@@ -595,7 +554,7 @@ WORKFLOW:
 4. Propose: summarize the agent in plain language (name, model, connections, key instruction points) and get a quick confirmation.
 5. Call save_agent. It pauses for the user's approval — they'll see the full spec; that's expected.
 6. TEST IT: after saving, offer to test_agent with a realistic message. Read the answer + tool calls it returns, and tell the user how it did. If it's off (wrong tone, missed a tool, weak reasoning), refine the instructions and save_agent again, then re-test — iterate until it's good. test_agent blocks mutating tools by default (no real side effects); only pass live=true if the user explicitly wants a real end-to-end run.
-7. EVAL IT: once the agent basically works, offer to create an eval set (see EVALS) — draft the cases from everything you learned in this conversation, let the user curate, save_eval_set, then run_evals. Read the failures, improve the instructions, and re-run until the score is good; report each delta.
+7. EVAL IT: once the agent basically works, offer to create an eval set (see EVALS) — brief the eval-author subagent to draft the cases, let the user curate, save_eval_set, then run_evals. On failures, have the eval-author diagnose (same thread), apply its verdicts, and re-run until the score is good; report each delta.
 8. Confirm it's ready and that they can pick it from the agent list or refine it on the Agents page.
 
 MODIFYING an existing agent: call get_agent first, change only what's needed, then save_agent with the SAME name and scope. Re-test with test_agent to confirm the change had the intended effect — and if the agent has an eval set (list_eval_sets), run_evals to prove the change didn't regress anything.
@@ -606,6 +565,11 @@ RULES:
 - You can only create/edit the user's own agents (those from list_agents → yourAgents). Built-in agents are read-only references — inspect for inspiration, don't overwrite their names.
 - Never invent a modelId or connection name. Only use values from list_models / list_connections.
 - delete_agent is destructive and pauses for approval; only call it when the user clearly asks.`,
+    // Eval drafting + failure diagnosis delegate to the read-only Eval Author
+    // (the runtime injects a `spawn_agent` tool for it). It MUST stay
+    // read-only: subagent runs are auto-approved, so any write tool on it
+    // would bypass the user-approval gates below.
+    subagents: ["eval-author"],
     // Host tools bound to the chatting user's Principal.
     toolSources: [
       {

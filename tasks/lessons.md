@@ -32,3 +32,16 @@ time (multiple screenshots seconds apart). Integration tests prove mechanisms;
 only the browser proves the feature. Use claude-in-chrome against the dev
 server; check for OTHER writers to the same client state (polls, reconcilers,
 optimistic updates) — a correct stream loses to a 2-second overwrite loop.
+
+## Code-declared agents need a dev-server restart (2026-07-21)
+Editing code-declared agents (src/agents/*) or anything the getLatch()/runtime
+singleton captures is NOT picked up by vite HMR — the running server keeps the
+old agent definitions/prompts. Symptom: new subagents/tools/prompt sections
+silently absent (builder behaved as if spawn_agent didn't exist). Fix: restart
+`pnpm dev`. Check `ps -o lstart -p $(lsof -ti :3000)` vs your edit time before
+trusting live behavior.
+
+## A denied-tool turn steers later turns in the same chat (2026-07-21)
+After a denial + inline draft in context, the builder reused its drafted cases
+instead of following new prompt rules (delegation). When verifying prompt-level
+behavior changes, use a FRESH chat — old chats carry momentum that masks them.

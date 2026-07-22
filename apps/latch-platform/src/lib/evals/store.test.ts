@@ -75,4 +75,24 @@ describe("eval store (in-memory libsql)", () => {
     expect(runs[0].results[0].toolCalls).toEqual([{ tool: "t" }]);
     expect(await store.listRuns("other/owner", "a")).toHaveLength(0);
   });
+
+  it("getRun fetches one run by id, owner-scoped, with per-case threadIds", async () => {
+    const saved = await store.saveRun({
+      owner,
+      agentName: "b",
+      setName: "default",
+      agentSnapshot: null,
+      results: [
+        { caseId: "c1", caseName: "c1", pass: false, reasons: ["missing"], threadId: "sub_x", answerPreview: "…", toolCalls: [] },
+      ],
+      passCount: 0,
+      failCount: 1,
+    });
+    const run = await store.getRun(owner, saved.id);
+    expect(run?.id).toBe(saved.id);
+    expect(run?.results[0].threadId).toBe("sub_x");
+    // Another owner can't read it; unknown ids miss cleanly.
+    expect(await store.getRun("other/owner", saved.id)).toBeNull();
+    expect(await store.getRun(owner, "evr_nope")).toBeNull();
+  });
 });

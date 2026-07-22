@@ -131,6 +131,7 @@ export interface EvalStore {
   listSets: (owner: string, agentName?: string) => Promise<EvalSet[]>;
   deleteSet: (owner: string, agentName: string, name: string) => Promise<void>;
   saveRun: (run: Omit<EvalRun, "id" | "createdAt">) => Promise<EvalRun>;
+  getRun: (owner: string, id: string) => Promise<EvalRun | null>;
   listRuns: (owner: string, agentName: string, setName?: string, limit?: number) => Promise<EvalRun[]>;
 }
 
@@ -262,6 +263,15 @@ export function createEvalStore(client: Client): EvalStore {
         ],
       });
       return full;
+    },
+
+    async getRun(owner, id) {
+      const res = await client.execute({
+        sql: `SELECT * FROM latch_eval_runs WHERE owner = ? AND id = ?`,
+        args: [owner, id],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      return r ? rowToRun(r) : null;
     },
 
     async listRuns(owner, agentName, setName, limit) {
