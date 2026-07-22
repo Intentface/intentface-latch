@@ -192,6 +192,15 @@ approved save + run → live card counted attempts 0/6 → final 5/5 · ±0 with
 the judge's reasoning → DB row has judge_model_id=claude-haiku-4-5 and the
 per-attempt fields persisted.
 
+Failure-path e2e (2026-07-22, same chat): planted an intentionally-failing
+rubric criterion ("answer entirely in French") → run 4/5 · -1, red row reason
+`rubric "...": The answer is written entirely in English, not French`, summary
+"80% (−20pp vs. previous run)", expanded row shows red ✗ Judge verdict →
+builder delegated diagnosis to eval-author → verdict: remove the bogus
+criterion → approved save → re-run 5/5 · +1. DB: three nutrition runs all
+carry judge_model_id=claude-haiku-4-5. End state: French criterion removed;
+the legit rubric + repeats:2 remain on nutrition-mid-race-fueling.
+
 Open product question (from the pre-commit review): eval-author appears in the
 user-facing agent picker; its instructions handle direct chats, but if it
 should be hidden an internal-only flag on AgentMeta is the likely shape.
