@@ -7,6 +7,7 @@ import {
   
   
 } from "@intentface/latch-core";
+import type { LanguageModel } from "ai";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createSqliteAdapter,
@@ -39,6 +40,8 @@ import { createWhatsappStore, migrateWhatsapp } from "./whatsapp-store";
 import type {WhatsappStore} from "./whatsapp-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
+import { createEvalStore, migrateEvals } from "./evals/store";
+import type {EvalStore} from "./evals/store";
 import { createAuthoredTools  } from "./tools";
 import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
@@ -75,7 +78,9 @@ let cached:
       whatsappStore: WhatsappStore;
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
+      evalStore: EvalStore;
       models: ModelInfo[];
+      modelFor: (id: string) => LanguageModel;
       handler: LatchHandler;
     }
   | undefined;
@@ -93,7 +98,9 @@ export async function getLatch(): Promise<{
   whatsappStore: WhatsappStore;
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
+  evalStore: EvalStore;
   models: ModelInfo[];
+  modelFor: (id: string) => LanguageModel;
   handler: LatchHandler;
 }> {
   if (cached) return cached;
@@ -109,6 +116,7 @@ export async function getLatch(): Promise<{
   await migrateTelegram(client); // latch_telegram_* (Telegram channel)
   await migrateWhatsapp(client); // latch_whatsapp_* (WhatsApp channel)
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
+  await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
@@ -146,6 +154,8 @@ export async function getLatch(): Promise<{
   const slackStore = createSlackStore(client);
   const telegramStore = createTelegramStore(client);
   const whatsappStore = createWhatsappStore(client);
+  // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
+  const evalStore = createEvalStore(client);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -244,6 +254,10 @@ export async function getLatch(): Promise<{
   if (!process.env.VERCEL) {
     const tick = setInterval(() => {
       void runtime.runDue().catch((e) => console.warn("runDue failed:", e));
+      // Reap lease-expired (crashed) runs — without this a dev-server restart
+      // mid-turn leaves the run "running" forever and its chat shows an eternal
+      // "Generating…" (reap only; no auto-resume in dev).
+      void runtime.tick().catch((e) => console.warn("tick failed:", e));
     }, 30_000);
     (tick as { unref?: () => void }).unref?.();
   }
@@ -261,7 +275,9 @@ export async function getLatch(): Promise<{
     whatsappStore,
     toolStore,
     authoredTools,
+    evalStore,
     models: catalog.models,
+    modelFor: catalog.modelFor,
     handler,
   };
   return cached;

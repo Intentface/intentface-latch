@@ -2,9 +2,16 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
+import type { TurnWriter } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
+import { collectMatcherPatterns, isRiskyRegex } from "@/lib/evals/grade";
+import { JUDGE_MODEL_ID } from "@/lib/evals/judge";
+import { repeatsOf, runEvalCases } from "@/lib/evals/run";
+import { compactResult, runPassRate } from "@/lib/evals/store";
+import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
+import { personalOwner, sharedReadTools } from "./shared-read-tools";
 
 /**
  * The Agent Builder — a meta-agent that designs, creates, and updates other
@@ -18,7 +25,7 @@ import type {AgentRecord} from "@/lib/agent-store";
  */
 
 /** Built-in (code-declared) agents — names the builder must not try to overwrite. */
-const RESERVED_NAMES = new Set(["assistant", "weekly", "agent-builder"]);
+const RESERVED_NAMES = new Set(["assistant", "weekly", "agent-builder", "eval-author"]);
 
 const SCOPE = z.enum(["user", "org"]);
 
@@ -52,11 +59,76 @@ const SAVE_INPUT = z.object({
   scope: SCOPE.describe("'user' (personal) or 'org' (shared). Ask the user — never guess."),
 });
 
+const EVAL_EXPECTED = z.object({
+  assertions: z
+    .object({
+      contains: z.array(z.string()).optional().describe("Substrings the answer must include (case-insensitive)."),
+      notContains: z.array(z.string()).optional().describe("Substrings the answer must NOT include."),
+      regex: z.array(z.string()).optional().describe("JS regexes the answer must match."),
+    })
+    .optional(),
+  toolCalls: z
+    .array(
+      z.object({
+        tool: z.string().describe("Tool the agent must call."),
+        args: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            'Subset of the call\'s args that must match (deep-equal per key). A value of {"$regex": "..."} matches the actual value against the pattern instead — for dynamic values like dates.',
+          ),
+        maxCalls: z.number().int().min(1).optional().describe("Max times the tool may be called (catches loops)."),
+      }),
+    )
+    .optional(),
+  forbiddenTools: z.array(z.string()).optional().describe("Tools the agent must NOT call."),
+  toolOrder: z
+    .array(z.string())
+    .min(2)
+    .optional()
+    .describe("Tools that must appear in this relative order (other calls may interleave). Use for 'orient before generating' style checks."),
+  maxTotalToolCalls: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Budget: max tool calls in the whole case (catches runaway loops)."),
+  rubric: z
+    .array(z.string())
+    .max(5)
+    .optional()
+    .describe(
+      "Plain-language criteria a pinned LLM judge grades (one call per criterion, temperature 0) — for qualities substring checks can't express ('explains WHY, not just what'). A failed criterion fails the case; keep each criterion one observable quality.",
+    ),
+});
+
+const EVAL_CASE_INPUT = z.object({
+  id: z
+    .string()
+    .optional()
+    .describe("Stable id — keep it constant across saves so run history stays comparable. Defaults to a slug of name."),
+  name: z.string().describe("Short human label, e.g. 'refund question escalates'."),
+  input: z.string().max(4000).describe("The user message to send the agent."),
+  expected: EVAL_EXPECTED.describe("At least one of assertions / toolCalls / forbiddenTools."),
+  repeats: z
+    .number()
+    .int()
+    .min(2)
+    .max(5)
+    .optional()
+    .describe(
+      "Flakiness measurement: run the case N times, pass on a majority, record the pass rate. Only for behaviors observed to be nondeterministic — each repeat costs a full agent run.",
+    ),
+});
+
+/** The slice of a tool call's options we use: its id + the turn's stream writer. */
+type ToolCallEnv = { toolCallId?: string; context?: { writer?: TurnWriter } };
+
 /** Build the management toolset bound to one Principal + the live Latch services. */
 async function builderTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy import avoids a static import cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
-  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, authoredTools } =
+  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, modelFor, authoredTools, evalStore } =
     await getLatch();
 
   const capsToExec = (
@@ -83,6 +155,10 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
   };
 
   return {
+    // get_agent / list_connection_tools / list_eval_sets — shared with the
+    // Eval Author subagent so the two can't drift.
+    ...sharedReadTools(principal, { agentStore, allConnections, evalStore }),
+
     list_agents: tool({
       description: "List the user's own (editable) agents plus the names of all available agents.",
       inputSchema: z.object({}),
@@ -102,17 +178,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           allAgentNames: all.map((a) => a.name),
           note: "Only 'yourAgents' can be edited. Other names are built-in, read-only references.",
         };
-      },
-    }),
-
-    get_agent: tool({
-      description: "Get the full config of one of the user's agents (instructions, connections, capabilities).",
-      inputSchema: z.object({ name: z.string() }),
-      execute: async ({ name }) => {
-        const records = await agentStore.listRecords(principal);
-        const rec = records.find((r) => r.name === name);
-        if (!rec) return { error: `No editable agent named "${name}".` };
-        return rec;
       },
     }),
 
@@ -136,26 +201,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           kind: stored.find((c) => c.name === name)?.kind ?? "mcp",
           authorized: status.get(name)?.authorized ?? true,
         }));
-      },
-    }),
-
-    list_connection_tools: tool({
-      description: "Enumerate the tools a set of connections exposes (to understand their capabilities).",
-      inputSchema: z.object({ connections: z.array(z.string()) }),
-      execute: async ({ connections: names }) => {
-        if (names.length === 0) return [];
-        const opened = await allConnections.hostFor(names).open(principal);
-        try {
-          return Object.keys(opened.tools)
-            .filter((k) => !k.startsWith("connect_"))
-            .map((toolName) => ({
-              name: toolName,
-              description:
-                (opened.tools[toolName] as { description?: string } | undefined)?.description ?? "",
-            }));
-        } finally {
-          await opened.close();
-        }
       },
     }),
 
@@ -239,7 +284,20 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           scope: input.scope,
         };
         await agentStore.upsert(principal, rec);
-        return { saved: true, name, scope: input.scope, note: "Available now in the agent picker." };
+        // Eval nudge, matched to the agent's actual state: the model acts on
+        // tool results far more reliably than on distant prompt instructions.
+        const sets = await evalStore.listSets(personalOwner(principal), name);
+        return {
+          saved: true,
+          name,
+          scope: input.scope,
+          evalSets: sets.map((s) => s.name),
+          note:
+            "Available now in the agent picker. " +
+            (sets.length
+              ? `This agent has eval set(s): ${sets.map((s) => s.name).join(", ")} — offer to run_evals now to prove this change didn't regress anything.`
+              : "No eval set exists yet — after testing, suggest creating one (brief the eval-author) so future changes can be regression-checked."),
+        };
       },
     }),
 
@@ -288,7 +346,264 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             }
           }
         }
-        return { answer, toolCalls, mode: live ? "live" : "safe (mutating tools blocked)" };
+        // Eval nudge at the moment it matters: a test that looks good is
+        // exactly when the workflow says to offer the regression suite.
+        const sets = await evalStore.listSets(personalOwner(principal), normalizeAgentName(name));
+        return {
+          answer,
+          toolCalls,
+          mode: live ? "live" : "safe (mutating tools blocked)",
+          note:
+            sets.length > 0
+              ? `This agent has eval set(s): ${sets.map((s) => s.name).join(", ")} — if you changed the agent, offer run_evals to prove nothing regressed.`
+              : "No eval set exists for this agent yet. If this test looks good, SUGGEST creating an eval set to the user (delegate drafting to the eval-author) so future changes can be regression-checked.",
+        };
+      },
+    }),
+
+    save_eval_set: tool({
+      description:
+        "Create or update a named eval set for an agent (upsert by agentName+setName): repeatable test cases with deterministic checks. Draft the cases yourself from what you know the agent should do — happy paths, edge cases, refusals — and let the user curate. Pauses for the user's approval.",
+      inputSchema: z.object({
+        agentName: z.string().describe("The agent these cases test."),
+        setName: z.string().optional().describe('Set name; defaults to "default".'),
+        cases: z.array(EVAL_CASE_INPUT).min(1).max(30),
+      }),
+      execute: async ({ agentName, setName, cases }) => {
+        const agent = normalizeAgentName(agentName);
+        const known = new Set((await runtime.listAgents(principal)).map((a) => a.name));
+        if (!known.has(agent)) {
+          return { error: `Unknown agent "${agent}". Use list_agents.` };
+        }
+        // A case must carry at least one POPULATED check — `assertions: {}` or
+        // empty arrays would create an always-pass case.
+        const empty = cases.filter((c) => {
+          const a = c.expected.assertions;
+          return !(
+            a?.contains?.length ||
+            a?.notContains?.length ||
+            a?.regex?.length ||
+            c.expected.toolCalls?.length ||
+            c.expected.forbiddenTools?.length ||
+            c.expected.toolOrder?.length ||
+            c.expected.maxTotalToolCalls != null ||
+            c.expected.rubric?.length
+          );
+        });
+        if (empty.length) {
+          return { error: `Case(s) with no checks (would always pass): ${empty.map((c) => c.name).join(", ")}.` };
+        }
+        // Blank check values are as bad as none: `contains: [""]` matches every
+        // answer. Reject any blank/whitespace assertion string or tool name.
+        const blank = cases.filter((c) => {
+          const a = c.expected.assertions;
+          return [
+            ...(a?.contains ?? []),
+            ...(a?.notContains ?? []),
+            ...(a?.regex ?? []),
+            ...(c.expected.forbiddenTools ?? []),
+            ...(c.expected.toolCalls ?? []).map((t) => t.tool),
+            ...(c.expected.toolOrder ?? []),
+            ...(c.expected.rubric ?? []),
+          ].some((s) => s.trim().length === 0);
+        });
+        if (blank.length) {
+          return { error: `Blank assertion value or tool name in case(s): ${blank.map((c) => c.name).join(", ")}.` };
+        }
+        // Reject unsafe/invalid assertion regexes at save time (ReDoS guard) —
+        // the grader also refuses them, but failing here lets you fix the case.
+        const badRegex = cases.filter((c) =>
+          [
+            ...(c.expected.assertions?.regex ?? []),
+            // {"$regex": "..."} arg matchers go through the same grader guards.
+            ...(c.expected.toolCalls ?? []).flatMap((t) => collectMatcherPatterns(t.args)),
+          ].some((r) => {
+            if (isRiskyRegex(r)) return true;
+            try {
+              new RegExp(r);
+              return false;
+            } catch {
+              return true;
+            }
+          }),
+        );
+        if (badRegex.length) {
+          return {
+            error:
+              `Unsafe or invalid regex in case(s): ${badRegex.map((c) => c.name).join(", ")}. ` +
+              "Max 200 chars, no nested quantifiers (e.g. (a+)+); prefer simple patterns or contains.",
+          };
+        }
+        // Stable ids: keep provided ones, slug the rest, dedupe with a suffix.
+        const seen = new Set<string>();
+        const withIds: EvalCase[] = cases.map((c) => {
+          let id = normalizeAgentName(c.id ?? c.name) || "case";
+          while (seen.has(id)) id = `${id}-2`;
+          seen.add(id);
+          return {
+            id,
+            name: c.name,
+            input: c.input,
+            expected: c.expected,
+            ...(c.repeats ? { repeats: c.repeats } : {}),
+          };
+        });
+        const name = setName?.trim() || "default";
+        await evalStore.saveSet({ owner: personalOwner(principal), agentName: agent, name, cases: withIds });
+        return {
+          saved: true,
+          agentName: agent,
+          setName: name,
+          caseCount: withIds.length,
+          note: "Run it with run_evals; keep case ids stable across edits so history stays comparable.",
+        };
+      },
+    }),
+
+    run_evals: tool({
+      description:
+        "Run an agent's eval set: every case runs in an isolated safe-mode thread (approval-gated tools stubbed, other tools execute for real) and is graded deterministically. Returns per-case pass/fail with reasons plus the delta vs the previous run. Costs one full agent run per case — pauses for the user's approval.",
+      inputSchema: z.object({
+        agentName: z.string(),
+        setName: z.string().optional().describe('Defaults to "default".'),
+      }),
+      execute: async ({ agentName, setName }, options) => {
+        const agent = normalizeAgentName(agentName);
+        const name = setName?.trim() || "default";
+        const owner = personalOwner(principal);
+        const set = await evalStore.getSet(owner, agent, name);
+        if (!set) {
+          return { error: `No eval set "${name}" for agent "${agent}". Create one with save_eval_set.` };
+        }
+        // Pin the agent's config so this run stays comparable after edits.
+        const records = await agentStore.listRecords(principal);
+        const snapshot = records.find((r) => r.name === agent) ?? null;
+        const previous = (await evalStore.listRuns(owner, agent, name, 1)).at(0);
+
+        // Rubric criteria need the pinned judge. modelFor() silently falls
+        // back to the default model for unknown ids — that would silently
+        // change the judge, so check the catalog explicitly and error loudly.
+        const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
+        if (needsJudge && !models.some((m) => m.id === JUDGE_MODEL_ID)) {
+          return {
+            error:
+              `This set has rubric criteria, which are graded by the pinned judge model "${JUDGE_MODEL_ID}" — ` +
+              "but it's not in the model catalog (provider key missing or catalog offline). " +
+              "Fix the provider setup or remove the rubric checks.",
+          };
+        }
+        const judgeModel = needsJudge ? modelFor(JUDGE_MODEL_ID) : undefined;
+
+        // Stream live progress into the chat while the cases run: one
+        // `data-eval-progress` part, reconciled in place by id, that the
+        // EvalRunCard renders (the run takes ~a minute per wave of cases —
+        // without this the turn is silent until the tool result lands).
+        const env = options as ToolCallEnv;
+        const soFar: EvalProgressData["results"] = [];
+        // Progress ticks count ATTEMPTS (a case with repeats: 3 is 3 ticks) so
+        // the card's counter reflects work done, not just cases resolved.
+        const totalAttempts = set.cases.reduce((n, c) => n + repeatsOf(c), 0);
+        const writeProgress = (completed: number) => {
+          env.context?.writer?.write({
+            type: "data-eval-progress",
+            id: `evalprog_${env.toolCallId ?? "run"}`,
+            data: {
+              toolCallId: env.toolCallId,
+              agentName: agent,
+              setName: name,
+              total: totalAttempts,
+              completed,
+              totalCases: set.cases.length,
+              results: soFar,
+            } satisfies EvalProgressData,
+          });
+        };
+        writeProgress(0);
+
+        const results = await runEvalCases({
+          runtime,
+          principal,
+          agent,
+          cases: set.cases,
+          judgeModel,
+          // onResult fires before the same unit's onAttempt tick, so the new
+          // row is always included in the very next progress write.
+          onResult: (r) => soFar.push(compactResult(r)),
+          onAttempt: (completed) => writeProgress(completed),
+        });
+        const passed = results.filter((r) => r.pass).length;
+        const failed = results.length - passed;
+        const run = await evalStore.saveRun({
+          owner,
+          agentName: agent,
+          setName: name,
+          agentSnapshot: snapshot,
+          results,
+          passCount: passed,
+          failCount: failed,
+          // Recorded like agentSnapshot: which judge graded this run's rubrics.
+          judgeModelId: needsJudge ? JUDGE_MODEL_ID : null,
+        });
+        const delta = previous ? passed - previous.passCount : undefined;
+        // Attempt-level pass RATE — with repeats in play this moves when a
+        // case gets flakier even though its majority verdict (and passCount)
+        // doesn't, so run-over-run comparison sees degradation early.
+        const passRate = runPassRate(results);
+        const prevRate = previous ? runPassRate(previous.results) : undefined;
+        const rateDelta = prevRate === undefined ? undefined : Math.round((passRate - prevRate) * 100);
+        const hasRepeats = results.some((r) => r.repeats != null);
+        return {
+          runId: run.id,
+          agentName: agent,
+          setName: name,
+          passed,
+          failed,
+          total: results.length,
+          passRate: Math.round(passRate * 1000) / 1000,
+          judgeModelId: needsJudge ? JUDGE_MODEL_ID : undefined,
+          previous: previous
+            ? {
+                runId: previous.id,
+                passed: previous.passCount,
+                total: previous.passCount + previous.failCount,
+                passRate: prevRate === undefined ? undefined : Math.round(prevRate * 1000) / 1000,
+              }
+            : null,
+          results: results.map(compactResult),
+          summary:
+            `${passed}/${results.length} passed` +
+            (delta === undefined ? "" : delta === 0 ? " (no change)" : ` (${delta > 0 ? "+" : ""}${delta} vs previous)`) +
+            (hasRepeats
+              ? ` · pass rate ${Math.round(passRate * 100)}%` +
+                (rateDelta === undefined ? "" : ` (${rateDelta >= 0 ? "+" : ""}${rateDelta}pp vs previous)`)
+              : ""),
+        };
+      },
+    }),
+
+    list_eval_runs: tool({
+      description: "Past eval runs for an agent (newest first) — scores over time, to judge whether changes helped.",
+      inputSchema: z.object({
+        agentName: z.string(),
+        setName: z.string().optional(),
+        limit: z.number().optional(),
+      }),
+      execute: async ({ agentName, setName, limit }) => {
+        const runs = await evalStore.listRuns(
+          personalOwner(principal),
+          normalizeAgentName(agentName),
+          setName?.trim() || undefined,
+          limit ?? 10,
+        );
+        return runs.map((r) => ({
+          runId: r.id,
+          setName: r.setName,
+          passed: r.passCount,
+          failed: r.failCount,
+          total: r.passCount + r.failCount,
+          failedCases: r.results.filter((c) => !c.pass).map((c) => c.caseName),
+          at: new Date(r.createdAt).toISOString(),
+        }));
       },
     }),
 
@@ -332,6 +647,15 @@ SCOPE: a tool is personal (default) or org-shared (scope:"org"). Match it to the
 
 Flow: write the program → call test_tool (pass sample \`input\` and the same allowedHosts) to confirm it runs and its fetches resolve — a compile error, thrown error, or fetch failure comes back in the result, so fix and re-test until correct → save_tool with a clear name, a description covering its inputs/output, an input JSON Schema, and allowedHosts. Then attach it to an agent via save_agent's authoredTools. Saved tools are visible and editable by the user on the Tools page.
 
+EVALS (save_eval_set / run_evals / list_eval_sets / list_eval_runs + the eval-author subagent):
+test_agent is one ad-hoc trial; an EVAL SET is the repeatable version — the agent's regression suite. Use it to prove a change helped instead of eyeballing one answer.
+- A case = a name, one user message (input), and checks (expected): assertions on the answer (contains / notContains / regex), toolCalls the agent must make (optionally with an args subset and maxCalls), forbiddenTools, toolOrder (relative order), maxTotalToolCalls (loop budget), and rubric — plain-language criteria graded by a pinned LLM judge for qualities substrings can't express. A failed rubric criterion fails the case like any other check; a judge infra error never does (it shows as a warning). Every case needs at least one check. A case may set repeats (2–5) to measure flakiness: majority verdict + recorded pass rate.
+- DRAFTING IS DELEGATED — never draft cases inline. Call spawn_agent(agent: "eval-author") with a compact brief distilled from this conversation: the target agent's name, its purpose, expected behaviors, edge cases, refusal/escalation rules, and anything the user said should be tested. The eval-author reads the agent's config, existing sets, and connection tools itself, and answers with ONLY a JSON array of cases matching save_eval_set's schema. Show those cases to the user, apply their edits, then save_eval_set (its validation catches empty checks and bad regexes). If the answer isn't valid JSON, re-prompt the SAME threadId to reply with only the corrected JSON.
+- Keep case ids STABLE across edits (save_eval_set defaults id to a slug of name) — run history is only comparable when ids persist. When a set already exists, tell the eval-author it's an EDIT so it preserves existing ids.
+- run_evals runs every case in an isolated safe-mode thread (approval-gated tools stubbed; other tools run for real) and returns per-case pass/fail with reasons plus the score delta vs the previous run. It costs one full agent run per case. The user watches live per-case progress in an in-chat card while it runs — don't re-list every case afterwards; go straight to the failures and what you'll change.
+- DIAGNOSIS IS DELEGATED TOO — never read failure transcripts yourself. Continue the SAME eval-author thread (pass its threadId to spawn_agent) with the runId and which cases failed; it reads the transcripts and answers a JSON array of verdicts {caseId, cause, fixTarget: "agent"|"case"|"rubric", suggestion}. Apply them: fixTarget "agent" → fold the suggestion into the instructions and save_agent; fixTarget "case" → update that case and save_eval_set; fixTarget "rubric" → replace that rubric criterion with the suggested wording and save_eval_set. Then run_evals again and report the delta ("8/12 → 11/12"). Iterate until the set passes or the user is satisfied.
+- Keep ONE eval-author thread per agent's eval work — reuse the threadId from the first spawn_agent for edits and diagnoses, so the eval-author remembers why each check exists.
+
 WORKFLOW:
 1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).
 2. Discover before proposing: call list_models and list_connections (and list_connection_tools for any you'll wire). If the agent needs an external API or real computation, AUTHOR + test_tool the tool(s) it needs now (see BUILDING TOOLS), to attach via authoredTools.
@@ -339,9 +663,10 @@ WORKFLOW:
 4. Propose: summarize the agent in plain language (name, model, connections, key instruction points) and get a quick confirmation.
 5. Call save_agent. It pauses for the user's approval — they'll see the full spec; that's expected.
 6. TEST IT: after saving, offer to test_agent with a realistic message. Read the answer + tool calls it returns, and tell the user how it did. If it's off (wrong tone, missed a tool, weak reasoning), refine the instructions and save_agent again, then re-test — iterate until it's good. test_agent blocks mutating tools by default (no real side effects); only pass live=true if the user explicitly wants a real end-to-end run.
-7. Confirm it's ready and that they can pick it from the agent list or refine it on the Agents page.
+7. EVAL IT: once the agent basically works, offer to create an eval set (see EVALS) — brief the eval-author subagent to draft the cases, let the user curate, save_eval_set, then run_evals. On failures, have the eval-author diagnose (same thread), apply its verdicts, and re-run until the score is good; report each delta.
+8. Confirm it's ready and that they can pick it from the agent list or refine it on the Agents page.
 
-MODIFYING an existing agent: call get_agent first, change only what's needed, then save_agent with the SAME name and scope. Re-test with test_agent to confirm the change had the intended effect.
+MODIFYING an existing agent: call get_agent first, change only what's needed, then save_agent with the SAME name and scope. Re-test with test_agent to confirm the change had the intended effect — and if the agent has an eval set (list_eval_sets), run_evals to prove the change didn't regress anything.
 
 USING HISTORY: when the user refers to past work ("make an agent like in that chat"), use list_chats + read_chat to read the relevant conversation and ground the prompt/connections in what actually happened.
 
@@ -349,6 +674,11 @@ RULES:
 - You can only create/edit the user's own agents (those from list_agents → yourAgents). Built-in agents are read-only references — inspect for inspiration, don't overwrite their names.
 - Never invent a modelId or connection name. Only use values from list_models / list_connections.
 - delete_agent is destructive and pauses for approval; only call it when the user clearly asks.`,
+    // Eval drafting + failure diagnosis delegate to the read-only Eval Author
+    // (the runtime injects a `spawn_agent` tool for it). It MUST stay
+    // read-only: subagent runs are auto-approved, so any write tool on it
+    // would bypass the user-approval gates below.
+    subagents: ["eval-author"],
     // Host tools bound to the chatting user's Principal.
     toolSources: [
       {
@@ -365,6 +695,9 @@ RULES:
       delete_agent: "user-approval",
       save_tool: "user-approval",
       delete_tool: "user-approval",
+      // Evals: saving persists, running costs one agent run per case.
+      save_eval_set: "user-approval",
+      run_evals: "user-approval",
     },
     smoothStream: true,
   },

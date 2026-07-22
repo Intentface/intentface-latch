@@ -32,6 +32,7 @@ export function Message({
   toolLabels,
   renderApproval,
   renderSubagent,
+  renderTool,
   onRegenerate,
   className,
 }: {
@@ -41,6 +42,12 @@ export function Message({
   renderApproval?: (part: ToolPart) => ReactNode;
   /** Render a `spawn_agent` tool call (e.g. an expandable subagent thread). */
   renderSubagent?: (part: ToolPart) => ReactNode;
+  /**
+   * Custom renderer for specific tool parts (e.g. an eval-run card). Return a
+   * node to replace that part's default Steps row; return undefined to keep it.
+   * Approval-requested parts still go to `renderApproval` first.
+   */
+  renderTool?: (part: ToolPart) => ReactNode | undefined;
   /** Called when the user clicks the regenerate action (assistant messages). */
   onRegenerate?: () => void;
   className?: string;
@@ -89,12 +96,21 @@ export function Message({
               ? seg.parts.filter((p) => stateOf(p) === "approval-requested")
               : [];
             const spawns = renderSubagent ? seg.parts.filter(isSpawnAgent) : [];
-            const rest = seg.parts.filter(
-              (p) => stateOf(p) !== "approval-requested" && !(renderSubagent && isSpawnAgent(p)),
-            );
+            const custom: { part: ToolPart; node: ReactNode }[] = [];
+            const rest: ToolPart[] = [];
+            for (const p of seg.parts) {
+              if (stateOf(p) === "approval-requested" && renderApproval) continue;
+              if (renderSubagent && isSpawnAgent(p)) continue;
+              const node = renderTool?.(p);
+              if (node !== undefined && node !== null) custom.push({ part: p, node });
+              else rest.push(p);
+            }
             return (
               <div key={i} className="space-y-2">
                 <Steps tools={rest} labels={toolLabels} />
+                {custom.map(({ part, node }) => (
+                  <div key={part.toolCallId}>{node}</div>
+                ))}
                 {spawns.map((p) => (
                   <div key={p.toolCallId}>{renderSubagent?.(p)}</div>
                 ))}
