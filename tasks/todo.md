@@ -205,6 +205,18 @@ Open product question (from the pre-commit review): eval-author appears in the
 user-facing agent picker; its instructions handle direct chats, but if it
 should be hidden an internal-only flag on AgentMeta is the likely shape.
 
+## Eval nudges on save_agent/test_agent results (2026-07-22)
+
+User request: the builder should proactively suggest evaluating a newly built
+agent. Prompt step 7 already said so but was too far from the moment — the
+model ignored it in live testing. Fix: both save_agent and test_agent results
+now carry an eval-state note (no sets → suggest creating one via eval-author;
+sets exist → offer run_evals regression check). Verified live: built a
+throwaway haiku-bot, after the test the builder asked "Would you like to set
+up an eval set to lock in this behavior for future changes?" (test agent
+deleted afterwards). Lesson: nudge in the tool result at the decision moment,
+not (only) in distant prompt instructions.
+
 ## Live subagent streaming (2026-07-22)
 
 User request: the "Delegated to …" element only showed the sub-conversation

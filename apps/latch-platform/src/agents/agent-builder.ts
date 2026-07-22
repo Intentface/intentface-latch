@@ -284,7 +284,20 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           scope: input.scope,
         };
         await agentStore.upsert(principal, rec);
-        return { saved: true, name, scope: input.scope, note: "Available now in the agent picker." };
+        // Eval nudge, matched to the agent's actual state: the model acts on
+        // tool results far more reliably than on distant prompt instructions.
+        const sets = await evalStore.listSets(personalOwner(principal), name);
+        return {
+          saved: true,
+          name,
+          scope: input.scope,
+          evalSets: sets.map((s) => s.name),
+          note:
+            "Available now in the agent picker. " +
+            (sets.length
+              ? `This agent has eval set(s): ${sets.map((s) => s.name).join(", ")} — offer to run_evals now to prove this change didn't regress anything.`
+              : "No eval set exists yet — after testing, suggest creating one (brief the eval-author) so future changes can be regression-checked."),
+        };
       },
     }),
 
@@ -333,7 +346,18 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             }
           }
         }
-        return { answer, toolCalls, mode: live ? "live" : "safe (mutating tools blocked)" };
+        // Eval nudge at the moment it matters: a test that looks good is
+        // exactly when the workflow says to offer the regression suite.
+        const sets = await evalStore.listSets(personalOwner(principal), normalizeAgentName(name));
+        return {
+          answer,
+          toolCalls,
+          mode: live ? "live" : "safe (mutating tools blocked)",
+          note:
+            sets.length > 0
+              ? `This agent has eval set(s): ${sets.map((s) => s.name).join(", ")} — if you changed the agent, offer run_evals to prove nothing regressed.`
+              : "No eval set exists for this agent yet. If this test looks good, SUGGEST creating an eval set to the user (delegate drafting to the eval-author) so future changes can be regression-checked.",
+        };
       },
     }),
 
