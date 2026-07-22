@@ -176,6 +176,26 @@ for a real motivating failure.
     DIAGNOSE gains fixTarget:"rubric")
 
 Original context: /tmp/handoff-eval-grader-tiers.md
+
+### Review (2026-07-22)
+
+Shipped all three grader tiers in commits eedde18 (eval-author + review fixes),
+5336e7d (trajectory checks), e08a75e (repeats), a674ffd (judge) on PR #6.
+CodeRabbit had already APPROVED the branch before today's pushes.
+
+Verification: 41 vitest + 3 live-gated green, tsc + eslint clean per commit;
+judge meta-eval 3/3 against the REAL pinned Haiku (LIVE_JUDGE=1). Live browser
+run (fresh builder chat, restarted dev server): edited the nutrition set via
+the builder (rubric + repeats:2 on nutrition-mid-race-fueling, ids stable),
+approved save + run → live card counted attempts 0/6 → final 5/5 · ±0 with a
+"2/2 runs" chip → expanded row shows the Judge section with the criterion and
+the judge's reasoning → DB row has judge_model_id=claude-haiku-4-5 and the
+per-attempt fields persisted.
+
+Open product question (from the pre-commit review): eval-author appears in the
+user-facing agent picker; its instructions handle direct chats, but if it
+should be hidden an internal-only flag on AgentMeta is the likely shape.
+- [ ] 4. (later) Multi-turn cases — wait for a real multi-turn failure
 builder briefed eval-author via spawn_agent ("Delegated to eval-author" thread in
 UI) → strict-JSON cases came back with REAL tool names (runner-kn_orient, self-
 discovered via get_agent) → curation table → approved save_eval_set → run_evals
