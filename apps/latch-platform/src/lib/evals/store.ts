@@ -41,6 +41,22 @@ export interface EvalExpectation {
   toolOrder?: string[];
   /** Budget: max tool calls in the whole case (catches runaway loops). */
   maxTotalToolCalls?: number;
+  /**
+   * Plain-language criteria graded by a pinned LLM judge (one call per
+   * criterion, temperature 0). A failed criterion FAILS the case, like any
+   * deterministic check; a judge infra error does not. Max 5 per case.
+   */
+  rubric?: string[];
+}
+
+/** The judge's verdict on one rubric criterion. */
+export interface RubricVerdict {
+  criterion: string;
+  pass: boolean;
+  /** One short sentence from the judge on why. */
+  reason: string;
+  /** Set when the judge CALL failed (bad JSON, API error) — never fails the case. */
+  error?: string;
 }
 
 export interface EvalCase {
@@ -87,6 +103,8 @@ export interface EvalAttemptResult {
   toolCalls: EvalToolCall[];
   /** Set when the run itself errored (agent crash, not a failed grade). */
   error?: string;
+  /** Judge verdicts, one per rubric criterion (only when the case has a rubric). */
+  rubric?: RubricVerdict[];
 }
 
 export interface EvalCaseResult extends EvalAttemptResult {
@@ -125,6 +143,8 @@ export interface EvalRun {
   results: EvalCaseResult[];
   passCount: number;
   failCount: number;
+  /** The pinned judge model used for rubric criteria (null when the set has none). */
+  judgeModelId?: string | null;
   createdAt: number;
 }
 
@@ -141,6 +161,8 @@ export interface CompactCaseResult {
   /** Attempts run / passed (only for repeated cases) — the flakiness signal. */
   repeats?: number;
   passes?: number;
+  /** Judge verdicts per rubric criterion (shown distinctly in the card). */
+  rubric?: RubricVerdict[];
 }
 
 export const compactResult = (r: EvalCaseResult): CompactCaseResult => ({
@@ -154,6 +176,7 @@ export const compactResult = (r: EvalCaseResult): CompactCaseResult => ({
   error: r.error,
   repeats: r.repeats,
   passes: r.passes,
+  rubric: r.rubric,
 });
 
 /**
@@ -203,8 +226,13 @@ export async function migrateEvals(client: Client): Promise<void> {
     results TEXT NOT NULL,
     pass_count INTEGER NOT NULL,
     fail_count INTEGER NOT NULL,
+    judge_model_id TEXT,
     created_at INTEGER NOT NULL
   )`);
+  // Pre-judge-tier tables lack the column; ADD COLUMN fails once it exists.
+  await client
+    .execute(`ALTER TABLE latch_eval_runs ADD COLUMN judge_model_id TEXT`)
+    .catch(() => {});
   await client.execute(
     `CREATE INDEX IF NOT EXISTS latch_eval_runs_owner_agent ON latch_eval_runs (owner, agent_name, created_at)`,
   );
@@ -244,6 +272,7 @@ const rowToRun = (r: Record<string, unknown>): EvalRun => ({
   })(),
   passCount: Number(r.pass_count),
   failCount: Number(r.fail_count),
+  judgeModelId: r.judge_model_id == null ? null : String(r.judge_model_id),
   createdAt: Number(r.created_at),
 });
 
@@ -297,8 +326,8 @@ export function createEvalStore(client: Client): EvalStore {
     async saveRun(run) {
       const full: EvalRun = { ...run, id: newRunId(), createdAt: Date.now() };
       await client.execute({
-        sql: `INSERT INTO latch_eval_runs (id, owner, agent_name, set_name, agent_snapshot, results, pass_count, fail_count, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO latch_eval_runs (id, owner, agent_name, set_name, agent_snapshot, results, pass_count, fail_count, judge_model_id, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           full.id,
           full.owner,
@@ -308,6 +337,7 @@ export function createEvalStore(client: Client): EvalStore {
           JSON.stringify(full.results),
           full.passCount,
           full.failCount,
+          full.judgeModelId ?? null,
           full.createdAt,
         ],
       });

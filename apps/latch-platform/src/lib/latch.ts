@@ -7,6 +7,7 @@ import {
   
   
 } from "@intentface/latch-core";
+import type { LanguageModel } from "ai";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createSqliteAdapter,
@@ -72,6 +73,7 @@ let cached:
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
       models: ModelInfo[];
+      modelFor: (id: string) => LanguageModel;
       handler: LatchHandler;
     }
   | undefined;
@@ -89,6 +91,7 @@ export async function getLatch(): Promise<{
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
   models: ModelInfo[];
+  modelFor: (id: string) => LanguageModel;
   handler: LatchHandler;
 }> {
   if (cached) return cached;
@@ -258,6 +261,7 @@ export async function getLatch(): Promise<{
     authoredTools,
     evalStore,
     models: catalog.models,
+    modelFor: catalog.modelFor,
     handler,
   };
   return cached;

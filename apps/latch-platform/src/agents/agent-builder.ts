@@ -7,6 +7,7 @@ import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
 import { collectMatcherPatterns, isRiskyRegex } from "@/lib/evals/grade";
+import { JUDGE_MODEL_ID } from "@/lib/evals/judge";
 import { repeatsOf, runEvalCases } from "@/lib/evals/run";
 import { compactResult, runPassRate } from "@/lib/evals/store";
 import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
@@ -92,6 +93,13 @@ const EVAL_EXPECTED = z.object({
     .min(1)
     .optional()
     .describe("Budget: max tool calls in the whole case (catches runaway loops)."),
+  rubric: z
+    .array(z.string())
+    .max(5)
+    .optional()
+    .describe(
+      "Plain-language criteria a pinned LLM judge grades (one call per criterion, temperature 0) — for qualities substring checks can't express ('explains WHY, not just what'). A failed criterion fails the case; keep each criterion one observable quality.",
+    ),
 });
 
 const EVAL_CASE_INPUT = z.object({
@@ -120,7 +128,7 @@ type ToolCallEnv = { toolCallId?: string; context?: { writer?: TurnWriter } };
 async function builderTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy import avoids a static import cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
-  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, authoredTools, evalStore } =
+  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, modelFor, authoredTools, evalStore } =
     await getLatch();
 
   const capsToExec = (
@@ -354,7 +362,8 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             c.expected.toolCalls?.length ||
             c.expected.forbiddenTools?.length ||
             c.expected.toolOrder?.length ||
-            c.expected.maxTotalToolCalls != null
+            c.expected.maxTotalToolCalls != null ||
+            c.expected.rubric?.length
           );
         });
         if (empty.length) {
@@ -371,6 +380,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             ...(c.expected.forbiddenTools ?? []),
             ...(c.expected.toolCalls ?? []).map((t) => t.tool),
             ...(c.expected.toolOrder ?? []),
+            ...(c.expected.rubric ?? []),
           ].some((s) => s.trim().length === 0);
         });
         if (blank.length) {
@@ -446,6 +456,20 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const snapshot = records.find((r) => r.name === agent) ?? null;
         const previous = (await evalStore.listRuns(owner, agent, name, 1)).at(0);
 
+        // Rubric criteria need the pinned judge. modelFor() silently falls
+        // back to the default model for unknown ids — that would silently
+        // change the judge, so check the catalog explicitly and error loudly.
+        const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
+        if (needsJudge && !models.some((m) => m.id === JUDGE_MODEL_ID)) {
+          return {
+            error:
+              `This set has rubric criteria, which are graded by the pinned judge model "${JUDGE_MODEL_ID}" — ` +
+              "but it's not in the model catalog (provider key missing or catalog offline). " +
+              "Fix the provider setup or remove the rubric checks.",
+          };
+        }
+        const judgeModel = needsJudge ? modelFor(JUDGE_MODEL_ID) : undefined;
+
         // Stream live progress into the chat while the cases run: one
         // `data-eval-progress` part, reconciled in place by id, that the
         // EvalRunCard renders (the run takes ~a minute per wave of cases —
@@ -477,6 +501,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           principal,
           agent,
           cases: set.cases,
+          judgeModel,
           // onResult fires before the same unit's onAttempt tick, so the new
           // row is always included in the very next progress write.
           onResult: (r) => soFar.push(compactResult(r)),
@@ -492,6 +517,8 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           results,
           passCount: passed,
           failCount: failed,
+          // Recorded like agentSnapshot: which judge graded this run's rubrics.
+          judgeModelId: needsJudge ? JUDGE_MODEL_ID : null,
         });
         const delta = previous ? passed - previous.passCount : undefined;
         // Attempt-level pass RATE — with repeats in play this moves when a
@@ -509,6 +536,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           failed,
           total: results.length,
           passRate: Math.round(passRate * 1000) / 1000,
+          judgeModelId: needsJudge ? JUDGE_MODEL_ID : undefined,
           previous: previous
             ? {
                 runId: previous.id,
@@ -597,11 +625,11 @@ Flow: write the program → call test_tool (pass sample \`input\` and the same a
 
 EVALS (save_eval_set / run_evals / list_eval_sets / list_eval_runs + the eval-author subagent):
 test_agent is one ad-hoc trial; an EVAL SET is the repeatable version — the agent's regression suite. Use it to prove a change helped instead of eyeballing one answer.
-- A case = a name, one user message (input), and deterministic checks (expected): assertions on the answer (contains / notContains / regex), toolCalls the agent must make (optionally with an args subset), and forbiddenTools it must not touch. Every case needs at least one check.
+- A case = a name, one user message (input), and checks (expected): assertions on the answer (contains / notContains / regex), toolCalls the agent must make (optionally with an args subset and maxCalls), forbiddenTools, toolOrder (relative order), maxTotalToolCalls (loop budget), and rubric — plain-language criteria graded by a pinned LLM judge for qualities substrings can't express. A failed rubric criterion fails the case like any other check; a judge infra error never does (it shows as a warning). Every case needs at least one check. A case may set repeats (2–5) to measure flakiness: majority verdict + recorded pass rate.
 - DRAFTING IS DELEGATED — never draft cases inline. Call spawn_agent(agent: "eval-author") with a compact brief distilled from this conversation: the target agent's name, its purpose, expected behaviors, edge cases, refusal/escalation rules, and anything the user said should be tested. The eval-author reads the agent's config, existing sets, and connection tools itself, and answers with ONLY a JSON array of cases matching save_eval_set's schema. Show those cases to the user, apply their edits, then save_eval_set (its validation catches empty checks and bad regexes). If the answer isn't valid JSON, re-prompt the SAME threadId to reply with only the corrected JSON.
 - Keep case ids STABLE across edits (save_eval_set defaults id to a slug of name) — run history is only comparable when ids persist. When a set already exists, tell the eval-author it's an EDIT so it preserves existing ids.
 - run_evals runs every case in an isolated safe-mode thread (approval-gated tools stubbed; other tools run for real) and returns per-case pass/fail with reasons plus the score delta vs the previous run. It costs one full agent run per case. The user watches live per-case progress in an in-chat card while it runs — don't re-list every case afterwards; go straight to the failures and what you'll change.
-- DIAGNOSIS IS DELEGATED TOO — never read failure transcripts yourself. Continue the SAME eval-author thread (pass its threadId to spawn_agent) with the runId and which cases failed; it reads the transcripts and answers a JSON array of verdicts {caseId, cause, fixTarget: "agent"|"case", suggestion}. Apply them: fixTarget "agent" → fold the suggestion into the instructions and save_agent; fixTarget "case" → update that case and save_eval_set. Then run_evals again and report the delta ("8/12 → 11/12"). Iterate until the set passes or the user is satisfied.
+- DIAGNOSIS IS DELEGATED TOO — never read failure transcripts yourself. Continue the SAME eval-author thread (pass its threadId to spawn_agent) with the runId and which cases failed; it reads the transcripts and answers a JSON array of verdicts {caseId, cause, fixTarget: "agent"|"case"|"rubric", suggestion}. Apply them: fixTarget "agent" → fold the suggestion into the instructions and save_agent; fixTarget "case" → update that case and save_eval_set; fixTarget "rubric" → replace that rubric criterion with the suggested wording and save_eval_set. Then run_evals again and report the delta ("8/12 → 11/12"). Iterate until the set passes or the user is satisfied.
 - Keep ONE eval-author thread per agent's eval work — reuse the threadId from the first spawn_agent for edits and diagnoses, so the eval-author remembers why each check exists.
 
 WORKFLOW:

@@ -1,6 +1,8 @@
+import type { LanguageModel } from "ai";
 import type { Runtime } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import { gradeCase } from "./grade";
+import { judgeRubric } from "./judge";
 import type { EvalAttemptResult, EvalCase, EvalCaseResult, EvalToolCall } from "./store";
 
 /** Attempts a case runs: its opt-in `repeats` (bounded), default 1. */
@@ -21,6 +23,7 @@ export async function runEvalCases({
   agent,
   cases,
   concurrency = 4,
+  judgeModel,
   onResult,
   onAttempt,
 }: {
@@ -29,6 +32,8 @@ export async function runEvalCases({
   agent: string;
   cases: EvalCase[];
   concurrency?: number;
+  /** Pinned judge for rubric criteria — required iff any case declares a rubric. */
+  judgeModel?: LanguageModel;
   /** Fires as each CASE finishes all its attempts (completion order). */
   onResult?: (result: EvalCaseResult, completedCases: number, totalCases: number) => void;
   /** Fires as each ATTEMPT finishes — the finer-grained progress tick. */
@@ -44,8 +49,30 @@ export async function runEvalCases({
       });
       const history = await runtime.loadHistory({ chatId: threadId, principal });
       const toolCalls = extractToolCalls(history);
-      const { pass, reasons } = await gradeCase(c, answer, toolCalls);
-      return { pass, reasons, threadId, answerPreview: answer.slice(0, 400), toolCalls };
+      const { reasons } = await gradeCase(c, answer, toolCalls);
+      // Judge tier: a failed criterion fails the attempt like any check; a
+      // judge INFRA error (v.error) surfaces in the verdicts but never fails.
+      let rubric;
+      if (judgeModel && c.expected.rubric?.length) {
+        rubric = await judgeRubric({
+          model: judgeModel,
+          input: c.input,
+          answer,
+          toolCalls,
+          criteria: c.expected.rubric,
+        });
+        for (const v of rubric) {
+          if (!v.error && !v.pass) reasons.push(`rubric "${v.criterion}": ${v.reason}`);
+        }
+      }
+      return {
+        pass: reasons.length === 0,
+        reasons,
+        threadId,
+        answerPreview: answer.slice(0, 400),
+        toolCalls,
+        rubric,
+      };
     } catch (e) {
       return {
         pass: false,
@@ -105,6 +132,7 @@ function aggregateCase(c: EvalCase, attempts: EvalAttemptResult[]): EvalCaseResu
     threadId: rep.threadId,
     answerPreview: rep.answerPreview,
     toolCalls: rep.toolCalls,
+    rubric: rep.rubric,
     error: attempts.every((a) => a.error) ? rep.error : undefined,
     repeats: attempts.length,
     passes,

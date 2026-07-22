@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MockLanguageModelV3 } from "ai/test";
 import { extractToolCalls, runEvalCases } from "./run";
 import type { EvalCase } from "./store";
 import type { Principal } from "@/lib/session";
@@ -124,6 +125,56 @@ describe("runEvalCases", () => {
     expect(attemptTicks.map(([c]) => c)).toEqual([1, 2, 3, 4]);
     expect(attemptTicks.every(([, t]) => t === 4)).toBe(true);
     expect(resultTicks.sort()).toEqual(["a", "b"]);
+  });
+
+  it("fails the case on a rubric verdict but not on a judge infra error", async () => {
+    const judgeText = (text: string) =>
+      new MockLanguageModelV3({
+        doGenerate: async () => ({
+          content: [{ type: "text" as const, text }],
+          finishReason: { unified: "stop" as const, raw: undefined },
+          usage: {
+            inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        }),
+      });
+    const rubricCase: EvalCase = {
+      id: "r",
+      name: "explains why",
+      input: "hello",
+      expected: { assertions: { contains: ["hi"] }, rubric: ["explains the why"] },
+    };
+
+    // Deterministic checks pass, judge says the criterion fails → case FAILS.
+    const failed = await runEvalCases({
+      runtime: fakeRuntime,
+      principal,
+      agent: "x",
+      cases: [rubricCase],
+      judgeModel: judgeText('{"pass": false, "reason": "no why given"}'),
+    });
+    expect(failed[0].pass).toBe(false);
+    expect(failed[0].reasons[0]).toBe('rubric "explains the why": no why given');
+    expect(failed[0].rubric?.[0].pass).toBe(false);
+
+    // Judge infra failure (malformed after retry) → verdict carries error, case PASSES.
+    const infra = await runEvalCases({
+      runtime: fakeRuntime,
+      principal,
+      agent: "x",
+      cases: [rubricCase],
+      judgeModel: judgeText("not json"),
+    });
+    expect(infra[0].pass).toBe(true);
+    expect(infra[0].reasons).toEqual([]);
+    expect(infra[0].rubric?.[0].error).toContain("judge call failed");
+
+    // No judge model wired → rubric silently ungraded is NOT a thing at this
+    // layer either: run_evals always resolves one; here rubric just stays unset.
+    const without = await runEvalCases({ runtime: fakeRuntime, principal, agent: "x", cases: [rubricCase] });
+    expect(without[0].rubric).toBeUndefined();
   });
 
   it("captures a crashed run as a failed result instead of throwing", async () => {

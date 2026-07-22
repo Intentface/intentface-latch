@@ -100,8 +100,37 @@ describe("eval store (in-memory libsql)", () => {
     const run = await store.getRun(owner, saved.id);
     expect(run?.id).toBe(saved.id);
     expect(run?.results[0].threadId).toBe("sub_x");
+    expect(run?.judgeModelId).toBeNull();
     // Another owner can't read it; unknown ids miss cleanly.
     expect(await store.getRun("other/owner", saved.id)).toBeNull();
     expect(await store.getRun(owner, "evr_nope")).toBeNull();
+  });
+
+  it("records the judge model on rubric runs and round-trips rubric verdicts", async () => {
+    const saved = await store.saveRun({
+      owner,
+      agentName: "b",
+      setName: "default",
+      agentSnapshot: null,
+      results: [
+        {
+          caseId: "c1",
+          caseName: "c1",
+          pass: false,
+          reasons: ['rubric "explains why": no reasoning'],
+          answerPreview: "…",
+          toolCalls: [],
+          rubric: [{ criterion: "explains why", pass: false, reason: "no reasoning" }],
+        },
+      ],
+      passCount: 0,
+      failCount: 1,
+      judgeModelId: "claude-haiku-4-5",
+    });
+    const run = await store.getRun(owner, saved.id);
+    expect(run?.judgeModelId).toBe("claude-haiku-4-5");
+    expect(run?.results[0].rubric).toEqual([
+      { criterion: "explains why", pass: false, reason: "no reasoning" },
+    ]);
   });
 });

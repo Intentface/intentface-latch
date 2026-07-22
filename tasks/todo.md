@@ -155,7 +155,9 @@ for a real motivating failure.
     persisted on the case result; run_evals reports attempt-level passRate +
     pp delta (runPassRate degrades old boolean history gracefully); progress
     counts attempts, card gets per-row "2/3 runs" chip + case-based bar
-- [ ] 3. LLM-judge rubric tier — design settled in grill session 2026-07-22:
+- [x] 3. LLM-judge rubric tier — SHIPPED per the grilled design (all bullets
+  below implemented; judge meta-eval passed 3/3 against the REAL pinned Haiku
+  via LIVE_JUDGE=1; catalog confirms claude-haiku-4-5 at $1/$5 per 1M):
   - Pass semantics: rubric criterion fail = CASE FAIL (one honest verdict);
     verdicts in a distinct result field; judge INFRA errors never fail a case;
     deterministic fail always fails regardless of rubric

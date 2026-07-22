@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ChevronDown, FlaskConical, Loader2, X } from "lucide-react";
+import { Check, ChevronDown, FlaskConical, Loader2, Scale, TriangleAlert, X } from "lucide-react";
 import { cn, Message } from "@intentface/latch-ui";
 import type { AppUIMessage, ToolPart } from "@intentface/latch-ui";
 import type { AppMessage } from "@intentface/latch-core";
@@ -169,6 +169,32 @@ function CaseRow({ result }: { result: CompactCaseResult }) {
         <div className="border-primary-border bg-base/40 space-y-3 border-t p-3">
           {result.toolCalls.length > 0 && (
             <p className="text-ink-tertiary text-xs">Tools: {result.toolCalls.join(", ")}</p>
+          )}
+          {result.rubric && result.rubric.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-ink-tertiary flex items-center gap-1 text-xs font-medium">
+                <Scale className="size-3" /> Judge
+              </p>
+              {result.rubric.map((v) => (
+                <p key={v.criterion} className="flex items-start gap-1.5 text-xs">
+                  <span className="mt-0.5 shrink-0">
+                    {v.error ? (
+                      <TriangleAlert className="text-ink-tertiary size-3" />
+                    ) : v.pass ? (
+                      <Check className="size-3 text-(--accent)" />
+                    ) : (
+                      <X className="text-destructive size-3" />
+                    )}
+                  </span>
+                  <span className="text-ink-primary min-w-0">
+                    {v.criterion}
+                    {(v.error ?? v.reason) && (
+                      <span className="text-ink-tertiary"> — {v.error ?? v.reason}</span>
+                    )}
+                  </span>
+                </p>
+              ))}
+            </div>
           )}
           {loading ? (
             <p className="text-ink-tertiary text-xs">Loading transcript…</p>
