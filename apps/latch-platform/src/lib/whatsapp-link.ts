@@ -35,7 +35,15 @@ export function verifyWhatsappLink(
   sig: string,
 ): boolean {
   if (!Number.isFinite(exp) || Date.now() > exp) return false;
-  const expected = sign(botId, waId, exp);
+  let expected: string;
+  try {
+    expected = sign(botId, waId, exp);
+  } catch (e) {
+    // No signing secret (misconfigured production): no inbound link can be
+    // valid — refuse instead of 500ing. BUILDING links still throws loudly.
+    console.error("[whatsapp] link verification unavailable:", e);
+    return false;
+  }
   const a = Buffer.from(expected);
   const b = Buffer.from(sig);
   return a.length === b.length && timingSafeEqual(a, b);

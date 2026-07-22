@@ -703,13 +703,14 @@ export const deleteAuthoredToolFn = createServerFn({ method: "POST" })
 /**
  * Editor-side authorization for a channel bot binding: same org, and — since a
  * binding is created by (and may serve) one specific member's personal agent —
- * only its creator may see or manage it. Org-shared management would need an
- * explicit role gate; until then every binding is creator-owned.
+ * only its creator may see or manage it. A binding without a recorded creator
+ * is unmanageable (fail closed) — org-shared management would need an explicit
+ * role gate; until then every binding is creator-owned.
  */
 const canManageBot = (
   bot: { orgId: string; userId?: string },
   principal: { orgId: string; userId?: string },
-): boolean => bot.orgId === principal.orgId && (!bot.userId || bot.userId === principal.userId);
+): boolean => bot.orgId === principal.orgId && !!bot.userId && bot.userId === principal.userId;
 
 /** The caller's Telegram bots (for the editor's status view). */
 export const listTelegramBotsFn = createServerFn({ method: "GET" }).handler(async () => {

@@ -57,6 +57,17 @@ describe("link token signing secret", () => {
       /BETTER_AUTH_SECRET/,
     );
   });
+
+  it("refuses (not throws) verification of inbound links without the secret", () => {
+    // The link routes call verify directly — a misconfigured production must
+    // refuse the link (302 to link_error), never 500.
+    const t = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
+    const w = parts(buildWhatsappLinkUrl("https://x.example", "w1", "35840123"));
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("BETTER_AUTH_SECRET", "");
+    expect(verifyTelegramLink(t.bot, t.user, t.exp, t.sig)).toBe(false);
+    expect(verifyWhatsappLink(w.bot, w.user, w.exp, w.sig)).toBe(false);
+  });
 });
 
 describe("whatsapp link tokens", () => {
