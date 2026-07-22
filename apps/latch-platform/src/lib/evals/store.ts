@@ -22,8 +22,14 @@ export interface EvalAssertions {
 export interface EvalToolExpectation {
   /** Tool the agent must have called. */
   tool: string;
-  /** Subset of the call's arguments that must match exactly (deep-equal per key). */
+  /**
+   * Subset of the call's arguments that must match (deep-equal per key). A
+   * value of `{"$regex": "..."}` is a matcher instead of a literal — it tests
+   * the actual value against the pattern (for dynamic values like dates).
+   */
   args?: Record<string, unknown>;
+  /** Max times the tool may be called (catches tool loops). */
+  maxCalls?: number;
 }
 
 export interface EvalExpectation {
@@ -31,6 +37,10 @@ export interface EvalExpectation {
   toolCalls?: EvalToolExpectation[];
   /** Tools the agent must NOT have called. */
   forbiddenTools?: string[];
+  /** Tools that must appear in this relative order (others may interleave). */
+  toolOrder?: string[];
+  /** Budget: max tool calls in the whole case (catches runaway loops). */
+  maxTotalToolCalls?: number;
 }
 
 export interface EvalCase {

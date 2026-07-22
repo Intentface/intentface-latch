@@ -6,7 +6,7 @@ import type { TurnWriter } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
-import { isRiskyRegex } from "@/lib/evals/grade";
+import { collectMatcherPatterns, isRiskyRegex } from "@/lib/evals/grade";
 import { runEvalCases } from "@/lib/evals/run";
 import { compactResult } from "@/lib/evals/store";
 import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
@@ -73,11 +73,25 @@ const EVAL_EXPECTED = z.object({
         args: z
           .record(z.string(), z.unknown())
           .optional()
-          .describe("Subset of the call's args that must match exactly (deep-equal per key)."),
+          .describe(
+            'Subset of the call\'s args that must match (deep-equal per key). A value of {"$regex": "..."} matches the actual value against the pattern instead — for dynamic values like dates.',
+          ),
+        maxCalls: z.number().int().min(1).optional().describe("Max times the tool may be called (catches loops)."),
       }),
     )
     .optional(),
   forbiddenTools: z.array(z.string()).optional().describe("Tools the agent must NOT call."),
+  toolOrder: z
+    .array(z.string())
+    .min(2)
+    .optional()
+    .describe("Tools that must appear in this relative order (other calls may interleave). Use for 'orient before generating' style checks."),
+  maxTotalToolCalls: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Budget: max tool calls in the whole case (catches runaway loops)."),
 });
 
 const EVAL_CASE_INPUT = z.object({
@@ -329,7 +343,9 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             a?.notContains?.length ||
             a?.regex?.length ||
             c.expected.toolCalls?.length ||
-            c.expected.forbiddenTools?.length
+            c.expected.forbiddenTools?.length ||
+            c.expected.toolOrder?.length ||
+            c.expected.maxTotalToolCalls != null
           );
         });
         if (empty.length) {
@@ -345,6 +361,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             ...(a?.regex ?? []),
             ...(c.expected.forbiddenTools ?? []),
             ...(c.expected.toolCalls ?? []).map((t) => t.tool),
+            ...(c.expected.toolOrder ?? []),
           ].some((s) => s.trim().length === 0);
         });
         if (blank.length) {
@@ -353,7 +370,11 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         // Reject unsafe/invalid assertion regexes at save time (ReDoS guard) —
         // the grader also refuses them, but failing here lets you fix the case.
         const badRegex = cases.filter((c) =>
-          (c.expected.assertions?.regex ?? []).some((r) => {
+          [
+            ...(c.expected.assertions?.regex ?? []),
+            // {"$regex": "..."} arg matchers go through the same grader guards.
+            ...(c.expected.toolCalls ?? []).flatMap((t) => collectMatcherPatterns(t.args)),
+          ].some((r) => {
             if (isRiskyRegex(r)) return true;
             try {
               new RegExp(r);

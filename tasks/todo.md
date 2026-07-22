@@ -140,10 +140,15 @@ pending for the user). 25 vitest tests green, tsc green.
 Order: commit eval-author work first, then 1 → 2 → 3. Item 4 (multi-turn) waits
 for a real motivating failure.
 
-- [ ] 0. Ship pending eval-author work: code review, commit, push to PR #6
-- [ ] 1. Richer deterministic trajectory checks (grade.ts + schemas, no deps)
-  - `expected.toolOrder: string[]` (relative order), arg matchers (`$regex` via
-    isRiskyRegex/safeRegexTest), `maxCalls` per tool, optional step/token budget
+- [x] 0. Ship pending eval-author work: code review, commit, push to PR #6
+  (agent review: no blockers; fixed read-only-invariant test gap +
+  read_transcript empty-thread error + built-in-agent instruction caveat;
+  pushed eedde18)
+- [x] 1. Richer deterministic trajectory checks (grade.ts + schemas, no deps)
+  - `expected.toolOrder: string[]` (subsequence), `{"$regex"}` arg matchers
+    (through isRiskyRegex/safeRegexTest, save-time validated), `maxCalls` per
+    tool, `maxTotalToolCalls` per case. Token budget SKIPPED — needs usage
+    plumbing from core runAgent; revisit if step budget proves insufficient.
 - [ ] 2. Flakiness as a number (run.ts + store + card)
   - per-case `repeats: N` opt-in + pass threshold; persist per-repeat results;
     report pass RATE; delta compares rates

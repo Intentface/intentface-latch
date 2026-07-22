@@ -61,10 +61,31 @@ export async function safeRegexTest(
 }
 
 /**
+ * `{"$regex": "..."}` in expected tool args is a MATCHER, not a literal: it
+ * passes when the actual value (string/number/boolean, stringified) matches
+ * the pattern. Returns the pattern, or null when the value is a plain literal.
+ */
+export function asRegexMatcher(v: unknown): string | null {
+  if (v == null || typeof v !== "object" || Array.isArray(v)) return null;
+  const rec = v as Record<string, unknown>;
+  const keys = Object.keys(rec);
+  return keys.length === 1 && keys[0] === "$regex" && typeof rec.$regex === "string" ? rec.$regex : null;
+}
+
+/** All `$regex` matcher patterns nested anywhere in an expected-args value (for save-time validation). */
+export function collectMatcherPatterns(v: unknown): string[] {
+  const pattern = asRegexMatcher(v);
+  if (pattern != null) return [pattern];
+  if (v == null || typeof v !== "object") return [];
+  return Object.values(v).flatMap(collectMatcherPatterns);
+}
+
+/**
  * Deterministic grading for one eval case: answer assertions (contains /
- * notContains / regex) + tool-call expectations (called with matching args,
- * didn't call forbidden ones). No model calls (an LLM judge is a later grader
- * tier); async only because regex assertions run in a time-boxed worker.
+ * notContains / regex) + trajectory expectations (called with matching args,
+ * within maxCalls, in toolOrder, didn't call forbidden ones, within the
+ * case's total-call budget). No model calls (the LLM judge is a separate
+ * grader tier); async only because regex matching runs in a time-boxed worker.
  */
 export async function gradeCase(
   c: EvalCase,
@@ -100,8 +121,37 @@ export async function gradeCase(
       reasons.push(`expected a call to ${exp.tool}`);
       continue;
     }
-    if (exp.args && !candidates.some((tc) => argsMatch(exp.args!, tc.args))) {
-      reasons.push(`${exp.tool} was called but not with args ${JSON.stringify(exp.args)}`);
+    if (exp.maxCalls != null && candidates.length > exp.maxCalls) {
+      reasons.push(`${exp.tool} called ${candidates.length}× (max ${exp.maxCalls})`);
+    }
+    if (exp.args) {
+      const risky = collectMatcherPatterns(exp.args).find((p) => isRiskyRegex(p));
+      if (risky != null) {
+        reasons.push(`unsafe regex matcher (too long or nested quantifiers): ${risky.slice(0, 40)}`);
+        continue;
+      }
+      let matched = false;
+      for (const tc of candidates) {
+        if (await argsMatch(exp.args, tc.args)) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) reasons.push(`${exp.tool} was called but not with args ${JSON.stringify(exp.args)}`);
+    }
+  }
+
+  // Relative order: the expected names must appear as a subsequence of the
+  // observed call sequence (other calls may interleave).
+  const order = c.expected.toolOrder;
+  if (order?.length) {
+    const seq = calls.map((tc) => tc.tool);
+    let i = 0;
+    for (const name of seq) if (i < order.length && name === order[i]) i += 1;
+    if (i < order.length) {
+      reasons.push(
+        `tools out of order: expected ${order.join(" → ")} (got ${seq.join(", ") || "no calls"})`,
+      );
     }
   }
 
@@ -109,24 +159,45 @@ export async function gradeCase(
     if (calls.some((tc) => tc.tool === name)) reasons.push(`must not call ${name}`);
   }
 
+  if (c.expected.maxTotalToolCalls != null && calls.length > c.expected.maxTotalToolCalls) {
+    reasons.push(`${calls.length} tool calls total (max ${c.expected.maxTotalToolCalls}) — tool loop?`);
+  }
+
   return { pass: reasons.length === 0, reasons };
 }
 
-/** Every expected key must deep-equal the actual call's value (subset match). */
-function argsMatch(expected: Record<string, unknown>, actual: unknown): boolean {
+/** Every expected key must match the actual call's value (subset match; `$regex` matchers allowed). */
+async function argsMatch(expected: Record<string, unknown>, actual: unknown): Promise<boolean> {
   if (actual == null || typeof actual !== "object") return false;
   const act = actual as Record<string, unknown>;
-  return Object.entries(expected).every(([k, v]) => deepEqual(v, act[k]));
+  for (const [k, v] of Object.entries(expected)) {
+    if (!(await valueMatches(v, act[k]))) return false;
+  }
+  return true;
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (a == null || b == null || typeof a !== "object" || typeof b !== "object") return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const ka = Object.keys(a);
-  const kb = Object.keys(b);
-  if (ka.length !== kb.length) return false;
-  return ka.every((k) =>
-    deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
-  );
+/** Deep equality, except a `{"$regex"}` matcher anywhere in `expected` tests the actual value. */
+async function valueMatches(expected: unknown, actual: unknown): Promise<boolean> {
+  const pattern = asRegexMatcher(expected);
+  if (pattern != null) {
+    if (typeof actual !== "string" && typeof actual !== "number" && typeof actual !== "boolean") {
+      return false;
+    }
+    return (await safeRegexTest(pattern, String(actual).slice(0, REGEX_INPUT_CAP))) === true;
+  }
+  if (expected === actual) return true;
+  if (expected == null || actual == null || typeof expected !== "object" || typeof actual !== "object") {
+    return false;
+  }
+  if (Array.isArray(expected) !== Array.isArray(actual)) return false;
+  const ke = Object.keys(expected);
+  if (ke.length !== Object.keys(actual).length) return false;
+  for (const k of ke) {
+    const ok = await valueMatches(
+      (expected as Record<string, unknown>)[k],
+      (actual as Record<string, unknown>)[k],
+    );
+    if (!ok) return false;
+  }
+  return true;
 }
