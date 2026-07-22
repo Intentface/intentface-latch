@@ -23,6 +23,8 @@ const VERDICT = z.object({
 
 /** The judge only ever sees a bounded slice of the answer. */
 const ANSWER_CAP = 8_000;
+/** Hard wall-clock bound per judge call — a stalled provider must not hang the run. */
+const JUDGE_TIMEOUT_MS = 30_000;
 
 export interface JudgeCaseInput {
   model: LanguageModel;
@@ -69,9 +71,16 @@ TOOLS THE AGENT CALLED (names, in order): ${tools}`;
 
   let lastError = "";
   // One retry on a malformed verdict; then an error marker (never a case fail).
+  // Each attempt gets its own hard timeout — a hung call counts as an attempt.
   for (let i = 0; i < 2; i++) {
     try {
-      const { object } = await generateObject({ model, schema: VERDICT, temperature: 0, prompt });
+      const { object } = await generateObject({
+        model,
+        schema: VERDICT,
+        temperature: 0,
+        prompt,
+        abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
+      });
       return { criterion, pass: object.pass, reason: object.reason };
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);

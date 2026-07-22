@@ -87,6 +87,32 @@ describe("runEvalCases", () => {
     expect(r.reasons).toEqual([]);
   });
 
+  it("represents a repeated case by a failing attempt WITH a transcript, skipping errored ones", async () => {
+    // Attempt 1 crashes (no threadId), attempts 2-3 run: 2 fails the grade, 3 passes.
+    let attempts = 0;
+    const crashyThenFlaky = {
+      async runAgent() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("provider down");
+        return { threadId: `sub_${attempts}`, answer: attempts === 2 ? "nope" : "hi there" };
+      },
+      async loadHistory() {
+        return [];
+      },
+    };
+    const results = await runEvalCases({
+      runtime: crashyThenFlaky,
+      principal,
+      agent: "x",
+      cases: [{ ...cases[0], repeats: 3 }],
+      concurrency: 1,
+    });
+    // The representative transcript is attempt 2 (failing WITH a transcript),
+    // not the errored attempt 1 that has none.
+    expect(results[0].threadId).toBe("sub_2");
+    expect(results[0].passes).toBe(1);
+  });
+
   it("fails a repeated case below majority with an aggregate reason", async () => {
     let attempts = 0;
     const mostlyBroken = {

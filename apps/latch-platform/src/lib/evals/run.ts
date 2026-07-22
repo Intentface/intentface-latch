@@ -115,9 +115,13 @@ function aggregateCase(c: EvalCase, attempts: EvalAttemptResult[]): EvalCaseResu
   const passes = attempts.filter((a) => a.pass).length;
   const need = Math.floor(attempts.length / 2) + 1;
   const pass = passes >= need;
-  // Represent the case by its first failing attempt (that's the transcript
-  // worth diagnosing) — or the first attempt when all passed.
-  const rep = attempts.find((a) => !a.pass) ?? attempts[0];
+  // Represent the case by a failing attempt WITH a transcript (that's what's
+  // worth diagnosing — an errored attempt has none), then any failing
+  // attempt, then the first attempt when all passed.
+  const rep =
+    attempts.find((a) => !a.pass && a.threadId) ??
+    attempts.find((a) => !a.pass) ??
+    attempts[0];
   const reasons = pass
     ? []
     : [

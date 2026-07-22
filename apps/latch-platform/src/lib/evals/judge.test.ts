@@ -5,10 +5,12 @@ import { judgeRubric } from "./judge";
 /** Mock judge: returns each text in sequence (repeating the last), capturing prompts. */
 function mockJudge(texts: string[]) {
   const prompts: string[] = [];
+  const signals: (AbortSignal | undefined)[] = [];
   let call = 0;
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
       prompts.push(JSON.stringify(options.prompt));
+      signals.push(options.abortSignal);
       const text = texts[Math.min(call, texts.length - 1)];
       call += 1;
       return {
@@ -22,7 +24,7 @@ function mockJudge(texts: string[]) {
       };
     },
   });
-  return { model, prompts, calls: () => call };
+  return { model, prompts, signals, calls: () => call };
 }
 
 describe("judgeRubric", () => {
@@ -59,6 +61,12 @@ describe("judgeRubric", () => {
     expect(v.pass).toBe(false);
     expect(v.reason).toBe("never says why");
     expect(v.error).toBeUndefined();
+  });
+
+  it("bounds every judge call with an abort signal (stalled provider can't hang the run)", async () => {
+    const { model, signals } = mockJudge(['{"pass": true, "reason": "ok"}']);
+    await judgeRubric({ model, input: "q", answer: "a", toolCalls: [], criteria: ["c"] });
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
   });
 
   it("retries once on a malformed verdict, then succeeds", async () => {
