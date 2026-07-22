@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { secretEnv } from "./env";
 
 /**
  * Signed account-link tokens for Telegram, mirroring `slack-link.ts`. The bot
@@ -10,7 +11,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 const TTL_MS = 10 * 60 * 1000;
 
 function secret(): string {
-  return process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-change-me";
+  return secretEnv("BETTER_AUTH_SECRET", "dev-only-secret-change-me");
 }
 
 function sign(botId: string, telegramUserId: string, exp: number): string {

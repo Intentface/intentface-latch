@@ -700,13 +700,26 @@ export const deleteAuthoredToolFn = createServerFn({ method: "POST" })
 
 // ── Telegram channel: per-agent bot onboarding ───────────────────────────────
 
-/** The caller's org's Telegram bots (for the editor's status view). */
+/**
+ * Editor-side authorization for a channel bot binding: same org, and — since a
+ * binding is created by (and may serve) one specific member's personal agent —
+ * only its creator may see or manage it. Org-shared management would need an
+ * explicit role gate; until then every binding is creator-owned.
+ */
+const canManageBot = (
+  bot: { orgId: string; userId?: string },
+  principal: { orgId: string; userId?: string },
+): boolean => bot.orgId === principal.orgId && (!bot.userId || bot.userId === principal.userId);
+
+/** The caller's Telegram bots (for the editor's status view). */
 export const listTelegramBotsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
   const { telegramStore } = await getLatch();
   const bots = await telegramStore.listForOrg(principal.orgId);
-  return bots.map((b) => ({ ...b, eventsUrl: `${baseUrl()}/api/telegram/${b.id}/events` }));
+  return bots
+    .filter((b) => canManageBot(b, principal))
+    .map((b) => ({ ...b, eventsUrl: `${baseUrl()}/api/telegram/${b.id}/events` }));
 });
 
 /** Create a Telegram bot row for an agent (token pasted in a second step). */
@@ -748,7 +761,7 @@ export const saveTelegramTokenFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const { telegramStore, credentials } = await getLatch();
     const bot = await telegramStore.get(data.botId);
-    if (!bot || bot.orgId !== principal.orgId) return { ok: false as const, error: "not found" };
+    if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
 
     let me: { username: string };
     try {
@@ -772,7 +785,7 @@ export const registerTelegramWebhookFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const { telegramStore, credentials } = await getLatch();
     const bot = await telegramStore.get(botId);
-    if (!bot || bot.orgId !== principal.orgId) return { ok: false as const, error: "not found" };
+    if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
 
     const keys = telegramVaultKeys(botId);
     const token = await credentials.get(principal, keys.botToken, "org");
@@ -799,7 +812,7 @@ export const telegramWebhookStatusFn = createServerFn({ method: "GET" })
     if (!principal) return null;
     const { telegramStore, credentials } = await getLatch();
     const bot = await telegramStore.get(botId);
-    if (!bot || bot.orgId !== principal.orgId) return null;
+    if (!bot || !canManageBot(bot, principal)) return null;
     const token = await credentials.get(principal, telegramVaultKeys(botId).botToken, "org");
     if (!token) return null;
     try {
@@ -817,7 +830,7 @@ export const deleteTelegramBotFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false };
     const { telegramStore, credentials } = await getLatch();
     const bot = await telegramStore.get(botId);
-    if (!bot || bot.orgId !== principal.orgId) return { ok: false };
+    if (!bot || !canManageBot(bot, principal)) return { ok: false };
     const token = await credentials.get(principal, telegramVaultKeys(botId).botToken, "org");
     if (token) await telegramApi(token).deleteWebhook().catch(() => {});
     await telegramStore.remove(botId);
@@ -826,13 +839,15 @@ export const deleteTelegramBotFn = createServerFn({ method: "POST" })
 
 // ── WhatsApp channel: per-agent business-number onboarding ───────────────────
 
-/** The caller's org's WhatsApp bots (for the editor's status view). */
+/** The caller's WhatsApp bots (for the editor's status view). */
 export const listWhatsappBotsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
   const { whatsappStore } = await getLatch();
   const bots = await whatsappStore.listForOrg(principal.orgId);
-  return bots.map((b) => ({ ...b, callbackUrl: `${baseUrl()}/api/whatsapp/${b.id}/events` }));
+  return bots
+    .filter((b) => canManageBot(b, principal))
+    .map((b) => ({ ...b, callbackUrl: `${baseUrl()}/api/whatsapp/${b.id}/events` }));
 });
 
 /** Create a WhatsApp bot row for an agent (credentials pasted in a second step). */
@@ -878,10 +893,16 @@ export const saveWhatsappCredentialsFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const { whatsappStore, credentials } = await getLatch();
     const bot = await whatsappStore.get(data.botId);
-    if (!bot || bot.orgId !== principal.orgId) return { ok: false as const, error: "not found" };
+    if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
 
     const accessToken = data.accessToken.trim();
     const phoneNumberId = data.phoneNumberId.trim();
+    const appSecret = data.appSecret.trim();
+    // The Graph API check below only exercises the token + phone-number id; an
+    // empty app secret would silently key webhook HMAC verification to "".
+    if (!accessToken || !phoneNumberId || !appSecret) {
+      return { ok: false as const, error: "all three credentials are required" };
+    }
     let check: { displayPhoneNumber?: string };
     try {
       check = await whatsappApi({ accessToken, phoneNumberId }).checkCredentials();
@@ -892,7 +913,7 @@ export const saveWhatsappCredentialsFn = createServerFn({ method: "POST" })
     const keys = whatsappVaultKeys(data.botId);
     await credentials.set(principal, keys.accessToken, "org", accessToken);
     await credentials.set(principal, keys.phoneNumberId, "org", phoneNumberId);
-    await credentials.set(principal, keys.appSecret, "org", data.appSecret.trim());
+    await credentials.set(principal, keys.appSecret, "org", appSecret);
     if (!(await credentials.has(principal, keys.verifyToken, "org"))) {
       await credentials.set(principal, keys.verifyToken, "org", randomBytes(24).toString("base64url"));
     }
@@ -908,7 +929,7 @@ export const whatsappWebhookInfoFn = createServerFn({ method: "GET" })
     if (!principal) return null;
     const { whatsappStore, credentials } = await getLatch();
     const bot = await whatsappStore.get(botId);
-    if (!bot || bot.orgId !== principal.orgId) return null;
+    if (!bot || !canManageBot(bot, principal)) return null;
     const verifyToken = await credentials.get(
       principal,
       whatsappVaultKeys(botId).verifyToken,
@@ -928,7 +949,7 @@ export const deleteWhatsappBotFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false };
     const { whatsappStore } = await getLatch();
     const bot = await whatsappStore.get(botId);
-    if (!bot || bot.orgId !== principal.orgId) return { ok: false };
+    if (!bot || !canManageBot(bot, principal)) return { ok: false };
     await whatsappStore.remove(botId);
     return { ok: true };
   });

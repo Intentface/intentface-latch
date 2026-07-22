@@ -20,6 +20,7 @@ import type {LatchHandler} from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
+import { secretEnv } from "./env";
 import { getPrincipalFromHeaders  } from "./session";
 import type {Principal} from "./session";
 import { createCredentials  } from "./credentials";
@@ -117,8 +118,9 @@ export async function getLatch(): Promise<{
   const storage = createSqliteAdapter<Principal>(client, { owner });
   const vault = createVault<Principal>({
     store: createSqliteSecretStore<Principal>(client, { owner }),
-    // Dev fallback is a deterministic 32-byte key; set LATCH_VAULT_KEY in prod.
-    masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
+    // Dev-only fallback is a deterministic 32-byte key; production without
+    // LATCH_VAULT_KEY throws (secrets must never be encrypted with a public key).
+    masterKey: secretEnv("LATCH_VAULT_KEY", btoa("latch-dev-vault-key-32-bytes!!!!")),
   });
   const credentials = createCredentials(vault);
   const connectionStore = createConnectionStore(vault);

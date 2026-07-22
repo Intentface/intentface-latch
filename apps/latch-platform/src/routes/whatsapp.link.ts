@@ -31,6 +31,9 @@ async function handleLink(request: Request): Promise<Response> {
   const { whatsappStore } = await getLatch();
   const bot = await whatsappStore.get(botId);
   if (!bot) return redirect("/agents?whatsapp=link_error");
+  // The link grants a `{ orgId: bot.orgId, userId }` principal — never mint
+  // one for a user who isn't a member of the bot's org.
+  if (bot.orgId !== principal.orgId) return redirect("/agents?whatsapp=link_wrong_org");
 
   const outcome = await whatsappStore.linkIdentity({
     botId,

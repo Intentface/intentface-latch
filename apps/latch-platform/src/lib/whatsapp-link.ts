@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { secretEnv } from "./env";
 
 /**
  * Signed account-link tokens for WhatsApp, mirroring `telegram-link.ts`:
@@ -7,7 +8,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 const TTL_MS = 10 * 60 * 1000;
 
 function secret(): string {
-  return process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-change-me";
+  return secretEnv("BETTER_AUTH_SECRET", "dev-only-secret-change-me");
 }
 
 function sign(botId: string, waId: string, exp: number): string {

@@ -34,6 +34,9 @@ async function handleLink(request: Request): Promise<Response> {
   const { telegramStore } = await getLatch();
   const bot = await telegramStore.get(botId);
   if (!bot) return redirect("/agents?telegram=link_error");
+  // The link grants a `{ orgId: bot.orgId, userId }` principal — never mint
+  // one for a user who isn't a member of the bot's org.
+  if (bot.orgId !== principal.orgId) return redirect("/agents?telegram=link_wrong_org");
 
   const outcome = await telegramStore.linkIdentity({
     botId,

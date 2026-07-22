@@ -4,6 +4,7 @@ import { buildWhatsappLinkUrl, verifyWhatsappLink } from "./whatsapp-link";
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 function parts(url: string) {
@@ -42,6 +43,19 @@ describe("telegram link tokens", () => {
     // Domain-separated signatures: same (bot, user) must not verify cross-channel.
     const p = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
     expect(verifyWhatsappLink(p.bot, p.user, p.exp, p.sig)).toBe(false);
+  });
+});
+
+describe("link token signing secret", () => {
+  it("fails closed in production when BETTER_AUTH_SECRET is unset", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("BETTER_AUTH_SECRET", "");
+    expect(() => buildTelegramLinkUrl("https://x.example", "b1", "5")).toThrow(
+      /BETTER_AUTH_SECRET/,
+    );
+    expect(() => buildWhatsappLinkUrl("https://x.example", "w1", "35840123")).toThrow(
+      /BETTER_AUTH_SECRET/,
+    );
   });
 });
 
