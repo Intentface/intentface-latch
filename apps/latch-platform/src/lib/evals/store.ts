@@ -51,6 +51,12 @@ export interface EvalCase {
   /** The user message sent to the agent. */
   input: string;
   expected: EvalExpectation;
+  /**
+   * Opt-in flakiness measurement: run the case N times (2–5); it passes on a
+   * majority of attempts and the result records the pass rate. Only for
+   * behaviors observed to be nondeterministic — repeats multiply run cost.
+   */
+  repeats?: number;
 }
 
 export interface EvalSet {
@@ -70,9 +76,8 @@ export interface EvalToolCall {
   blocked?: boolean;
 }
 
-export interface EvalCaseResult {
-  caseId: string;
-  caseName: string;
+/** One attempt of a case (a repeated case has several; a plain case exactly one). */
+export interface EvalAttemptResult {
   pass: boolean;
   /** Failure reasons (empty when passing). */
   reasons: string[];
@@ -82,6 +87,32 @@ export interface EvalCaseResult {
   toolCalls: EvalToolCall[];
   /** Set when the run itself errored (agent crash, not a failed grade). */
   error?: string;
+}
+
+export interface EvalCaseResult extends EvalAttemptResult {
+  caseId: string;
+  caseName: string;
+  /** Attempts run (only set when the case declared repeats > 1). */
+  repeats?: number;
+  /** Attempts that passed (only set alongside `repeats`). */
+  passes?: number;
+  /** Per-attempt detail for repeated cases (top-level fields mirror the first failing attempt). */
+  attempts?: EvalAttemptResult[];
+}
+
+/**
+ * Attempt-level pass rate of a run (0..1): a repeated case contributes
+ * passes/repeats, a single-attempt case 0 or 1. Older stored results (no
+ * repeats fields) degrade to their boolean verdict, so run-over-run rate
+ * deltas stay computable across history.
+ */
+export function runPassRate(results: Pick<EvalCaseResult, "pass" | "passes" | "repeats">[]): number {
+  if (results.length === 0) return 0;
+  const sum = results.reduce(
+    (acc, r) => acc + (r.repeats ? (r.passes ?? 0) / r.repeats : r.pass ? 1 : 0),
+    0,
+  );
+  return sum / results.length;
 }
 
 export interface EvalRun {
@@ -107,6 +138,9 @@ export interface CompactCaseResult {
   answerPreview: string;
   toolCalls: string[];
   error?: string;
+  /** Attempts run / passed (only for repeated cases) — the flakiness signal. */
+  repeats?: number;
+  passes?: number;
 }
 
 export const compactResult = (r: EvalCaseResult): CompactCaseResult => ({
@@ -118,6 +152,8 @@ export const compactResult = (r: EvalCaseResult): CompactCaseResult => ({
   answerPreview: r.answerPreview,
   toolCalls: r.toolCalls.map((tc) => (tc.blocked ? `${tc.tool} (blocked)` : tc.tool)),
   error: r.error,
+  repeats: r.repeats,
+  passes: r.passes,
 });
 
 /**
@@ -129,8 +165,11 @@ export interface EvalProgressData {
   toolCallId?: string;
   agentName: string;
   setName: string;
+  /** Total ATTEMPTS (repeats counted) — what completed ticks against. */
   total: number;
   completed: number;
+  /** Number of cases (≤ total when repeats are in play) — for the pass bar. */
+  totalCases?: number;
   /** Graded cases so far, in completion order. */
   results: CompactCaseResult[];
 }

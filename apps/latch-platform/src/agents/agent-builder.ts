@@ -7,8 +7,8 @@ import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
 import { collectMatcherPatterns, isRiskyRegex } from "@/lib/evals/grade";
-import { runEvalCases } from "@/lib/evals/run";
-import { compactResult } from "@/lib/evals/store";
+import { repeatsOf, runEvalCases } from "@/lib/evals/run";
+import { compactResult, runPassRate } from "@/lib/evals/store";
 import type { EvalCase, EvalProgressData } from "@/lib/evals/store";
 import { personalOwner, sharedReadTools } from "./shared-read-tools";
 
@@ -102,6 +102,15 @@ const EVAL_CASE_INPUT = z.object({
   name: z.string().describe("Short human label, e.g. 'refund question escalates'."),
   input: z.string().max(4000).describe("The user message to send the agent."),
   expected: EVAL_EXPECTED.describe("At least one of assertions / toolCalls / forbiddenTools."),
+  repeats: z
+    .number()
+    .int()
+    .min(2)
+    .max(5)
+    .optional()
+    .describe(
+      "Flakiness measurement: run the case N times, pass on a majority, record the pass rate. Only for behaviors observed to be nondeterministic — each repeat costs a full agent run.",
+    ),
 });
 
 /** The slice of a tool call's options we use: its id + the turn's stream writer. */
@@ -397,7 +406,13 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           let id = normalizeAgentName(c.id ?? c.name) || "case";
           while (seen.has(id)) id = `${id}-2`;
           seen.add(id);
-          return { id, name: c.name, input: c.input, expected: c.expected };
+          return {
+            id,
+            name: c.name,
+            input: c.input,
+            expected: c.expected,
+            ...(c.repeats ? { repeats: c.repeats } : {}),
+          };
         });
         const name = setName?.trim() || "default";
         await evalStore.saveSet({ owner: personalOwner(principal), agentName: agent, name, cases: withIds });
@@ -437,6 +452,9 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         // without this the turn is silent until the tool result lands).
         const env = options as ToolCallEnv;
         const soFar: EvalProgressData["results"] = [];
+        // Progress ticks count ATTEMPTS (a case with repeats: 3 is 3 ticks) so
+        // the card's counter reflects work done, not just cases resolved.
+        const totalAttempts = set.cases.reduce((n, c) => n + repeatsOf(c), 0);
         const writeProgress = (completed: number) => {
           env.context?.writer?.write({
             type: "data-eval-progress",
@@ -445,8 +463,9 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
               toolCallId: env.toolCallId,
               agentName: agent,
               setName: name,
-              total: set.cases.length,
+              total: totalAttempts,
               completed,
+              totalCases: set.cases.length,
               results: soFar,
             } satisfies EvalProgressData,
           });
@@ -458,10 +477,10 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           principal,
           agent,
           cases: set.cases,
-          onResult: (r, completed) => {
-            soFar.push(compactResult(r));
-            writeProgress(completed);
-          },
+          // onResult fires before the same unit's onAttempt tick, so the new
+          // row is always included in the very next progress write.
+          onResult: (r) => soFar.push(compactResult(r)),
+          onAttempt: (completed) => writeProgress(completed),
         });
         const passed = results.filter((r) => r.pass).length;
         const failed = results.length - passed;
@@ -475,6 +494,13 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           failCount: failed,
         });
         const delta = previous ? passed - previous.passCount : undefined;
+        // Attempt-level pass RATE — with repeats in play this moves when a
+        // case gets flakier even though its majority verdict (and passCount)
+        // doesn't, so run-over-run comparison sees degradation early.
+        const passRate = runPassRate(results);
+        const prevRate = previous ? runPassRate(previous.results) : undefined;
+        const rateDelta = prevRate === undefined ? undefined : Math.round((passRate - prevRate) * 100);
+        const hasRepeats = results.some((r) => r.repeats != null);
         return {
           runId: run.id,
           agentName: agent,
@@ -482,13 +508,23 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           passed,
           failed,
           total: results.length,
+          passRate: Math.round(passRate * 1000) / 1000,
           previous: previous
-            ? { runId: previous.id, passed: previous.passCount, total: previous.passCount + previous.failCount }
+            ? {
+                runId: previous.id,
+                passed: previous.passCount,
+                total: previous.passCount + previous.failCount,
+                passRate: prevRate === undefined ? undefined : Math.round(prevRate * 1000) / 1000,
+              }
             : null,
           results: results.map(compactResult),
           summary:
             `${passed}/${results.length} passed` +
-            (delta === undefined ? "" : delta === 0 ? " (no change)" : ` (${delta > 0 ? "+" : ""}${delta} vs previous)`),
+            (delta === undefined ? "" : delta === 0 ? " (no change)" : ` (${delta > 0 ? "+" : ""}${delta} vs previous)`) +
+            (hasRepeats
+              ? ` · pass rate ${Math.round(passRate * 100)}%` +
+                (rateDelta === undefined ? "" : ` (${rateDelta >= 0 ? "+" : ""}${rateDelta}pp vs previous)`)
+              : ""),
         };
       },
     }),

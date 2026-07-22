@@ -57,6 +57,75 @@ describe("runEvalCases", () => {
     expect(new Set(ticks.map((t) => t.caseId))).toEqual(new Set(["a", "b"]));
   });
 
+  it("repeats a flaky case, passes on majority, and records the pass rate", async () => {
+    // Fails on the 1st attempt, passes on the 2nd and 3rd.
+    let attempts = 0;
+    const flaky = {
+      async runAgent() {
+        attempts += 1;
+        return { threadId: `sub_${attempts}`, answer: attempts === 1 ? "nope" : "hi there" };
+      },
+      async loadHistory() {
+        return [];
+      },
+    };
+    const results = await runEvalCases({
+      runtime: flaky,
+      principal,
+      agent: "x",
+      cases: [{ ...cases[0], repeats: 3 }],
+      concurrency: 1,
+    });
+    const r = results[0];
+    expect(r.pass).toBe(true);
+    expect(r.repeats).toBe(3);
+    expect(r.passes).toBe(2);
+    expect(r.attempts).toHaveLength(3);
+    // The representative transcript is the FIRST FAILING attempt (worth diagnosing).
+    expect(r.threadId).toBe("sub_1");
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("fails a repeated case below majority with an aggregate reason", async () => {
+    let attempts = 0;
+    const mostlyBroken = {
+      async runAgent() {
+        attempts += 1;
+        return { threadId: `sub_${attempts}`, answer: attempts === 2 ? "hi there" : "nope" };
+      },
+      async loadHistory() {
+        return [];
+      },
+    };
+    const results = await runEvalCases({
+      runtime: mostlyBroken,
+      principal,
+      agent: "x",
+      cases: [{ ...cases[0], repeats: 3 }],
+      concurrency: 1,
+    });
+    expect(results[0].pass).toBe(false);
+    expect(results[0].passes).toBe(1);
+    expect(results[0].reasons[0]).toBe("passed 1/3 repeats (need 2)");
+    expect(results[0].reasons[1]).toContain('missing "hi"');
+  });
+
+  it("ticks onAttempt per attempt and onResult once per case", async () => {
+    const attemptTicks: [number, number][] = [];
+    const resultTicks: string[] = [];
+    await runEvalCases({
+      runtime: fakeRuntime,
+      principal,
+      agent: "x",
+      cases: [{ ...cases[0], repeats: 3 }, cases[1]],
+      onAttempt: (completed, total) => attemptTicks.push([completed, total]),
+      onResult: (r) => resultTicks.push(r.caseId),
+    });
+    expect(attemptTicks.map(([c]) => c)).toEqual([1, 2, 3, 4]);
+    expect(attemptTicks.every(([, t]) => t === 4)).toBe(true);
+    expect(resultTicks.sort()).toEqual(["a", "b"]);
+  });
+
   it("captures a crashed run as a failed result instead of throwing", async () => {
     const boom = {
       async runAgent() {

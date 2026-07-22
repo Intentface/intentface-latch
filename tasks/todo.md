@@ -149,9 +149,12 @@ for a real motivating failure.
     (through isRiskyRegex/safeRegexTest, save-time validated), `maxCalls` per
     tool, `maxTotalToolCalls` per case. Token budget SKIPPED — needs usage
     plumbing from core runAgent; revisit if step budget proves insufficient.
-- [ ] 2. Flakiness as a number (run.ts + store + card)
-  - per-case `repeats: N` opt-in + pass threshold; persist per-repeat results;
-    report pass RATE; delta compares rates
+- [x] 2. Flakiness as a number (run.ts + store + card)
+  - per-case `repeats: 2..5` opt-in, majority verdict (floor(n/2)+1); attempts
+    fan through the SAME mapPool (no serialization); per-attempt results
+    persisted on the case result; run_evals reports attempt-level passRate +
+    pp delta (runPassRate degrades old boolean history gracefully); progress
+    counts attempts, card gets per-row "2/3 runs" chip + case-based bar
 - [ ] 3. LLM-judge rubric tier — design settled in grill session 2026-07-22:
   - Pass semantics: rubric criterion fail = CASE FAIL (one honest verdict);
     verdicts in a distinct result field; judge INFRA errors never fail a case;

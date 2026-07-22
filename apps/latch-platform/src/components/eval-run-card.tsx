@@ -14,7 +14,9 @@ interface EvalRunOutput {
   passed: number;
   failed: number;
   total: number;
-  previous: { runId: string; passed: number; total: number } | null;
+  /** Attempt-level pass rate (0..1) — differs from passed/total only with repeats. */
+  passRate?: number;
+  previous: { runId: string; passed: number; total: number; passRate?: number } | null;
   results: CompactCaseResult[];
 }
 
@@ -81,7 +83,8 @@ export function EvalRunCard({ part, progress }: { part: ToolPart; progress?: Eva
               style={{
                 width: out
                   ? `${out.total ? (out.passed / out.total) * 100 : 0}%`
-                  : `${live!.total ? ((passedSoFar ?? 0) / live!.total) * 100 : 0}%`,
+                  : // live.total counts ATTEMPTS (repeats); the pass bar is per case.
+                    `${(live!.totalCases ?? live!.total) ? ((passedSoFar ?? 0) / (live!.totalCases ?? live!.total)) * 100 : 0}%`,
               }}
             />
           </div>
@@ -147,6 +150,12 @@ function CaseRow({ result }: { result: CompactCaseResult }) {
         </span>
         <span className="min-w-0 flex-1 text-xs">
           <span className="text-ink-primary">{result.caseName}</span>
+          {result.repeats != null && (
+            <span className={cn("text-ink-tertiary", (result.passes ?? 0) < result.repeats && "text-destructive")}>
+              {" "}
+              · {result.passes ?? 0}/{result.repeats} runs
+            </span>
+          )}
           {!result.pass && result.reasons.length > 0 && (
             <span className="text-ink-tertiary"> · {result.reasons.join("; ")}</span>
           )}

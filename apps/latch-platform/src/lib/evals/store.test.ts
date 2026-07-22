@@ -1,7 +1,16 @@
 import { createClient } from "@libsql/client";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createEvalStore, migrateEvals } from "./store";
+import { createEvalStore, migrateEvals, runPassRate } from "./store";
 import type { EvalStore } from "./store";
+
+describe("runPassRate", () => {
+  it("averages per-case attempt rates; legacy boolean results count 0 or 1", () => {
+    expect(runPassRate([])).toBe(0);
+    expect(runPassRate([{ pass: true }, { pass: false }])).toBe(0.5);
+    // Repeated case: 2/4 attempts = 0.5, plus a legacy pass = 1 → mean 0.75.
+    expect(runPassRate([{ pass: true, passes: 2, repeats: 4 }, { pass: true }])).toBe(0.75);
+  });
+});
 
 const owner = "org/user";
 
