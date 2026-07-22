@@ -10,12 +10,13 @@ import {
   StepQueue,
   Thread,
   useComposerState,
-  useSettingsStore,
-  type AppUIMessage,
-  type ComposerSubmitData,
-  type ToolPart,
+  useSettingsStore
+  
+  
+  
 } from "@intentface/latch-ui";
-import type { AppMessage } from "@intentface/latch-core";
+import type {AppUIMessage, ComposerSubmitData, ToolPart} from "@intentface/latch-ui";
+import type { AppMessage, SubagentProgressData } from "@intentface/latch-core";
 import {
   authorizeUrl,
   chatApi,
@@ -26,6 +27,8 @@ import {
 import { chatGeneratingFn } from "@/lib/server";
 import type { UIMessageChunk } from "ai";
 import { Button } from "@/components/ui/button";
+import { EvalRunCard } from "@/components/eval-run-card";
+import type { EvalProgressData } from "@/lib/evals/store";
 
 /** Loose view of a tool part's approval fields (SDK types keep these opaque). */
 type ApprovalPart = {
@@ -35,6 +38,47 @@ type ApprovalPart = {
   input?: unknown;
   approval?: { id: string; approved?: boolean };
 };
+
+/**
+ * The streamed `data-eval-progress` part for a run_evals tool call, if any.
+ * The tool writes one part (reconciled in place by id) while its cases run.
+ * Searched across ALL messages: a continuation may land streamed parts in a
+ * different message container than the one holding the original tool call.
+ */
+function evalProgressFor(
+  messages: readonly { parts?: unknown[] }[],
+  part: ToolPart,
+): EvalProgressData | undefined {
+  const callId = (part as { toolCallId?: string }).toolCallId;
+  let found: EvalProgressData | undefined;
+  for (const msg of messages) {
+    for (const p of (msg.parts ?? []) as { type: string; data?: EvalProgressData }[]) {
+      if (p.type !== "data-eval-progress" || !p.data) continue;
+      if (!p.data.toolCallId || p.data.toolCallId === callId) found = p.data;
+    }
+  }
+  return found;
+}
+
+/**
+ * The streamed `data-subagent-progress` part for a spawn_agent tool call, if
+ * any — same reconciled-by-id pattern (and cross-message search) as
+ * `evalProgressFor`.
+ */
+function subagentProgressFor(
+  messages: readonly { parts?: unknown[] }[],
+  part: ToolPart,
+): SubagentProgressData | undefined {
+  const callId = (part as { toolCallId?: string }).toolCallId;
+  let found: SubagentProgressData | undefined;
+  for (const msg of messages) {
+    for (const p of (msg.parts ?? []) as { type: string; data?: SubagentProgressData }[]) {
+      if (p.type !== "data-subagent-progress" || !p.data) continue;
+      if (!p.data.toolCallId || p.data.toolCallId === callId) found = p.data;
+    }
+  }
+  return found;
+}
 
 /** The approval id of a pending `connect_<name>` gate, if one is awaiting a decision. */
 function pendingConnectApprovalId(
@@ -66,6 +110,11 @@ export function Chat({
 }) {
   const router = useRouter();
   const [deciding, setDeciding] = useState(false);
+  // Poll guard: while an approval/tool-result continuation is streaming into
+  // setMessages, the background history poll must not overwrite it (server
+  // history lags the stream — it lacks streamed-only parts like eval progress).
+  const decidingRef = useRef(false);
+  decidingRef.current = deciding;
   const { messages, sendMessage, setMessages, status, addToolResult, regenerate, stop } = useChat({
     id: chatId,
     messages: initialMessages,
@@ -87,12 +136,22 @@ export function Chat({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
+      // A continuation stream is live — its snapshots are fresher than server
+      // history. Keep checking, but don't clobber the streamed state.
+      if (decidingRef.current) {
+        timer = setTimeout(poll, 2000);
+        return;
+      }
       const gen = await chatGeneratingFn({ data: chatId }).catch(() => false);
       if (cancelled) return;
+      if (decidingRef.current) {
+        timer = setTimeout(poll, 2000);
+        return;
+      }
       setResuming(gen);
       const updated = await loadHistory(chatId).catch(() => null);
       if (cancelled) return;
-      if (updated) setMessages(updated as never);
+      if (updated && !decidingRef.current) setMessages(updated);
       if (gen) timer = setTimeout(poll, 2000);
     }
     void poll();
@@ -146,25 +205,52 @@ export function Chat({
       // only the new parts; seed the reader with a clone of that message and
       // let the deltas fill it in live (the reader mutates the seed in place).
       const last = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
-      const seed = last ? (structuredClone(last) as AppMessage) : undefined;
+      const seed = last ? (structuredClone(last)) : undefined;
       for await (const snapshot of readUIMessageStream<AppMessage>({ message: seed, stream })) {
         setMessages((prev) => {
           const next = [...prev];
           const i = next.findIndex((m) => m.id === snapshot.id);
-          if (i >= 0) next[i] = snapshot as never;
-          else next.push(snapshot as never);
+          if (i >= 0) next[i] = snapshot;
+          else next.push(snapshot);
           return next;
         });
       }
     }
     // Reconcile against authoritative server history (also covers the still-paused case).
     const updated = await loadHistory(chatId);
-    setMessages(updated as never);
+    setMessages(updated);
     router.invalidate();
+  }
+
+  /**
+   * Mirror the server's applyDecisions on the local copy BEFORE streaming the
+   * continuation: the stream re-emits the tool part only once it has output, so
+   * without this the part stays `approval-requested` client-side for the whole
+   * execution and the approval card sits on screen instead of the tool's live
+   * view (for run_evals, minutes of frozen dialog).
+   */
+  function applyLocalDecision(approvalId: string, approved: boolean) {
+    const next = messagesRef.current.map((m) => {
+      const parts = (m as { parts?: unknown[] }).parts;
+      if (!Array.isArray(parts)) return m;
+      let touched = false;
+      const nextParts = parts.map((part) => {
+        const p = part as ApprovalPart;
+        if (p.state !== "approval-requested" || p.approval?.id !== approvalId) return part;
+        touched = true;
+        return { ...p, state: "approval-responded", approval: { ...p.approval, approved } };
+      });
+      return touched ? { ...m, parts: nextParts } : m;
+    });
+    // Update the ref too: consumeResume seeds the continuation reader from it,
+    // and React may not have re-rendered by then.
+    messagesRef.current = next as never;
+    setMessages(next as never);
   }
 
   async function decide(approvalId: string, approved: boolean) {
     setDeciding(true);
+    applyLocalDecision(approvalId, approved);
     try {
       await consumeResume(await submitApproval(chatId, agent, [{ approvalId, approved }]));
     } finally {
@@ -284,7 +370,14 @@ export function Chat({
               message={m as unknown as AppUIMessage}
               isStreaming={busy && m.id === lastId && m.role === "assistant"}
               renderApproval={renderApproval}
-              renderSubagent={(part) => <SubagentThread part={part} />}
+              renderSubagent={(part) => (
+                <SubagentThread part={part} progress={subagentProgressFor(messages, part)} />
+              )}
+              renderTool={(part) =>
+                part.type === "tool-run_evals" ? (
+                  <EvalRunCard part={part} progress={evalProgressFor(messages, part)} />
+                ) : undefined
+              }
               onRegenerate={
                 m.role === "assistant" && !busy ? () => regenerate({ messageId: m.id }) : undefined
               }
@@ -355,22 +448,33 @@ export function Chat({
   );
 }
 
-/** A `spawn_agent` tool call: header + lazy-expandable subagent conversation. */
-function SubagentThread({ part }: { part: ToolPart }) {
+/**
+ * A `spawn_agent` tool call: header + the subagent conversation. While the
+ * subagent runs, the streamed `data-subagent-progress` part renders the
+ * delegated exchange LIVE (expanded by default, collapsible); once the tool
+ * result lands, it reverts to the lazy-expandable persisted thread.
+ */
+function SubagentThread({ part, progress }: { part: ToolPart; progress?: SubagentProgressData }) {
   const p = part as {
     state?: string;
     input?: { agent?: string; threadId?: string };
     output?: { threadId?: string; answer?: string };
   };
-  const agent = p.input?.agent ?? "agent";
-  const threadId = p.output?.threadId ?? p.input?.threadId;
+  const agent = p.input?.agent ?? progress?.agent ?? "agent";
+  const threadId = p.output?.threadId ?? p.input?.threadId ?? progress?.threadId;
   const running = p.state === "input-streaming" || p.state === "input-available";
+  const live = running && progress ? progress : undefined;
 
   const [open, setOpen] = useState(false);
+  const [liveCollapsed, setLiveCollapsed] = useState(false);
   const [msgs, setMsgs] = useState<AppMessage[] | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function toggle() {
+    if (live) {
+      setLiveCollapsed((c) => !c);
+      return;
+    }
     const next = !open;
     setOpen(next);
     if (next && !msgs && threadId) {
@@ -381,31 +485,41 @@ function SubagentThread({ part }: { part: ToolPart }) {
     }
   }
 
+  const expanded = live ? !liveCollapsed : open;
+
   return (
     <div className="border-primary-border overflow-hidden rounded-lg border">
       <button
         type="button"
         onClick={toggle}
-        disabled={!threadId}
+        disabled={!live && !threadId}
         className="hover:bg-primary-hover flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors disabled:opacity-60"
       >
         <Bot className="text-ink-secondary size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
           Delegated to <span className="font-medium">{agent}</span>
         </span>
-        {running ? (
-          <Loader2 className="text-ink-tertiary size-3.5 shrink-0 animate-spin" />
-        ) : (
-          threadId && (
-            <ChevronDown
-              className={cn("text-ink-tertiary size-4 shrink-0 transition-transform", open && "rotate-180")}
-            />
-          )
+        {running && <Loader2 className="text-ink-tertiary size-3.5 shrink-0 animate-spin" />}
+        {(live || threadId) && (
+          <ChevronDown
+            className={cn(
+              "text-ink-tertiary size-4 shrink-0 transition-transform",
+              expanded && "rotate-180",
+            )}
+          />
         )}
       </button>
-      {open && (
+      {expanded && (
         <div className="border-primary-border bg-base/40 space-y-3 border-t p-3">
-          {loading ? (
+          {live ? (
+            live.messages.length > 0 ? (
+              live.messages.map((m) => (
+                <Message key={m.id} message={m as unknown as AppUIMessage} />
+              ))
+            ) : (
+              <p className="text-ink-tertiary text-xs">Starting…</p>
+            )
+          ) : loading ? (
             <p className="text-ink-tertiary text-xs">Loading…</p>
           ) : msgs && msgs.length > 0 ? (
             msgs.map((m) => <Message key={m.id} message={m as unknown as AppUIMessage} />)

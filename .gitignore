@@ -36,3 +36,4 @@ pnpm-debug.log*
 # internal-only (kept locally, never committed)
 STRATEGY.md
 .vercel
+tasks/
