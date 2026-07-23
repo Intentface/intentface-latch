@@ -266,13 +266,35 @@ export function createLatchHandler<P>(
           string,
           unknown
         >;
-        return rt.handleChat({
-          agent,
-          chatId,
-          principal,
-          message: toUserMessage(body),
-          request,
-        });
+        try {
+          return await rt.handleChat({
+            agent,
+            chatId,
+            principal,
+            message: toUserMessage(body),
+            request,
+          });
+        } catch (e) {
+          // A new message arrived while the previous turn is still awaiting an
+          // approval decision. PendingApprovalError carries a stable `code` so
+          // we map it to 409 (the client should resolve the pending approval
+          // first) instead of letting it bubble to the host as a 500.
+          if (
+            e &&
+            typeof e === "object" &&
+            (e as { code?: unknown }).code === "pending_approval"
+          ) {
+            return json(
+              {
+                error:
+                  e instanceof Error ? e.message : "awaiting approval decision",
+                code: "pending_approval",
+              },
+              409,
+            );
+          }
+          throw e;
+        }
       }
     }
 

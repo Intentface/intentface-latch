@@ -647,6 +647,43 @@ function markSubagentApprovalResolved(
   return changed;
 }
 
+/**
+ * The resume paths ({@link applyApproval} / {@link applyToolResult}) re-run the
+ * model from history whose LAST message is the assistant turn that paused — no
+ * fresh user message is appended. If that turn streamed trailing user-facing
+ * text before pausing (e.g. "…ready to create the page but needs your approval
+ * first"), the model projection ends on an assistant message. Some providers
+ * reject that ("This model does not support assistant message prefill. The
+ * conversation must end with a user message.").
+ *
+ * Trim trailing non-tool parts (text/reasoning/step boundaries) that follow the
+ * final tool/approval part of the last assistant message, so the projection ends
+ * on the tool result (a user turn) and the model generates a fresh continuation.
+ * Returns a shallow copy touching only the last message — the persisted history
+ * (with the provisional text) is left intact; this shapes the resumed call only.
+ */
+export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
+  if (messages.length === 0) return messages;
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+  if (last.role !== "assistant") return messages;
+  const parts = (last.parts ?? []) as { type: string }[];
+  // Last part that anchors a model-turn boundary we must keep: a tool call/result
+  // or a bubbled subagent approval. Everything after it is trailing commentary.
+  let keepUntil = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const t = parts[i].type;
+    if (t.startsWith("tool-") || t === "dynamic-tool" || t === "data-subagent-approval") {
+      keepUntil = i;
+      break;
+    }
+  }
+  // No tool/approval anchor, or nothing trailing to drop → leave untouched.
+  if (keepUntil === -1 || keepUntil === parts.length - 1) return messages;
+  const trimmed = { ...last, parts: parts.slice(0, keepUntil + 1) } as AppMessage;
+  return [...messages.slice(0, lastIndex), trimmed];
+}
+
 /** A tool/dynamic-tool UI part, narrowed to the result fields we touch. */
 type ResultPart = { type?: string; toolCallId?: string; state?: string; output?: unknown };
 
@@ -1599,7 +1636,9 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: messages,
+      // Resume: strip the paused turn's trailing text so the model call ends on
+      // the tool result (a user turn), not an assistant prefill.
+      uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
   }
@@ -1648,7 +1687,8 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: messages,
+      // Resume: same prefill guard as applyApproval (see trimTrailingAssistantPrefill).
+      uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
   }
