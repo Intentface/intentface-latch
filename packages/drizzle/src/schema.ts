@@ -4,6 +4,8 @@ import {
   integer,
   real,
   index,
+  primaryKey,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 /** The v1 tables. `messages` is the source of truth; parts + metadata are JSON. */
@@ -27,7 +29,7 @@ export const chats = sqliteTable(
 export const messages = sqliteTable(
   "latch_messages",
   {
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     chatId: text("chat_id").notNull(),
     runId: text("run_id"),
     seq: integer("seq").notNull(),
@@ -38,7 +40,15 @@ export const messages = sqliteTable(
     metadata: text("metadata", { mode: "json" }),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [index("latch_messages_chat_idx").on(t.chatId, t.seq)],
+  (t) => [
+    // Message ids are client/stream-generated, so they're only unique WITHIN a
+    // chat — a global PK on `id` would let an upsert in one chat overwrite a
+    // same-id row in another owner's chat. Scope the identity to the chat.
+    primaryKey({ columns: [t.chatId, t.id] }),
+    // One row per (chat, seq): guards concurrent appenders computing the same
+    // next seq. Doubles as the (chat_id, seq) read-ordering index.
+    uniqueIndex("latch_messages_chat_seq_idx").on(t.chatId, t.seq),
+  ],
 );
 
 export const runs = sqliteTable(

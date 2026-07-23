@@ -145,48 +145,56 @@ export function createPostgresAdapter<P>(
     },
 
     async appendMessages(chatId, msgs) {
+      /** Chat activity: keep `updatedAt` fresh so `listChats` orders by it. */
+      const touchChat = () =>
+        db
+          .update(schema.chats)
+          .set({ updatedAt: Date.now() })
+          .where(eq(schema.chats.id, chatId));
       if (opts.messages) {
         const [c] = await db
           .select()
           .from(schema.chats)
           .where(eq(schema.chats.id, chatId));
         if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
+          if (msgs.length > 0) await touchChat();
           return;
         }
       }
       if (msgs.length === 0) return;
-      const [agg] = await db
-        .select({ maxSeq: sql<number | null>`max(${schema.messages.seq})` })
-        .from(schema.messages)
-        .where(eq(schema.messages.chatId, chatId));
-      const existing = new Set(
-        (
-          await db
-            .select({ id: schema.messages.id })
-            .from(schema.messages)
-            .where(eq(schema.messages.chatId, chatId))
-        ).map((r) => r.id),
-      );
-      let next = (agg?.maxSeq ?? -1) + 1;
-      for (const m of msgs) {
-        const seq = existing.has(m.id) ? 0 : next++;
-        await db
-          .insert(schema.messages)
-          .values({
-            id: m.id,
-            chatId,
-            runId: null,
-            seq,
-            role: m.role,
-            parts: m.parts,
-            metadata: m.metadata ?? null,
-            createdAt: m.metadata?.createdAt ?? Date.now(),
-          })
-          .onConflictDoUpdate({
-            target: schema.messages.id,
-            set: { parts: m.parts, metadata: m.metadata ?? null },
-          });
-      }
+      // One transaction per batch: the max(seq) read and the inserts commit (or
+      // roll back) together, so a crash mid-batch can't leave a partial write
+      // and a concurrent appender can't interleave into the same seq range.
+      // The next seq is additionally computed INSIDE each INSERT, with the
+      // UNIQUE (chat_id, seq) index as the backstop for a true race.
+      await db.transaction(async (tx) => {
+        const nextSeq = sql`(select coalesce(max(${schema.messages.seq}), -1) + 1 from ${schema.messages} where ${schema.messages.chatId} = ${chatId})`;
+        for (const m of msgs) {
+          await tx
+            .insert(schema.messages)
+            .values({
+              id: m.id,
+              chatId,
+              runId: null,
+              seq: nextSeq as unknown as number,
+              role: m.role,
+              parts: m.parts,
+              metadata: m.metadata ?? null,
+              createdAt: m.metadata?.createdAt ?? Date.now(),
+            })
+            // Existing message (same chat + id) → update content only; seq is
+            // preserved. Conflict target is the composite PK — a same-id row
+            // in ANOTHER chat is a different row, never overwritten from here.
+            .onConflictDoUpdate({
+              target: [schema.messages.chatId, schema.messages.id],
+              set: { parts: m.parts, metadata: m.metadata ?? null },
+            });
+        }
+        await tx
+          .update(schema.chats)
+          .set({ updatedAt: Date.now() })
+          .where(eq(schema.chats.id, chatId));
+      });
     },
 
     async createRun(principal, input) {

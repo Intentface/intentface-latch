@@ -7,10 +7,16 @@ const DDL = [
      title TEXT, kind TEXT NOT NULL DEFAULT 'user',
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
+  // NOTE: composite PK — message ids are only unique within a chat, and the
+  // UNIQUE (chat_id, seq) guards concurrent appenders. Databases created by an
+  // older version of this DDL (global `id` PK, non-unique index) are NOT
+  // upgraded by migrateWith (it only creates missing tables / adds columns) —
+  // they need a one-off table rebuild (create-new → copy → drop → rename).
   `CREATE TABLE IF NOT EXISTS latch_messages (
-     id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, run_id TEXT, seq INTEGER NOT NULL,
-     role TEXT NOT NULL, parts TEXT NOT NULL, metadata TEXT, created_at INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS latch_messages_chat_idx ON latch_messages (chat_id, seq)`,
+     id TEXT NOT NULL, chat_id TEXT NOT NULL, run_id TEXT, seq INTEGER NOT NULL,
+     role TEXT NOT NULL, parts TEXT NOT NULL, metadata TEXT, created_at INTEGER NOT NULL,
+     PRIMARY KEY (chat_id, id))`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS latch_messages_chat_seq_idx ON latch_messages (chat_id, seq)`,
   `CREATE TABLE IF NOT EXISTS latch_runs (
      id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, agent TEXT NOT NULL, status TEXT NOT NULL,
      identity TEXT,
