@@ -25,6 +25,13 @@ export interface ChatRecord {
   owner: string;
   agent: string;
   title?: string;
+  /**
+   * What kind of chat this is. `'user'` (the default) = a user-facing
+   * conversation; `'internal'` = a runtime-created sub-thread (the `sub_…`
+   * chats `spawn_agent` mints) that should stay out of the main chat list.
+   * Open vocabulary — a host may stamp its own kinds via `createChat`.
+   */
+  kind?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -119,12 +126,21 @@ export interface StorageAdapter<P> {
       id?: string;
       agent: string;
       title?: string;
+      /** Chat kind (see `ChatRecord.kind`). Defaults to `'user'`. */
+      kind?: string;
     },
   ): Promise<ChatRecord>;
   /** Scoped: returns null if the chat isn't the caller's. */
   getChat(principal: P, id: string): Promise<ChatRecord | null>;
-  /** Scoped list of the caller's chats, most-recently-updated first. */
-  listChats(principal: P, opts?: { limit?: number }): Promise<ChatRecord[]>;
+  /**
+   * Scoped list of the caller's chats, most-recently-updated first.
+   * `opts.kind` filters to one kind (e.g. `'user'` for a sidebar that must not
+   * show internal sub-threads); omitted → ALL kinds (back-compatible default).
+   */
+  listChats(
+    principal: P,
+    opts?: { limit?: number; kind?: string },
+  ): Promise<ChatRecord[]>;
 
   // messages (the source of truth)
   /** Scoped read of the conversation, oldest first. */

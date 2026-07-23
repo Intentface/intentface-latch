@@ -322,10 +322,15 @@ export interface Runtime<P> {
     chatId: string;
     principal: P;
   }): Promise<AppMessage[]>;
-  /** The caller's chats, most-recent first (for a chat list / sidebar). */
+  /**
+   * The caller's chats, most-recent first (for a chat list / sidebar).
+   * `kind` filters to one chat kind (e.g. `'user'` to hide the runtime's
+   * internal `sub_…` threads); omitted → all kinds (back-compatible default).
+   */
   listChats(input: {
     principal: P;
     limit?: number;
+    kind?: string;
   }): Promise<ChatRecord[]>;
   /** The caller's runs, most-recent first (status, usage, cost — for an ops view). */
   listRuns(input: {
@@ -1740,11 +1745,15 @@ export function createRuntime<P, RC = unknown>(
   async function listChats({
     principal,
     limit,
+    kind,
   }: {
     principal: P;
     limit?: number;
+    kind?: string;
   }): Promise<ChatRecord[]> {
-    return storage.listChats(principal, { limit });
+    // No default kind filter — passing nothing returns ALL chats (unchanged
+    // behavior). Callers that want only user-facing chats pass kind: "user".
+    return storage.listChats(principal, { limit, kind });
   }
 
   async function listRuns({
@@ -1847,6 +1856,9 @@ export function createRuntime<P, RC = unknown>(
         id: subChatId,
         agent,
         title: prompt.slice(0, 80),
+        // Runtime-created sub-thread: stamp it internal so a host filtering
+        // its chat list on kind never shows it (see ChatRecord.kind).
+        kind: "internal",
       });
     }
     const prior = await storage.loadMessages(principal, subChatId);

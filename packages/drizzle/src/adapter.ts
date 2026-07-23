@@ -65,6 +65,7 @@ export function createSqliteAdapter<P>(
     owner: r.owner,
     agent: r.agent,
     title: r.title ?? undefined,
+    kind: r.kind,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   });
@@ -124,6 +125,7 @@ export function createSqliteAdapter<P>(
         owner: ownerKey(principal),
         agent: input.agent,
         title: input.title ?? null,
+        kind: input.kind ?? "user",
         createdAt: now,
         updatedAt: now,
       };
@@ -134,10 +136,12 @@ export function createSqliteAdapter<P>(
     getChat,
 
     async listChats(principal, opts) {
+      // No kind → all chats (back-compatible); kind → only that kind.
+      const scope = eq(schema.chats.owner, ownerKey(principal));
       const rows = await db
         .select()
         .from(schema.chats)
-        .where(eq(schema.chats.owner, ownerKey(principal)))
+        .where(opts?.kind ? and(scope, eq(schema.chats.kind, opts.kind)) : scope)
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map(rowToChat);

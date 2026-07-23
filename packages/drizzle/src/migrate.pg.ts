@@ -4,7 +4,8 @@ import type { PgDatabase } from "drizzle-orm/pg-core";
 const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_chats (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL,
-     title TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
+     title TEXT, kind TEXT NOT NULL DEFAULT 'user',
+     created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   `CREATE TABLE IF NOT EXISTS latch_messages (
      id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, run_id TEXT, seq INTEGER NOT NULL,
@@ -38,6 +39,12 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS latch_schedules_due_idx ON latch_schedules (enabled, next_run_at)`,
 ];
 
+/** Idempotent column adds for DBs created before a column existed. */
+const ALTERS = [
+  `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'`,
+];
+
 export async function migratePostgres(db: PgDatabase<any, any, any>): Promise<void> {
   for (const stmt of DDL) await db.execute(sql.raw(stmt));
+  for (const stmt of ALTERS) await db.execute(sql.raw(stmt));
 }

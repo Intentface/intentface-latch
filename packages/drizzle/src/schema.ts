@@ -16,6 +16,8 @@ export const chats = sqliteTable(
     owner: text("owner").notNull(),
     agent: text("agent").notNull(),
     title: text("title"),
+    /** Chat kind: 'user' (default) vs 'internal' sub-threads (ChatRecord.kind). */
+    kind: text("kind").notNull().default("user"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
