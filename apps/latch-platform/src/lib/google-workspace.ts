@@ -186,13 +186,17 @@ export function createGoogleWorkspaceConnection<P>(opts: {
     },
 
     // Connectivity probe: a refresh-grant round trip proves the stored token
-    // still works. No tools to enumerate.
+    // still works. There are no tools — report the mounts instead, so the
+    // Connections page's Test shows what this connection actually provides.
     async testTools(name, principal) {
       if (name !== NAME) return [];
       const tokens = await readTokens(principal);
       if (!tokens) throw new Error(`"${NAME}" is not connected`);
       await exchange({ grant_type: "refresh_token", refresh_token: tokens.refresh_token });
-      return [];
+      return [
+        "mirage sandbox mount: /gdrive (Drive, read-only)",
+        "mirage sandbox mount: /gmail (Gmail, read-only)",
+      ];
     },
 
     async mountCredsFor(principal): Promise<GoogleMountCreds | null> {
