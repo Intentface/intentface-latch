@@ -496,6 +496,7 @@ function AgentEditor() {
               <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
                 <option value="just-bash">just-bash (in-process)</option>
                 <option value="daytona">Daytona (VM — needs API key)</option>
+                <option value="mirage">Mirage (VFS — workspace + read-only Slack)</option>
               </Select>
             </label>
           )}

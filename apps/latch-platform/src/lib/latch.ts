@@ -31,7 +31,7 @@ import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
 import { createAgentStore, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
-import { createSlackStore, migrateSlack  } from "./slack-store";
+import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
@@ -42,7 +42,7 @@ import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
 import { loadModelCatalog  } from "./models";
 import type {ModelInfo} from "./models";
-import { resolveSandbox, harnessTools } from "./sandbox";
+import { createSandboxResolver, harnessTools } from "./sandbox";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";
 
@@ -199,8 +199,20 @@ export async function getLatch(): Promise<{
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash
-    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY.
-    sandbox: resolveSandbox,
+    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY; mirage
+    // (opt-in) mounts the agent's Slack app read-only when one is bound.
+    sandbox: createSandboxResolver({
+      slackTokenForAgent: async (agent, principal) => {
+        const app = (await slackStore.listForOrg(principal.orgId)).find(
+          (a) => a.agent === agent,
+        );
+        if (!app) return null;
+        return (
+          (await credentials.get(principal, slackVaultKeys(app.appId).botToken, "org")) ??
+          null
+        );
+      },
+    }),
     harnessTools,
     // Native provider web tools (search/fetch) for agents that opt in.
     resolveProviderTools,
