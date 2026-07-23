@@ -1,15 +1,16 @@
 import { and, asc, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
-import type {
-  AppMessage,
-  ChatRecord,
-  RunRecord,
-  RunStatus,
-  ScheduleRecord,
-  StorageAdapter,
+import {
+  ChatConflictError,
+  type AppMessage,
+  type ChatRecord,
+  type RunRecord,
+  type RunStatus,
+  type ScheduleRecord,
+  type StorageAdapter,
 } from "@intentface/latch-core";
 import * as schema from "./schema.pg.js";
-import type { SqliteAdapterOptions } from "./adapter.js";
+import { isUniqueViolation, type SqliteAdapterOptions } from "./adapter.js";
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
@@ -99,7 +100,15 @@ export function createPostgresAdapter<P>(
         createdAt: now,
         updatedAt: now,
       };
-      await db.insert(schema.chats).values(row);
+      try {
+        await db.insert(schema.chats).values(row);
+      } catch (error) {
+        // A client-supplied id can collide with a chat the caller doesn't own
+        // (the scoped getChat missed, so the caller fell through to create).
+        // Surface a typed conflict the server layer can map to a 409.
+        if (isUniqueViolation(error)) throw new ChatConflictError(row.id);
+        throw error;
+      }
       return rowToChat(row as typeof schema.chats.$inferSelect);
     },
 

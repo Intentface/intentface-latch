@@ -375,6 +375,24 @@ export function createLatchHandler<P>(
               409,
             );
           }
+          // A client-supplied chat id collided with an existing (typically
+          // foreign-owned) chat: the scoped getChat missed, createChat hit the
+          // PK. ChatConflictError carries a stable `code` — map it to 409 so
+          // the client can pick a different id, instead of a 500.
+          if (
+            e &&
+            typeof e === "object" &&
+            (e as { code?: unknown }).code === "chat_conflict"
+          ) {
+            return json(
+              {
+                error:
+                  e instanceof Error ? e.message : "chat id is not available",
+                code: "chat_conflict",
+              },
+              409,
+            );
+          }
           throw e;
         }
       }
