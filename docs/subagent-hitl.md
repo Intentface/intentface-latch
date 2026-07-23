@@ -33,17 +33,20 @@ subagent **gates** its tools; autonomous top-level → subagent still auto-appro
 
 ### 3. `spawn_agent` surfaces the sub-approval on the parent turn
 
-On a `pending` result, `spawn_agent`'s `execute` writes an **approval-requested
-part** into the parent stream (via the turn `writer`), tagged with
-`{ subChatId, subApprovalId }` in its metadata, and returns a short "awaiting
-approval" tool result. The parent turn finishes with a pending approval →
-`awaiting_input` (existing behavior). The user sees the summary.
+On a `pending` result, `spawn_agent`'s `execute` writes a
+**`data-subagent-approval` data part** into the parent stream (via the turn
+`writer`) with `data: { approvalId, subChatId, subApprovalIds, spawnToolCallId,
+summaries }` (`subApprovalIds`/`summaries` are arrays — one entry per gated sub
+tool), and returns a short "awaiting approval" tool result. The parent turn
+finishes with a pending approval → `awaiting_input` (existing behavior). The
+user sees the summaries. `pendingApprovals` and `applyApproval` key off
+`type === "data-subagent-approval"` and `data.approvalId`.
 
 ### 4. `applyApproval` routes a sub-approval to the child, then resumes the parent
 
-When `applyApproval(parentChat, decisions)` sees an approval-requested part
-tagged with `subChatId`:
-1. apply the decision to the **sub thread's** approval part;
+When `applyApproval(parentChat, decisions)` sees a `data-subagent-approval`
+part whose `data.approvalId` matches the decision:
+1. apply the decision to the **sub thread's** approval parts (`subApprovalIds`);
 2. resume the **sub turn** (`buildTurn` on the sub thread from history) → the
    approved tool executes → sub completes → digest;
 3. record the sub's answer as the `spawn_agent` tool **result** in the parent

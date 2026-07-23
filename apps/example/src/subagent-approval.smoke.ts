@@ -142,9 +142,10 @@ async function runScenario(approved: boolean) {
     | undefined;
   const approvalId = dataPart?.data?.approvalId;
   const execBefore = execCount;
-  const parentStatuses = (await client.execute(
-    `SELECT status FROM latch_runs r JOIN latch_chats c ON r.chat_id=c.id WHERE c.id='${chat.id}'`,
-  )).rows.map((r) => String(r.status));
+  const parentStatuses = (await client.execute({
+    sql: "SELECT status FROM latch_runs r JOIN latch_chats c ON r.chat_id=c.id WHERE c.id=?",
+    args: [chat.id],
+  })).rows.map((r) => String(r.status));
 
   if (!approvalId) {
     return { approvalId: undefined, execBefore, execAfter: execCount, parentStatuses, blob: "", client };

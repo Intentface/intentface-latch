@@ -216,9 +216,12 @@ export function createLatchHandler<P>(
         if (res.status !== "redirect") {
           // Already authorized (tokens live in the Vault) — start()
           // short-circuits without an IdP round-trip, so the callback (which
-          // signals `onConnected`) never runs. Signal it here too.
+          // signals `onConnected` and appends `connectedParam`) never runs.
+          // Signal both here too, so a pending `connect_<name>` still resumes.
           await config.onConnected?.(principal, name);
-          return redirect(returnTo ?? "/");
+          return redirect(
+            `${returnTo ?? "/"}?${config.connectedParam ?? "connected"}=${name}`,
+          );
         }
         return redirect(res.authorizationUrl);
       }

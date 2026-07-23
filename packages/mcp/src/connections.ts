@@ -265,13 +265,18 @@ export function createMcpConnections<P>(
     for (const [name, def] of entries) {
       const auth = def.auth ?? none;
       // `*For` resolvers vary by caller (awaited per turn); they take precedence
-      // over the static `approval`/`visibleTools`.
-      const approval = def.approvalFor
-        ? await def.approvalFor(principal)
-        : def.approval;
-      const visible = def.visibleToolsFor
-        ? await def.visibleToolsFor(principal)
-        : def.visibleTools;
+      // over the static `approval`/`visibleTools`. A resolver failure skips just
+      // this connection (graceful degradation, like a connect-time failure)
+      // instead of rejecting the whole host.
+      let approval = def.approval;
+      let visible = def.visibleTools;
+      try {
+        if (def.approvalFor) approval = await def.approvalFor(principal);
+        if (def.visibleToolsFor) visible = await def.visibleToolsFor(principal);
+      } catch (error) {
+        config.onConnectionError?.(name, error);
+        continue;
+      }
       if (auth.kind === "oauth") {
         const o = oauthByName.get(name);
         // Include the live connection only once the caller has authorized.

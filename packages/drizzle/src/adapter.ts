@@ -141,7 +141,11 @@ export function createSqliteAdapter<P>(
       const rows = await db
         .select()
         .from(schema.chats)
-        .where(opts?.kind ? and(scope, eq(schema.chats.kind, opts.kind)) : scope)
+        .where(
+          opts?.kind !== undefined
+            ? and(scope, eq(schema.chats.kind, opts.kind))
+            : scope,
+        )
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map(rowToChat);

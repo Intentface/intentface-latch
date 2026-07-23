@@ -1,4 +1,3 @@
-import { scryptSync } from "node:crypto";
 import type { SecretResolver } from "./context.js";
 
 /**
@@ -73,25 +72,9 @@ function fromB64(b64: string): Uint8Array {
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-/**
- * Derive a base64 32-byte `masterKey` from a free-form passphrase via scrypt.
- *
- * NOTE — Node-crypto exception: this module is otherwise pure Web Crypto
- * (`crypto.subtle`) so it stays portable to edge/serverless. `scryptSync` is a
- * Node-only KDF and is used deliberately here: it's a convenience for the common
- * case where the KEK comes from a human passphrase env var rather than a raw
- * base64 key, and key derivation happens once at startup on the server (never in
- * an edge request path). Consumers on non-Node runtimes should supply a raw
- * base64 32-byte `masterKey` to `createVault` directly and skip this helper.
- */
-export function deriveMasterKey(
-  passphrase: string,
-  opts?: { salt?: string },
-): string {
-  return scryptSync(passphrase, opts?.salt ?? "latch-vault", 32).toString(
-    "base64",
-  );
-}
+// `deriveMasterKey` (passphrase → KEK via scrypt) lives in
+// `@intentface/latch-core/node` — it needs `node:crypto`, and importing it here
+// would make the package root unusable on edge/serverless runtimes.
 
 // Web Crypto's lib types narrow BufferSource to ArrayBuffer-backed views; our
 // Uint8Arrays are structurally fine, so coerce at the crypto call boundary.

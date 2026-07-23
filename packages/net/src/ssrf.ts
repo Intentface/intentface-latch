@@ -39,7 +39,8 @@ export function isPrivateV4(ip: string): boolean {
 export function isBlockedHost(host: string): boolean {
   let h = host.toLowerCase().replace(/\.$/, "");
   if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1); // unwrap IPv6 literal
-  if (h === "localhost" || h.endsWith(".local") || h === "::1" || h === "::") return true;
+  // `.localhost` subdomains are reserved to resolve loopback (RFC 6761).
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h === "::1" || h === "::") return true;
   if (h.includes(":")) {
     if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true;
     if (h.startsWith("::ffff:")) return true; // IPv4-mapped

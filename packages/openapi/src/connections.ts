@@ -1,4 +1,5 @@
 import SwaggerParser from "@apidevtools/swagger-parser";
+import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
 import type {
   ConnectionRegistry,
   OpenToolSet,
@@ -73,6 +74,16 @@ export function createOpenApiConnections<P>(
       const host = new URL(def.spec).hostname;
       if (!isHostAllowed(host, config.allowedHosts)) {
         throw new Error(`OpenAPI spec host not allowed: ${host} (connection "${name}")`);
+      }
+      // Same private/internal-address backstop as operation requests: an
+      // allowlisted spec hostname must not resolve to a private/link-local IP.
+      if (
+        !def.allowPrivateHost &&
+        (isBlockedHost(host) || (await isBlockedResolved(host)))
+      ) {
+        throw new Error(
+          `OpenAPI spec host resolves to a private/internal address: ${host} (connection "${name}")`,
+        );
       }
       const res = await fetchFn(def.spec, { redirect: "error" });
       if (!res.ok) throw new Error(`spec fetch failed: HTTP ${res.status}`);

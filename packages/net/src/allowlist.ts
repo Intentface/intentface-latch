@@ -7,7 +7,9 @@
 
 /** True if `host` is permitted by the allowlist (exact, or `.suffix` subdomain). */
 export function isHostAllowed(host: string, allowed: string[]): boolean {
-  const h = host.toLowerCase();
+  // Strip one trailing DNS dot: `URL.hostname` preserves it for a FQDN like
+  // `api.example.com.`, which must match the same allowlist entries.
+  const h = host.toLowerCase().replace(/\.$/, "");
   return allowed.some((entry) => {
     const a = entry.toLowerCase();
     if (a.startsWith(".")) return h === a.slice(1) || h.endsWith(a);

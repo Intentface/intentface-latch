@@ -61,8 +61,13 @@ export async function migrateWith(
   for (const stmt of ALTERS) {
     try {
       await exec(stmt);
-    } catch {
-      /* column already exists */
+    } catch (error) {
+      // Idempotency only: swallow "column already exists" (sqlite/libsql say
+      // "duplicate column name"), propagate everything else (locked DB, failed
+      // write) so callers don't proceed against an outdated schema.
+      const message =
+        error instanceof Error ? error.message : String(error);
+      if (!/duplicate column|already exists/i.test(message)) throw error;
     }
   }
 }
