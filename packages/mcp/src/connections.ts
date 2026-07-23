@@ -95,6 +95,12 @@ export interface McpConnectionDef<P = unknown> {
    * marks destructive / not read-only). `"all"`, `"none"`, or a predicate.
    */
   approval?: McpApprovalPolicy;
+  /**
+   * Permit this connection to reach a private/internal address. Off by default
+   * (the host blocks private/loopback/link-local IPs and DNS rebinding); set
+   * `true` only for a trusted local/in-cluster MCP server.
+   */
+  allowPrivateHost?: boolean;
 }
 
 /** Identity helper — keeps connection files declarative and typed. */
@@ -245,6 +251,7 @@ export function createMcpConnections<P>(
             authProvider: o.provider(principal),
             fetch: fetchByName.get(name),
             approval: def.approval,
+            allowPrivateHost: def.allowPrivateHost,
           });
         }
       } else if (auth.kind === "bearer") {
@@ -254,6 +261,7 @@ export function createMcpConnections<P>(
           url: def.url,
           auth: { type: "headers", headers: { Authorization: `Bearer ${token}` } },
           approval: def.approval,
+          allowPrivateHost: def.allowPrivateHost,
         });
       } else if (auth.kind === "headers") {
         out.push({
@@ -261,9 +269,15 @@ export function createMcpConnections<P>(
           url: def.url,
           auth: { type: "headers", headers: auth.headers },
           approval: def.approval,
+          allowPrivateHost: def.allowPrivateHost,
         });
       } else {
-        out.push({ name, url: def.url, approval: def.approval });
+        out.push({
+          name,
+          url: def.url,
+          approval: def.approval,
+          allowPrivateHost: def.allowPrivateHost,
+        });
       }
     }
     return out;

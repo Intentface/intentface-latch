@@ -5,6 +5,7 @@ import {
   type OAuthClientProvider,
 } from "@ai-sdk/mcp";
 import type { SecretResolver } from "@intentface/latch-core";
+import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
 import type { FetchFunction } from "./oauth-fetch.js";
 
 /**
@@ -81,6 +82,13 @@ export type McpConnection =
        * `createOAuthDiscoveryFetch`) so discovery normalization is consistent.
        */
       fetch?: FetchFunction;
+      /**
+       * Permit this connection to reach a private/internal address. By default
+       * the host rejects private/loopback/link-local IPs and DNS-rebinding
+       * (a name that resolves private) even when the host is on the allowlist.
+       * Set `true` only for a trusted local/in-cluster MCP server.
+       */
+      allowPrivateHost?: boolean;
       /** Which tools require approval (default: respect MCP destructive hints). */
       approval?: McpApprovalPolicy;
     }
@@ -192,6 +200,19 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
             await closeAll();
             throw new Error(
               `MCP host not allowed for this tenant: ${host} (connection "${conn.name}")`,
+            );
+          }
+          // Defense-in-depth beyond the allowlist: reject private/internal
+          // addresses and DNS rebinding (an allowlisted name that resolves to a
+          // private/link-local IP — e.g. cloud metadata at 169.254.169.254).
+          // Opt out per connection for a trusted local server.
+          if (
+            !conn.allowPrivateHost &&
+            (isBlockedHost(host) || (await isBlockedResolved(host)))
+          ) {
+            await closeAll();
+            throw new Error(
+              `MCP host resolves to a private/internal address: ${host} (connection "${conn.name}"). Set allowPrivateHost to permit a trusted local server.`,
             );
           }
         }
