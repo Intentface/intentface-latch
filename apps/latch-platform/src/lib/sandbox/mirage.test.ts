@@ -108,4 +108,36 @@ describe("createMirageSession", () => {
     const r = await session.run({ command: "curl https://example.com" });
     expect(r.exitCode).not.toBe(0);
   });
+
+  it("mounts /gdrive and /gmail read-only when google creds are present", async () => {
+    // Resource construction is lazy (no network) — only mount topology and
+    // write rejection are asserted here.
+    const session = createMirageSession({
+      workspaceDir: await scratchDir(),
+      google: {
+        clientId: "test-client",
+        refreshToken: "rt",
+        refreshFn: async () => ({ accessToken: "at", expiresIn: 3600 }),
+      },
+    });
+    const ls = await session.run({ command: "ls /" });
+    expect(ls.stdout).toContain("gdrive");
+    expect(ls.stdout).toContain("gmail");
+    for (const p of ["/gdrive/x.txt", "/gmail/x.txt"]) {
+      const w = await session.run({ command: `echo x > ${p}` });
+      expect(w.exitCode).not.toBe(0);
+      // gdrive: READ mount → "read-only"; gmail: no write op registered at all.
+      expect(w.stderr).toMatch(/read-only|no op registered: write/i);
+      await expect(session.writeTextFile!({ path: p, content: "x" })).rejects.toThrow(
+        /only allowed under \/workspace/,
+      );
+    }
+  });
+
+  it("omits google mounts without creds", async () => {
+    const session = createMirageSession({ workspaceDir: await scratchDir() });
+    const ls = await session.run({ command: "ls /" });
+    expect(ls.stdout).not.toContain("gdrive");
+    expect(ls.stdout).not.toContain("gmail");
+  });
 });

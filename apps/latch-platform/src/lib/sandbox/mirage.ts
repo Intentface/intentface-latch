@@ -4,19 +4,25 @@ import {
   Workspace,
   DiskResource,
   SlackResource,
+  GDriveResource,
+  GmailResource,
   MountMode,
   type MountSpec,
 } from "@struktoai/mirage-node";
 import type { Experimental_SandboxSession, Experimental_SandboxProcess } from "ai";
+import type { GoogleMountCreds } from "../google-workspace";
 
 /**
  * mirage-backed `Experimental_SandboxSession` — the connector-mount sandbox.
  * Same simulated-shell model as just-bash, but mounts can be external services
  * exposed as files: `/workspace` is a read-write disk mount on the same
  * per-chat host directory just-bash uses (so switching providers keeps files),
- * and `/slack` (when the agent has a Slack app) is a READ-ONLY view of the
+ * `/slack` (when the agent has a Slack app) is a READ-ONLY view of the
  * Slack workspace — public channels only, enforced by bot-token scopes
- * (`channels:read` without `groups:read`).
+ * (`channels:read` without `groups:read`) — and `/gdrive` + `/gmail` (when the
+ * CHAT USER has connected `google_workspace`) are READ-ONLY views of that
+ * user's own Drive and Gmail, enforced by consent scopes (`drive.readonly`,
+ * `gmail.readonly`) on top of the READ mount mode.
  *
  * Security posture (deliberate, don't relax):
  * - `curl`/`wget` builtins are unregistered — mirage has no SSRF allowlist, so
@@ -73,6 +79,8 @@ export function createMirageSession(opts: {
   workspaceDir: string;
   /** Bot token of the agent's Slack app; when absent, no `/slack` mount. */
   slackToken?: string | null;
+  /** The chat user's Google tokens; when absent, no `/gdrive` or `/gmail`. */
+  google?: GoogleMountCreds | null;
 }): Experimental_SandboxSession {
   let ws: Workspace | undefined;
 
@@ -96,6 +104,20 @@ export function createMirageSession(opts: {
     };
     if (opts.slackToken) {
       mounts["/slack"] = [new SlackResource({ token: opts.slackToken }), MountMode.READ];
+    }
+    if (opts.google) {
+      // refreshFn keeps the client secret on our side; mirage only ever holds
+      // the refresh token + short-lived access tokens. Its TokenManager never
+      // reads clientSecret when refreshFn is set — the empty string only
+      // satisfies the config type.
+      const cfg = {
+        clientId: opts.google.clientId,
+        clientSecret: "",
+        refreshToken: opts.google.refreshToken,
+        refreshFn: opts.google.refreshFn,
+      };
+      mounts["/gdrive"] = [new GDriveResource(cfg), MountMode.READ];
+      mounts["/gmail"] = [new GmailResource(cfg), MountMode.READ];
     }
     ws = createMirageWorkspace(mounts);
     return ws;
@@ -157,6 +179,10 @@ export function createMirageSession(opts: {
       (opts.slackToken
         ? ` /slack is a READ-ONLY mount of the Slack workspace (public channels ` +
           `the bot is in) — browse it with ls/cat/grep.`
+        : ``) +
+      (opts.google
+        ? ` /gdrive and /gmail are READ-ONLY mounts of the user's own Google ` +
+          `Drive and Gmail — browse them with ls/cat/grep.`
         : ``) +
       ` No real system binaries and no network access (curl/wget disabled); ` +
       `built-in shell utilities (cat, ls, grep, sed, etc.) and file I/O only.`,

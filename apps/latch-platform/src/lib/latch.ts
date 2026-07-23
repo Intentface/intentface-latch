@@ -43,6 +43,7 @@ import { baseUrl } from "./base-url";
 import { loadModelCatalog  } from "./models";
 import type {ModelInfo} from "./models";
 import { createSandboxResolver, harnessTools } from "./sandbox";
+import { createGoogleWorkspaceConnection } from "./google-workspace";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";
 
@@ -174,8 +175,22 @@ export async function getLatch(): Promise<{
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
+  // Google Workspace OAuth for the mirage sandbox's read-only /gdrive +
+  // /gmail mounts — a tool-less connection (the mount is the interface).
+  // Needs its own pre-registered OAuth client (no DCR), separate from the
+  // Google login and Calendar clients. Omitted (no client id) → not loaded.
+  const googleWorkspace = process.env.GOOGLE_WORKSPACE_CLIENT_ID
+    ? createGoogleWorkspaceConnection<Principal>({
+        vault,
+        clientId: process.env.GOOGLE_WORKSPACE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_WORKSPACE_CLIENT_SECRET ?? "",
+        callbackBaseUrl: `${baseURL}/api/latch/connections`,
+      })
+    : undefined;
+
   // The full connection registry across kinds — also used to enumerate a
-  // connection's tools for the agent editor.
+  // connection's tools for the agent editor. (google_workspace contributes no
+  // tools, so it only joins the handler registry below.)
   const allConnections = mergeConnections(connections, dynamic);
 
   const runtime = createRuntime<Principal, Ctx>({
@@ -212,6 +227,8 @@ export async function getLatch(): Promise<{
           null
         );
       },
+      googleForUser: async (principal) =>
+        (await googleWorkspace?.mountCredsFor(principal)) ?? null,
     }),
     harnessTools,
     // Native provider web tools (search/fetch) for agents that opt in.
@@ -226,14 +243,24 @@ export async function getLatch(): Promise<{
   const handlerConnections: McpConnections<Principal> = {
     host: connections.host,
     hostFor: (names) => connections.hostFor(names),
-    names: connections.names,
+    names: [...connections.names, ...(googleWorkspace?.names ?? [])],
     oauth: (name) =>
-      connections.names.includes(name) ? connections.oauth(name) : dynamic.oauth(name),
-    status: async (p) => [...(await connections.status(p)), ...(await dynamic.status(p))],
+      googleWorkspace?.names.includes(name)
+        ? googleWorkspace.oauth(name)
+        : connections.names.includes(name)
+          ? connections.oauth(name)
+          : dynamic.oauth(name),
+    status: async (p) => [
+      ...(await connections.status(p)),
+      ...(googleWorkspace ? await googleWorkspace.status(p) : []),
+      ...(await dynamic.status(p)),
+    ],
     testTools: (name, p) =>
-      connections.names.includes(name)
-        ? connections.testTools(name, p)
-        : dynamic.testTools(name, p),
+      googleWorkspace?.names.includes(name)
+        ? googleWorkspace.testTools(name, p)
+        : connections.names.includes(name)
+          ? connections.testTools(name, p)
+          : dynamic.testTools(name, p),
   };
 
   const handler = createLatchHandler<Principal>({

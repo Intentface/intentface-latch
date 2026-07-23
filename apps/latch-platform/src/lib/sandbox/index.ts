@@ -4,6 +4,7 @@ import type { Principal } from "../session";
 import { createJustBashSession, workspaceDir } from "./just-bash";
 import { createDaytonaSession } from "./daytona";
 import { createMirageSession } from "./mirage";
+import type { GoogleMountCreds } from "../google-workspace";
 import { sandboxTools, appTools, renderTools } from "./tools";
 
 /**
@@ -23,6 +24,8 @@ const SANDBOX_BASE =
 export interface SandboxDeps {
   /** Bot token of the agent's dedicated Slack app (org Vault), or null. */
   slackTokenForAgent?: (agent: string, principal: Principal) => Promise<string | null>;
+  /** The chat user's google_workspace mount credentials, or null. */
+  googleForUser?: (principal: Principal) => Promise<GoogleMountCreds | null>;
 }
 
 export function createSandboxResolver(deps: SandboxDeps = {}) {
@@ -38,13 +41,15 @@ export function createSandboxResolver(deps: SandboxDeps = {}) {
       return createDaytonaSession({ orgId, userId, chatId: args.chatId });
     }
     if (args.provider === "mirage") {
-      // Token lookup failures degrade to a workspace-only mount.
-      const slackToken =
-        (await deps.slackTokenForAgent?.(args.agent, args.principal).catch(() => null)) ??
-        null;
+      // Credential lookup failures degrade to fewer mounts, never a dead sandbox.
+      const [slackToken, google] = await Promise.all([
+        deps.slackTokenForAgent?.(args.agent, args.principal).catch(() => null) ?? null,
+        deps.googleForUser?.(args.principal).catch(() => null) ?? null,
+      ]);
       return createMirageSession({
         workspaceDir: workspaceDir(SANDBOX_BASE, orgId, userId, args.chatId),
         slackToken,
+        google,
       });
     }
     return createJustBashSession({
