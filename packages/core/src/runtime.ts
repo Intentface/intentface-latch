@@ -262,6 +262,13 @@ export interface HandleChatInput<P> {
   message: AppMessage;
   /** Optional original request, passed to context.build. */
   request?: Request;
+  /**
+   * Per-turn request payload, passed to `context.build` and the agent factory.
+   * EPHEMERAL: never persisted with the run (only the principal is stored as
+   * `runs.identity`), so it is absent on resume/cron. Use it for request-scoped
+   * inputs (active document, UI selection, parsed body fields) — never identity.
+   */
+  turnContext?: unknown;
 }
 
 export interface Runtime<P> {
@@ -282,6 +289,8 @@ export interface Runtime<P> {
     principal: P;
     messages: AppMessage[];
     request?: Request;
+    /** Per-turn request payload (see HandleChatInput.turnContext). */
+    turnContext?: unknown;
     /** Body format: `ui` (default) SSE UIMessage stream, or `text` plain text. */
     format?: "ui" | "text";
     /** Fired with the final assistant text + messages (capture side outputs). */
@@ -359,6 +368,8 @@ export interface Runtime<P> {
     principal: P;
     decisions: ApprovalDecision[];
     request?: Request;
+    /** Per-turn request payload (see HandleChatInput.turnContext). */
+    turnContext?: unknown;
   }): Promise<Response>;
   /**
    * Resume a turn paused on a client-handled tool (no `execute`, e.g.
@@ -372,6 +383,8 @@ export interface Runtime<P> {
     toolCallId: string;
     output: unknown;
     request?: Request;
+    /** Per-turn request payload (see HandleChatInput.turnContext). */
+    turnContext?: unknown;
   }): Promise<Response>;
   /**
    * Schedule an agent to run on a cron expression (or `cron: null` for one-shot,
@@ -753,12 +766,13 @@ export function createRuntime<P, RC = unknown>(
     agentName: string,
     principal: P,
     request?: Request,
+    turnContext?: unknown,
   ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
-    const runtimeCtx = await config.context.build({ principal, request });
+    const runtimeCtx = await config.context.build({ principal, request, turnContext });
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
     const cfg = factory
-      ? await factory({ runtime: runtimeCtx, principal })
+      ? await factory({ runtime: runtimeCtx, principal, turnContext })
       : await config.dynamicAgents?.resolve(agentName, principal);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
@@ -1410,6 +1424,7 @@ export function createRuntime<P, RC = unknown>(
     principal,
     message,
     request,
+    turnContext,
   }: HandleChatInput<P>): Promise<Response> {
     // chat: scoped create-or-continue (others' ids resolve to "not found")
     let chat = chatId ? await storage.getChat(principal, chatId) : null;
@@ -1427,6 +1442,7 @@ export function createRuntime<P, RC = unknown>(
       agentName,
       principal,
       request,
+      turnContext,
     );
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
@@ -1471,6 +1487,7 @@ export function createRuntime<P, RC = unknown>(
     principal,
     messages,
     request,
+    turnContext,
     format,
     onComplete,
   }: {
@@ -1478,6 +1495,7 @@ export function createRuntime<P, RC = unknown>(
     principal: P;
     messages: AppMessage[];
     request?: Request;
+    turnContext?: unknown;
     format?: "ui" | "text";
     onComplete?: (result: {
       text: string;
@@ -1488,6 +1506,7 @@ export function createRuntime<P, RC = unknown>(
       agentName,
       principal,
       request,
+      turnContext,
     );
     // Synthetic, unpersisted run — buildTurn only reads `id`/`agent` from it,
     // and every storage write is guarded by `ephemeral`.
@@ -1576,11 +1595,13 @@ export function createRuntime<P, RC = unknown>(
     principal,
     decisions,
     request,
+    turnContext,
   }: {
     chatId: string;
     principal: P;
     decisions: ApprovalDecision[];
     request?: Request;
+    turnContext?: unknown;
   }): Promise<Response> {
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
@@ -1626,7 +1647,12 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      chat.agent,
+      principal,
+      request,
+      turnContext,
+    );
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -1657,12 +1683,14 @@ export function createRuntime<P, RC = unknown>(
     toolCallId,
     output,
     request,
+    turnContext,
   }: {
     chatId: string;
     principal: P;
     toolCallId: string;
     output: unknown;
     request?: Request;
+    turnContext?: unknown;
   }): Promise<Response> {
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
@@ -1677,7 +1705,12 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      chat.agent,
+      principal,
+      request,
+      turnContext,
+    );
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({

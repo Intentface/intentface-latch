@@ -298,6 +298,9 @@ export function createLatchHandler<P>(
           principal,
           decisions: Array.isArray(body.decisions) ? body.decisions : [],
           request,
+          // The body was consumed above — hand the parsed payload on so
+          // context.build never needs to re-read the spent Request.
+          turnContext: body,
         });
       }
 
@@ -314,6 +317,8 @@ export function createLatchHandler<P>(
           toolCallId: body.toolCallId,
           output: body.output,
           request,
+          // See the approvals route: the parsed body doubles as turnContext.
+          turnContext: body,
         });
       }
 
@@ -330,6 +335,10 @@ export function createLatchHandler<P>(
             principal,
             message: toUserMessage(body),
             request,
+            // The POST body is parsed exactly once, here — pass it on as the
+            // per-turn payload so `context.build` / agent factories can read
+            // request-scoped fields without touching the spent Request body.
+            turnContext: body,
           });
         } catch (e) {
           // A new message arrived while the previous turn is still awaiting an
