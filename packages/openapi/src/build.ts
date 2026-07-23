@@ -1,5 +1,9 @@
 import { tool, jsonSchema } from "ai";
-import { isHostAllowed } from "@intentface/latch-net";
+import {
+  isBlockedHost,
+  isBlockedResolved,
+  isHostAllowed,
+} from "@intentface/latch-net";
 import type { OpenApiAuth } from "./auth.js";
 
 /** A custom fetch (structurally `globalThis.fetch`). */
@@ -113,8 +117,24 @@ export function buildOpenApiTools<P>(args: {
   operations?: { allow?: string[]; block?: string[] };
   allowedHosts: string[];
   fetchFn: FetchFunction;
+  /**
+   * Skip the private/internal-address SSRF backstop for this connection.
+   * Mirrors the MCP host's `allowPrivateHost`: set it only for a trusted
+   * local/internal API — the allowlist check still applies.
+   */
+  allowPrivateHost?: boolean;
 }): BuiltTools {
-  const { name, doc, baseUrl, auth, approval, operations, allowedHosts, fetchFn } = args;
+  const {
+    name,
+    doc,
+    baseUrl,
+    auth,
+    approval,
+    operations,
+    allowedHosts,
+    fetchFn,
+    allowPrivateHost,
+  } = args;
   const tools: Record<string, unknown> = {};
   const toolApproval: Record<string, unknown> = {};
   const base = baseUrl.replace(/\/$/, "");
@@ -157,6 +177,18 @@ export function buildOpenApiTools<P>(args: {
           // SSRF guard — the resolved host must be on the allowlist.
           if (!isHostAllowed(url.hostname, allowedHosts)) {
             return { error: `host not allowed: ${url.hostname}` };
+          }
+          // Defense-in-depth beyond the allowlist: reject private/internal
+          // addresses and DNS rebinding (an allowlisted name that resolves to
+          // a private/link-local IP — e.g. cloud metadata at 169.254.169.254).
+          // Opt out per connection for a trusted local backend.
+          if (
+            !allowPrivateHost &&
+            (isBlockedHost(url.hostname) || (await isBlockedResolved(url.hostname)))
+          ) {
+            return {
+              error: `host resolves to a private/internal address: ${url.hostname}`,
+            };
           }
           const principal = (options as { context?: { principal?: P } })?.context?.principal as P;
           const authHeaders = auth ? await auth(principal) : {};

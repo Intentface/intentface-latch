@@ -32,6 +32,12 @@ export interface OpenApiConnectionDef<P> {
   approval?: OpenApiApprovalPolicy;
   /** Header resolver (where credential scope lives). See `apiKey`/`bearer`/`headers`. */
   auth?: OpenApiAuth<P>;
+  /**
+   * Skip the private/internal-address SSRF backstop for this connection.
+   * Mirrors the MCP host's `allowPrivateHost`: set it only for a trusted
+   * local/internal API — the allowlist check still applies.
+   */
+  allowPrivateHost?: boolean;
 }
 
 export function defineOpenApiConnection<P = unknown>(
@@ -92,6 +98,7 @@ export function createOpenApiConnections<P>(
       operations: def.operations,
       allowedHosts: config.allowedHosts,
       fetchFn,
+      allowPrivateHost: def.allowPrivateHost,
     });
   }
 
