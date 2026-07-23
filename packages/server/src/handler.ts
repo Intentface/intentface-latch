@@ -74,6 +74,14 @@ export interface LatchHandlerConfig<P> {
   /** Path prefix the handler is mounted under (e.g. "/api/latch"). Default "/". */
   basePath?: string;
   /**
+   * Extra query-param names on `connections/:name/authorize` to fold verbatim
+   * into the OAuth `state` (alongside the built-in chatId/approvalId/returnTo/
+   * scope). Lets a consumer thread its own context (e.g. a tenant id) through
+   * the flow so `resolveContext` can rebuild the principal from
+   * `extra.oauthState` on the session-less callback. Default: none.
+   */
+  stateParams?: string[];
+  /**
    * Shared secret guarding `POST /cron/run` (the system-wide schedule tick).
    * When set, the request must send it as `x-latch-cron-secret`. That route is
    * NOT user-authed — it fires all tenants' due schedules — so guard it at the
@@ -196,13 +204,18 @@ export function createLatchHandler<P>(
         const approvalId = url.searchParams.get("approvalId") ?? undefined;
         const returnTo = url.searchParams.get("returnTo") ?? undefined;
         // Optional caller-supplied context folded into the OAuth state so the
-        // callback (which may lack a session) can rebuild it — e.g. the tenant
-        // the flow was started for, or a credential-scope selector.
+        // callback (which may lack a session) can rebuild it — e.g. a
+        // credential-scope selector, plus any consumer-declared `stateParams`
+        // (e.g. a tenant id).
         const scope = url.searchParams.get("scope") ?? undefined;
-        const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
+        const extraState: Record<string, string> = {};
+        for (const key of config.stateParams ?? []) {
+          const value = url.searchParams.get(key);
+          if (value !== null) extraState[key] = value;
+        }
         const state =
-          chatId || approvalId || returnTo || scope || workspaceId
-            ? { chatId, approvalId, returnTo, scope, workspaceId }
+          chatId || approvalId || returnTo || scope || Object.keys(extraState).length > 0
+            ? { ...extraState, chatId, approvalId, returnTo, scope }
             : undefined;
         // A connection resolved as OAuth-capable but not actually configured for
         // it (e.g. a dynamic name whose stored record isn't oauth) throws here —

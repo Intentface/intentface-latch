@@ -53,6 +53,8 @@ export function createPostgresAdapter<P>(
     attempt: r.attempt,
     usageInputTokens: r.usageInputTokens ?? undefined,
     usageOutputTokens: r.usageOutputTokens ?? undefined,
+    usageCacheReadTokens: r.usageCacheReadTokens ?? undefined,
+    usageCacheWriteTokens: r.usageCacheWriteTokens ?? undefined,
     costTotal: r.costTotal ?? undefined,
     error: r.error,
     startedAt: r.startedAt,
@@ -67,6 +69,7 @@ export function createPostgresAdapter<P>(
     agent: r.agent,
     identity: r.identity ?? undefined,
     cron: r.cron,
+    timezone: r.timezone ?? undefined,
     prompt: r.prompt,
     nextRunAt: r.nextRunAt,
     lastRunAt: r.lastRunAt,
@@ -119,8 +122,13 @@ export function createPostgresAdapter<P>(
     },
 
     async loadMessages(principal, chatId) {
+      // Scope check first — a chat the caller doesn't own returns nothing.
       const chat = await getChat(principal, chatId);
       if (!chat) return [];
+      if (opts.messages) {
+        const overridden = await opts.messages.loadMessages(principal, chat);
+        if (overridden !== null) return overridden;
+      }
       const rows = await db
         .select()
         .from(schema.messages)
@@ -137,6 +145,15 @@ export function createPostgresAdapter<P>(
     },
 
     async appendMessages(chatId, msgs) {
+      if (opts.messages) {
+        const [c] = await db
+          .select()
+          .from(schema.chats)
+          .where(eq(schema.chats.id, chatId));
+        if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
+          return;
+        }
+      }
       if (msgs.length === 0) return;
       const [agg] = await db
         .select({ maxSeq: sql<number | null>`max(${schema.messages.seq})` })
@@ -335,6 +352,7 @@ export function createPostgresAdapter<P>(
         agent: input.agent,
         identity: principal,
         cron: input.cron,
+        timezone: input.timezone ?? null,
         prompt: input.prompt,
         nextRunAt: input.nextRunAt,
         lastRunAt: null,
