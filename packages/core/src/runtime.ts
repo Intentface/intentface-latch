@@ -889,7 +889,7 @@ export function createRuntime<P, RC = unknown>(
     if (dur.enabled && lease) {
       heartbeat = setInterval(() => {
         void storage
-          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs)
+          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs, lease.fencingToken)
           .then((held) => {
             if (!held) {
               stopHeartbeat();
@@ -1296,11 +1296,10 @@ export function createRuntime<P, RC = unknown>(
             cost,
           };
         }
-        // Ephemeral turns persist nothing (no run/message/usage rows); the
-        // observability hooks below still fire so usage/analytics are recorded.
-        if (!ephemeral) await storage.appendMessages(resolvedChatId, messages);
-        // Aborted (lease lost / client gone): don't claim completion. The
-        // guarded update no-ops if the run was already reaped+reassigned.
+        // Aborted (lease lost): don't claim completion, and DON'T persist the
+        // partial messages/usage — the run may already be reaped and re-claimed
+        // by another node whose writes must win. The guarded update no-ops if
+        // the run was reassigned.
         if (isAborted) {
           if (!ephemeral)
             await storage.updateRun(
@@ -1326,7 +1325,11 @@ export function createRuntime<P, RC = unknown>(
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
         if (!ephemeral) {
-          await storage.updateRun(
+          // Fenced finish: settle the run FIRST. If the guarded update doesn't
+          // apply (our lease was reaped + the run re-claimed elsewhere), we're
+          // a stale writer — skip the final message/usage persistence so we
+          // don't overwrite the new owner's state.
+          const applied = await storage.updateRun(
             run.id,
             {
               status: paused ? "awaiting_input" : "completed",
@@ -1339,13 +1342,16 @@ export function createRuntime<P, RC = unknown>(
             },
             lease,
           );
-          await storage.recordUsage(principal, {
-            runId: run.id,
-            model: modelId,
-            inputTokens,
-            outputTokens,
-            cost,
-          });
+          if (applied) {
+            await storage.appendMessages(resolvedChatId, messages);
+            await storage.recordUsage(principal, {
+              runId: run.id,
+              model: modelId,
+              inputTokens,
+              outputTokens,
+              cost,
+            });
+          }
         }
         fireObs(config.observability?.onFinish, {
           principal,
@@ -2047,7 +2053,11 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       } finally {
         await storage
-          .completeSchedule(s.id, { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null })
+          .completeSchedule(
+            s.id,
+            { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null },
+            dur.instanceId,
+          )
           .catch(() => {});
       }
     }

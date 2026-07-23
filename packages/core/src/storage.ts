@@ -164,14 +164,23 @@ export interface StorageAdapter<P> {
     ttlMs: number;
   }): Promise<RunRecord>;
   /**
-   * Extend our lease by `ttlMs`. Returns false if we no longer own the active run
-   * (it was reaped/reassigned or already closed) — the caller should stop work.
+   * Extend our lease by `ttlMs`. Fenced: the extension only applies while
+   * `(owner, fencingToken)` still match the row, so a stale holder whose run was
+   * reaped and re-claimed (same owner id, bumped token) can't resurrect the
+   * lease. Returns false if we no longer own the active run — stop work.
    */
-  heartbeatRun(id: string, owner: string, ttlMs: number): Promise<boolean>;
+  heartbeatRun(
+    id: string,
+    owner: string,
+    ttlMs: number,
+    fencingToken: number,
+  ): Promise<boolean>;
   /**
    * Re-claim an interrupted run for a new owner (resume). Succeeds only if the
-   * run is not completed AND currently unowned or lease-expired — so two nodes
-   * racing to resume the same run resolve to exactly one. Bumps the fencing
+   * run is not completed AND was leased at some point with the lease now
+   * expired (`leaseExpiresAt < now`) — so two nodes racing to resume the same
+   * run resolve to exactly one, and a live never-leased (T1) run can never be
+   * seized out from under its writer. Bumps the fencing
    * token and attempt, clears the error/end, and re-leases. Returns the
    * re-claimed record (carrying `identity`), or null if it wasn't resumable.
    */
@@ -183,13 +192,15 @@ export interface StorageAdapter<P> {
   /**
    * Patch a run. With `guard`, the write only applies while `(leaseOwner,
    * fencingToken)` still match — stale-writer protection (fencing). Without it,
-   * an unconditional update (T1).
+   * an unconditional update (T1). Returns whether the patch was applied — a
+   * guarded caller must treat `false` as "I'm a stale writer" and skip any
+   * follow-up persistence.
    */
   updateRun(
     id: string,
     patch: Partial<RunRecord>,
     guard?: RunLease,
-  ): Promise<void>;
+  ): Promise<boolean>;
   getRun(id: string): Promise<RunRecord | null>;
   /** Scoped list of the caller's runs (joined via chats), most-recent first. */
   listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
@@ -233,9 +244,15 @@ export interface StorageAdapter<P> {
    * `identity`). Mirrors the run reclaim transition.
    */
   claimDueSchedules(now: number, ttlMs: number, owner: string): Promise<ScheduleRecord[]>;
-  /** Finish a fired schedule: advance `nextRunAt`/`enabled`, set `lastRunAt`, clear the lease. */
+  /**
+   * Finish a fired schedule: advance `nextRunAt`/`enabled`, set `lastRunAt`,
+   * clear the lease. Fenced by `owner`: only the node holding the claim lease
+   * may complete it, so a node whose lease expired mid-fire (schedule since
+   * re-claimed elsewhere) can't clobber the newer claim.
+   */
   completeSchedule(
     id: string,
     patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
+    owner: string,
   ): Promise<void>;
 }

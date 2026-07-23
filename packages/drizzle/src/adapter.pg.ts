@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import type {
   AppMessage,
@@ -238,7 +238,7 @@ export function createPostgresAdapter<P>(
       return rowToRun(got[0]!);
     },
 
-    async heartbeatRun(id, owner, ttlMs) {
+    async heartbeatRun(id, owner, ttlMs, fencingToken) {
       const now = Date.now();
       const updated = await db
         .update(schema.runs)
@@ -247,6 +247,9 @@ export function createPostgresAdapter<P>(
           and(
             eq(schema.runs.id, id),
             eq(schema.runs.leaseOwner, owner),
+            // Fenced: a stale holder whose run was reaped + re-claimed (owner
+            // may match again, token was bumped) can't resurrect the lease.
+            eq(schema.runs.fencingToken, fencingToken),
             eq(schema.runs.status, "active"),
           ),
         )
@@ -272,10 +275,12 @@ export function createPostgresAdapter<P>(
           and(
             eq(schema.runs.id, id),
             ne(schema.runs.status, "completed"),
-            or(
-              isNull(schema.runs.leaseOwner),
-              lt(schema.runs.leaseExpiresAt, now),
-            ),
+            // Only runs that WERE leased and whose lease has expired. A
+            // never-leased live (T1) run has leaseExpiresAt NULL and must not
+            // be seizable; a reaped run keeps its (expired) leaseExpiresAt
+            // even though the reaper cleared leaseOwner, so it still matches.
+            isNotNull(schema.runs.leaseExpiresAt),
+            lt(schema.runs.leaseExpiresAt, now),
           ),
         )
         .returning();
@@ -286,7 +291,7 @@ export function createPostgresAdapter<P>(
       const set = Object.fromEntries(
         Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "id"),
       );
-      if (Object.keys(set).length === 0) return;
+      if (Object.keys(set).length === 0) return true;
       const where = guard
         ? and(
             eq(schema.runs.id, id),
@@ -294,10 +299,12 @@ export function createPostgresAdapter<P>(
             eq(schema.runs.fencingToken, guard.fencingToken),
           )
         : eq(schema.runs.id, id);
-      await db
+      const updated = await db
         .update(schema.runs)
         .set(set as Partial<typeof schema.runs.$inferInsert>)
-        .where(where);
+        .where(where)
+        .returning({ id: schema.runs.id });
+      return updated.length > 0;
     },
 
     async reapExpiredRuns(now, opts) {
@@ -412,7 +419,7 @@ export function createPostgresAdapter<P>(
       return claimed.map(rowToSchedule);
     },
 
-    async completeSchedule(id, patch) {
+    async completeSchedule(id, patch, owner) {
       await db
         .update(schema.schedules)
         .set({
@@ -422,7 +429,11 @@ export function createPostgresAdapter<P>(
           leaseOwner: null,
           leaseExpiresAt: null,
         })
-        .where(eq(schema.schedules.id, id));
+        // Fenced by the claim lease: if our lease expired mid-fire and another
+        // node re-claimed the schedule, this no-ops instead of clobbering it.
+        .where(
+          and(eq(schema.schedules.id, id), eq(schema.schedules.leaseOwner, owner)),
+        );
     },
   };
 }
