@@ -859,8 +859,12 @@ export const deleteTelegramBotFn = createServerFn({ method: "POST" })
     const { telegramStore, credentials } = await getLatch();
     const bot = await telegramStore.get(botId);
     if (!bot || !canManageBot(bot, principal)) return { ok: false };
-    const token = await credentials.get(principal, telegramVaultKeys(botId).botToken, "org");
+    const keys = telegramVaultKeys(botId);
+    const token = await credentials.get(principal, keys.botToken, "org");
     if (token) await telegramApi(token).deleteWebhook().catch(() => {});
+    // The binding's Vault secrets go with it — deleting a bot must not leave
+    // its token/webhook secret stored indefinitely.
+    for (const key of Object.values(keys)) await credentials.remove(principal, key, "org");
     await telegramStore.remove(botId);
     return { ok: true };
   });
@@ -976,9 +980,13 @@ export const deleteWhatsappBotFn = createServerFn({ method: "POST" })
   .handler(async ({ data: botId }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
-    const { whatsappStore } = await getLatch();
+    const { whatsappStore, credentials } = await getLatch();
     const bot = await whatsappStore.get(botId);
     if (!bot || !canManageBot(bot, principal)) return { ok: false };
+    // The binding's Vault secrets go with it — the Meta access token, app
+    // secret etc. must not outlive the deletion request.
+    for (const key of Object.values(whatsappVaultKeys(botId)))
+      await credentials.remove(principal, key, "org");
     await whatsappStore.remove(botId);
     return { ok: true };
   });

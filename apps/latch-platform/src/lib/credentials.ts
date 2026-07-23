@@ -22,6 +22,8 @@ export function createCredentials(vault: Vault<Principal>) {
       vault.set(ownerOf(p, scope), vaultKey(name), value),
     has: (p: Principal, name: string, scope: CredentialScope) =>
       vault.has(ownerOf(p, scope), vaultKey(name)),
+    remove: (p: Principal, name: string, scope: CredentialScope) =>
+      vault.delete(ownerOf(p, scope), vaultKey(name)),
   };
 }
 

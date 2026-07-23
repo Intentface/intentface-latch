@@ -250,6 +250,35 @@ describe("telegramChannel.handleRequest", () => {
     ]);
   });
 
+  it("approval callbacks resume under the turn lease and release it", async () => {
+    const claimTurn = vi.fn(async () => "lease-3");
+    const releaseTurn = vi.fn(async () => {});
+    const h = harness({ claimTurn, releaseTurn });
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 3,
+        callback_query: { id: "cb1", from: { id: 5 }, data: "lta:1|ap1" },
+      }),
+    );
+    await h.flush();
+    expect(claimTurn).toHaveBeenCalledWith("telegram_bot1_5");
+    expect(h.runtime.applyApproval).toHaveBeenCalledTimes(1);
+    expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-3");
+  });
+
+  it("approval callbacks back off with 'still working' when the turn is claimed", async () => {
+    const h = harness({ claimTurn: async () => null });
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 3,
+        callback_query: { id: "cb1", from: { id: 5 }, data: "lta:1|ap1" },
+      }),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect(String(h.of("sendMessage")[0]!.body.text)).toContain("still working");
+  });
+
   it("resolves an approval callback: applyApproval + settled card + continuation", async () => {
     const h = harness();
     h.runtime.loadHistory.mockResolvedValueOnce(approvalHistory("ap1")); // toolName lookup

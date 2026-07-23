@@ -220,6 +220,39 @@ describe("whatsappChannel.handleRequest", () => {
     expect((sends[0]!.text as { body: string }).body.length).toBeLessThanOrEqual(4096);
   });
 
+  it("approval replies resume under the turn lease and release it", async () => {
+    const claimTurn = vi.fn(async () => "lease-4");
+    const releaseTurn = vi.fn(async () => {});
+    const h = harness({ claimTurn, releaseTurn });
+    await h.channel.handleRequest(
+      signedPost(
+        inbound({
+          type: "interactive",
+          interactive: { type: "button_reply", button_reply: { id: "lta:1|ap1" } },
+        }),
+      ),
+    );
+    await h.flush();
+    expect(claimTurn).toHaveBeenCalledWith("whatsapp_wb1_358401234567");
+    expect(h.runtime.applyApproval).toHaveBeenCalledTimes(1);
+    expect(releaseTurn).toHaveBeenCalledWith("whatsapp_wb1_358401234567", "lease-4");
+  });
+
+  it("approval replies back off with 'still working' when the turn is claimed", async () => {
+    const h = harness({ claimTurn: async () => null });
+    await h.channel.handleRequest(
+      signedPost(
+        inbound({
+          type: "interactive",
+          interactive: { type: "button_reply", button_reply: { id: "lta:1|ap1" } },
+        }),
+      ),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect((h.sends()[0]!.text as { body: string }).body).toContain("still working");
+  });
+
   it("resolves an approval button reply via applyApproval", async () => {
     const h = harness();
     await h.channel.handleRequest(

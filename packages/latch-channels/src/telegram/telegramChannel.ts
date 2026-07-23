@@ -192,6 +192,35 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
   /** chatId for a Telegram DM — continuity is per (bot, Telegram user). */
   const chatIdFor = (telegramUserId: string) => `telegram_${config.botRef}_${telegramUserId}`;
 
+  /**
+   * Run `fn` under the one-turn-per-chat lease. Every path that mutates a
+   * chat's run state — fresh turns, post-link replays AND approval resumes —
+   * goes through here, so two of them can never interleave on one chat. When
+   * the lease is taken the user gets the "still working" notice instead.
+   */
+  async function withTurnLease(
+    chatId: string,
+    telegramChatId: string | number,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    let lease: string | undefined;
+    if (config.claimTurn) {
+      const token = await config.claimTurn(chatId);
+      if (!token) {
+        await api
+          .sendMessage({ chat_id: telegramChatId, text: STILL_WORKING_MESSAGE })
+          .catch(() => {});
+        return;
+      }
+      lease = token;
+    }
+    try {
+      await fn();
+    } finally {
+      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
+    }
+  }
+
   // ── Inbound message → one agent turn ───────────────────────────────────────
   async function runTurn(msg: TgMessage): Promise<void> {
     const from = msg.from;
@@ -251,29 +280,10 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       return;
     }
 
-    const chatId = chatIdFor(telegramUserId);
-    let lease: string | undefined;
-    if (config.claimTurn) {
-      const token = await config.claimTurn(chatId);
-      if (!token) {
-        await api
-          .sendMessage({ chat_id: msg.chat.id, text: STILL_WORKING_MESSAGE })
-          .catch(() => {});
-        return;
-      }
-      lease = token;
-    }
-    try {
-      await runMessage({
-        telegramUserId,
-        telegramChatId,
-        text,
-        media,
-        principal: auth.principal,
-      });
-    } finally {
-      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
-    }
+    const principal = auth.principal;
+    await withTurnLease(chatIdFor(telegramUserId), msg.chat.id, () =>
+      runMessage({ telegramUserId, telegramChatId, text, media, principal }),
+    );
   }
 
   /**
@@ -365,23 +375,7 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     media?: { ref: TgFileRef; mediaType: string; name: string }[];
     principal: P;
   }): Promise<void> {
-    const chatId = chatIdFor(ctx.telegramUserId);
-    let lease: string | undefined;
-    if (config.claimTurn) {
-      const token = await config.claimTurn(chatId);
-      if (!token) {
-        await api
-          .sendMessage({ chat_id: ctx.telegramChatId, text: STILL_WORKING_MESSAGE })
-          .catch(() => {});
-        return;
-      }
-      lease = token;
-    }
-    try {
-      await runMessage(ctx);
-    } finally {
-      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
-    }
+    await withTurnLease(chatIdFor(ctx.telegramUserId), ctx.telegramChatId, () => runMessage(ctx));
   }
 
   /** Approvals are message state, not stream chunks — scan fresh history. */
@@ -453,46 +447,52 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     }
 
     const chatId = chatIdFor(telegramUserId);
+    const principal = auth.principal;
 
-    // Name the tool on the settled card (history still holds the pending part).
-    let toolName = "tool";
-    try {
-      const history = await config.runtime.loadHistory({ chatId, principal: auth.principal });
-      toolName =
-        pendingApprovals(history).find((p) => p.approvalId === decoded.approvalId)?.toolName ??
-        toolName;
-    } catch {
-      /* cosmetic only */
-    }
+    // The resume mutates the same run state as a fresh turn — take the lease
+    // too, or an approval press racing a new message runs two turns at once.
+    // If the chat is busy the buttons stay in place; the user presses again.
+    await withTurnLease(chatId, telegramChatId, async () => {
+      // Name the tool on the settled card (history still holds the pending part).
+      let toolName = "tool";
+      try {
+        const history = await config.runtime.loadHistory({ chatId, principal });
+        toolName =
+          pendingApprovals(history).find((p) => p.approvalId === decoded.approvalId)?.toolName ??
+          toolName;
+      } catch {
+        /* cosmetic only */
+      }
 
-    try {
-      const res = await config.runtime.applyApproval({
-        chatId,
-        principal: auth.principal,
-        decisions: [{ approvalId: decoded.approvalId, approved: decoded.approved }],
-      });
-      if (cb.message) {
+      try {
+        const res = await config.runtime.applyApproval({
+          chatId,
+          principal,
+          decisions: [{ approvalId: decoded.approvalId, approved: decoded.approved }],
+        });
+        if (cb.message) {
+          await api
+            .editMessageText({
+              chat_id: cb.message.chat.id,
+              message_id: cb.message.message_id,
+              text: decoded.approved
+                ? `✅ Approved <b>${escapeHtml(toolName)}</b>`
+                : `🚫 Denied <b>${escapeHtml(toolName)}</b>`,
+              parse_mode: "HTML",
+            })
+            .catch(() => {});
+        }
+        // Continue rendering whatever the resume produced (incl. chained approvals).
+        await renderTelegramStream(consumeRun(res), { api, chatId: telegramChatId });
+        await renderApprovals(chatId, telegramChatId, telegramUserId, principal);
+      } catch (e) {
+        console.error("[telegram] applyApproval failed:", e);
+        const m = e instanceof Error ? e.message : String(e);
         await api
-          .editMessageText({
-            chat_id: cb.message.chat.id,
-            message_id: cb.message.message_id,
-            text: decoded.approved
-              ? `✅ Approved <b>${escapeHtml(toolName)}</b>`
-              : `🚫 Denied <b>${escapeHtml(toolName)}</b>`,
-            parse_mode: "HTML",
-          })
+          .sendMessage({ chat_id: telegramChatId, text: `⚠️ ${m.slice(0, 3000)}` })
           .catch(() => {});
       }
-      // Continue rendering whatever the resume produced (incl. chained approvals).
-      await renderTelegramStream(consumeRun(res), { api, chatId: telegramChatId });
-      await renderApprovals(chatId, telegramChatId, telegramUserId, auth.principal);
-    } catch (e) {
-      console.error("[telegram] applyApproval failed:", e);
-      const m = e instanceof Error ? e.message : String(e);
-      await api
-        .sendMessage({ chat_id: telegramChatId, text: `⚠️ ${m.slice(0, 3000)}` })
-        .catch(() => {});
-    }
+    });
   }
 
   // ── The per-bot webhook entrypoint ──────────────────────────────────────────

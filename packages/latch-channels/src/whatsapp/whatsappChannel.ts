@@ -172,6 +172,29 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
   /** chatId for a WhatsApp conversation — continuity is per (bot, wa_id). */
   const chatIdFor = (waId: string) => `whatsapp_${config.botRef}_${waId}`;
 
+  /**
+   * Run `fn` under the one-turn-per-chat lease. Every path that mutates a
+   * chat's run state — fresh turns, post-link replays AND approval resumes —
+   * goes through here, so two of them can never interleave on one chat. When
+   * the lease is taken the user gets the "still working" notice instead.
+   */
+  async function withTurnLease(chatId: string, waId: string, fn: () => Promise<void>): Promise<void> {
+    let lease: string | undefined;
+    if (config.claimTurn) {
+      const token = await config.claimTurn(chatId);
+      if (!token) {
+        await api.sendText(waId, STILL_WORKING_MESSAGE).catch(() => {});
+        return;
+      }
+      lease = token;
+    }
+    try {
+      await fn();
+    } finally {
+      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
+    }
+  }
+
   /** Fold a run into ONE reply (or several, past the length cap) + approvals. */
   async function renderRun(res: Response, ctx: { waId: string; chatId: string; principal: P }) {
     let text = "";
@@ -296,21 +319,7 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     media?: { ref: WaMediaRef; mediaType: string; name: string }[];
     principal: P;
   }): Promise<void> {
-    const chatId = chatIdFor(ctx.waId);
-    let lease: string | undefined;
-    if (config.claimTurn) {
-      const token = await config.claimTurn(chatId);
-      if (!token) {
-        await api.sendText(ctx.waId, STILL_WORKING_MESSAGE).catch(() => {});
-        return;
-      }
-      lease = token;
-    }
-    try {
-      await runMessage(ctx);
-    } finally {
-      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
-    }
+    await withTurnLease(chatIdFor(ctx.waId), ctx.waId, () => runMessage(ctx));
   }
 
   // ── Inbound message → one agent turn ───────────────────────────────────────
@@ -364,21 +373,10 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
       return;
     }
 
-    const chatId = chatIdFor(waId);
-    let lease: string | undefined;
-    if (config.claimTurn) {
-      const token = await config.claimTurn(chatId);
-      if (!token) {
-        await api.sendText(waId, STILL_WORKING_MESSAGE).catch(() => {});
-        return;
-      }
-      lease = token;
-    }
-    try {
-      await runMessage({ waId, text, media, principal: auth.principal });
-    } finally {
-      if (lease) await config.releaseTurn?.(chatId, lease).catch(() => {});
-    }
+    const principal = auth.principal;
+    await withTurnLease(chatIdFor(waId), waId, () =>
+      runMessage({ waId, text, media, principal }),
+    );
   }
 
   // ── Approve/Deny button reply → resume the run ──────────────────────────────
@@ -399,18 +397,24 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
       return;
     }
     const chatId = chatIdFor(waId);
-    try {
-      const res = await config.runtime.applyApproval({
-        chatId,
-        principal: auth.principal,
-        decisions: [{ approvalId: decision.approvalId, approved: decision.approved }],
-      });
-      await renderRun(res, { waId, chatId, principal: auth.principal });
-    } catch (e) {
-      console.error("[whatsapp] applyApproval failed:", e);
-      const m = e instanceof Error ? e.message : String(e);
-      await api.sendText(waId, `⚠️ ${m.slice(0, 3000)}`).catch(() => {});
-    }
+    const principal = auth.principal;
+    // The resume mutates the same run state as a fresh turn — take the lease
+    // too, or an approval reply racing a new message runs two turns at once.
+    // If the chat is busy the buttons stay in place; the user replies again.
+    await withTurnLease(chatId, waId, async () => {
+      try {
+        const res = await config.runtime.applyApproval({
+          chatId,
+          principal,
+          decisions: [{ approvalId: decision.approvalId, approved: decision.approved }],
+        });
+        await renderRun(res, { waId, chatId, principal });
+      } catch (e) {
+        console.error("[whatsapp] applyApproval failed:", e);
+        const m = e instanceof Error ? e.message : String(e);
+        await api.sendText(waId, `⚠️ ${m.slice(0, 3000)}`).catch(() => {});
+      }
+    });
   }
 
   // ── The per-bot webhook entrypoint (GET verify + POST events) ──────────────
