@@ -5,7 +5,11 @@ import {
   type OAuthClientProvider,
 } from "@ai-sdk/mcp";
 import type { SecretResolver } from "@intentface/latch-core";
-import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
+import {
+  isBlockedHost,
+  isBlockedResolved,
+  isHostAllowed,
+} from "@intentface/latch-net";
 import type { FetchFunction } from "./oauth-fetch.js";
 
 /**
@@ -244,15 +248,9 @@ export interface McpHost<P> {
   open(principal: P): Promise<OpenMcp>;
 }
 
-/** True if `host` is permitted by the allowlist (exact, or `.suffix` subdomain). */
-export function isHostAllowed(host: string, allowed: string[]): boolean {
-  const h = host.toLowerCase();
-  return allowed.some((entry) => {
-    const a = entry.toLowerCase();
-    if (a.startsWith(".")) return h === a.slice(1) || h.endsWith(a);
-    return h === a;
-  });
-}
+// Canonical implementation lives in @intentface/latch-net; re-exported here
+// for callers that historically imported it from this package.
+export { isHostAllowed };
 
 /**
  * Resolve the request headers for a connection. Bearer tokens are read from the

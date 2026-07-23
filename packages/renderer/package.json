@@ -14,6 +14,7 @@
     "docker-run": "docker run --rm -p 8787:8787 -e PORT=8787 latch-renderer"
   },
   "dependencies": {
+    "@intentface/latch-net": "workspace:*",
     "playwright": "1.61.1"
   },
   "devDependencies": {

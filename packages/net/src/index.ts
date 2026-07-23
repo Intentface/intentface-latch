@@ -11,3 +11,4 @@ export {
   isBlockedResolved,
   assertPublicUrl,
 } from "./ssrf.js";
+export { isHostAllowed } from "./allowlist.js";

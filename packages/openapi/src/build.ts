@@ -1,4 +1,5 @@
 import { tool, jsonSchema } from "ai";
+import { isHostAllowed } from "@intentface/latch-net";
 import type { OpenApiAuth } from "./auth.js";
 
 /** A custom fetch (structurally `globalThis.fetch`). */
@@ -17,15 +18,9 @@ export type OpenApiApprovalPolicy =
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete"] as const;
 type HttpMethod = (typeof HTTP_METHODS)[number];
 
-/** True if `host` is permitted by the allowlist (exact, or `.suffix` subdomain). */
-export function isHostAllowed(host: string, allowed: string[]): boolean {
-  const h = host.toLowerCase();
-  return allowed.some((entry) => {
-    const a = entry.toLowerCase();
-    if (a.startsWith(".")) return h === a.slice(1) || h.endsWith(a);
-    return h === a;
-  });
-}
+// Canonical implementation lives in @intentface/latch-net; re-exported here
+// for callers that historically imported it from this package.
+export { isHostAllowed };
 
 function needsApproval(
   policy: OpenApiApprovalPolicy | undefined,
