@@ -188,10 +188,34 @@ export async function getLatch(): Promise<{
       })
     : undefined;
 
+  // The code-declared built-ins across kinds (MCP + the tool-less
+  // google_workspace) — one registry so the Connections page status list, the
+  // handler routes, and any registry consumer all see google_workspace like
+  // any other built-in.
+  const builtinConnections: McpConnections<Principal> = googleWorkspace
+    ? {
+        host: connections.host,
+        hostFor: (names) => connections.hostFor(names),
+        names: [...connections.names, ...googleWorkspace.names],
+        oauth: (name) =>
+          googleWorkspace.names.includes(name)
+            ? googleWorkspace.oauth(name)
+            : connections.oauth(name),
+        status: async (p) => [
+          ...(await connections.status(p)),
+          ...(await googleWorkspace.status(p)),
+        ],
+        testTools: (name, p) =>
+          googleWorkspace.names.includes(name)
+            ? googleWorkspace.testTools(name, p)
+            : connections.testTools(name, p),
+      }
+    : connections;
+
   // The full connection registry across kinds — also used to enumerate a
   // connection's tools for the agent editor. (google_workspace contributes no
-  // tools, so it only joins the handler registry below.)
-  const allConnections = mergeConnections(connections, dynamic);
+  // tools, so it only affects status/oauth via builtinConnections.)
+  const allConnections = mergeConnections(builtinConnections, dynamic);
 
   const runtime = createRuntime<Principal, Ctx>({
     storage,
@@ -241,26 +265,21 @@ export async function getLatch(): Promise<{
   // connections, plus the UI-added ones dispatched by name. So `connect`,
   // authorize/callback, status, and test work for dynamic OAuth connections too.
   const handlerConnections: McpConnections<Principal> = {
-    host: connections.host,
-    hostFor: (names) => connections.hostFor(names),
-    names: [...connections.names, ...(googleWorkspace?.names ?? [])],
+    host: builtinConnections.host,
+    hostFor: (names) => builtinConnections.hostFor(names),
+    names: builtinConnections.names,
     oauth: (name) =>
-      googleWorkspace?.names.includes(name)
-        ? googleWorkspace.oauth(name)
-        : connections.names.includes(name)
-          ? connections.oauth(name)
-          : dynamic.oauth(name),
+      builtinConnections.names.includes(name)
+        ? builtinConnections.oauth(name)
+        : dynamic.oauth(name),
     status: async (p) => [
-      ...(await connections.status(p)),
-      ...(googleWorkspace ? await googleWorkspace.status(p) : []),
+      ...(await builtinConnections.status(p)),
       ...(await dynamic.status(p)),
     ],
     testTools: (name, p) =>
-      googleWorkspace?.names.includes(name)
-        ? googleWorkspace.testTools(name, p)
-        : connections.names.includes(name)
-          ? connections.testTools(name, p)
-          : dynamic.testTools(name, p),
+      builtinConnections.names.includes(name)
+        ? builtinConnections.testTools(name, p)
+        : dynamic.testTools(name, p),
   };
 
   const handler = createLatchHandler<Principal>({
@@ -289,7 +308,9 @@ export async function getLatch(): Promise<{
 
   cached = {
     runtime,
-    connections,
+    // The merged built-ins (MCP + google_workspace) — server fns like the
+    // Connections page's status list read this, not the raw MCP set.
+    connections: builtinConnections,
     credentials,
     connectionStore,
     dynamic,
