@@ -9,7 +9,7 @@ import {
   type ObservabilityStepEvent,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, mockModel, owner, type Principal } from "./setup.js";
+import { assert, latchDb, mockModel, owner, type Principal } from "./setup.js";
 
 /**
  * Observability seam: the optional `observability` hooks let a consumer attach
@@ -20,7 +20,7 @@ import { assert, mockModel, owner, type Principal } from "./setup.js";
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });

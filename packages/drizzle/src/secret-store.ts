@@ -1,12 +1,15 @@
-import type { Client } from "@libsql/client";
-import { drizzle } from "drizzle-orm/libsql";
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { eq } from "drizzle-orm";
 import type { SecretRecord, SecretStore } from "@intentface/latch-core";
 import * as schema from "./schema.js";
 
 /** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
-function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
-  return owner(principal).map(encodeURIComponent).join("/");
+function ownerKeyOf<P>(
+  owner: (p: P, key?: string) => string[],
+  principal: P,
+  key?: string,
+): string {
+  return owner(principal, key).map(encodeURIComponent).join("/");
 }
 
 /** Stable composite id from the ownership key + secret key. */
@@ -17,20 +20,25 @@ export interface SqliteSecretStoreOptions<P> {
    * Derive the ownership key for a principal — credential isolation boundary.
    * Can differ from the storage adapter's `owner` (e.g. credentials shared at the
    * tenant level while chats are per-user). Server-derived only.
+   *
+   * The optional `key` argument enables secret-class scoping: a store can place
+   * a secret in a different owner bucket based on its key (e.g. workspace-shared
+   * OAuth tokens vs. per-user API keys). `list()` has no key context and passes
+   * none, so the derivation must be stable for the enumerated bucket.
    */
-  owner: (principal: P) => string[];
+  owner: (principal: P, key?: string) => string[];
 }
 
 /**
- * A `SecretStore` on libsql — persists the Vault's opaque encrypted records.
- * It never sees plaintext; encryption/decryption happens in `createVault`.
+ * A `SecretStore` on a Drizzle SQLite database — persists the Vault's opaque
+ * encrypted records. It never sees plaintext; encryption/decryption happens in
+ * `createVault`. The caller owns the connection (pass a `drizzle(...)`).
  */
 export function createSqliteSecretStore<P>(
-  client: Client,
+  db: BaseSQLiteDatabase<"sync" | "async", any, any>,
   opts: SqliteSecretStoreOptions<P>,
 ): SecretStore<P> {
-  const db = drizzle(client, { schema });
-  const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
+  const ownerKey = (p: P, key?: string) => ownerKeyOf(opts.owner, p, key);
 
   const rowToRecord = (r: typeof schema.secrets.$inferSelect): SecretRecord => ({
     key: r.key,
@@ -44,7 +52,7 @@ export function createSqliteSecretStore<P>(
 
   return {
     async put(principal, r) {
-      const owner = ownerKey(principal);
+      const owner = ownerKey(principal, r.key);
       await db
         .insert(schema.secrets)
         .values({
@@ -74,14 +82,14 @@ export function createSqliteSecretStore<P>(
       const rows = await db
         .select()
         .from(schema.secrets)
-        .where(eq(schema.secrets.id, secretId(ownerKey(principal), key)));
+        .where(eq(schema.secrets.id, secretId(ownerKey(principal, key), key)));
       return rows[0] ? rowToRecord(rows[0]) : null;
     },
 
     async delete(principal, key) {
       await db
         .delete(schema.secrets)
-        .where(eq(schema.secrets.id, secretId(ownerKey(principal), key)));
+        .where(eq(schema.secrets.id, secretId(ownerKey(principal, key), key)));
     },
 
     async list(principal) {

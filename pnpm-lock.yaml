@@ -44,6 +44,9 @@ importers:
       ai:
         specifier: ^7.0.2
         version: 7.0.2(zod@4.4.3)
+      drizzle-orm:
+        specifier: ^0.38.0
+        version: 0.38.4(@electric-sql/pglite@0.2.17)(@libsql/client@0.15.15)(@opentelemetry/api@1.9.1)(@prisma/client@5.22.0)(@types/pg@8.20.0)(@types/react@19.2.17)(better-sqlite3@12.11.1)(kysely@0.29.2)(pg@8.22.0)(react@19.2.7)(sql.js@1.14.1)
       hono:
         specifier: ^4.6.0
         version: 4.12.26
@@ -57,6 +60,9 @@ importers:
       '@types/node':
         specifier: ^25.9.3
         version: 25.9.3
+      better-sqlite3:
+        specifier: ^12.11.1
+        version: 12.11.1
       tsx:
         specifier: ^4.19.0
         version: 4.22.4
@@ -413,6 +419,9 @@ importers:
       '@intentface/latch-core':
         specifier: workspace:*
         version: link:../core
+      '@intentface/latch-net':
+        specifier: workspace:*
+        version: link:../net
     devDependencies:
       '@ai-sdk/mcp':
         specifier: ^2.0.0
@@ -420,6 +429,15 @@ importers:
       ai:
         specifier: ^7.0.2
         version: 7.0.2(zod@4.4.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  packages/net:
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.21
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
