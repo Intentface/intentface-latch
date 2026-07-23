@@ -43,8 +43,11 @@ function tail(text: string, maxLines = 400, maxBytes = 20_000): { text: string; 
 const bash = tool({
   description:
     "Run a shell command in the sandbox workspace (cwd /workspace). Use for " +
-    "listing, moving, inspecting, and combining files with pipes. Output is " +
-    "tail-truncated if very long.",
+    "listing, moving, inspecting, and combining files with pipes. Depending " +
+    "on the sandbox backend, the root may also hold READ-ONLY mounts of " +
+    "connected services (e.g. /slack, /gdrive, /gmail) — run `ls /` to " +
+    "discover them and browse with ls/cat/grep. Output is tail-truncated if " +
+    "very long.",
   inputSchema: jsonSchema<{ command: string }>({
     type: "object",
     properties: { command: { type: "string", description: "Shell command to run." } },
