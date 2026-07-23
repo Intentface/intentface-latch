@@ -4,8 +4,13 @@ import type { SecretRecord, SecretStore } from "@intentface/latch-core";
 import * as schema from "./schema.pg.js";
 import type { SqliteSecretStoreOptions } from "./secret-store.js";
 
-function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
-  return owner(principal).map(encodeURIComponent).join("/");
+/** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
+function ownerKeyOf<P>(
+  owner: (p: P, key?: string) => string[],
+  principal: P,
+  key?: string,
+): string {
+  return owner(principal, key).map(encodeURIComponent).join("/");
 }
 
 const secretId = (ownerKey: string, key: string) => `${ownerKey}:${key}`;
@@ -15,7 +20,7 @@ export function createPostgresSecretStore<P>(
   db: PgDatabase<any, any, any>,
   opts: SqliteSecretStoreOptions<P>,
 ): SecretStore<P> {
-  const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
+  const ownerKey = (p: P, key?: string) => ownerKeyOf(opts.owner, p, key);
 
   const rowToRecord = (r: typeof schema.secrets.$inferSelect): SecretRecord => ({
     key: r.key,
@@ -29,7 +34,7 @@ export function createPostgresSecretStore<P>(
 
   return {
     async put(principal, r) {
-      const owner = ownerKey(principal);
+      const owner = ownerKey(principal, r.key);
       await db
         .insert(schema.secrets)
         .values({
@@ -59,14 +64,14 @@ export function createPostgresSecretStore<P>(
       const rows = await db
         .select()
         .from(schema.secrets)
-        .where(eq(schema.secrets.id, secretId(ownerKey(principal), key)));
+        .where(eq(schema.secrets.id, secretId(ownerKey(principal, key), key)));
       return rows[0] ? rowToRecord(rows[0]) : null;
     },
 
     async delete(principal, key) {
       await db
         .delete(schema.secrets)
-        .where(eq(schema.secrets.id, secretId(ownerKey(principal), key)));
+        .where(eq(schema.secrets.id, secretId(ownerKey(principal, key), key)));
     },
 
     async list(principal) {
