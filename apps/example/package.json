@@ -36,7 +36,7 @@
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
     "ai": "^7.0.2",
-    "drizzle-orm": "^0.38.0",
+    "drizzle-orm": "^0.45.0",
     "hono": "^4.6.0",
     "zod": "^4.4.3"
   },
