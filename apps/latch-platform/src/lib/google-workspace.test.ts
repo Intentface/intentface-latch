@@ -1,10 +1,10 @@
 import type { Vault } from "@intentface/latch-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  buildRawEmail,
   createGoogleWorkspaceConnection,
   createGoogleWorkspaceWriteConnection,
 } from "./google-workspace";
+import { buildRawEmail } from "./google-workspace-tools";
 
 type P = { orgId: string; userId?: string };
 
@@ -217,23 +217,39 @@ async function authorizeWrite(gw: ReturnType<typeof writeConnection>) {
 }
 
 describe("google_workspace_write (gmail_send)", () => {
-  it("requests ONLY the gmail.send scope — never readonly ones, never full gmail", async () => {
+  const WRITE_TOOLS = [
+    "gmail_send",
+    "gdocs_create",
+    "gdocs_append",
+    "gsheets_create",
+    "gsheets_append",
+    "gslides_create",
+  ];
+
+  it("requests only send + the RW scopes its tools need — never gmail read/modify", async () => {
     const gw = writeConnection();
     const res = await gw.oauth("google_workspace_write")!.start(principal);
     const url = new URL((res as { authorizationUrl: string }).authorizationUrl);
-    expect(url.searchParams.get("scope")).toBe("https://www.googleapis.com/auth/gmail.send");
+    const scope = url.searchParams.get("scope")!;
+    expect(scope.split(" ").sort()).toEqual(
+      [
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/presentations",
+      ].sort(),
+    );
     expect(url.searchParams.get("redirect_uri")).toBe(
       "http://localhost:3000/api/latch/connections/google_workspace_write/callback",
     );
   });
 
-  it("contributes gmail_send, approval-gated by default, only when picked", async () => {
+  it("contributes the write tools, ALL approval-gated, only when picked", async () => {
     const gw = writeConnection();
     const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
-    expect(Object.keys(opened.tools)).toEqual(["gmail_send"]);
-    expect(
-      (opened as { toolApproval?: Record<string, string> }).toolApproval,
-    ).toEqual({ gmail_send: "user-approval" });
+    expect(Object.keys(opened.tools).sort()).toEqual([...WRITE_TOOLS].sort());
+    const approval = (opened as { toolApproval?: Record<string, string> }).toolApproval!;
+    for (const name of WRITE_TOOLS) expect(approval[name]).toBe("user-approval");
     await opened.close();
 
     const notPicked = await gw.hostFor(["other_connection"]).open(principal);
@@ -290,5 +306,80 @@ describe("google_workspace_write (gmail_send)", () => {
       "base64url",
     ).toString("utf8");
     expect(rfc822).toContain("Subject: plain");
+  });
+
+  /** Mock: token endpoint + per-URL API responses; returns the fetch mock. */
+  function apiMock(respond: (url: string) => Record<string, unknown>) {
+    const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(
+      async (url) =>
+        String(url).includes("oauth2.googleapis.com/token")
+          ? tokenResponse({ access_token: "at", expires_in: 3600, refresh_token: "rt" })
+          : tokenResponse(respond(String(url))),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  const callBody = (
+    fetchMock: ReturnType<typeof apiMock>,
+    urlPart: string,
+  ): Record<string, unknown> => {
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes(urlPart));
+    expect(call, `no call to ${urlPart}`).toBeDefined();
+    return JSON.parse(String(call![1]!.body)) as Record<string, unknown>;
+  };
+
+  it("gdocs_create makes the doc then inserts the body text", async () => {
+    const fetchMock = apiMock(() => ({ documentId: "doc-1" }));
+    const gw = writeConnection();
+    await authorizeWrite(gw);
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    const result = await (opened.tools.gdocs_create as ExecutableTool).execute({
+      title: "Notes",
+      body: "hello doc",
+    });
+    expect(result).toMatchObject({ created: true, documentId: "doc-1" });
+    expect(callBody(fetchMock, "docs.googleapis.com/v1/documents")).toEqual({ title: "Notes" });
+    expect(callBody(fetchMock, "doc-1:batchUpdate")).toEqual({
+      requests: [{ insertText: { endOfSegmentLocation: {}, text: "hello doc" } }],
+    });
+  });
+
+  it("gsheets_append posts rows to the encoded range", async () => {
+    const fetchMock = apiMock(() => ({}));
+    const gw = writeConnection();
+    await authorizeWrite(gw);
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    const result = await (opened.tools.gsheets_append as ExecutableTool).execute({
+      spreadsheet_id: "sheet-1",
+      rows: [["a", "b"]],
+      range: "Sheet2!A1",
+    });
+    expect(result).toMatchObject({ appended: true, rowCount: 1 });
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes(":append"))!;
+    expect(String(call[0])).toContain("/sheet-1/values/Sheet2!A1:append");
+    expect(String(call[0])).toContain("valueInputOption=USER_ENTERED");
+    expect(JSON.parse(String(call[1]!.body))).toEqual({ values: [["a", "b"]] });
+  });
+
+  it("gslides_create builds slides with 5+ char object ids and fills placeholders", async () => {
+    const fetchMock = apiMock(() => ({ presentationId: "pres-1" }));
+    const gw = writeConnection();
+    await authorizeWrite(gw);
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    const result = await (opened.tools.gslides_create as ExecutableTool).execute({
+      title: "Deck",
+      slides: [{ title: "Intro", body: "Welcome" }],
+    });
+    expect(result).toMatchObject({ created: true, presentationId: "pres-1", slideCount: 1 });
+    const { requests } = callBody(fetchMock, "pres-1:batchUpdate") as {
+      requests: Record<string, Record<string, unknown>>[];
+    };
+    const ids = requests.flatMap((r) =>
+      [r.createSlide?.objectId, r.insertText?.objectId].filter(Boolean),
+    ) as string[];
+    for (const id of ids) expect(id.length).toBeGreaterThanOrEqual(5);
+    expect(requests.some((r) => r.insertText?.text === "Intro")).toBe(true);
+    expect(requests.some((r) => r.insertText?.text === "Welcome")).toBe(true);
   });
 });

@@ -1,4 +1,3 @@
-import { tool, jsonSchema } from "ai";
 import type { Vault } from "@intentface/latch-core";
 import type {
   ConnectionStatus,
@@ -6,6 +5,7 @@ import type {
   McpOAuth,
   StartResult,
 } from "@intentface/latch-mcp";
+import { googleWriteTools } from "./google-workspace-tools";
 
 /**
  * Google Workspace OAuth for the mirage sandbox and its write companion.
@@ -19,9 +19,11 @@ import type {
  *   are ever requested, so even a compromised mount cannot write.
  *
  * - `google_workspace_write` — the draft-and-apply side. Contributes the
- *   approval-gated `gmail_send` tool and requests ONLY `gmail.send`. Because
- *   it is a separate grant, the read-only token mirage holds never gains
- *   write power, and users who never connect it can't have agents send mail.
+ *   approval-gated write tools (gmail_send; gdocs/gsheets/gslides create +
+ *   append) with the narrowest scopes that allow them (send-only for Gmail;
+ *   Docs/Sheets/Slides have no write-only scopes). Because it is a separate
+ *   grant, the read-only token mirage holds never gains write power, and
+ *   users who never connect it can't have agents write anything.
  *
  * Neither is an MCP connection (Google's Workspace MCP servers are gated
  * behind the Developer Preview); both broker plain Google REST OAuth:
@@ -298,109 +300,34 @@ export function createGoogleWorkspaceConnection<P>(
 
 const WRITE_NAME = "google_workspace_write";
 const WRITE_DESCRIPTION =
-  "Google Workspace write actions (Gmail send) — approval-gated tools; " +
-  "separate consent from the read-only mounts.";
-const WRITE_SCOPES = ["https://www.googleapis.com/auth/gmail.send"];
-const GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
-
-/** RFC 2047-encode a header value when it isn't plain ASCII. */
-const encodeHeader = (value: string): string =>
-  /^[\x20-\x7e]*$/.test(value)
-    ? value
-    : `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
-
-/**
- * Build the RFC 822 message Gmail's `messages.send` expects (as base64url
- * `raw`). Body is base64-encoded so any UTF-8 content is line-length safe;
- * Bcc is honored by Gmail and stripped from delivered copies.
- */
-export function buildRawEmail(msg: {
-  to: string;
-  subject: string;
-  body: string;
-  cc?: string;
-  bcc?: string;
-}): string {
-  const headers = [
-    `To: ${msg.to}`,
-    ...(msg.cc ? [`Cc: ${msg.cc}`] : []),
-    ...(msg.bcc ? [`Bcc: ${msg.bcc}`] : []),
-    `Subject: ${encodeHeader(msg.subject)}`,
-    `MIME-Version: 1.0`,
-    `Content-Type: text/plain; charset="UTF-8"`,
-    `Content-Transfer-Encoding: base64`,
-  ];
-  const rfc822 = `${headers.join("\r\n")}\r\n\r\n${Buffer.from(msg.body, "utf8").toString("base64")}`;
-  return Buffer.from(rfc822, "utf8").toString("base64url");
-}
+  "Google Workspace write actions (send email; create/append Docs, Sheets, " +
+  "Slides) — approval-gated tools; separate consent from the read-only mounts.";
+// No write-only scopes exist for Docs/Sheets/Slides — full RW is the
+// narrowest grant that can create/append. Gmail keeps send-only.
+const WRITE_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/presentations",
+];
 
 export function createGoogleWorkspaceWriteConnection<P>(
   opts: GoogleConnectionOpts<P>,
 ): McpConnections<P> & { names: string[] } {
   const core = createGoogleOAuthCore({ ...opts, name: WRITE_NAME, scopes: WRITE_SCOPES });
 
-  // The draft-and-apply contract: the agent composes (in chat or /workspace),
-  // then calls this with the FINAL content inline — the approval prompt shows
-  // the tool input verbatim, so what the user approves is exactly what is
-  // sent. Never accept a file path here: it would hide the content from the
-  // approver and let it change between approval and execution.
-  //
-  // Built per open(principal) so the tenant is bound in closure — the source
-  // is opened fresh each turn.
-  const gmailSendToolFor = (principal: P) =>
-    tool({
-      description:
-        "Send an email from the user's own Gmail. Compose the final message " +
-        "first, then call this ONCE with the complete content — the user " +
-        "reviews and approves exactly this input before anything is sent.",
-      inputSchema: jsonSchema<{
-        to: string;
-        subject: string;
-        body: string;
-        cc?: string;
-        bcc?: string;
-      }>({
-        type: "object",
-        properties: {
-          to: { type: "string", description: "Recipient(s), comma-separated." },
-          subject: { type: "string" },
-          body: { type: "string", description: "Plain-text body — the full, final message." },
-          cc: { type: "string", description: "Optional Cc recipient(s), comma-separated." },
-          bcc: { type: "string", description: "Optional Bcc recipient(s), comma-separated." },
-        },
-        required: ["to", "subject", "body"],
-        additionalProperties: false,
-      }),
-      execute: async (input) => {
-        const accessToken = await core.accessTokenFor(principal);
-        const res = await fetch(GMAIL_SEND_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ raw: buildRawEmail(input) }),
-        });
-        if (!res.ok) {
-          throw new Error(`gmail send failed (${res.status}): ${await res.text()}`);
-        }
-        const sent = (await res.json()) as { id?: string; threadId?: string };
-        return {
-          sent: true,
-          id: sent.id,
-          threadId: sent.threadId,
-          to: input.to,
-          subject: input.subject,
-        };
-      },
-    });
-
-  const sourceFor = (principal: P) => ({
-    tools: { gmail_send: gmailSendToolFor(principal) },
-    // Gated by default; the agent editor can still surface/override this.
-    toolApproval: { gmail_send: "user-approval" },
-    close: async () => {},
-  });
+  // Tool definitions + the draft-and-apply contract live in
+  // google-workspace-tools.ts. Built per open(principal) so the tenant is
+  // bound in closure — the source is opened fresh each turn. EVERY tool is
+  // gated by default (the agent editor can still surface/override that).
+  const sourceFor = (principal: P) => {
+    const tools = googleWriteTools(() => core.accessTokenFor(principal));
+    return {
+      tools,
+      toolApproval: Object.fromEntries(Object.keys(tools).map((k) => [k, "user-approval"])),
+      close: async () => {},
+    };
+  };
 
   const emptySource = {
     open: async () => ({ tools: {}, close: async () => {} }),
@@ -429,7 +356,12 @@ export function createGoogleWorkspaceWriteConnection<P>(
     async testTools(name, principal) {
       if (name !== WRITE_NAME) return [];
       await core.accessTokenFor(principal); // refresh-grant connectivity probe
-      return ["gmail_send (send email as the user — approval-gated)"];
+      return [
+        "gmail_send (send email — approval-gated)",
+        "gdocs_create / gdocs_append (Docs — approval-gated)",
+        "gsheets_create / gsheets_append (Sheets — approval-gated)",
+        "gslides_create (Slides — approval-gated)",
+      ];
     },
   };
 }
