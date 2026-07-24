@@ -177,6 +177,78 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     tools: Record<string, unknown>,
     opts?: { agent: string },
   ) => unknown;
+  /**
+   * Optional observability seam — consumer telemetry (usage rollups, per-tool
+   * analytics, tracing) attached WITHOUT wrapping `handleChat`. Complements the
+   * built-in `recordUsage` (billing rollup): this is where an app emits its own
+   * events. Fires for subagent turns too — distinguish via `depth` (0 =
+   * top-level). All hooks are fire-and-forget: a thrown/rejected hook is
+   * swallowed so telemetry never breaks a turn. Without it, zero behavior change.
+   */
+  observability?: ObservabilityHooks<P>;
+}
+
+/** Fields common to every observability event. */
+export interface ObservabilityEventBase<P> {
+  principal: P;
+  chatId: string;
+  runId: string;
+  /** The agent (registry key) running this turn. */
+  agent: string;
+  /** Resolved model id for this turn. */
+  modelId: string;
+  /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
+  depth: number;
+}
+
+/** One completed generation step (model call + any tool calls made in it). */
+export interface ObservabilityStepEvent<P> extends ObservabilityEventBase<P> {
+  step: {
+    text?: string;
+    finishReason?: string;
+    usage?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+    toolCalls?: Array<{
+      toolCallId: string;
+      toolName: string;
+      input?: unknown;
+    }>;
+    toolResults?: Array<{
+      toolCallId: string;
+      toolName: string;
+      output?: unknown;
+    }>;
+  };
+}
+
+/** The turn settled. `usage`/`cost` are the turn totals also written to the run. */
+export interface ObservabilityFinishEvent<P> extends ObservabilityEventBase<P> {
+  status: "completed" | "awaiting_input" | "errored";
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+  };
+  cost: number;
+  messages: AppMessage[];
+}
+
+export interface ObservabilityErrorEvent<P> extends ObservabilityEventBase<P> {
+  error: unknown;
+}
+
+export interface ObservabilityHooks<P> {
+  /** After each generation step (model output + the step's tool calls/results). */
+  onStep?: (event: ObservabilityStepEvent<P>) => void | Promise<void>;
+  /** After the turn settles (completed / awaiting_input / errored-on-abort). */
+  onFinish?: (event: ObservabilityFinishEvent<P>) => void | Promise<void>;
+  /** When the turn errors. */
+  onError?: (event: ObservabilityErrorEvent<P>) => void | Promise<void>;
 }
 
 export interface HandleChatInput<P> {
@@ -441,6 +513,20 @@ function recordToolResult(
     if (touched) changed.push(m);
   }
   return changed;
+}
+
+/** Invoke an observability hook fire-and-forget — a thrown/rejected hook is
+ * swallowed so telemetry never breaks a turn. */
+function fireObs<E>(
+  hook: ((event: E) => void | Promise<void>) | undefined,
+  event: E,
+): void {
+  if (!hook) return;
+  try {
+    void Promise.resolve(hook(event)).catch(() => {});
+  } catch {
+    // synchronous throw from the hook — ignore
+  }
 }
 
 export function createRuntime<P, RC = unknown>(
@@ -801,16 +887,40 @@ export function createRuntime<P, RC = unknown>(
           // generate-text step callback: accumulate usage across steps,
           // including the cached-prompt breakdown so cost reflects cache reads.
           onStepEnd: (step: {
+            text?: string;
+            finishReason?: string;
             usage?: {
               inputTokens?: number;
               outputTokens?: number;
               inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
             };
+            toolCalls?: Array<{ toolCallId: string; toolName: string; input?: unknown }>;
+            toolResults?: Array<{ toolCallId: string; toolName: string; output?: unknown }>;
           }) => {
             inputTokens += step.usage?.inputTokens ?? 0;
             outputTokens += step.usage?.outputTokens ?? 0;
             cacheReadTokens += step.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
             cacheWriteTokens += step.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
+            fireObs(config.observability?.onStep, {
+              principal,
+              chatId: resolvedChatId,
+              runId: run.id,
+              agent: run.agent,
+              modelId,
+              depth,
+              step: {
+                text: step.text,
+                finishReason: step.finishReason,
+                usage: {
+                  inputTokens: step.usage?.inputTokens,
+                  outputTokens: step.usage?.outputTokens,
+                  cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
+                  cacheWriteTokens: step.usage?.inputTokenDetails?.cacheWriteTokens,
+                },
+                toolCalls: step.toolCalls,
+                toolResults: step.toolResults,
+              },
+            });
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
         // Fold the model's own output into the stream.
@@ -873,6 +983,18 @@ export function createRuntime<P, RC = unknown>(
             { status: "errored", error: "aborted", endedAt: Date.now() },
             lease,
           );
+          fireObs(config.observability?.onFinish, {
+            principal,
+            chatId: resolvedChatId,
+            runId: run.id,
+            agent: run.agent,
+            modelId,
+            depth,
+            status: "errored",
+            usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+            cost,
+            messages,
+          });
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
@@ -898,10 +1020,31 @@ export function createRuntime<P, RC = unknown>(
           outputTokens,
           cost,
         });
+        fireObs(config.observability?.onFinish, {
+          principal,
+          chatId: resolvedChatId,
+          runId: run.id,
+          agent: run.agent,
+          modelId,
+          depth,
+          status: paused ? "awaiting_input" : "completed",
+          usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+          cost,
+          messages,
+        });
       },
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
+        fireObs(config.observability?.onError, {
+          principal,
+          chatId: resolvedChatId,
+          runId: run.id,
+          agent: run.agent,
+          modelId,
+          depth,
+          error,
+        });
         return error instanceof Error ? error.message : "An error occurred.";
       },
     } as Parameters<typeof createUIMessageStream>[0]);
