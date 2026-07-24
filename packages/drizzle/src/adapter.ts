@@ -1,5 +1,4 @@
-import type { Client } from "@libsql/client";
-import { drizzle } from "drizzle-orm/libsql";
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { and, asc, eq, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type {
   AppMessage,
@@ -20,6 +19,21 @@ function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
   return owner(principal).map(encodeURIComponent).join("/");
 }
 
+/**
+ * Optional override for message persistence — a seam any consumer can supply to
+ * route a chat's messages somewhere other than the `latch_messages` table (e.g.
+ * bridge a user-facing chat to files it already owns). Both methods receive the
+ * resolved `ChatRecord` so the consumer can decide per chat.
+ *
+ * `loadMessages` returns the messages to use, or `null` to defer to the default
+ * table read. `appendMessages` returns `true` if it handled the write, or
+ * `false` to defer to the default table write.
+ */
+export interface MessageStore<P> {
+  loadMessages(principal: P, chat: ChatRecord): Promise<AppMessage[] | null>;
+  appendMessages(chat: ChatRecord, msgs: AppMessage[]): Promise<boolean>;
+}
+
 export interface SqliteAdapterOptions<P> {
   /**
    * Derive the ownership key for a principal — the isolation boundary. Coarser
@@ -27,14 +41,23 @@ export interface SqliteAdapterOptions<P> {
    * server-derived from the authenticated principal, never client input.
    */
   owner: (principal: P) => string[];
+  /**
+   * Optional message-persistence override (see `MessageStore`). When present,
+   * it's consulted first on load/append; if it declines (null / false) the
+   * default `latch_messages` behaviour applies.
+   */
+  messages?: MessageStore<P>;
 }
 
-/** A `StorageAdapter` backed by libsql (local file / Turso). SQLite first. */
+/**
+ * A `StorageAdapter` on a Drizzle SQLite database (libsql / better-sqlite3 /
+ * Turso). The caller owns the connection — pass a `drizzle(...)` instance — so
+ * the adapter never opens or dialect-binds one itself.
+ */
 export function createSqliteAdapter<P>(
-  client: Client,
+  db: BaseSQLiteDatabase<"sync" | "async", any, any>,
   opts: SqliteAdapterOptions<P>,
 ): StorageAdapter<P> {
-  const db = drizzle(client, { schema });
   const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
 
   const rowToChat = (r: typeof schema.chats.$inferSelect): ChatRecord => ({
@@ -124,6 +147,10 @@ export function createSqliteAdapter<P>(
       // Scope check first — a chat the caller doesn't own returns nothing.
       const chat = await getChat(principal, chatId);
       if (!chat) return [];
+      if (opts.messages) {
+        const overridden = await opts.messages.loadMessages(principal, chat);
+        if (overridden !== null) return overridden;
+      }
       const rows = await db
         .select()
         .from(schema.messages)
@@ -140,6 +167,15 @@ export function createSqliteAdapter<P>(
     },
 
     async appendMessages(chatId, msgs) {
+      if (opts.messages) {
+        const [c] = await db
+          .select()
+          .from(schema.chats)
+          .where(eq(schema.chats.id, chatId));
+        if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
+          return;
+        }
+      }
       if (msgs.length === 0) return;
       const [agg] = await db
         .select({ maxSeq: sql<number | null>`max(${schema.messages.seq})` })

@@ -6,7 +6,7 @@ import {
   createVaultOAuthProvider,
   type McpOAuthConfig,
 } from "@intentface/latch-mcp";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 function randomKey(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));
@@ -25,7 +25,7 @@ function randomKey(): string {
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(client, { owner }), masterKey: randomKey() });
+  const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(latchDb(client), { owner }), masterKey: randomKey() });
 
   const config: McpOAuthConfig = {
     name: "linear",

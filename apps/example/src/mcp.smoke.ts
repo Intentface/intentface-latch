@@ -7,7 +7,7 @@ import {
   isHostAllowed,
   type McpConnection,
 } from "@intentface/latch-mcp";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 function randomKey(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));
@@ -35,7 +35,7 @@ async function main() {
   // --- vault-brokered bearer auth ----------------------------------------
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(client, { owner }), masterKey: randomKey() });
+  const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(latchDb(client), { owner }), masterKey: randomKey() });
   await vault.set(orgA, "linear_token", "lin_api_secret");
 
   const bearerConn: McpConnection = {

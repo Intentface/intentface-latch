@@ -46,13 +46,25 @@ const ALTERS = [
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_write_tokens INTEGER`,
 ];
 
-export async function migrate(client: Client): Promise<void> {
-  for (const stmt of DDL) await client.execute(stmt);
+/**
+ * Run the schema against any executor — a driver-agnostic seam so a consumer on
+ * a non-libsql driver (e.g. better-sqlite3's `db.run`) can create the tables
+ * without pulling in a libsql `Client`. `exec` runs one statement; ALTERs that
+ * fail because the column already exists are swallowed.
+ */
+export async function migrateWith(
+  exec: (sql: string) => unknown | Promise<unknown>,
+): Promise<void> {
+  for (const stmt of DDL) await exec(stmt);
   for (const stmt of ALTERS) {
     try {
-      await client.execute(stmt);
+      await exec(stmt);
     } catch {
       /* column already exists */
     }
   }
+}
+
+export async function migrate(client: Client): Promise<void> {
+  await migrateWith((s) => client.execute(s));
 }

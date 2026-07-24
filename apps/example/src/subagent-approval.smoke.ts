@@ -9,7 +9,7 @@ import {
   type AppMessage,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 /**
  * Subagent HITL (C-native): a gated tool INSIDE a subagent pauses, and the
@@ -88,7 +88,7 @@ const scope: Principal = { orgId: "org_a", userId: "user_1" };
 async function runScenario(approved: boolean) {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
@@ -142,9 +142,10 @@ async function runScenario(approved: boolean) {
     | undefined;
   const approvalId = dataPart?.data?.approvalId;
   const execBefore = execCount;
-  const parentStatuses = (await client.execute(
-    `SELECT status FROM latch_runs r JOIN latch_chats c ON r.chat_id=c.id WHERE c.id='${chat.id}'`,
-  )).rows.map((r) => String(r.status));
+  const parentStatuses = (await client.execute({
+    sql: "SELECT status FROM latch_runs r JOIN latch_chats c ON r.chat_id=c.id WHERE c.id=?",
+    args: [chat.id],
+  })).rows.map((r) => String(r.status));
 
   if (!approvalId) {
     return { approvalId: undefined, execBefore, execAfter: execCount, parentStatuses, blob: "", client };
