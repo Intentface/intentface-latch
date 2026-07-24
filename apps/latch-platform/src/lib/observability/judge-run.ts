@@ -9,7 +9,7 @@ import type { AttachedEval } from "../agent-store";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
 import { JUDGE_MODEL_ID, judgeOnce } from "../evals/judge";
-import { extractRunView } from "./extract";
+import { extractRunView, summarizeToolCalls } from "./extract";
 import type { RunScore } from "./run-scores-store";
 
 type Latch = Awaited<ReturnType<typeof getLatch>>;
@@ -118,7 +118,7 @@ export async function judgeLiveRun({
     if (!view.outputText) return; // nothing judgeable (e.g. pure tool-approval turn)
     answer = view.outputText;
     input = outcome.inputText ?? "";
-    tools = view.toolNames.length ? view.toolNames.join(", ") : "none";
+    tools = summarizeToolCalls(view.toolCalls);
   } catch (e) {
     console.warn(`online judge setup failed (run ${meta.runId}):`, e);
     return;
@@ -182,7 +182,7 @@ export async function rejudgeRun(args: {
   );
   if (idx < 0) throw new Error(`No readable run "${args.runId}" in this chat.`);
 
-  const { toolNames } = extractRunView([history[idx]]);
+  const { toolCalls } = extractRunView([history[idx]]);
   const answer = messageText(history[idx]);
   // Input: the nearest preceding user message's text.
   let input = "";
@@ -192,7 +192,7 @@ export async function rejudgeRun(args: {
       break;
     }
   }
-  const tools = toolNames.length ? toolNames.join(", ") : "none";
+  const tools = summarizeToolCalls(toolCalls);
 
   const enabled = args.rubrics.filter((r) => r.enabled);
   const results: RubricVerdictResult[] = [];
