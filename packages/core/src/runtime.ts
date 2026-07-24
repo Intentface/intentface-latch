@@ -270,6 +270,27 @@ export interface Runtime<P> {
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
+   * Run one agent turn from the supplied messages and stream it back, persisting
+   * NOTHING (no chat/run/message/usage rows). The full tool loop, streaming, and
+   * observability hooks all run; durability, history, and HITL round-tripping are
+   * not available. For read-mostly, single-shot loops where a durable chat would
+   * be pure churn (e.g. inline editor assist). Use `handleChat` when you need
+   * history, resume, or approvals.
+   */
+  runTurnStream(input: {
+    agent: string;
+    principal: P;
+    messages: AppMessage[];
+    request?: Request;
+    /** Body format: `ui` (default) SSE UIMessage stream, or `text` plain text. */
+    format?: "ui" | "text";
+    /** Fired with the final assistant text + messages (capture side outputs). */
+    onComplete?: (result: {
+      text: string;
+      messages: AppMessage[];
+    }) => void | Promise<void>;
+  }): Promise<Response>;
+  /**
    * Run one agent to completion once, autonomously, in an isolated throwaway
    * thread (no streaming) — for programmatic use like the Agent Builder testing
    * an agent it just created. `blockGated` (default true) stubs approval-gated
@@ -412,6 +433,8 @@ const generateSubApprovalId = createIdGenerator({ prefix: "sapv", separator: "_"
 const MAX_SUBAGENT_DEPTH = 4;
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
+/** Synthetic run id for an ephemeral (unpersisted) `runTurnStream` turn. */
+const generateRunId = createIdGenerator({ prefix: "run", separator: "_" });
 
 /** A tool/dynamic-tool UI part, narrowed to the approval fields we touch. */
 type ApprovalPart = {
@@ -771,12 +794,37 @@ export function createRuntime<P, RC = unknown>(
     blockGated?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
+    /**
+     * Ephemeral turn (`runTurnStream`): stream a full tool-loop turn WITHOUT
+     * persisting anything — no run/lease, no message/run/usage writes. The
+     * observability hooks still fire (usage/analytics), tool sources still
+     * open/close. For read-mostly, single-shot loops (e.g. inline editor assist)
+     * where a durable chat would be pure churn. `run` is a synthetic record.
+     */
+    ephemeral?: boolean;
+    /**
+     * Response body format (ephemeral turns): `ui` (default) → the SSE
+     * UIMessage stream; `text` → a plain `text/plain` stream of the assistant's
+     * text deltas (parity with the AI SDK's `toTextStreamResponse`), for
+     * consumers that render raw text.
+     */
+    responseFormat?: "ui" | "text";
+    /**
+     * Fired once the turn's messages are final (after any persistence), with the
+     * assembled assistant text + the full message list — so an ephemeral caller
+     * can capture side outputs (e.g. tool results) that the text stream drops.
+     */
+    onComplete?: (result: {
+      text: string;
+      messages: AppMessage[];
+    }) => void | Promise<void>;
   }): Promise<Response> {
     const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
       args;
     const autoApprove = args.autoApprove ?? false;
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
+    const ephemeral = args.ephemeral ?? false;
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -1196,15 +1244,18 @@ export function createRuntime<P, RC = unknown>(
             cost,
           };
         }
-        await storage.appendMessages(resolvedChatId, messages);
+        // Ephemeral turns persist nothing (no run/message/usage rows); the
+        // observability hooks below still fire so usage/analytics are recorded.
+        if (!ephemeral) await storage.appendMessages(resolvedChatId, messages);
         // Aborted (lease lost / client gone): don't claim completion. The
         // guarded update no-ops if the run was already reaped+reassigned.
         if (isAborted) {
-          await storage.updateRun(
-            run.id,
-            { status: "errored", error: "aborted", endedAt: Date.now() },
-            lease,
-          );
+          if (!ephemeral)
+            await storage.updateRun(
+              run.id,
+              { status: "errored", error: "aborted", endedAt: Date.now() },
+              lease,
+            );
           fireObs(config.observability?.onFinish, {
             principal,
             chatId: resolvedChatId,
@@ -1222,26 +1273,28 @@ export function createRuntime<P, RC = unknown>(
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
-        await storage.updateRun(
-          run.id,
-          {
-            status: paused ? "awaiting_input" : "completed",
-            usageInputTokens: inputTokens,
-            usageOutputTokens: outputTokens,
-            usageCacheReadTokens: cacheReadTokens || undefined,
-            usageCacheWriteTokens: cacheWriteTokens || undefined,
-            costTotal: cost,
-            endedAt: paused ? undefined : Date.now(),
-          },
-          lease,
-        );
-        await storage.recordUsage(principal, {
-          runId: run.id,
-          model: modelId,
-          inputTokens,
-          outputTokens,
-          cost,
-        });
+        if (!ephemeral) {
+          await storage.updateRun(
+            run.id,
+            {
+              status: paused ? "awaiting_input" : "completed",
+              usageInputTokens: inputTokens,
+              usageOutputTokens: outputTokens,
+              usageCacheReadTokens: cacheReadTokens || undefined,
+              usageCacheWriteTokens: cacheWriteTokens || undefined,
+              costTotal: cost,
+              endedAt: paused ? undefined : Date.now(),
+            },
+            lease,
+          );
+          await storage.recordUsage(principal, {
+            runId: run.id,
+            model: modelId,
+            inputTokens,
+            outputTokens,
+            cost,
+          });
+        }
         fireObs(config.observability?.onFinish, {
           principal,
           chatId: resolvedChatId,
@@ -1254,6 +1307,13 @@ export function createRuntime<P, RC = unknown>(
           cost,
           messages,
         });
+        if (args.onComplete) {
+          try {
+            await args.onComplete({ text: lastAssistantText(messages), messages });
+          } catch (e) {
+            console.error("[runtime] onComplete hook failed:", e);
+          }
+        }
       },
       onError: (error: unknown) => {
         stopHeartbeat();
@@ -1270,6 +1330,41 @@ export function createRuntime<P, RC = unknown>(
         return error instanceof Error ? error.message : "An error occurred.";
       },
     } as Parameters<typeof createUIMessageStream>[0]);
+
+    // Plain-text stream (ephemeral `responseFormat: "text"`): project the
+    // UIMessage chunks down to their text deltas and emit `text/plain` — parity
+    // with the AI SDK's `toTextStreamResponse`. Tool calls still run (their
+    // side effects happen as the stream is pulled); only the framing differs.
+    if (args.responseFormat === "text") {
+      const text = (
+        stream as ReadableStream<{
+          type?: string;
+          delta?: string;
+          errorText?: string;
+        }>
+      )
+        .pipeThrough(
+          new TransformStream<
+            { type?: string; delta?: string; errorText?: string },
+            string
+          >({
+            transform(chunk, controller) {
+              if (chunk.type === "text-delta" && chunk.delta)
+                controller.enqueue(chunk.delta);
+              // Don't let a failed turn look like an empty-but-successful one:
+              // fail the stream so the client sees an error, not silence.
+              else if (chunk.type === "error")
+                controller.error(
+                  new Error(chunk.errorText || "The run failed."),
+                );
+            },
+          }),
+        )
+        .pipeThrough(new TextEncoderStream());
+      return new Response(text, {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
 
     // Drain the stream server-side regardless of the client. If the browser
     // closes mid-turn, the response stops being pulled — without this the
@@ -1359,6 +1454,62 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [...prior, message],
       runtimeCtx,
+    });
+  }
+
+  /**
+   * Run one agent turn from the supplied messages and stream it back, persisting
+   * NOTHING — no chat, run, message, or usage rows. The full tool loop,
+   * streaming, and observability hooks all run; only durability/history are
+   * skipped. For read-mostly, single-shot loops (inline editor assist, one-off
+   * generations) where a durable chat would be pure churn. There's no chatId to
+   * resume and approvals can't round-trip (no persisted state) — use `handleChat`
+   * for anything that needs HITL or history.
+   */
+  async function runTurnStream({
+    agent: agentName,
+    principal,
+    messages,
+    request,
+    format,
+    onComplete,
+  }: {
+    agent: string;
+    principal: P;
+    messages: AppMessage[];
+    request?: Request;
+    format?: "ui" | "text";
+    onComplete?: (result: {
+      text: string;
+      messages: AppMessage[];
+    }) => void | Promise<void>;
+  }): Promise<Response> {
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      agentName,
+      principal,
+      request,
+    );
+    // Synthetic, unpersisted run — buildTurn only reads `id`/`agent` from it,
+    // and every storage write is guarded by `ephemeral`.
+    const run = {
+      id: generateRunId(),
+      chatId: "ephemeral",
+      agent: agentName,
+      status: "active",
+      startedAt: Date.now(),
+    } as unknown as RunRecord;
+    return buildTurn({
+      resolvedChatId: run.chatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease: undefined,
+      uiMessages: messages,
+      runtimeCtx,
+      ephemeral: true,
+      responseFormat: format ?? "ui",
+      onComplete,
     });
   }
 
@@ -1801,6 +1952,7 @@ export function createRuntime<P, RC = unknown>(
     listAgents: agentInfos,
     tick: reapTick,
     handleChat,
+    runTurnStream,
     runAgent: ({ principal, agent, prompt, threadId, blockGated = true }) =>
       runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated }),
     loadHistory,
