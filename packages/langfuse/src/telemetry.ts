@@ -175,7 +175,12 @@ export function langfuseTelemetry<P>(
 
     async flush() {
       if (!enabled) return;
-      await flushLangfuse();
+      const p = flushLangfuse();
+      // Keep the flush alive in serverless even when the caller can't await it
+      // (e.g. core's synchronous onError path voids the promise). waitUntil
+      // registers it with the platform; we still await for the normal path.
+      opts.waitUntil?.(p.catch(() => {}));
+      await p;
     },
   };
 }

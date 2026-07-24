@@ -240,6 +240,12 @@ export interface Runtime<P> {
     limit?: number;
   }): Promise<RunRecord[]>;
   /**
+   * One run by id, scoped to the caller: returns it only when the run's chat is
+   * owned by `principal` (else null). A direct lookup — no capped scan — so it's
+   * safe for ownership checks on arbitrarily old runs.
+   */
+  getRun(input: { principal: P; runId: string }): Promise<RunRecord | null>;
+  /**
    * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
    * Returns the reaped runs. No-op-safe to call on every node.
    */
@@ -824,6 +830,13 @@ export function createRuntime<P, RC = unknown>(
       principal,
     };
     const telemetryOptions = config.telemetry?.telemetryFor?.(telemetryMeta);
+    // A telemetry impl that defines `telemetryFor` but returns undefined is
+    // opting THIS run out — so the span wrapper and finish/flush hooks must go
+    // silent too, not just the AI SDK settings. If `telemetryFor` is absent
+    // entirely, the impl simply isn't customizing settings, so tracing stays on.
+    const telemetryOn =
+      !!config.telemetry &&
+      !(config.telemetry.telemetryFor && telemetryOptions === undefined);
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
@@ -850,7 +863,7 @@ export function createRuntime<P, RC = unknown>(
       error?: string,
     ) => {
       const t = config.telemetry;
-      if (!t) return;
+      if (!t || !telemetryOn) return;
       try {
         await t.onRunFinished?.(telemetryMeta, {
           status,
@@ -871,9 +884,16 @@ export function createRuntime<P, RC = unknown>(
           }),
           endedAt: Date.now(),
         });
-        await t.flush?.();
       } catch (e) {
         console.warn("latch telemetry onRunFinished failed:", e);
+      } finally {
+        // Always flush, even when the finish hook threw — otherwise a failed
+        // judge/score pass would drop the turn's spans in serverless.
+        try {
+          await t.flush?.();
+        } catch (e) {
+          console.warn("latch telemetry flush failed:", e);
+        }
       }
     };
 
@@ -945,9 +965,10 @@ export function createRuntime<P, RC = unknown>(
             cacheWriteTokens += step.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
-        const result = config.telemetry?.withRunSpan
-          ? await config.telemetry.withRunSpan(telemetryMeta, startStream)
-          : await startStream();
+        const result =
+          telemetryOn && config.telemetry?.withRunSpan
+            ? await config.telemetry.withRunSpan(telemetryMeta, startStream)
+            : await startStream();
         // Fold the model's own output into the stream.
         writer.merge(
           toUIMessageStream({
@@ -1048,6 +1069,10 @@ export function createRuntime<P, RC = unknown>(
         void closeSources();
         const message =
           error instanceof Error ? error.message : "An error occurred.";
+        // The AI SDK's onError must return the client string synchronously, so
+        // the terminal telemetry can't be awaited here. A serverless-safe impl
+        // keeps its own flush alive (e.g. via waitUntil) so the errored trace
+        // still lands; failures are swallowed inside reportRunFinished.
         void reportRunFinished("errored", [], message);
         return message;
       },
@@ -1334,6 +1359,21 @@ export function createRuntime<P, RC = unknown>(
     return storage.listRuns(principal, { limit });
   }
 
+  async function getRun({
+    principal,
+    runId,
+  }: {
+    principal: P;
+    runId: string;
+  }): Promise<RunRecord | null> {
+    const run = await storage.getRun(runId);
+    if (!run) return null;
+    // Ownership: the run is the caller's only if its chat is (getChat is
+    // principal-scoped). Guards cross-tenant reads/writes keyed by runId.
+    const chat = await storage.getChat(principal, run.chatId);
+    return chat ? run : null;
+  }
+
   /** A fresh user message from plain text (for cron-fired turns). */
   function userMessageOf(text: string): AppMessage {
     return {
@@ -1534,6 +1574,7 @@ export function createRuntime<P, RC = unknown>(
     loadHistory,
     listChats,
     listRuns,
+    getRun,
     resume: resumeRun,
     sweep,
     applyApproval,

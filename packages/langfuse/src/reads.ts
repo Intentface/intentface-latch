@@ -46,32 +46,47 @@ export async function listOwnerTraces(args: {
 }): Promise<TraceSummary[]> {
   const client = getLangfuseClient();
   const limit = args.limit ?? 50;
-  const [traces, scores] = await Promise.all([
-    client.api.trace.list({
-      userId: args.ownerTag,
-      ...(args.agent ? { name: args.agent } : {}),
-      limit,
-      page: args.page,
-      orderBy: "timestamp.desc",
-    }),
-    client.api.scores.getMany({ userId: args.ownerTag, limit: 100 }),
-  ]);
+  const traces = await client.api.trace.list({
+    userId: args.ownerTag,
+    ...(args.agent ? { name: args.agent } : {}),
+    limit,
+    page: args.page,
+    orderBy: "timestamp.desc",
+  });
+  const traceRows = traces.data ?? [];
 
+  // Fetch scores for exactly this page's traces via the Scores v3 API
+  // (`scores.getMany`/v2 is deprecated and 404s on Langfuse v4+). The v3
+  // endpoint takes a comma-separated `traceId` filter and returns the subject
+  // trace under `subject` when requested via `fields`, so scores reliably
+  // attach to the current page instead of a fixed 100-row owner-wide slice.
   const scoresByTrace = new Map<string, TraceScore[]>();
-  for (const s of scores.data ?? []) {
-    const traceId = (s as { traceId?: string | null }).traceId;
-    if (!traceId) continue;
-    const list = scoresByTrace.get(traceId) ?? [];
-    list.push({
-      name: s.name,
-      value: (s as { value?: number | string | null }).value ?? null,
-      comment: s.comment ?? undefined,
-      dataType: (s as { dataType?: string }).dataType,
+  if (traceRows.length > 0) {
+    const scores = await client.api.scoresV3.getManyV3({
+      traceId: traceRows.map((t) => t.id).join(","),
+      fields: "details,subject",
+      limit: 100,
     });
-    scoresByTrace.set(traceId, list);
+    for (const s of scores.data ?? []) {
+      const subject = (s as { subject?: { kind?: string; id?: string } }).subject;
+      if (subject?.kind !== "trace" || !subject.id) continue;
+      const list = scoresByTrace.get(subject.id) ?? [];
+      // v3 returns BOOLEAN scores as a JS boolean (v2 returned 1/0). Normalize
+      // to a number so binary and numeric scores share one numeric contract
+      // (aggregates/averaging); categorical scores stay strings.
+      const raw = (s as { value?: number | string | boolean | null }).value;
+      const value = typeof raw === "boolean" ? (raw ? 1 : 0) : (raw ?? null);
+      list.push({
+        name: s.name,
+        value,
+        comment: s.comment ?? undefined,
+        dataType: (s as { dataType?: string }).dataType,
+      });
+      scoresByTrace.set(subject.id, list);
+    }
   }
 
-  return (traces.data ?? []).map((t) => ({
+  return traceRows.map((t) => ({
     id: t.id,
     runId: tagValue(t.tags ?? [], "run:"),
     agent: t.name ?? tagValue(t.tags ?? [], "agent:"),

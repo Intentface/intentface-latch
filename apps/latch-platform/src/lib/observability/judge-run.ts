@@ -4,8 +4,12 @@ import type {
 } from "@intentface/latch-core";
 import { postScore } from "@intentface/latch-langfuse";
 import type { Principal } from "../session";
+import type { AttachedEval } from "../agent-store";
+import type { getLatch } from "../latch";
 import { JUDGE_MODEL_ID, judgeOnce } from "../evals/judge";
 import { extractRunView } from "./extract";
+
+type Latch = Awaited<ReturnType<typeof getLatch>>;
 
 /**
  * The online-eval judge: after a live run completes, grade it against the
@@ -20,26 +24,40 @@ export async function judgeLiveRun({
   meta: TelemetryRunMeta<Principal>;
   outcome: TelemetryRunOutcome;
 }): Promise<void> {
-  // Lazy import keeps this module load-safe from latch.ts (composition root).
-  const { getLatch } = await import("../latch");
-  const { agentStore, modelFor } = await getLatch();
+  // Setup (getLatch + record load) is guarded too: on non-Vercel hosts
+  // `afterRun` is awaited directly in the turn's finish path, so a transient
+  // DB/store error here must be swallowed — the contract is that a judge pass
+  // never disrupts run completion.
+  let latch: Latch;
+  let evals: AttachedEval[];
+  let answer: string;
+  let input = "";
+  let tools = "none";
+  try {
+    // Lazy import keeps this module load-safe from latch.ts (composition root).
+    const { getLatch } = await import("../latch");
+    latch = await getLatch();
+    const rec = await latch.agentStore.getRecord(meta.principal, meta.agent);
+    evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
+    if (evals.length === 0) return;
 
-  const rec = await agentStore.getRecord(meta.principal, meta.agent);
-  const evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
-  if (evals.length === 0) return;
-
-  const { outputText, toolNames } = extractRunView(outcome.messages);
-  if (!outputText) return; // nothing judgeable (e.g. pure tool-approval turn)
-  const input = outcome.inputText ?? "";
-  const tools = toolNames.length ? toolNames.join(", ") : "none";
+    const view = extractRunView(outcome.messages);
+    if (!view.outputText) return; // nothing judgeable (e.g. pure tool-approval turn)
+    answer = view.outputText;
+    input = outcome.inputText ?? "";
+    tools = view.toolNames.length ? view.toolNames.join(", ") : "none";
+  } catch (e) {
+    console.warn(`online judge setup failed (run ${meta.runId}):`, e);
+    return;
+  }
 
   await Promise.all(
     evals.map(async (ev) => {
       try {
-        const model = modelFor(ev.judgeModelId ?? JUDGE_MODEL_ID);
+        const model = latch.modelFor(ev.judgeModelId ?? JUDGE_MODEL_ID);
         const verdict = await judgeOnce(model, {
           input,
-          answer: outputText,
+          answer,
           tools,
           criterion: ev.prompt,
           scale: ev.scale,

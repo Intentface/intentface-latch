@@ -430,10 +430,10 @@ export const submitFeedbackFn = createServerFn({ method: "POST" })
     if (!isLangfuseConfigured()) return { ok: false as const, error: "langfuse not configured" };
     if (data.value !== 0 && data.value !== 1) return { ok: false as const, error: "bad value" };
     const { runtime } = await getLatch();
-    const runs = await runtime.listRuns({ principal, limit: 1000 });
-    if (!runs.some((r) => r.id === data.runId)) {
-      return { ok: false as const, error: "unknown run" };
-    }
+    // Direct, principal-scoped lookup (no capped scan) — an unowned or unknown
+    // runId returns null, so this both authorizes and validates in one O(1) hop.
+    const run = await runtime.getRun({ principal, runId: data.runId });
+    if (!run) return { ok: false as const, error: "unknown run" };
     await postScore({
       runId: data.runId,
       name: "user-feedback",

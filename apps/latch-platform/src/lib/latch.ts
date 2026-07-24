@@ -223,7 +223,9 @@ export async function getLatch(): Promise<{
     telemetry: isLangfuseConfigured()
       ? langfuseTelemetry<Principal>({
           ownerTag: ownerTagOf,
-          environment: process.env.VERCEL ? "production" : "development",
+          // VERCEL is "1" on every target (preview/dev too), so gate the trace
+          // environment on VERCEL_ENV to keep preview/dev traces out of prod.
+          environment: process.env.VERCEL_ENV === "production" ? "production" : "development",
           waitUntil: process.env.VERCEL ? waitUntil : undefined,
           afterRun: async ({ meta, outcome }) => {
             if (outcome.status !== "completed") return;
