@@ -3,9 +3,8 @@ import {
   createRuntime,
   createVault,
   defineContext,
-  mergeConnections
-  
-  
+  mergeConnections,
+  mergeToolSources,
 } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
@@ -23,6 +22,7 @@ import type {LatchHandler} from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
+import { secretEnv } from "./env";
 import { getPrincipalFromHeaders  } from "./session";
 import type {Principal} from "./session";
 import { createCredentials  } from "./credentials";
@@ -33,8 +33,12 @@ import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
 import { createAgentStore, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
-import { createSlackStore, migrateSlack  } from "./slack-store";
+import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
+import { createTelegramStore, migrateTelegram } from "./telegram-store";
+import type {TelegramStore} from "./telegram-store";
+import { createWhatsappStore, migrateWhatsapp } from "./whatsapp-store";
+import type {WhatsappStore} from "./whatsapp-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
 import { createEvalStore, migrateEvals } from "./evals/store";
@@ -44,7 +48,11 @@ import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
 import { loadModelCatalog  } from "./models";
 import type {ModelInfo} from "./models";
-import { resolveSandbox, harnessTools } from "./sandbox";
+import { createSandboxResolver, harnessTools } from "./sandbox";
+import {
+  createGoogleWorkspaceConnection,
+  createGoogleWorkspaceWriteConnection,
+} from "./google-workspace";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";
 
@@ -80,6 +88,8 @@ let cached:
       allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
       slackStore: SlackStore;
+      telegramStore: TelegramStore;
+      whatsappStore: WhatsappStore;
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
@@ -98,6 +108,8 @@ export async function getLatch(): Promise<{
   allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
   slackStore: SlackStore;
+  telegramStore: TelegramStore;
+  whatsappStore: WhatsappStore;
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
@@ -115,6 +127,8 @@ export async function getLatch(): Promise<{
   await migrate(client); // creates latch_* tables alongside the auth tables
   await migrateAgents(client); // latch_agents (UI-created agents)
   await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
+  await migrateTelegram(client); // latch_telegram_* (Telegram channel)
+  await migrateWhatsapp(client); // latch_whatsapp_* (WhatsApp channel)
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
 
@@ -126,8 +140,9 @@ export async function getLatch(): Promise<{
   const storage = createSqliteAdapter<Principal>(client, { owner });
   const vault = createVault<Principal>({
     store: createSqliteSecretStore<Principal>(client, { owner }),
-    // Dev fallback is a deterministic 32-byte key; set LATCH_VAULT_KEY in prod.
-    masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
+    // Dev-only fallback is a deterministic 32-byte key; production without
+    // LATCH_VAULT_KEY throws (secrets must never be encrypted with a public key).
+    masterKey: secretEnv("LATCH_VAULT_KEY", btoa("latch-dev-vault-key-32-bytes!!!!")),
   });
   const credentials = createCredentials(vault);
   const connectionStore = createConnectionStore(vault);
@@ -151,6 +166,8 @@ export async function getLatch(): Promise<{
     authoredTools.executableTools(p, names, scope),
   );
   const slackStore = createSlackStore(client);
+  const telegramStore = createTelegramStore(client);
+  const whatsappStore = createWhatsappStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
   const evalStore = createEvalStore(client);
 
@@ -185,9 +202,62 @@ export async function getLatch(): Promise<{
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
+  // Google Workspace OAuth: the tool-less read connection (mirage's read-only
+  // mounts ARE the interface) and its write companion (approval-gated
+  // gmail_send, separate consent/grant so the mount token never gains write
+  // scopes). Both need the same pre-registered OAuth client (no DCR), separate
+  // from the Google login and Calendar clients. Omitted (no client id) → not
+  // loaded.
+  const googleClient = process.env.GOOGLE_WORKSPACE_CLIENT_ID
+    ? {
+        vault,
+        clientId: process.env.GOOGLE_WORKSPACE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_WORKSPACE_CLIENT_SECRET ?? "",
+        callbackBaseUrl: `${baseURL}/api/latch/connections`,
+      }
+    : undefined;
+  const googleWorkspace = googleClient
+    ? createGoogleWorkspaceConnection<Principal>(googleClient)
+    : undefined;
+  const googleExtras = googleClient
+    ? [googleWorkspace!, createGoogleWorkspaceWriteConnection<Principal>(googleClient)]
+    : [];
+
+  // The code-declared built-ins across kinds (MCP + the google_workspace
+  // pair) — one registry so the Connections page status list, the handler
+  // routes, tool resolution, and any registry consumer see them all like any
+  // other built-in.
+  const builtinConnections: McpConnections<Principal> =
+    googleExtras.length === 0
+      ? connections
+      : {
+          host: connections.host,
+          hostFor: (names) =>
+            mergeToolSources(
+              connections.hostFor(names),
+              ...googleExtras.map((g) => g.hostFor(names)),
+            ),
+          names: [...connections.names, ...googleExtras.flatMap((g) => g.names)],
+          oauth: (name) =>
+            googleExtras.find((g) => g.names.includes(name))?.oauth(name) ??
+            connections.oauth(name),
+          status: async (p) =>
+            (
+              await Promise.all([
+                connections.status(p),
+                ...googleExtras.map((g) => g.status(p)),
+              ])
+            ).flat(),
+          testTools: (name, p) =>
+            googleExtras.find((g) => g.names.includes(name))?.testTools(name, p) ??
+            connections.testTools(name, p),
+        };
+
   // The full connection registry across kinds — also used to enumerate a
-  // connection's tools for the agent editor.
-  const allConnections = mergeConnections(connections, dynamic);
+  // connection's tools for the agent editor. (google_workspace contributes no
+  // tools — the mounts are its interface; google_workspace_write contributes
+  // the approval-gated gmail_send.)
+  const allConnections = mergeConnections(builtinConnections, dynamic);
 
   const runtime = createRuntime<Principal, Ctx>({
     storage,
@@ -210,8 +280,22 @@ export async function getLatch(): Promise<{
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash
-    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY.
-    sandbox: resolveSandbox,
+    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY; mirage
+    // (opt-in) mounts the agent's Slack app read-only when one is bound.
+    sandbox: createSandboxResolver({
+      slackTokenForAgent: async (agent, principal) => {
+        const app = (await slackStore.listForOrg(principal.orgId)).find(
+          (a) => a.agent === agent,
+        );
+        if (!app) return null;
+        return (
+          (await credentials.get(principal, slackVaultKeys(app.appId).botToken, "org")) ??
+          null
+        );
+      },
+      googleForUser: async (principal) =>
+        (await googleWorkspace?.mountCredsFor(principal)) ?? null,
+    }),
     harnessTools,
     // Native provider web tools (search/fetch) for agents that opt in.
     resolveProviderTools,
@@ -241,15 +325,20 @@ export async function getLatch(): Promise<{
   // connections, plus the UI-added ones dispatched by name. So `connect`,
   // authorize/callback, status, and test work for dynamic OAuth connections too.
   const handlerConnections: McpConnections<Principal> = {
-    host: connections.host,
-    hostFor: (names) => connections.hostFor(names),
-    names: connections.names,
+    host: builtinConnections.host,
+    hostFor: (names) => builtinConnections.hostFor(names),
+    names: builtinConnections.names,
     oauth: (name) =>
-      connections.names.includes(name) ? connections.oauth(name) : dynamic.oauth(name),
-    status: async (p) => [...(await connections.status(p)), ...(await dynamic.status(p))],
+      builtinConnections.names.includes(name)
+        ? builtinConnections.oauth(name)
+        : dynamic.oauth(name),
+    status: async (p) => [
+      ...(await builtinConnections.status(p)),
+      ...(await dynamic.status(p)),
+    ],
     testTools: (name, p) =>
-      connections.names.includes(name)
-        ? connections.testTools(name, p)
+      builtinConnections.names.includes(name)
+        ? builtinConnections.testTools(name, p)
         : dynamic.testTools(name, p),
   };
 
@@ -279,13 +368,17 @@ export async function getLatch(): Promise<{
 
   cached = {
     runtime,
-    connections,
+    // The merged built-ins (MCP + google_workspace) — server fns like the
+    // Connections page's status list read this, not the raw MCP set.
+    connections: builtinConnections,
     credentials,
     connectionStore,
     dynamic,
     allConnections,
     agentStore,
     slackStore,
+    telegramStore,
+    whatsappStore,
     toolStore,
     authoredTools,
     evalStore,

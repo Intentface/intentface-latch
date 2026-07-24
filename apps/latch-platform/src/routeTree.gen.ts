@@ -28,9 +28,13 @@ import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
 import { Route as SlackLinkRouteImport } from './routes/slack.link'
+import { Route as TelegramLinkRouteImport } from './routes/telegram.link'
+import { Route as WhatsappLinkRouteImport } from './routes/whatsapp.link'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
 import { Route as ApiSlackOauthRouteImport } from './routes/api/slack.oauth'
+import { Route as ApiTelegramBotIdEventsRouteImport } from './routes/api/telegram.$botId.events'
+import { Route as ApiWhatsappBotIdEventsRouteImport } from './routes/api/whatsapp.$botId.events'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -127,6 +131,16 @@ const SlackLinkRoute = SlackLinkRouteImport.update({
   path: '/slack/link',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TelegramLinkRoute = TelegramLinkRouteImport.update({
+  id: '/telegram/link',
+  path: '/telegram/link',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WhatsappLinkRoute = WhatsappLinkRouteImport.update({
+  id: '/whatsapp/link',
+  path: '/whatsapp/link',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   id: '/api/auth/$',
   path: '/api/auth/$',
@@ -141,6 +155,16 @@ const ApiSlackOauthRoute = ApiSlackOauthRouteImport.update({
   id: '/oauth',
   path: '/oauth',
   getParentRoute: () => ApiSlackRoute,
+} as any)
+const ApiTelegramBotIdEventsRoute = ApiTelegramBotIdEventsRouteImport.update({
+  id: '/api/telegram/$botId/events',
+  path: '/api/telegram/$botId/events',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiWhatsappBotIdEventsRoute = ApiWhatsappBotIdEventsRouteImport.update({
+  id: '/api/whatsapp/$botId/events',
+  path: '/api/whatsapp/$botId/events',
+  getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -161,11 +185,15 @@ export interface FileRoutesByFullPath {
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
   '/slack/link': typeof SlackLinkRoute
+  '/telegram/link': typeof TelegramLinkRoute
+  '/whatsapp/link': typeof WhatsappLinkRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
   '/api/slack/oauth': typeof ApiSlackOauthRoute
+  '/api/telegram/$botId/events': typeof ApiTelegramBotIdEventsRoute
+  '/api/whatsapp/$botId/events': typeof ApiWhatsappBotIdEventsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -183,11 +211,15 @@ export interface FileRoutesByTo {
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
   '/slack/link': typeof SlackLinkRoute
+  '/telegram/link': typeof TelegramLinkRoute
+  '/whatsapp/link': typeof WhatsappLinkRoute
   '/agents': typeof AgentsIndexRoute
   '/chat': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
   '/api/slack/oauth': typeof ApiSlackOauthRoute
+  '/api/telegram/$botId/events': typeof ApiTelegramBotIdEventsRoute
+  '/api/whatsapp/$botId/events': typeof ApiWhatsappBotIdEventsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -208,11 +240,15 @@ export interface FileRoutesById {
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/chat/$chatId': typeof ChatChatIdRoute
   '/slack/link': typeof SlackLinkRoute
+  '/telegram/link': typeof TelegramLinkRoute
+  '/whatsapp/link': typeof WhatsappLinkRoute
   '/agents/': typeof AgentsIndexRoute
   '/chat/': typeof ChatIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/latch/$': typeof ApiLatchSplatRoute
   '/api/slack/oauth': typeof ApiSlackOauthRoute
+  '/api/telegram/$botId/events': typeof ApiTelegramBotIdEventsRoute
+  '/api/whatsapp/$botId/events': typeof ApiWhatsappBotIdEventsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -234,11 +270,15 @@ export interface FileRouteTypes {
     | '/api/slack'
     | '/chat/$chatId'
     | '/slack/link'
+    | '/telegram/link'
+    | '/whatsapp/link'
     | '/agents/'
     | '/chat/'
     | '/api/auth/$'
     | '/api/latch/$'
     | '/api/slack/oauth'
+    | '/api/telegram/$botId/events'
+    | '/api/whatsapp/$botId/events'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -256,11 +296,15 @@ export interface FileRouteTypes {
     | '/api/slack'
     | '/chat/$chatId'
     | '/slack/link'
+    | '/telegram/link'
+    | '/whatsapp/link'
     | '/agents'
     | '/chat'
     | '/api/auth/$'
     | '/api/latch/$'
     | '/api/slack/oauth'
+    | '/api/telegram/$botId/events'
+    | '/api/whatsapp/$botId/events'
   id:
     | '__root__'
     | '/'
@@ -280,11 +324,15 @@ export interface FileRouteTypes {
     | '/api/slack'
     | '/chat/$chatId'
     | '/slack/link'
+    | '/telegram/link'
+    | '/whatsapp/link'
     | '/agents/'
     | '/chat/'
     | '/api/auth/$'
     | '/api/latch/$'
     | '/api/slack/oauth'
+    | '/api/telegram/$botId/events'
+    | '/api/whatsapp/$botId/events'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -303,8 +351,12 @@ export interface RootRouteChildren {
   ApiCronRoute: typeof ApiCronRoute
   ApiSlackRoute: typeof ApiSlackRouteWithChildren
   SlackLinkRoute: typeof SlackLinkRoute
+  TelegramLinkRoute: typeof TelegramLinkRoute
+  WhatsappLinkRoute: typeof WhatsappLinkRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiLatchSplatRoute: typeof ApiLatchSplatRoute
+  ApiTelegramBotIdEventsRoute: typeof ApiTelegramBotIdEventsRoute
+  ApiWhatsappBotIdEventsRoute: typeof ApiWhatsappBotIdEventsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -442,6 +494,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SlackLinkRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/telegram/link': {
+      id: '/telegram/link'
+      path: '/telegram/link'
+      fullPath: '/telegram/link'
+      preLoaderRoute: typeof TelegramLinkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/whatsapp/link': {
+      id: '/whatsapp/link'
+      path: '/whatsapp/link'
+      fullPath: '/whatsapp/link'
+      preLoaderRoute: typeof WhatsappLinkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/auth/$': {
       id: '/api/auth/$'
       path: '/api/auth/$'
@@ -462,6 +528,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/slack/oauth'
       preLoaderRoute: typeof ApiSlackOauthRouteImport
       parentRoute: typeof ApiSlackRoute
+    }
+    '/api/telegram/$botId/events': {
+      id: '/api/telegram/$botId/events'
+      path: '/api/telegram/$botId/events'
+      fullPath: '/api/telegram/$botId/events'
+      preLoaderRoute: typeof ApiTelegramBotIdEventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/whatsapp/$botId/events': {
+      id: '/api/whatsapp/$botId/events'
+      path: '/api/whatsapp/$botId/events'
+      fullPath: '/api/whatsapp/$botId/events'
+      preLoaderRoute: typeof ApiWhatsappBotIdEventsRouteImport
+      parentRoute: typeof rootRouteImport
     }
   }
 }
@@ -519,8 +599,12 @@ const rootRouteChildren: RootRouteChildren = {
   ApiCronRoute: ApiCronRoute,
   ApiSlackRoute: ApiSlackRouteWithChildren,
   SlackLinkRoute: SlackLinkRoute,
+  TelegramLinkRoute: TelegramLinkRoute,
+  WhatsappLinkRoute: WhatsappLinkRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiLatchSplatRoute: ApiLatchSplatRoute,
+  ApiTelegramBotIdEventsRoute: ApiTelegramBotIdEventsRoute,
+  ApiWhatsappBotIdEventsRoute: ApiWhatsappBotIdEventsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

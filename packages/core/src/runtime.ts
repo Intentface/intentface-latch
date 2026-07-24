@@ -813,12 +813,13 @@ export function createRuntime<P, RC = unknown>(
           : undefined;
 
     // Reasoning/thinking effort → provider-specific options (the platform maps
-    // it per provider + gates to reasoning-capable models). Omitted/unsupported
-    // → provider default.
-    const reasoning =
-      cfg.effort && config.resolveReasoningOptions
-        ? config.resolveReasoningOptions(modelId, cfg.effort)
-        : undefined;
+    // it per provider + gates to reasoning-capable models). Called even without
+    // an effort so the hook can set safe defaults (e.g. lift a provider's tiny
+    // default max_tokens for models that think by default); an absent/unknown
+    // effort must be a thinking-config no-op in the hook.
+    const reasoning = config.resolveReasoningOptions
+      ? config.resolveReasoningOptions(modelId, cfg.effort ?? "")
+      : undefined;
 
     // Telemetry seam: per-run AI SDK telemetry options + trace correlation
     // identity, resolved once per turn (undefined → nothing traced).

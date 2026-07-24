@@ -13,6 +13,12 @@ const config = defineConfig({
   // Dev-only: let tunnel hostnames (ngrok/cloudflared, used for Telegram/
   // WhatsApp webhook testing) through Vite's host protection.
   server: { allowedHosts: [".ngrok-free.dev", ".ngrok-free.app", ".trycloudflare.com"] },
+  // Keep mirage-node out of the server bundle: it loads tree-sitter .wasm and
+  // several deps via runtime require, which only works from a real
+  // node_modules layout. `traceDeps` externalizes it; the tracer misses its
+  // dynamic-require edges, so scripts/copy-mirage-deps.mjs (postbuild) copies
+  // the full dependency closure into the server output.
+  nitro: { traceDeps: ["@struktoai/mirage-node*"] },
   plugins: [devtools(), tailwindcss(), tanstackStart(), nitro(), viteReact()],
 })
 
