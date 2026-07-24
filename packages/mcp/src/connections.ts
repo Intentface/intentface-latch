@@ -7,7 +7,7 @@ import type {
   ToolSource,
 } from "@intentface/latch-core";
 import { createMcpHost } from "./host.js";
-import type { McpConnection, McpApprovalPolicy } from "./host.js";
+import type { McpConnection, McpApprovalPolicy, McpToolInfo } from "./host.js";
 import { createMcpOAuth } from "./oauth.js";
 import type { McpOAuth } from "./oauth.js";
 import { createOAuthDiscoveryFetch } from "./oauth-fetch.js";
@@ -92,9 +92,32 @@ export interface McpConnectionDef<P = unknown> {
   /**
    * Which of this connection's tools require human approval. Default
    * `"destructive"` — respect the MCP server's own annotations (gate tools it
-   * marks destructive / not read-only). `"all"`, `"none"`, or a predicate.
+   * marks destructive / not read-only). `"all"`, `"none"`, or a per-tool
+   * predicate `(tool) => boolean`. For policy that varies by caller, use
+   * {@link approvalFor} instead.
    */
   approval?: McpApprovalPolicy;
+  /**
+   * Per-principal approval resolver — awaited at open time to produce the
+   * approval policy for this caller (e.g. per-user permissions from a DB).
+   * Takes precedence over {@link approval} when set.
+   */
+  approvalFor?: (principal: P) => McpApprovalPolicy | Promise<McpApprovalPolicy>;
+  /**
+   * Tool visibility filter — a tool for which it returns `false` is dropped
+   * entirely (no tool, no approval entry). A per-tool predicate
+   * `(tool) => boolean`, for a hard block an approval policy can't express. For
+   * visibility that varies by caller, use {@link visibleToolsFor} instead.
+   */
+  visibleTools?: (tool: McpToolInfo) => boolean;
+  /**
+   * Per-principal visibility resolver — awaited at open time to produce the
+   * visibility predicate for this caller. Takes precedence over
+   * {@link visibleTools} when set.
+   */
+  visibleToolsFor?: (
+    principal: P,
+  ) => ((tool: McpToolInfo) => boolean) | Promise<(tool: McpToolInfo) => boolean>;
   /**
    * Permit this connection to reach a private/internal address. Off by default
    * (the host blocks private/loopback/link-local IPs and DNS rebinding); set
@@ -241,6 +264,19 @@ export function createMcpConnections<P>(
     const out: McpConnection[] = [];
     for (const [name, def] of entries) {
       const auth = def.auth ?? none;
+      // `*For` resolvers vary by caller (awaited per turn); they take precedence
+      // over the static `approval`/`visibleTools`. A resolver failure skips just
+      // this connection (graceful degradation, like a connect-time failure)
+      // instead of rejecting the whole host.
+      let approval = def.approval;
+      let visible = def.visibleTools;
+      try {
+        if (def.approvalFor) approval = await def.approvalFor(principal);
+        if (def.visibleToolsFor) visible = await def.visibleToolsFor(principal);
+      } catch (error) {
+        config.onConnectionError?.(name, error);
+        continue;
+      }
       if (auth.kind === "oauth") {
         const o = oauthByName.get(name);
         // Include the live connection only once the caller has authorized.
@@ -250,7 +286,8 @@ export function createMcpConnections<P>(
             url: def.url,
             authProvider: o.provider(principal),
             fetch: fetchByName.get(name),
-            approval: def.approval,
+            approval,
+            visible,
             allowPrivateHost: def.allowPrivateHost,
           });
         }
@@ -260,7 +297,8 @@ export function createMcpConnections<P>(
           name,
           url: def.url,
           auth: { type: "headers", headers: { Authorization: `Bearer ${token}` } },
-          approval: def.approval,
+          approval,
+          visible,
           allowPrivateHost: def.allowPrivateHost,
         });
       } else if (auth.kind === "headers") {
@@ -268,14 +306,16 @@ export function createMcpConnections<P>(
           name,
           url: def.url,
           auth: { type: "headers", headers: auth.headers },
-          approval: def.approval,
+          approval,
+          visible,
           allowPrivateHost: def.allowPrivateHost,
         });
       } else {
         out.push({
           name,
           url: def.url,
-          approval: def.approval,
+          approval,
+          visible,
           allowPrivateHost: def.allowPrivateHost,
         });
       }
