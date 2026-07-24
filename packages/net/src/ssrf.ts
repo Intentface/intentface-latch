@@ -11,6 +11,13 @@ import { isIP } from "node:net";
  * These are best-effort and deliberately conservative (they err toward
  * blocking). They complement, but do not replace, a positive allowlist — see
  * `@intentface/latch-mcp`'s per-tenant `allowedHosts`.
+ *
+ * KNOWN GAP (tracked follow-up): validation happens at CHECK time, not CONNECT
+ * time. A name that resolves public here but private when the request actually
+ * opens (DNS rebinding) is not fully closed — that needs resolving once and
+ * pinning the connection to the vetted IP (a custom fetch/dispatcher threaded
+ * through the MCP/OpenAPI transports). The allowlist is the primary defense
+ * meanwhile.
  */
 
 /** True if a dotted-decimal IPv4 (or a short form like 127.1) is private/loopback/link-local. */
@@ -30,21 +37,59 @@ export function isPrivateV4(ip: string): boolean {
 }
 
 /**
- * Extract the embedded IPv4 of an IPv4-in-IPv6 literal, else null. The IPv4 may
- * be dotted (`::ffff:127.0.0.1`) OR hex — mapped `::ffff:7f00:1`, compatible
- * `::7f00:1` (both 127.0.0.1), `::a9fe:a9fe` (169.254.169.254). Without this,
- * hex-embedded forms slip past a dotted-only check.
+ * Parse an IPv6 literal into its 16 bytes — compressed (`::1`), fully expanded
+ * (`0:0:0:0:0:0:0:1`), or with an embedded IPv4 tail (`::ffff:127.0.0.1`).
+ * Returns null for anything that isn't a valid IPv6 literal. One parser so every
+ * spelling (not just `::`-prefixed hex) is classified the same way.
  */
-function embeddedV4(h: string): string | null {
+export function parseIPv6(input: string): number[] | null {
+  let h = input.toLowerCase().split("%")[0]; // drop any zone id
+  // Rewrite an embedded IPv4 tail (::ffff:127.0.0.1) as its two hextets so the
+  // rest parses uniformly as hex groups.
   const dotted = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (dotted?.[1]) return dotted[1];
-  const hex = h.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hex) {
-    const hi = Number.parseInt(hex[1], 16);
-    const lo = Number.parseInt(hex[2], 16);
-    return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+  if (dotted) {
+    const o = dotted[1].split(".").map(Number);
+    if (o.some((x) => x > 255)) return null;
+    const hextets = `${(((o[0] << 8) | o[1]) >>> 0).toString(16)}:${(((o[2] << 8) | o[3]) >>> 0).toString(16)}`;
+    h = h.slice(0, h.length - dotted[1].length) + hextets;
   }
-  return null;
+  const halves = h.split("::");
+  if (halves.length > 2) return null;
+  const toBytes = (s: string): number[] | null => {
+    if (s === "") return [];
+    const out: number[] = [];
+    for (const g of s.split(":")) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      const n = Number.parseInt(g, 16);
+      out.push((n >> 8) & 255, n & 255);
+    }
+    return out;
+  };
+  const head = toBytes(halves[0]);
+  const rest = toBytes(halves[1] ?? "");
+  if (!head || !rest) return null;
+  const known = head.length + rest.length;
+  if (halves.length === 2) {
+    const gap = 16 - known; // "::" expands to this many zero bytes
+    return gap < 0 ? null : [...head, ...Array(gap).fill(0), ...rest];
+  }
+  return known === 16 ? [...head, ...rest] : null;
+}
+
+/**
+ * True if a 16-byte IPv6 address is unspecified/loopback/ULA/link-local, or an
+ * IPv4-mapped/compatible address whose embedded IPv4 is private.
+ */
+export function isPrivateV6(b: number[]): boolean {
+  if (b.every((x) => x === 0)) return true; // :: unspecified
+  if (b.slice(0, 15).every((x) => x === 0) && b[15] === 1) return true; // ::1 loopback
+  // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 → classify embedded v4.
+  const mapped = b.slice(0, 10).every((x) => x === 0) && b[10] === 0xff && b[11] === 0xff;
+  const compat = b.slice(0, 12).every((x) => x === 0);
+  if (mapped || compat) return isPrivateV4(b.slice(12).join("."));
+  if ((b[0] & 0xfe) === 0xfc) return true; // ULA fc00::/7
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true; // link-local fe80::/10
+  return false;
 }
 
 /**
@@ -60,12 +105,10 @@ export function isBlockedHost(host: string): boolean {
   // `.localhost` subdomains are reserved to resolve loopback (RFC 6761).
   if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h === "::1" || h === "::") return true;
   if (h.includes(":")) {
-    if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true;
-    // IPv4-in-IPv6 (mapped/compatible) — classify the embedded IPv4. Other
-    // global IPv6 literals fall through to false; names are covered by the
-    // resolve-time backstop.
-    const v4 = embeddedV4(h);
-    return v4 ? isPrivateV4(v4) : false;
+    // Parse the full IPv6 literal (any spelling) and classify its bytes. A
+    // non-parseable colon-host falls through to false (names hit the resolver).
+    const bytes = parseIPv6(h);
+    return bytes ? isPrivateV6(bytes) : false;
   }
   if (/^\d+$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true; // bare int / hex = encoded IPv4
   return isPrivateV4(h);
@@ -80,11 +123,11 @@ export async function isBlockedResolved(hostname: string): Promise<boolean> {
   if (isIP(hostname)) return false; // literal IPs already handled by isBlockedHost
   try {
     const addrs = await lookup(hostname, { all: true });
-    return addrs.some(({ address, family }) =>
-      family === 4
-        ? isPrivateV4(address)
-        : /^(::1|::|fc|fd|fe[89ab])/.test(address.toLowerCase()) || address.toLowerCase().startsWith("::ffff:"),
-    );
+    return addrs.some(({ address, family }) => {
+      if (family === 4) return isPrivateV4(address);
+      const bytes = parseIPv6(address); // same classifier as the literal path
+      return bytes ? isPrivateV6(bytes) : false;
+    });
   } catch {
     return true; // fail closed — a lookup error must not open the gate (a
     // rebinding/flaky resolver could otherwise slip a private target through)
