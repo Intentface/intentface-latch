@@ -26,7 +26,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@intentface/latch-core": "workspace:*"
+    "@intentface/latch-core": "workspace:*",
+    "@intentface/latch-net": "workspace:*"
   },
   "peerDependencies": {
     "@ai-sdk/mcp": ">=2.0.0",
