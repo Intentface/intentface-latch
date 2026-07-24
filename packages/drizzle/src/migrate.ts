@@ -4,7 +4,8 @@ import type { Client } from "@libsql/client";
 const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_chats (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL,
-     title TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+     title TEXT, kind TEXT NOT NULL DEFAULT 'user',
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   `CREATE TABLE IF NOT EXISTS latch_messages (
      id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, run_id TEXT, seq INTEGER NOT NULL,
@@ -44,6 +45,7 @@ const ALTERS = [
   `ALTER TABLE latch_schedules ADD COLUMN timezone TEXT`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_read_tokens INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_write_tokens INTEGER`,
+  `ALTER TABLE latch_chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`,
 ];
 
 /**

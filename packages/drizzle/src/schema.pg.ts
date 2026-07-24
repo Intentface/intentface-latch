@@ -18,6 +18,8 @@ export const chats = pgTable(
     owner: text("owner").notNull(),
     agent: text("agent").notNull(),
     title: text("title"),
+    /** Chat kind: 'user' (default) vs 'internal' sub-threads (ChatRecord.kind). */
+    kind: text("kind").notNull().default("user"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
