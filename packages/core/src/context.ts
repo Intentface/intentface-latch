@@ -19,10 +19,19 @@ export type SecretResolver<P> = (
 ) => Promise<string | undefined>;
 
 export interface ContextDefinition<P, RuntimeContext> {
-  /** Build the shared runtime context for a request from its principal. */
+  /**
+   * Build the shared runtime context for a request from its principal.
+   *
+   * `turnContext` is the per-turn request payload (e.g. the parsed POST body or
+   * a caller-supplied object) — EPHEMERAL by design. Unlike the principal it is
+   * never persisted with a run, so a resumed/cron-fired turn rebuilds context
+   * without it: derive anything durable from the principal, and treat
+   * `turnContext` as optional per-turn enrichment only.
+   */
   build: (args: {
     principal: P;
     request?: Request;
+    turnContext?: unknown;
   }) => RuntimeContext | Promise<RuntimeContext>;
   /** Optional: map runtime context → per-tool context (secrets resolved here). */
   toolsContext?: (

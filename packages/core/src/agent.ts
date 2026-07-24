@@ -174,6 +174,11 @@ export interface AgentInfo extends AgentMeta {
 export type AgentFactory<P, RuntimeContext = unknown> = ((ctx: {
   runtime: RuntimeContext;
   principal: P;
+  /**
+   * The per-turn request payload (see `ContextDefinition.build`). Ephemeral —
+   * absent on resume/cron turns, so factories must not require it.
+   */
+  turnContext?: unknown;
 }) => AgentConfig<P> | Promise<AgentConfig<P>>) & { meta?: AgentMeta };
 
 export function defineAgent<P, RuntimeContext = unknown>(
