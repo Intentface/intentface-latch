@@ -17,6 +17,16 @@
       "development": "./src/slack/index.ts",
       "types": "./dist/slack/index.d.ts",
       "import": "./dist/slack/index.js"
+    },
+    "./telegram": {
+      "development": "./src/telegram/index.ts",
+      "types": "./dist/telegram/index.d.ts",
+      "import": "./dist/telegram/index.js"
+    },
+    "./whatsapp": {
+      "development": "./src/whatsapp/index.ts",
+      "types": "./dist/whatsapp/index.d.ts",
+      "import": "./dist/whatsapp/index.js"
     }
   },
   "files": [
@@ -27,8 +37,9 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:*"
@@ -39,6 +50,7 @@
   "devDependencies": {
     "@types/node": "^22",
     "ai": "^7.0.2",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4"
   }
 }

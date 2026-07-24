@@ -112,6 +112,22 @@ export async function ensurePersonalOrg(userId: string): Promise<string> {
   return orgId;
 }
 
+/**
+ * Is the user CURRENTLY a member of the org? Channel identity links
+ * (Telegram/WhatsApp) persist independently of membership, so webhook turns
+ * re-check this before minting a principal — a removed member must not keep
+ * channel access to the org's agents. The `user:<id>` personal tenant is its
+ * owner's by construction (covers pre-backfill sessions with no member row).
+ */
+export async function isOrgMember(userId: string, orgId: string): Promise<boolean> {
+  if (orgId === `user:${userId}`) return true;
+  const res = await db.execute({
+    sql: `SELECT 1 FROM member WHERE userId = ? AND organizationId = ? LIMIT 1`,
+    args: [userId, orgId],
+  });
+  return res.rows.length > 0;
+}
+
 export const auth = betterAuth({
   baseURL,
   trustedOrigins,

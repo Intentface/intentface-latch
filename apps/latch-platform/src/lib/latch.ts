@@ -21,6 +21,7 @@ import type {LatchHandler} from "@intentface/latch-server";
 import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
+import { secretEnv } from "./env";
 import { getPrincipalFromHeaders  } from "./session";
 import type {Principal} from "./session";
 import { createCredentials  } from "./credentials";
@@ -33,6 +34,10 @@ import { createAgentStore, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
 import { createSlackStore, migrateSlack  } from "./slack-store";
 import type {SlackStore} from "./slack-store";
+import { createTelegramStore, migrateTelegram } from "./telegram-store";
+import type {TelegramStore} from "./telegram-store";
+import { createWhatsappStore, migrateWhatsapp } from "./whatsapp-store";
+import type {WhatsappStore} from "./whatsapp-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
 import { createEvalStore, migrateEvals } from "./evals/store";
@@ -69,6 +74,8 @@ let cached:
       allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
       slackStore: SlackStore;
+      telegramStore: TelegramStore;
+      whatsappStore: WhatsappStore;
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
@@ -87,6 +94,8 @@ export async function getLatch(): Promise<{
   allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
   slackStore: SlackStore;
+  telegramStore: TelegramStore;
+  whatsappStore: WhatsappStore;
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
@@ -104,6 +113,8 @@ export async function getLatch(): Promise<{
   await migrate(client); // creates latch_* tables alongside the auth tables
   await migrateAgents(client); // latch_agents (UI-created agents)
   await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
+  await migrateTelegram(client); // latch_telegram_* (Telegram channel)
+  await migrateWhatsapp(client); // latch_whatsapp_* (WhatsApp channel)
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
 
@@ -115,8 +126,9 @@ export async function getLatch(): Promise<{
   const storage = createSqliteAdapter<Principal>(client, { owner });
   const vault = createVault<Principal>({
     store: createSqliteSecretStore<Principal>(client, { owner }),
-    // Dev fallback is a deterministic 32-byte key; set LATCH_VAULT_KEY in prod.
-    masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
+    // Dev-only fallback is a deterministic 32-byte key; production without
+    // LATCH_VAULT_KEY throws (secrets must never be encrypted with a public key).
+    masterKey: secretEnv("LATCH_VAULT_KEY", btoa("latch-dev-vault-key-32-bytes!!!!")),
   });
   const credentials = createCredentials(vault);
   const connectionStore = createConnectionStore(vault);
@@ -140,6 +152,8 @@ export async function getLatch(): Promise<{
     authoredTools.executableTools(p, names, scope),
   );
   const slackStore = createSlackStore(client);
+  const telegramStore = createTelegramStore(client);
+  const whatsappStore = createWhatsappStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
   const evalStore = createEvalStore(client);
 
@@ -257,6 +271,8 @@ export async function getLatch(): Promise<{
     allConnections,
     agentStore,
     slackStore,
+    telegramStore,
+    whatsappStore,
     toolStore,
     authoredTools,
     evalStore,
