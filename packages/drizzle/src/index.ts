@@ -1,8 +1,9 @@
 /**
  * @intentface/latch-drizzle
  *
- * The StorageAdapter on Drizzle. SQLite/libsql first (local file or Turso);
- * the Postgres dialect lands next behind the same `StorageAdapter` contract.
+ * The StorageAdapter on Drizzle, in two dialects behind the same
+ * `StorageAdapter` contract: SQLite (libsql / better-sqlite3 / Turso) and
+ * Postgres (node-postgres / postgres-js / PGlite).
  */
 export { createSqliteAdapter, isUniqueViolation } from "./adapter.js";
 export type { SqliteAdapterOptions, MessageStore } from "./adapter.js";
