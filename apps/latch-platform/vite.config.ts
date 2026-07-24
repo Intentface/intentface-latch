@@ -11,10 +11,6 @@ import tailwindcss from "@tailwindcss/vite"
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
   // Keep mirage-node out of the server bundle: it loads tree-sitter .wasm and
-  // other deps via runtime require, which only works from a real node_modules
-  // layout — `traceDeps` externalizes the package and traces its dep subtree
-  // into .output/server/node_modules.
-  // Keep mirage-node out of the server bundle: it loads tree-sitter .wasm and
   // several deps via runtime require, which only works from a real
   // node_modules layout. `traceDeps` externalizes it; the tracer misses its
   // dynamic-require edges, so scripts/copy-mirage-deps.mjs (postbuild) copies

@@ -62,8 +62,8 @@ describe("createMirageSession", () => {
   it("round-trips files under /workspace and persists them to the host dir", async () => {
     const dir = await scratchDir();
     const session = createMirageSession({ workspaceDir: dir });
-    await session.writeTextFile!({ path: "/workspace/notes/a.txt", content: "hello" });
-    expect(await session.readTextFile!({ path: "/workspace/notes/a.txt" })).toBe("hello");
+    await session.writeTextFile({ path: "/workspace/notes/a.txt", content: "hello" });
+    expect(await session.readTextFile({ path: "/workspace/notes/a.txt" })).toBe("hello");
     // The persistence seam: the file must exist on the host, where a later
     // turn's fresh session (or just-bash) will find it.
     expect(await readFile(path.join(dir, "notes/a.txt"), "utf-8")).toBe("hello");
@@ -72,17 +72,17 @@ describe("createMirageSession", () => {
   it("rejects session-level writes outside /workspace", async () => {
     const session = createMirageSession({ workspaceDir: await scratchDir() });
     await expect(
-      session.writeTextFile!({ path: "/slack/channels/x", content: "x" }),
+      session.writeTextFile({ path: "/slack/channels/x", content: "x" }),
     ).rejects.toThrow(/only allowed under \/workspace/);
     await expect(
-      session.writeTextFile!({ path: "/workspacefake/x", content: "x" }),
+      session.writeTextFile({ path: "/workspacefake/x", content: "x" }),
     ).rejects.toThrow(/only allowed under \/workspace/);
   });
 
   it("returns null for missing files", async () => {
     const session = createMirageSession({ workspaceDir: await scratchDir() });
-    expect(await session.readTextFile!({ path: "/workspace/nope.txt" })).toBeNull();
-    expect(await session.readBinaryFile!({ path: "/workspace/nope.bin" })).toBeNull();
+    expect(await session.readTextFile({ path: "/workspace/nope.txt" })).toBeNull();
+    expect(await session.readBinaryFile({ path: "/workspace/nope.bin" })).toBeNull();
   });
 
   it("runs commands with cwd defaulting to /workspace", async () => {
@@ -130,7 +130,7 @@ describe("createMirageSession", () => {
       expect(w.exitCode).not.toBe(0);
       // READ mount → "read-only"; some resources register no write op at all.
       expect(w.stderr).toMatch(/read-only|no op registered: write/i);
-      await expect(session.writeTextFile!({ path: p, content: "x" })).rejects.toThrow(
+      await expect(session.writeTextFile({ path: p, content: "x" })).rejects.toThrow(
         /only allowed under \/workspace/,
       );
     }

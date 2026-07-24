@@ -43,9 +43,10 @@ export function makeResolveReasoningOptions(models: ModelInfo[]) {
     // claude-sonnet-5) can burn all 4096 inside the thinking block on a heavy
     // turn and end the run with an empty message.
     if (!eff || !info?.reasoning) {
-      const max = info?.maxOutput;
-      return (info?.provider === "anthropic" || info?.provider === "google") && max
-        ? { maxOutputTokens: Math.min(max, 32_000) }
+      // Same fallback as the effort path: a catalog entry without maxOutput
+      // must still lift the 4096 default.
+      return info?.provider === "anthropic" || info?.provider === "google"
+        ? { maxOutputTokens: Math.min(info.maxOutput ?? 32_000, 32_000) }
         : undefined;
     }
     const provider = info.provider;

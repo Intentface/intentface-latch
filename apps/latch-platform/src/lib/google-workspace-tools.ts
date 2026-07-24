@@ -40,6 +40,13 @@ const encodeHeader = (value: string): string =>
     : `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 
 /**
+ * Address values go into the raw message verbatim — strip CR/LF so a crafted
+ * value can't inject extra headers (e.g. `"x@y.z\r\nBcc: hidden@evil"`).
+ * (Subjects are covered by encodeHeader: CRLF isn't plain ASCII.)
+ */
+const addr = (value: string): string => value.replace(/[\r\n]+/g, " ").trim();
+
+/**
  * Build the RFC 822 message Gmail's `messages.send` expects (as base64url
  * `raw`). Body is base64-encoded so any UTF-8 content is line-length safe;
  * Bcc is honored by Gmail and stripped from delivered copies.
@@ -52,9 +59,9 @@ export function buildRawEmail(msg: {
   bcc?: string;
 }): string {
   const headers = [
-    `To: ${msg.to}`,
-    ...(msg.cc ? [`Cc: ${msg.cc}`] : []),
-    ...(msg.bcc ? [`Bcc: ${msg.bcc}`] : []),
+    `To: ${addr(msg.to)}`,
+    ...(msg.cc ? [`Cc: ${addr(msg.cc)}`] : []),
+    ...(msg.bcc ? [`Bcc: ${addr(msg.bcc)}`] : []),
     `Subject: ${encodeHeader(msg.subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: text/plain; charset="UTF-8"`,

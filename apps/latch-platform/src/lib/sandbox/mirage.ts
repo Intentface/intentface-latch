@@ -52,7 +52,7 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value) chunks.push(value);
+    chunks.push(value);
   }
   return new Uint8Array(Buffer.concat(chunks.map((c) => Buffer.from(c))));
 }

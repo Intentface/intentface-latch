@@ -300,6 +300,24 @@ describe("google_workspace_write (gmail_send)", () => {
     ).rejects.toThrow(/not connected/);
   });
 
+  it("buildRawEmail strips CRLF from address fields (header injection)", () => {
+    const rfc822 = Buffer.from(
+      buildRawEmail({
+        to: "x@y.z\r\nBcc: hidden@evil.example",
+        subject: "s",
+        body: "b",
+        cc: "c@y.z\nX-Evil: 1",
+      }),
+      "base64url",
+    ).toString("utf8");
+    expect(rfc822).toContain("To: x@y.z Bcc: hidden@evil.example");
+    expect(rfc822).toContain("Cc: c@y.z X-Evil: 1");
+    // No injected header lines: every CRLF-delimited line is one we built.
+    const headerLines = rfc822.split("\r\n\r\n")[0]!.split("\r\n");
+    expect(headerLines.filter((l) => l.startsWith("Bcc:"))).toHaveLength(0);
+    expect(headerLines.filter((l) => l.startsWith("X-Evil:"))).toHaveLength(0);
+  });
+
   it("buildRawEmail keeps plain-ASCII subjects readable", () => {
     const rfc822 = Buffer.from(
       buildRawEmail({ to: "x@y.z", subject: "plain", body: "hi" }),
