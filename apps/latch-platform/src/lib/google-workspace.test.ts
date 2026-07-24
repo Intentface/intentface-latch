@@ -313,7 +313,7 @@ describe("google_workspace_write (gmail_send)", () => {
     expect(rfc822).toContain("To: x@y.z Bcc: hidden@evil.example");
     expect(rfc822).toContain("Cc: c@y.z X-Evil: 1");
     // No injected header lines: every CRLF-delimited line is one we built.
-    const headerLines = rfc822.split("\r\n\r\n")[0]!.split("\r\n");
+    const headerLines = rfc822.split("\r\n\r\n")[0].split("\r\n");
     expect(headerLines.filter((l) => l.startsWith("Bcc:"))).toHaveLength(0);
     expect(headerLines.filter((l) => l.startsWith("X-Evil:"))).toHaveLength(0);
   });
