@@ -30,11 +30,29 @@ export function isPrivateV4(ip: string): boolean {
 }
 
 /**
+ * Extract the embedded IPv4 of an IPv4-in-IPv6 literal, else null. The IPv4 may
+ * be dotted (`::ffff:127.0.0.1`) OR hex — mapped `::ffff:7f00:1`, compatible
+ * `::7f00:1` (both 127.0.0.1), `::a9fe:a9fe` (169.254.169.254). Without this,
+ * hex-embedded forms slip past a dotted-only check.
+ */
+function embeddedV4(h: string): string | null {
+  const dotted = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted?.[1]) return dotted[1];
+  const hex = h.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hex) {
+    const hi = Number.parseInt(hex[1], 16);
+    const lo = Number.parseInt(hex[2], 16);
+    return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+  }
+  return null;
+}
+
+/**
  * String-level blocklist: trailing-dot, bracketed IPv6 (loopback/ULA/link-local
- * + IPv4-mapped), bare integer / hex encodings of IPv4 (2130706433,
- * 0x7f000001), short dotted forms (127.1). Best-effort and conservative —
- * strictly more blocking. `isBlockedResolved` backs this up to defeat DNS
- * rebinding.
+ * + IPv4-mapped/compatible, dotted or hex), bare integer / hex encodings of
+ * IPv4 (2130706433, 0x7f000001), short dotted forms (127.1). Best-effort and
+ * conservative — strictly more blocking. `isBlockedResolved` backs this up to
+ * defeat DNS rebinding.
  */
 export function isBlockedHost(host: string): boolean {
   let h = host.toLowerCase().replace(/\.$/, "");
@@ -43,10 +61,11 @@ export function isBlockedHost(host: string): boolean {
   if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h === "::1" || h === "::") return true;
   if (h.includes(":")) {
     if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true;
-    if (h.startsWith("::ffff:")) return true; // IPv4-mapped
-    const mapped = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (mapped?.[1]) h = mapped[1];
-    else return false;
+    // IPv4-in-IPv6 (mapped/compatible) — classify the embedded IPv4. Other
+    // global IPv6 literals fall through to false; names are covered by the
+    // resolve-time backstop.
+    const v4 = embeddedV4(h);
+    return v4 ? isPrivateV4(v4) : false;
   }
   if (/^\d+$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true; // bare int / hex = encoded IPv4
   return isPrivateV4(h);
@@ -67,7 +86,8 @@ export async function isBlockedResolved(hostname: string): Promise<boolean> {
         : /^(::1|::|fc|fd|fe[89ab])/.test(address.toLowerCase()) || address.toLowerCase().startsWith("::ffff:"),
     );
   } catch {
-    return false; // let the fetch itself fail on an unresolvable host
+    return true; // fail closed — a lookup error must not open the gate (a
+    // rebinding/flaky resolver could otherwise slip a private target through)
   }
 }
 

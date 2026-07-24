@@ -20,5 +20,16 @@ export function deriveMasterKey(
   passphrase: string,
   opts: { salt: string },
 ): string {
+  // Fail closed: a missing/blank passphrase or salt (an unset env var) must not
+  // silently derive a valid-looking key — that would encrypt the vault under a
+  // predictable KEK.
+  if (!passphrase || passphrase.trim() === "") {
+    throw new Error("deriveMasterKey: passphrase must be a non-empty string");
+  }
+  if (!opts?.salt || opts.salt.trim() === "") {
+    throw new Error(
+      "deriveMasterKey: salt must be a non-empty, deployment-stable string",
+    );
+  }
   return scryptSync(passphrase, opts.salt, 32).toString("base64");
 }

@@ -103,6 +103,31 @@ const json = (data: unknown, status = 200): Response =>
 const redirect = (location: string): Response =>
   new Response(null, { status: 302, headers: { location } });
 
+/**
+ * A caller-supplied `returnTo` is only allowed as an app-relative path. Absolute
+ * (`https://evil`) or protocol-relative (`//evil`, `/\evil`) targets are an
+ * open-redirect vector — fall back to `/`.
+ */
+function safeReturnTo(raw: string | undefined): string {
+  if (!raw || !raw.startsWith("/") || raw[1] === "/" || raw[1] === "\\") return "/";
+  return raw;
+}
+
+/**
+ * Redirect to a vetted relative `returnTo`, merging `params` into its query with
+ * proper encoding (preserving any query the path already carries).
+ */
+function redirectTo(
+  raw: string | undefined,
+  params: Record<string, string>,
+): Response {
+  const [base, existing] = safeReturnTo(raw).split("?", 2);
+  const qs = new URLSearchParams(existing);
+  for (const [key, value] of Object.entries(params)) qs.set(key, value);
+  const query = qs.toString();
+  return redirect(query ? `${base}?${query}` : base);
+}
+
 /** Split a path into segments after stripping `basePath`. Null if outside it. */
 function segmentsUnder(pathname: string, basePath: string): string[] | null {
   let base = basePath.replace(/\/$/, "");
@@ -232,9 +257,9 @@ export function createLatchHandler<P>(
           // signals `onConnected` and appends `connectedParam`) never runs.
           // Signal both here too, so a pending `connect_<name>` still resumes.
           await config.onConnected?.(principal, name);
-          return redirect(
-            `${returnTo ?? "/"}?${config.connectedParam ?? "connected"}=${name}`,
-          );
+          return redirectTo(returnTo, {
+            [config.connectedParam ?? "connected"]: name,
+          });
         }
         return redirect(res.authorizationUrl);
       }
@@ -245,7 +270,7 @@ export function createLatchHandler<P>(
         const code = url.searchParams.get("code");
         const rawState = url.searchParams.get("state");
         const returnTo = (callbackState?.returnTo as string) ?? "/";
-        if (!code) return redirect(`${returnTo}?error=missing_code`);
+        if (!code) return redirectTo(returnTo, { error: "missing_code" });
         try {
           await oauth.finish(principal, { code, state: rawState ?? undefined });
         } catch (e) {
@@ -256,7 +281,7 @@ export function createLatchHandler<P>(
             `OAuth callback "${name}" token exchange failed:`,
             e instanceof Error ? (e.stack ?? e.message) : e,
           );
-          return redirect(`${returnTo}?error=exchange_failed`);
+          return redirectTo(returnTo, { error: "exchange_failed" });
         }
         await config.onConnected?.(principal, name);
         // Redirect back IMMEDIATELY — don't run the resumed turn here, or the
@@ -264,9 +289,9 @@ export function createLatchHandler<P>(
         // + generation) finished. The chat page approves the pending
         // `connect_<name>` on return, so the conversation renders at once and
         // the answer streams/fills in with a working state.
-        return redirect(
-          `${returnTo}?${config.connectedParam ?? "connected"}=${name}`,
-        );
+        return redirectTo(returnTo, {
+          [config.connectedParam ?? "connected"]: name,
+        });
       }
 
       // POST connections/:name/disconnect → drop credentials
