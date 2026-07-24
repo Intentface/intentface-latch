@@ -5,8 +5,13 @@ import {
   createFromManifestUrl,
   SLACK_BOT_SCOPES,
 } from "@intentface/latch-channels/slack";
+import {
+  isLangfuseConfigured,
+  listOwnerTraces,
+  postScore,
+} from "@intentface/latch-langfuse";
 import { getPrincipal } from "./session";
-import { getLatch } from "./latch";
+import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName } from "./agent-store";
 import {
   slackVaultKeys,
@@ -362,6 +367,9 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         };
       }
     }
+    // The editor doesn't manage attached evals — carry them over so a save
+    // never silently wipes the agent's online-eval rubrics.
+    const existing = await agentStore.getRecord(principal, name);
     await agentStore.upsert(principal, {
       name,
       title: data.title?.trim() || undefined,
@@ -373,6 +381,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       tools: data.tools,
       exec: data.exec,
       subagents: data.subagents,
+      attachedEvals: existing?.attachedEvals,
       scope: data.scope,
     });
     return { ok: true };
@@ -405,6 +414,113 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async (
     enabled: s.enabled,
   }));
 });
+
+// ── Observability (Langfuse): feedback scores + the live trace feed ─────────
+
+/**
+ * Record 👍/👎 (+ optional comment) on a run's trace as the Langfuse
+ * `user-feedback` score. Ownership-checked: the run must belong to the
+ * caller's tenant — a forged runId from another org is rejected.
+ */
+export const submitFeedbackFn = createServerFn({ method: "POST" })
+  .validator((data: { runId: string; value: 0 | 1; comment?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!isLangfuseConfigured()) return { ok: false as const, error: "langfuse not configured" };
+    if (data.value !== 0 && data.value !== 1) return { ok: false as const, error: "bad value" };
+    const { runtime } = await getLatch();
+    const runs = await runtime.listRuns({ principal, limit: 1000 });
+    if (!runs.some((r) => r.id === data.runId)) {
+      return { ok: false as const, error: "unknown run" };
+    }
+    await postScore({
+      runId: data.runId,
+      name: "user-feedback",
+      value: data.value,
+      comment: data.comment?.slice(0, 2000),
+      // NUMERIC (1/0) so Langfuse can average it into a satisfaction rate.
+      dataType: "NUMERIC",
+    });
+    return { ok: true as const };
+  });
+
+/** One row of the observability feed (a run's trace + its scores). */
+export interface ObservabilityRow {
+  runId: string | null;
+  traceId: string;
+  agent: string | null;
+  timestamp: string;
+  inputPreview: string;
+  outputPreview: string;
+  latencySeconds: number | null;
+  cost: number | null;
+  scores: { name: string; value: number | string | null; comment?: string; dataType?: string }[];
+  deepLink: string | null;
+}
+
+const preview = (v: unknown): string => {
+  if (v == null) return "";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+};
+
+/**
+ * The live observability feed: the tenant's recent traces with judge scores
+ * and user feedback joined in, plus per-rubric aggregates over the window.
+ * Polled by /observability (~5s) — all Langfuse reads stay server-side and
+ * owner-filtered (tenants never get Langfuse credentials).
+ */
+export const listObservabilityFn = createServerFn({ method: "GET" })
+  .validator((data: { agent?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { configured: false as const, rows: [], aggregates: [], feedback: null };
+    if (!isLangfuseConfigured()) {
+      return { configured: false as const, rows: [], aggregates: [], feedback: null };
+    }
+    const base = (process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com").replace(/\/$/, "");
+    const traces = await listOwnerTraces({
+      ownerTag: ownerTagOf(principal),
+      agent: data.agent || undefined,
+      limit: 50,
+    });
+    const rows: ObservabilityRow[] = traces.map((t) => ({
+      runId: t.runId ?? null,
+      traceId: t.id,
+      agent: t.agent ?? null,
+      timestamp: t.timestamp,
+      inputPreview: preview(t.input),
+      outputPreview: preview(t.output),
+      latencySeconds: t.latency ?? null,
+      cost: t.totalCost ?? null,
+      scores: t.scores,
+      deepLink: t.htmlPath ? `${base}${t.htmlPath}` : null,
+    }));
+    // Per-rubric aggregates over the window; user-feedback becomes a 👍 rate.
+    const byName = new Map<string, { sum: number; count: number }>();
+    for (const row of rows) {
+      for (const s of row.scores) {
+        if (typeof s.value !== "number") continue;
+        const agg = byName.get(s.name) ?? { sum: 0, count: 0 };
+        agg.sum += s.value;
+        agg.count += 1;
+        byName.set(s.name, agg);
+      }
+    }
+    const fb = byName.get("user-feedback");
+    byName.delete("user-feedback");
+    return {
+      configured: true as const,
+      rows,
+      aggregates: Array.from(byName, ([name, a]) => ({
+        name,
+        average: a.sum / a.count,
+        count: a.count,
+      })).sort((a, b) => a.name.localeCompare(b.name)),
+      feedback: fb ? { rate: fb.sum / fb.count, count: fb.count } : null,
+    };
+  });
 
 // ── Slack channel: per-agent app onboarding ─────────────────────────────────
 

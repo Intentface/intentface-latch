@@ -24,6 +24,7 @@ import type {
 } from "./agent.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
+import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import type {
   ChatRecord,
   RunLease,
@@ -178,6 +179,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     tools: Record<string, unknown>,
     opts?: { agent: string },
   ) => unknown;
+  /**
+   * Observability seam (kept out of core — no OTEL/vendor dep). Supplies
+   * per-run AI SDK telemetry options, an optional trace wrapper around the
+   * model call, and a post-turn hook (e.g. `@intentface/latch-langfuse`).
+   * Optional — without it, nothing is traced and behavior is unchanged.
+   */
+  telemetry?: LatchTelemetry<P>;
 }
 
 export interface HandleChatInput<P> {
@@ -371,6 +379,15 @@ function firstText(message: AppMessage): string | undefined {
     .join(" ")
     .trim();
   return text.length > 0 ? text : undefined;
+}
+
+/** The text of the turn's incoming user message (for telemetry). */
+function lastUserText(messages: AppMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "user") return firstText(m);
+  }
+  return undefined;
 }
 
 /** True if any message has a tool part still awaiting an approval decision. */
@@ -797,6 +814,17 @@ export function createRuntime<P, RC = unknown>(
         ? config.resolveReasoningOptions(modelId, cfg.effort)
         : undefined;
 
+    // Telemetry seam: per-run AI SDK telemetry options + trace correlation
+    // identity, resolved once per turn (undefined → nothing traced).
+    const telemetryMeta: TelemetryRunMeta<P> = {
+      runId: run.id,
+      chatId: resolvedChatId,
+      agent: run.agent,
+      modelId,
+      principal,
+    };
+    const telemetryOptions = config.telemetry?.telemetryFor?.(telemetryMeta);
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
       instructions: cfg.instructions,
@@ -806,12 +834,48 @@ export function createRuntime<P, RC = unknown>(
       activeTools,
       ...(reasoning?.providerOptions ? { providerOptions: reasoning.providerOptions } : {}),
       ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
+      ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
     let outputTokens = 0;
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
+
+    // Post-turn telemetry: fired after persistence on every terminal path
+    // (completed / awaiting_input / errored). Must never fail the turn.
+    const reportRunFinished = async (
+      status: "completed" | "awaiting_input" | "errored",
+      messages: AppMessage[],
+      error?: string,
+    ) => {
+      const t = config.telemetry;
+      if (!t) return;
+      try {
+        await t.onRunFinished?.(telemetryMeta, {
+          status,
+          ...(error !== undefined ? { error } : {}),
+          inputText: lastUserText(uiMessages),
+          messages,
+          usage: {
+            inputTokens,
+            outputTokens,
+            ...(cacheReadTokens ? { cacheReadTokens } : {}),
+            ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+          },
+          cost: computeCost(config.pricing?.(modelId), {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+          }),
+          endedAt: Date.now(),
+        });
+        await t.flush?.();
+      } catch (e) {
+        console.warn("latch telemetry onRunFinished failed:", e);
+      }
+    };
 
     // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
     // UI-stream `onStepEnd` (per-step persistence) and the `writer`. The model
@@ -838,7 +902,10 @@ export function createRuntime<P, RC = unknown>(
               provider: cfg.sandboxProvider,
             })
           : undefined;
-        const result = await agent.stream({
+        // Start the model call inside the telemetry run span (when provided)
+        // so the impl can root every AI SDK span in one seeded trace.
+        const startStream = () =>
+          agent.stream({
           prompt: modelMessages,
           experimental_sandbox: sandbox,
           abortSignal: dur.enabled ? abort.signal : undefined,
@@ -878,13 +945,23 @@ export function createRuntime<P, RC = unknown>(
             cacheWriteTokens += step.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
+        const result = config.telemetry?.withRunSpan
+          ? await config.telemetry.withRunSpan(telemetryMeta, startStream)
+          : await startStream();
         // Fold the model's own output into the stream.
         writer.merge(
           toUIMessageStream({
             stream: result.stream,
             messageMetadata: ({ part }: { part: { type: string } }) =>
               part.type === "start"
-                ? { visibility: "user", model: modelId, createdAt: Date.now() }
+                ? {
+                    visibility: "user",
+                    model: modelId,
+                    createdAt: Date.now(),
+                    // Correlates the assistant message to its run (and trace)
+                    // — e.g. per-message feedback posts against this id.
+                    runId: run.id,
+                  }
                 : undefined,
           } as Parameters<typeof toUIMessageStream>[0]) as ReadableStream<unknown>,
         );
@@ -938,6 +1015,7 @@ export function createRuntime<P, RC = unknown>(
             { status: "errored", error: "aborted", endedAt: Date.now() },
             lease,
           );
+          await reportRunFinished("errored", messages, "aborted");
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
@@ -963,11 +1041,15 @@ export function createRuntime<P, RC = unknown>(
           outputTokens,
           cost,
         });
+        await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
       },
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
-        return error instanceof Error ? error.message : "An error occurred.";
+        const message =
+          error instanceof Error ? error.message : "An error occurred.";
+        void reportRunFinished("errored", [], message);
+        return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);
 

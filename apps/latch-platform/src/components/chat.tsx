@@ -6,14 +6,15 @@ import { Bot, Brain, ChevronDown, CircleDot, Loader2 } from "lucide-react";
 import {
   cn,
   Composer,
+  FeedbackDialog,
   Message,
   StepQueue,
   Thread,
   useComposerState,
   useSettingsStore
-  
-  
-  
+
+
+
 } from "@intentface/latch-ui";
 import type {AppUIMessage, ComposerSubmitData, ToolPart} from "@intentface/latch-ui";
 import type { AppMessage, SubagentProgressData } from "@intentface/latch-core";
@@ -24,7 +25,7 @@ import {
   submitApproval,
   submitToolResult,
 } from "@/lib/latch-client";
-import { chatGeneratingFn } from "@/lib/server";
+import { chatGeneratingFn, submitFeedbackFn } from "@/lib/server";
 import type { UIMessageChunk } from "ai";
 import { Button } from "@/components/ui/button";
 import { EvalRunCard } from "@/components/eval-run-card";
@@ -125,6 +126,16 @@ export function Chat({
   const scrollMode = useSettingsStore((s) => s.scrollMode);
   const composerState = useComposerState(messages, status);
   const isAskUser = composerState.type === "ask-user";
+
+  // Response feedback → Langfuse `user-feedback` score on the run's trace.
+  // The thumb click opens the dialog preselected; submitted verdicts are kept
+  // per message id so the chosen thumb stays highlighted.
+  const [feedbackFor, setFeedbackFor] = useState<{
+    messageId: string;
+    runId: string;
+    initial: 0 | 1;
+  } | null>(null);
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, 0 | 1>>({});
 
   // On reload, a turn may still be running server-side (we now drain it to
   // completion regardless of the client). Poll for that: show a "Generating…"
@@ -381,9 +392,32 @@ export function Chat({
               onRegenerate={
                 m.role === "assistant" && !busy ? () => regenerate({ messageId: m.id }) : undefined
               }
+              onFeedback={(() => {
+                const runId = (m.metadata as { runId?: string } | undefined)?.runId;
+                return m.role === "assistant" && !busy && runId
+                  ? (value: 0 | 1) => setFeedbackFor({ messageId: m.id, runId, initial: value })
+                  : undefined;
+              })()}
+              feedbackValue={feedbackGiven[m.id]}
             />
           ))
         )}
+        <FeedbackDialog
+          key={feedbackFor ? `${feedbackFor.messageId}-${feedbackFor.initial}` : "closed"}
+          open={feedbackFor !== null}
+          onOpenChange={(open) => {
+            if (!open) setFeedbackFor(null);
+          }}
+          initialValue={feedbackFor?.initial}
+          onSubmit={async ({ value, comment }) => {
+            if (!feedbackFor) return;
+            const res = await submitFeedbackFn({
+              data: { runId: feedbackFor.runId, value, comment },
+            });
+            if (!res.ok) throw new Error(res.error);
+            setFeedbackGiven((prev) => ({ ...prev, [feedbackFor.messageId]: value }));
+          }}
+        />
       </Thread.Viewport>
       <Thread.Composer>
         <Thread.ScrollButton />

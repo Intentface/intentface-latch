@@ -54,7 +54,26 @@ export interface AgentRecord {
   };
   /** Agents this one may delegate to via the `spawn_agent` tool. */
   subagents?: string[];
+  /**
+   * Online evals attached to this agent: LLM-judge rubrics run against every
+   * completed live run, with verdicts pushed to Langfuse as scores (the score
+   * name is the rubric name). Authored via the eval-author / attach_evals.
+   */
+  attachedEvals?: AttachedEval[];
   scope: CredentialScope;
+}
+
+/** One judge rubric attached to an agent (see AgentRecord.attachedEvals). */
+export interface AttachedEval {
+  /** Kebab-case identifier — becomes the Langfuse score name. */
+  name: string;
+  /** The judging instructions: one observable quality of a good response. */
+  prompt: string;
+  /** Judge model override (default: the platform judge model). */
+  judgeModelId?: string;
+  /** binary → pass/fail (1/0, BOOLEAN); score → graded 0–1 (NUMERIC). */
+  scale: "binary" | "score";
+  enabled: boolean;
 }
 
 /** Column value (INTEGER) ↔ AgentConfig.maxSteps: NULL=default, 0=unlimited, N=cap. */
@@ -88,7 +107,7 @@ export async function migrateAgents(client: Client): Promise<void> {
     `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   );
   // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
-  for (const col of ["max_steps INTEGER", "exec TEXT", "subagents TEXT"]) {
+  for (const col of ["max_steps INTEGER", "exec TEXT", "subagents TEXT", "attached_evals TEXT"]) {
     try {
       await client.execute(`ALTER TABLE latch_agents ADD COLUMN ${col}`);
     } catch {
@@ -100,6 +119,8 @@ export async function migrateAgents(client: Client): Promise<void> {
 export interface AgentStore extends DynamicAgentStore<Principal> {
   /** Full records visible to the caller (org + personal), for the editor. */
   listRecords: (p: Principal) => Promise<(AgentRecord & { scope: CredentialScope })[]>;
+  /** One record by name (personal wins over org) — e.g. for the online judge. */
+  getRecord: (p: Principal, name: string) => Promise<AgentRecord | undefined>;
   upsert: (p: Principal, rec: AgentRecord) => Promise<void>;
   remove: (p: Principal, scope: CredentialScope, name: string) => Promise<void>;
 }
@@ -131,6 +152,9 @@ export function createAgentStore(
       : undefined,
     exec: row.exec ? (JSON.parse(String(row.exec)) as AgentRecord["exec"]) : undefined,
     subagents: row.subagents ? (JSON.parse(String(row.subagents)) as string[]) : undefined,
+    attachedEvals: row.attached_evals
+      ? (JSON.parse(String(row.attached_evals)) as AttachedEval[])
+      : undefined,
     scope: String(row.scope) as CredentialScope,
   });
 
@@ -219,6 +243,10 @@ export function createAgentStore(
       }));
     },
 
+    async getRecord(principal, name) {
+      return find(principal, name);
+    },
+
     async listRecords(principal) {
       const res = await client.execute({
         sql: "SELECT * FROM latch_agents WHERE owner IN (?, ?) ORDER BY created_at DESC",
@@ -234,12 +262,13 @@ export function createAgentStore(
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_agents
-          (id, owner, name, title, description, model_id, instructions, connections, tools, exec, subagents, max_steps, scope, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, owner, name, title, description, model_id, instructions, connections, tools, exec, subagents, attached_evals, max_steps, scope, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, name) DO UPDATE SET
             title=excluded.title, description=excluded.description, model_id=excluded.model_id,
             instructions=excluded.instructions, connections=excluded.connections,
             tools=excluded.tools, exec=excluded.exec, subagents=excluded.subagents,
+            attached_evals=excluded.attached_evals,
             max_steps=excluded.max_steps, scope=excluded.scope,
             updated_at=excluded.updated_at`,
         args: [
@@ -254,6 +283,7 @@ export function createAgentStore(
           rec.tools ? JSON.stringify(rec.tools) : null,
           rec.exec ? JSON.stringify(rec.exec) : null,
           rec.subagents?.length ? JSON.stringify(rec.subagents) : null,
+          rec.attachedEvals?.length ? JSON.stringify(rec.attachedEvals) : null,
           maxStepsToCol(rec.maxSteps),
           rec.scope,
           now,

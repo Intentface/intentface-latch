@@ -10,6 +10,9 @@ import tailwindcss from "@tailwindcss/vite"
 // instead of the plain `dist/` that Vercel's static preset would 404 on.
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
+  // Dev-only: let tunnel hostnames (ngrok/cloudflared, used for Telegram/
+  // WhatsApp webhook testing) through Vite's host protection.
+  server: { allowedHosts: [".ngrok-free.dev", ".ngrok-free.app", ".trycloudflare.com"] },
   plugins: [devtools(), tailwindcss(), tanstackStart(), nitro(), viteReact()],
 })
 

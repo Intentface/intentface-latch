@@ -14,6 +14,8 @@ import {
   createSqliteSecretStore,
   migrate,
 } from "@intentface/latch-drizzle";
+import { isLangfuseConfigured, langfuseTelemetry } from "@intentface/latch-langfuse";
+import { waitUntil } from "@vercel/functions";
 import { createMcpConnections  } from "@intentface/latch-mcp";
 import type {McpConnections} from "@intentface/latch-mcp";
 import { createLatchHandler  } from "@intentface/latch-server";
@@ -50,6 +52,15 @@ import { makeResolveReasoningOptions } from "./reasoning";
 interface Ctx {
   orgId: string;
 }
+
+/**
+ * The Langfuse tenant tag for a principal — the same derivation as the
+ * storage owner key, URL-encoded and joined. Telemetry WRITES tag traces with
+ * it (userId + `owner:` tag) and observability READS filter on it, so both
+ * sides must use this one function.
+ */
+export const ownerTagOf = (p: Principal): string =>
+  (p.userId ? [p.orgId, p.userId] : [p.orgId]).map(encodeURIComponent).join("/");
 
 /**
  * The platform's Latch composition root — built lazily, memoized per process.
@@ -206,6 +217,22 @@ export async function getLatch(): Promise<{
     resolveProviderTools,
     // Per-agent reasoning effort → provider options (gated to reasoning models).
     resolveReasoningOptions: makeResolveReasoningOptions(catalog.models),
+    // Langfuse observability (opt-in via LANGFUSE_* env): every run becomes a
+    // trace tagged owner/agent/run; attached-eval judges + user feedback land
+    // on it as scores. Absent keys → undefined → zero behavior change.
+    telemetry: isLangfuseConfigured()
+      ? langfuseTelemetry<Principal>({
+          ownerTag: ownerTagOf,
+          environment: process.env.VERCEL ? "production" : "development",
+          waitUntil: process.env.VERCEL ? waitUntil : undefined,
+          afterRun: async ({ meta, outcome }) => {
+            if (outcome.status !== "completed") return;
+            // Lazy import: judge-run pulls getLatch back (agent store + models).
+            const { judgeLiveRun } = await import("./observability/judge-run");
+            await judgeLiveRun({ meta, outcome });
+          },
+        })
+      : undefined,
   });
 
   // The connection registry the handler's OAuth/status/test routes see: code

@@ -9,71 +9,32 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as ToolsRouteImport } from './routes/tools'
-import { Route as SchedulesRouteImport } from './routes/schedules'
-import { Route as RunsRouteImport } from './routes/runs'
-import { Route as ResetPasswordRouteImport } from './routes/reset-password'
-import { Route as MembersRouteImport } from './routes/members'
-import { Route as LoginRouteImport } from './routes/login'
-import { Route as ConnectionsRouteImport } from './routes/connections'
-import { Route as ChatRouteImport } from './routes/chat'
-import { Route as AgentsRouteImport } from './routes/agents'
-import { Route as AcceptInvitationRouteImport } from './routes/accept-invitation'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as ChatIndexRouteImport } from './routes/chat.index'
+import { Route as AcceptInvitationRouteImport } from './routes/accept-invitation'
+import { Route as AgentsRouteImport } from './routes/agents'
+import { Route as ChatRouteImport } from './routes/chat'
+import { Route as ConnectionsRouteImport } from './routes/connections'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as MembersRouteImport } from './routes/members'
+import { Route as ObservabilityRouteImport } from './routes/observability'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as RunsRouteImport } from './routes/runs'
+import { Route as SchedulesRouteImport } from './routes/schedules'
+import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
-import { Route as SlackLinkRouteImport } from './routes/slack.link'
-import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
-import { Route as ApiSlackRouteImport } from './routes/api/slack'
-import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as AgentsEditRouteImport } from './routes/agents.edit'
-import { Route as ApiSlackOauthRouteImport } from './routes/api/slack.oauth'
-import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
+import { Route as ApiCronRouteImport } from './routes/api/cron'
+import { Route as ApiSlackRouteImport } from './routes/api/slack'
+import { Route as ChatIndexRouteImport } from './routes/chat.index'
+import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
+import { Route as SlackLinkRouteImport } from './routes/slack.link'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiLatchSplatRouteImport } from './routes/api/latch/$'
+import { Route as ApiSlackOauthRouteImport } from './routes/api/slack.oauth'
 
-const ToolsRoute = ToolsRouteImport.update({
-  id: '/tools',
-  path: '/tools',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SchedulesRoute = SchedulesRouteImport.update({
-  id: '/schedules',
-  path: '/schedules',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RunsRoute = RunsRouteImport.update({
-  id: '/runs',
-  path: '/runs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ResetPasswordRoute = ResetPasswordRouteImport.update({
-  id: '/reset-password',
-  path: '/reset-password',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const MembersRoute = MembersRouteImport.update({
-  id: '/members',
-  path: '/members',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LoginRoute = LoginRouteImport.update({
-  id: '/login',
-  path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ConnectionsRoute = ConnectionsRouteImport.update({
-  id: '/connections',
-  path: '/connections',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ChatRoute = ChatRouteImport.update({
-  id: '/chat',
-  path: '/chat',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsRoute = AgentsRouteImport.update({
-  id: '/agents',
-  path: '/agents',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AcceptInvitationRoute = AcceptInvitationRouteImport.update({
@@ -81,9 +42,74 @@ const AcceptInvitationRoute = AcceptInvitationRouteImport.update({
   path: '/accept-invitation',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
+const AgentsRoute = AgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ChatRoute = ChatRouteImport.update({
+  id: '/chat',
+  path: '/chat',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConnectionsRoute = ConnectionsRouteImport.update({
+  id: '/connections',
+  path: '/connections',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MembersRoute = MembersRouteImport.update({
+  id: '/members',
+  path: '/members',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ObservabilityRoute = ObservabilityRouteImport.update({
+  id: '/observability',
+  path: '/observability',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RunsRoute = RunsRouteImport.update({
+  id: '/runs',
+  path: '/runs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SchedulesRoute = SchedulesRouteImport.update({
+  id: '/schedules',
+  path: '/schedules',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ToolsRoute = ToolsRouteImport.update({
+  id: '/tools',
+  path: '/tools',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AgentsIndexRoute = AgentsIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AgentsRoute,
+} as any)
+const AgentsEditRoute = AgentsEditRouteImport.update({
+  id: '/edit',
+  path: '/edit',
+  getParentRoute: () => AgentsRoute,
+} as any)
+const ApiCronRoute = ApiCronRouteImport.update({
+  id: '/api/cron',
+  path: '/api/cron',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSlackRoute = ApiSlackRouteImport.update({
+  id: '/api/slack',
+  path: '/api/slack',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatIndexRoute = ChatIndexRouteImport.update({
@@ -91,50 +117,30 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ChatRoute,
 } as any)
-const AgentsIndexRoute = AgentsIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => AgentsRoute,
+const ChatChatIdRoute = ChatChatIdRouteImport.update({
+  id: '/$chatId',
+  path: '/$chatId',
+  getParentRoute: () => ChatRoute,
 } as any)
 const SlackLinkRoute = SlackLinkRouteImport.update({
   id: '/slack/link',
   path: '/slack/link',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ChatChatIdRoute = ChatChatIdRouteImport.update({
-  id: '/$chatId',
-  path: '/$chatId',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ApiSlackRoute = ApiSlackRouteImport.update({
-  id: '/api/slack',
-  path: '/api/slack',
+const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
+  id: '/api/auth/$',
+  path: '/api/auth/$',
   getParentRoute: () => rootRouteImport,
-} as any)
-const ApiCronRoute = ApiCronRouteImport.update({
-  id: '/api/cron',
-  path: '/api/cron',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsEditRoute = AgentsEditRouteImport.update({
-  id: '/edit',
-  path: '/edit',
-  getParentRoute: () => AgentsRoute,
-} as any)
-const ApiSlackOauthRoute = ApiSlackOauthRouteImport.update({
-  id: '/oauth',
-  path: '/oauth',
-  getParentRoute: () => ApiSlackRoute,
 } as any)
 const ApiLatchSplatRoute = ApiLatchSplatRouteImport.update({
   id: '/api/latch/$',
   path: '/api/latch/$',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
-  id: '/api/auth/$',
-  path: '/api/auth/$',
-  getParentRoute: () => rootRouteImport,
+const ApiSlackOauthRoute = ApiSlackOauthRouteImport.update({
+  id: '/oauth',
+  path: '/oauth',
+  getParentRoute: () => ApiSlackRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -145,6 +151,7 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
+  '/observability': typeof ObservabilityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
@@ -166,6 +173,7 @@ export interface FileRoutesByTo {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
+  '/observability': typeof ObservabilityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
@@ -190,6 +198,7 @@ export interface FileRoutesById {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
+  '/observability': typeof ObservabilityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
@@ -215,6 +224,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/members'
+    | '/observability'
     | '/reset-password'
     | '/runs'
     | '/schedules'
@@ -236,6 +246,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/members'
+    | '/observability'
     | '/reset-password'
     | '/runs'
     | '/schedules'
@@ -259,6 +270,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/members'
+    | '/observability'
     | '/reset-password'
     | '/runs'
     | '/schedules'
@@ -283,6 +295,7 @@ export interface RootRouteChildren {
   ConnectionsRoute: typeof ConnectionsRoute
   LoginRoute: typeof LoginRoute
   MembersRoute: typeof MembersRoute
+  ObservabilityRoute: typeof ObservabilityRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
@@ -296,67 +309,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/tools': {
-      id: '/tools'
-      path: '/tools'
-      fullPath: '/tools'
-      preLoaderRoute: typeof ToolsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/schedules': {
-      id: '/schedules'
-      path: '/schedules'
-      fullPath: '/schedules'
-      preLoaderRoute: typeof SchedulesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/runs': {
-      id: '/runs'
-      path: '/runs'
-      fullPath: '/runs'
-      preLoaderRoute: typeof RunsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/reset-password': {
-      id: '/reset-password'
-      path: '/reset-password'
-      fullPath: '/reset-password'
-      preLoaderRoute: typeof ResetPasswordRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/members': {
-      id: '/members'
-      path: '/members'
-      fullPath: '/members'
-      preLoaderRoute: typeof MembersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/login': {
-      id: '/login'
-      path: '/login'
-      fullPath: '/login'
-      preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/connections': {
-      id: '/connections'
-      path: '/connections'
-      fullPath: '/connections'
-      preLoaderRoute: typeof ConnectionsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/chat': {
-      id: '/chat'
-      path: '/chat'
-      fullPath: '/chat'
-      preLoaderRoute: typeof ChatRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/agents': {
-      id: '/agents'
-      path: '/agents'
-      fullPath: '/agents'
-      preLoaderRoute: typeof AgentsRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/accept-invitation': {
@@ -366,11 +323,102 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AcceptInvitationRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
+    '/agents': {
+      id: '/agents'
+      path: '/agents'
+      fullPath: '/agents'
+      preLoaderRoute: typeof AgentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/chat': {
+      id: '/chat'
+      path: '/chat'
+      fullPath: '/chat'
+      preLoaderRoute: typeof ChatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/connections': {
+      id: '/connections'
+      path: '/connections'
+      fullPath: '/connections'
+      preLoaderRoute: typeof ConnectionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/members': {
+      id: '/members'
+      path: '/members'
+      fullPath: '/members'
+      preLoaderRoute: typeof MembersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/observability': {
+      id: '/observability'
+      path: '/observability'
+      fullPath: '/observability'
+      preLoaderRoute: typeof ObservabilityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/runs': {
+      id: '/runs'
+      path: '/runs'
+      fullPath: '/runs'
+      preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/schedules': {
+      id: '/schedules'
+      path: '/schedules'
+      fullPath: '/schedules'
+      preLoaderRoute: typeof SchedulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tools': {
+      id: '/tools'
+      path: '/tools'
+      fullPath: '/tools'
+      preLoaderRoute: typeof ToolsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agents/': {
+      id: '/agents/'
       path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+      fullPath: '/agents/'
+      preLoaderRoute: typeof AgentsIndexRouteImport
+      parentRoute: typeof AgentsRoute
+    }
+    '/agents/edit': {
+      id: '/agents/edit'
+      path: '/edit'
+      fullPath: '/agents/edit'
+      preLoaderRoute: typeof AgentsEditRouteImport
+      parentRoute: typeof AgentsRoute
+    }
+    '/api/cron': {
+      id: '/api/cron'
+      path: '/api/cron'
+      fullPath: '/api/cron'
+      preLoaderRoute: typeof ApiCronRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/slack': {
+      id: '/api/slack'
+      path: '/api/slack'
+      fullPath: '/api/slack'
+      preLoaderRoute: typeof ApiSlackRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/chat/': {
@@ -380,12 +428,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
     }
-    '/agents/': {
-      id: '/agents/'
-      path: '/'
-      fullPath: '/agents/'
-      preLoaderRoute: typeof AgentsIndexRouteImport
-      parentRoute: typeof AgentsRoute
+    '/chat/$chatId': {
+      id: '/chat/$chatId'
+      path: '/$chatId'
+      fullPath: '/chat/$chatId'
+      preLoaderRoute: typeof ChatChatIdRouteImport
+      parentRoute: typeof ChatRoute
     }
     '/slack/link': {
       id: '/slack/link'
@@ -394,40 +442,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SlackLinkRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/chat/$chatId': {
-      id: '/chat/$chatId'
-      path: '/$chatId'
-      fullPath: '/chat/$chatId'
-      preLoaderRoute: typeof ChatChatIdRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/api/slack': {
-      id: '/api/slack'
-      path: '/api/slack'
-      fullPath: '/api/slack'
-      preLoaderRoute: typeof ApiSlackRouteImport
+    '/api/auth/$': {
+      id: '/api/auth/$'
+      path: '/api/auth/$'
+      fullPath: '/api/auth/$'
+      preLoaderRoute: typeof ApiAuthSplatRouteImport
       parentRoute: typeof rootRouteImport
-    }
-    '/api/cron': {
-      id: '/api/cron'
-      path: '/api/cron'
-      fullPath: '/api/cron'
-      preLoaderRoute: typeof ApiCronRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/agents/edit': {
-      id: '/agents/edit'
-      path: '/edit'
-      fullPath: '/agents/edit'
-      preLoaderRoute: typeof AgentsEditRouteImport
-      parentRoute: typeof AgentsRoute
-    }
-    '/api/slack/oauth': {
-      id: '/api/slack/oauth'
-      path: '/oauth'
-      fullPath: '/api/slack/oauth'
-      preLoaderRoute: typeof ApiSlackOauthRouteImport
-      parentRoute: typeof ApiSlackRoute
     }
     '/api/latch/$': {
       id: '/api/latch/$'
@@ -436,12 +456,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiLatchSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/auth/$': {
-      id: '/api/auth/$'
-      path: '/api/auth/$'
-      fullPath: '/api/auth/$'
-      preLoaderRoute: typeof ApiAuthSplatRouteImport
-      parentRoute: typeof rootRouteImport
+    '/api/slack/oauth': {
+      id: '/api/slack/oauth'
+      path: '/oauth'
+      fullPath: '/api/slack/oauth'
+      preLoaderRoute: typeof ApiSlackOauthRouteImport
+      parentRoute: typeof ApiSlackRoute
     }
   }
 }
@@ -491,6 +511,7 @@ const rootRouteChildren: RootRouteChildren = {
   ConnectionsRoute: ConnectionsRoute,
   LoginRoute: LoginRoute,
   MembersRoute: MembersRoute,
+  ObservabilityRoute: ObservabilityRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,
