@@ -13,6 +13,9 @@ import {
 import { getPrincipal } from "./session";
 import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName } from "./agent-store";
+import type { AttachedEval } from "./agent-store";
+import { validateRubrics } from "./observability/rubrics";
+import { rejudgeRun } from "./observability/judge-run";
 import {
   slackVaultKeys,
   SLACK_CONFIG_TOKEN_KEY,
@@ -520,6 +523,129 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
       })).sort((a, b) => a.name.localeCompare(b.name)),
       feedback: fb ? { rate: fb.sum / fb.count, count: fb.count } : null,
     };
+  });
+
+// ── Chat evals panel: rubric CRUD, live scores, on-demand re-judge ──────────
+
+/** The chatted agent's rubrics + whether the caller can edit them (owns it). */
+export const getAgentEvalsFn = createServerFn({ method: "GET" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { editable: false as const, evals: [] as AttachedEval[] };
+    const { agentStore } = await getLatch();
+    // Only the user's own (editable) agents resolve here; built-ins/others → null.
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(agent));
+    return { editable: !!rec, evals: rec?.attachedEvals ?? [] };
+  });
+
+/** Persist the drawer's rubric set to the agent (the explicit "Save to agent"). */
+export const saveAgentEvalsFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; evals: AttachedEval[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore, models } = await getLatch();
+    const name = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, name);
+    if (!rec) return { ok: false as const, error: `No editable agent "${name}".` };
+    const valid = validateRubrics(data.evals, (id) => models.some((m) => m.id === id));
+    if (!valid.ok) return { ok: false as const, error: valid.error };
+    await agentStore.upsert(principal, { ...rec, attachedEvals: valid.rubrics });
+    return { ok: true as const, evals: valid.rubrics };
+  });
+
+/** Local (fast) eval verdicts for the given run ids — the chat badges poll this. */
+export const getRunScoresFn = createServerFn({ method: "POST" })
+  .validator((runIds: string[]) => runIds)
+  .handler(async ({ data: runIds }) => {
+    const principal = await getPrincipal();
+    if (!principal || runIds.length === 0) return {} as Record<string, AttachedEvalScore[]>;
+    const { runScores } = await getLatch();
+    const byRun = await runScores.getForRuns(ownerTagOf(principal), runIds);
+    const out: Record<string, AttachedEvalScore[]> = {};
+    for (const [runId, scores] of byRun) {
+      out[runId] = scores.map((s) => ({
+        name: s.rubricName,
+        value: s.value,
+        comment: s.comment,
+        scale: s.scale,
+        source: s.source,
+      }));
+    }
+    return out;
+  });
+
+export interface AttachedEvalScore {
+  name: string;
+  value: number;
+  comment?: string;
+  scale: "binary" | "score";
+  source: "live" | "rejudge";
+}
+
+/** Re-judge one already-sent message against the (draft) rubric set — no re-chat. */
+export const rejudgeRunFn = createServerFn({ method: "POST" })
+  .validator((data: { chatId: string; runId: string; evals: AttachedEval[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    try {
+      const verdicts = await rejudgeRun({
+        principal,
+        chatId: data.chatId,
+        runId: data.runId,
+        rubrics: data.evals,
+      });
+      return {
+        ok: true as const,
+        scores: verdicts.map((v) => ({
+          name: v.rubric.name,
+          value: v.value,
+          comment: v.comment,
+          scale: v.rubric.scale,
+          source: "rejudge" as const,
+        })),
+      };
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : "re-judge failed" };
+    }
+  });
+
+/** Extract the single fenced ```json block the eval-author is contracted to emit. */
+function parseFencedJson<T>(answer: string): T | null {
+  const fence = answer.match(/```json\s*([\s\S]*?)```/i);
+  const body = (fence ? fence[1] : answer).trim();
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Draft a rubric for a described quality via the eval-author subagent. */
+export const draftRubricFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; quality: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const quality = data.quality.trim();
+    if (!quality) return { ok: false as const, error: "describe the quality to measure" };
+    const { runtime } = await getLatch();
+    const brief =
+      `Agent: ${normalizeAgentName(data.agent)}. Author ONE online-eval rubric that measures this quality: ` +
+      `"${quality}". Return the JSON array (a single rubric) per your output contract.`;
+    const { answer } = await runtime.runAgent({
+      principal,
+      agent: "eval-author",
+      prompt: brief,
+    });
+    const parsed = parseFencedJson<AttachedEval[] | { error: string }>(answer);
+    if (!parsed) return { ok: false as const, error: "eval-author returned no valid JSON" };
+    if (!Array.isArray(parsed)) {
+      return { ok: false as const, error: parsed.error ?? "eval-author could not draft a rubric" };
+    }
+    return { ok: true as const, rubrics: parsed };
   });
 
 // ── Slack channel: per-agent app onboarding ─────────────────────────────────

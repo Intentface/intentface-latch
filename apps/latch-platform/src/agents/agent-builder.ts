@@ -5,7 +5,7 @@ import { defineAgent } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord, AttachedEval} from "@/lib/agent-store";
-import { JUDGE_MODEL_ID } from "@/lib/evals/judge";
+import { validateRubrics } from "@/lib/observability/rubrics";
 import { sharedReadTools } from "./shared-read-tools";
 
 /**
@@ -329,35 +329,12 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const name = normalizeAgentName(agentName);
         const rec = await agentStore.getRecord(principal, name);
         if (!rec) return { error: `No editable agent named "${name}". Use list_agents.` };
-        // Kebab names double as Langfuse score names — keep them clean + unique.
-        const badName = evals.filter((e) => !/^[a-z0-9][a-z0-9-]*$/.test(e.name));
-        if (badName.length) {
-          return { error: `Rubric names must be kebab-case: ${badName.map((e) => e.name).join(", ")}.` };
-        }
-        const seen = new Set<string>();
-        for (const e of evals) {
-          if (seen.has(e.name)) return { error: `Duplicate rubric name "${e.name}".` };
-          seen.add(e.name);
-        }
-        const blank = evals.filter((e) => !e.prompt.trim());
-        if (blank.length) {
-          return { error: `Empty rubric prompt in: ${blank.map((e) => e.name).join(", ")}.` };
-        }
-        // The judge model must exist in the catalog — modelFor() silently
-        // falls back to the default model, which would silently change the
-        // judge, so check explicitly and error loudly.
-        const judgeIds = new Set(evals.map((e) => e.judgeModelId ?? JUDGE_MODEL_ID));
-        const missing = [...judgeIds].filter((id) => !models.some((m) => m.id === id));
-        if (missing.length) {
-          return { error: `Judge model(s) not in the catalog: ${missing.join(", ")}. Use list_models.` };
-        }
-        const attached: AttachedEval[] = evals.map((e) => ({
-          name: e.name,
-          prompt: e.prompt.trim(),
-          judgeModelId: e.judgeModelId,
-          scale: e.scale,
-          enabled: e.enabled,
-        }));
+        const valid = validateRubrics(
+          evals as AttachedEval[],
+          (id) => models.some((m) => m.id === id),
+        );
+        if (!valid.ok) return { error: valid.error };
+        const attached = valid.rubrics;
         await agentStore.upsert(principal, { ...rec, attachedEvals: attached });
         return {
           saved: true,

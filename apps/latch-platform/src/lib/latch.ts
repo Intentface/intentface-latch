@@ -39,6 +39,8 @@ import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
 import { createEvalStore, migrateEvals } from "./evals/store";
 import type {EvalStore} from "./evals/store";
+import { createRunScoresStore, migrateRunScores } from "./observability/run-scores-store";
+import type {RunScoresStore} from "./observability/run-scores-store";
 import { createAuthoredTools  } from "./tools";
 import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
@@ -83,6 +85,7 @@ let cached:
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
+      runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
       handler: LatchHandler;
@@ -101,6 +104,7 @@ export async function getLatch(): Promise<{
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
+  runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
   handler: LatchHandler;
@@ -117,6 +121,7 @@ export async function getLatch(): Promise<{
   await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
+  await migrateRunScores(client); // latch_run_scores (fast local mirror for the chat evals panel)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
@@ -153,6 +158,8 @@ export async function getLatch(): Promise<{
   const slackStore = createSlackStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
   const evalStore = createEvalStore(client);
+  // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
+  const runScores = createRunScoresStore(client);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -289,6 +296,7 @@ export async function getLatch(): Promise<{
     toolStore,
     authoredTools,
     evalStore,
+    runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
     handler,
