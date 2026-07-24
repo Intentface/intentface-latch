@@ -9,6 +9,8 @@
  * RenderEvents", never "re-parse the AI stream".
  */
 
+import type { AppMessage } from "@intentface/latch-core";
+
 /** A single thing worth showing on a chat surface as a run progresses. */
 export type RenderEvent =
   /** Coarse run lifecycle, for typing/status indicators. */
@@ -53,6 +55,25 @@ export interface PendingApproval {
    */
   isConnect: boolean;
   connectionName?: string;
+}
+
+/**
+ * The subset of the Latch runtime a channel drives. Structural so the package
+ * stays decoupled from the concrete app (and could even target a remote Latch).
+ */
+export interface ChannelRunOps<P> {
+  handleChat(input: {
+    agent: string;
+    chatId?: string;
+    principal: P;
+    message: AppMessage;
+  }): Promise<Response>;
+  applyApproval(input: {
+    chatId: string;
+    principal: P;
+    decisions: { approvalId: string; approved: boolean }[];
+  }): Promise<Response>;
+  loadHistory(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
 }
 
 /** A tool-name → approval policy view, for rendering an agent's capabilities. */
