@@ -144,6 +144,39 @@ describe("google_workspace OAuth", () => {
     expect(await gw.mountCredsFor(other)).toBeNull();
   });
 
+  it("disconnect (provider().invalidateCredentials) revokes and drops tokens", async () => {
+    const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(
+      async () =>
+        tokenResponse({ access_token: "at", expires_in: 3600, refresh_token: "rt" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const gw = connection();
+    const oauth = gw.oauth("google_workspace")!;
+    const start = await oauth.start(principal);
+    const state = new URL(
+      (start as { authorizationUrl: string }).authorizationUrl,
+    ).searchParams.get("state")!;
+    await oauth.finish(principal, { code: "c", state });
+    expect(await oauth.isAuthorized(principal)).toBe(true);
+
+    await oauth.provider(principal).invalidateCredentials?.("all");
+    expect(await oauth.isAuthorized(principal)).toBe(false);
+    expect(await gw.mountCredsFor(principal)).toBeNull();
+    const revoke = fetchMock.mock.calls.find(([u]) => String(u).includes("/revoke"));
+    expect(String(revoke![1]!.body)).toContain("token=rt");
+
+    // Revocation endpoint failure must not block the local disconnect.
+    await oauth.finish(principal, {
+      code: "c2",
+      state: new URL(
+        ((await oauth.start(principal)) as { authorizationUrl: string }).authorizationUrl,
+      ).searchParams.get("state")!,
+    });
+    fetchMock.mockRejectedValueOnce(new Error("network down"));
+    await oauth.provider(principal).invalidateCredentials?.("all");
+    expect(await oauth.isAuthorized(principal)).toBe(false);
+  });
+
   it("contributes no tools and answers status", async () => {
     const gw = connection();
     const opened = await gw.hostFor(["google_workspace"]).open(principal);

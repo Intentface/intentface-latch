@@ -164,8 +164,26 @@ export function createGoogleWorkspaceConnection<P>(opts: {
       return { status: "authorized" };
     },
 
-    provider(): never {
-      throw new Error(`${NAME} is not an MCP connection — no OAuth provider`);
+    // Not an MCP connection, so no real OAuthClientProvider exists. The only
+    // provider capability the platform calls outside the MCP client is
+    // `invalidateCredentials` (the disconnect route) — implement exactly that:
+    // best-effort revoke at Google, then drop the Vault entries.
+    provider(principal) {
+      const stub = {
+        invalidateCredentials: async (_scope: string) => {
+          const tokens = await readTokens(principal);
+          if (tokens?.refresh_token) {
+            await fetch("https://oauth2.googleapis.com/revoke", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ token: tokens.refresh_token }),
+            }).catch(() => {}); // revocation is hygiene, not a precondition
+          }
+          await vault.delete(principal, vaultKey("tokens"));
+          await vault.delete(principal, vaultKey("csrf"));
+        },
+      };
+      return stub as unknown as ReturnType<McpOAuth<P>["provider"]>;
     },
   };
 
