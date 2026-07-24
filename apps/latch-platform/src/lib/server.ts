@@ -500,6 +500,33 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
       scores: t.scores,
       deepLink: t.htmlPath ? `${base}${t.htmlPath}` : null,
     }));
+
+    // Overlay local human corrections onto the Langfuse-derived scores. Langfuse
+    // is the record of truth but has read-side ingestion lag (~20–45s), and a
+    // correction of a rubric that the live judge already scored can briefly show
+    // as two same-named scores until ingestion settles. The local store holds the
+    // authoritative human verdict immediately, so we replace by (runId, name):
+    // this both dedups and reflects corrections without waiting on Langfuse.
+    const runIds = rows.map((r) => r.runId).filter((id): id is string => !!id);
+    if (runIds.length > 0) {
+      const { runScores } = await getLatch();
+      const localByRun = await runScores.getForRuns(ownerTagOf(principal), runIds);
+      for (const row of rows) {
+        if (!row.runId) continue;
+        const corrections = localByRun.get(row.runId)?.filter((s) => s.source === "human");
+        if (!corrections?.length) continue;
+        const byName = new Map(row.scores.map((s) => [s.name, s]));
+        for (const c of corrections) {
+          byName.set(c.rubricName, {
+            name: c.rubricName,
+            value: c.value,
+            comment: c.comment,
+            dataType: c.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          });
+        }
+        row.scores = Array.from(byName.values());
+      }
+    }
     // Per-rubric aggregates over the window; user-feedback becomes a 👍 rate.
     const byName = new Map<string, { sum: number; count: number }>();
     for (const row of rows) {
