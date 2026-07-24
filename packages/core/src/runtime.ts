@@ -642,6 +642,39 @@ function collectDecidedSubagentApprovals(
   return out;
 }
 
+/**
+ * Re-bubble: append a fresh `data-subagent-approval` part next to a resolved
+ * one (same parent assistant message), for a resumed subagent that paused on
+ * ANOTHER gated tool. The undecided part keeps the parent `awaiting_input`;
+ * deciding it round-trips through `applyApproval` again, so bubbling recurses
+ * for as many rounds as the sub needs.
+ */
+function appendSubagentApprovalPart(
+  messages: AppMessage[],
+  afterApprovalId: string,
+  data: NonNullable<SubApprovalPart["data"]>,
+): AppMessage[] {
+  for (const m of messages) {
+    const parts = (m.parts ?? []) as (SubApprovalPart & { id?: string })[];
+    if (
+      parts.some(
+        (p) =>
+          p.type === "data-subagent-approval" &&
+          p.data?.approvalId === afterApprovalId,
+      )
+    ) {
+      parts.push({
+        type: "data-subagent-approval",
+        id: data.approvalId,
+        data,
+      });
+      m.parts = parts as AppMessage["parts"];
+      return [m];
+    }
+  }
+  return [];
+}
+
 /** Mark a routed subagent approval resolved so it isn't re-processed. */
 function markSubagentApprovalResolved(
   messages: AppMessage[],
@@ -856,7 +889,7 @@ export function createRuntime<P, RC = unknown>(
     if (dur.enabled && lease) {
       heartbeat = setInterval(() => {
         void storage
-          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs)
+          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs, lease.fencingToken)
           .then((held) => {
             if (!held) {
               stopHeartbeat();
@@ -1263,11 +1296,10 @@ export function createRuntime<P, RC = unknown>(
             cost,
           };
         }
-        // Ephemeral turns persist nothing (no run/message/usage rows); the
-        // observability hooks below still fire so usage/analytics are recorded.
-        if (!ephemeral) await storage.appendMessages(resolvedChatId, messages);
-        // Aborted (lease lost / client gone): don't claim completion. The
-        // guarded update no-ops if the run was already reaped+reassigned.
+        // Aborted (lease lost): don't claim completion, and DON'T persist the
+        // partial messages/usage — the run may already be reaped and re-claimed
+        // by another node whose writes must win. The guarded update no-ops if
+        // the run was reassigned.
         if (isAborted) {
           if (!ephemeral)
             await storage.updateRun(
@@ -1293,7 +1325,11 @@ export function createRuntime<P, RC = unknown>(
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
         if (!ephemeral) {
-          await storage.updateRun(
+          // Fenced finish: settle the run FIRST. If the guarded update doesn't
+          // apply (our lease was reaped + the run re-claimed elsewhere), we're
+          // a stale writer — skip the final message/usage persistence so we
+          // don't overwrite the new owner's state.
+          const applied = await storage.updateRun(
             run.id,
             {
               status: paused ? "awaiting_input" : "completed",
@@ -1306,13 +1342,16 @@ export function createRuntime<P, RC = unknown>(
             },
             lease,
           );
-          await storage.recordUsage(principal, {
-            runId: run.id,
-            model: modelId,
-            inputTokens,
-            outputTokens,
-            cost,
-          });
+          if (applied) {
+            await storage.appendMessages(resolvedChatId, messages);
+            await storage.recordUsage(principal, {
+              runId: run.id,
+              model: modelId,
+              inputTokens,
+              outputTokens,
+              cost,
+            });
+          }
         }
         fireObs(config.observability?.onFinish, {
           principal,
@@ -1623,7 +1662,7 @@ export function createRuntime<P, RC = unknown>(
     const subApprovals = collectDecidedSubagentApprovals(messages);
     if (subApprovals.length > 0) {
       for (const sa of subApprovals) {
-        const answer = await resumeSubagentApproval(
+        const resumed = await resumeSubagentApproval(
           principal,
           sa.subChatId,
           sa.subApprovalIds.map((id) => ({
@@ -1632,15 +1671,38 @@ export function createRuntime<P, RC = unknown>(
             reason: sa.reason,
           })),
         );
-        if (sa.spawnToolCallId) {
+        if (resumed.pending?.length) {
+          // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
+          // fresh data-subagent-approval part on the same parent message. The
+          // undecided part keeps this chat awaiting_input (hasPendingApproval
+          // below), and the next decision routes through here again, so
+          // bubbling recurses per round.
+          const nextApprovalId = generateSubApprovalId();
+          appendSubagentApprovalPart(messages, sa.approvalId, {
+            approvalId: nextApprovalId,
+            subChatId: sa.subChatId,
+            subApprovalIds: resumed.pending.map((p) => p.approvalId),
+            spawnToolCallId: sa.spawnToolCallId,
+            summaries: resumed.pending.map((p) => p.summary),
+          });
+          if (sa.spawnToolCallId) {
+            overwriteToolResult(messages, sa.spawnToolCallId, {
+              status: "awaiting_approval",
+              threadId: sa.subChatId,
+              pending: resumed.pending.map((p) => p.summary),
+              note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
+            });
+          }
+        } else if (sa.spawnToolCallId) {
           overwriteToolResult(messages, sa.spawnToolCallId, {
             threadId: sa.subChatId,
-            answer,
+            answer: resumed.answer,
           });
         }
         markSubagentApprovalResolved(messages, sa.approvalId);
       }
-      // Persist the folded spawn_agent result + resolved markers.
+      // Persist the folded spawn_agent result (or re-bubbled approval part)
+      // + resolved markers.
       await storage.appendMessages(chatId, messages);
     }
 
@@ -1897,22 +1959,23 @@ export function createRuntime<P, RC = unknown>(
    * the decision to the sub's gated tool, re-run the sub from history (the
    * approved tool executes, or returns denied), and return the sub's digest.
    *
-   * First cut handles the common single-gate case. If the resumed sub pauses
-   * AGAIN on a new gated tool, its re-bubble isn't wired (no parent writer
-   * here) — it returns best-effort text; multi-round bubbling is a follow-up.
+   * If the resumed sub pauses AGAIN on a new gated tool, its pending
+   * approval(s) are returned so the caller (`applyApproval`) can re-bubble
+   * them to the parent as a fresh `data-subagent-approval` part — bubbling
+   * recurses one round per decision round-trip.
    */
   async function resumeSubagentApproval(
     principal: P,
     subChatId: string,
     decisions: ApprovalDecision[],
-  ): Promise<string> {
+  ): Promise<{ answer: string; pending?: SubagentPending[] }> {
     const subChat = await storage.getChat(principal, subChatId);
-    if (!subChat) return "";
+    if (!subChat) return { answer: "" };
     const subMessages = await storage.loadMessages(principal, subChatId);
     const changed = applyDecisions(subMessages, decisions);
     if (changed.length > 0) await storage.appendMessages(subChatId, changed);
     // Another gated call in the same sub step still undecided → can't finish.
-    if (hasPendingApproval(subMessages)) return "";
+    if (hasPendingApproval(subMessages)) return { answer: "" };
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
       subChat.agent,
@@ -1932,7 +1995,11 @@ export function createRuntime<P, RC = unknown>(
       depth: 1,
     });
     await res.text();
-    return lastAssistantText(await storage.loadMessages(principal, subChatId));
+    const after = await storage.loadMessages(principal, subChatId);
+    // Paused on a SECOND gated tool → lift it so the caller re-bubbles.
+    const pending = collectPendingApprovals(after);
+    if (pending.length > 0) return { answer: "", pending };
+    return { answer: lastAssistantText(after) };
   }
 
   async function schedule({
@@ -1986,7 +2053,11 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       } finally {
         await storage
-          .completeSchedule(s.id, { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null })
+          .completeSchedule(
+            s.id,
+            { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null },
+            dur.instanceId,
+          )
           .catch(() => {});
       }
     }
