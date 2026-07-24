@@ -406,6 +406,8 @@ const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 /** Sub-thread chat ids start with `sub_` so the host can keep them out of the
  * main chat list (they're nested under the parent's spawn_agent tool calls). */
 const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
+/** Parent-level id for a subagent approval bubbled up via `spawn_agent`. */
+const generateSubApprovalId = createIdGenerator({ prefix: "sapv", separator: "_" });
 /** Recursion ceiling for subagent delegation. */
 const MAX_SUBAGENT_DEPTH = 4;
 
@@ -415,8 +417,50 @@ const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
 type ApprovalPart = {
   type: string;
   state?: string;
+  input?: unknown;
   approval?: { id: string; approved?: boolean; reason?: string };
 };
+
+/** A subagent's undecided approval, lifted so the parent turn can surface it. */
+export interface SubagentPending {
+  approvalId: string;
+  toolName: string;
+  summary: string;
+}
+
+/** One-line summary of a gated tool call, for the approval dialog. */
+function summarizeApproval(toolName: string, input: unknown): string {
+  let args = "";
+  try {
+    args = JSON.stringify(input ?? {});
+  } catch {
+    args = "";
+  }
+  if (args.length > 200) args = `${args.slice(0, 200)}…`;
+  return `${toolName}(${args})`;
+}
+
+/** The undecided (`approved === undefined`) approvals in a thread's messages. */
+function collectPendingApprovals(messages: AppMessage[]): SubagentPending[] {
+  const out: SubagentPending[] = [];
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+      if (
+        p.state === "approval-requested" &&
+        p.approval &&
+        p.approval.approved === undefined
+      ) {
+        const toolName = p.type.replace(/^tool-/, "");
+        out.push({
+          approvalId: p.approval.id,
+          toolName,
+          summary: summarizeApproval(toolName, p.input),
+        });
+      }
+    }
+  }
+  return out;
+}
 
 /** The concatenated text of a message's text parts (for a chat title). */
 function firstText(message: AppMessage): string | undefined {
@@ -442,10 +486,33 @@ export class PendingApprovalError extends Error {
   }
 }
 
+/** A bubbled-up subagent approval, carried as a `data-subagent-approval` part. */
+type SubApprovalPart = {
+  type: string;
+  data?: {
+    approvalId: string;
+    subChatId: string;
+    subApprovalIds: string[];
+    spawnToolCallId?: string;
+    summaries: string[];
+    approved?: boolean;
+    reason?: string;
+    resolved?: boolean;
+  };
+};
+
 function hasPendingApproval(messages: AppMessage[]): boolean {
   for (const m of messages) {
-    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
       if (p.state === "approval-requested" && p.approval?.approved === undefined) {
+        return true;
+      }
+      // A bubbled-up subagent approval still awaiting a decision.
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        p.data.approved === undefined
+      ) {
         return true;
       }
     }
@@ -465,17 +532,133 @@ function applyDecisions(
   const changed: AppMessage[] = [];
   for (const m of messages) {
     let touched = false;
-    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
       if (p.state === "approval-requested" && p.approval && byId.has(p.approval.id)) {
         const d = byId.get(p.approval.id)!;
         p.state = "approval-responded";
         p.approval = { ...p.approval, approved: d.approved, reason: d.reason };
         touched = true;
       }
+      // A bubbled-up subagent approval — record the decision on the data part;
+      // applyApproval routes it to the sub thread.
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        byId.has(p.data.approvalId)
+      ) {
+        const d = byId.get(p.data.approvalId)!;
+        p.data = { ...p.data, approved: d.approved, reason: d.reason };
+        touched = true;
+      }
     }
     if (touched) changed.push(m);
   }
   return changed;
+}
+
+/** Overwrite a tool call's result (regardless of current state) — used to fold
+ * a resumed subagent's answer back into the `spawn_agent` call on the parent. */
+function overwriteToolResult(
+  messages: AppMessage[],
+  toolCallId: string,
+  output: unknown,
+): AppMessage[] {
+  const changed: AppMessage[] = [];
+  for (const m of messages) {
+    let touched = false;
+    for (const p of (m.parts ?? []) as ResultPart[]) {
+      if (
+        p.toolCallId === toolCallId &&
+        (p.state === "output-available" || p.state === "input-available")
+      ) {
+        p.state = "output-available";
+        p.output = output;
+        touched = true;
+      }
+    }
+    if (touched) changed.push(m);
+  }
+  return changed;
+}
+
+/** Decided-but-unresolved subagent approvals to route to their sub threads. */
+function collectDecidedSubagentApprovals(
+  messages: AppMessage[],
+): NonNullable<SubApprovalPart["data"]>[] {
+  const out: NonNullable<SubApprovalPart["data"]>[] = [];
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as SubApprovalPart[]) {
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        p.data.approved !== undefined &&
+        !p.data.resolved
+      ) {
+        out.push(p.data);
+      }
+    }
+  }
+  return out;
+}
+
+/** Mark a routed subagent approval resolved so it isn't re-processed. */
+function markSubagentApprovalResolved(
+  messages: AppMessage[],
+  approvalId: string,
+): AppMessage[] {
+  const changed: AppMessage[] = [];
+  for (const m of messages) {
+    let touched = false;
+    for (const p of (m.parts ?? []) as SubApprovalPart[]) {
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        p.data.approvalId === approvalId
+      ) {
+        p.data = { ...p.data, resolved: true };
+        touched = true;
+      }
+    }
+    if (touched) changed.push(m);
+  }
+  return changed;
+}
+
+/**
+ * The resume paths ({@link applyApproval} / {@link applyToolResult}) re-run the
+ * model from history whose LAST message is the assistant turn that paused — no
+ * fresh user message is appended. If that turn streamed trailing user-facing
+ * text before pausing (e.g. "…ready to create the page but needs your approval
+ * first"), the model projection ends on an assistant message. Some providers
+ * reject that ("This model does not support assistant message prefill. The
+ * conversation must end with a user message.").
+ *
+ * Trim trailing non-tool parts (text/reasoning/step boundaries) that follow the
+ * final tool/approval part of the last assistant message, so the projection ends
+ * on the tool result (a user turn) and the model generates a fresh continuation.
+ * Returns a shallow copy touching only the last message — the persisted history
+ * (with the provisional text) is left intact; this shapes the resumed call only.
+ */
+export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
+  if (messages.length === 0) return messages;
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+  if (last.role !== "assistant") return messages;
+  const parts = (last.parts ?? []) as { type: string }[];
+  // Last part that anchors a model-turn boundary we must keep: a tool call/result
+  // or a bubbled subagent approval. Everything after it is trailing commentary.
+  let keepUntil = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const t = parts[i].type;
+    if (t.startsWith("tool-") || t === "dynamic-tool" || t === "data-subagent-approval") {
+      keepUntil = i;
+      break;
+    }
+  }
+  // No tool/approval anchor, or nothing trailing to drop → leave untouched.
+  if (keepUntil === -1 || keepUntil === parts.length - 1) return messages;
+  const trimmed = { ...last, parts: parts.slice(0, keepUntil + 1) } as AppMessage;
+  return [...messages.slice(0, lastIndex), trimmed];
 }
 
 /** A tool/dynamic-tool UI part, narrowed to the result fields we touch. */
@@ -722,9 +905,48 @@ export function createRuntime<P, RC = unknown>(
           required: ["agent", "prompt"],
           additionalProperties: false,
         }),
-        execute: async ({ agent, prompt, threadId }) => {
+        execute: async (
+          { agent, prompt, threadId }: { agent: string; prompt: string; threadId?: string },
+          options: { toolCallId?: string; context?: { writer?: TurnWriter } },
+        ) => {
           if (!allowed.has(agent)) return { error: `Not an allowed subagent: ${agent}` };
-          return runSubagent({ principal, agent, prompt, threadId, depth: depth + 1 });
+          // Propagate the PARENT turn's approval mode: interactive → the subagent
+          // gates its tools (a pending write bubbles up here); autonomous → it
+          // auto-approves.
+          const result = await runSubagent({
+            principal,
+            agent,
+            prompt,
+            threadId,
+            depth: depth + 1,
+            autoApprove,
+          });
+          if (result.pending?.length) {
+            // The subagent paused on a gated tool. Surface it on THIS turn as a
+            // `data-subagent-approval` part (tagged with the sub thread + this
+            // spawn_agent call) so the turn ends `awaiting_input` and
+            // `applyApproval` can route the decision back → resume the sub →
+            // resume here. Raw sub output stays in the sub thread (isolation).
+            const approvalId = generateSubApprovalId();
+            options.context?.writer?.write({
+              type: "data-subagent-approval",
+              id: approvalId,
+              data: {
+                approvalId,
+                subChatId: result.threadId,
+                subApprovalIds: result.pending.map((p) => p.approvalId),
+                spawnToolCallId: options.toolCallId,
+                summaries: result.pending.map((p) => p.summary),
+              },
+            });
+            return {
+              status: "awaiting_approval",
+              threadId: result.threadId,
+              pending: result.pending.map((p) => p.summary),
+              note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
+            };
+          }
+          return { threadId: result.threadId, answer: result.answer };
         },
       });
       capabilityTools.push("spawn_agent");
@@ -1218,6 +1440,33 @@ export function createRuntime<P, RC = unknown>(
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
 
+    // Route any just-decided SUBAGENT approvals (bubbled up via spawn_agent):
+    // resume the sub thread with the decision, then fold its answer back into
+    // the parent's spawn_agent result so this turn continues with the digest.
+    const subApprovals = collectDecidedSubagentApprovals(messages);
+    if (subApprovals.length > 0) {
+      for (const sa of subApprovals) {
+        const answer = await resumeSubagentApproval(
+          principal,
+          sa.subChatId,
+          sa.subApprovalIds.map((id) => ({
+            approvalId: id,
+            approved: sa.approved as boolean,
+            reason: sa.reason,
+          })),
+        );
+        if (sa.spawnToolCallId) {
+          overwriteToolResult(messages, sa.spawnToolCallId, {
+            threadId: sa.subChatId,
+            answer,
+          });
+        }
+        markSubagentApprovalResolved(messages, sa.approvalId);
+      }
+      // Persist the folded spawn_agent result + resolved markers.
+      await storage.appendMessages(chatId, messages);
+    }
+
     // If the step had several gated calls and some are still undecided, DON'T
     // re-run yet — a tool call without a result makes convertToModelMessages
     // throw MissingToolResultsError. Persist the decision, stay awaiting_input,
@@ -1236,7 +1485,9 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: messages,
+      // Resume: strip the paused turn's trailing text so the model call ends on
+      // the tool result (a user turn), not an assistant prefill.
+      uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
   }
@@ -1285,7 +1536,8 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: messages,
+      // Resume: same prefill guard as applyApproval (see trimTrailingAssistantPrefill).
+      uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
   }
@@ -1388,6 +1640,7 @@ export function createRuntime<P, RC = unknown>(
     threadId,
     depth,
     blockGated,
+    autoApprove = true,
   }: {
     principal: P;
     agent: string;
@@ -1395,7 +1648,14 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
-  }): Promise<{ threadId: string; answer: string }> {
+    /**
+     * Waive HITL approvals inside the subagent. Default true (autonomous runs —
+     * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
+     * value, so a subagent spawned from an interactive chat GATES its tools and
+     * a pending approval bubbles up to the parent (see the pending return).
+     */
+    autoApprove?: boolean;
+  }): Promise<{ threadId: string; answer: string; pending?: SubagentPending[] }> {
     const subChatId = threadId ?? generateSubchatId();
     let chat = await storage.getChat(principal, subChatId);
     if (!chat) {
@@ -1420,14 +1680,63 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [...prior, message],
       runtimeCtx,
-      autoApprove: true,
+      autoApprove,
       blockGated,
       depth,
     });
     await res.text();
 
-    const answer = lastAssistantText(await storage.loadMessages(principal, subChatId));
-    return { threadId: subChatId, answer };
+    const subMessages = await storage.loadMessages(principal, subChatId);
+    // Interactive subagent paused on a gated tool → lift its pending approval(s)
+    // so the caller (`spawn_agent`) can surface them on the parent turn.
+    const pending = collectPendingApprovals(subMessages);
+    if (pending.length > 0) {
+      return { threadId: subChatId, answer: "", pending };
+    }
+    return { threadId: subChatId, answer: lastAssistantText(subMessages) };
+  }
+
+  /**
+   * Resume a subagent thread after its bubbled-up approval was decided: apply
+   * the decision to the sub's gated tool, re-run the sub from history (the
+   * approved tool executes, or returns denied), and return the sub's digest.
+   *
+   * First cut handles the common single-gate case. If the resumed sub pauses
+   * AGAIN on a new gated tool, its re-bubble isn't wired (no parent writer
+   * here) — it returns best-effort text; multi-round bubbling is a follow-up.
+   */
+  async function resumeSubagentApproval(
+    principal: P,
+    subChatId: string,
+    decisions: ApprovalDecision[],
+  ): Promise<string> {
+    const subChat = await storage.getChat(principal, subChatId);
+    if (!subChat) return "";
+    const subMessages = await storage.loadMessages(principal, subChatId);
+    const changed = applyDecisions(subMessages, decisions);
+    if (changed.length > 0) await storage.appendMessages(subChatId, changed);
+    // Another gated call in the same sub step still undecided → can't finish.
+    if (hasPendingApproval(subMessages)) return "";
+
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      subChat.agent,
+      principal,
+    );
+    const { run, lease } = await openRun(principal, subChatId, subChat.agent);
+    const res = await buildTurn({
+      resolvedChatId: subChatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: subMessages,
+      runtimeCtx,
+      autoApprove: false, // keep gating any further writes in the sub
+      depth: 1,
+    });
+    await res.text();
+    return lastAssistantText(await storage.loadMessages(principal, subChatId));
   }
 
   async function schedule({
