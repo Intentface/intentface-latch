@@ -9,9 +9,11 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   // NOTE: composite PK — message ids are only unique within a chat, and the
   // UNIQUE (chat_id, seq) guards concurrent appenders. Databases created by an
-  // older version of this DDL (global `id` PK, non-unique index) are NOT
-  // upgraded by migrateWith (it only creates missing tables / adds columns) —
-  // they need a one-off table rebuild (create-new → copy → drop → rename).
+  // older version of this DDL (global `id` PK, non-unique index) can't take the
+  // UNIQUE index in place (the old writer restarted `seq` per turn, so a chat
+  // may hold duplicate seqs). `migrate(client)` heals them first via
+  // `healLegacyMessages` (rebuild + re-sequence); the exec-only `migrateWith`
+  // path (no query seam) still needs that one-off rebuild done by the host.
   `CREATE TABLE IF NOT EXISTS latch_messages (
      id TEXT NOT NULL, chat_id TEXT NOT NULL, run_id TEXT, seq INTEGER NOT NULL,
      role TEXT NOT NULL, parts TEXT NOT NULL, metadata TEXT, created_at INTEGER NOT NULL,
@@ -78,6 +80,48 @@ export async function migrateWith(
   }
 }
 
+/**
+ * One-off upgrade for DBs created before `latch_messages` moved to a composite
+ * `(chat_id, id)` PK + `UNIQUE (chat_id, seq)`. The old DDL used a global `id`
+ * PK and a NON-unique `(chat_id, seq)` index, and the old writer restarted
+ * `seq` per turn — so an existing chat can hold duplicate `(chat_id, seq)` rows,
+ * which makes the new UNIQUE index fail to create. Rebuild once into the correct
+ * shape, re-sequencing `seq` densely per chat (order preserved: by old seq, then
+ * time), then swap. No-op on a fresh DB (table absent → the DDL builds it right)
+ * or an already-migrated DB (composite PK present). Columns are unchanged, so
+ * the copy is loss-free. libsql-only (needs a query to detect the legacy shape);
+ * the exec-only `migrateWith` path can't run it.
+ */
+async function healLegacyMessages(client: Client): Promise<void> {
+  const existing = await client.execute(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='latch_messages'",
+  );
+  const ddl = existing.rows[0]?.sql as string | undefined;
+  if (!ddl) return; // fresh DB — the create DDL builds the right shape
+  if (/PRIMARY\s+KEY\s*\(\s*chat_id\s*,\s*id\s*\)/i.test(ddl)) return; // already upgraded
+  // Atomic rebuild: correct-shape table, densely re-sequenced seq per chat.
+  await client.batch(
+    [
+      `CREATE TABLE latch_messages_v2 (
+         id TEXT NOT NULL, chat_id TEXT NOT NULL, run_id TEXT, seq INTEGER NOT NULL,
+         role TEXT NOT NULL, parts TEXT NOT NULL, metadata TEXT, created_at INTEGER NOT NULL,
+         PRIMARY KEY (chat_id, id))`,
+      // Re-sequence by true chronology — `created_at`, then insertion order
+      // (`rowid`). NOT by old `seq`: the legacy writer restarted `seq` per turn,
+      // so ordering by seq would interleave turns (all seq=0s, then all seq=1s).
+      `INSERT INTO latch_messages_v2 (id, chat_id, run_id, seq, role, parts, metadata, created_at)
+         SELECT id, chat_id, run_id,
+                ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY created_at, rowid) - 1,
+                role, parts, metadata, created_at
+         FROM latch_messages`,
+      `DROP TABLE latch_messages`,
+      `ALTER TABLE latch_messages_v2 RENAME TO latch_messages`,
+    ],
+    "write",
+  );
+}
+
 export async function migrate(client: Client): Promise<void> {
+  await healLegacyMessages(client);
   await migrateWith((s) => client.execute(s));
 }
