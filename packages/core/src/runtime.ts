@@ -5,6 +5,7 @@ import {
   createUIMessageStream,
   createUIMessageStreamResponse,
   jsonSchema,
+  readUIMessageStream,
   smoothStream,
   stepCountIs,
   tool,
@@ -440,6 +441,22 @@ export interface TurnWriter {
   merge(stream: ReadableStream<unknown>): void;
 }
 
+/**
+ * The `data-subagent-progress` part `spawn_agent` streams into the PARENT
+ * turn while a subagent runs (one part, reconciled in place by id) — lets the
+ * host render the delegated conversation live instead of a silent spinner.
+ * Written immediately on spawn (empty `messages`) so the client learns the
+ * sub-thread id up front, then re-written (throttled) as the subagent streams.
+ */
+export interface SubagentProgressData {
+  /** The spawn_agent tool call this progress belongs to. */
+  toolCallId?: string;
+  agent: string;
+  threadId: string;
+  /** The sub-thread's current exchange: the prompt + the streaming assistant snapshot. */
+  messages: AppMessage[];
+}
+
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 /** Sub-thread chat ids start with `sub_` so the host can keep them out of the
@@ -870,6 +887,13 @@ export function createRuntime<P, RC = unknown>(
       text: string;
       messages: AppMessage[];
     }) => void | Promise<void>;
+    /**
+     * Observe the turn's UI chunk stream without consuming it (the response
+     * gets a tee'd branch). Used by `runSubagent` to forward a subagent's
+     * live output into the parent turn. The observer owns its branch — it
+     * must keep reading or the tee buffers.
+     */
+    observeStream?: (stream: ReadableStream<unknown>) => void;
   }): Promise<Response> {
     const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
       args;
@@ -1010,6 +1034,37 @@ export function createRuntime<P, RC = unknown>(
           options: { toolCallId?: string; context?: { writer?: TurnWriter } },
         ) => {
           if (!allowed.has(agent)) return { error: `Not an allowed subagent: ${agent}` };
+          // Stream the delegated conversation live into the parent turn (one
+          // data part, reconciled in place by id). Pre-generate the sub-thread
+          // id so the very first write already carries it.
+          const writer = options.context?.writer;
+          const subChatId = threadId ?? generateSubchatId();
+          let onProgress: ((messages: AppMessage[]) => void) | undefined;
+          if (writer) {
+            const write = (messages: AppMessage[]) => {
+              writer.write({
+                type: "data-subagent-progress",
+                id: `subagent_${options.toolCallId ?? subChatId}`,
+                data: {
+                  toolCallId: options.toolCallId,
+                  agent,
+                  threadId: subChatId,
+                  messages,
+                } satisfies SubagentProgressData,
+              });
+            };
+            write([]);
+            // Each write re-sends the whole snapshot — throttle the re-sends.
+            // The trailing tokens are covered by the tool RESULT (the client
+            // switches to the persisted thread once output lands).
+            let lastWrite = 0;
+            onProgress = (messages) => {
+              const now = Date.now();
+              if (now - lastWrite < 250) return;
+              lastWrite = now;
+              write(messages);
+            };
+          }
           // Propagate the PARENT turn's approval mode: interactive → the subagent
           // gates its tools (a pending write bubbles up here); autonomous → it
           // auto-approves.
@@ -1017,9 +1072,10 @@ export function createRuntime<P, RC = unknown>(
             principal,
             agent,
             prompt,
-            threadId,
+            threadId: subChatId,
             depth: depth + 1,
             autoApprove,
+            onProgress,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -1028,7 +1084,7 @@ export function createRuntime<P, RC = unknown>(
             // `applyApproval` can route the decision back → resume the sub →
             // resume here. Raw sub output stays in the sub thread (isolation).
             const approvalId = generateSubApprovalId();
-            options.context?.writer?.write({
+            writer?.write({
               type: "data-subagent-approval",
               id: approvalId,
               data: {
@@ -1430,7 +1486,16 @@ export function createRuntime<P, RC = unknown>(
     // it, the agent runs to completion in the background and onFinish persists
     // the full message (the model's abort is tied to the lease, not the
     // request, so a disconnect doesn't cancel generation).
-    return createUIMessageStreamResponse({ stream, consumeSseStream: consumeStream });
+    let out = stream as ReadableStream<unknown>;
+    if (args.observeStream) {
+      const [main, observed] = out.tee();
+      out = main;
+      args.observeStream(observed);
+    }
+    return createUIMessageStreamResponse({
+      stream: out as Parameters<typeof createUIMessageStreamResponse>[0]["stream"],
+      consumeSseStream: consumeStream,
+    });
   }
 
   async function reapTick(opts?: { now?: number; error?: string }) {
@@ -1896,6 +1961,7 @@ export function createRuntime<P, RC = unknown>(
     depth,
     blockGated,
     autoApprove = true,
+    onProgress,
   }: {
     principal: P;
     agent: string;
@@ -1910,6 +1976,8 @@ export function createRuntime<P, RC = unknown>(
      * a pending approval bubbles up to the parent (see the pending return).
      */
     autoApprove?: boolean;
+    /** Progressive snapshots of the sub-turn's exchange (prompt + streaming assistant). */
+    onProgress?: (messages: AppMessage[]) => void;
   }): Promise<{ threadId: string; answer: string; pending?: SubagentPending[] }> {
     const subChatId = threadId ?? generateSubchatId();
     let chat = await storage.getChat(principal, subChatId);
@@ -1941,6 +2009,27 @@ export function createRuntime<P, RC = unknown>(
       autoApprove,
       blockGated,
       depth,
+      // Forward progressive UI-message snapshots to the caller (spawn_agent
+      // streams them into the parent turn). Observation must never break the
+      // run — the primary stream is drained independently below.
+      observeStream: onProgress
+        ? (observed) => {
+            void (async () => {
+              try {
+                const byId = new Map<string, AppMessage>();
+                for await (const m of readUIMessageStream({
+                  stream: observed as Parameters<typeof readUIMessageStream>[0]["stream"],
+                })) {
+                  const msg = m as unknown as AppMessage;
+                  byId.set(msg.id, msg);
+                  onProgress([message, ...byId.values()]);
+                }
+              } catch {
+                // ignore — live progress is best-effort
+              }
+            })();
+          }
+        : undefined,
     });
     await res.text();
 

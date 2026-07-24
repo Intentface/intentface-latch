@@ -370,6 +370,22 @@ export const DEFAULT_TOOL_LABELS: ToolLabels = {
     active: (i) => `Exporting report "${i.title ?? ""}"`,
     complete: (i) => `Exported report "${i.title ?? ""}"`,
   },
+  save_eval_set: {
+    active: (i) => `Saving eval set for ${i.agentName ?? "agent"}`,
+    complete: (i) => `Saved eval set for ${i.agentName ?? "agent"}`,
+  },
+  list_eval_sets: {
+    active: () => "Reading eval sets",
+    complete: () => "Read eval sets",
+  },
+  run_evals: {
+    active: (i) => `Running evals for ${i.agentName ?? "agent"}`,
+    complete: (i) => `Ran evals for ${i.agentName ?? "agent"}`,
+  },
+  list_eval_runs: {
+    active: () => "Reading eval history",
+    complete: () => "Read eval history",
+  },
 };
 
 export const toolLabels = DEFAULT_TOOL_LABELS;
