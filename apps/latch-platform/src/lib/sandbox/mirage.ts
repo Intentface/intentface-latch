@@ -6,6 +6,9 @@ import {
   SlackResource,
   GDriveResource,
   GmailResource,
+  GDocsResource,
+  GSheetsResource,
+  GSlidesResource,
   MountMode,
   type MountSpec,
 } from "@struktoai/mirage-node";
@@ -22,7 +25,9 @@ import type { GoogleMountCreds } from "../google-workspace";
  * (`channels:read` without `groups:read`) — and `/gdrive` + `/gmail` (when the
  * CHAT USER has connected `google_workspace`) are READ-ONLY views of that
  * user's own Drive and Gmail, enforced by consent scopes (`drive.readonly`,
- * `gmail.readonly`) on top of the READ mount mode.
+ * `gmail.readonly`) on top of the READ mount mode. `/gdocs`, `/gsheets` and
+ * `/gslides` add structured per-document views over the same credentials
+ * (docs/sheets/slides readonly scopes).
  *
  * Security posture (deliberate, don't relax):
  * - `curl`/`wget` builtins are unregistered — mirage has no SSRF allowlist, so
@@ -118,6 +123,11 @@ export function createMirageSession(opts: {
       };
       mounts["/gdrive"] = [new GDriveResource(cfg), MountMode.READ];
       mounts["/gmail"] = [new GmailResource(cfg), MountMode.READ];
+      // Structured per-document views (tabs/sheets/slides rendered as files) —
+      // same creds, gated by the docs/sheets/slides readonly consent scopes.
+      mounts["/gdocs"] = [new GDocsResource(cfg), MountMode.READ];
+      mounts["/gsheets"] = [new GSheetsResource(cfg), MountMode.READ];
+      mounts["/gslides"] = [new GSlidesResource(cfg), MountMode.READ];
     }
     ws = createMirageWorkspace(mounts);
     return ws;
@@ -181,8 +191,9 @@ export function createMirageSession(opts: {
           `the bot is in) — browse it with ls/cat/grep.`
         : ``) +
       (opts.google
-        ? ` /gdrive and /gmail are READ-ONLY mounts of the user's own Google ` +
-          `Drive and Gmail — browse them with ls/cat/grep.`
+        ? ` /gdrive, /gmail, /gdocs, /gsheets and /gslides are READ-ONLY ` +
+          `mounts of the user's own Google Drive, Gmail, Docs, Sheets and ` +
+          `Slides — browse them with ls/cat/grep.`
         : ``) +
       ` No real system binaries and no network access (curl/wget disabled); ` +
       `built-in shell utilities (cat, ls, grep, sed, etc.) and file I/O only.`,

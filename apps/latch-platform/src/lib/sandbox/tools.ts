@@ -45,7 +45,8 @@ const bash = tool({
     "Run a shell command in the sandbox workspace (cwd /workspace). Use for " +
     "listing, moving, inspecting, and combining files with pipes. Depending " +
     "on the sandbox backend, the root may also hold READ-ONLY mounts of " +
-    "connected services (e.g. /slack, /gdrive, /gmail) — run `ls /` to " +
+    "connected services (e.g. /slack, /gdrive, /gmail, /gdocs, /gsheets, " +
+    "/gslides) — run `ls /` to " +
     "discover them and browse with ls/cat/grep. Output is tail-truncated if " +
     "very long.",
   inputSchema: jsonSchema<{ command: string }>({

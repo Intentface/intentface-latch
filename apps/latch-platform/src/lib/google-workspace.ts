@@ -9,7 +9,8 @@ import type {
 /**
  * Google Workspace OAuth for the mirage sandbox's read-only mounts — a
  * connection with NO tools. The mount IS the interface: once a user
- * authorizes, their per-chat mirage workspace gains `/gdrive` and `/gmail`.
+ * authorizes, their per-chat mirage workspace gains `/gdrive`, `/gmail`,
+ * `/gdocs`, `/gsheets` and `/gslides`.
  *
  * Not an MCP connection (Google's Workspace MCP servers are gated behind the
  * Developer Preview), and unlike an MCP connection it brokers plain Google
@@ -17,10 +18,10 @@ import type {
  * refresh token in the Vault, keyed per tenant (`[orgId, userId]` scope, so
  * every user mounts their OWN Drive/Gmail — never someone else's).
  *
- * Read-only is enforced at the CONSENT level: only `drive.readonly` and
- * `gmail.readonly` scopes are ever requested, so even a compromised mount
- * cannot write — the same scope-level pattern as the Slack mount's
- * public-channels-only rule. Do not add write scopes here.
+ * Read-only is enforced at the CONSENT level: only `*.readonly` scopes
+ * (drive, gmail, documents, spreadsheets, presentations) are ever requested,
+ * so even a compromised mount cannot write — the same scope-level pattern as
+ * the Slack mount's public-channels-only rule. Do not add write scopes here.
  *
  * Registered like any built-in connection (status list, authorize/callback
  * routes) via the same registry shape the MCP set uses; `hostFor` contributes
@@ -28,10 +29,14 @@ import type {
  */
 const NAME = "google_workspace";
 const DESCRIPTION =
-  "Google Drive + Gmail, read-only — files for the mirage sandbox (/gdrive, /gmail).";
+  "Google Drive, Gmail, Docs, Sheets + Slides, read-only — files for the mirage " +
+  "sandbox (/gdrive, /gmail, /gdocs, /gsheets, /gslides).";
 const SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/documents.readonly",
+  "https://www.googleapis.com/auth/spreadsheets.readonly",
+  "https://www.googleapis.com/auth/presentations.readonly",
 ];
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -196,6 +201,9 @@ export function createGoogleWorkspaceConnection<P>(opts: {
       return [
         "mirage sandbox mount: /gdrive (Drive, read-only)",
         "mirage sandbox mount: /gmail (Gmail, read-only)",
+        "mirage sandbox mount: /gdocs (Docs, read-only)",
+        "mirage sandbox mount: /gsheets (Sheets, read-only)",
+        "mirage sandbox mount: /gslides (Slides, read-only)",
       ];
     },
 

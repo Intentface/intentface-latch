@@ -54,6 +54,9 @@ describe("google_workspace OAuth", () => {
     const scope = url.searchParams.get("scope")!;
     expect(scope).toContain("drive.readonly");
     expect(scope).toContain("gmail.readonly");
+    expect(scope).toContain("documents.readonly");
+    expect(scope).toContain("spreadsheets.readonly");
+    expect(scope).toContain("presentations.readonly");
     expect(scope).not.toMatch(/drive(\s|$)|gmail\.(send|modify|compose)/);
     expect(url.searchParams.get("redirect_uri")).toBe(
       "http://localhost:3000/api/latch/connections/google_workspace/callback",
