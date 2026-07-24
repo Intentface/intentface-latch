@@ -1,15 +1,16 @@
-import { and, asc, eq, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
-import type {
-  AppMessage,
-  ChatRecord,
-  RunRecord,
-  RunStatus,
-  ScheduleRecord,
-  StorageAdapter,
+import {
+  ChatConflictError,
+  type AppMessage,
+  type ChatRecord,
+  type RunRecord,
+  type RunStatus,
+  type ScheduleRecord,
+  type StorageAdapter,
 } from "@intentface/latch-core";
 import * as schema from "./schema.pg.js";
-import type { SqliteAdapterOptions } from "./adapter.js";
+import { isUniqueViolation, type SqliteAdapterOptions } from "./adapter.js";
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
@@ -53,6 +54,8 @@ export function createPostgresAdapter<P>(
     attempt: r.attempt,
     usageInputTokens: r.usageInputTokens ?? undefined,
     usageOutputTokens: r.usageOutputTokens ?? undefined,
+    usageCacheReadTokens: r.usageCacheReadTokens ?? undefined,
+    usageCacheWriteTokens: r.usageCacheWriteTokens ?? undefined,
     costTotal: r.costTotal ?? undefined,
     error: r.error,
     startedAt: r.startedAt,
@@ -67,6 +70,7 @@ export function createPostgresAdapter<P>(
     agent: r.agent,
     identity: r.identity ?? undefined,
     cron: r.cron,
+    timezone: r.timezone ?? undefined,
     prompt: r.prompt,
     nextRunAt: r.nextRunAt,
     lastRunAt: r.lastRunAt,
@@ -96,7 +100,15 @@ export function createPostgresAdapter<P>(
         createdAt: now,
         updatedAt: now,
       };
-      await db.insert(schema.chats).values(row);
+      try {
+        await db.insert(schema.chats).values(row);
+      } catch (error) {
+        // A client-supplied id can collide with a chat the caller doesn't own
+        // (the scoped getChat missed, so the caller fell through to create).
+        // Surface a typed conflict the server layer can map to a 409.
+        if (isUniqueViolation(error)) throw new ChatConflictError(row.id);
+        throw error;
+      }
       return rowToChat(row as typeof schema.chats.$inferSelect);
     },
 
@@ -108,15 +120,24 @@ export function createPostgresAdapter<P>(
       const rows = await db
         .select()
         .from(schema.chats)
-        .where(opts?.kind ? and(scope, eq(schema.chats.kind, opts.kind)) : scope)
+        .where(
+          opts?.kind !== undefined
+            ? and(scope, eq(schema.chats.kind, opts.kind))
+            : scope,
+        )
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map(rowToChat);
     },
 
     async loadMessages(principal, chatId) {
+      // Scope check first — a chat the caller doesn't own returns nothing.
       const chat = await getChat(principal, chatId);
       if (!chat) return [];
+      if (opts.messages) {
+        const overridden = await opts.messages.loadMessages(principal, chat);
+        if (overridden !== null) return overridden;
+      }
       const rows = await db
         .select()
         .from(schema.messages)
@@ -133,39 +154,56 @@ export function createPostgresAdapter<P>(
     },
 
     async appendMessages(chatId, msgs) {
-      if (msgs.length === 0) return;
-      const [agg] = await db
-        .select({ maxSeq: sql<number | null>`max(${schema.messages.seq})` })
-        .from(schema.messages)
-        .where(eq(schema.messages.chatId, chatId));
-      const existing = new Set(
-        (
-          await db
-            .select({ id: schema.messages.id })
-            .from(schema.messages)
-            .where(eq(schema.messages.chatId, chatId))
-        ).map((r) => r.id),
-      );
-      let next = (agg?.maxSeq ?? -1) + 1;
-      for (const m of msgs) {
-        const seq = existing.has(m.id) ? 0 : next++;
-        await db
-          .insert(schema.messages)
-          .values({
-            id: m.id,
-            chatId,
-            runId: null,
-            seq,
-            role: m.role,
-            parts: m.parts,
-            metadata: m.metadata ?? null,
-            createdAt: m.metadata?.createdAt ?? Date.now(),
-          })
-          .onConflictDoUpdate({
-            target: schema.messages.id,
-            set: { parts: m.parts, metadata: m.metadata ?? null },
-          });
+      /** Chat activity: keep `updatedAt` fresh so `listChats` orders by it. */
+      const touchChat = () =>
+        db
+          .update(schema.chats)
+          .set({ updatedAt: Date.now() })
+          .where(eq(schema.chats.id, chatId));
+      if (opts.messages) {
+        const [c] = await db
+          .select()
+          .from(schema.chats)
+          .where(eq(schema.chats.id, chatId));
+        if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
+          if (msgs.length > 0) await touchChat();
+          return;
+        }
       }
+      if (msgs.length === 0) return;
+      // One transaction per batch: the max(seq) read and the inserts commit (or
+      // roll back) together, so a crash mid-batch can't leave a partial write
+      // and a concurrent appender can't interleave into the same seq range.
+      // The next seq is additionally computed INSIDE each INSERT, with the
+      // UNIQUE (chat_id, seq) index as the backstop for a true race.
+      await db.transaction(async (tx) => {
+        const nextSeq = sql`(select coalesce(max(${schema.messages.seq}), -1) + 1 from ${schema.messages} where ${schema.messages.chatId} = ${chatId})`;
+        for (const m of msgs) {
+          await tx
+            .insert(schema.messages)
+            .values({
+              id: m.id,
+              chatId,
+              runId: null,
+              seq: nextSeq as unknown as number,
+              role: m.role,
+              parts: m.parts,
+              metadata: m.metadata ?? null,
+              createdAt: m.metadata?.createdAt ?? Date.now(),
+            })
+            // Existing message (same chat + id) → update content only; seq is
+            // preserved. Conflict target is the composite PK — a same-id row
+            // in ANOTHER chat is a different row, never overwritten from here.
+            .onConflictDoUpdate({
+              target: [schema.messages.chatId, schema.messages.id],
+              set: { parts: m.parts, metadata: m.metadata ?? null },
+            });
+        }
+        await tx
+          .update(schema.chats)
+          .set({ updatedAt: Date.now() })
+          .where(eq(schema.chats.id, chatId));
+      });
     },
 
     async createRun(principal, input) {
@@ -209,7 +247,7 @@ export function createPostgresAdapter<P>(
       return rowToRun(got[0]!);
     },
 
-    async heartbeatRun(id, owner, ttlMs) {
+    async heartbeatRun(id, owner, ttlMs, fencingToken) {
       const now = Date.now();
       const updated = await db
         .update(schema.runs)
@@ -218,6 +256,9 @@ export function createPostgresAdapter<P>(
           and(
             eq(schema.runs.id, id),
             eq(schema.runs.leaseOwner, owner),
+            // Fenced: a stale holder whose run was reaped + re-claimed (owner
+            // may match again, token was bumped) can't resurrect the lease.
+            eq(schema.runs.fencingToken, fencingToken),
             eq(schema.runs.status, "active"),
           ),
         )
@@ -243,10 +284,12 @@ export function createPostgresAdapter<P>(
           and(
             eq(schema.runs.id, id),
             ne(schema.runs.status, "completed"),
-            or(
-              isNull(schema.runs.leaseOwner),
-              lt(schema.runs.leaseExpiresAt, now),
-            ),
+            // Only runs that WERE leased and whose lease has expired. A
+            // never-leased live (T1) run has leaseExpiresAt NULL and must not
+            // be seizable; a reaped run keeps its (expired) leaseExpiresAt
+            // even though the reaper cleared leaseOwner, so it still matches.
+            isNotNull(schema.runs.leaseExpiresAt),
+            lt(schema.runs.leaseExpiresAt, now),
           ),
         )
         .returning();
@@ -257,7 +300,7 @@ export function createPostgresAdapter<P>(
       const set = Object.fromEntries(
         Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "id"),
       );
-      if (Object.keys(set).length === 0) return;
+      if (Object.keys(set).length === 0) return true;
       const where = guard
         ? and(
             eq(schema.runs.id, id),
@@ -265,10 +308,12 @@ export function createPostgresAdapter<P>(
             eq(schema.runs.fencingToken, guard.fencingToken),
           )
         : eq(schema.runs.id, id);
-      await db
+      const updated = await db
         .update(schema.runs)
         .set(set as Partial<typeof schema.runs.$inferInsert>)
-        .where(where);
+        .where(where)
+        .returning({ id: schema.runs.id });
+      return updated.length > 0;
     },
 
     async reapExpiredRuns(now, opts) {
@@ -331,6 +376,7 @@ export function createPostgresAdapter<P>(
         agent: input.agent,
         identity: principal,
         cron: input.cron,
+        timezone: input.timezone ?? null,
         prompt: input.prompt,
         nextRunAt: input.nextRunAt,
         lastRunAt: null,
@@ -382,7 +428,7 @@ export function createPostgresAdapter<P>(
       return claimed.map(rowToSchedule);
     },
 
-    async completeSchedule(id, patch) {
+    async completeSchedule(id, patch, owner) {
       await db
         .update(schema.schedules)
         .set({
@@ -392,7 +438,11 @@ export function createPostgresAdapter<P>(
           leaseOwner: null,
           leaseExpiresAt: null,
         })
-        .where(eq(schema.schedules.id, id));
+        // Fenced by the claim lease: if our lease expired mid-fire and another
+        // node re-claimed the schedule, this no-ops instead of clobbering it.
+        .where(
+          and(eq(schema.schedules.id, id), eq(schema.schedules.leaseOwner, owner)),
+        );
     },
   };
 }

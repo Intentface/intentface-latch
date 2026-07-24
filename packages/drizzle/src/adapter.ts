@@ -171,49 +171,53 @@ export function createSqliteAdapter<P>(
     },
 
     async appendMessages(chatId, msgs) {
+      /** Chat activity: keep `updatedAt` fresh so `listChats` orders by it. */
+      const touchChat = () =>
+        db
+          .update(schema.chats)
+          .set({ updatedAt: Date.now() })
+          .where(eq(schema.chats.id, chatId));
       if (opts.messages) {
         const [c] = await db
           .select()
           .from(schema.chats)
           .where(eq(schema.chats.id, chatId));
         if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
+          if (msgs.length > 0) await touchChat();
           return;
         }
       }
       if (msgs.length === 0) return;
-      const [agg] = await db
-        .select({ maxSeq: sql<number | null>`max(${schema.messages.seq})` })
-        .from(schema.messages)
-        .where(eq(schema.messages.chatId, chatId));
-      const existing = new Set(
-        (
-          await db
-            .select({ id: schema.messages.id })
-            .from(schema.messages)
-            .where(eq(schema.messages.chatId, chatId))
-        ).map((r) => r.id),
-      );
-      let next = (agg?.maxSeq ?? -1) + 1;
+      // The next seq is computed INSIDE each INSERT (a single statement), so
+      // two concurrent appenders can't both read the same max(seq) and then
+      // write colliding rows — the statement is atomic, and the UNIQUE
+      // (chat_id, seq) index backstops it. (An explicit db.transaction can't
+      // be used here: this adapter also serves synchronous drivers
+      // (better-sqlite3), whose native transaction API rejects the async
+      // callback that async drivers (libsql) require.)
+      const nextSeq = sql`(select coalesce(max(${schema.messages.seq}), -1) + 1 from ${schema.messages} where ${schema.messages.chatId} = ${chatId})`;
       for (const m of msgs) {
-        const seq = existing.has(m.id) ? 0 : next++;
         await db
           .insert(schema.messages)
           .values({
             id: m.id,
             chatId,
             runId: null,
-            seq,
+            seq: nextSeq as unknown as number,
             role: m.role,
             parts: m.parts,
             metadata: m.metadata ?? null,
             createdAt: m.metadata?.createdAt ?? Date.now(),
           })
-          // existing message → update content only; seq is preserved.
+          // Existing message (same chat + id) → update content only; seq is
+          // preserved. Conflict target is the composite PK — a same-id row in
+          // ANOTHER chat is a different row, never overwritten from here.
           .onConflictDoUpdate({
-            target: schema.messages.id,
+            target: [schema.messages.chatId, schema.messages.id],
             set: { parts: m.parts, metadata: m.metadata ?? null },
           });
       }
+      await touchChat();
     },
 
     async createRun(principal, input) {
