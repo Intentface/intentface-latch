@@ -3,9 +3,8 @@ import {
   createRuntime,
   createVault,
   defineContext,
-  mergeConnections
-  
-  
+  mergeConnections,
+  mergeToolSources,
 } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
@@ -43,7 +42,10 @@ import { baseUrl } from "./base-url";
 import { loadModelCatalog  } from "./models";
 import type {ModelInfo} from "./models";
 import { createSandboxResolver, harnessTools } from "./sandbox";
-import { createGoogleWorkspaceConnection } from "./google-workspace";
+import {
+  createGoogleWorkspaceConnection,
+  createGoogleWorkspaceWriteConnection,
+} from "./google-workspace";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";
 
@@ -175,46 +177,61 @@ export async function getLatch(): Promise<{
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
-  // Google Workspace OAuth for the mirage sandbox's read-only /gdrive +
-  // /gmail mounts — a tool-less connection (the mount is the interface).
-  // Needs its own pre-registered OAuth client (no DCR), separate from the
-  // Google login and Calendar clients. Omitted (no client id) → not loaded.
-  const googleWorkspace = process.env.GOOGLE_WORKSPACE_CLIENT_ID
-    ? createGoogleWorkspaceConnection<Principal>({
+  // Google Workspace OAuth: the tool-less read connection (mirage's read-only
+  // mounts ARE the interface) and its write companion (approval-gated
+  // gmail_send, separate consent/grant so the mount token never gains write
+  // scopes). Both need the same pre-registered OAuth client (no DCR), separate
+  // from the Google login and Calendar clients. Omitted (no client id) → not
+  // loaded.
+  const googleClient = process.env.GOOGLE_WORKSPACE_CLIENT_ID
+    ? {
         vault,
         clientId: process.env.GOOGLE_WORKSPACE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_WORKSPACE_CLIENT_SECRET ?? "",
         callbackBaseUrl: `${baseURL}/api/latch/connections`,
-      })
-    : undefined;
-
-  // The code-declared built-ins across kinds (MCP + the tool-less
-  // google_workspace) — one registry so the Connections page status list, the
-  // handler routes, and any registry consumer all see google_workspace like
-  // any other built-in.
-  const builtinConnections: McpConnections<Principal> = googleWorkspace
-    ? {
-        host: connections.host,
-        hostFor: (names) => connections.hostFor(names),
-        names: [...connections.names, ...googleWorkspace.names],
-        oauth: (name) =>
-          googleWorkspace.names.includes(name)
-            ? googleWorkspace.oauth(name)
-            : connections.oauth(name),
-        status: async (p) => [
-          ...(await connections.status(p)),
-          ...(await googleWorkspace.status(p)),
-        ],
-        testTools: (name, p) =>
-          googleWorkspace.names.includes(name)
-            ? googleWorkspace.testTools(name, p)
-            : connections.testTools(name, p),
       }
-    : connections;
+    : undefined;
+  const googleWorkspace = googleClient
+    ? createGoogleWorkspaceConnection<Principal>(googleClient)
+    : undefined;
+  const googleExtras = googleClient
+    ? [googleWorkspace!, createGoogleWorkspaceWriteConnection<Principal>(googleClient)]
+    : [];
+
+  // The code-declared built-ins across kinds (MCP + the google_workspace
+  // pair) — one registry so the Connections page status list, the handler
+  // routes, tool resolution, and any registry consumer see them all like any
+  // other built-in.
+  const builtinConnections: McpConnections<Principal> =
+    googleExtras.length === 0
+      ? connections
+      : {
+          host: connections.host,
+          hostFor: (names) =>
+            mergeToolSources(
+              connections.hostFor(names),
+              ...googleExtras.map((g) => g.hostFor(names)),
+            ),
+          names: [...connections.names, ...googleExtras.flatMap((g) => g.names)],
+          oauth: (name) =>
+            googleExtras.find((g) => g.names.includes(name))?.oauth(name) ??
+            connections.oauth(name),
+          status: async (p) =>
+            (
+              await Promise.all([
+                connections.status(p),
+                ...googleExtras.map((g) => g.status(p)),
+              ])
+            ).flat(),
+          testTools: (name, p) =>
+            googleExtras.find((g) => g.names.includes(name))?.testTools(name, p) ??
+            connections.testTools(name, p),
+        };
 
   // The full connection registry across kinds — also used to enumerate a
   // connection's tools for the agent editor. (google_workspace contributes no
-  // tools, so it only affects status/oauth via builtinConnections.)
+  // tools — the mounts are its interface; google_workspace_write contributes
+  // the approval-gated gmail_send.)
   const allConnections = mergeConnections(builtinConnections, dynamic);
 
   const runtime = createRuntime<Principal, Ctx>({

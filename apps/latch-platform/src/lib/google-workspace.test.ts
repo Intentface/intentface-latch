@@ -1,6 +1,10 @@
 import type { Vault } from "@intentface/latch-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createGoogleWorkspaceConnection } from "./google-workspace";
+import {
+  buildRawEmail,
+  createGoogleWorkspaceConnection,
+  createGoogleWorkspaceWriteConnection,
+} from "./google-workspace";
 
 type P = { orgId: string; userId?: string };
 
@@ -186,5 +190,105 @@ describe("google_workspace OAuth", () => {
     expect(status).toEqual([
       expect.objectContaining({ name: "google_workspace", oauth: true, authorized: false }),
     ]);
+  });
+});
+
+function writeConnection(vault = memoryVault()) {
+  return createGoogleWorkspaceWriteConnection<P>({
+    vault,
+    clientId: "test-client",
+    clientSecret: "test-secret",
+    callbackBaseUrl: "http://localhost:3000/api/latch/connections",
+  });
+}
+
+type ExecutableTool = {
+  execute: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+};
+
+/** Authorize the write connection against a mocked token endpoint. */
+async function authorizeWrite(gw: ReturnType<typeof writeConnection>) {
+  const oauth = gw.oauth("google_workspace_write")!;
+  const start = await oauth.start(principal);
+  const state = new URL(
+    (start as { authorizationUrl: string }).authorizationUrl,
+  ).searchParams.get("state")!;
+  await oauth.finish(principal, { code: "c", state });
+}
+
+describe("google_workspace_write (gmail_send)", () => {
+  it("requests ONLY the gmail.send scope — never readonly ones, never full gmail", async () => {
+    const gw = writeConnection();
+    const res = await gw.oauth("google_workspace_write")!.start(principal);
+    const url = new URL((res as { authorizationUrl: string }).authorizationUrl);
+    expect(url.searchParams.get("scope")).toBe("https://www.googleapis.com/auth/gmail.send");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "http://localhost:3000/api/latch/connections/google_workspace_write/callback",
+    );
+  });
+
+  it("contributes gmail_send, approval-gated by default, only when picked", async () => {
+    const gw = writeConnection();
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    expect(Object.keys(opened.tools)).toEqual(["gmail_send"]);
+    expect(
+      (opened as { toolApproval?: Record<string, string> }).toolApproval,
+    ).toEqual({ gmail_send: "user-approval" });
+    await opened.close();
+
+    const notPicked = await gw.hostFor(["other_connection"]).open(principal);
+    expect(Object.keys(notPicked.tools)).toEqual([]);
+  });
+
+  it("execute refreshes a token and posts the RFC822 raw message", async () => {
+    const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(
+      async (url) =>
+        String(url).includes("/token")
+          ? tokenResponse({ access_token: "at-send", expires_in: 3600, refresh_token: "rt" })
+          : tokenResponse({ id: "msg-1", threadId: "thr-1" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const gw = writeConnection();
+    await authorizeWrite(gw);
+
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    const result = await (opened.tools.gmail_send as ExecutableTool).execute({
+      to: "a@example.com",
+      subject: "Hei ✨",
+      body: "terve maailma",
+      cc: "b@example.com",
+    });
+    expect(result).toMatchObject({ sent: true, id: "msg-1", to: "a@example.com" });
+
+    const send = fetchMock.mock.calls.find(([u]) => String(u).includes("/messages/send"))!;
+    expect((send[1]!.headers as Record<string, string>).Authorization).toBe("Bearer at-send");
+    const { raw } = JSON.parse(String(send[1]!.body)) as { raw: string };
+    const rfc822 = Buffer.from(raw, "base64url").toString("utf8");
+    expect(rfc822).toContain("To: a@example.com");
+    expect(rfc822).toContain("Cc: b@example.com");
+    expect(rfc822).toContain("Subject: =?UTF-8?B?"); // non-ASCII → RFC 2047
+    expect(rfc822).not.toContain("Bcc:");
+    const body64 = rfc822.split("\r\n\r\n")[1]!;
+    expect(Buffer.from(body64, "base64").toString("utf8")).toBe("terve maailma");
+  });
+
+  it("execute fails with a connect hint when not authorized", async () => {
+    const gw = writeConnection();
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    await expect(
+      (opened.tools.gmail_send as ExecutableTool).execute({
+        to: "a@example.com",
+        subject: "s",
+        body: "b",
+      }),
+    ).rejects.toThrow(/not connected/);
+  });
+
+  it("buildRawEmail keeps plain-ASCII subjects readable", () => {
+    const rfc822 = Buffer.from(
+      buildRawEmail({ to: "x@y.z", subject: "plain", body: "hi" }),
+      "base64url",
+    ).toString("utf8");
+    expect(rfc822).toContain("Subject: plain");
   });
 });
