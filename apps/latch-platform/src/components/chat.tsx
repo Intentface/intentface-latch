@@ -472,7 +472,15 @@ export function Chat({
                   feedbackValue={feedbackGiven[m.id]}
                 />
                 {showScores && (
-                  <ScoreBadges scores={runId ? scores[runId] : undefined} pending={hasRubrics} />
+                  <ScoreBadges
+                    runId={runId}
+                    scores={runId ? scores[runId] : undefined}
+                    pending={hasRubrics}
+                    canCorrect={editable}
+                    onCorrected={(rid, updated) =>
+                      merge(rid, (scores[rid] ?? []).map((s) => (s.name === updated.name ? updated : s)))
+                    }
+                  />
                 )}
               </div>
             );

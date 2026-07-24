@@ -14,11 +14,14 @@ import type { Client } from "@libsql/client";
 export interface RunScore {
   runId: string;
   rubricName: string;
-  /** 1/0 for binary, 0–1 for graded. */
+  /** 1/0 for binary, 0–1 for graded. The human value when source="human". */
   value: number;
   comment?: string;
   scale: "binary" | "score";
-  source: "live" | "rejudge";
+  source: "live" | "rejudge" | "human";
+  /** When a human corrected it: the judge's original value/reason, preserved. */
+  aiValue?: number;
+  aiComment?: string;
   updatedAt: number;
 }
 
@@ -37,6 +40,10 @@ export async function migrateRunScores(client: Client): Promise<void> {
   await client.execute(
     `CREATE INDEX IF NOT EXISTS latch_run_scores_owner_run ON latch_run_scores (owner, run_id)`,
   );
+  // Human-correction columns (idempotent for existing dev DBs).
+  for (const col of ["ai_value REAL", "ai_comment TEXT"]) {
+    await client.execute(`ALTER TABLE latch_run_scores ADD COLUMN ${col}`).catch(() => {});
+  }
 }
 
 export interface RunScoresStore {
@@ -45,7 +52,12 @@ export interface RunScoresStore {
   put: (owner: string, score: RunScore) => Promise<void>;
   /** All scores for the given run ids, grouped by runId. */
   getForRuns: (owner: string, runIds: string[]) => Promise<Map<string, RunScore[]>>;
+  /** One score for a run+rubric, or null. */
+  getOne: (owner: string, runId: string, rubricName: string) => Promise<RunScore | null>;
 }
+
+const asSource = (v: unknown): RunScore["source"] =>
+  v === "human" ? "human" : v === "rejudge" ? "rejudge" : "live";
 
 const rowToScore = (r: Record<string, unknown>): RunScore => ({
   runId: String(r.run_id),
@@ -53,7 +65,9 @@ const rowToScore = (r: Record<string, unknown>): RunScore => ({
   value: Number(r.value),
   comment: (r.comment as string) ?? undefined,
   scale: String(r.scale) === "score" ? "score" : "binary",
-  source: String(r.source) === "rejudge" ? "rejudge" : "live",
+  source: asSource(r.source),
+  aiValue: r.ai_value == null ? undefined : Number(r.ai_value),
+  aiComment: (r.ai_comment as string) ?? undefined,
   updatedAt: Number(r.updated_at),
 });
 
@@ -62,11 +76,12 @@ export function createRunScoresStore(client: Client): RunScoresStore {
     async put(owner, score) {
       await client.execute({
         sql: `INSERT INTO latch_run_scores
-          (owner, run_id, rubric_name, value, comment, scale, source, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (owner, run_id, rubric_name, value, comment, scale, source, ai_value, ai_comment, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, run_id, rubric_name) DO UPDATE SET
             value=excluded.value, comment=excluded.comment, scale=excluded.scale,
-            source=excluded.source, updated_at=excluded.updated_at`,
+            source=excluded.source, ai_value=excluded.ai_value,
+            ai_comment=excluded.ai_comment, updated_at=excluded.updated_at`,
         args: [
           owner,
           score.runId,
@@ -75,9 +90,20 @@ export function createRunScoresStore(client: Client): RunScoresStore {
           score.comment ?? null,
           score.scale,
           score.source,
+          score.aiValue ?? null,
+          score.aiComment ?? null,
           score.updatedAt,
         ],
       });
+    },
+
+    async getOne(owner, runId, rubricName) {
+      const res = await client.execute({
+        sql: `SELECT * FROM latch_run_scores WHERE owner = ? AND run_id = ? AND rubric_name = ?`,
+        args: [owner, runId, rubricName],
+      });
+      const row = (res.rows as unknown as Record<string, unknown>[])[0];
+      return row ? rowToScore(row) : null;
     },
 
     async getForRuns(owner, runIds) {

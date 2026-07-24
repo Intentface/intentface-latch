@@ -571,6 +571,8 @@ export const getRunScoresFn = createServerFn({ method: "POST" })
         comment: s.comment,
         scale: s.scale,
         source: s.source,
+        aiValue: s.aiValue,
+        aiComment: s.aiComment,
       }));
     }
     return out;
@@ -581,7 +583,10 @@ export interface AttachedEvalScore {
   value: number;
   comment?: string;
   scale: "binary" | "score";
-  source: "live" | "rejudge";
+  source: "live" | "rejudge" | "human";
+  /** Present when source="human": the judge's original value/reason. */
+  aiValue?: number;
+  aiComment?: string;
 }
 
 /** Re-judge one already-sent message against the (draft) rubric set — no re-chat. */
@@ -610,6 +615,74 @@ export const rejudgeRunFn = createServerFn({ method: "POST" })
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : "re-judge failed" };
     }
+  });
+
+/**
+ * Human correction of a judge verdict: the human sets the authoritative value
+ * (+ required note). Updates the local store (source "human", preserving the
+ * judge's original value/reason) so the badge flips immediately, AND overwrites
+ * the score in Langfuse (human value + note, AI original in metadata) so
+ * /observability and Langfuse aggregates reflect the corrected truth.
+ */
+export const correctScoreFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { runId: string; rubricName: string; value: number; comment: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!data.comment.trim()) return { ok: false as const, error: "a note is required" };
+    const { runtime, runScores } = await getLatch();
+    // Ownership: the run must be the caller's (direct, principal-scoped).
+    const run = await runtime.getRun({ principal, runId: data.runId });
+    if (!run) return { ok: false as const, error: "unknown run" };
+
+    const ownerTag = ownerTagOf(principal);
+    const existing = await runScores.getOne(ownerTag, data.runId, data.rubricName);
+    if (!existing) return { ok: false as const, error: "no score to correct" };
+    const value = existing.scale === "binary" ? (data.value >= 0.5 ? 1 : 0) : data.value;
+    // Preserve the judge's original verdict (unless already a human correction).
+    const aiValue = existing.source === "human" ? existing.aiValue : existing.value;
+    const aiComment = existing.source === "human" ? existing.aiComment : existing.comment;
+
+    await runScores.put(ownerTag, {
+      runId: data.runId,
+      rubricName: data.rubricName,
+      value,
+      comment: data.comment.trim(),
+      scale: existing.scale,
+      source: "human",
+      aiValue,
+      aiComment,
+      updatedAt: Date.now(),
+    });
+    if (isLangfuseConfigured()) {
+      await postScore({
+        runId: data.runId,
+        name: data.rubricName,
+        value,
+        comment: data.comment.trim(),
+        dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+        metadata: {
+          corrected: true,
+          correctedBy: principal.userId ?? principal.orgId,
+          ...(aiValue != null ? { aiValue } : {}),
+          ...(aiComment ? { aiComment } : {}),
+        },
+      });
+    }
+    return {
+      ok: true as const,
+      score: {
+        name: data.rubricName,
+        value,
+        comment: data.comment.trim(),
+        scale: existing.scale,
+        source: "human" as const,
+        aiValue,
+        aiComment,
+      },
+    };
   });
 
 /** Extract the single fenced ```json block the eval-author is contracted to emit. */

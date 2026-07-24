@@ -10,6 +10,8 @@ export interface PostScoreInput {
   /** Free-text rationale (judge reason / user comment). */
   comment?: string;
   dataType?: "NUMERIC" | "BOOLEAN" | "CATEGORICAL";
+  /** Extra metadata on the score — e.g. a human correction's original AI verdict. */
+  metadata?: Record<string, unknown>;
 }
 
 /** Default hard bound on the flush network call (ms). */
@@ -32,6 +34,7 @@ export async function postScore(
     value: input.value,
     comment: input.comment,
     dataType: input.dataType,
+    ...(input.metadata ? { metadata: input.metadata } : {}),
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
