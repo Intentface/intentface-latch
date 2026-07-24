@@ -4,7 +4,7 @@
  * The StorageAdapter on Drizzle. SQLite/libsql first (local file or Turso);
  * the Postgres dialect lands next behind the same `StorageAdapter` contract.
  */
-export { createSqliteAdapter } from "./adapter.js";
+export { createSqliteAdapter, isUniqueViolation } from "./adapter.js";
 export type { SqliteAdapterOptions, MessageStore } from "./adapter.js";
 export { createSqliteSecretStore } from "./secret-store.js";
 export type { SqliteSecretStoreOptions } from "./secret-store.js";

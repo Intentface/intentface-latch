@@ -19,6 +19,20 @@ import type { AppMessage } from "./message.js";
 
 export type RunStatus = "active" | "awaiting_input" | "completed" | "errored";
 
+/**
+ * Thrown by `createChat` when the requested chat id already exists (typically a
+ * client-supplied id colliding with a chat the caller doesn't own — the scoped
+ * `getChat` missed, so the create raced into the PK). Carries a stable `code`
+ * so the server layer can map it to a 409 instead of a 500.
+ */
+export class ChatConflictError extends Error {
+  readonly code = "chat_conflict";
+  constructor(chatId: string) {
+    super(`Chat id is not available: ${chatId}`);
+    this.name = "ChatConflictError";
+  }
+}
+
 export interface ChatRecord {
   id: string;
   /** Opaque ownership key the adapter scoped this row by (e.g. `tenant/user`). */

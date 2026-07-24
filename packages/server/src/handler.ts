@@ -74,6 +74,14 @@ export interface LatchHandlerConfig<P> {
   /** Path prefix the handler is mounted under (e.g. "/api/latch"). Default "/". */
   basePath?: string;
   /**
+   * Extra query-param names on `connections/:name/authorize` to fold verbatim
+   * into the OAuth `state` (alongside the built-in chatId/approvalId/returnTo/
+   * scope). Lets a consumer thread its own context (e.g. a tenant id) through
+   * the flow so `resolveContext` can rebuild the principal from
+   * `extra.oauthState` on the session-less callback. Default: none.
+   */
+  stateParams?: string[];
+  /**
    * Shared secret guarding `POST /cron/run` (the system-wide schedule tick).
    * When set, the request must send it as `x-latch-cron-secret`. That route is
    * NOT user-authed — it fires all tenants' due schedules — so guard it at the
@@ -196,13 +204,18 @@ export function createLatchHandler<P>(
         const approvalId = url.searchParams.get("approvalId") ?? undefined;
         const returnTo = url.searchParams.get("returnTo") ?? undefined;
         // Optional caller-supplied context folded into the OAuth state so the
-        // callback (which may lack a session) can rebuild it — e.g. the tenant
-        // the flow was started for, or a credential-scope selector.
+        // callback (which may lack a session) can rebuild it — e.g. a
+        // credential-scope selector, plus any consumer-declared `stateParams`
+        // (e.g. a tenant id).
         const scope = url.searchParams.get("scope") ?? undefined;
-        const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
+        const extraState: Record<string, string> = {};
+        for (const key of config.stateParams ?? []) {
+          const value = url.searchParams.get(key);
+          if (value !== null) extraState[key] = value;
+        }
         const state =
-          chatId || approvalId || returnTo || scope || workspaceId
-            ? { chatId, approvalId, returnTo, scope, workspaceId }
+          chatId || approvalId || returnTo || scope || Object.keys(extraState).length > 0
+            ? { ...extraState, chatId, approvalId, returnTo, scope }
             : undefined;
         // A connection resolved as OAuth-capable but not actually configured for
         // it (e.g. a dynamic name whose stored record isn't oauth) throws here —
@@ -216,9 +229,12 @@ export function createLatchHandler<P>(
         if (res.status !== "redirect") {
           // Already authorized (tokens live in the Vault) — start()
           // short-circuits without an IdP round-trip, so the callback (which
-          // signals `onConnected`) never runs. Signal it here too.
+          // signals `onConnected` and appends `connectedParam`) never runs.
+          // Signal both here too, so a pending `connect_<name>` still resumes.
           await config.onConnected?.(principal, name);
-          return redirect(returnTo ?? "/");
+          return redirect(
+            `${returnTo ?? "/"}?${config.connectedParam ?? "connected"}=${name}`,
+          );
         }
         return redirect(res.authorizationUrl);
       }
@@ -355,6 +371,24 @@ export function createLatchHandler<P>(
                 error:
                   e instanceof Error ? e.message : "awaiting approval decision",
                 code: "pending_approval",
+              },
+              409,
+            );
+          }
+          // A client-supplied chat id collided with an existing (typically
+          // foreign-owned) chat: the scoped getChat missed, createChat hit the
+          // PK. ChatConflictError carries a stable `code` — map it to 409 so
+          // the client can pick a different id, instead of a 500.
+          if (
+            e &&
+            typeof e === "object" &&
+            (e as { code?: unknown }).code === "chat_conflict"
+          ) {
+            return json(
+              {
+                error:
+                  e instanceof Error ? e.message : "chat id is not available",
+                code: "chat_conflict",
               },
               409,
             );

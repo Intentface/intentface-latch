@@ -1,17 +1,26 @@
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { and, asc, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
-import type {
-  AppMessage,
-  ChatRecord,
-  RunRecord,
-  RunStatus,
-  ScheduleRecord,
-  StorageAdapter,
+import {
+  ChatConflictError,
+  type AppMessage,
+  type ChatRecord,
+  type RunRecord,
+  type RunStatus,
+  type ScheduleRecord,
+  type StorageAdapter,
 } from "@intentface/latch-core";
 import * as schema from "./schema.js";
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+/** True if a driver error is a primary-key / unique-constraint violation. */
+export function isUniqueViolation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unique constraint|primary key|duplicate key|sqlite_constraint/i.test(
+    message,
+  );
 }
 
 /** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
@@ -129,7 +138,15 @@ export function createSqliteAdapter<P>(
         createdAt: now,
         updatedAt: now,
       };
-      await db.insert(schema.chats).values(row);
+      try {
+        await db.insert(schema.chats).values(row);
+      } catch (error) {
+        // A client-supplied id can collide with a chat the caller doesn't own
+        // (the scoped getChat missed, so the caller fell through to create).
+        // Surface a typed conflict the server layer can map to a 409.
+        if (isUniqueViolation(error)) throw new ChatConflictError(row.id);
+        throw error;
+      }
       return rowToChat(row);
     },
 
@@ -141,7 +158,11 @@ export function createSqliteAdapter<P>(
       const rows = await db
         .select()
         .from(schema.chats)
-        .where(opts?.kind ? and(scope, eq(schema.chats.kind, opts.kind)) : scope)
+        .where(
+          opts?.kind !== undefined
+            ? and(scope, eq(schema.chats.kind, opts.kind))
+            : scope,
+        )
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map(rowToChat);
