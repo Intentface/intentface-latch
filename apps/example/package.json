@@ -6,6 +6,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "tsx --conditions development src/runtime.smoke.ts",
+    "smoke:better-sqlite3": "tsx --conditions development src/runtime.better-sqlite3.smoke.ts",
     "smoke:server": "tsx --conditions development src/server.smoke.ts",
     "smoke:tools": "tsx --conditions development src/tools.smoke.ts",
     "smoke:durability": "tsx --conditions development src/durability.smoke.ts",
@@ -17,8 +18,11 @@
     "smoke:mcp-integration": "tsx --conditions development src/mcp.integration.smoke.ts",
     "smoke:oauth": "tsx --conditions development src/oauth.smoke.ts",
     "smoke:approval": "tsx --conditions development src/approval.smoke.ts",
+    "smoke:subagent-approval": "tsx --conditions development src/subagent-approval.smoke.ts",
+    "smoke:ephemeral": "tsx --conditions development src/ephemeral.smoke.ts",
     "smoke:writer": "tsx --conditions development src/writer.smoke.ts",
     "smoke:cost": "tsx --conditions development src/cost.smoke.ts",
+    "smoke:observability": "tsx --conditions development src/observability.smoke.ts",
     "smoke:projections": "tsx --conditions development src/projections.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
@@ -32,12 +36,14 @@
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
     "ai": "^7.0.2",
+    "drizzle-orm": "^0.45.0",
     "hono": "^4.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.9.3",
+    "better-sqlite3": "^12.11.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

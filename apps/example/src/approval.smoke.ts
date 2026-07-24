@@ -9,7 +9,7 @@ import {
   type AppMessage,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 /**
  * HITL tool approval — no suspension machinery, just message round-trips.
@@ -51,7 +51,7 @@ const principal: Principal = scope;
 async function runScenario(approved: boolean) {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
 
   let execCount = 0;

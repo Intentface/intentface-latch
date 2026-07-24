@@ -9,7 +9,7 @@ import {
   type AppMessage,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 /**
  * The writer is exposed to tools via `toolsContext` → a tool reads
@@ -46,7 +46,7 @@ function toolThenText() {
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
 
   // What the tool observed from its context — proves user + run + writer all arrive.

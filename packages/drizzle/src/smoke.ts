@@ -1,7 +1,9 @@
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import type { AppMessage } from "@intentface/latch-core";
 import { migrate } from "./migrate.js";
 import { createSqliteAdapter } from "./adapter.js";
+import * as schema from "./schema.js";
 
 /** A real run against an in-memory libsql DB: persistence + owner isolation + run/usage. */
 type P = { org: string; user?: string };
@@ -9,7 +11,7 @@ type P = { org: string; user?: string };
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const store = createSqliteAdapter<P>(client, {
+  const store = createSqliteAdapter<P>(drizzle(client, { schema }), {
     owner: (p) => (p.user ? [p.org, p.user] : [p.org]),
   });
 

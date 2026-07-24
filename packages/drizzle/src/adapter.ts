@@ -1,13 +1,13 @@
-import type { Client } from "@libsql/client";
-import { drizzle } from "drizzle-orm/libsql";
-import { and, asc, eq, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
-import type {
-  AppMessage,
-  ChatRecord,
-  RunRecord,
-  RunStatus,
-  ScheduleRecord,
-  StorageAdapter,
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
+import { and, asc, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import {
+  ChatConflictError,
+  type AppMessage,
+  type ChatRecord,
+  type RunRecord,
+  type RunStatus,
+  type ScheduleRecord,
+  type StorageAdapter,
 } from "@intentface/latch-core";
 import * as schema from "./schema.js";
 
@@ -15,9 +15,32 @@ function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
+/** True if a driver error is a primary-key / unique-constraint violation. */
+export function isUniqueViolation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unique constraint|primary key|duplicate key|sqlite_constraint/i.test(
+    message,
+  );
+}
+
 /** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
 function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
   return owner(principal).map(encodeURIComponent).join("/");
+}
+
+/**
+ * Optional override for message persistence — a seam any consumer can supply to
+ * route a chat's messages somewhere other than the `latch_messages` table (e.g.
+ * bridge a user-facing chat to files it already owns). Both methods receive the
+ * resolved `ChatRecord` so the consumer can decide per chat.
+ *
+ * `loadMessages` returns the messages to use, or `null` to defer to the default
+ * table read. `appendMessages` returns `true` if it handled the write, or
+ * `false` to defer to the default table write.
+ */
+export interface MessageStore<P> {
+  loadMessages(principal: P, chat: ChatRecord): Promise<AppMessage[] | null>;
+  appendMessages(chat: ChatRecord, msgs: AppMessage[]): Promise<boolean>;
 }
 
 export interface SqliteAdapterOptions<P> {
@@ -27,14 +50,23 @@ export interface SqliteAdapterOptions<P> {
    * server-derived from the authenticated principal, never client input.
    */
   owner: (principal: P) => string[];
+  /**
+   * Optional message-persistence override (see `MessageStore`). When present,
+   * it's consulted first on load/append; if it declines (null / false) the
+   * default `latch_messages` behaviour applies.
+   */
+  messages?: MessageStore<P>;
 }
 
-/** A `StorageAdapter` backed by libsql (local file / Turso). SQLite first. */
+/**
+ * A `StorageAdapter` on a Drizzle SQLite database (libsql / better-sqlite3 /
+ * Turso). The caller owns the connection — pass a `drizzle(...)` instance — so
+ * the adapter never opens or dialect-binds one itself.
+ */
 export function createSqliteAdapter<P>(
-  client: Client,
+  db: BaseSQLiteDatabase<"sync" | "async", any, any>,
   opts: SqliteAdapterOptions<P>,
 ): StorageAdapter<P> {
-  const db = drizzle(client, { schema });
   const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
 
   const rowToChat = (r: typeof schema.chats.$inferSelect): ChatRecord => ({
@@ -42,6 +74,7 @@ export function createSqliteAdapter<P>(
     owner: r.owner,
     agent: r.agent,
     title: r.title ?? undefined,
+    kind: r.kind,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   });
@@ -101,20 +134,35 @@ export function createSqliteAdapter<P>(
         owner: ownerKey(principal),
         agent: input.agent,
         title: input.title ?? null,
+        kind: input.kind ?? "user",
         createdAt: now,
         updatedAt: now,
       };
-      await db.insert(schema.chats).values(row);
+      try {
+        await db.insert(schema.chats).values(row);
+      } catch (error) {
+        // A client-supplied id can collide with a chat the caller doesn't own
+        // (the scoped getChat missed, so the caller fell through to create).
+        // Surface a typed conflict the server layer can map to a 409.
+        if (isUniqueViolation(error)) throw new ChatConflictError(row.id);
+        throw error;
+      }
       return rowToChat(row);
     },
 
     getChat,
 
     async listChats(principal, opts) {
+      // No kind → all chats (back-compatible); kind → only that kind.
+      const scope = eq(schema.chats.owner, ownerKey(principal));
       const rows = await db
         .select()
         .from(schema.chats)
-        .where(eq(schema.chats.owner, ownerKey(principal)))
+        .where(
+          opts?.kind !== undefined
+            ? and(scope, eq(schema.chats.kind, opts.kind))
+            : scope,
+        )
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map(rowToChat);
@@ -124,6 +172,10 @@ export function createSqliteAdapter<P>(
       // Scope check first — a chat the caller doesn't own returns nothing.
       const chat = await getChat(principal, chatId);
       if (!chat) return [];
+      if (opts.messages) {
+        const overridden = await opts.messages.loadMessages(principal, chat);
+        if (overridden !== null) return overridden;
+      }
       const rows = await db
         .select()
         .from(schema.messages)
@@ -140,40 +192,53 @@ export function createSqliteAdapter<P>(
     },
 
     async appendMessages(chatId, msgs) {
+      /** Chat activity: keep `updatedAt` fresh so `listChats` orders by it. */
+      const touchChat = () =>
+        db
+          .update(schema.chats)
+          .set({ updatedAt: Date.now() })
+          .where(eq(schema.chats.id, chatId));
+      if (opts.messages) {
+        const [c] = await db
+          .select()
+          .from(schema.chats)
+          .where(eq(schema.chats.id, chatId));
+        if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
+          if (msgs.length > 0) await touchChat();
+          return;
+        }
+      }
       if (msgs.length === 0) return;
-      const [agg] = await db
-        .select({ maxSeq: sql<number | null>`max(${schema.messages.seq})` })
-        .from(schema.messages)
-        .where(eq(schema.messages.chatId, chatId));
-      const existing = new Set(
-        (
-          await db
-            .select({ id: schema.messages.id })
-            .from(schema.messages)
-            .where(eq(schema.messages.chatId, chatId))
-        ).map((r) => r.id),
-      );
-      let next = (agg?.maxSeq ?? -1) + 1;
+      // The next seq is computed INSIDE each INSERT (a single statement), so
+      // two concurrent appenders can't both read the same max(seq) and then
+      // write colliding rows — the statement is atomic, and the UNIQUE
+      // (chat_id, seq) index backstops it. (An explicit db.transaction can't
+      // be used here: this adapter also serves synchronous drivers
+      // (better-sqlite3), whose native transaction API rejects the async
+      // callback that async drivers (libsql) require.)
+      const nextSeq = sql`(select coalesce(max(${schema.messages.seq}), -1) + 1 from ${schema.messages} where ${schema.messages.chatId} = ${chatId})`;
       for (const m of msgs) {
-        const seq = existing.has(m.id) ? 0 : next++;
         await db
           .insert(schema.messages)
           .values({
             id: m.id,
             chatId,
             runId: null,
-            seq,
+            seq: nextSeq as unknown as number,
             role: m.role,
             parts: m.parts,
             metadata: m.metadata ?? null,
             createdAt: m.metadata?.createdAt ?? Date.now(),
           })
-          // existing message → update content only; seq is preserved.
+          // Existing message (same chat + id) → update content only; seq is
+          // preserved. Conflict target is the composite PK — a same-id row in
+          // ANOTHER chat is a different row, never overwritten from here.
           .onConflictDoUpdate({
-            target: schema.messages.id,
+            target: [schema.messages.chatId, schema.messages.id],
             set: { parts: m.parts, metadata: m.metadata ?? null },
           });
       }
+      await touchChat();
     },
 
     async createRun(principal, input) {
@@ -217,7 +282,7 @@ export function createSqliteAdapter<P>(
       return rowToRun(got[0]!);
     },
 
-    async heartbeatRun(id, owner, ttlMs) {
+    async heartbeatRun(id, owner, ttlMs, fencingToken) {
       const now = Date.now();
       const updated = await db
         .update(schema.runs)
@@ -226,6 +291,9 @@ export function createSqliteAdapter<P>(
           and(
             eq(schema.runs.id, id),
             eq(schema.runs.leaseOwner, owner),
+            // Fenced: a stale holder whose run was reaped + re-claimed (owner
+            // may match again, token was bumped) can't resurrect the lease.
+            eq(schema.runs.fencingToken, fencingToken),
             eq(schema.runs.status, "active"),
           ),
         )
@@ -251,10 +319,12 @@ export function createSqliteAdapter<P>(
           and(
             eq(schema.runs.id, id),
             ne(schema.runs.status, "completed"),
-            or(
-              isNull(schema.runs.leaseOwner),
-              lt(schema.runs.leaseExpiresAt, now),
-            ),
+            // Only runs that WERE leased and whose lease has expired. A
+            // never-leased live (T1) run has leaseExpiresAt NULL and must not
+            // be seizable; a reaped run keeps its (expired) leaseExpiresAt
+            // even though the reaper cleared leaseOwner, so it still matches.
+            isNotNull(schema.runs.leaseExpiresAt),
+            lt(schema.runs.leaseExpiresAt, now),
           ),
         )
         .returning();
@@ -265,7 +335,7 @@ export function createSqliteAdapter<P>(
       const set = Object.fromEntries(
         Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "id"),
       );
-      if (Object.keys(set).length === 0) return;
+      if (Object.keys(set).length === 0) return true;
       const where = guard
         ? and(
             eq(schema.runs.id, id),
@@ -273,10 +343,12 @@ export function createSqliteAdapter<P>(
             eq(schema.runs.fencingToken, guard.fencingToken),
           )
         : eq(schema.runs.id, id);
-      await db
+      const updated = await db
         .update(schema.runs)
         .set(set as Partial<typeof schema.runs.$inferInsert>)
-        .where(where);
+        .where(where)
+        .returning({ id: schema.runs.id });
+      return updated.length > 0;
     },
 
     async reapExpiredRuns(now, opts) {
@@ -392,7 +464,7 @@ export function createSqliteAdapter<P>(
       return claimed.map(rowToSchedule);
     },
 
-    async completeSchedule(id, patch) {
+    async completeSchedule(id, patch, owner) {
       await db
         .update(schema.schedules)
         .set({
@@ -402,7 +474,11 @@ export function createSqliteAdapter<P>(
           leaseOwner: null,
           leaseExpiresAt: null,
         })
-        .where(eq(schema.schedules.id, id));
+        // Fenced by the claim lease: if our lease expired mid-fire and another
+        // node re-claimed the schedule, this no-ops instead of clobbering it.
+        .where(
+          and(eq(schema.schedules.id, id), eq(schema.schedules.leaseOwner, owner)),
+        );
     },
   };
 }

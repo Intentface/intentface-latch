@@ -1,4 +1,5 @@
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import {
   createRuntime,
   createVault,
@@ -11,6 +12,7 @@ import {
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
+  schema,
 } from "@intentface/latch-drizzle";
 import { model } from "./models.js";
 import { tools } from "./tools.js";
@@ -35,7 +37,8 @@ export async function makeLiveRuntime(): Promise<{
 }> {
   const client = createClient({ url: "file:./latch-dev.db" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const db = drizzle(client, { schema });
+  const storage = createSqliteAdapter<Principal>(db, { owner });
 
   const masterKey = process.env.LATCH_VAULT_KEY;
   if (!masterKey) {
@@ -45,7 +48,7 @@ export async function makeLiveRuntime(): Promise<{
     );
   }
   const vault = createVault<Principal>({
-    store: createSqliteSecretStore<Principal>(client, { owner }),
+    store: createSqliteSecretStore<Principal>(db, { owner }),
     masterKey,
   });
 
