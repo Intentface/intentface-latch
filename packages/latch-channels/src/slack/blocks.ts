@@ -57,35 +57,41 @@ function truncateJson(value: unknown, max = 2500): string {
 /** An approval prompt: the tool + its proposed input, with Approve / Deny. */
 export function approvalBlocks(ref: ApprovalRef, toolName: string, input: unknown): unknown[] {
   const value = JSON.stringify({ ...ref, toolName });
-  return [
+  const blocks: unknown[] = [
     {
       type: "section",
       text: { type: "mrkdwn", text: `:lock: Approve *${toolName}*?` },
     },
-    {
+  ];
+  // Some approvals carry no separate input (e.g. a subagent approval whose
+  // summary already names the action) — omit the code block rather than
+  // rendering a literal "undefined".
+  if (input !== undefined) {
+    blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: "```" + truncateJson(input) + "```" },
-    },
-    {
-      type: "actions",
-      elements: [
-        {
-          type: "button",
-          action_id: APPROVE_ACTION,
-          style: "primary",
-          text: { type: "plain_text", text: "Approve" },
-          value,
-        },
-        {
-          type: "button",
-          action_id: DENY_ACTION,
-          style: "danger",
-          text: { type: "plain_text", text: "Deny" },
-          value,
-        },
-      ],
-    },
-  ];
+    });
+  }
+  blocks.push({
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        action_id: APPROVE_ACTION,
+        style: "primary",
+        text: { type: "plain_text", text: "Approve" },
+        value,
+      },
+      {
+        type: "button",
+        action_id: DENY_ACTION,
+        style: "danger",
+        text: { type: "plain_text", text: "Deny" },
+        value,
+      },
+    ],
+  });
+  return blocks;
 }
 
 /** The settled-approval card shown after a decision (replaces the buttons). */
