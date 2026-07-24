@@ -63,7 +63,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <head>
         <HeadContent />
       </head>
-      <body>
+      {/* suppressHydrationWarning: browser extensions (Grammarly et al.) add
+          attributes to <body> before React hydrates — same reason <html> has it. */}
+      <body suppressHydrationWarning>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <ThemeOverridesApplier />
           <ThemeContrast />

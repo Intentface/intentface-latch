@@ -27,6 +27,10 @@ export const SLACK_BOT_SCOPES = [
   "im:read",
   "im:write",
   "channels:history",
+  // List public channels — needed by the mirage sandbox's read-only /slack
+  // mount. Deliberately NOT groups:read: private channels stay unlistable, so
+  // the mount is public-channels-only at the API level.
+  "channels:read",
   "groups:history",
   "assistant:write",
   "commands",

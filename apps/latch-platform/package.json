@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 3000",
-    "build": "vite build",
+    "build": "vite build && node scripts/copy-mirage-deps.mjs",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/scripts/migrate.ts",
     "backfill:personal-orgs": "node --env-file-if-exists=.env --import tsx src/scripts/backfill-personal-orgs.ts",
     "preview": "vite preview",
@@ -33,6 +33,7 @@
     "@jitl/quickjs-singlefile-mjs-release-asyncify": "^0.32.0",
     "@libsql/client": "^0.15.15",
     "@libsql/kysely-libsql": "^0.4.1",
+    "@struktoai/mirage-node": "0.0.4",
     "@tailwindcss/vite": "^4",
     "@tanstack/react-devtools": "latest",
     "@tanstack/react-router": "latest",

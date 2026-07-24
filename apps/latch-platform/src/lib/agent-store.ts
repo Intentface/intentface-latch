@@ -134,11 +134,21 @@ export function createAgentStore(
     scope: String(row.scope) as CredentialScope,
   });
 
-  async function find(p: Principal, name: string): Promise<AgentRecord | undefined> {
-    // Personal wins over org on a name clash.
+  async function find(
+    p: Principal,
+    name: string,
+    scope?: CredentialScope,
+  ): Promise<AgentRecord | undefined> {
+    // Personal wins over org on a name clash — unless pinned to one scope.
+    const owners =
+      scope === "org"
+        ? [ownerKey(p, "org")]
+        : scope === "user"
+          ? [ownerKey(p, "user")]
+          : [ownerKey(p, "user"), ownerKey(p, "org")];
     const res = await client.execute({
-      sql: "SELECT * FROM latch_agents WHERE name = ? AND owner IN (?, ?)",
-      args: [name, ownerKey(p, "user"), ownerKey(p, "org")],
+      sql: `SELECT * FROM latch_agents WHERE name = ? AND owner IN (${owners.map(() => "?").join(", ")})`,
+      args: [name, ...owners],
     });
     const rows = res.rows as unknown as Record<string, unknown>[];
     const personal = rows.find((r) => r.owner === ownerKey(p, "user"));
@@ -148,7 +158,14 @@ export function createAgentStore(
 
   return {
     async resolve(name, principal): Promise<AgentConfig<Principal> | undefined> {
-      const rec = await find(principal, name);
+      // Channel bindings pin resolution to one scope with an `org:`/`user:`
+      // prefix (stored names never contain `:` — normalizeAgentName strips
+      // it), so a same-named record in the OTHER scope can never shadow the
+      // agent the binding was created for.
+      const pin = /^(org|user):(.+)$/.exec(name);
+      const rec = pin
+        ? await find(principal, pin[2]!, pin[1] as CredentialScope)
+        : await find(principal, name);
       if (!rec) return undefined;
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
