@@ -156,12 +156,12 @@ describe("createMirageSession", () => {
     it("blocks dms/ and users/ content at the API level (shell path)", async () => {
       const session = await slackSession();
       // The root listing's dms/users names are static folder stubs; what
-      // matters is that their CONTENT is unreachable. Depending on the index
-      // state the listing either errors (transport rejected the im/mpim or
-      // users.* call) or comes back empty — it must never surface entries.
+      // matters is that their CONTENT is unreachable. Whether the listing
+      // errors (transport rejected the im/mpim or users.* call) or serves an
+      // empty index, stdout must never surface a single entry.
       for (const p of ["/slack/dms", "/slack/users", "/slack/dms/someone__D123"]) {
         const r = await session.run({ command: `ls ${p}` });
-        expect(r.exitCode !== 0 || r.stdout.trim() === "").toBe(true);
+        expect(r.stdout.trim()).toBe("");
       }
       expect(await session.readTextFile({ path: "/slack/users/u__U1.json" })).toBeNull();
     });

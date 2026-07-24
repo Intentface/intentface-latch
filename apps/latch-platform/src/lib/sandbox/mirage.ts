@@ -133,7 +133,7 @@ export class PublicChannelsSlackResource extends SlackResource {
   }
 
   private static key(p: PathSpec): string {
-    return (p.resourcePath ?? "").replace(/^\/+/, "");
+    return p.resourcePath.replace(/^\/+/, "");
   }
 
   private static allowed(p: PathSpec): boolean {
