@@ -271,11 +271,14 @@ export function googleWriteTools(getToken: GetToken): Record<string, unknown> {
       additionalProperties: false,
     }),
     execute: async ({ title, slides }) => {
-      const pres = await gjson<{ presentationId: string }>(getToken, SLIDES_URL, { title });
+      const pres = await gjson<{
+        presentationId: string;
+        slides?: { objectId?: string }[];
+      }>(getToken, SLIDES_URL, { title });
       if (slides?.length) {
         // One batchUpdate: create each slide with deterministic placeholder
         // ids (Slides object ids must be 5–50 chars), then fill them.
-        const requests = slides.flatMap((s, i) => [
+        const requests: unknown[] = slides.flatMap((s, i) => [
           {
             createSlide: {
               objectId: `slide_${i}_root`,
@@ -291,6 +294,10 @@ export function googleWriteTools(getToken: GetToken): Record<string, unknown> {
             : []),
           ...(s.body ? [{ insertText: { objectId: `slide_${i}_body`, text: s.body } }] : []),
         ]);
+        // presentations.create seeds a blank first slide; drop it (after the
+        // real slides exist) so an N-slide input yields an N-slide deck.
+        const initialSlide = pres.slides?.[0]?.objectId;
+        if (initialSlide) requests.push({ deleteObject: { objectId: initialSlide } });
         await gjson(getToken, `${SLIDES_URL}/${pres.presentationId}:batchUpdate`, { requests });
       }
       return {

@@ -181,11 +181,19 @@ describe("google_workspace OAuth", () => {
     expect(await oauth.isAuthorized(principal)).toBe(false);
   });
 
-  it("contributes no tools and answers status", async () => {
+  it("contributes only the gated connect tool and answers status", async () => {
     const gw = connection();
     const opened = await gw.hostFor(["google_workspace"]).open(principal);
-    expect(Object.keys(opened.tools)).toEqual([]);
+    expect(Object.keys(opened.tools)).toEqual(["connect_google_workspace"]);
+    expect(
+      (opened as { toolApproval?: Record<string, string> }).toolApproval,
+    ).toEqual({ connect_google_workspace: "user-approval" });
+    expect((opened as { alwaysActive?: string[] }).alwaysActive).toEqual([
+      "connect_google_workspace",
+    ]);
     await opened.close();
+    const notPicked = await gw.hostFor(["other"]).open(principal);
+    expect(Object.keys(notPicked.tools)).toEqual([]);
     const status = await gw.status(principal);
     expect(status).toEqual([
       expect.objectContaining({ name: "google_workspace", oauth: true, authorized: false }),
@@ -244,12 +252,36 @@ describe("google_workspace_write (gmail_send)", () => {
     );
   });
 
-  it("contributes the write tools, ALL approval-gated, only when picked", async () => {
+  const CONNECT = "connect_google_workspace_write";
+
+  it("unauthorized: exposes ONLY the gated, always-active connect tool", async () => {
     const gw = writeConnection();
     const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
-    expect(Object.keys(opened.tools).sort()).toEqual([...WRITE_TOOLS].sort());
+    expect(Object.keys(opened.tools)).toEqual([CONNECT]);
+    expect(
+      (opened as { toolApproval?: Record<string, string> }).toolApproval,
+    ).toEqual({ [CONNECT]: "user-approval" });
+    expect((opened as { alwaysActive?: string[] }).alwaysActive).toEqual([CONNECT]);
+    // The connect tool itself just acknowledges — OAuth rides on the approval.
+    expect(await (opened.tools[CONNECT] as ExecutableTool).execute({})).toEqual({
+      connected: true,
+      connection: "google_workspace_write",
+    });
+  });
+
+  it("authorized: contributes the write tools, ALL approval-gated, only when picked", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        tokenResponse({ access_token: "at", expires_in: 3600, refresh_token: "rt" }),
+      ),
+    );
+    const gw = writeConnection();
+    await authorizeWrite(gw);
+    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
+    expect(Object.keys(opened.tools).sort()).toEqual([...WRITE_TOOLS, CONNECT].sort());
     const approval = (opened as { toolApproval?: Record<string, string> }).toolApproval!;
-    for (const name of WRITE_TOOLS) expect(approval[name]).toBe("user-approval");
+    for (const name of [...WRITE_TOOLS, CONNECT]) expect(approval[name]).toBe("user-approval");
     await opened.close();
 
     const notPicked = await gw.hostFor(["other_connection"]).open(principal);
@@ -286,18 +318,6 @@ describe("google_workspace_write (gmail_send)", () => {
     expect(rfc822).not.toContain("Bcc:");
     const body64 = rfc822.split("\r\n\r\n")[1]!;
     expect(Buffer.from(body64, "base64").toString("utf8")).toBe("terve maailma");
-  });
-
-  it("execute fails with a connect hint when not authorized", async () => {
-    const gw = writeConnection();
-    const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
-    await expect(
-      (opened.tools.gmail_send as ExecutableTool).execute({
-        to: "a@example.com",
-        subject: "s",
-        body: "b",
-      }),
-    ).rejects.toThrow(/not connected/);
   });
 
   it("buildRawEmail strips CRLF from address fields (header injection)", () => {
@@ -380,8 +400,11 @@ describe("google_workspace_write (gmail_send)", () => {
     expect(JSON.parse(String(call[1]!.body))).toEqual({ values: [["a", "b"]] });
   });
 
-  it("gslides_create builds slides with 5+ char object ids and fills placeholders", async () => {
-    const fetchMock = apiMock(() => ({ presentationId: "pres-1" }));
+  it("gslides_create builds slides, fills placeholders, and drops the default blank slide", async () => {
+    const fetchMock = apiMock(() => ({
+      presentationId: "pres-1",
+      slides: [{ objectId: "initial_blank" }],
+    }));
     const gw = writeConnection();
     await authorizeWrite(gw);
     const opened = await gw.hostFor(["google_workspace_write"]).open(principal);
@@ -399,5 +422,8 @@ describe("google_workspace_write (gmail_send)", () => {
     for (const id of ids) expect(id.length).toBeGreaterThanOrEqual(5);
     expect(requests.some((r) => r.insertText?.text === "Intro")).toBe(true);
     expect(requests.some((r) => r.insertText?.text === "Welcome")).toBe(true);
+    // The API's seeded blank slide is deleted AFTER the real slides exist, so
+    // a 1-slide input yields a 1-slide deck (never an empty one mid-batch).
+    expect(requests.at(-1)).toEqual({ deleteObject: { objectId: "initial_blank" } });
   });
 });

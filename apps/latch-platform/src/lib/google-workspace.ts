@@ -5,6 +5,7 @@ import type {
   McpOAuth,
   StartResult,
 } from "@intentface/latch-mcp";
+import { tool, jsonSchema } from "ai";
 import { googleWriteTools } from "./google-workspace-tools";
 
 /**
@@ -206,6 +207,28 @@ function createGoogleOAuthCore<P>(opts: GoogleOAuthCoreOpts<P>) {
   return { oauth, readTokens, exchange, accessTokenFor };
 }
 
+/**
+ * The synthetic auth tool, mirroring the MCP registry's `connect_<name>`:
+ * gated `user-approval` and always active, so an agent whose connection isn't
+ * authorized pauses the turn for OAuth (approve → authorize → callback
+ * auto-approves → resume) instead of failing mid-task. Present even when
+ * authorized so an approved historical call can still execute on resume.
+ */
+function connectTool(name: string, description: string) {
+  return tool({
+    description:
+      `Connect the "${name}" integration (${description}). The user must ` +
+      `authorize access first — calling this prompts them to connect. Only ` +
+      `call it when ${name}'s own tools are not already available.`,
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async () => ({ connected: true, connection: name }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // google_workspace — read-only mounts, no tools
 // ---------------------------------------------------------------------------
@@ -240,13 +263,24 @@ export function createGoogleWorkspaceConnection<P>(
 } {
   const core = createGoogleOAuthCore({ ...opts, name: READ_NAME, scopes: READ_SCOPES });
 
+  // No real tools (the mounts are the interface), but the gated connect tool
+  // still rides along so an agent can prompt the user to authorize the mounts
+  // in-chat instead of dead-ending on an empty `ls /`.
+  const source = {
+    open: async () => ({
+      tools: { [`connect_${READ_NAME}`]: connectTool(READ_NAME, READ_DESCRIPTION) },
+      toolApproval: { [`connect_${READ_NAME}`]: "user-approval" },
+      alwaysActive: [`connect_${READ_NAME}`],
+      close: async () => {},
+    }),
+  };
   const emptySource = {
     open: async () => ({ tools: {}, close: async () => {} }),
   };
 
   return {
-    host: emptySource,
-    hostFor: () => emptySource,
+    host: source,
+    hostFor: (names) => (names.includes(READ_NAME) ? source : emptySource),
     names: [READ_NAME],
     oauth: (name) => (name === READ_NAME ? core.oauth : undefined),
 
@@ -320,11 +354,21 @@ export function createGoogleWorkspaceWriteConnection<P>(
   // google-workspace-tools.ts. Built per open(principal) so the tenant is
   // bound in closure — the source is opened fresh each turn. EVERY tool is
   // gated by default (the agent editor can still surface/override that).
-  const sourceFor = (principal: P) => {
-    const tools = googleWriteTools(() => core.accessTokenFor(principal));
+  //
+  // Mirrors the MCP registry's auth model: the real write tools appear only
+  // once the caller has authorized; the gated `connect_<name>` tool is always
+  // present so an unauthorized call pauses the turn for OAuth instead of
+  // failing with "not connected".
+  const openFor = async (principal: P) => {
+    const writeTools = (await core.oauth.isAuthorized(principal))
+      ? googleWriteTools(() => core.accessTokenFor(principal))
+      : {};
+    const connect = `connect_${WRITE_NAME}`;
+    const tools = { ...writeTools, [connect]: connectTool(WRITE_NAME, WRITE_DESCRIPTION) };
     return {
       tools,
       toolApproval: Object.fromEntries(Object.keys(tools).map((k) => [k, "user-approval"])),
+      alwaysActive: [connect],
       close: async () => {},
     };
   };
@@ -334,11 +378,8 @@ export function createGoogleWorkspaceWriteConnection<P>(
   };
 
   return {
-    host: { open: async (principal: P) => sourceFor(principal) },
-    hostFor: (names) =>
-      names.includes(WRITE_NAME)
-        ? { open: async (principal: P) => sourceFor(principal) }
-        : emptySource,
+    host: { open: openFor },
+    hostFor: (names) => (names.includes(WRITE_NAME) ? { open: openFor } : emptySource),
     names: [WRITE_NAME],
     oauth: (name) => (name === WRITE_NAME ? core.oauth : undefined),
 

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RAMResource, MountMode, type Workspace } from "@struktoai/mirage-node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMirageWorkspace, createMirageSession } from "./mirage";
 
 /**
@@ -140,5 +140,85 @@ describe("createMirageSession", () => {
     const session = createMirageSession({ workspaceDir: await scratchDir() });
     const ls = await session.run({ command: "ls /" });
     for (const name of GOOGLE_MOUNTS) expect(ls.stdout).not.toContain(name);
+  });
+
+  // The public-channels-only boundary: bot tokens carry im:* (for the Slack
+  // CHAT channel), so the unfiltered resource would expose every user's DMs
+  // with the bot to any org member. These assertions run offline — the root
+  // listing and path rejections never hit the Slack API.
+  describe("/slack public-channels-only filter", () => {
+    const slackSession = async () =>
+      createMirageSession({
+        workspaceDir: await scratchDir(),
+        slackToken: "xoxb-fake-token",
+      });
+
+    it("blocks dms/ and users/ content at the API level (shell path)", async () => {
+      const session = await slackSession();
+      // The root listing's dms/users names are static folder stubs; what
+      // matters is that their CONTENT is unreachable. Depending on the index
+      // state the listing either errors (transport rejected the im/mpim or
+      // users.* call) or comes back empty — it must never surface entries.
+      for (const p of ["/slack/dms", "/slack/users", "/slack/dms/someone__D123"]) {
+        const r = await session.run({ command: `ls ${p}` });
+        expect(r.exitCode !== 0 || r.stdout.trim() === "").toBe(true);
+      }
+      expect(await session.readTextFile({ path: "/slack/users/u__U1.json" })).toBeNull();
+    });
+
+    it("transport allow-list: DM listing, history, users, search all rejected", async () => {
+      const { PublicChannelsSlackResource } = await import("./mirage");
+      const res = new PublicChannelsSlackResource({ token: "xoxb-fake" });
+      const t = res.accessor.transport;
+      await expect(t.call("conversations.list", { types: "im,mpim" })).rejects.toThrow(
+        /public-channels-only/,
+      );
+      await expect(t.call("conversations.history", { channel: "D12345" })).rejects.toThrow(
+        /public-channels-only/,
+      );
+      for (const endpoint of ["users.list", "users.info", "search.messages", "chat.postMessage"]) {
+        await expect(t.call(endpoint)).rejects.toThrow(/public-channels-only/);
+      }
+    });
+
+    it("unregisters the server-side search/profile commands", async () => {
+      const session = await slackSession();
+      for (const cmd of [
+        "slack-search hello",
+        "slack-get-users",
+        "slack-get-user-profile U123",
+      ]) {
+        const r = await session.run({ command: cmd });
+        expect(r.exitCode).not.toBe(0);
+        expect(r.stderr).toMatch(/command not found/i);
+      }
+    });
+
+    it("transport allow-list: channel listings pass through narrowed to public_channel", async () => {
+      const requests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          requests.push(`${String(url)} ${String(init?.body ?? "")}`);
+          return new Response(JSON.stringify({ ok: true, channels: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }),
+      );
+      try {
+        // Construct AFTER stubbing — the transport captures fetch at build time.
+        const { PublicChannelsSlackResource } = await import("./mirage");
+        const res = new PublicChannelsSlackResource({ token: "xoxb-fake" });
+        await res.accessor.transport.call("conversations.list", {
+          types: "public_channel,private_channel",
+        });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      const wire = requests.join("\n");
+      expect(wire).toContain("public_channel");
+      expect(wire).not.toContain("private_channel");
+    });
   });
 });

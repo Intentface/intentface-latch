@@ -9,8 +9,10 @@ import {
   GDocsResource,
   GSheetsResource,
   GSlidesResource,
+  SlackAccessor,
   MountMode,
   type MountSpec,
+  type PathSpec,
 } from "@struktoai/mirage-node";
 import type { Experimental_SandboxSession, Experimental_SandboxProcess } from "ai";
 import type { GoogleMountCreds } from "../google-workspace";
@@ -65,6 +67,122 @@ const oneChunk = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
     },
   });
 
+type SlackTransport = SlackResource["accessor"]["transport"];
+
+/**
+ * mirage's Slack layout exposes `dms/` (every user's private conversation
+ * with the bot — the token carries `im:read`/`im:history` for the Slack CHAT
+ * channel, not for browsing) and `users/` profiles. Latch's boundary for the
+ * mount is PUBLIC CHANNELS ONLY.
+ *
+ * Enforcement is at the TRANSPORT level — mirage's shell commands close over
+ * the raw IO table at module load, so path filters on the resource class (or
+ * its registered ops) never see `ls`/`cat`/`grep` traffic. Every Slack API
+ * call, from every dispatch path, flows through `accessor.transport`, so the
+ * subclass swaps in an allow-list transport:
+ * - `conversations.list` → forced to `types=public_channel` (DM/mpim listings
+ *   are rejected, private channels never requested);
+ * - `conversations.history` → public-channel ids (`C…`) only;
+ * - everything else (users.*, search.*, chat.*, reactions.*) → rejected.
+ * The fs-level guards below are defense in depth for the `ws.fs` path, and
+ * the reach-around commands are unregistered so agents don't see dead tools.
+ * Write commands (post/reply/react) are already blocked by MountMode.READ.
+ */
+export class PublicChannelsSlackResource extends SlackResource {
+  /** Commands that hit Slack APIs directly, bypassing path-based reads. */
+  private static readonly BLOCKED_COMMANDS = new Set([
+    "slack-search",
+    "slack-get-users",
+    "slack-get-user-profile",
+  ]);
+
+  constructor(config: ConstructorParameters<typeof SlackResource>[0]) {
+    super(config);
+    const real = this.accessor.transport;
+    const blocked = (endpoint: string) =>
+      new Error(
+        `public-channels-only /slack mount: Slack API "${endpoint}" is not allowed`,
+      );
+    const guarded: SlackTransport = {
+      call: async (endpoint, params, body) => {
+        if (endpoint === "conversations.list") {
+          const types = (params?.types ?? "")
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean);
+          // Channel listings only (the DM listing asks for im/mpim) — and
+          // always narrowed to public channels.
+          if (types.length === 0 || !types.every((t) => t.endsWith("_channel"))) {
+            throw blocked(`${endpoint}?types=${params?.types ?? ""}`);
+          }
+          return real.call(endpoint, { ...params, types: "public_channel" }, body);
+        }
+        if (endpoint === "conversations.history") {
+          // DM ids start with D, legacy private groups with G.
+          if (!(params?.channel ?? "").startsWith("C")) throw blocked(endpoint);
+          return real.call(endpoint, params, body);
+        }
+        throw blocked(endpoint);
+      },
+      // File bytes are only reachable via messages in listable channels.
+      ...(real.downloadFile ? { downloadFile: (url: string) => real.downloadFile!(url) } : {}),
+    };
+    // `accessor` is a readonly field on the base class; swap it wholesale so
+    // commands, ops, fs, and search all use the guarded transport.
+    (this as { accessor: SlackResource["accessor"] }).accessor = new SlackAccessor(guarded);
+  }
+
+  private static key(p: PathSpec): string {
+    return (p.resourcePath ?? "").replace(/^\/+/, "");
+  }
+
+  private static allowed(p: PathSpec): boolean {
+    const key = PublicChannelsSlackResource.key(p);
+    return key === "" || key === "channels" || key.startsWith("channels/");
+  }
+
+  private static assertAllowed(p: PathSpec): void {
+    if (!PublicChannelsSlackResource.allowed(p)) {
+      const e = new Error(`ENOENT: ${p.virtual}`) as Error & { code: string };
+      e.code = "ENOENT";
+      throw e;
+    }
+  }
+
+  override commands(): ReturnType<SlackResource["commands"]> {
+    return super
+      .commands()
+      .filter((c) => !PublicChannelsSlackResource.BLOCKED_COMMANDS.has(c.name));
+  }
+
+  override async readdir(p: PathSpec): Promise<string[]> {
+    PublicChannelsSlackResource.assertAllowed(p);
+    const names = await super.readdir(p);
+    // Root listing advertises dms/ and users/ — hide everything but channels.
+    return PublicChannelsSlackResource.key(p) === ""
+      ? names.filter((n) => n.split("/").pop() === "channels")
+      : names;
+  }
+
+  override readFile(p: PathSpec): ReturnType<SlackResource["readFile"]> {
+    PublicChannelsSlackResource.assertAllowed(p);
+    return super.readFile(p);
+  }
+
+  override stat(p: PathSpec): ReturnType<SlackResource["stat"]> {
+    PublicChannelsSlackResource.assertAllowed(p);
+    return super.stat(p);
+  }
+
+  override async glob(
+    paths: readonly PathSpec[],
+    prefix?: string,
+  ): Promise<PathSpec[]> {
+    const results = await super.glob(paths, prefix);
+    return results.filter((p) => PublicChannelsSlackResource.allowed(p));
+  }
+}
+
 /**
  * Build a hardened mirage Workspace: read-only default mode, vfs-only
  * runtimes, curl/wget unregistered on every mount. Exported so tests exercise
@@ -108,7 +226,10 @@ export function createMirageSession(opts: {
       [WORKSPACE]: [new DiskResource({ root: opts.workspaceDir }), MountMode.WRITE],
     };
     if (opts.slackToken) {
-      mounts["/slack"] = [new SlackResource({ token: opts.slackToken }), MountMode.READ];
+      mounts["/slack"] = [
+        new PublicChannelsSlackResource({ token: opts.slackToken }),
+        MountMode.READ,
+      ];
     }
     if (opts.google) {
       // refreshFn keeps the client secret on our side; mirage only ever holds
