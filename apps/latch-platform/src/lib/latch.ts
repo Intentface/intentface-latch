@@ -3,9 +3,8 @@ import {
   createRuntime,
   createVault,
   defineContext,
-  mergeConnections
-  
-  
+  mergeConnections,
+  mergeToolSources,
 } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
@@ -32,7 +31,7 @@ import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
 import { createAgentStore, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
-import { createSlackStore, migrateSlack  } from "./slack-store";
+import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
 import { createTelegramStore, migrateTelegram } from "./telegram-store";
 import type {TelegramStore} from "./telegram-store";
@@ -47,7 +46,11 @@ import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
 import { loadModelCatalog  } from "./models";
 import type {ModelInfo} from "./models";
-import { resolveSandbox, harnessTools } from "./sandbox";
+import { createSandboxResolver, harnessTools } from "./sandbox";
+import {
+  createGoogleWorkspaceConnection,
+  createGoogleWorkspaceWriteConnection,
+} from "./google-workspace";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";
 
@@ -188,9 +191,62 @@ export async function getLatch(): Promise<{
       console.warn(`MCP "${name}" skipped:`, err instanceof Error ? err.message : err),
   });
 
+  // Google Workspace OAuth: the tool-less read connection (mirage's read-only
+  // mounts ARE the interface) and its write companion (approval-gated
+  // gmail_send, separate consent/grant so the mount token never gains write
+  // scopes). Both need the same pre-registered OAuth client (no DCR), separate
+  // from the Google login and Calendar clients. Omitted (no client id) → not
+  // loaded.
+  const googleClient = process.env.GOOGLE_WORKSPACE_CLIENT_ID
+    ? {
+        vault,
+        clientId: process.env.GOOGLE_WORKSPACE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_WORKSPACE_CLIENT_SECRET ?? "",
+        callbackBaseUrl: `${baseURL}/api/latch/connections`,
+      }
+    : undefined;
+  const googleWorkspace = googleClient
+    ? createGoogleWorkspaceConnection<Principal>(googleClient)
+    : undefined;
+  const googleExtras = googleClient
+    ? [googleWorkspace!, createGoogleWorkspaceWriteConnection<Principal>(googleClient)]
+    : [];
+
+  // The code-declared built-ins across kinds (MCP + the google_workspace
+  // pair) — one registry so the Connections page status list, the handler
+  // routes, tool resolution, and any registry consumer see them all like any
+  // other built-in.
+  const builtinConnections: McpConnections<Principal> =
+    googleExtras.length === 0
+      ? connections
+      : {
+          host: connections.host,
+          hostFor: (names) =>
+            mergeToolSources(
+              connections.hostFor(names),
+              ...googleExtras.map((g) => g.hostFor(names)),
+            ),
+          names: [...connections.names, ...googleExtras.flatMap((g) => g.names)],
+          oauth: (name) =>
+            googleExtras.find((g) => g.names.includes(name))?.oauth(name) ??
+            connections.oauth(name),
+          status: async (p) =>
+            (
+              await Promise.all([
+                connections.status(p),
+                ...googleExtras.map((g) => g.status(p)),
+              ])
+            ).flat(),
+          testTools: (name, p) =>
+            googleExtras.find((g) => g.names.includes(name))?.testTools(name, p) ??
+            connections.testTools(name, p),
+        };
+
   // The full connection registry across kinds — also used to enumerate a
-  // connection's tools for the agent editor.
-  const allConnections = mergeConnections(connections, dynamic);
+  // connection's tools for the agent editor. (google_workspace contributes no
+  // tools — the mounts are its interface; google_workspace_write contributes
+  // the approval-gated gmail_send.)
+  const allConnections = mergeConnections(builtinConnections, dynamic);
 
   const runtime = createRuntime<Principal, Ctx>({
     storage,
@@ -213,8 +269,22 @@ export async function getLatch(): Promise<{
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash
-    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY.
-    sandbox: resolveSandbox,
+    // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY; mirage
+    // (opt-in) mounts the agent's Slack app read-only when one is bound.
+    sandbox: createSandboxResolver({
+      slackTokenForAgent: async (agent, principal) => {
+        const app = (await slackStore.listForOrg(principal.orgId)).find(
+          (a) => a.agent === agent,
+        );
+        if (!app) return null;
+        return (
+          (await credentials.get(principal, slackVaultKeys(app.appId).botToken, "org")) ??
+          null
+        );
+      },
+      googleForUser: async (principal) =>
+        (await googleWorkspace?.mountCredsFor(principal)) ?? null,
+    }),
     harnessTools,
     // Native provider web tools (search/fetch) for agents that opt in.
     resolveProviderTools,
@@ -226,15 +296,20 @@ export async function getLatch(): Promise<{
   // connections, plus the UI-added ones dispatched by name. So `connect`,
   // authorize/callback, status, and test work for dynamic OAuth connections too.
   const handlerConnections: McpConnections<Principal> = {
-    host: connections.host,
-    hostFor: (names) => connections.hostFor(names),
-    names: connections.names,
+    host: builtinConnections.host,
+    hostFor: (names) => builtinConnections.hostFor(names),
+    names: builtinConnections.names,
     oauth: (name) =>
-      connections.names.includes(name) ? connections.oauth(name) : dynamic.oauth(name),
-    status: async (p) => [...(await connections.status(p)), ...(await dynamic.status(p))],
+      builtinConnections.names.includes(name)
+        ? builtinConnections.oauth(name)
+        : dynamic.oauth(name),
+    status: async (p) => [
+      ...(await builtinConnections.status(p)),
+      ...(await dynamic.status(p)),
+    ],
     testTools: (name, p) =>
-      connections.names.includes(name)
-        ? connections.testTools(name, p)
+      builtinConnections.names.includes(name)
+        ? builtinConnections.testTools(name, p)
         : dynamic.testTools(name, p),
   };
 
@@ -264,7 +339,9 @@ export async function getLatch(): Promise<{
 
   cached = {
     runtime,
-    connections,
+    // The merged built-ins (MCP + google_workspace) — server fns like the
+    // Connections page's status list read this, not the raw MCP set.
+    connections: builtinConnections,
     credentials,
     connectionStore,
     dynamic,

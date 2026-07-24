@@ -10,6 +10,12 @@ import tailwindcss from "@tailwindcss/vite"
 // instead of the plain `dist/` that Vercel's static preset would 404 on.
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
+  // Keep mirage-node out of the server bundle: it loads tree-sitter .wasm and
+  // several deps via runtime require, which only works from a real
+  // node_modules layout. `traceDeps` externalizes it; the tracer misses its
+  // dynamic-require edges, so scripts/copy-mirage-deps.mjs (postbuild) copies
+  // the full dependency closure into the server output.
+  nitro: { traceDeps: ["@struktoai/mirage-node*"] },
   plugins: [devtools(), tailwindcss(), tanstackStart(), nitro(), viteReact()],
 })
 
