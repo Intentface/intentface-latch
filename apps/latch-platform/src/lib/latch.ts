@@ -1,17 +1,19 @@
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import {
   createRuntime,
   createVault,
   defineContext,
   mergeConnections
-  
-  
+
+
 } from "@intentface/latch-core";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
+  schema,
 } from "@intentface/latch-drizzle";
 import { createMcpConnections  } from "@intentface/latch-mcp";
 import type {McpConnections} from "@intentface/latch-mcp";
@@ -104,9 +106,10 @@ export async function getLatch(): Promise<{
   // (`[org]`) — used for org-level credentials.
   const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
 
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const db = drizzle(client, { schema }); // adapters take a pre-built drizzle db
+  const storage = createSqliteAdapter<Principal>(db, { owner });
   const vault = createVault<Principal>({
-    store: createSqliteSecretStore<Principal>(client, { owner }),
+    store: createSqliteSecretStore<Principal>(db, { owner }),
     // Dev fallback is a deterministic 32-byte key; set LATCH_VAULT_KEY in prod.
     masterKey: process.env.LATCH_VAULT_KEY ?? btoa("latch-dev-vault-key-32-bytes!!!!"),
   });
