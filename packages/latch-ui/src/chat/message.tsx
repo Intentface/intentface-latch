@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "motion/react";
-import { Check, ChevronDown, CircleHelp, Copy, FileText, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Copy, FileText, Mic, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
@@ -59,6 +59,7 @@ export function Message({
   className?: string;
 }) {
   const isUser = message.role === "user";
+  const voice = message.metadata?.voice;
   const segments = getSegmentedParts(message.parts);
   const { sources, hasSources } = getSourcesInfo(message.parts);
   const { text: copyText } = getTextInfo(segments);
@@ -164,6 +165,13 @@ export function Message({
         })}
       </div>
 
+      {isUser && voice && (
+        <span className="text-ink-tertiary flex items-center gap-1 text-xs">
+          <Mic className="size-3 shrink-0" />
+          Voice message · {formatDuration(voice.durationMs)}
+        </span>
+      )}
+
       {!isUser &&
         answered.map((a) => (
           <Collapsible.Root key={a.toolCallId} className="group/ask w-full">
@@ -262,6 +270,14 @@ export function Message({
       )}
     </motion.div>
   );
+}
+
+/** Format a duration in ms as m:ss (e.g. 42000 → "0:42"). */
+function formatDuration(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /** Ghost icon button that copies `text` and briefly shows a check. */
