@@ -7,7 +7,7 @@ import {
   type StorageAdapter,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, toolCallMock, owner, type Principal } from "./setup.js";
+import { assert, latchDb, toolCallMock, owner, type Principal } from "./setup.js";
 import { tools } from "./tools.js";
 
 /**
@@ -23,7 +23,7 @@ import { tools } from "./tools.js";
 async function countAssistantAppends(durable: boolean): Promise<number> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const base = createSqliteAdapter<Principal>(client, { owner });
+  const base = createSqliteAdapter<Principal>(latchDb(client), { owner });
 
   // Spy: count appendMessages calls that include an assistant message.
   let assistantAppends = 0;

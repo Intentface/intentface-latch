@@ -6,6 +6,8 @@ import {
   jsonb,
   doublePrecision,
   index,
+  primaryKey,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 /** The v1 tables, Postgres dialect. Same shape as SQLite; jsonb for parts/metadata,
@@ -18,6 +20,8 @@ export const chats = pgTable(
     owner: text("owner").notNull(),
     agent: text("agent").notNull(),
     title: text("title"),
+    /** Chat kind: 'user' (default) vs 'internal' sub-threads (ChatRecord.kind). */
+    kind: text("kind").notNull().default("user"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -27,7 +31,7 @@ export const chats = pgTable(
 export const messages = pgTable(
   "latch_messages",
   {
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     chatId: text("chat_id").notNull(),
     runId: text("run_id"),
     seq: integer("seq").notNull(),
@@ -36,7 +40,15 @@ export const messages = pgTable(
     metadata: jsonb("metadata"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("latch_messages_chat_idx").on(t.chatId, t.seq)],
+  (t) => [
+    // Message ids are client/stream-generated, so they're only unique WITHIN a
+    // chat — a global PK on `id` would let an upsert in one chat overwrite a
+    // same-id row in another owner's chat. Scope the identity to the chat.
+    primaryKey({ columns: [t.chatId, t.id] }),
+    // One row per (chat, seq): guards concurrent appenders computing the same
+    // next seq. Doubles as the (chat_id, seq) read-ordering index.
+    uniqueIndex("latch_messages_chat_seq_idx").on(t.chatId, t.seq),
+  ],
 );
 
 export const runs = pgTable(
@@ -54,6 +66,8 @@ export const runs = pgTable(
     attempt: integer("attempt"),
     usageInputTokens: integer("usage_input_tokens"),
     usageOutputTokens: integer("usage_output_tokens"),
+    usageCacheReadTokens: integer("usage_cache_read_tokens"),
+    usageCacheWriteTokens: integer("usage_cache_write_tokens"),
     costTotal: doublePrecision("cost_total"),
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }).notNull(),
@@ -106,6 +120,7 @@ export const schedules = pgTable(
     agent: text("agent").notNull(),
     identity: jsonb("identity"),
     cron: text("cron"),
+    timezone: text("timezone"),
     prompt: text("prompt").notNull(),
     nextRunAt: bigint("next_run_at", { mode: "number" }).notNull(),
     lastRunAt: bigint("last_run_at", { mode: "number" }),

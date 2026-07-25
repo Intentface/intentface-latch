@@ -72,6 +72,10 @@ function fromB64(b64: string): Uint8Array {
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// `deriveMasterKey` (passphrase → KEK via scrypt) lives in
+// `@intentface/latch-core/node` — it needs `node:crypto`, and importing it here
+// would make the package root unusable on edge/serverless runtimes.
+
 // Web Crypto's lib types narrow BufferSource to ArrayBuffer-backed views; our
 // Uint8Arrays are structurally fine, so coerce at the crypto call boundary.
 const bs = (u: Uint8Array): BufferSource => u as unknown as BufferSource;

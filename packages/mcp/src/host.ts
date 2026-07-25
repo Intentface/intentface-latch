@@ -5,6 +5,11 @@ import {
   type OAuthClientProvider,
 } from "@ai-sdk/mcp";
 import type { SecretResolver } from "@intentface/latch-core";
+import {
+  isBlockedHost,
+  isBlockedResolved,
+  isHostAllowed,
+} from "@intentface/latch-net";
 import type { FetchFunction } from "./oauth-fetch.js";
 
 /**
@@ -60,6 +65,102 @@ export function needsMcpApproval(
   return a.destructiveHint === true || a.readOnlyHint === false;
 }
 
+/** Tuning for {@link nameHeuristicApproval} — extra verbs merged into the defaults. */
+export interface NameHeuristicOptions {
+  /** Verbs that mark a write (added to the built-in write list). */
+  writeVerbs?: string[];
+  /** Verbs that mark a destructive op (added to the built-in destructive list). */
+  destructiveVerbs?: string[];
+}
+
+/** Default verbs a tool name may start with to count as a write. */
+const DEFAULT_WRITE_VERBS = [
+  "create",
+  "update",
+  "delete",
+  "write",
+  "remove",
+  "set",
+  "put",
+  "post",
+  "patch",
+  "add",
+  "insert",
+  "edit",
+  "move",
+  "assign",
+  "send",
+  "cancel",
+  "complete",
+  "upsert",
+  "publish",
+  "share",
+  "invite",
+  "revoke",
+  "merge",
+  "duplicate",
+  "copy",
+  "archive",
+  "destroy",
+  "drop",
+  "purge",
+];
+
+/** Default verbs a tool name may start with to count as destructive. */
+const DEFAULT_DESTRUCTIVE_VERBS = [
+  "delete",
+  "remove",
+  "drop",
+  "destroy",
+  "archive",
+  "purge",
+];
+
+/** Normalize CamelCase/PascalCase (`CreateDeal`) → snake_case (`create_deal`). */
+function normalizeToolName(s: string): string {
+  return s.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * A generic approval predicate that gates a tool when either its MCP
+ * annotations say it's destructive/non-read-only (the same rule
+ * {@link needsMcpApproval} applies for `"destructive"`), OR — when the server
+ * ships no annotations — the tool's name (normalized to snake_case) starts with
+ * a write/destructive verb. Pure function; the returned predicate is stateless.
+ *
+ * Use it as an `approval` policy (or as a building block) for MCP servers whose
+ * tools lack sensitivity hints.
+ */
+export function nameHeuristicApproval(
+  opts?: NameHeuristicOptions,
+): (tool: McpToolInfo) => boolean {
+  const verbs = Array.from(
+    new Set([
+      ...DEFAULT_WRITE_VERBS,
+      ...DEFAULT_DESTRUCTIVE_VERBS,
+      ...(opts?.writeVerbs ?? []),
+      ...(opts?.destructiveVerbs ?? []),
+    ]),
+  );
+  const pattern = new RegExp(
+    `^(${verbs.map(escapeRegExp).join("|")})([_\\W]|$)`,
+    "i",
+  );
+  return (tool: McpToolInfo): boolean => {
+    const a = tool.annotations ?? {};
+    // Annotations are authoritative when present — reuse the destructive rule.
+    if (a.readOnlyHint !== undefined || a.destructiveHint !== undefined) {
+      return needsMcpApproval("destructive", tool);
+    }
+    // No hints — fall back to the tool-name verb heuristic.
+    return pattern.test(normalizeToolName(tool.name));
+  };
+}
+
 /**
  * A connection is either a URL (untrusted/config-driven → SSRF allowlist + auth
  * applies) or a developer-provided transport instance (trusted in-process; e.g.
@@ -81,8 +182,22 @@ export type McpConnection =
        * `createOAuthDiscoveryFetch`) so discovery normalization is consistent.
        */
       fetch?: FetchFunction;
+      /**
+       * Permit this connection to reach a private/internal address. By default
+       * the host rejects private/loopback/link-local IPs and DNS-rebinding
+       * (a name that resolves private) even when the host is on the allowlist.
+       * Set `true` only for a trusted local/in-cluster MCP server.
+       */
+      allowPrivateHost?: boolean;
       /** Which tools require approval (default: respect MCP destructive hints). */
       approval?: McpApprovalPolicy;
+      /**
+       * Tool visibility filter. When set, a tool for which this returns `false`
+       * is dropped entirely — no agent tool, no approval entry. Use it to hide
+       * tools an approval predicate can't express (e.g. a hard block). Absent →
+       * all of the server's tools are exposed.
+       */
+      visible?: (tool: McpToolInfo) => boolean;
     }
   | {
       name: string;
@@ -90,6 +205,13 @@ export type McpConnection =
       transport: MCPTransport;
       /** Which tools require approval (default: respect MCP destructive hints). */
       approval?: McpApprovalPolicy;
+      /**
+       * Tool visibility filter. When set, a tool for which this returns `false`
+       * is dropped entirely — no agent tool, no approval entry. Use it to hide
+       * tools an approval predicate can't express (e.g. a hard block). Absent →
+       * all of the server's tools are exposed.
+       */
+      visible?: (tool: McpToolInfo) => boolean;
     };
 
 export interface McpHostConfig<P> {
@@ -126,15 +248,9 @@ export interface McpHost<P> {
   open(principal: P): Promise<OpenMcp>;
 }
 
-/** True if `host` is permitted by the allowlist (exact, or `.suffix` subdomain). */
-export function isHostAllowed(host: string, allowed: string[]): boolean {
-  const h = host.toLowerCase();
-  return allowed.some((entry) => {
-    const a = entry.toLowerCase();
-    if (a.startsWith(".")) return h === a.slice(1) || h.endsWith(a);
-    return h === a;
-  });
-}
+// Canonical implementation lives in @intentface/latch-net; re-exported here
+// for callers that historically imported it from this package.
+export { isHostAllowed };
 
 /**
  * Resolve the request headers for a connection. Bearer tokens are read from the
@@ -194,6 +310,19 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
               `MCP host not allowed for this tenant: ${host} (connection "${conn.name}")`,
             );
           }
+          // Defense-in-depth beyond the allowlist: reject private/internal
+          // addresses and DNS rebinding (an allowlisted name that resolves to a
+          // private/link-local IP — e.g. cloud metadata at 169.254.169.254).
+          // Opt out per connection for a trusted local server.
+          if (
+            !conn.allowPrivateHost &&
+            (isBlockedHost(host) || (await isBlockedResolved(host)))
+          ) {
+            await closeAll();
+            throw new Error(
+              `MCP host resolves to a private/internal address: ${host} (connection "${conn.name}"). Set allowPrivateHost to permit a trusted local server.`,
+            );
+          }
         }
         // A connection that can't be opened (down / bad token / no tools) is
         // SKIPPED, not fatal — the agent degrades gracefully without it.
@@ -226,9 +355,13 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
             (defs.tools ?? []).map((t) => [t.name, t.annotations]),
           );
           for (const [name, tool] of Object.entries(serverTools)) {
+            const info: McpToolInfo = { name, annotations: annotations.get(name) };
+            // A hidden tool is dropped entirely (no tool, no approval entry) —
+            // the primitive for a hard block, which approval can't express.
+            if (conn.visible && !conn.visible(info)) continue;
             const key = `${conn.name}_${name}`; // namespace to avoid collisions
             tools[key] = tool;
-            if (needsMcpApproval(conn.approval, { name, annotations: annotations.get(name) })) {
+            if (needsMcpApproval(conn.approval, info)) {
               toolApproval[key] = "user-approval";
             }
           }

@@ -180,12 +180,85 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     opts?: { agent: string },
   ) => unknown;
   /**
-   * Observability seam (kept out of core — no OTEL/vendor dep). Supplies
-   * per-run AI SDK telemetry options, an optional trace wrapper around the
-   * model call, and a post-turn hook (e.g. `@intentface/latch-langfuse`).
+   * Tracing seam (kept out of core — no OTEL/vendor dep). Supplies per-run AI
+   * SDK telemetry options, an optional trace wrapper around the model call, and
+   * a post-turn hook (e.g. `@intentface/latch-langfuse`). This is the OTEL/span
+   * plumbing — the `observability` seam below is for plain event callbacks.
    * Optional — without it, nothing is traced and behavior is unchanged.
    */
   telemetry?: LatchTelemetry<P>;
+  /**
+   * Optional observability seam — consumer telemetry (usage rollups, per-tool
+   * analytics, tracing) attached WITHOUT wrapping `handleChat`. Complements the
+   * built-in `recordUsage` (billing rollup): this is where an app emits its own
+   * events. Fires for subagent turns too — distinguish via `depth` (0 =
+   * top-level). All hooks are fire-and-forget: a thrown/rejected hook is
+   * swallowed so telemetry never breaks a turn. Without it, zero behavior change.
+   */
+  observability?: ObservabilityHooks<P>;
+}
+
+/** Fields common to every observability event. */
+export interface ObservabilityEventBase<P> {
+  principal: P;
+  chatId: string;
+  runId: string;
+  /** The agent (registry key) running this turn. */
+  agent: string;
+  /** Resolved model id for this turn. */
+  modelId: string;
+  /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
+  depth: number;
+}
+
+/** One completed generation step (model call + any tool calls made in it). */
+export interface ObservabilityStepEvent<P> extends ObservabilityEventBase<P> {
+  step: {
+    text?: string;
+    finishReason?: string;
+    usage?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+    toolCalls?: Array<{
+      toolCallId: string;
+      toolName: string;
+      input?: unknown;
+    }>;
+    toolResults?: Array<{
+      toolCallId: string;
+      toolName: string;
+      output?: unknown;
+    }>;
+  };
+}
+
+/** The turn settled. `usage`/`cost` are the turn totals also written to the run. */
+export interface ObservabilityFinishEvent<P> extends ObservabilityEventBase<P> {
+  status: "completed" | "awaiting_input" | "errored";
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+  };
+  cost: number;
+  messages: AppMessage[];
+}
+
+export interface ObservabilityErrorEvent<P> extends ObservabilityEventBase<P> {
+  error: unknown;
+}
+
+export interface ObservabilityHooks<P> {
+  /** After each generation step (model output + the step's tool calls/results). */
+  onStep?: (event: ObservabilityStepEvent<P>) => void | Promise<void>;
+  /** After the turn settles (completed / awaiting_input / errored-on-abort). */
+  onFinish?: (event: ObservabilityFinishEvent<P>) => void | Promise<void>;
+  /** When the turn errors. */
+  onError?: (event: ObservabilityErrorEvent<P>) => void | Promise<void>;
 }
 
 export interface HandleChatInput<P> {
@@ -199,6 +272,13 @@ export interface HandleChatInput<P> {
   message: AppMessage;
   /** Optional original request, passed to context.build. */
   request?: Request;
+  /**
+   * Per-turn request payload, passed to `context.build` and the agent factory.
+   * EPHEMERAL: never persisted with the run (only the principal is stored as
+   * `runs.identity`), so it is absent on resume/cron. Use it for request-scoped
+   * inputs (active document, UI selection, parsed body fields) — never identity.
+   */
+  turnContext?: unknown;
 }
 
 export interface Runtime<P> {
@@ -206,6 +286,29 @@ export interface Runtime<P> {
   listAgents(principal: P): Promise<AgentInfo[]>;
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
+  /**
+   * Run one agent turn from the supplied messages and stream it back, persisting
+   * NOTHING (no chat/run/message/usage rows). The full tool loop, streaming, and
+   * observability hooks all run; durability, history, and HITL round-tripping are
+   * not available. For read-mostly, single-shot loops where a durable chat would
+   * be pure churn (e.g. inline editor assist). Use `handleChat` when you need
+   * history, resume, or approvals.
+   */
+  runTurnStream(input: {
+    agent: string;
+    principal: P;
+    messages: AppMessage[];
+    request?: Request;
+    /** Per-turn request payload (see HandleChatInput.turnContext). */
+    turnContext?: unknown;
+    /** Body format: `ui` (default) SSE UIMessage stream, or `text` plain text. */
+    format?: "ui" | "text";
+    /** Fired with the final assistant text + messages (capture side outputs). */
+    onComplete?: (result: {
+      text: string;
+      messages: AppMessage[];
+    }) => void | Promise<void>;
+  }): Promise<Response>;
   /**
    * Run one agent to completion once, autonomously, in an isolated throwaway
    * thread (no streaming) — for programmatic use like the Agent Builder testing
@@ -229,10 +332,15 @@ export interface Runtime<P> {
     chatId: string;
     principal: P;
   }): Promise<AppMessage[]>;
-  /** The caller's chats, most-recent first (for a chat list / sidebar). */
+  /**
+   * The caller's chats, most-recent first (for a chat list / sidebar).
+   * `kind` filters to one chat kind (e.g. `'user'` to hide the runtime's
+   * internal `sub_…` threads); omitted → all kinds (back-compatible default).
+   */
   listChats(input: {
     principal: P;
     limit?: number;
+    kind?: string;
   }): Promise<ChatRecord[]>;
   /** The caller's runs, most-recent first (status, usage, cost — for an ops view). */
   listRuns(input: {
@@ -281,6 +389,8 @@ export interface Runtime<P> {
     principal: P;
     decisions: ApprovalDecision[];
     request?: Request;
+    /** Per-turn request payload (see HandleChatInput.turnContext). */
+    turnContext?: unknown;
   }): Promise<Response>;
   /**
    * Resume a turn paused on a client-handled tool (no `execute`, e.g.
@@ -294,6 +404,8 @@ export interface Runtime<P> {
     toolCallId: string;
     output: unknown;
     request?: Request;
+    /** Per-turn request payload (see HandleChatInput.turnContext). */
+    turnContext?: unknown;
   }): Promise<Response>;
   /**
    * Schedule an agent to run on a cron expression (or `cron: null` for one-shot,
@@ -365,17 +477,63 @@ const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 /** Sub-thread chat ids start with `sub_` so the host can keep them out of the
  * main chat list (they're nested under the parent's spawn_agent tool calls). */
 const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
+/** Parent-level id for a subagent approval bubbled up via `spawn_agent`. */
+const generateSubApprovalId = createIdGenerator({ prefix: "sapv", separator: "_" });
 /** Recursion ceiling for subagent delegation. */
 const MAX_SUBAGENT_DEPTH = 4;
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
+/** Synthetic run id for an ephemeral (unpersisted) `runTurnStream` turn. */
+const generateRunId = createIdGenerator({ prefix: "run", separator: "_" });
 
 /** A tool/dynamic-tool UI part, narrowed to the approval fields we touch. */
 type ApprovalPart = {
   type: string;
   state?: string;
+  input?: unknown;
   approval?: { id: string; approved?: boolean; reason?: string };
 };
+
+/** A subagent's undecided approval, lifted so the parent turn can surface it. */
+export interface SubagentPending {
+  approvalId: string;
+  toolName: string;
+  summary: string;
+}
+
+/** One-line summary of a gated tool call, for the approval dialog. */
+function summarizeApproval(toolName: string, input: unknown): string {
+  let args = "";
+  try {
+    args = JSON.stringify(input ?? {});
+  } catch {
+    args = "";
+  }
+  if (args.length > 200) args = `${args.slice(0, 200)}…`;
+  return `${toolName}(${args})`;
+}
+
+/** The undecided (`approved === undefined`) approvals in a thread's messages. */
+function collectPendingApprovals(messages: AppMessage[]): SubagentPending[] {
+  const out: SubagentPending[] = [];
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+      if (
+        p.state === "approval-requested" &&
+        p.approval &&
+        p.approval.approved === undefined
+      ) {
+        const toolName = p.type.replace(/^tool-/, "");
+        out.push({
+          approvalId: p.approval.id,
+          toolName,
+          summary: summarizeApproval(toolName, p.input),
+        });
+      }
+    }
+  }
+  return out;
+}
 
 /** The concatenated text of a message's text parts (for a chat title). */
 function firstText(message: AppMessage): string | undefined {
@@ -410,10 +568,33 @@ export class PendingApprovalError extends Error {
   }
 }
 
+/** A bubbled-up subagent approval, carried as a `data-subagent-approval` part. */
+type SubApprovalPart = {
+  type: string;
+  data?: {
+    approvalId: string;
+    subChatId: string;
+    subApprovalIds: string[];
+    spawnToolCallId?: string;
+    summaries: string[];
+    approved?: boolean;
+    reason?: string;
+    resolved?: boolean;
+  };
+};
+
 function hasPendingApproval(messages: AppMessage[]): boolean {
   for (const m of messages) {
-    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
       if (p.state === "approval-requested" && p.approval?.approved === undefined) {
+        return true;
+      }
+      // A bubbled-up subagent approval still awaiting a decision.
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        p.data.approved === undefined
+      ) {
         return true;
       }
     }
@@ -433,17 +614,166 @@ function applyDecisions(
   const changed: AppMessage[] = [];
   for (const m of messages) {
     let touched = false;
-    for (const p of (m.parts ?? []) as ApprovalPart[]) {
+    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
       if (p.state === "approval-requested" && p.approval && byId.has(p.approval.id)) {
         const d = byId.get(p.approval.id)!;
         p.state = "approval-responded";
         p.approval = { ...p.approval, approved: d.approved, reason: d.reason };
         touched = true;
       }
+      // A bubbled-up subagent approval — record the decision on the data part;
+      // applyApproval routes it to the sub thread.
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        byId.has(p.data.approvalId)
+      ) {
+        const d = byId.get(p.data.approvalId)!;
+        p.data = { ...p.data, approved: d.approved, reason: d.reason };
+        touched = true;
+      }
     }
     if (touched) changed.push(m);
   }
   return changed;
+}
+
+/** Overwrite a tool call's result (regardless of current state) — used to fold
+ * a resumed subagent's answer back into the `spawn_agent` call on the parent. */
+function overwriteToolResult(
+  messages: AppMessage[],
+  toolCallId: string,
+  output: unknown,
+): AppMessage[] {
+  const changed: AppMessage[] = [];
+  for (const m of messages) {
+    let touched = false;
+    for (const p of (m.parts ?? []) as ResultPart[]) {
+      if (
+        p.toolCallId === toolCallId &&
+        (p.state === "output-available" || p.state === "input-available")
+      ) {
+        p.state = "output-available";
+        p.output = output;
+        touched = true;
+      }
+    }
+    if (touched) changed.push(m);
+  }
+  return changed;
+}
+
+/** Decided-but-unresolved subagent approvals to route to their sub threads. */
+function collectDecidedSubagentApprovals(
+  messages: AppMessage[],
+): NonNullable<SubApprovalPart["data"]>[] {
+  const out: NonNullable<SubApprovalPart["data"]>[] = [];
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as SubApprovalPart[]) {
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        p.data.approved !== undefined &&
+        !p.data.resolved
+      ) {
+        out.push(p.data);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Re-bubble: append a fresh `data-subagent-approval` part next to a resolved
+ * one (same parent assistant message), for a resumed subagent that paused on
+ * ANOTHER gated tool. The undecided part keeps the parent `awaiting_input`;
+ * deciding it round-trips through `applyApproval` again, so bubbling recurses
+ * for as many rounds as the sub needs.
+ */
+function appendSubagentApprovalPart(
+  messages: AppMessage[],
+  afterApprovalId: string,
+  data: NonNullable<SubApprovalPart["data"]>,
+): AppMessage[] {
+  for (const m of messages) {
+    const parts = (m.parts ?? []) as (SubApprovalPart & { id?: string })[];
+    if (
+      parts.some(
+        (p) =>
+          p.type === "data-subagent-approval" &&
+          p.data?.approvalId === afterApprovalId,
+      )
+    ) {
+      parts.push({
+        type: "data-subagent-approval",
+        id: data.approvalId,
+        data,
+      });
+      m.parts = parts as AppMessage["parts"];
+      return [m];
+    }
+  }
+  return [];
+}
+
+/** Mark a routed subagent approval resolved so it isn't re-processed. */
+function markSubagentApprovalResolved(
+  messages: AppMessage[],
+  approvalId: string,
+): AppMessage[] {
+  const changed: AppMessage[] = [];
+  for (const m of messages) {
+    let touched = false;
+    for (const p of (m.parts ?? []) as SubApprovalPart[]) {
+      if (
+        p.type === "data-subagent-approval" &&
+        p.data &&
+        p.data.approvalId === approvalId
+      ) {
+        p.data = { ...p.data, resolved: true };
+        touched = true;
+      }
+    }
+    if (touched) changed.push(m);
+  }
+  return changed;
+}
+
+/**
+ * The resume paths ({@link applyApproval} / {@link applyToolResult}) re-run the
+ * model from history whose LAST message is the assistant turn that paused — no
+ * fresh user message is appended. If that turn streamed trailing user-facing
+ * text before pausing (e.g. "…ready to create the page but needs your approval
+ * first"), the model projection ends on an assistant message. Some providers
+ * reject that ("This model does not support assistant message prefill. The
+ * conversation must end with a user message.").
+ *
+ * Trim trailing non-tool parts (text/reasoning/step boundaries) that follow the
+ * final tool/approval part of the last assistant message, so the projection ends
+ * on the tool result (a user turn) and the model generates a fresh continuation.
+ * Returns a shallow copy touching only the last message — the persisted history
+ * (with the provisional text) is left intact; this shapes the resumed call only.
+ */
+export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
+  if (messages.length === 0) return messages;
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+  if (last.role !== "assistant") return messages;
+  const parts = (last.parts ?? []) as { type: string }[];
+  // Last part that anchors a model-turn boundary we must keep: a tool call/result
+  // or a bubbled subagent approval. Everything after it is trailing commentary.
+  let keepUntil = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const t = parts[i].type;
+    if (t.startsWith("tool-") || t === "dynamic-tool" || t === "data-subagent-approval") {
+      keepUntil = i;
+      break;
+    }
+  }
+  // No tool/approval anchor, or nothing trailing to drop → leave untouched.
+  if (keepUntil === -1 || keepUntil === parts.length - 1) return messages;
+  const trimmed = { ...last, parts: parts.slice(0, keepUntil + 1) } as AppMessage;
+  return [...messages.slice(0, lastIndex), trimmed];
 }
 
 /** A tool/dynamic-tool UI part, narrowed to the result fields we touch. */
@@ -483,6 +813,20 @@ function recordToolResult(
   return changed;
 }
 
+/** Invoke an observability hook fire-and-forget — a thrown/rejected hook is
+ * swallowed so telemetry never breaks a turn. */
+function fireObs<E>(
+  hook: ((event: E) => void | Promise<void>) | undefined,
+  event: E,
+): void {
+  if (!hook) return;
+  try {
+    void Promise.resolve(hook(event)).catch(() => {});
+  } catch {
+    // synchronous throw from the hook — ignore
+  }
+}
+
 export function createRuntime<P, RC = unknown>(
   config: RuntimeConfig<P, RC>,
 ): Runtime<P> {
@@ -501,12 +845,13 @@ export function createRuntime<P, RC = unknown>(
     agentName: string,
     principal: P,
     request?: Request,
+    turnContext?: unknown,
   ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
-    const runtimeCtx = await config.context.build({ principal, request });
+    const runtimeCtx = await config.context.build({ principal, request, turnContext });
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
     const cfg = factory
-      ? await factory({ runtime: runtimeCtx, principal })
+      ? await factory({ runtime: runtimeCtx, principal, turnContext })
       : await config.dynamicAgents?.resolve(agentName, principal);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
@@ -543,6 +888,30 @@ export function createRuntime<P, RC = unknown>(
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
     /**
+     * Ephemeral turn (`runTurnStream`): stream a full tool-loop turn WITHOUT
+     * persisting anything — no run/lease, no message/run/usage writes. The
+     * observability hooks still fire (usage/analytics), tool sources still
+     * open/close. For read-mostly, single-shot loops (e.g. inline editor assist)
+     * where a durable chat would be pure churn. `run` is a synthetic record.
+     */
+    ephemeral?: boolean;
+    /**
+     * Response body format (ephemeral turns): `ui` (default) → the SSE
+     * UIMessage stream; `text` → a plain `text/plain` stream of the assistant's
+     * text deltas (parity with the AI SDK's `toTextStreamResponse`), for
+     * consumers that render raw text.
+     */
+    responseFormat?: "ui" | "text";
+    /**
+     * Fired once the turn's messages are final (after any persistence), with the
+     * assembled assistant text + the full message list — so an ephemeral caller
+     * can capture side outputs (e.g. tool results) that the text stream drops.
+     */
+    onComplete?: (result: {
+      text: string;
+      messages: AppMessage[];
+    }) => void | Promise<void>;
+    /**
      * Observe the turn's UI chunk stream without consuming it (the response
      * gets a tee'd branch). Used by `runSubagent` to forward a subagent's
      * live output into the parent turn. The observer owns its branch — it
@@ -555,6 +924,7 @@ export function createRuntime<P, RC = unknown>(
     const autoApprove = args.autoApprove ?? false;
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
+    const ephemeral = args.ephemeral ?? false;
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -567,7 +937,7 @@ export function createRuntime<P, RC = unknown>(
     if (dur.enabled && lease) {
       heartbeat = setInterval(() => {
         void storage
-          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs)
+          .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs, lease.fencingToken)
           .then((held) => {
             if (!held) {
               stopHeartbeat();
@@ -683,24 +1053,24 @@ export function createRuntime<P, RC = unknown>(
           required: ["agent", "prompt"],
           additionalProperties: false,
         }),
-        execute: async ({ agent, prompt, threadId }, options) => {
+        execute: async (
+          { agent, prompt, threadId }: { agent: string; prompt: string; threadId?: string },
+          options: { toolCallId?: string; context?: { writer?: TurnWriter } },
+        ) => {
           if (!allowed.has(agent)) return { error: `Not an allowed subagent: ${agent}` };
           // Stream the delegated conversation live into the parent turn (one
           // data part, reconciled in place by id). Pre-generate the sub-thread
           // id so the very first write already carries it.
-          const env = options as
-            | { toolCallId?: string; context?: { writer?: TurnWriter } }
-            | undefined;
-          const writer = env?.context?.writer;
+          const writer = options.context?.writer;
           const subChatId = threadId ?? generateSubchatId();
           let onProgress: ((messages: AppMessage[]) => void) | undefined;
           if (writer) {
             const write = (messages: AppMessage[]) => {
               writer.write({
                 type: "data-subagent-progress",
-                id: `subagent_${env?.toolCallId ?? subChatId}`,
+                id: `subagent_${options.toolCallId ?? subChatId}`,
                 data: {
-                  toolCallId: env?.toolCallId,
+                  toolCallId: options.toolCallId,
                   agent,
                   threadId: subChatId,
                   messages,
@@ -719,14 +1089,44 @@ export function createRuntime<P, RC = unknown>(
               write(messages);
             };
           }
-          return runSubagent({
+          // Propagate the PARENT turn's approval mode: interactive → the subagent
+          // gates its tools (a pending write bubbles up here); autonomous → it
+          // auto-approves.
+          const result = await runSubagent({
             principal,
             agent,
             prompt,
             threadId: subChatId,
             depth: depth + 1,
+            autoApprove,
             onProgress,
           });
+          if (result.pending?.length) {
+            // The subagent paused on a gated tool. Surface it on THIS turn as a
+            // `data-subagent-approval` part (tagged with the sub thread + this
+            // spawn_agent call) so the turn ends `awaiting_input` and
+            // `applyApproval` can route the decision back → resume the sub →
+            // resume here. Raw sub output stays in the sub thread (isolation).
+            const approvalId = generateSubApprovalId();
+            writer?.write({
+              type: "data-subagent-approval",
+              id: approvalId,
+              data: {
+                approvalId,
+                subChatId: result.threadId,
+                subApprovalIds: result.pending.map((p) => p.approvalId),
+                spawnToolCallId: options.toolCallId,
+                summaries: result.pending.map((p) => p.summary),
+              },
+            });
+            return {
+              status: "awaiting_approval",
+              threadId: result.threadId,
+              pending: result.pending.map((p) => p.summary),
+              note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
+            };
+          }
+          return { threadId: result.threadId, answer: result.answer };
         },
       });
       capabilityTools.push("spawn_agent");
@@ -954,16 +1354,40 @@ export function createRuntime<P, RC = unknown>(
           // generate-text step callback: accumulate usage across steps,
           // including the cached-prompt breakdown so cost reflects cache reads.
           onStepEnd: (step: {
+            text?: string;
+            finishReason?: string;
             usage?: {
               inputTokens?: number;
               outputTokens?: number;
               inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
             };
+            toolCalls?: Array<{ toolCallId: string; toolName: string; input?: unknown }>;
+            toolResults?: Array<{ toolCallId: string; toolName: string; output?: unknown }>;
           }) => {
             inputTokens += step.usage?.inputTokens ?? 0;
             outputTokens += step.usage?.outputTokens ?? 0;
             cacheReadTokens += step.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
             cacheWriteTokens += step.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
+            fireObs(config.observability?.onStep, {
+              principal,
+              chatId: resolvedChatId,
+              runId: run.id,
+              agent: run.agent,
+              modelId,
+              depth,
+              step: {
+                text: step.text,
+                finishReason: step.finishReason,
+                usage: {
+                  inputTokens: step.usage?.inputTokens,
+                  outputTokens: step.usage?.outputTokens,
+                  cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
+                  cacheWriteTokens: step.usage?.inputTokenDetails?.cacheWriteTokens,
+                },
+                toolCalls: step.toolCalls,
+                toolResults: step.toolResults,
+              },
+            });
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
         const result =
@@ -1028,41 +1452,83 @@ export function createRuntime<P, RC = unknown>(
             cost,
           };
         }
-        await storage.appendMessages(resolvedChatId, messages);
-        // Aborted (lease lost / client gone): don't claim completion. The
-        // guarded update no-ops if the run was already reaped+reassigned.
+        // Aborted (lease lost): don't claim completion, and DON'T persist the
+        // partial messages/usage — the run may already be reaped and re-claimed
+        // by another node whose writes must win. The guarded update no-ops if
+        // the run was reassigned.
         if (isAborted) {
-          await storage.updateRun(
-            run.id,
-            { status: "errored", error: "aborted", endedAt: Date.now() },
-            lease,
-          );
+          if (!ephemeral)
+            await storage.updateRun(
+              run.id,
+              { status: "errored", error: "aborted", endedAt: Date.now() },
+              lease,
+            );
+          fireObs(config.observability?.onFinish, {
+            principal,
+            chatId: resolvedChatId,
+            runId: run.id,
+            agent: run.agent,
+            modelId,
+            depth,
+            status: "errored",
+            usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+            cost,
+            messages,
+          });
           await reportRunFinished("errored", messages, "aborted");
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
-        await storage.updateRun(
-          run.id,
-          {
-            status: paused ? "awaiting_input" : "completed",
-            usageInputTokens: inputTokens,
-            usageOutputTokens: outputTokens,
-            usageCacheReadTokens: cacheReadTokens || undefined,
-            usageCacheWriteTokens: cacheWriteTokens || undefined,
-            costTotal: cost,
-            endedAt: paused ? undefined : Date.now(),
-          },
-          lease,
-        );
-        await storage.recordUsage(principal, {
+        if (!ephemeral) {
+          // Fenced finish: settle the run FIRST. If the guarded update doesn't
+          // apply (our lease was reaped + the run re-claimed elsewhere), we're
+          // a stale writer — skip the final message/usage persistence so we
+          // don't overwrite the new owner's state.
+          const applied = await storage.updateRun(
+            run.id,
+            {
+              status: paused ? "awaiting_input" : "completed",
+              usageInputTokens: inputTokens,
+              usageOutputTokens: outputTokens,
+              usageCacheReadTokens: cacheReadTokens || undefined,
+              usageCacheWriteTokens: cacheWriteTokens || undefined,
+              costTotal: cost,
+              endedAt: paused ? undefined : Date.now(),
+            },
+            lease,
+          );
+          if (applied) {
+            await storage.appendMessages(resolvedChatId, messages);
+            await storage.recordUsage(principal, {
+              runId: run.id,
+              model: modelId,
+              inputTokens,
+              outputTokens,
+              cost,
+            });
+          }
+        }
+        fireObs(config.observability?.onFinish, {
+          principal,
+          chatId: resolvedChatId,
           runId: run.id,
-          model: modelId,
-          inputTokens,
-          outputTokens,
+          agent: run.agent,
+          modelId,
+          depth,
+          status: paused ? "awaiting_input" : "completed",
+          usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
           cost,
+          messages,
         });
+        if (args.onComplete) {
+          try {
+            await args.onComplete({ text: lastAssistantText(messages), messages });
+          } catch (e) {
+            console.error("[runtime] onComplete hook failed:", e);
+          }
+        }
         await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
       },
       onError: (error: unknown) => {
@@ -1070,6 +1536,15 @@ export function createRuntime<P, RC = unknown>(
         void closeSources();
         const message =
           error instanceof Error ? error.message : "An error occurred.";
+        fireObs(config.observability?.onError, {
+          principal,
+          chatId: resolvedChatId,
+          runId: run.id,
+          agent: run.agent,
+          modelId,
+          depth,
+          error,
+        });
         // The AI SDK's onError must return the client string synchronously, so
         // the terminal telemetry can't be awaited here. A serverless-safe impl
         // keeps its own flush alive (e.g. via waitUntil) so the errored trace
@@ -1078,6 +1553,41 @@ export function createRuntime<P, RC = unknown>(
         return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);
+
+    // Plain-text stream (ephemeral `responseFormat: "text"`): project the
+    // UIMessage chunks down to their text deltas and emit `text/plain` — parity
+    // with the AI SDK's `toTextStreamResponse`. Tool calls still run (their
+    // side effects happen as the stream is pulled); only the framing differs.
+    if (args.responseFormat === "text") {
+      const text = (
+        stream as ReadableStream<{
+          type?: string;
+          delta?: string;
+          errorText?: string;
+        }>
+      )
+        .pipeThrough(
+          new TransformStream<
+            { type?: string; delta?: string; errorText?: string },
+            string
+          >({
+            transform(chunk, controller) {
+              if (chunk.type === "text-delta" && chunk.delta)
+                controller.enqueue(chunk.delta);
+              // Don't let a failed turn look like an empty-but-successful one:
+              // fail the stream so the client sees an error, not silence.
+              else if (chunk.type === "error")
+                controller.error(
+                  new Error(chunk.errorText || "The run failed."),
+                );
+            },
+          }),
+        )
+        .pipeThrough(new TextEncoderStream());
+      return new Response(text, {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
 
     // Drain the stream server-side regardless of the client. If the browser
     // closes mid-turn, the response stops being pulled — without this the
@@ -1132,6 +1642,7 @@ export function createRuntime<P, RC = unknown>(
     principal,
     message,
     request,
+    turnContext,
   }: HandleChatInput<P>): Promise<Response> {
     // chat: scoped create-or-continue (others' ids resolve to "not found")
     let chat = chatId ? await storage.getChat(principal, chatId) : null;
@@ -1149,6 +1660,7 @@ export function createRuntime<P, RC = unknown>(
       agentName,
       principal,
       request,
+      turnContext,
     );
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
@@ -1176,6 +1688,65 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [...prior, message],
       runtimeCtx,
+    });
+  }
+
+  /**
+   * Run one agent turn from the supplied messages and stream it back, persisting
+   * NOTHING — no chat, run, message, or usage rows. The full tool loop,
+   * streaming, and observability hooks all run; only durability/history are
+   * skipped. For read-mostly, single-shot loops (inline editor assist, one-off
+   * generations) where a durable chat would be pure churn. There's no chatId to
+   * resume and approvals can't round-trip (no persisted state) — use `handleChat`
+   * for anything that needs HITL or history.
+   */
+  async function runTurnStream({
+    agent: agentName,
+    principal,
+    messages,
+    request,
+    turnContext,
+    format,
+    onComplete,
+  }: {
+    agent: string;
+    principal: P;
+    messages: AppMessage[];
+    request?: Request;
+    turnContext?: unknown;
+    format?: "ui" | "text";
+    onComplete?: (result: {
+      text: string;
+      messages: AppMessage[];
+    }) => void | Promise<void>;
+  }): Promise<Response> {
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      agentName,
+      principal,
+      request,
+      turnContext,
+    );
+    // Synthetic, unpersisted run — buildTurn only reads `id`/`agent` from it,
+    // and every storage write is guarded by `ephemeral`.
+    const run = {
+      id: generateRunId(),
+      chatId: "ephemeral",
+      agent: agentName,
+      status: "active",
+      startedAt: Date.now(),
+    } as unknown as RunRecord;
+    return buildTurn({
+      resolvedChatId: run.chatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease: undefined,
+      uiMessages: messages,
+      runtimeCtx,
+      ephemeral: true,
+      responseFormat: format ?? "ui",
+      onComplete,
     });
   }
 
@@ -1242,11 +1813,13 @@ export function createRuntime<P, RC = unknown>(
     principal,
     decisions,
     request,
+    turnContext,
   }: {
     chatId: string;
     principal: P;
     decisions: ApprovalDecision[];
     request?: Request;
+    turnContext?: unknown;
   }): Promise<Response> {
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
@@ -1257,6 +1830,56 @@ export function createRuntime<P, RC = unknown>(
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
 
+    // Route any just-decided SUBAGENT approvals (bubbled up via spawn_agent):
+    // resume the sub thread with the decision, then fold its answer back into
+    // the parent's spawn_agent result so this turn continues with the digest.
+    const subApprovals = collectDecidedSubagentApprovals(messages);
+    if (subApprovals.length > 0) {
+      for (const sa of subApprovals) {
+        const resumed = await resumeSubagentApproval(
+          principal,
+          sa.subChatId,
+          sa.subApprovalIds.map((id) => ({
+            approvalId: id,
+            approved: sa.approved as boolean,
+            reason: sa.reason,
+          })),
+        );
+        if (resumed.pending?.length) {
+          // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
+          // fresh data-subagent-approval part on the same parent message. The
+          // undecided part keeps this chat awaiting_input (hasPendingApproval
+          // below), and the next decision routes through here again, so
+          // bubbling recurses per round.
+          const nextApprovalId = generateSubApprovalId();
+          appendSubagentApprovalPart(messages, sa.approvalId, {
+            approvalId: nextApprovalId,
+            subChatId: sa.subChatId,
+            subApprovalIds: resumed.pending.map((p) => p.approvalId),
+            spawnToolCallId: sa.spawnToolCallId,
+            summaries: resumed.pending.map((p) => p.summary),
+          });
+          if (sa.spawnToolCallId) {
+            overwriteToolResult(messages, sa.spawnToolCallId, {
+              status: "awaiting_approval",
+              threadId: sa.subChatId,
+              pending: resumed.pending.map((p) => p.summary),
+              note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
+            });
+          }
+        } else if (sa.spawnToolCallId) {
+          overwriteToolResult(messages, sa.spawnToolCallId, {
+            threadId: sa.subChatId,
+            answer: resumed.answer,
+          });
+        }
+        markSubagentApprovalResolved(messages, sa.approvalId);
+      }
+      // Persist the folded spawn_agent result (or re-bubbled approval part)
+      // + resolved markers.
+      await storage.appendMessages(chatId, messages);
+    }
+
     // If the step had several gated calls and some are still undecided, DON'T
     // re-run yet — a tool call without a result makes convertToModelMessages
     // throw MissingToolResultsError. Persist the decision, stay awaiting_input,
@@ -1265,7 +1888,12 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      chat.agent,
+      principal,
+      request,
+      turnContext,
+    );
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -1275,7 +1903,9 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: messages,
+      // Resume: strip the paused turn's trailing text so the model call ends on
+      // the tool result (a user turn), not an assistant prefill.
+      uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
   }
@@ -1294,12 +1924,14 @@ export function createRuntime<P, RC = unknown>(
     toolCallId,
     output,
     request,
+    turnContext,
   }: {
     chatId: string;
     principal: P;
     toolCallId: string;
     output: unknown;
     request?: Request;
+    turnContext?: unknown;
   }): Promise<Response> {
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
@@ -1314,7 +1946,12 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(chat.agent, principal, request);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      chat.agent,
+      principal,
+      request,
+      turnContext,
+    );
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -1324,7 +1961,8 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: messages,
+      // Resume: same prefill guard as applyApproval (see trimTrailingAssistantPrefill).
+      uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
   }
@@ -1343,11 +1981,15 @@ export function createRuntime<P, RC = unknown>(
   async function listChats({
     principal,
     limit,
+    kind,
   }: {
     principal: P;
     limit?: number;
+    kind?: string;
   }): Promise<ChatRecord[]> {
-    return storage.listChats(principal, { limit });
+    // No default kind filter — passing nothing returns ALL chats (unchanged
+    // behavior). Callers that want only user-facing chats pass kind: "user".
+    return storage.listChats(principal, { limit, kind });
   }
 
   async function listRuns({
@@ -1442,6 +2084,7 @@ export function createRuntime<P, RC = unknown>(
     threadId,
     depth,
     blockGated,
+    autoApprove = true,
     onProgress,
   }: {
     principal: P;
@@ -1450,9 +2093,16 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
+    /**
+     * Waive HITL approvals inside the subagent. Default true (autonomous runs —
+     * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
+     * value, so a subagent spawned from an interactive chat GATES its tools and
+     * a pending approval bubbles up to the parent (see the pending return).
+     */
+    autoApprove?: boolean;
     /** Progressive snapshots of the sub-turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
-  }): Promise<{ threadId: string; answer: string }> {
+  }): Promise<{ threadId: string; answer: string; pending?: SubagentPending[] }> {
     const subChatId = threadId ?? generateSubchatId();
     let chat = await storage.getChat(principal, subChatId);
     if (!chat) {
@@ -1460,6 +2110,9 @@ export function createRuntime<P, RC = unknown>(
         id: subChatId,
         agent,
         title: prompt.slice(0, 80),
+        // Runtime-created sub-thread: stamp it internal so a host filtering
+        // its chat list on kind never shows it (see ChatRecord.kind).
+        kind: "internal",
       });
     }
     const prior = await storage.loadMessages(principal, subChatId);
@@ -1477,7 +2130,7 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [...prior, message],
       runtimeCtx,
-      autoApprove: true,
+      autoApprove,
       blockGated,
       depth,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
@@ -1504,8 +2157,62 @@ export function createRuntime<P, RC = unknown>(
     });
     await res.text();
 
-    const answer = lastAssistantText(await storage.loadMessages(principal, subChatId));
-    return { threadId: subChatId, answer };
+    const subMessages = await storage.loadMessages(principal, subChatId);
+    // Interactive subagent paused on a gated tool → lift its pending approval(s)
+    // so the caller (`spawn_agent`) can surface them on the parent turn.
+    const pending = collectPendingApprovals(subMessages);
+    if (pending.length > 0) {
+      return { threadId: subChatId, answer: "", pending };
+    }
+    return { threadId: subChatId, answer: lastAssistantText(subMessages) };
+  }
+
+  /**
+   * Resume a subagent thread after its bubbled-up approval was decided: apply
+   * the decision to the sub's gated tool, re-run the sub from history (the
+   * approved tool executes, or returns denied), and return the sub's digest.
+   *
+   * If the resumed sub pauses AGAIN on a new gated tool, its pending
+   * approval(s) are returned so the caller (`applyApproval`) can re-bubble
+   * them to the parent as a fresh `data-subagent-approval` part — bubbling
+   * recurses one round per decision round-trip.
+   */
+  async function resumeSubagentApproval(
+    principal: P,
+    subChatId: string,
+    decisions: ApprovalDecision[],
+  ): Promise<{ answer: string; pending?: SubagentPending[] }> {
+    const subChat = await storage.getChat(principal, subChatId);
+    if (!subChat) return { answer: "" };
+    const subMessages = await storage.loadMessages(principal, subChatId);
+    const changed = applyDecisions(subMessages, decisions);
+    if (changed.length > 0) await storage.appendMessages(subChatId, changed);
+    // Another gated call in the same sub step still undecided → can't finish.
+    if (hasPendingApproval(subMessages)) return { answer: "" };
+
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      subChat.agent,
+      principal,
+    );
+    const { run, lease } = await openRun(principal, subChatId, subChat.agent);
+    const res = await buildTurn({
+      resolvedChatId: subChatId,
+      principal,
+      modelId,
+      cfg,
+      run,
+      lease,
+      uiMessages: subMessages,
+      runtimeCtx,
+      autoApprove: false, // keep gating any further writes in the sub
+      depth: 1,
+    });
+    await res.text();
+    const after = await storage.loadMessages(principal, subChatId);
+    // Paused on a SECOND gated tool → lift it so the caller re-bubbles.
+    const pending = collectPendingApprovals(after);
+    if (pending.length > 0) return { answer: "", pending };
+    return { answer: lastAssistantText(after) };
   }
 
   async function schedule({
@@ -1559,7 +2266,11 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       } finally {
         await storage
-          .completeSchedule(s.id, { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null })
+          .completeSchedule(
+            s.id,
+            { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null },
+            dur.instanceId,
+          )
           .catch(() => {});
       }
     }
@@ -1570,6 +2281,7 @@ export function createRuntime<P, RC = unknown>(
     listAgents: agentInfos,
     tick: reapTick,
     handleChat,
+    runTurnStream,
     runAgent: ({ principal, agent, prompt, threadId, blockGated = true }) =>
       runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated }),
     loadHistory,

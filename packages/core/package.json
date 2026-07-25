@@ -12,6 +12,11 @@
       "development": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./node": {
+      "development": "./src/vault-node.ts",
+      "types": "./dist/vault-node.d.ts",
+      "import": "./dist/vault-node.js"
     }
   },
   "files": [
@@ -32,6 +37,7 @@
     "ai": ">=7.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22",
     "ai": "^7.0.2",
     "typescript": "^5.7.0"
   }

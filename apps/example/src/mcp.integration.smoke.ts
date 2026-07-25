@@ -11,7 +11,7 @@ import {
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
 import { createMcpHost } from "@intentface/latch-mcp";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 /**
  * Live MCP integration: a real (in-memory) MCP server exposes a `shout` tool;
@@ -86,7 +86,7 @@ async function main() {
   // --- a runtime whose agent uses the MCP host as a tool source ----------
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });

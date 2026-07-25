@@ -1,7 +1,7 @@
 import { createClient } from "@libsql/client";
 import { createVault } from "@intentface/latch-core";
 import { createSqliteSecretStore, migrate } from "@intentface/latch-drizzle";
-import { assert, owner, type Principal } from "./setup.js";
+import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 /** A random base64 256-bit key (in prod this lives in env/KMS, never the DB). */
 function randomKey(): string {
@@ -19,7 +19,7 @@ function randomKey(): string {
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const store = createSqliteSecretStore<Principal>(client, { owner });
+  const store = createSqliteSecretStore<Principal>(latchDb(client), { owner });
   const masterKey = randomKey();
   const vault = createVault<Principal>({ store, masterKey });
 

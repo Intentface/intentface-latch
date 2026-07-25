@@ -24,10 +24,17 @@ async function main() {
   assert(run.leaseOwner === "node_A", "lease owned by claimant");
   assert(run.fencingToken === 1, "fencing token starts at 1");
 
-  assert(await storage.heartbeatRun(run.id, "node_A", 30_000), "owner heartbeat succeeds");
   assert(
-    !(await storage.heartbeatRun(run.id, "node_B", 30_000)),
+    await storage.heartbeatRun(run.id, "node_A", 30_000, 1),
+    "owner heartbeat succeeds",
+  );
+  assert(
+    !(await storage.heartbeatRun(run.id, "node_B", 30_000, 1)),
     "non-owner heartbeat fails (someone else can't steal the lease)",
+  );
+  assert(
+    !(await storage.heartbeatRun(run.id, "node_A", 30_000, 99)),
+    "stale fencing token can't extend the lease",
   );
 
   // --- reaper reclaims an expired lease ----------------------------------
