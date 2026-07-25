@@ -64,11 +64,16 @@ export const Route = createFileRoute("/api/transcribe")({
         scribe.append("temperature", "0");
         for (const term of keyterms) scribe.append("keyterms", term);
 
+        // Bound the upstream call — a stalled ElevenLabs response must fail the
+        // request, not hang the serverless invocation until the platform timeout.
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60_000);
         try {
           const res = await fetch(SCRIBE_URL, {
             method: "POST",
             headers: { "xi-api-key": apiKey },
             body: scribe,
+            signal: controller.signal,
           });
           if (!res.ok) {
             console.error("transcription failed:", res.status, (await res.text()).slice(0, 300));
@@ -81,6 +86,8 @@ export const Route = createFileRoute("/api/transcribe")({
         } catch (e) {
           console.error("transcription failed:", e);
           return json(502, { error: "transcription failed — try again" });
+        } finally {
+          clearTimeout(timeout);
         }
       },
     },

@@ -34,12 +34,19 @@ workspace — never from these instructions, and never from your own priors abou
 - \`anchor-build\` (READ-WRITE) — this person's prior records + where you save.
 
 ## PHASE 0 — ORIENT (silent, before asking anything)
-1. \`anchor-frame_read_file\` \`anchor/domain.md\` (the field + areas).
-2. \`edge-kn_orient\`, then read the pillar playbook \`edge/kn/<pillar>/playbook.md\`. If it's
-  missing, say so and work from \`anchor/domain.md\`.
+1. \`anchor-frame_orient\` FIRST, then \`anchor-frame_read_file\` \`anchor/domain.md\` (the
+  field + areas) — file id EXACTLY as the orient listing gave it, in the \`fileIds\` ARRAY
+  (set \`fileId\` too). A \`"files": []\` return means your CALL SHAPE was wrong, not that
+  the file is missing — retry with the listed id, never conclude "missing".
+2. \`edge-kn_orient\`, then read the pillar playbook \`edge/kn/<pillar>/playbook.md\` — the
+  pillar is whatever the orient listing shows under \`edge/kn/\`; if it lists SEVERAL
+  pillars, pick the one whose playbook sections match \`anchor/domain.md\`'s areas, or the
+  one the operator's opening message names. If no playbook exists, say so and work from
+  \`anchor/domain.md\`.
 3. Once you know WHO you're talking to: find and read their prior records
-  (\`anchor-build_search\` their name, or scan \`anchor/interviews/\` + \`anchor/sessions/\`) so
-  you never re-ask what's already captured — you re-verify and update.
+  (\`anchor-build_orient\`, then \`anchor-build_search\` their name, or scan
+  \`anchor/interviews/\` + \`anchor/sessions/\` and read the listed ids) so you never re-ask
+  what's already captured — you re-verify and update.
 The person must never see this phase: no "let me load / search / check / scan the
 workspace / records / playbook" in any form, and never an empty or tool-only turn.
 

@@ -18,12 +18,12 @@ import type { Principal } from "@/lib/session"
  *    (never read prior conclusions — this is the baseline extractor), concrete-
  *    practice-per-area depth, and a per-area save sweep so nothing surfaced is lost.
  *
- * Reads from a READ-ONLY `anchor-frame` workspace (`domain.md` + `sources/`) and writes its
- * contribution to `anchor-build` — so prior conclusions (playbook/interviews/sessions) are
- * structurally out of reach, not just prompt-forbidden. Repoint the frame at another workspace's
- * `anchor/domain.md` to run it on a different field. This agent IS the single source of truth for
- * the prompt: the anchor evals (`anchor-edge/evals/anchor/run.ts` + `arc.ts`, at the repo
- * root) test these instructions directly.
+ * The client-work plane variant of `anchor-interview`: reads a READ-ONLY
+ * `client-work-anchor-frame` workspace (`domain.md` + `sources/`) and writes its contribution
+ * to `client-work-anchor-build` — so prior conclusions (playbook/interviews/sessions) are
+ * structurally out of reach, not just prompt-forbidden. The prompt is kept in sync with
+ * `anchor-interview.ts`, which the anchor evals (`anchor-edge/evals/anchor/run.ts` + `arc.ts`,
+ * in the anchor-edge-experiments repo) test directly.
  */
 export const clientWorkInterview = defineAgent<
   Principal,

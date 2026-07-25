@@ -184,20 +184,28 @@ export async function getLatch(): Promise<{
   // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
   const runScores = createRunScoresStore(client);
 
-  // Resolve the principal's user row once per process per user — agents (e.g. the
-  // anchor interview/orient pair) read `runtime.user` to know who they're talking to.
-  const userCache = new Map<string, { name?: string; email?: string } | undefined>();
+  // Resolve the principal's user row, cached with a short TTL — agents (e.g. the
+  // anchor interview/orient pair) read `runtime.user` to know who they're talking
+  // to. The TTL keeps better-auth profile edits surfacing without a restart; a
+  // failed query is never memoized (it would pin `runtime.user` to undefined for
+  // the process lifetime) — fall back to the last known value instead.
+  const USER_TTL_MS = 5 * 60_000;
+  const userCache = new Map<string, { at: number; value?: { name?: string; email?: string } }>();
   async function resolveUser(userId: string) {
-    if (!userCache.has(userId)) {
-      const row = await client
-        .execute({ sql: "SELECT name, email FROM user WHERE id = ?", args: [userId] })
-        .then((r) => r.rows[0], () => undefined);
-      userCache.set(
-        userId,
-        row ? { name: (row.name as string) || undefined, email: (row.email as string) || undefined } : undefined,
-      );
+    const hit = userCache.get(userId);
+    if (hit && Date.now() - hit.at < USER_TTL_MS) return hit.value;
+    let row;
+    try {
+      row = (await client.execute({ sql: "SELECT name, email FROM user WHERE id = ?", args: [userId] })).rows[0];
+    } catch (e) {
+      console.warn("resolveUser failed:", e instanceof Error ? e.message : e);
+      return hit?.value;
     }
-    return userCache.get(userId);
+    const value = row
+      ? { name: (row.name as string) || undefined, email: (row.email as string) || undefined }
+      : undefined;
+    userCache.set(userId, { at: Date.now(), value });
+    return value;
   }
 
   const context = defineContext<Principal, Ctx>({

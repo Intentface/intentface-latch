@@ -16,7 +16,10 @@ export const anchorMaintainer = defineAgent<Principal, { orgId: string }>(
   () => {
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     return {
-      model: openai("gpt-5.4-nano"),
+      // Same multi-connection read→diff→write batch shape as anchor-frame-keeper,
+      // which is pinned to terra because nano silently skipped steps on that
+      // workload in roughly half of eval runs.
+      model: openai("gpt-5.6-terra"),
       instructions: `# Anchor — Maintain
 
 You run as a BATCH JOB: fold every unprocessed contribution (interview + session files)
@@ -140,6 +143,10 @@ when unsure, summarize high-level or queue it.`,
       connections: ["anchor-frame", "anchor-build", "edge-kn"],
       defaultTools: ["web_fetch"],
       smoothStream: true,
+      // The frame is READ-ONLY for the maintainer by contract (domain.md is
+      // human-owned) — drop the write tools structurally rather than trusting
+      // the prompt, same as anchor-frame-keeper does for its read-only planes.
+      disableTools: ["anchor-frame_create", "anchor-frame_edit_file"],
     };
   },
   {

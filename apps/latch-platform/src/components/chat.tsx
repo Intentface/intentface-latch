@@ -292,7 +292,7 @@ export function Chat({
   // corrupt the turn — queue the transcript and send once the chat is ready.
   // Status is read through refs: `onTranscribed` fires from a closure created
   // when recording STARTED, whose captured `busy` may be long stale.
-  const queuedVoiceRef = useRef<{ text: string; durationMs: number } | null>(null);
+  const queuedVoiceRef = useRef<{ text: string; durationMs: number }[]>([]);
   const chatBusyRef = useRef(false);
   chatBusyRef.current = busy || deciding;
   function sendVoiceMessage(text: string, durationMs: number) {
@@ -300,16 +300,17 @@ export function Chat({
   }
   function handleVoiceTranscribed(text: string, durationMs: number) {
     if (chatBusyRef.current) {
-      queuedVoiceRef.current = { text, durationMs };
+      // FIFO, not a single slot: a second recording finishing while the chat is
+      // still busy must not overwrite an unsent first transcript.
+      queuedVoiceRef.current.push({ text, durationMs });
       return;
     }
     sendVoiceMessage(text, durationMs);
   }
   useEffect(() => {
-    if (busy || deciding || !queuedVoiceRef.current) return;
-    const queued = queuedVoiceRef.current;
-    queuedVoiceRef.current = null;
-    sendVoiceMessage(queued.text, queued.durationMs);
+    if (busy || deciding || queuedVoiceRef.current.length === 0) return;
+    const queued = queuedVoiceRef.current.shift();
+    if (queued) sendVoiceMessage(queued.text, queued.durationMs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, deciding]);
 
