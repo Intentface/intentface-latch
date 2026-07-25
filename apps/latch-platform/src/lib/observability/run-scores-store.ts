@@ -44,16 +44,24 @@ export async function migrateRunScores(client: Client): Promise<void> {
   // ADD COLUMN has no IF NOT EXISTS, so add only what PRAGMA reports missing —
   // swallowing every ALTER error would let a genuine failure leave the schema
   // half-migrated, and put() would then hit missing ai_value/ai_comment columns.
-  const info = await client.execute(`PRAGMA table_info(latch_run_scores)`);
-  const existing = new Set(
-    (info.rows as unknown as Record<string, unknown>[]).map((r) => String(r.name)),
-  );
+  const columns = async () =>
+    new Set(
+      ((await client.execute(`PRAGMA table_info(latch_run_scores)`))
+        .rows as unknown as Record<string, unknown>[]).map((r) => String(r.name)),
+    );
+  const existing = await columns();
   for (const [name, def] of [
     ["ai_value", "ai_value REAL"],
     ["ai_comment", "ai_comment TEXT"],
   ] as const) {
-    if (!existing.has(name)) {
+    if (existing.has(name)) continue;
+    try {
       await client.execute(`ALTER TABLE latch_run_scores ADD COLUMN ${def}`);
+    } catch (err) {
+      // Race: another process (concurrent getLatch()) may have added the column
+      // between our PRAGMA read and this ALTER. Re-read and tolerate the error
+      // ONLY if the column is now present — otherwise it's a genuine failure.
+      if (!(await columns()).has(name)) throw err;
     }
   }
 }
