@@ -190,10 +190,23 @@ export async function getLatch(): Promise<{
   // failed query is never memoized (it would pin `runtime.user` to undefined for
   // the process lifetime) — fall back to the last known value instead.
   const USER_TTL_MS = 5 * 60_000;
+  const USER_CACHE_MAX = 1_000;
   const userCache = new Map<string, { at: number; value?: { name?: string; email?: string } }>();
   async function resolveUser(userId: string) {
     const hit = userCache.get(userId);
     if (hit && Date.now() - hit.at < USER_TTL_MS) return hit.value;
+    // Bound the cache: TTL alone never evicts users that stop being queried.
+    // Sweep expired entries at the cap; if every entry is still live, drop the
+    // oldest-inserted (Map preserves insertion order).
+    if (userCache.size >= USER_CACHE_MAX) {
+      const now = Date.now();
+      for (const [k, v] of userCache) if (now - v.at >= USER_TTL_MS) userCache.delete(k);
+      while (userCache.size >= USER_CACHE_MAX) {
+        const oldest = userCache.keys().next().value;
+        if (oldest === undefined) break;
+        userCache.delete(oldest);
+      }
+    }
     let row;
     try {
       row = (await client.execute({ sql: "SELECT name, email FROM user WHERE id = ?", args: [userId] })).rows[0];

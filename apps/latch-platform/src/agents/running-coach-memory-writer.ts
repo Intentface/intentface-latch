@@ -1,6 +1,7 @@
 import { anthropic } from "@ai-sdk/anthropic";
 import { defineAgent } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
+import { getCurrentDate } from "./running-coach";
 
 /**
  * Running Coach Memory Writer — the coach's end-of-session archivist, run as a
@@ -35,7 +36,9 @@ Do NOT save: generic advice, filler conversation, things already in profile.db o
 1. First call \`runner-kn_orient\` to check the workspace.
 2. Check if the folder \`/Running Coach/Memory/\` exists. If not, create it.
 3. Save a single .md file named with the current date-time: \`/Running Coach/Memory/YYYY-MM-DD-HH-MM.md\`
-   - Use the timestamp provided to you in the summary (or estimate from context).
+   - Use the timestamp provided to you in the summary; if the summary has none, call
+     \`get_current_date\` and use its \`iso\` + \`time_utc\`. NEVER estimate or invent a
+     timestamp — these filenames are the ordering key for recalling recent memories.
    - Format:
 
 \`\`\`
@@ -49,10 +52,11 @@ Do NOT save: generic advice, filler conversation, things already in profile.db o
 \`\`\`
 
 4. Keep it short — 5–10 bullets maximum. Quality over quantity.
-5. Reply with a single line confirming what was saved, e.g. "Saved 4 memory snippets for [date]."
+5. Reply with a single line confirming what was saved, e.g. "Saved memory snippet for [date] (4 facts)."
 
 That's it. No coaching, no conversation. Extract, save, confirm.`,
     connections: ["runner-kn"],
+    tools: { get_current_date: getCurrentDate },
     effort: "minimal",
     maxSteps: 8,
   }),

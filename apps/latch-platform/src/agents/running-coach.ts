@@ -15,8 +15,12 @@ import type { Principal } from "@/lib/session";
  * `get_current_date` authored tool it used is inlined below.
  */
 
-/** The UI agent leaned on an authored tool for "today" — inlined verbatim. */
-const getCurrentDate = tool({
+/**
+ * The UI agent leaned on an authored tool for "today" — inlined verbatim.
+ * Shared with the memory-writer so snippet filenames never rest on an
+ * estimated timestamp.
+ */
+export const getCurrentDate = tool({
   description:
     'Returns the current date and time (UTC). Output: { iso: "YYYY-MM-DD", dayOfWeek: "Monday", display: "Monday, January 1 2026", time_utc: "HH:MM" }. No inputs required.',
   inputSchema: jsonSchema<Record<string, never>>({
