@@ -46,13 +46,11 @@ export async function migrateSlack(client: Client): Promise<void> {
     created_at INTEGER NOT NULL,
     PRIMARY KEY (team_id, slack_user_id)
   )`);
-  // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
-  for (const [table, col] of [["latch_slack_app", "agent_scope TEXT"]] as const) {
-    try {
-      await client.execute(`ALTER TABLE ${table} ADD COLUMN ${col}`);
-    } catch {
-      /* column already exists */
-    }
+  // Idempotent add for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  try {
+    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN agent_scope TEXT`);
+  } catch {
+    /* column already exists */
   }
 }
 

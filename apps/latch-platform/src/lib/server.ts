@@ -462,10 +462,14 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
     const { runtime, slackStore, credentials, agentStore } = await getLatch();
 
     // An `api_app_id` is visible to every member of the hosting Slack workspace
-    // and echoed in every event payload — refuse to touch one another org has
-    // already claimed BEFORE writing any credentials. `bind` is guarded too.
+    // and echoed in every event payload. RECONFIGURING an existing binding needs
+    // the same creator gate as unbinding, not just a same-org check: the three
+    // credentials below are stored at "org" scope, so any other member of the
+    // owning org could otherwise overwrite the binding's Slack secrets and break
+    // (or repoint) it. Checked BEFORE any write; `bind` is guarded too. A binding
+    // with no recorded creator is unmanageable — `canManageBot` fails closed.
     const existing = await slackStore.resolve(data.appId);
-    if (existing && existing.orgId !== principal.orgId) {
+    if (existing && !canManageBot(existing, principal)) {
       return { ok: false as const, error: "app already bound" };
     }
 
