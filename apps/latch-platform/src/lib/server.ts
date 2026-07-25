@@ -459,7 +459,15 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, slackStore, credentials } = await getLatch();
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
+
+    // An `api_app_id` is visible to every member of the hosting Slack workspace
+    // and echoed in every event payload — refuse to touch one another org has
+    // already claimed BEFORE writing any credentials. `bind` is guarded too.
+    const existing = await slackStore.resolve(data.appId);
+    if (existing && existing.orgId !== principal.orgId) {
+      return { ok: false as const, error: "app already bound" };
+    }
 
     const keys = slackVaultKeys(data.appId);
     await credentials.set(principal, keys.clientId, "org", data.clientId);
@@ -468,13 +476,15 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
 
     const botName =
       (await runtime.listAgents(principal)).find((a) => a.name === data.agent)?.title ?? data.agent;
-    await slackStore.bind({
+    const bound = await slackStore.bind({
       appId: data.appId,
       agent: data.agent,
+      agentScope: await boundAgentScope(agentStore, principal, data.agent),
       orgId: principal.orgId,
       userId: principal.userId,
       botName,
     });
+    if (!bound) return { ok: false as const, error: "app already bound" };
 
     const authorizeUrl =
       `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(data.clientId)}` +
@@ -499,7 +509,11 @@ export const unbindSlackAppFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
     const { slackStore } = await getLatch();
-    await slackStore.unbind(appId);
+    // Ownership check, same gate as every other channel binding — without it any
+    // authenticated user could delete any org's binding by app id.
+    const app = await slackStore.resolve(appId);
+    if (!app || !canManageBot(app, principal)) return { ok: false };
+    await slackStore.unbind(appId, principal.orgId);
     return { ok: true };
   });
 
@@ -536,7 +550,7 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
   .handler(async ({ data: agent }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, slackStore, credentials } = await getLatch();
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
 
     const configToken = await credentials.get(principal, SLACK_CONFIG_TOKEN_KEY, "org");
     if (!configToken) return { ok: false as const, error: "no_config_token" };
@@ -573,13 +587,17 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
     await credentials.set(principal, keys.signingSecret, "org", created.signingSecret);
     await credentials.set(principal, keys.clientId, "org", created.clientId);
     await credentials.set(principal, keys.clientSecret, "org", created.clientSecret);
-    await slackStore.bind({
+    // Slack minted this app id, so a cross-org conflict shouldn't happen —
+    // report it rather than silently reporting success if it ever does.
+    const bound = await slackStore.bind({
       appId: created.appId,
       agent,
+      agentScope: await boundAgentScope(agentStore, principal, agent),
       orgId: principal.orgId,
       userId: principal.userId,
       botName: displayName,
     });
+    if (!bound) return { ok: false as const, error: "app already bound" };
 
     // Send the installer to Slack; we carry the app id back via `state`.
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";

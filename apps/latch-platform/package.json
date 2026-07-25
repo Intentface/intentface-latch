@@ -27,6 +27,7 @@
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
     "@intentface/latch-mcp": "workspace:*",
+    "@intentface/latch-net": "workspace:*",
     "@intentface/latch-openapi": "workspace:*",
     "@intentface/latch-server": "workspace:*",
     "@intentface/latch-ui": "workspace:*",

@@ -2,7 +2,7 @@ import { transform } from "sucrase";
 import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 import type { QuickJSAsyncWASMModule } from "quickjs-emscripten-core";
 import variant from "@jitl/quickjs-singlefile-mjs-release-asyncify";
-import { isBlockedHost } from "../web-fetch";
+import { isBlockedHost } from "@intentface/latch-net";
 
 /**
  * The tool-authoring runtime: runs a (human- or agent-) authored JS program in a

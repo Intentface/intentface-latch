@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { createFileRoute } from "@tanstack/react-router";
 import { getLatch } from "@/lib/latch";
 
@@ -8,12 +9,22 @@ import { getLatch } from "@/lib/latch";
  *   • sweep()   — reap lease-expired/crashed runs and resume them (durability)
  *
  * Guarded by Vercel's `CRON_SECRET` (Vercel sends it as `Authorization:
- * Bearer …`). With no secret set the route runs unguarded (dev only).
+ * Bearer …`). Unauthenticated and system-wide, so it fails CLOSED: in production
+ * an unset secret refuses every request rather than leaving all tenants'
+ * schedules runnable by anyone. Only dev runs it unguarded.
  */
 async function runCron(request: Request): Promise<Response> {
+  const forbidden = () => new Response("Forbidden", { status: 403 });
   const secret = process.env.CRON_SECRET;
-  if (secret && request.headers.get("authorization") !== `Bearer ${secret}`) {
-    return new Response("Forbidden", { status: 403 });
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      console.error("[cron] CRON_SECRET is not set — refusing to run");
+      return forbidden();
+    }
+  } else {
+    const expected = Buffer.from(`Bearer ${secret}`);
+    const got = Buffer.from(request.headers.get("authorization") ?? "");
+    if (expected.length !== got.length || !timingSafeEqual(expected, got)) return forbidden();
   }
   const { runtime } = await getLatch();
   const due = await runtime.runDue().catch((e: unknown) => ({ error: String(e) }));

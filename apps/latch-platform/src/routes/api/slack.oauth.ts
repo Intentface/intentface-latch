@@ -44,6 +44,7 @@ async function handleOauth(request: Request): Promise<Response> {
         appId,
         teamId: res.teamId,
         agent: app.agent,
+        agentScope: app.agentScope,
         orgId: app.orgId,
         userId: app.userId,
         botName: app.botName,
