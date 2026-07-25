@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:*",
+    "@intentface/latch-net": "workspace:*",
     "@apidevtools/swagger-parser": "^10.1.1"
   },
   "peerDependencies": {

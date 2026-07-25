@@ -32,13 +32,55 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   POST connections/:name/test         open the connection, list its tools
  */
 export interface LatchHandlerConfig<P> {
-  runtime: Runtime<P>;
-  /** Map a request to a Principal (your existing auth). Null → 401. */
-  resolveContext: (request: Request) => P | null | Promise<P | null>;
-  /** Connection registry (enables the connection routes). */
-  connections?: McpConnections<P>;
+  /**
+   * The runtime, or a per-principal resolver. A resolver enables DB-per-tenant
+   * isolation (a separate runtime/DB per tenant, e.g. one SQLite file per
+   * workspace) — it's called after `resolveContext` yields the principal. A
+   * single `Runtime` value fits column-scoped (`owner`) tenancy. Note: `POST
+   * cron/run` (no principal) requires a static runtime.
+   */
+  runtime: Runtime<P> | ((principal: P) => Runtime<P> | Promise<Runtime<P>>);
+  /**
+   * Map a request to a Principal (your existing auth). Null → 401.
+   *
+   * The OAuth callback can run without an app session, so its decoded `state`
+   * is passed as `extra.oauthState` — a `resolveContext` can rebuild the
+   * principal from it (e.g. a `workspaceId` baked into the flow) when the
+   * request itself doesn't carry enough context.
+   */
+  resolveContext: (
+    request: Request,
+    extra?: { oauthState?: Record<string, unknown> },
+  ) => P | null | Promise<P | null>;
+  /**
+   * Connection registry (enables the connection routes), or a per-principal
+   * resolver — the latter lets a consumer build a tenant-scoped registry (e.g.
+   * a workspace's installed connectors) after the principal is known.
+   */
+  connections?:
+    | McpConnections<P>
+    | ((principal: P) => McpConnections<P> | Promise<McpConnections<P>>);
+  /**
+   * Called after a connection is successfully authorized (both the IdP callback
+   * and the already-authorized short-circuit in `authorize`). A consumer can use
+   * it to flip its own catalog/connector state to active.
+   */
+  onConnected?: (principal: P, connectionName: string) => void | Promise<void>;
+  /**
+   * Query param appended to the post-callback redirect signalling which
+   * connection just connected (`?<connectedParam>=<name>`). Default "connected".
+   */
+  connectedParam?: string;
   /** Path prefix the handler is mounted under (e.g. "/api/latch"). Default "/". */
   basePath?: string;
+  /**
+   * Extra query-param names on `connections/:name/authorize` to fold verbatim
+   * into the OAuth `state` (alongside the built-in chatId/approvalId/returnTo/
+   * scope). Lets a consumer thread its own context (e.g. a tenant id) through
+   * the flow so `resolveContext` can rebuild the principal from
+   * `extra.oauthState` on the session-less callback. Default: none.
+   */
+  stateParams?: string[];
   /**
    * Shared secret guarding `POST /cron/run` (the system-wide schedule tick).
    * When set, the request must send it as `x-latch-cron-secret`. That route is
@@ -60,6 +102,31 @@ const json = (data: unknown, status = 200): Response =>
 
 const redirect = (location: string): Response =>
   new Response(null, { status: 302, headers: { location } });
+
+/**
+ * A caller-supplied `returnTo` is only allowed as an app-relative path. Absolute
+ * (`https://evil`) or protocol-relative (`//evil`, `/\evil`) targets are an
+ * open-redirect vector — fall back to `/`.
+ */
+function safeReturnTo(raw: string | undefined): string {
+  if (!raw || !raw.startsWith("/") || raw[1] === "/" || raw[1] === "\\") return "/";
+  return raw;
+}
+
+/**
+ * Redirect to a vetted relative `returnTo`, merging `params` into its query with
+ * proper encoding (preserving any query the path already carries).
+ */
+function redirectTo(
+  raw: string | undefined,
+  params: Record<string, string>,
+): Response {
+  const [base, existing] = safeReturnTo(raw).split("?", 2);
+  const qs = new URLSearchParams(existing);
+  for (const [key, value] of Object.entries(params)) qs.set(key, value);
+  const query = qs.toString();
+  return redirect(query ? `${base}?${query}` : base);
+}
 
 /** Split a path into segments after stripping `basePath`. Null if outside it. */
 function segmentsUnder(pathname: string, basePath: string): string[] | null {
@@ -101,6 +168,22 @@ export function createLatchHandler<P>(
 ): LatchHandler {
   const { runtime, resolveContext, connections } = config;
   const basePath = config.basePath ?? "/";
+  /** Resolve the runtime for this request's principal (static value or per-principal resolver). */
+  const resolveRuntime = (principal: P): Runtime<P> | Promise<Runtime<P>> =>
+    typeof runtime === "function"
+      ? (runtime as (p: P) => Runtime<P> | Promise<Runtime<P>>)(principal)
+      : runtime;
+  /** Resolve the connection registry for a principal (static value or per-principal resolver). */
+  const resolveConnections = async (
+    principal: P,
+  ): Promise<McpConnections<P> | undefined> =>
+    typeof connections === "function"
+      ? await (
+          connections as (
+            p: P,
+          ) => McpConnections<P> | Promise<McpConnections<P>>
+        )(principal)
+      : connections;
 
   return async (request) => {
     const url = new URL(request.url);
@@ -113,28 +196,51 @@ export function createLatchHandler<P>(
     // principal itself; the other connection routes require one.
     if (seg[0] === "connections" && connections) {
       const name = seg[1];
+      const action = seg[2];
+
+      // The callback may run before/without an app session, so decode its OAuth
+      // state up front and hand it to resolveContext — a consumer can rebuild
+      // the principal from it (e.g. a workspaceId baked into the flow).
+      const callbackState =
+        name && action === "callback" && method === "GET"
+          ? (decodeOAuthState(url.searchParams.get("state")) ?? undefined)
+          : undefined;
+
+      const principal = await resolveContext(
+        request,
+        callbackState ? { oauthState: callbackState } : undefined,
+      );
+      if (!principal) return json({ error: "unauthorized" }, 401);
+
+      const conns = await resolveConnections(principal);
+      if (!conns) return json({ error: "no connections configured" }, 400);
+
+      const oauth = name ? conns.oauth(name) : undefined;
 
       // GET connections → status list
       if (!name && method === "GET") {
-        const principal = await resolveContext(request);
-        if (!principal) return json({ error: "unauthorized" }, 401);
-        return json({ connections: await connections.status(principal) });
+        return json({ connections: await conns.status(principal) });
       }
-
-      const action = seg[2];
-      const oauth = name ? connections.oauth(name) : undefined;
 
       // GET connections/:name/authorize → 302 to IdP
       if (name && action === "authorize" && method === "GET") {
-        const principal = await resolveContext(request);
-        if (!principal) return json({ error: "unauthorized" }, 401);
         if (!oauth) return json({ error: `not an OAuth connection: ${name}` }, 400);
         const chatId = url.searchParams.get("chatId") ?? undefined;
         const approvalId = url.searchParams.get("approvalId") ?? undefined;
         const returnTo = url.searchParams.get("returnTo") ?? undefined;
+        // Optional caller-supplied context folded into the OAuth state so the
+        // callback (which may lack a session) can rebuild it — e.g. a
+        // credential-scope selector, plus any consumer-declared `stateParams`
+        // (e.g. a tenant id).
+        const scope = url.searchParams.get("scope") ?? undefined;
+        const extraState: Record<string, string> = {};
+        for (const key of config.stateParams ?? []) {
+          const value = url.searchParams.get(key);
+          if (value !== null) extraState[key] = value;
+        }
         const state =
-          chatId || approvalId || returnTo
-            ? { chatId, approvalId, returnTo }
+          chatId || approvalId || returnTo || scope || Object.keys(extraState).length > 0
+            ? { ...extraState, chatId, approvalId, returnTo, scope }
             : undefined;
         // A connection resolved as OAuth-capable but not actually configured for
         // it (e.g. a dynamic name whose stored record isn't oauth) throws here —
@@ -145,21 +251,26 @@ export function createLatchHandler<P>(
         } catch (e) {
           return json({ error: e instanceof Error ? e.message : "authorize failed" }, 400);
         }
-        return redirect(
-          res.status === "redirect" ? res.authorizationUrl : (returnTo ?? "/"),
-        );
+        if (res.status !== "redirect") {
+          // Already authorized (tokens live in the Vault) — start()
+          // short-circuits without an IdP round-trip, so the callback (which
+          // signals `onConnected` and appends `connectedParam`) never runs.
+          // Signal both here too, so a pending `connect_<name>` still resumes.
+          await config.onConnected?.(principal, name);
+          return redirectTo(returnTo, {
+            [config.connectedParam ?? "connected"]: name,
+          });
+        }
+        return redirect(res.authorizationUrl);
       }
 
       // GET connections/:name/callback → finish OAuth, resume a waiting chat
       if (name && action === "callback" && method === "GET") {
-        const principal = await resolveContext(request);
-        if (!principal) return json({ error: "unauthorized" }, 401);
         if (!oauth) return json({ error: `not an OAuth connection: ${name}` }, 400);
         const code = url.searchParams.get("code");
         const rawState = url.searchParams.get("state");
-        const ctx = decodeOAuthState(rawState);
-        const returnTo = (ctx?.returnTo as string) ?? "/";
-        if (!code) return redirect(`${returnTo}?error=missing_code`);
+        const returnTo = (callbackState?.returnTo as string) ?? "/";
+        if (!code) return redirectTo(returnTo, { error: "missing_code" });
         try {
           await oauth.finish(principal, { code, state: rawState ?? undefined });
         } catch (e) {
@@ -170,30 +281,29 @@ export function createLatchHandler<P>(
             `OAuth callback "${name}" token exchange failed:`,
             e instanceof Error ? (e.stack ?? e.message) : e,
           );
-          return redirect(`${returnTo}?error=exchange_failed`);
+          return redirectTo(returnTo, { error: "exchange_failed" });
         }
+        await config.onConnected?.(principal, name);
         // Redirect back IMMEDIATELY — don't run the resumed turn here, or the
         // browser would block on a blank page until the whole answer (tool calls
         // + generation) finished. The chat page approves the pending
-        // `connect_<name>` on return (`?connected=<name>`), so the conversation
-        // renders at once and the answer streams/fills in with a working state.
-        return redirect(`${returnTo}?connected=${name}`);
+        // `connect_<name>` on return, so the conversation renders at once and
+        // the answer streams/fills in with a working state.
+        return redirectTo(returnTo, {
+          [config.connectedParam ?? "connected"]: name,
+        });
       }
 
       // POST connections/:name/disconnect → drop credentials
       if (name && action === "disconnect" && method === "POST") {
-        const principal = await resolveContext(request);
-        if (!principal) return json({ error: "unauthorized" }, 401);
         await oauth?.provider(principal).invalidateCredentials?.("all");
         return json({ ok: true });
       }
 
       // POST connections/:name/test → connectivity probe (tool names)
       if (name && action === "test" && method === "POST") {
-        const principal = await resolveContext(request);
-        if (!principal) return json({ error: "unauthorized" }, 401);
         try {
-          return json({ tools: await connections.testTools(name, principal) });
+          return json({ tools: await conns.testTools(name, principal) });
         } catch (e) {
           return json(
             { error: e instanceof Error ? e.message : "test failed" },
@@ -207,9 +317,10 @@ export function createLatchHandler<P>(
     if (seg[0] === "agents") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
       // GET agents — the agents available to the caller (for a picker).
       if (!seg[1] && method === "GET") {
-        return json({ agents: await runtime.listAgents(principal) });
+        return json({ agents: await rt.listAgents(principal) });
       }
       const agent = seg[1];
       // Client-chosen chat id, used as-is. Tenant isolation is enforced by the
@@ -223,11 +334,14 @@ export function createLatchHandler<P>(
         const body = (await request.json().catch(() => ({}))) as {
           decisions?: ApprovalDecision[];
         };
-        return runtime.applyApproval({
+        return rt.applyApproval({
           chatId,
           principal,
           decisions: Array.isArray(body.decisions) ? body.decisions : [],
           request,
+          // The body was consumed above — hand the parsed payload on so
+          // context.build never needs to re-read the spent Request.
+          turnContext: body,
         });
       }
 
@@ -238,12 +352,14 @@ export function createLatchHandler<P>(
           output?: unknown;
         };
         if (!body.toolCallId) return json({ error: "toolCallId is required" }, 400);
-        return runtime.applyToolResult({
+        return rt.applyToolResult({
           chatId,
           principal,
           toolCallId: body.toolCallId,
           output: body.output,
           request,
+          // See the approvals route: the parsed body doubles as turnContext.
+          turnContext: body,
         });
       }
 
@@ -253,39 +369,86 @@ export function createLatchHandler<P>(
           string,
           unknown
         >;
-        return runtime.handleChat({
-          agent,
-          chatId,
-          principal,
-          message: toUserMessage(body),
-          request,
-        });
+        try {
+          return await rt.handleChat({
+            agent,
+            chatId,
+            principal,
+            message: toUserMessage(body),
+            request,
+            // The POST body is parsed exactly once, here — pass it on as the
+            // per-turn payload so `context.build` / agent factories can read
+            // request-scoped fields without touching the spent Request body.
+            turnContext: body,
+          });
+        } catch (e) {
+          // A new message arrived while the previous turn is still awaiting an
+          // approval decision. PendingApprovalError carries a stable `code` so
+          // we map it to 409 (the client should resolve the pending approval
+          // first) instead of letting it bubble to the host as a 500.
+          if (
+            e &&
+            typeof e === "object" &&
+            (e as { code?: unknown }).code === "pending_approval"
+          ) {
+            return json(
+              {
+                error:
+                  e instanceof Error ? e.message : "awaiting approval decision",
+                code: "pending_approval",
+              },
+              409,
+            );
+          }
+          // A client-supplied chat id collided with an existing (typically
+          // foreign-owned) chat: the scoped getChat missed, createChat hit the
+          // PK. ChatConflictError carries a stable `code` — map it to 409 so
+          // the client can pick a different id, instead of a 500.
+          if (
+            e &&
+            typeof e === "object" &&
+            (e as { code?: unknown }).code === "chat_conflict"
+          ) {
+            return json(
+              {
+                error:
+                  e instanceof Error ? e.message : "chat id is not available",
+                code: "chat_conflict",
+              },
+              409,
+            );
+          }
+          throw e;
+        }
       }
     }
 
     if (seg[0] === "chats" && method === "GET") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
       const id = seg[1];
       if (id) {
-        return json({ messages: await runtime.loadHistory({ chatId: id, principal }) });
+        return json({ messages: await rt.loadHistory({ chatId: id, principal }) });
       }
-      return json({ chats: await runtime.listChats({ principal }) });
+      return json({ chats: await rt.listChats({ principal }) });
     }
 
     if (seg[0] === "runs" && method === "GET") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
-      return json({ runs: await runtime.listRuns({ principal }) });
+      const rt = await resolveRuntime(principal);
+      return json({ runs: await rt.listRuns({ principal }) });
     }
 
     // --- schedules (cron-driven agents) -----------------------------------
     if (seg[0] === "schedules") {
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
       const id = seg[1];
       if (!id && method === "GET") {
-        return json({ schedules: await runtime.listSchedules({ principal }) });
+        return json({ schedules: await rt.listSchedules({ principal }) });
       }
       if (!id && method === "POST") {
         const body = (await request.json().catch(() => ({}))) as {
@@ -298,7 +461,7 @@ export function createLatchHandler<P>(
           return json({ error: "agent and prompt are required" }, 400);
         }
         try {
-          const record = await runtime.schedule({
+          const record = await rt.schedule({
             principal,
             agent: body.agent,
             cron: body.cron ?? null,
@@ -311,7 +474,7 @@ export function createLatchHandler<P>(
         }
       }
       if (id && method === "DELETE") {
-        await runtime.unschedule({ principal, id });
+        await rt.unschedule({ principal, id });
         return json({ ok: true });
       }
     }
@@ -322,6 +485,14 @@ export function createLatchHandler<P>(
       if (!config.cronSecret) return json({ error: "cron route disabled" }, 404);
       if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
         return json({ error: "forbidden" }, 403);
+      }
+      // No principal here → can't resolve a per-tenant runtime. A resolver-based
+      // (DB-per-tenant) setup must sweep tenants app-side instead of this route.
+      if (typeof runtime === "function") {
+        return json(
+          { error: "cron/run requires a static runtime; sweep tenants app-side" },
+          400,
+        );
       }
       return json(await runtime.runDue());
     }

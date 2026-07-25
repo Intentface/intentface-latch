@@ -2,7 +2,7 @@
   "name": "@intentface/latch-renderer",
   "version": "0.0.0",
   "private": true,
-  "description": "Headless-Chromium renderer: render-once fetch service returning rendered text + schema.org JSON-LD + interaction affordances. Deployed as a Dockerfile Vercel Function; called by the platform's render_fetch app tool (lib/render-fetch.ts). Private — a deployable service, not a published library.",
+  "description": "Headless-Chromium renderer: render-once fetch service returning rendered text + schema.org JSON-LD + interaction affordances. Deployed as a Dockerfile Vercel Function; called by the platform's render_fetch app tool (lib/render-fetch.ts). Private \u2014 a deployable service, not a published library.",
   "type": "module",
   "main": "dist/server.js",
   "scripts": {

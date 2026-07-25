@@ -109,6 +109,24 @@ export function pendingApprovals(messages: AppMessage[]): PendingApproval[] {
   const out: PendingApproval[] = [];
   for (const msg of messages) {
     for (const part of (msg.parts ?? []) as ToolPartLike[]) {
+      // A gated tool inside a spawned subagent bubbles up as a
+      // `data-subagent-approval` part (not a tool part). Surface it so the
+      // channel renders Approve/Deny; the decision routes via applyApproval.
+      const sub = part as {
+        type: string;
+        data?: { approvalId?: string; summaries?: string[]; approved?: boolean };
+      };
+      if (sub.type === "data-subagent-approval") {
+        if (sub.data?.approvalId && sub.data.approved === undefined) {
+          out.push({
+            approvalId: sub.data.approvalId,
+            toolName: sub.data.summaries?.join(", ") || "connector action",
+            input: undefined,
+            isConnect: false,
+          });
+        }
+        continue;
+      }
       const isTool = part.type === "dynamic-tool" || part.type.startsWith("tool-");
       if (!isTool) continue;
       if (part.state !== "approval-requested") continue;

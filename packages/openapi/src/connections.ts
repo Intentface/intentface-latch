@@ -1,4 +1,5 @@
 import SwaggerParser from "@apidevtools/swagger-parser";
+import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
 import type {
   ConnectionRegistry,
   OpenToolSet,
@@ -32,6 +33,12 @@ export interface OpenApiConnectionDef<P> {
   approval?: OpenApiApprovalPolicy;
   /** Header resolver (where credential scope lives). See `apiKey`/`bearer`/`headers`. */
   auth?: OpenApiAuth<P>;
+  /**
+   * Skip the private/internal-address SSRF backstop for this connection.
+   * Mirrors the MCP host's `allowPrivateHost`: set it only for a trusted
+   * local/internal API — the allowlist check still applies.
+   */
+  allowPrivateHost?: boolean;
 }
 
 export function defineOpenApiConnection<P = unknown>(
@@ -68,6 +75,16 @@ export function createOpenApiConnections<P>(
       if (!isHostAllowed(host, config.allowedHosts)) {
         throw new Error(`OpenAPI spec host not allowed: ${host} (connection "${name}")`);
       }
+      // Same private/internal-address backstop as operation requests: an
+      // allowlisted spec hostname must not resolve to a private/link-local IP.
+      if (
+        !def.allowPrivateHost &&
+        (isBlockedHost(host) || (await isBlockedResolved(host)))
+      ) {
+        throw new Error(
+          `OpenAPI spec host resolves to a private/internal address: ${host} (connection "${name}")`,
+        );
+      }
       const res = await fetchFn(def.spec, { redirect: "error" });
       if (!res.ok) throw new Error(`spec fetch failed: HTTP ${res.status}`);
       raw = (await res.json()) as Record<string, unknown>;
@@ -92,6 +109,7 @@ export function createOpenApiConnections<P>(
       operations: def.operations,
       allowedHosts: config.allowedHosts,
       fetchFn,
+      allowPrivateHost: def.allowPrivateHost,
     });
   }
 

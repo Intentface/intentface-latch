@@ -1,4 +1,5 @@
 import { createClient, type Client } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import {
   createRuntime,
@@ -7,8 +8,14 @@ import {
   type Runtime,
   type StorageAdapter,
 } from "@intentface/latch-core";
-import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { tools } from "./tools.js";
+
+/**
+ * Wrap a libsql `Client` in a Drizzle db — the client-free adapter / secret-store
+ * APIs take a `BaseSQLiteDatabase`, so the caller owns the connection.
+ */
+export const latchDb = (client: Client) => drizzle(client, { schema });
 
 /** The example's Principal (opaque to Latch). The `owner` fn keys isolation. */
 export interface Principal {
@@ -103,7 +110,7 @@ export async function makeToolRuntime(): Promise<{
 }> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
@@ -126,7 +133,7 @@ export async function makeRuntime(): Promise<{
 }> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });
@@ -146,7 +153,7 @@ export async function makeDurableRuntime(
 ): Promise<{ runtime: Runtime<Principal>; storage: StorageAdapter<Principal>; client: Client }> {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
   });

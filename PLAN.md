@@ -50,10 +50,11 @@ Verified (Jun 2026): the agent ecosystem's engines are Apache-2.0 and usable sta
       ContextExtension registry + compaction, run orchestration,
       session-replay durability (lease/heartbeat/reaper) behind a seam, StorageAdapter iface,
       model registry + aliases, usage/cost calc, rate-limit iface,
-      observability hooks, Principal/auth seam, web-standard HTTP handlers.
+      observability hooks (`onFinish`/`onStep`/`onError`), Principal/auth seam, web-standard HTTP handlers.
 
 @intentface/latch-server       Hono app + auth adapters + Express bridge.   deps: hono
-@intentface/latch-drizzle      StorageAdapter (chats/messages/runs/usage) + migrations (pg/sqlite). deps: drizzle
+@intentface/latch-drizzle      StorageAdapter (chats/messages/runs/usage) + migrations (pg/sqlite); driver-agnostic (libsql/better-sqlite3) + MessageStore seam. deps: drizzle
+@intentface/latch-net          SSRF guard (private-IP + DNS-rebinding) for MCP/OpenAPI/fetch. deps: none (light).
 
 — optional, pulled only if used —
 @intentface/latch-mcp          MCP manager.                       deps: @ai-sdk/mcp
@@ -114,11 +115,14 @@ v7 only has raw per-call `runtimeContext`/`toolsContext` (+ tool `contextSchema`
 ContextResolver(req) → Principal → context.build(Principal) → RuntimeContext
                                   → context.toolsContext(runtime, secrets) → per-tool context
 ```
+**Per-turn `turnContext`** (shipped): a host-shaped request payload threaded into `context.build` **separately from the durable `Principal`**, so ephemeral fields (active document, editor selection, block config) are never persisted into `runs.identity` or replayed on resume/cron.
 
 ### Messages — three levels
 - **`AppMessage`** = `UIMessage<AppMetadata, AppDataParts, Tools>` — **the stored unit** (`messages` table). `AppMetadata` carries `visibility: user|internal|redacted` + `sendToModel?`.
 - **`ModelMessage[]`** = `toModelMessages(app)` — filter `sendToModel`, fold compaction, prune. Ephemeral.
 - **client `UIMessage[]`** = `toClientMessages(app)` — filter `visibility:user`, strip internal. Used on history load; live stream shaped by `writer.write`/`messageMetadata`.
+
+Chat-level **`kind`** (`user|internal`, shipped) on `ChatRecord` + a `listChats({ kind })` filter — keeps internal sub-chats (subagents, one-shot runs) out of a host's sidebar/store. **`runTurnStream`** (shipped) runs an ephemeral streamed turn with no persistence (one-shot generations, no chat loop).
 
 ### Context-extensions — open registry (ours)
 Compaction is one plugin, not special-cased. `defineContextExtension({ kind, dataPart?, event?, defaults, toModel?, toClient?, trigger?, run? })`. Projections iterate the registry. Built-ins: compaction (+ branch-summary). Compaction summary lives in **log + `compactions` projection** (server-only); client gets a **marker** `data-compaction` part (no summary) unless `visibility` flipped.
@@ -132,20 +136,20 @@ Core never authenticates. `ContextResolver(req) => Principal`. Embed (Hono `app.
 ### Workspaces
 `WorkspaceProvider` → `experimental_sandbox` contract, injected per call. Scope (`shared|org|user|session`) resolved from RuntimeContext. DB stores only a **handle**; files live in provider. Daytona (persisted fs, per-tenant creds) + local; swappable.
 
-### Subagents (AI SDK-native; near-term)
-A subagent = a tool whose `execute` calls another `ToolLoopAgent` — isolated fresh context window (offloading, parallel research, tool-access isolation). `toModelOutput` controls what the main model sees (summary) vs the user (full sub-run) → **reuses our `visibility`/`sendToModel` axes**. Streaming via preliminary tool results (`async function*` + `readUIMessageStream`). We add: `asTool(agent, { toModelOutput })` helper; subagent runs = **child runs** in the log (`parent_run_id`); parent runtime/tools context propagates. Caveats: no tool approvals inside subagents; pass `abortSignal`.
+### Subagents (AI SDK-native — subagent HITL shipped)
+A subagent = a tool whose `execute` calls another `ToolLoopAgent` — isolated fresh context window (offloading, parallel research, tool-access isolation). `toModelOutput` controls what the main model sees (summary) vs the user (full sub-run) → **reuses our `visibility`/`sendToModel` axes**. Streaming via preliminary tool results (`async function*` + `readUIMessageStream`). We add: `asTool(agent, { toModelOutput })` helper; subagent runs = **child runs** in the log (`parent_run_id`); parent runtime/tools context propagates. Subagent HITL: a gated tool inside a subagent bubbles its approval up to the parent turn (`awaiting_input`), routed back on `applyApproval` — uniform, hierarchy-agnostic approval (see `docs/subagent-hitl.md`). Caveats: pass `abortSignal`.
 
 ### Steering / input queue (later; composes from executor + prepareStep + log)
 Inject user input into an in-flight run. Per-run **input queue** owned by `RunExecutor`, DB-backed + pluggable (survives serverless processes). Modes (Pi): `steer` (drained between steps, before next LLM call), `followUp` (drained at run end → new run), `nextTurn` (stored for next prompt), + interrupt/abort. Emits `queue_update` events.
 
 ### MCP
-`createMCPClient` per-tenant registry; OAuth `authProvider` + `validateAuthorizationServerURL` (SSRF guard); aggregate `.tools()` into agent; route elicitation to approval flow. AI SDK client is lightweight (no session/notifications) → upgrade specific connections to official MCP SDK later.
+`createMCPClient` per-tenant registry; OAuth `authProvider` + `validateAuthorizationServerURL` (SSRF guard); aggregate `.tools()` into agent; route elicitation to approval flow. AI SDK client is lightweight (no session/notifications) → upgrade specific connections to official MCP SDK later. **Per-principal gating** (shipped): `approvalFor(principal)` resolves the approval level per caller and `visibleToolsFor(principal)` hides a tool entirely — not one static policy per connection.
 
 ### Vault / Connections — credentials seam (ours; most clients lack this)
 Secure per-tenant/per-user credential store + integration registry, so secrets never live in code, agent configs, logs, or model context. Borrows Claude Managed Agents' Vaults: **the agent declares which servers/tools; the session/`Principal` references the vault for auth** → secrets stay out of reusable configs.
-- **`SecretStore` seam:** default = **envelope-encrypted in the customer's Postgres** (env/KMS master key → per-tenant data keys → secrets); zero new infra. Swap: AWS Secrets Manager/KMS · GCP Secret Manager · HashiCorp Vault · Doppler · Infisical · env.
+- **`SecretStore` seam:** default = **envelope-encrypted in the customer's Postgres** (env/KMS master key → per-tenant data keys → secrets); zero new infra. Swap: AWS Secrets Manager/KMS · GCP Secret Manager · HashiCorp Vault · Doppler · Infisical · env. A `deriveMasterKey(passphrase)` helper (scrypt, `./node` subpath) lets a free-form secret back the envelope key.
 - **Connections registry:** a connection is an **MCP server**, an **OpenAPI spec** (endpoints → tools automatically), or a **generic HTTP** base (the `fetch`-bridge target for code-mode); cred type `static_token|oauth|env_secret`, resolved from the Vault, scoped per org/user. So an **API without MCP** (e.g. Clockify) = register it as an **OpenAPI/HTTP connection** → its endpoints become tools with no hand-written code (the code-mode `fetch`-bridge handles multi-query composition).
-- **OAuth flow manager** (clients won't build this): initiate → callback → store → **auto-refresh** → revoke; tokens encrypted in the Vault, scoped to `(org, user?, server)`. Connect-mid-run → the run **parks** (OAuth→park/resume).
+- **OAuth flow manager** (clients won't build this): initiate → callback → store → **auto-refresh** → revoke; tokens encrypted in the Vault, scoped to `(org, user?, server)`. Connect-mid-run → the run **parks** (OAuth→park/resume). The server handler takes `connections` as a **per-`principal` resolver** (multi-tenant hosts resolve a per-workspace registry, not one static value), and the sessionless callback carries **host-named state seams** (`stateParams` / `oauthState` → `resolveContext` / `connectedParam`) so latch stays host-agnostic.
 - **Injection, two levels:** default = server-side resolution into the MCP `authProvider` / `toolsContext` (model never sees it); hardened = **egress proxy / opaque placeholder** substituted at the network boundary (Claude-style) so the secret never enters the agent process — optional.
 - **Safety:** per-`Principal` scoping (no cross-tenant), encryption at rest, audit log, rotation, revocation, never in context/logs/telemetry, SSRF allowlist for MCP/auth servers.
 - Storage+lifecycle layer; `defineContext.toolsContext` / `SecretResolver` is the read-side. Package: `@intentface/latch-vault`.
@@ -283,10 +287,12 @@ Flow: presigned **PUT direct to S3** (no proxying bytes) → `AppMessage` stores
 - **History browsing** — API/UI over `messages`/`run_events` (data already there).
 - **Self-evolving agents** — scheduled job reads run history + **steering frequency** (signal that a prompt is off) → generates an instruction overlay stored **per-org/per-user** → injected via `defineContext`/before-agent-start hook. Composes from event-log + Scheduler + context-injection + a per-scope prompt store; no new primitives. Complements (not same as) Memory: evolution tunes *instructions*, memory recalls *facts*.
 - **Evals (early + first-class, à la Eve)** — thin `defineEval` (cases: input + assertions) → run a `defineAgent` headlessly → score with deterministic assertions + LLM-as-judge → reporter. Runs in CI/dev, **reuses the headless agent runtime** (cheap to add). Or integrate **Braintrust/Evalite/promptfoo** (Braintrust overlaps the observability adapter — one integration, evals + tracing). Bonuses: seed eval datasets from production `messages` history; **evals are the metric the self-evolving-prompts feature needs.** A consultancy differentiator ("we prove it works and keep it working").
+- **`deleteChat` seam** — the StorageAdapter has no delete path, so a host deleting a chat orphans its `latch_*` rows (no FKs). Add a delete seam (+ smaller gaps surfaced by a host: PG concurrent-boot `CREATE INDEX` race, workspace-scoped secrets not listable, scheduled bridged runs orphaning a host chat file).
+- **Deeper observability** — OTel + event sink, a `run_events` log, `usage` as a first-class billing ledger; the shipped `onFinish`/`onStep`/`onError` hooks are the light first step a host can consolidate its telemetry onto.
 - **Richer extension hooks** (à la Pi: before_provider_request, etc.) as the hook layer matures.
 
 ## Resolved opens (recommended defaults — override if needed)
-1. **Schema ownership** → own prefixed `latch_*` tables + ship Drizzle migrations; app-level orgId scoping v1, RLS later.
+1. **Schema ownership** → own prefixed `latch_*` tables + ship Drizzle migrations; app-level orgId scoping v1, RLS later. Hosts should **consume the shipped migrations, not hand-declare the tables** (à la better-auth) — hand-mirroring the schema in the host repo is error-prone (it can produce a bad migration timestamp).
 2. **MCP depth** → AI SDK client (tools+resources+OAuth) for v1; official MCP SDK wrapper for full session/notifications later.
 3. **Daytona tenancy** → per-customer creds via SecretResolver; shared account as a config option.
 4. **Executor for v1** → ship `RunExecutor` seam + `inline` only; `queueWorker`/durable adapter next.

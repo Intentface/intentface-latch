@@ -19,12 +19,33 @@ import type { AppMessage } from "./message.js";
 
 export type RunStatus = "active" | "awaiting_input" | "completed" | "errored";
 
+/**
+ * Thrown by `createChat` when the requested chat id already exists (typically a
+ * client-supplied id colliding with a chat the caller doesn't own — the scoped
+ * `getChat` missed, so the create raced into the PK). Carries a stable `code`
+ * so the server layer can map it to a 409 instead of a 500.
+ */
+export class ChatConflictError extends Error {
+  readonly code = "chat_conflict";
+  constructor(chatId: string) {
+    super(`Chat id is not available: ${chatId}`);
+    this.name = "ChatConflictError";
+  }
+}
+
 export interface ChatRecord {
   id: string;
   /** Opaque ownership key the adapter scoped this row by (e.g. `tenant/user`). */
   owner: string;
   agent: string;
   title?: string;
+  /**
+   * What kind of chat this is. `'user'` (the default) = a user-facing
+   * conversation; `'internal'` = a runtime-created sub-thread (the `sub_…`
+   * chats `spawn_agent` mints) that should stay out of the main chat list.
+   * Open vocabulary — a host may stamp its own kinds via `createChat`.
+   */
+  kind?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -119,12 +140,21 @@ export interface StorageAdapter<P> {
       id?: string;
       agent: string;
       title?: string;
+      /** Chat kind (see `ChatRecord.kind`). Defaults to `'user'`. */
+      kind?: string;
     },
   ): Promise<ChatRecord>;
   /** Scoped: returns null if the chat isn't the caller's. */
   getChat(principal: P, id: string): Promise<ChatRecord | null>;
-  /** Scoped list of the caller's chats, most-recently-updated first. */
-  listChats(principal: P, opts?: { limit?: number }): Promise<ChatRecord[]>;
+  /**
+   * Scoped list of the caller's chats, most-recently-updated first.
+   * `opts.kind` filters to one kind (e.g. `'user'` for a sidebar that must not
+   * show internal sub-threads); omitted → ALL kinds (back-compatible default).
+   */
+  listChats(
+    principal: P,
+    opts?: { limit?: number; kind?: string },
+  ): Promise<ChatRecord[]>;
 
   // messages (the source of truth)
   /** Scoped read of the conversation, oldest first. */
@@ -148,14 +178,23 @@ export interface StorageAdapter<P> {
     ttlMs: number;
   }): Promise<RunRecord>;
   /**
-   * Extend our lease by `ttlMs`. Returns false if we no longer own the active run
-   * (it was reaped/reassigned or already closed) — the caller should stop work.
+   * Extend our lease by `ttlMs`. Fenced: the extension only applies while
+   * `(owner, fencingToken)` still match the row, so a stale holder whose run was
+   * reaped and re-claimed (same owner id, bumped token) can't resurrect the
+   * lease. Returns false if we no longer own the active run — stop work.
    */
-  heartbeatRun(id: string, owner: string, ttlMs: number): Promise<boolean>;
+  heartbeatRun(
+    id: string,
+    owner: string,
+    ttlMs: number,
+    fencingToken: number,
+  ): Promise<boolean>;
   /**
    * Re-claim an interrupted run for a new owner (resume). Succeeds only if the
-   * run is not completed AND currently unowned or lease-expired — so two nodes
-   * racing to resume the same run resolve to exactly one. Bumps the fencing
+   * run is not completed AND was leased at some point with the lease now
+   * expired (`leaseExpiresAt < now`) — so two nodes racing to resume the same
+   * run resolve to exactly one, and a live never-leased (T1) run can never be
+   * seized out from under its writer. Bumps the fencing
    * token and attempt, clears the error/end, and re-leases. Returns the
    * re-claimed record (carrying `identity`), or null if it wasn't resumable.
    */
@@ -167,13 +206,15 @@ export interface StorageAdapter<P> {
   /**
    * Patch a run. With `guard`, the write only applies while `(leaseOwner,
    * fencingToken)` still match — stale-writer protection (fencing). Without it,
-   * an unconditional update (T1).
+   * an unconditional update (T1). Returns whether the patch was applied — a
+   * guarded caller must treat `false` as "I'm a stale writer" and skip any
+   * follow-up persistence.
    */
   updateRun(
     id: string,
     patch: Partial<RunRecord>,
     guard?: RunLease,
-  ): Promise<void>;
+  ): Promise<boolean>;
   getRun(id: string): Promise<RunRecord | null>;
   /** Scoped list of the caller's runs (joined via chats), most-recent first. */
   listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
@@ -217,9 +258,15 @@ export interface StorageAdapter<P> {
    * `identity`). Mirrors the run reclaim transition.
    */
   claimDueSchedules(now: number, ttlMs: number, owner: string): Promise<ScheduleRecord[]>;
-  /** Finish a fired schedule: advance `nextRunAt`/`enabled`, set `lastRunAt`, clear the lease. */
+  /**
+   * Finish a fired schedule: advance `nextRunAt`/`enabled`, set `lastRunAt`,
+   * clear the lease. Fenced by `owner`: only the node holding the claim lease
+   * may complete it, so a node whose lease expired mid-fire (schedule since
+   * re-claimed elsewhere) can't clobber the newer claim.
+   */
   completeSchedule(
     id: string,
     patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
+    owner: string,
   ): Promise<void>;
 }

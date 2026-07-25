@@ -7,7 +7,7 @@ import {
   type AppMessage,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { assert, mockModel, owner, type Principal } from "./setup.js";
+import { assert, latchDb, mockModel, owner, type Principal } from "./setup.js";
 
 /**
  * Cost calc: with a pricing table, the runtime computes cost from token usage
@@ -18,7 +18,7 @@ import { assert, mockModel, owner, type Principal } from "./setup.js";
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const storage = createSqliteAdapter<Principal>(latchDb(client), { owner });
   const context = defineContext<Principal, { orgId: string }>({ build: ({ principal }) => ({ orgId: principal.orgId }) });
   const agents = {
     echo: defineAgent<Principal, { orgId: string }>(() => ({

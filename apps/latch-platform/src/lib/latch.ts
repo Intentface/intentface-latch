@@ -1,4 +1,5 @@
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import {
   createRuntime,
   createVault,
@@ -12,6 +13,7 @@ import {
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
+  schema,
 } from "@intentface/latch-drizzle";
 import { isLangfuseConfigured, langfuseTelemetry } from "@intentface/latch-langfuse";
 import { waitUntil } from "@vercel/functions";
@@ -137,11 +139,13 @@ export async function getLatch(): Promise<{
   // (`[org]`) — used for org-level credentials.
   const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
 
-  const storage = createSqliteAdapter<Principal>(client, { owner });
+  const db = drizzle(client, { schema }); // adapters take a pre-built drizzle db
+  const storage = createSqliteAdapter<Principal>(db, { owner });
   const vault = createVault<Principal>({
-    store: createSqliteSecretStore<Principal>(client, { owner }),
-    // Dev-only fallback is a deterministic 32-byte key; production without
-    // LATCH_VAULT_KEY throws (secrets must never be encrypted with a public key).
+    // Our driver-agnostic adapter API takes the pre-built drizzle `db`; main's
+    // fail-closed `secretEnv` (throws in prod if the key is the dev default) is
+    // kept — both improvements coexist.
+    store: createSqliteSecretStore<Principal>(db, { owner }),
     masterKey: secretEnv("LATCH_VAULT_KEY", btoa("latch-dev-vault-key-32-bytes!!!!")),
   });
   const credentials = createCredentials(vault);
