@@ -63,6 +63,8 @@ import { makeResolveReasoningOptions } from "./reasoning";
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
   orgId: string;
+  /** The logged-in user, resolved from better-auth — absent for org-only principals. */
+  user?: { name?: string; email?: string };
 }
 
 /**
@@ -182,8 +184,27 @@ export async function getLatch(): Promise<{
   // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
   const runScores = createRunScoresStore(client);
 
+  // Resolve the principal's user row once per process per user — agents (e.g. the
+  // anchor interview/orient pair) read `runtime.user` to know who they're talking to.
+  const userCache = new Map<string, { name?: string; email?: string } | undefined>();
+  async function resolveUser(userId: string) {
+    if (!userCache.has(userId)) {
+      const row = await client
+        .execute({ sql: "SELECT name, email FROM user WHERE id = ?", args: [userId] })
+        .then((r) => r.rows[0], () => undefined);
+      userCache.set(
+        userId,
+        row ? { name: (row.name as string) || undefined, email: (row.email as string) || undefined } : undefined,
+      );
+    }
+    return userCache.get(userId);
+  }
+
   const context = defineContext<Principal, Ctx>({
-    build: ({ principal }) => ({ orgId: principal.orgId }),
+    build: async ({ principal }) => ({
+      orgId: principal.orgId,
+      ...(principal.userId ? { user: await resolveUser(principal.userId) } : {}),
+    }),
   });
 
   // MCP connections, declared in `connections/`. SSRF allowlist derives from the
