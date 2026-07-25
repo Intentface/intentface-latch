@@ -1,5 +1,5 @@
 import { getLangfuseClient } from "./client.js";
-import { traceIdForRun } from "./trace-id.js";
+import { scoreIdForRun, traceIdForRun } from "./trace-id.js";
 
 export interface PostScoreInput {
   /** The latch run the score belongs to (resolved to its trace id). */
@@ -10,6 +10,15 @@ export interface PostScoreInput {
   /** Free-text rationale (judge reason / user comment). */
   comment?: string;
   dataType?: "NUMERIC" | "BOOLEAN" | "CATEGORICAL";
+  /** Extra metadata on the score — e.g. a human correction's original AI verdict. */
+  metadata?: Record<string, unknown>;
+  /**
+   * Stable score id. Defaults to a deterministic id derived from (runId, name)
+   * so repeated writes for the same run+name upsert one score rather than
+   * accumulating duplicates (live verdict → human correction overwrites it).
+   * Pass an explicit id only when you deliberately want independent scores.
+   */
+  id?: string;
 }
 
 /** Default hard bound on the flush network call (ms). */
@@ -27,11 +36,13 @@ export async function postScore(
 ): Promise<void> {
   const client = getLangfuseClient();
   client.score.create({
+    id: input.id ?? (await scoreIdForRun(input.runId, input.name)),
     traceId: await traceIdForRun(input.runId),
     name: input.name,
     value: input.value,
     comment: input.comment,
     dataType: input.dataType,
+    ...(input.metadata ? { metadata: input.metadata } : {}),
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {

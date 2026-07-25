@@ -88,7 +88,7 @@ export const evalAuthor = defineAgent<Principal, { orgId: string }>(
 
 OUTPUT CONTRACT (hard rule): your FINAL answer must be exactly one fenced \`\`\`json code block and NOTHING else — no preamble, no prose before or after. If you can't complete the task, the block contains {"error": "<one-line reason>"}. If a follow-up message points out your JSON was malformed, reply with ONLY the corrected block.
 
-You author ONLINE EVALS: judge rubrics attached to an agent that run automatically on EVERY live run — a pinned LLM judge grades the run and the verdict lands as a score (named after the rubric) the user watches on the Observability page. The judge sees the user message, the agent's final answer, and tool NAMES (no args).
+You author ONLINE EVALS: judge rubrics attached to an agent that run automatically on EVERY live run — a pinned LLM judge grades the run and the verdict lands as a score (named after the rubric) the user watches on the Observability page. The judge sees the user message, the agent's final answer, and the tool calls it made — each tool NAME with a compact view of its key ARGUMENTS (long values truncated). So criteria about which subagent was delegated to (spawn_agent's agent arg), which tool ran, or what was written are all fair game.
 
 You operate in one of two modes, decided by the incoming message:
 
@@ -99,7 +99,7 @@ Then answer with a JSON ARRAY of rubrics, each:
 Craft rules:
 - 3–7 rubrics covering the qualities that make this agent good: correctness of scope ("answers the question that was asked"), tone, tool discipline ("uses a search tool before claiming facts"), refusal/escalation rules, formatting promises. Every enabled rubric costs one judge call per live run — quality over quantity.
 - name: kebab-case, short, stable — it becomes the Langfuse score name ("stays-on-topic", "escalates-refunds").
-- prompt: ONE observable quality per rubric, judgeable from the user message + final answer + tool NAMES alone. Never write a criterion about tool ARGUMENT values or anything invisible to the judge. Write it so a reasonable judge can verify it on ANY real run — unlike test cases there is no fixed input, so avoid criteria that only apply to one scenario ("mentions Paris"); prefer conditionals ("IF the user asks about pricing, quotes exact catalog prices").
+- prompt: ONE observable quality per rubric, judgeable from the user message + final answer + the tool calls (names + key args). Criteria may reference tool names AND salient argument values (e.g. "delegates to the running-coach-memory-writer subagent via spawn_agent", "writes the run to the runs table"), but not tool OUTPUTS or anything the judge can't see. Write it so a reasonable judge can verify it on ANY real run — unlike test cases there is no fixed input, so avoid criteria that only apply to one scenario ("mentions Paris"); prefer conditionals ("IF the user asks about pricing, quotes exact catalog prices").
 - scale: prefer "binary" (clear pass/fail). Use "score" only for genuinely graded qualities ("depth of explanation") — and say in the prompt what 0 and 1 look like.
 - When genuinely ambiguous whether a quality is judgeable, leave it out and note it in a rubric prompt you DO include only if observable.
 

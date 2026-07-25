@@ -1,6 +1,6 @@
 export { isLangfuseConfigured, getLangfuseClient } from "./client.js";
 export { ensureTracing, flushLangfuse } from "./otel.js";
-export { traceIdForRun } from "./trace-id.js";
+export { traceIdForRun, scoreIdForRun } from "./trace-id.js";
 export {
   langfuseTelemetry,
   type LangfuseTelemetryOptions,

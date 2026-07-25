@@ -104,7 +104,8 @@ ${input}
 AGENT'S ANSWER:
 ${answer.slice(0, ANSWER_CAP)}
 
-TOOLS THE AGENT CALLED (names, in order): ${tools}`;
+TOOLS THE AGENT CALLED (in order, with key arguments — long values truncated):
+${tools}`;
 
   let lastError = "";
   // One retry on a malformed verdict; then an error marker (never a case fail).

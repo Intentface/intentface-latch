@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, readUIMessageStream } from "ai";
 import { useRouter } from "@tanstack/react-router";
-import { Bot, Brain, ChevronDown, CircleDot, Loader2 } from "lucide-react";
+import { Bot, Brain, ChevronDown, CircleDot, Loader2, Telescope } from "lucide-react";
 import {
   cn,
   Composer,
@@ -25,7 +25,10 @@ import {
   submitApproval,
   submitToolResult,
 } from "@/lib/latch-client";
-import { chatGeneratingFn, submitFeedbackFn } from "@/lib/server";
+import { chatGeneratingFn, getAgentEvalsFn, rejudgeRunFn, submitFeedbackFn } from "@/lib/server";
+import type { AttachedEval } from "@/lib/agent-store";
+import { EvalsDrawer, useEvalsDrawerToggle } from "@/components/evals-drawer";
+import { ScoreBadges, useEvalScores } from "@/components/eval-scores";
 import type { UIMessageChunk } from "ai";
 import { Button } from "@/components/ui/button";
 import { EvalRunCard } from "@/components/eval-run-card";
@@ -136,6 +139,52 @@ export function Chat({
     initial: 0 | 1;
   } | null>(null);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<string, 0 | 1>>({});
+
+  // Live evals (owner-only): the drawer + per-message score badges. The judge
+  // dual-writes verdicts to a fast local store; we poll it for visible runs.
+  const [editable, setEditable] = useState(false);
+  const [hasRubrics, setHasRubrics] = useState(false);
+  const [drawerOn, setDrawerOn] = useEvalsDrawerToggle(agent);
+  const [draft, setDraft] = useState<AttachedEval[]>([]);
+  const [reevaluating, setReevaluating] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void getAgentEvalsFn({ data: agent }).then((res) => {
+      if (cancelled) return;
+      setEditable(res.editable);
+      setHasRubrics(res.evals.some((e) => e.enabled));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent]);
+  // Distinct assistant run ids currently on screen (feedback + scores key on these).
+  const runIds = Array.from(
+    new Set(
+      messages
+        .filter((m) => m.role === "assistant")
+        .map((m) => (m.metadata as { runId?: string } | undefined)?.runId)
+        .filter((id): id is string => !!id),
+    ),
+  );
+  const showEvals = editable && drawerOn;
+  const { scores, merge } = useEvalScores(runIds, editable && (drawerOn || hasRubrics));
+
+  // Re-judge every visible message against the current (draft) rubric set.
+  const reevaluate = async () => {
+    if (reevaluating || draft.length === 0) return;
+    setReevaluating(true);
+    try {
+      await Promise.all(
+        runIds.map(async (runId) => {
+          const res = await rejudgeRunFn({ data: { chatId, runId, evals: draft } });
+          if (res.ok) merge(runId, res.scores);
+        }),
+      );
+    } finally {
+      setReevaluating(false);
+    }
+  };
 
   // On reload, a turn may still be running server-side (we now drain it to
   // completion regardless of the client). Poll for that: show a "Generating…"
@@ -364,8 +413,23 @@ export function Chat({
   const lastId = messages.at(-1)?.id;
 
   return (
-    <Thread autoScroll={scrollMode}>
-      <Thread.Overlay direction="top" />
+    <div className="flex h-full min-w-0">
+      <div className="relative flex h-full min-w-0 flex-1 flex-col">
+        {editable && (
+          <button
+            type="button"
+            onClick={() => setDrawerOn(!drawerOn)}
+            aria-pressed={showEvals}
+            className={cn(
+              "border-secondary-border bg-secondary text-ink-secondary hover:text-ink-primary absolute top-2 right-2 z-10 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
+              showEvals && "text-ink-primary",
+            )}
+          >
+            <Telescope className="size-3.5" /> Evals
+          </button>
+        )}
+        <Thread autoScroll={scrollMode}>
+          <Thread.Overlay direction="top" />
       <Thread.Viewport>
         {messages.length === 0 ? (
           <Thread.Placeholder>
@@ -375,32 +439,52 @@ export function Chat({
             </p>
           </Thread.Placeholder>
         ) : (
-          messages.map((m) => (
-            <Message
-              key={m.id}
-              message={m as unknown as AppUIMessage}
-              isStreaming={busy && m.id === lastId && m.role === "assistant"}
-              renderApproval={renderApproval}
-              renderSubagent={(part) => (
-                <SubagentThread part={part} progress={subagentProgressFor(messages, part)} />
-              )}
-              renderTool={(part) =>
-                part.type === "tool-run_evals" ? (
-                  <EvalRunCard part={part} progress={evalProgressFor(messages, part)} />
-                ) : undefined
-              }
-              onRegenerate={
-                m.role === "assistant" && !busy ? () => regenerate({ messageId: m.id }) : undefined
-              }
-              onFeedback={(() => {
-                const runId = (m.metadata as { runId?: string } | undefined)?.runId;
-                return m.role === "assistant" && !busy && runId
-                  ? (value: 0 | 1) => setFeedbackFor({ messageId: m.id, runId, initial: value })
-                  : undefined;
-              })()}
-              feedbackValue={feedbackGiven[m.id]}
-            />
-          ))
+          messages.map((m) => {
+            const runId = (m.metadata as { runId?: string } | undefined)?.runId;
+            const isAssistant = m.role === "assistant";
+            const settled = isAssistant && !(busy && m.id === lastId);
+            // Show badges/pending for owners watching evals, once the message
+            // is complete and carries a run id.
+            const showScores =
+              editable && (drawerOn || hasRubrics) && settled && !!runId;
+            return (
+              <div key={m.id}>
+                <Message
+                  message={m as unknown as AppUIMessage}
+                  isStreaming={busy && m.id === lastId && isAssistant}
+                  renderApproval={renderApproval}
+                  renderSubagent={(part) => (
+                    <SubagentThread part={part} progress={subagentProgressFor(messages, part)} />
+                  )}
+                  renderTool={(part) =>
+                    part.type === "tool-run_evals" ? (
+                      <EvalRunCard part={part} progress={evalProgressFor(messages, part)} />
+                    ) : undefined
+                  }
+                  onRegenerate={
+                    isAssistant && !busy ? () => regenerate({ messageId: m.id }) : undefined
+                  }
+                  onFeedback={
+                    isAssistant && !busy && runId
+                      ? (value: 0 | 1) => setFeedbackFor({ messageId: m.id, runId, initial: value })
+                      : undefined
+                  }
+                  feedbackValue={feedbackGiven[m.id]}
+                />
+                {showScores && (
+                  <ScoreBadges
+                    runId={runId}
+                    scores={runId ? scores[runId] : undefined}
+                    pending={hasRubrics}
+                    canCorrect={editable}
+                    onCorrected={(rid, updated) =>
+                      merge(rid, (scores[rid] ?? []).map((s) => (s.name === updated.name ? updated : s)))
+                    }
+                  />
+                )}
+              </div>
+            );
+          })
         )}
         <FeedbackDialog
           key={feedbackFor ? `${feedbackFor.messageId}-${feedbackFor.initial}` : "closed"}
@@ -477,8 +561,20 @@ export function Chat({
           </Composer.Container>
         </Composer>
       </Thread.Composer>
-      <Thread.Overlay direction="bottom" />
-    </Thread>
+          <Thread.Overlay direction="bottom" />
+        </Thread>
+      </div>
+      {showEvals && (
+        <EvalsDrawer
+          agent={agent}
+          draft={draft}
+          setDraft={setDraft}
+          onClose={() => setDrawerOn(false)}
+          onReevaluate={reevaluate}
+          reevaluating={reevaluating}
+        />
+      )}
+    </div>
   );
 }
 
