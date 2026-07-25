@@ -1242,6 +1242,7 @@ export function createRuntime<P, RC = unknown>(
       agent: run.agent,
       modelId,
       principal,
+      startedAt: run.startedAt,
       depth,
       parentRunId: args.parentRunId,
       // Top-level turns are their own root; subagent turns inherit the root the

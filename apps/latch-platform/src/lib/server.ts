@@ -449,6 +449,8 @@ export const submitFeedbackFn = createServerFn({ method: "POST" })
       comment: data.comment?.slice(0, 2000),
       // NUMERIC (1/0) so Langfuse can average it into a satisfaction rate.
       dataType: "NUMERIC",
+      // Pin to the run's start so flipping 👍↔👎 later upserts one score.
+      timestamp: run.startedAt,
     });
     return { ok: true as const };
   });
@@ -627,12 +629,18 @@ export const rejudgeRunFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
+    // Client-supplied rubrics: enforce the same limits as the save path
+    // (≤7, kebab names, prompt length, known judge model) before judging so a
+    // caller can't fan out hundreds of judge calls or pin an arbitrary model.
+    const { models } = await getLatch();
+    const valid = validateRubrics(data.evals, (id) => models.some((m) => m.id === id));
+    if (!valid.ok) return { ok: false as const, error: valid.error };
     try {
       const verdicts = await rejudgeRun({
         principal,
         chatId: data.chatId,
         runId: data.runId,
-        rubrics: data.evals,
+        rubrics: valid.rubrics,
       });
       return {
         ok: true as const,
@@ -695,6 +703,9 @@ export const correctScoreFn = createServerFn({ method: "POST" })
         value,
         comment: data.comment.trim(),
         dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+        // Same timestamp as the original live verdict (the run's start) so this
+        // correction overwrites it in Langfuse instead of adding a second score.
+        timestamp: run.startedAt,
         metadata: {
           corrected: true,
           correctedBy: principal.userId ?? principal.orgId,

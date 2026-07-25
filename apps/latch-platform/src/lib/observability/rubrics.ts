@@ -2,6 +2,14 @@ import type { AttachedEval } from "../agent-store";
 import { JUDGE_MODEL_ID } from "../evals/judge";
 
 /**
+ * Score names the observability layer treats specially — a rubric may not claim
+ * one. `user-feedback` is the 👍/👎 score `listObservabilityFn` pulls out as the
+ * feedback rate; a rubric of that name would be absorbed into it (and collide on
+ * the derived score id), vanishing from the per-rubric aggregates.
+ */
+const RESERVED_SCORE_NAMES = new Set(["user-feedback"]);
+
+/**
  * Validation shared by every surface that writes attached rubrics — the Agent
  * Builder's `attach_evals` tool and the chat evals panel's save — so the rules
  * (kebab names, uniqueness, non-empty prompts, ≤7, known judge model) can't
@@ -18,6 +26,10 @@ export function validateRubrics(
   const badName = evals.filter((e) => !/^[a-z0-9][a-z0-9-]*$/.test(e.name));
   if (badName.length) {
     return { ok: false, error: `Rubric names must be kebab-case: ${badName.map((e) => e.name).join(", ")}.` };
+  }
+  const reserved = evals.filter((e) => RESERVED_SCORE_NAMES.has(e.name));
+  if (reserved.length) {
+    return { ok: false, error: `Reserved score name(s): ${reserved.map((e) => e.name).join(", ")}.` };
   }
   const seen = new Set<string>();
   for (const e of evals) {

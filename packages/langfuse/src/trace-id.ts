@@ -11,10 +11,13 @@ export function traceIdForRun(runId: string): Promise<string> {
 
 /**
  * A deterministic Langfuse score id for a (run, score-name) pair. Langfuse
- * ingestion upserts scores by id, so deriving the id from run+name makes score
- * writes idempotent: the live judge and a later human correction of the same
- * rubric write the SAME id and the correction overwrites the original verdict
- * instead of leaving two scores of the same name on the trace.
+ * upserts a score only when its id, name AND timestamp (date granularity) all
+ * match, so deriving the id from run+name is necessary but not sufficient:
+ * writers must ALSO pin the score timestamp to the run's clock (see
+ * `PostScoreInput.timestamp`). Together they make score writes idempotent — the
+ * live judge and a later human correction of the same rubric write the SAME id
+ * and the correction overwrites the original verdict instead of leaving two
+ * scores of the same name on the trace, even across days.
  */
 export function scoreIdForRun(runId: string, name: string): Promise<string> {
   return createTraceId(`latch-score:${runId}:${name}`);

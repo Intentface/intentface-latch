@@ -134,14 +134,21 @@ export async function judgeLiveRun({
     answer,
     tools,
     sink: async (v) => {
+      // Local mirror first (fast, always-on) so the chat evals panel has the
+      // verdict even if Langfuse is slow/unreachable — then best-effort to
+      // Langfuse. Pinning the score timestamp to the run's start keeps a later
+      // human correction an upsert (see postScore's `timestamp`).
+      await putLocal(latch, ownerTag, meta.runId, v, "live", now);
       await postScore({
         runId: meta.runId,
         name: v.rubric.name,
         value: v.value,
         comment: v.comment,
         dataType: v.rubric.scale === "binary" ? "BOOLEAN" : "NUMERIC",
-      });
-      await putLocal(latch, ownerTag, meta.runId, v, "live", now);
+        timestamp: meta.startedAt,
+      }).catch((e) =>
+        console.warn(`postScore "${v.rubric.name}" (run ${meta.runId}) failed:`, e),
+      );
     },
   });
 }

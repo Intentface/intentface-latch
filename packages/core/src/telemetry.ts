@@ -23,6 +23,13 @@ export interface TelemetryRunMeta<P = unknown> {
   modelId: string;
   /** The caller the run is scoped to (tenant/user isolation flows from this). */
   principal: P;
+  /**
+   * Run start time (epoch ms, `latch_runs.startedAt`). A stable per-run clock:
+   * out-of-band score writers (judge verdicts, user feedback, human
+   * corrections) pin their Langfuse score timestamp to it so repeated writes
+   * for the same run+rubric upsert one score instead of duplicating across days.
+   */
+  startedAt: number;
   /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
   depth: number;
   /**

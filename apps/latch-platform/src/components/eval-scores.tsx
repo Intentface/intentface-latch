@@ -193,7 +193,12 @@ function CorrectionDialog({
               max={1}
               step={0.05}
               value={value}
-              onChange={(e) => setValue(Math.max(0, Math.min(1, Number(e.target.value))))}
+              onChange={(e) => {
+                // Clearing the field yields Number("") === NaN; ignore it and
+                // keep the last valid value so we never persist NaN (→ null).
+                const n = Number(e.target.value);
+                if (Number.isFinite(n)) setValue(Math.max(0, Math.min(1, n)));
+              }}
               className="border-secondary-border text-ink-primary w-24 rounded border bg-transparent px-2 py-1 text-sm"
             />
           </label>
@@ -211,7 +216,7 @@ function CorrectionDialog({
           <Dialog.Close className="text-ink-secondary hover:text-ink-primary cursor-pointer rounded-lg px-3 text-sm" disabled={busy}>
             Cancel
           </Dialog.Close>
-          <Button size="sm" onClick={save} disabled={!note.trim() || busy}>
+          <Button size="sm" onClick={save} disabled={!note.trim() || busy || !Number.isFinite(value)}>
             {busy ? "Saving…" : "Save correction"}
           </Button>
         </div>

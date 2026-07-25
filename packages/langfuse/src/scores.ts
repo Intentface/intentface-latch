@@ -19,14 +19,31 @@ export interface PostScoreInput {
    * Pass an explicit id only when you deliberately want independent scores.
    */
   id?: string;
+  /**
+   * The run's start time (epoch ms) — the stable per-run clock every writer for
+   * a run should pass. Langfuse only treats a write as an upsert when id, name
+   * AND timestamp (at date granularity) all match; the high-level SDK stamps
+   * `now`, so a correction on a later day would create a SECOND score and skew
+   * aggregates. Pinning every write for a run to its start keeps corrections
+   * idempotent across days. Defaults to now (same-day writes still dedupe).
+   */
+  timestamp?: number;
 }
 
-/** Default hard bound on the flush network call (ms). */
+/** Default hard bound on the ingest network call (ms). */
 const FLUSH_TIMEOUT_MS = 10_000;
+
+/** The `score-create` ingestion event shape, derived from the client's API. */
+type IngestionEvent = Parameters<
+  ReturnType<typeof getLangfuseClient>["api"]["ingestion"]["batch"]
+>[0]["batch"][number];
 
 /**
  * Attach a score to a run's Langfuse trace (judge verdicts, user feedback).
- * Flushes immediately — callers are post-turn/endpoint paths, not hot loops —
+ * Sent through the raw ingestion endpoint (not the high-level `score.create`)
+ * so the event timestamp can be pinned to the run's clock — the only way to
+ * make cross-day corrections upsert instead of duplicate (see `timestamp`).
+ * Ingests immediately — callers are post-turn/endpoint paths, not hot loops —
  * with a hard timeout so a slow/down Langfuse can't hang a user-facing request
  * for a non-critical write. Rejects on timeout/error; callers decide whether
  * to surface or swallow it.
@@ -35,24 +52,44 @@ export async function postScore(
   input: PostScoreInput & { timeoutMs?: number },
 ): Promise<void> {
   const client = getLangfuseClient();
-  client.score.create({
-    id: input.id ?? (await scoreIdForRun(input.runId, input.name)),
-    traceId: await traceIdForRun(input.runId),
-    name: input.name,
-    value: input.value,
-    comment: input.comment,
-    dataType: input.dataType,
-    ...(input.metadata ? { metadata: input.metadata } : {}),
-  });
+  const event: IngestionEvent = {
+    // Event id is unique per write so the ingestion event itself isn't deduped;
+    // the SCORE is deduped by `body.id` (the deterministic per-run+name id).
+    id: crypto.randomUUID(),
+    type: "score-create",
+    timestamp: new Date(input.timestamp ?? Date.now()).toISOString(),
+    body: {
+      id: input.id ?? (await scoreIdForRun(input.runId, input.name)),
+      traceId: await traceIdForRun(input.runId),
+      name: input.name,
+      value: input.value,
+      comment: input.comment,
+      dataType: input.dataType,
+      // Same env source the SDK's score.create uses, so scores land alongside
+      // their trace instead of in a mismatched environment.
+      environment: process.env.LANGFUSE_TRACING_ENVIRONMENT,
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+    },
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error("Langfuse score flush timed out")),
+      () => reject(new Error("Langfuse score ingest timed out")),
       input.timeoutMs ?? FLUSH_TIMEOUT_MS,
     );
   });
   try {
-    await Promise.race([client.score.flush(), timeout]);
+    const res = await Promise.race([
+      client.api.ingestion.batch({ batch: [event] }),
+      timeout,
+    ]);
+    if (res.errors.length > 0) {
+      throw new Error(
+        `Langfuse score ingest failed: ${res.errors
+          .map((e) => e.message ?? String(e.status))
+          .join("; ")}`,
+      );
+    }
   } finally {
     if (timer) clearTimeout(timer);
   }

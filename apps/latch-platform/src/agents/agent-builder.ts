@@ -4,7 +4,7 @@ import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
-import type {AgentRecord, AttachedEval} from "@/lib/agent-store";
+import type {AgentRecord} from "@/lib/agent-store";
 import { validateRubrics } from "@/lib/observability/rubrics";
 import { sharedReadTools } from "./shared-read-tools";
 
@@ -329,10 +329,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const name = normalizeAgentName(agentName);
         const rec = await agentStore.getRecord(principal, name);
         if (!rec) return { error: `No editable agent named "${name}". Use list_agents.` };
-        const valid = validateRubrics(
-          evals as AttachedEval[],
-          (id) => models.some((m) => m.id === id),
-        );
+        const valid = validateRubrics(evals, (id) => models.some((m) => m.id === id));
         if (!valid.ok) return { error: valid.error };
         const attached = valid.rubrics;
         await agentStore.upsert(principal, { ...rec, attachedEvals: attached });
