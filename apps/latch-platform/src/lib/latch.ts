@@ -326,7 +326,12 @@ export async function getLatch(): Promise<{
             if (outcome.status !== "completed") return;
             // Lazy import: judge-run pulls getLatch back (agent store + models).
             const { judgeLiveRun } = await import("./observability/judge-run");
-            await judgeLiveRun({ meta, outcome });
+            // Best-effort: on non-Vercel hosts this is awaited inline in the
+            // run-finalization path, so a judge/persistence failure must never
+            // propagate and break run completion.
+            await judgeLiveRun({ meta, outcome }).catch((error) => {
+              console.warn(`online judge failed (run ${meta.runId}):`, error);
+            });
           },
         })
       : undefined,

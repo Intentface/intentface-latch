@@ -442,16 +442,23 @@ export const submitFeedbackFn = createServerFn({ method: "POST" })
     // runId returns null, so this both authorizes and validates in one O(1) hop.
     const run = await runtime.getRun({ principal, runId: data.runId });
     if (!run) return { ok: false as const, error: "unknown run" };
-    await postScore({
-      runId: data.runId,
-      name: "user-feedback",
-      value: data.value,
-      comment: data.comment?.slice(0, 2000),
-      // NUMERIC (1/0) so Langfuse can average it into a satisfaction rate.
-      dataType: "NUMERIC",
-      // Pin to the run's start so flipping 👍↔👎 later upserts one score.
-      timestamp: run.startedAt,
-    });
+    // Best-effort: a thumbs signal is non-critical, so a slow/down Langfuse
+    // shouldn't fail the click. postScore is already bounded + retry-free.
+    try {
+      await postScore({
+        runId: data.runId,
+        name: "user-feedback",
+        value: data.value,
+        comment: data.comment?.slice(0, 2000),
+        // NUMERIC (1/0) so Langfuse can average it into a satisfaction rate.
+        dataType: "NUMERIC",
+        // Pin to the run's start so flipping 👍↔👎 later upserts one score.
+        timestamp: run.startedAt,
+      });
+    } catch (e) {
+      console.warn(`feedback postScore failed (run ${data.runId}):`, e);
+      return { ok: false as const, error: "feedback could not be saved" };
+    }
     return { ok: true as const };
   });
 
@@ -697,22 +704,29 @@ export const correctScoreFn = createServerFn({ method: "POST" })
       updatedAt: Date.now(),
     });
     if (isLangfuseConfigured()) {
-      await postScore({
-        runId: data.runId,
-        name: data.rubricName,
-        value,
-        comment: data.comment.trim(),
-        dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
-        // Same timestamp as the original live verdict (the run's start) so this
-        // correction overwrites it in Langfuse instead of adding a second score.
-        timestamp: run.startedAt,
-        metadata: {
-          corrected: true,
-          correctedBy: principal.userId ?? principal.orgId,
-          ...(aiValue != null ? { aiValue } : {}),
-          ...(aiComment ? { aiComment } : {}),
-        },
-      });
+      // The correction is already persisted locally (above) and /observability
+      // overlays local human corrections, so it's applied regardless — a
+      // slow/down Langfuse must not fail the user's save. Best-effort mirror.
+      try {
+        await postScore({
+          runId: data.runId,
+          name: data.rubricName,
+          value,
+          comment: data.comment.trim(),
+          dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          // Same timestamp as the original live verdict (the run's start) so this
+          // correction overwrites it in Langfuse instead of adding a second score.
+          timestamp: run.startedAt,
+          metadata: {
+            corrected: true,
+            correctedBy: principal.userId ?? principal.orgId,
+            ...(aiValue != null ? { aiValue } : {}),
+            ...(aiComment ? { aiComment } : {}),
+          },
+        });
+      } catch (e) {
+        console.warn(`correction postScore failed (run ${data.runId}):`, e);
+      }
     }
     return {
       ok: true as const,

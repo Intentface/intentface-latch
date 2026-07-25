@@ -40,9 +40,21 @@ export async function migrateRunScores(client: Client): Promise<void> {
   await client.execute(
     `CREATE INDEX IF NOT EXISTS latch_run_scores_owner_run ON latch_run_scores (owner, run_id)`,
   );
-  // Human-correction columns (idempotent for existing dev DBs).
-  for (const col of ["ai_value REAL", "ai_comment TEXT"]) {
-    await client.execute(`ALTER TABLE latch_run_scores ADD COLUMN ${col}`).catch(() => {});
+  // Human-correction columns, added idempotently for existing dev DBs. SQLite's
+  // ADD COLUMN has no IF NOT EXISTS, so add only what PRAGMA reports missing —
+  // swallowing every ALTER error would let a genuine failure leave the schema
+  // half-migrated, and put() would then hit missing ai_value/ai_comment columns.
+  const info = await client.execute(`PRAGMA table_info(latch_run_scores)`);
+  const existing = new Set(
+    (info.rows as unknown as Record<string, unknown>[]).map((r) => String(r.name)),
+  );
+  for (const [name, def] of [
+    ["ai_value", "ai_value REAL"],
+    ["ai_comment", "ai_comment TEXT"],
+  ] as const) {
+    if (!existing.has(name)) {
+      await client.execute(`ALTER TABLE latch_run_scores ADD COLUMN ${def}`);
+    }
   }
 }
 

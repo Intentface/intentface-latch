@@ -31,7 +31,7 @@ export interface PostScoreInput {
 }
 
 /** Default hard bound on the ingest network call (ms). */
-const FLUSH_TIMEOUT_MS = 10_000;
+const INGEST_TIMEOUT_MS = 10_000;
 
 /** The `score-create` ingestion event shape, derived from the client's API. */
 type IngestionEvent = Parameters<
@@ -44,9 +44,10 @@ type IngestionEvent = Parameters<
  * so the event timestamp can be pinned to the run's clock — the only way to
  * make cross-day corrections upsert instead of duplicate (see `timestamp`).
  * Ingests immediately — callers are post-turn/endpoint paths, not hot loops —
- * with a hard timeout so a slow/down Langfuse can't hang a user-facing request
- * for a non-critical write. Rejects on timeout/error; callers decide whether
- * to surface or swallow it.
+ * with a request-level timeout and no retries so a slow/down Langfuse can't
+ * hang a user-facing request for this non-critical write. Rejects on
+ * timeout/error; callers decide whether to surface or swallow it (the judge
+ * and endpoint callers all swallow).
  */
 export async function postScore(
   input: PostScoreInput & { timeoutMs?: number },
@@ -71,26 +72,21 @@ export async function postScore(
       ...(input.metadata ? { metadata: input.metadata } : {}),
     },
   };
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error("Langfuse score ingest timed out")),
-      input.timeoutMs ?? FLUSH_TIMEOUT_MS,
+  // Bound the call at the request level: this cancels the actual HTTP on
+  // timeout (a Promise.race would leave it running) and disables the SDK's
+  // default 2 retries, so the worst-case hang stays at one timeout window.
+  const res = await client.api.ingestion.batch(
+    { batch: [event] },
+    {
+      timeoutInSeconds: Math.ceil((input.timeoutMs ?? INGEST_TIMEOUT_MS) / 1000),
+      maxRetries: 0,
+    },
+  );
+  if (res.errors.length > 0) {
+    throw new Error(
+      `Langfuse score ingest failed: ${res.errors
+        .map((e) => e.message ?? String(e.status))
+        .join("; ")}`,
     );
-  });
-  try {
-    const res = await Promise.race([
-      client.api.ingestion.batch({ batch: [event] }),
-      timeout,
-    ]);
-    if (res.errors.length > 0) {
-      throw new Error(
-        `Langfuse score ingest failed: ${res.errors
-          .map((e) => e.message ?? String(e.status))
-          .join("; ")}`,
-      );
-    }
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
