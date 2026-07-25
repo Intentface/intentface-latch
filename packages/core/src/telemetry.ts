@@ -23,6 +23,20 @@ export interface TelemetryRunMeta<P = unknown> {
   modelId: string;
   /** The caller the run is scoped to (tenant/user isolation flows from this). */
   principal: P;
+  /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
+  depth: number;
+  /**
+   * The run that spawned this subagent turn, when applicable. Absent at the top
+   * level. Lets a tracer link a helper's trace back to the agent it ran for.
+   */
+  parentRunId?: string;
+  /**
+   * The top-level conversation id — stable across a turn AND its subagent
+   * turns (a subagent's own `chatId` is an internal `sub_…` thread). A tracer
+   * can use it as the session id so a whole delegation tree groups together.
+   * Falls back to `chatId` when unset (top-level turns).
+   */
+  rootChatId?: string;
 }
 
 /** Outcome of one finished turn, delivered after persistence. */

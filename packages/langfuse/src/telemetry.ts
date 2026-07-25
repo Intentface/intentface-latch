@@ -124,18 +124,28 @@ export function langfuseTelemetry<P>(
       // roots its spans in the active context, and propagated attributes
       // (trace name/session/user/tags) flow to every child span.
       const ctx = otelTrace.setSpan(otelContext.active(), span.otelSpan);
+      // Group a whole delegation tree under one session: subagent turns run in
+      // their own `sub_…` chat, so keying the session on the ROOT conversation
+      // (threaded down by the runtime) makes the main turn and its helpers show
+      // together in Langfuse. A `parent-run:` tag links each helper to the run
+      // that spawned it; `depth` (0 = top-level) records how deep it nested.
+      const sessionId = run.rootChatId ?? run.chatId;
+      const tags = [`owner:${owner}`, `agent:${run.agent}`, `run:${run.runId}`];
+      if (run.parentRunId) tags.push(`parent-run:${run.parentRunId}`, "subagent");
       return otelContext.with(ctx, () =>
         propagateAttributes(
           {
             traceName: run.agent,
-            sessionId: run.chatId,
+            sessionId,
             userId: owner,
-            tags: [`owner:${owner}`, `agent:${run.agent}`, `run:${run.runId}`],
+            tags,
             metadata: {
               runId: run.runId,
               chatId: run.chatId,
               agent: run.agent,
               model: run.modelId,
+              depth: String(run.depth),
+              ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
             },
           },
           fn,

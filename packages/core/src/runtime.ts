@@ -887,6 +887,11 @@ export function createRuntime<P, RC = unknown>(
     blockGated?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
+    /** Telemetry linkage: the run that spawned this subagent turn (if any). */
+    parentRunId?: string;
+    /** Telemetry linkage: the top-level conversation id (threaded through
+     *  subagent turns so a delegation tree shares one trace session). */
+    rootChatId?: string;
     /**
      * Ephemeral turn (`runTurnStream`): stream a full tool-loop turn WITHOUT
      * persisting anything — no run/lease, no message/run/usage writes. The
@@ -925,6 +930,10 @@ export function createRuntime<P, RC = unknown>(
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
     const ephemeral = args.ephemeral ?? false;
+    // The top-level conversation id — this turn's own chat unless a spawn
+    // threaded a root down. Subagent turns spawned below inherit it, so a whole
+    // delegation tree shares one telemetry session (see telemetryMeta).
+    const rootChatId = args.rootChatId ?? resolvedChatId;
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -1100,6 +1109,10 @@ export function createRuntime<P, RC = unknown>(
             depth: depth + 1,
             autoApprove,
             onProgress,
+            // Telemetry linkage: this turn is the parent; carry the root chat
+            // down so the subagent's trace nests under this conversation.
+            parentRunId: run.id,
+            rootChatId,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -1229,6 +1242,11 @@ export function createRuntime<P, RC = unknown>(
       agent: run.agent,
       modelId,
       principal,
+      depth,
+      parentRunId: args.parentRunId,
+      // Top-level turns are their own root; subagent turns inherit the root the
+      // spawn threaded down, so a whole delegation tree shares one session id.
+      rootChatId,
     };
     const telemetryOptions = config.telemetry?.telemetryFor?.(telemetryMeta);
     // A telemetry impl that defines `telemetryFor` but returns undefined is
@@ -1481,12 +1499,16 @@ export function createRuntime<P, RC = unknown>(
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
+        // Ephemeral turns aren't fenced (no lease/run row) — they always finish
+        // here. For persisted turns, `applied` reflects whether our lease still
+        // owns the run (see below).
+        let applied = true;
         if (!ephemeral) {
           // Fenced finish: settle the run FIRST. If the guarded update doesn't
           // apply (our lease was reaped + the run re-claimed elsewhere), we're
           // a stale writer — skip the final message/usage persistence so we
           // don't overwrite the new owner's state.
-          const applied = await storage.updateRun(
+          applied = await storage.updateRun(
             run.id,
             {
               status: paused ? "awaiting_input" : "completed",
@@ -1529,7 +1551,12 @@ export function createRuntime<P, RC = unknown>(
             console.error("[runtime] onComplete hook failed:", e);
           }
         }
-        await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
+        // Only the winning writer reports terminal telemetry. If our lease was
+        // reaped and the run re-claimed elsewhere (`!applied`), that node will
+        // finish it — a stale writer must not re-run the judge or emit a
+        // duplicate "completed"/"awaiting_input" trace.
+        if (applied)
+          await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
       },
       onError: (error: unknown) => {
         stopHeartbeat();
@@ -2086,6 +2113,8 @@ export function createRuntime<P, RC = unknown>(
     blockGated,
     autoApprove = true,
     onProgress,
+    parentRunId,
+    rootChatId,
   }: {
     principal: P;
     agent: string;
@@ -2093,6 +2122,10 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
+    /** Telemetry: the run that spawned this subagent (nests its trace). */
+    parentRunId?: string;
+    /** Telemetry: the top-level conversation id (shared session across the tree). */
+    rootChatId?: string;
     /**
      * Waive HITL approvals inside the subagent. Default true (autonomous runs —
      * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
@@ -2133,6 +2166,8 @@ export function createRuntime<P, RC = unknown>(
       autoApprove,
       blockGated,
       depth,
+      parentRunId,
+      rootChatId,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
       // streams them into the parent turn). Observation must never break the
       // run — the primary stream is drained independently below.
