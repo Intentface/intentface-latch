@@ -127,14 +127,16 @@ export function Chat({
       api: chatApi(chatId, agent),
       // Send new submissions as an explicit `{ message }` so the server keeps
       // our metadata (e.g. the voice-message marker) — the default `{ messages }`
-      // body shape gets its metadata rebuilt server-side. Parts are filtered to
-      // text for parity with what the server extracts from the default shape.
+      // body shape gets its metadata rebuilt server-side (and its parts reduced
+      // to text, which silently dropped attachments). Keep text AND file parts:
+      // the explicit path forwards them as-is, so attachments actually reach
+      // the agent.
       prepareSendMessagesRequest: ({ id, messages: all, trigger, messageId, body }) => {
         const last = all.at(-1);
         if (trigger === "submit-message" && last?.role === "user") {
           const message: AppMessage = {
             ...last,
-            parts: last.parts.filter((p) => p.type === "text"),
+            parts: last.parts.filter((p) => p.type === "text" || p.type === "file"),
             metadata: { visibility: "user", createdAt: Date.now(), ...last.metadata },
           };
           return { body: { ...body, message } };

@@ -152,7 +152,12 @@ not folded = not covered.`,
       // with agents that do write (interviews/sessions save there) — drop the write
       // tools structurally rather than trusting the prompt. The frame keeps its write
       // tools (coverage notes + proposals ARE the job); domain.md protection is
-      // prompt-level + eval-enforced (tools can't be disabled per-file).
+      // prompt-level + eval-enforced only, because `disableTools` is per-tool and the
+      // platform has no per-file ACL. KNOWN RESIDUAL RISK: this agent reads untrusted
+      // contribution files, so an injected instruction could in principle steer a frame
+      // write at domain.md — the prompt prohibition is not an authorization boundary.
+      // Follow-up: a connection-level scoped writer (allowlist coverage_*.md +
+      // domain-proposals.md, domain.md read-only) once the platform supports it.
       disableTools: [
         "anchor-build_create",
         "anchor-build_edit_file",
