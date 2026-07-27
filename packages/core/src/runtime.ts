@@ -580,6 +580,14 @@ type SubApprovalPart = {
     approved?: boolean;
     reason?: string;
     resolved?: boolean;
+    /**
+     * Telemetry linkage of the paused subagent turn, persisted here so the
+     * resumed turn (post-approval) keeps nesting under the same trace/session
+     * instead of defaulting `rootChatId` to its own `sub_…` chat and dropping
+     * `parentRunId`. Set at bubble time; forwarded into the resumed `buildTurn`.
+     */
+    parentRunId?: string;
+    rootChatId?: string;
   };
 };
 
@@ -1130,6 +1138,10 @@ export function createRuntime<P, RC = unknown>(
                 subApprovalIds: result.pending.map((p) => p.approvalId),
                 spawnToolCallId: options.toolCallId,
                 summaries: result.pending.map((p) => p.summary),
+                // Persist the sub-turn's telemetry linkage so its resumed turn
+                // (after approval) stays nested under this conversation/run.
+                parentRunId: run.id,
+                rootChatId,
               },
             });
             return {
@@ -1872,6 +1884,7 @@ export function createRuntime<P, RC = unknown>(
             approved: sa.approved as boolean,
             reason: sa.reason,
           })),
+          { parentRunId: sa.parentRunId, rootChatId: sa.rootChatId },
         );
         if (resumed.pending?.length) {
           // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
@@ -1886,6 +1899,9 @@ export function createRuntime<P, RC = unknown>(
             subApprovalIds: resumed.pending.map((p) => p.approvalId),
             spawnToolCallId: sa.spawnToolCallId,
             summaries: resumed.pending.map((p) => p.summary),
+            // Carry the linkage forward so each further resume stays nested.
+            parentRunId: sa.parentRunId,
+            rootChatId: sa.rootChatId,
           });
           if (sa.spawnToolCallId) {
             overwriteToolResult(messages, sa.spawnToolCallId, {
@@ -2217,6 +2233,8 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     subChatId: string,
     decisions: ApprovalDecision[],
+    /** Telemetry linkage of the original sub-turn, so the trace stays nested. */
+    linkage?: { parentRunId?: string; rootChatId?: string },
   ): Promise<{ answer: string; pending?: SubagentPending[] }> {
     const subChat = await storage.getChat(principal, subChatId);
     if (!subChat) return { answer: "" };
@@ -2242,6 +2260,9 @@ export function createRuntime<P, RC = unknown>(
       runtimeCtx,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
+      // Keep the resumed turn nested under the original trace/session.
+      parentRunId: linkage?.parentRunId,
+      rootChatId: linkage?.rootChatId,
     });
     await res.text();
     const after = await storage.loadMessages(principal, subChatId);
