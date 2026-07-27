@@ -1,4 +1,5 @@
 import TurndownService from "turndown";
+import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
 
 /**
  * Robust URL fetching for the `web_fetch` tool — mirrors eve's implementation
@@ -13,6 +14,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_LINES = 2000;
 const MAX_OUTPUT_BYTES = 50 * 1024;
+const MAX_REDIRECTS = 4;
 
 // Browser-like UA so servers return full content, not bot-degraded pages.
 const BROWSER_USER_AGENT =
@@ -26,39 +28,18 @@ export type WebFetchResult =
   | { ok: false; error: string };
 
 /**
- * Block private/loopback hosts (SSRF guard). Covers the common bypass vectors:
- * trailing-dot, bracketed IPv6 (loopback/ULA/link-local + IPv4-mapped), bare
- * integer / hex encodings of IPv4 (e.g. 2130706433 = 127.0.0.1), and short
- * dotted forms (127.1). Best-effort but conservative — strictly more blocking.
+ * Full SSRF gate for one hop: protocol, the string-level blocklist, and the DNS
+ * backstop (a public NAME that resolves to a private address — the string check
+ * alone cannot see that). Applied to the initial URL AND every redirect target.
  */
-export function isBlockedHost(host: string): boolean {
-  let h = host.toLowerCase().replace(/\.$/, ""); // drop a trailing dot
-  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1); // unwrap IPv6 literal
-  if (h === "localhost" || h.endsWith(".local") || h === "::1" || h === "::") return true;
-  if (h.includes(":")) {
-    // IPv6 loopback / ULA (fc00::/7) / link-local (fe80::/10).
-    if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true;
-    // IPv4-mapped (::ffff:127.0.0.1 or hex ::ffff:7f00:1) — block conservatively;
-    // these only ever point at a v4 address, which an allowlist shouldn't need.
-    if (h.startsWith("::ffff:")) return true;
-    // Any remaining embedded dotted IPv4 → fall through to the IPv4 check.
-    const mapped = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (mapped) h = mapped[1];
-    else return false;
+async function blockedReason(t: URL): Promise<string | null> {
+  if (t.protocol !== "http:" && t.protocol !== "https:") {
+    return "Only http(s) URLs are allowed.";
   }
-  // Bare integer or hex host = an encoded IPv4 (e.g. 2130706433, 0x7f000001).
-  if (/^\d+$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true;
-  // Dotted IPv4, including short forms (127.1, 10.0.1).
-  const parts = h.split(".");
-  if (parts.length >= 2 && parts.length <= 4 && parts.every((p) => /^\d{1,3}$/.test(p))) {
-    const a = Number(parts[0]);
-    const b = Number(parts[1] ?? 0);
-    if (a === 127 || a === 10 || a === 0) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
+  if (isBlockedHost(t.hostname) || (await isBlockedResolved(t.hostname))) {
+    return "Host is not allowed.";
   }
-  return false;
+  return null;
 }
 
 function buildHeaders(format: WebFetchFormat): Record<string, string> {
@@ -141,11 +122,6 @@ export async function webFetch(args: {
   } catch {
     return { ok: false, error: "Invalid URL." };
   }
-  if (u.protocol !== "http:" && u.protocol !== "https:") {
-    return { ok: false, error: "Only http(s) URLs are allowed." };
-  }
-  if (isBlockedHost(u.hostname)) return { ok: false, error: "Host is not allowed." };
-
   const timeoutMs = Math.min(
     args.timeout != null ? args.timeout * 1000 : DEFAULT_TIMEOUT_MS,
     MAX_TIMEOUT_MS,
@@ -153,14 +129,44 @@ export async function webFetch(args: {
   const signal = AbortSignal.timeout(timeoutMs);
   const headers = buildHeaders(format);
 
+  /**
+   * Follow redirects MANUALLY so each hop is re-gated: with `redirect: "follow"`
+   * a public URL that 302s to an internal address (e.g. cloud metadata) would be
+   * fetched transparently, and only the first host would ever be checked.
+   */
+  const fetchGuarded = async (
+    start: URL,
+    reqHeaders: Record<string, string>,
+  ): Promise<Response | { error: string }> => {
+    let current = start;
+    for (let hop = 0; ; hop++) {
+      const bad = await blockedReason(current);
+      if (bad) return { error: bad };
+      const res = await fetch(current, { headers: reqHeaders, signal, redirect: "manual" });
+      const location =
+        res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!location) return res;
+      if (hop >= MAX_REDIRECTS) return { error: "Too many redirects." };
+      try {
+        current = new URL(location, current);
+      } catch {
+        return { error: "Invalid redirect location." };
+      }
+    }
+  };
+
   let response: Response;
   try {
-    const initial = await fetch(u, { headers, signal, redirect: "follow" });
+    const initial = await fetchGuarded(u, headers);
+    if ("error" in initial) return { ok: false, error: initial.error };
     // Cloudflare may block browser UAs from non-browser TLS; retry honestly.
-    response =
-      initial.status === 403 && initial.headers.get("cf-mitigated") === "challenge"
-        ? await fetch(u, { headers: { ...headers, "User-Agent": HONEST_UA }, signal, redirect: "follow" })
-        : initial;
+    if (initial.status === 403 && initial.headers.get("cf-mitigated") === "challenge") {
+      const retry = await fetchGuarded(u, { ...headers, "User-Agent": HONEST_UA });
+      if ("error" in retry) return { ok: false, error: retry.error };
+      response = retry;
+    } else {
+      response = initial;
+    }
   } catch (e) {
     const msg =
       e instanceof Error

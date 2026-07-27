@@ -832,22 +832,42 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, slackStore, credentials } = await getLatch();
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
+
+    // An `api_app_id` is visible to every member of the hosting Slack workspace
+    // and echoed in every event payload. RECONFIGURING an existing binding needs
+    // the same creator gate as unbinding, not just a same-org check: the three
+    // credentials below are stored at "org" scope, so any other member of the
+    // owning org could otherwise overwrite the binding's Slack secrets and break
+    // (or repoint) it. Checked BEFORE any write; `bind` is guarded too. A binding
+    // with no recorded creator is unmanageable — `canManageBot` fails closed.
+    const existing = await slackStore.resolve(data.appId);
+    if (existing && !canManageBot(existing, principal)) {
+      return { ok: false as const, error: "app already bound" };
+    }
 
     const keys = slackVaultKeys(data.appId);
     await credentials.set(principal, keys.clientId, "org", data.clientId);
     await credentials.set(principal, keys.clientSecret, "org", data.clientSecret);
     await credentials.set(principal, keys.signingSecret, "org", data.signingSecret);
 
+    // One lookup for both the pinned scope and the display title (see
+    // `boundAgentRecord`); fall back to the directory for code-registry agents,
+    // which have no stored record.
+    const record = await boundAgentRecord(agentStore, principal, data.agent);
     const botName =
-      (await runtime.listAgents(principal)).find((a) => a.name === data.agent)?.title ?? data.agent;
-    await slackStore.bind({
+      record.title ??
+      (await runtime.listAgents(principal)).find((a) => a.name === data.agent)?.title ??
+      data.agent;
+    const bound = await slackStore.bind({
       appId: data.appId,
       agent: data.agent,
+      agentScope: record.scope,
       orgId: principal.orgId,
       userId: principal.userId,
       botName,
     });
+    if (!bound) return { ok: false as const, error: "app already bound" };
 
     const authorizeUrl =
       `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(data.clientId)}` +
@@ -872,7 +892,11 @@ export const unbindSlackAppFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
     const { slackStore } = await getLatch();
-    await slackStore.unbind(appId);
+    // Ownership check, same gate as every other channel binding — without it any
+    // authenticated user could delete any org's binding by app id.
+    const app = await slackStore.resolve(appId);
+    if (!app || !canManageBot(app, principal)) return { ok: false };
+    await slackStore.unbind(appId, principal.orgId);
     return { ok: true };
   });
 
@@ -909,7 +933,7 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
   .handler(async ({ data: agent }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, slackStore, credentials } = await getLatch();
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
 
     const configToken = await credentials.get(principal, SLACK_CONFIG_TOKEN_KEY, "org");
     if (!configToken) return { ok: false as const, error: "no_config_token" };
@@ -918,7 +942,10 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
 
     const info = (await runtime.listAgents(principal)).find((a) => a.name === agent);
     if (!info) return { ok: false as const, error: "unknown_agent" };
-    const displayName = info.title ?? agent;
+    // The pinned record decides the title too, so the app we create is named
+    // after the agent the binding will actually run (see `boundAgentRecord`).
+    const record = await boundAgentRecord(agentStore, principal, agent);
+    const displayName = record.title ?? info.title ?? agent;
 
     const manifest = slackManifest({
       displayName,
@@ -946,13 +973,17 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
     await credentials.set(principal, keys.signingSecret, "org", created.signingSecret);
     await credentials.set(principal, keys.clientId, "org", created.clientId);
     await credentials.set(principal, keys.clientSecret, "org", created.clientSecret);
-    await slackStore.bind({
+    // Slack minted this app id, so a cross-org conflict shouldn't happen —
+    // report it rather than silently reporting success if it ever does.
+    const bound = await slackStore.bind({
       appId: created.appId,
       agent,
+      agentScope: record.scope,
       orgId: principal.orgId,
       userId: principal.userId,
       botName: displayName,
     });
+    if (!bound) return { ok: false as const, error: "app already bound" };
 
     // Send the installer to Slack; we carry the app id back via `state`.
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
@@ -1086,21 +1117,34 @@ const canManageBot = (
 ): boolean => bot.orgId === principal.orgId && !!bot.userId && bot.userId === principal.userId;
 
 /**
- * The scope of the agent record a new channel binding will serve — personal
- * wins on a name clash, mirroring turn-time resolution (agent-store `find`).
- * Persisted on the bot row so webhook turns pin resolution to this exact
+ * The agent record a new channel binding will serve — personal wins on a name
+ * clash, mirroring turn-time resolution (agent-store `find`). Its scope is
+ * persisted on the bot row so webhook turns pin resolution to this exact
  * record. Undefined = not in the store (a code-registry agent).
+ *
+ * Callers that also need a display title must take it from THIS record, not from
+ * a separate `runtime.listAgents` lookup: that directory lists code-declared
+ * agents first and stored ones unordered-by-scope, so on a name clash the two
+ * can disagree — pinning one record while displaying another's title.
  */
-const boundAgentScope = async (
-  agentStore: { listRecords: (p: { orgId: string; userId?: string }) => Promise<{ name: string; scope: string }[]> },
+const boundAgentRecord = async (
+  agentStore: {
+    listRecords: (p: {
+      orgId: string;
+      userId?: string;
+    }) => Promise<{ name: string; scope: string; title?: string }[]>;
+  },
   principal: { orgId: string; userId?: string },
   agent: string,
-): Promise<"org" | "user" | undefined> => {
+): Promise<{ scope?: "org" | "user"; title?: string }> => {
   const records = await agentStore.listRecords(principal);
   const match =
     records.find((r) => r.name === agent && r.scope === "user") ??
     records.find((r) => r.name === agent);
-  return match?.scope === "org" || match?.scope === "user" ? match.scope : undefined;
+  return {
+    scope: match?.scope === "org" || match?.scope === "user" ? match.scope : undefined,
+    title: match?.title,
+  };
 };
 
 /** The caller's Telegram bots (for the editor's status view). */
@@ -1126,7 +1170,7 @@ export const createTelegramBotFn = createServerFn({ method: "POST" })
       await telegramStore.create({
         id,
         agent: data.agent,
-        agentScope: await boundAgentScope(agentStore, principal, data.agent),
+        agentScope: (await boundAgentRecord(agentStore, principal, data.agent)).scope,
         orgId: principal.orgId,
         userId: principal.userId,
         handle: data.handle.trim(),
@@ -1267,7 +1311,7 @@ export const createWhatsappBotFn = createServerFn({ method: "POST" })
       await whatsappStore.create({
         id,
         agent: data.agent,
-        agentScope: await boundAgentScope(agentStore, principal, data.agent),
+        agentScope: (await boundAgentRecord(agentStore, principal, data.agent)).scope,
         orgId: principal.orgId,
         userId: principal.userId,
         handle: data.handle.trim(),

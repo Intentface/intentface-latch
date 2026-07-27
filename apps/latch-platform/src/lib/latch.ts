@@ -405,8 +405,15 @@ export async function getLatch(): Promise<{
     connections: handlerConnections,
     basePath: "/api/latch",
     resolveContext: (request) => getPrincipalFromHeaders(request.headers),
-    // Guards POST /api/latch/cron/run for an external cron in prod.
-    cronSecret: process.env.LATCH_CRON_SECRET ?? "dev-cron-secret",
+    // Guards POST /api/latch/cron/run for an external cron in prod. That route is
+    // NOT user-authed and fires every tenant's due schedules, so in production an
+    // unset secret must leave this undefined — the handler then 404s the route
+    // rather than guarding it with a constant published in this repo. Dev keeps a
+    // convenient default. (Not `secretEnv`: throwing here would fail app boot for
+    // every request, not just the cron route.)
+    cronSecret:
+      process.env.LATCH_CRON_SECRET ??
+      (process.env.NODE_ENV === "production" ? undefined : "dev-cron-secret"),
   });
 
   // Dev only: no long-running process, so tick due schedules in-process every

@@ -15,6 +15,7 @@ export async function migrateSlack(client: Client): Promise<void> {
     app_id TEXT PRIMARY KEY,
     team_id TEXT,
     agent TEXT NOT NULL,
+    agent_scope TEXT,
     org_id TEXT NOT NULL,
     user_id TEXT,
     bot_name TEXT,
@@ -45,6 +46,12 @@ export async function migrateSlack(client: Client): Promise<void> {
     created_at INTEGER NOT NULL,
     PRIMARY KEY (team_id, slack_user_id)
   )`);
+  // Idempotent add for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  try {
+    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN agent_scope TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 /** Vault credential key names for a Slack app's secrets (stored at org scope). */
@@ -63,28 +70,57 @@ export interface SlackApp {
   appId: string;
   teamId?: string;
   agent: string;
+  /**
+   * The scope the bound agent record had at binding time — inbound turns pin
+   * resolution to it (`org:`/`user:` prefixed names, see agent-store.ts) so a
+   * same-named personal agent can never shadow an org binding (and vice versa).
+   * Undefined = a code-registry agent (unambiguous by construction).
+   */
+  agentScope?: "org" | "user";
   orgId: string;
   userId?: string;
   botName?: string;
 }
 
+const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name
+              FROM latch_slack_app`;
+
+const rowToApp = (r: Record<string, unknown>): SlackApp => ({
+  appId: String(r.app_id),
+  teamId: r.team_id ? String(r.team_id) : undefined,
+  agent: String(r.agent),
+  agentScope: r.agent_scope === "org" || r.agent_scope === "user" ? r.agent_scope : undefined,
+  orgId: String(r.org_id),
+  userId: r.user_id ? String(r.user_id) : undefined,
+  botName: r.bot_name ? String(r.bot_name) : undefined,
+});
+
 export function createSlackStore(client: Client) {
   return {
-    /** Bind (or rebind) a Slack app to an agent + owner. */
-    async bind(app: SlackApp): Promise<void> {
+    /**
+     * Bind (or rebind) a Slack app to an agent + owner. Returns false when the
+     * `app_id` is already bound by ANOTHER org: the upsert is guarded on
+     * `org_id`, so a caller cannot hijack a foreign binding by claiming its app
+     * id (the id is visible to every member of the hosting Slack workspace, and
+     * is echoed in every event payload). Rebinds within the owning org proceed.
+     */
+    async bind(app: SlackApp): Promise<boolean> {
       const now = Date.now();
-      await client.execute({
+      const res = await client.execute({
         sql: `INSERT INTO latch_slack_app
-                (app_id, team_id, agent, org_id, user_id, bot_name, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(app_id) DO UPDATE SET
                 team_id = excluded.team_id, agent = excluded.agent,
-                org_id = excluded.org_id, user_id = excluded.user_id,
-                bot_name = excluded.bot_name, updated_at = excluded.updated_at`,
+                agent_scope = excluded.agent_scope,
+                user_id = excluded.user_id,
+                bot_name = excluded.bot_name, updated_at = excluded.updated_at
+              WHERE latch_slack_app.org_id = excluded.org_id`,
         args: [
           app.appId,
           app.teamId ?? null,
           app.agent,
+          app.agentScope ?? null,
           app.orgId,
           app.userId ?? null,
           app.botName ?? null,
@@ -92,46 +128,38 @@ export function createSlackStore(client: Client) {
           now,
         ],
       });
+      return res.rowsAffected > 0;
     },
 
     /** Look up the agent + owner behind a Slack app id (inbound dispatch). */
     async resolve(appId: string): Promise<SlackApp | null> {
       const res = await client.execute({
-        sql: `SELECT app_id, team_id, agent, org_id, user_id, bot_name
-              FROM latch_slack_app WHERE app_id = ? LIMIT 1`,
+        sql: `${APP_COLUMNS} WHERE app_id = ? LIMIT 1`,
         args: [appId],
       });
       const r = res.rows[0] as Record<string, unknown> | undefined;
-      if (!r) return null;
-      return {
-        appId: String(r.app_id),
-        teamId: r.team_id ? String(r.team_id) : undefined,
-        agent: String(r.agent),
-        orgId: String(r.org_id),
-        userId: r.user_id ? String(r.user_id) : undefined,
-        botName: r.bot_name ? String(r.bot_name) : undefined,
-      };
+      return r ? rowToApp(r) : null;
     },
 
     /** The Slack apps owned within an org (for the editor's status view). */
     async listForOrg(orgId: string): Promise<SlackApp[]> {
       const res = await client.execute({
-        sql: `SELECT app_id, team_id, agent, org_id, user_id, bot_name
-              FROM latch_slack_app WHERE org_id = ?`,
+        sql: `${APP_COLUMNS} WHERE org_id = ?`,
         args: [orgId],
       });
-      return res.rows.map((r) => ({
-        appId: String(r.app_id),
-        teamId: r.team_id ? String(r.team_id) : undefined,
-        agent: String(r.agent),
-        orgId: String(r.org_id),
-        userId: r.user_id ? String(r.user_id) : undefined,
-        botName: r.bot_name ? String(r.bot_name) : undefined,
-      }));
+      return res.rows.map((r) => rowToApp(r as Record<string, unknown>));
     },
 
-    async unbind(appId: string): Promise<void> {
-      await client.execute({ sql: `DELETE FROM latch_slack_app WHERE app_id = ?`, args: [appId] });
+    /**
+     * Unbind a Slack app. Scoped by org so one tenant can never delete
+     * another's binding by app id (the caller must also pass the ownership
+     * check in `server.ts` — this is the fail-closed backstop).
+     */
+    async unbind(appId: string, orgId: string): Promise<void> {
+      await client.execute({
+        sql: `DELETE FROM latch_slack_app WHERE app_id = ? AND org_id = ?`,
+        args: [appId, orgId],
+      });
     },
 
     /** Link a Slack user to a platform user (so they may drive agents). */

@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { secretEnv } from "./env";
 
 /**
  * Signed account-link tokens. The bot DMs a Slack user a `/slack/link` URL
@@ -7,11 +8,16 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  * it, and only by logging into a real platform account.
  */
 function secret(): string {
-  return process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-change-me";
+  return secretEnv("BETTER_AUTH_SECRET", "dev-only-secret-change-me");
 }
 
 function sign(teamId: string, slackUserId: string, exp: number): string {
-  return createHmac("sha256", secret()).update(`${teamId}:${slackUserId}:${exp}`).digest("hex");
+  // `slack:` domain-separates this from the Telegram/WhatsApp link tokens, which
+  // share the same signing key — without it an id that collides across channels
+  // could yield a token valid on the wrong channel.
+  return createHmac("sha256", secret())
+    .update(`slack:${teamId}:${slackUserId}:${exp}`)
+    .digest("hex");
 }
 
 /** Build the signed `/slack/link` URL (valid ~30 min). */
@@ -34,7 +40,15 @@ export function verifyLink(
   sig: string,
 ): boolean {
   if (!Number.isFinite(exp) || Date.now() > exp) return false;
-  const expected = sign(teamId, slackUserId, exp);
+  let expected: string;
+  try {
+    expected = sign(teamId, slackUserId, exp);
+  } catch (e) {
+    // No signing secret (misconfigured production): no inbound link can be
+    // valid — refuse instead of 500ing. BUILDING links still throws loudly.
+    console.error("[slack] link verification unavailable:", e);
+    return false;
+  }
   const a = Buffer.from(expected);
   const b = Buffer.from(sig);
   return a.length === b.length && timingSafeEqual(a, b);

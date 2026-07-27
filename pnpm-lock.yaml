@@ -114,6 +114,9 @@ importers:
       '@intentface/latch-mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@intentface/latch-net':
+        specifier: workspace:*
+        version: link:../../packages/net
       '@intentface/latch-openapi':
         specifier: workspace:*
         version: link:../../packages/openapi
