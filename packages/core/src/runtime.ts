@@ -1079,7 +1079,9 @@ export function createRuntime<P, RC = unknown>(
           // data part, reconciled in place by id). Pre-generate the sub-thread
           // id so the very first write already carries it.
           const writer = options.context?.writer;
-          const subChatId = threadId ?? generateSubchatId();
+          // `||` (not `??`): strict-schema models fill optional params with "" — an
+          // empty threadId must mean "new thread", never become a real chat id.
+          const subChatId = threadId?.trim() || generateSubchatId();
           let onProgress: ((messages: AppMessage[]) => void) | undefined;
           if (writer) {
             const write = (messages: AppMessage[]) => {
@@ -2153,7 +2155,9 @@ export function createRuntime<P, RC = unknown>(
     /** Progressive snapshots of the sub-turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
   }): Promise<{ threadId: string; answer: string; pending?: SubagentPending[] }> {
-    const subChatId = threadId ?? generateSubchatId();
+    // `||` (not `??`): an empty-string threadId must mint a fresh id, or the
+    // subagent chat is created with id "" and the UI can never open it.
+    const subChatId = threadId?.trim() || generateSubchatId();
     let chat = await storage.getChat(principal, subChatId);
     if (!chat) {
       chat = await storage.createChat(principal, {

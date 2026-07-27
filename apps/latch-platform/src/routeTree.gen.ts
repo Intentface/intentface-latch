@@ -27,6 +27,7 @@ import { Route as WhatsappLinkRouteImport } from './routes/whatsapp.link'
 import { Route as TelegramLinkRouteImport } from './routes/telegram.link'
 import { Route as SlackLinkRouteImport } from './routes/slack.link'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
+import { Route as ApiTranscribeRouteImport } from './routes/api/transcribe'
 import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as AgentsEditRouteImport } from './routes/agents.edit'
@@ -126,6 +127,11 @@ const ChatChatIdRoute = ChatChatIdRouteImport.update({
   path: '/$chatId',
   getParentRoute: () => ChatRoute,
 } as any)
+const ApiTranscribeRoute = ApiTranscribeRouteImport.update({
+  id: '/api/transcribe',
+  path: '/api/transcribe',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiSlackRoute = ApiSlackRouteImport.update({
   id: '/api/slack',
   path: '/api/slack',
@@ -183,6 +189,7 @@ export interface FileRoutesByFullPath {
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
+  '/api/transcribe': typeof ApiTranscribeRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/slack/link': typeof SlackLinkRoute
   '/telegram/link': typeof TelegramLinkRoute
@@ -209,6 +216,7 @@ export interface FileRoutesByTo {
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
+  '/api/transcribe': typeof ApiTranscribeRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/slack/link': typeof SlackLinkRoute
   '/telegram/link': typeof TelegramLinkRoute
@@ -238,6 +246,7 @@ export interface FileRoutesById {
   '/agents/edit': typeof AgentsEditRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
+  '/api/transcribe': typeof ApiTranscribeRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/slack/link': typeof SlackLinkRoute
   '/telegram/link': typeof TelegramLinkRoute
@@ -268,6 +277,7 @@ export interface FileRouteTypes {
     | '/agents/edit'
     | '/api/cron'
     | '/api/slack'
+    | '/api/transcribe'
     | '/chat/$chatId'
     | '/slack/link'
     | '/telegram/link'
@@ -294,6 +304,7 @@ export interface FileRouteTypes {
     | '/agents/edit'
     | '/api/cron'
     | '/api/slack'
+    | '/api/transcribe'
     | '/chat/$chatId'
     | '/slack/link'
     | '/telegram/link'
@@ -322,6 +333,7 @@ export interface FileRouteTypes {
     | '/agents/edit'
     | '/api/cron'
     | '/api/slack'
+    | '/api/transcribe'
     | '/chat/$chatId'
     | '/slack/link'
     | '/telegram/link'
@@ -350,6 +362,7 @@ export interface RootRouteChildren {
   ToolsRoute: typeof ToolsRoute
   ApiCronRoute: typeof ApiCronRoute
   ApiSlackRoute: typeof ApiSlackRouteWithChildren
+  ApiTranscribeRoute: typeof ApiTranscribeRoute
   SlackLinkRoute: typeof SlackLinkRoute
   TelegramLinkRoute: typeof TelegramLinkRoute
   WhatsappLinkRoute: typeof WhatsappLinkRoute
@@ -487,6 +500,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatChatIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/api/transcribe': {
+      id: '/api/transcribe'
+      path: '/api/transcribe'
+      fullPath: '/api/transcribe'
+      preLoaderRoute: typeof ApiTranscribeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/slack': {
       id: '/api/slack'
       path: '/api/slack'
@@ -598,6 +618,7 @@ const rootRouteChildren: RootRouteChildren = {
   ToolsRoute: ToolsRoute,
   ApiCronRoute: ApiCronRoute,
   ApiSlackRoute: ApiSlackRouteWithChildren,
+  ApiTranscribeRoute: ApiTranscribeRoute,
   SlackLinkRoute: SlackLinkRoute,
   TelegramLinkRoute: TelegramLinkRoute,
   WhatsappLinkRoute: WhatsappLinkRoute,

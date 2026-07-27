@@ -31,6 +31,7 @@ import { EvalsDrawer, useEvalsDrawerToggle } from "@/components/evals-drawer";
 import { ScoreBadges, useEvalScores } from "@/components/eval-scores";
 import type { UIMessageChunk } from "ai";
 import { Button } from "@/components/ui/button";
+import { VoiceRecorder } from "@/components/voice-recorder";
 import { EvalRunCard } from "@/components/eval-run-card";
 import type { EvalProgressData } from "@/lib/evals/store";
 
@@ -122,7 +123,27 @@ export function Chat({
   const { messages, sendMessage, setMessages, status, addToolResult, regenerate, stop } = useChat({
     id: chatId,
     messages: initialMessages,
-    transport: new DefaultChatTransport({ api: chatApi(chatId, agent) }),
+    transport: new DefaultChatTransport<AppMessage>({
+      api: chatApi(chatId, agent),
+      // Send new submissions as an explicit `{ message }` so the server keeps
+      // our metadata (e.g. the voice-message marker) — the default `{ messages }`
+      // body shape gets its metadata rebuilt server-side (and its parts reduced
+      // to text, which silently dropped attachments). Keep text AND file parts:
+      // the explicit path forwards them as-is, so attachments actually reach
+      // the agent.
+      prepareSendMessagesRequest: ({ id, messages: all, trigger, messageId, body }) => {
+        const last = all.at(-1);
+        if (trigger === "submit-message" && last?.role === "user") {
+          const message: AppMessage = {
+            ...last,
+            parts: last.parts.filter((p) => p.type === "text" || p.type === "file"),
+            metadata: { visibility: "user", createdAt: Date.now(), ...last.metadata },
+          };
+          return { body: { ...body, message } };
+        }
+        return { body: { ...body, id, messages: all, trigger, messageId } };
+      },
+    }),
     onFinish: () => router.invalidate(),
   });
   const busy = status === "submitted" || status === "streaming";
@@ -266,6 +287,34 @@ export function Chat({
     }
     sendMessage({ text: data.text, files: data.files });
   }
+
+  // A finished voice recording: the transcript becomes the user message, with
+  // a marker so it renders (and persists) as a voice message. Recording is
+  // allowed while the agent is still streaming, but sending mid-stream would
+  // corrupt the turn — queue the transcript and send once the chat is ready.
+  // Status is read through refs: `onTranscribed` fires from a closure created
+  // when recording STARTED, whose captured `busy` may be long stale.
+  const queuedVoiceRef = useRef<{ text: string; durationMs: number }[]>([]);
+  const chatBusyRef = useRef(false);
+  chatBusyRef.current = busy || deciding;
+  function sendVoiceMessage(text: string, durationMs: number) {
+    sendMessage({ text, metadata: { visibility: "user", voice: { durationMs } } });
+  }
+  function handleVoiceTranscribed(text: string, durationMs: number) {
+    if (chatBusyRef.current) {
+      // FIFO, not a single slot: a second recording finishing while the chat is
+      // still busy must not overwrite an unsent first transcript.
+      queuedVoiceRef.current.push({ text, durationMs });
+      return;
+    }
+    sendVoiceMessage(text, durationMs);
+  }
+  useEffect(() => {
+    if (busy || deciding || queuedVoiceRef.current.length === 0) return;
+    const queued = queuedVoiceRef.current.shift();
+    if (queued) sendVoiceMessage(queued.text, queued.durationMs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, deciding]);
 
   // Latest messages, for seeding the approval-continuation stream (a click
   // handler / mount effect would otherwise close over a stale snapshot).
@@ -569,7 +618,10 @@ export function Chat({
               </Composer.Actions>
             ) : (
               <Composer.Actions className="flex items-center justify-between">
-                <Composer.AttachmentTrigger />
+                <div className="flex items-center gap-1">
+                  <Composer.AttachmentTrigger />
+                  <VoiceRecorder onTranscribed={handleVoiceTranscribed} />
+                </div>
                 <Composer.Submit isGenerating={busy} onStop={stop} />
               </Composer.Actions>
             )}

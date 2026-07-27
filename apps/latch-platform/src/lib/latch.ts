@@ -63,6 +63,8 @@ import { makeResolveReasoningOptions } from "./reasoning";
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
   orgId: string;
+  /** The logged-in user, resolved from better-auth — absent for org-only principals. */
+  user?: { name?: string; email?: string };
 }
 
 /**
@@ -182,8 +184,48 @@ export async function getLatch(): Promise<{
   // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
   const runScores = createRunScoresStore(client);
 
+  // Resolve the principal's user row, cached with a short TTL — agents (e.g. the
+  // anchor interview/orient pair) read `runtime.user` to know who they're talking
+  // to. The TTL keeps better-auth profile edits surfacing without a restart; a
+  // failed query is never memoized (it would pin `runtime.user` to undefined for
+  // the process lifetime) — fall back to the last known value instead.
+  const USER_TTL_MS = 5 * 60_000;
+  const USER_CACHE_MAX = 1_000;
+  const userCache = new Map<string, { at: number; value?: { name?: string; email?: string } }>();
+  async function resolveUser(userId: string) {
+    const hit = userCache.get(userId);
+    if (hit && Date.now() - hit.at < USER_TTL_MS) return hit.value;
+    // Bound the cache: TTL alone never evicts users that stop being queried.
+    // Sweep expired entries at the cap; if every entry is still live, drop the
+    // oldest-inserted (Map preserves insertion order).
+    if (userCache.size >= USER_CACHE_MAX) {
+      const now = Date.now();
+      for (const [k, v] of userCache) if (now - v.at >= USER_TTL_MS) userCache.delete(k);
+      while (userCache.size >= USER_CACHE_MAX) {
+        const oldest = userCache.keys().next().value;
+        if (oldest === undefined) break;
+        userCache.delete(oldest);
+      }
+    }
+    let row;
+    try {
+      row = (await client.execute({ sql: "SELECT name, email FROM user WHERE id = ?", args: [userId] })).rows[0];
+    } catch (e) {
+      console.warn("resolveUser failed:", e instanceof Error ? e.message : e);
+      return hit?.value;
+    }
+    const value = row
+      ? { name: (row.name as string) || undefined, email: (row.email as string) || undefined }
+      : undefined;
+    userCache.set(userId, { at: Date.now(), value });
+    return value;
+  }
+
   const context = defineContext<Principal, Ctx>({
-    build: ({ principal }) => ({ orgId: principal.orgId }),
+    build: async ({ principal }) => ({
+      orgId: principal.orgId,
+      ...(principal.userId ? { user: await resolveUser(principal.userId) } : {}),
+    }),
   });
 
   // MCP connections, declared in `connections/`. SSRF allowlist derives from the
