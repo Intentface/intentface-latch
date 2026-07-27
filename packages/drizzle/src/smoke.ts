@@ -3,6 +3,8 @@ import { drizzle } from "drizzle-orm/libsql";
 import type { AppMessage } from "@intentface/latch-core";
 import { migrate } from "./migrate.js";
 import { createSqliteAdapter } from "./adapter.js";
+import { createMemoryJobStore } from "./memory-job-store.js";
+import { memoryJobStoreSmoke } from "./memory-job-store.smoke.shared.js";
 import * as schema from "./schema.js";
 
 /** A real run against an in-memory libsql DB: persistence + owner isolation + run/usage. */
@@ -73,8 +75,16 @@ async function main() {
   const gotRun = await store.getRun(run.id);
   assert(gotRun?.status === "completed", "run updated to completed");
 
+  // Memory job store: extraction/consolidation state machine + usage.
+  await memoryJobStoreSmoke({
+    jobs: createMemoryJobStore(drizzle(client, { schema })),
+    store,
+    principal: me,
+    assert,
+  });
+
   console.log(
-    "✅ smoke passed — persistence + owner isolation + run/identity/usage all work",
+    "✅ smoke passed — persistence + owner isolation + run/identity/usage + memory jobs all work",
   );
 }
 

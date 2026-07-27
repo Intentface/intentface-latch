@@ -44,6 +44,29 @@ const DDL = [
      created_at BIGINT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_owner_idx ON latch_schedules (owner)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_due_idx ON latch_schedules (enabled, next_run_at)`,
+  // Memory sweep state (see @intentface/latch-memory). Lease columns mirror
+  // latch_schedules; next_eligible_at always advances so nothing hot-loops.
+  // (The sweep index on latch_chats lives in ALTERS: it references the `kind`
+  // column, which pre-existing DBs only gain from the ALTER below.)
+  `CREATE TABLE IF NOT EXISTS latch_memory_chat_state (
+     chat_id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, scope_key TEXT NOT NULL,
+     last_extracted_seq INTEGER NOT NULL DEFAULT -1,
+     next_eligible_at BIGINT NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+     lease_owner TEXT, lease_expires_at BIGINT,
+     created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_memory_chat_state_scope_idx ON latch_memory_chat_state (scope_key)`,
+  `CREATE TABLE IF NOT EXISTS latch_memory_scope_state (
+     scope_key TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, connection TEXT NOT NULL,
+     identity JSONB, has_new INTEGER NOT NULL DEFAULT 0, pending_episodes JSONB,
+     consolidation_watermark TEXT, last_consolidated_at BIGINT,
+     next_eligible_at BIGINT NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+     lease_owner TEXT, lease_expires_at BIGINT,
+     created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_memory_scope_due_idx ON latch_memory_scope_state (has_new, next_eligible_at)`,
+  `CREATE TABLE IF NOT EXISTS latch_memory_usage (
+     scope_key TEXT NOT NULL, memory_id TEXT NOT NULL,
+     usage_count INTEGER NOT NULL DEFAULT 0, last_used_at BIGINT, created_at BIGINT NOT NULL,
+     PRIMARY KEY (scope_key, memory_id))`,
 ];
 
 /** Idempotent column adds for DBs created before a column existed. */
@@ -52,6 +75,8 @@ const ALTERS = [
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS usage_cache_read_tokens INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS usage_cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'`,
+  // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
+  `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];
 
 export async function migratePostgres(db: PgDatabase<any, any, any>): Promise<void> {
