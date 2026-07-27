@@ -10,8 +10,6 @@ import { anchorFrameKeeper } from "./anchor-frame-keeper";
 import { edgeOnboarding } from "./edge-onboarding";
 import { edgeAdvisor } from "./edge-advisor";
 import { clientWorkInterview } from "./anchor-client-work-interview";
-import { runningCoach } from "./running-coach";
-import { runningCoachMemoryWriter } from "./running-coach-memory-writer";
 
 /**
  * The platform's agents, keyed by name. Each agent file is a self-contained
@@ -32,6 +30,4 @@ export const agents = {
   "anchor-frame-keeper": anchorFrameKeeper,
   "edge-onboarding": edgeOnboarding,
   "edge-advisor": edgeAdvisor,
-  "running-coach": runningCoach,
-  "running-coach-memory-writer": runningCoachMemoryWriter,
 };
