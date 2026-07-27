@@ -49,6 +49,43 @@ const CAPABILITIES = z
   })
   .optional();
 
+/**
+ * The service-free save_agent preflight: name reservations + the memory-config
+ * invariants. Returns the rejection message, or undefined to proceed. Exported
+ * (with SAVE_INPUT) so the guards are regression-testable without standing up
+ * the live service bundle; the service-backed checks (models, connections,
+ * subagents, tools) stay inline in the tool.
+ */
+export function saveAgentPreflight(input: {
+  name: string;
+  scope: "user" | "org";
+  connections?: string[];
+  capabilities?: { memory?: { scope: string; connection: string } };
+}): string | undefined {
+  const name = normalizeAgentName(input.name);
+  if (!name) return "invalid name";
+  if (RESERVED_NAMES.has(name)) {
+    return `"${name}" is a built-in agent and can't be overwritten — pick another name.`;
+  }
+  // The whole memory-* prefix is reserved: the platform's memory system
+  // agents live there and pickers hide every name matching it.
+  if (name.startsWith("memory-")) {
+    return `"${name}" is reserved (memory-* are platform system agents) — pick another name.`;
+  }
+  // Memory files live in one of the agent's OWN connections. `!== undefined`
+  // (not truthy): an empty string must fail the membership check, not skip it.
+  const memConn = input.capabilities?.memory?.connection;
+  if (memConn !== undefined && !(input.connections ?? []).includes(memConn)) {
+    return `Memory connection "${memConn}" must also be listed in the agent's connections.`;
+  }
+  // agent-org memory is keyed by agent name alone — restrict it to
+  // org-visible agents so same-named personal agents can't share a store.
+  if (input.capabilities?.memory?.scope === "agent-org" && input.scope !== "org") {
+    return `Org-shared memory ('agent-org') requires scope: "org" on the agent itself.`;
+  }
+  return undefined;
+}
+
 // Exported for schema regression tests only.
 export const SAVE_INPUT = z.object({
   name: z.string().describe("Unique kebab-case id. Reusing an existing name UPDATES that agent."),
@@ -204,16 +241,9 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         "Create a new agent or update an existing one (upsert by name). Pauses for the user's approval.",
       inputSchema: SAVE_INPUT,
       execute: async (input) => {
+        const rejected = saveAgentPreflight(input);
+        if (rejected) return { error: rejected };
         const name = normalizeAgentName(input.name);
-        if (!name) return { error: "invalid name" };
-        if (RESERVED_NAMES.has(name)) {
-          return { error: `"${name}" is a built-in agent and can't be overwritten — pick another name.` };
-        }
-        // The whole memory-* prefix is reserved: the platform's memory system
-        // agents live there and pickers hide every name matching it.
-        if (name.startsWith("memory-")) {
-          return { error: `"${name}" is reserved (memory-* are platform system agents) — pick another name.` };
-        }
         if (!models.some((m) => m.id === input.modelId)) {
           return { error: `Unknown modelId "${input.modelId}". Call list_models and use one of those.` };
         }
@@ -223,22 +253,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const badConn = (input.connections ?? []).filter((n) => !knownConnections.has(n));
         if (badConn.length) {
           return { error: `Unknown connection(s): ${badConn.join(", ")}. Use list_connections.` };
-        }
-        // Memory files live in one of the agent's OWN connections.
-        // `!== undefined` (not truthy): an empty string must fail the
-        // membership check below, not skip it.
-        const memConn = input.capabilities?.memory?.connection;
-        if (memConn !== undefined && !(input.connections ?? []).includes(memConn)) {
-          return {
-            error: `Memory connection "${memConn}" must also be listed in the agent's connections.`,
-          };
-        }
-        // agent-org memory is keyed by agent name alone — restrict it to
-        // org-visible agents so same-named personal agents can't share a store.
-        if (input.capabilities?.memory?.scope === "agent-org" && input.scope !== "org") {
-          return {
-            error: `Org-shared memory ('agent-org') requires scope: "org" on the agent itself.`,
-          };
         }
         const knownAgents = new Set((await runtime.listAgents(principal)).map((a) => a.name));
         const badSub = (input.subagents ?? []).filter((n) => !knownAgents.has(n) && n !== name);
