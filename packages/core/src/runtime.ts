@@ -22,6 +22,7 @@ import type {
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
+import type { MemoryProvider } from "./memory.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
@@ -106,6 +107,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * per caller. Optional — without it, only code-declared agents exist.
    */
   dynamicAgents?: DynamicAgentStore<P>;
+  /**
+   * Memory seam: gives agents that declare `memory` persistent cross-session
+   * memory (compiled index injected into instructions + scope-bound
+   * `memory_search`/`memory_save` tools). Optional — without it, an agent's
+   * `memory` declaration is ignored. See `MemoryProvider`.
+   */
+  memory?: MemoryProvider<P>;
   /**
    * Rebuild a `Principal` from the opaque identity blob a run stored, for
    * resume/cron (no request). Default: passthrough (`identity as P`). Override to
@@ -322,6 +330,12 @@ export interface Runtime<P> {
     prompt: string;
     threadId?: string;
     blockGated?: boolean;
+    /**
+     * Per-turn request payload, passed to `context.build` and the agent
+     * factory (see `HandleChatInput.turnContext`). Ephemeral — never persisted,
+     * absent on resume.
+     */
+    turnContext?: unknown;
   }): Promise<{ threadId: string; answer: string }>;
   /**
    * Client-projected conversation history (`toClientMessages`): the stored
@@ -1031,6 +1045,23 @@ export function createRuntime<P, RC = unknown>(
         capabilityTools.push(name);
       }
     }
+    // Memory seam: when the agent declares `memory` and the runtime has a
+    // provider, merge the scope-bound memory tools (capabilities, not
+    // connection picks — they must survive an `enabledTools` restriction) and
+    // append the provider's compiled-index block to the instructions. A
+    // provider failure degrades to a turn without memory, never a dead turn.
+    let instructions = cfg.instructions;
+    if (cfg.memory && config.memory) {
+      const memArgs = { principal, agent: run.agent, memory: cfg.memory };
+      for (const [name, t] of Object.entries(config.memory.toolsFor(memArgs))) {
+        tools[name] = t;
+        capabilityTools.push(name);
+      }
+      const block = await config.memory
+        .instructionsFor(memArgs)
+        .catch(() => undefined);
+      if (block) instructions = [instructions, block].filter(Boolean).join("\n\n");
+    }
     for (const name of cfg.disableTools ?? []) delete tools[name];
 
     // Per-agent tool description overrides — swap the resolved tool's
@@ -1274,7 +1305,7 @@ export function createRuntime<P, RC = unknown>(
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
-      instructions: cfg.instructions,
+      instructions,
       tools,
       toolApproval,
       stopWhen,
@@ -2134,6 +2165,7 @@ export function createRuntime<P, RC = unknown>(
     onProgress,
     parentRunId,
     rootChatId,
+    turnContext,
   }: {
     principal: P;
     agent: string;
@@ -2141,6 +2173,13 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
+    /**
+     * Per-turn request payload for THIS run, passed to `context.build` and the
+     * agent factory (see `HandleChatInput.turnContext`). Ephemeral — applies to
+     * this initial turn only, never to resumes. Lets programmatic callers (e.g.
+     * background jobs) hand a factory-form agent its work payload.
+     */
+    turnContext?: unknown;
     /** Telemetry: the run that spawned this subagent (nests its trace). */
     parentRunId?: string;
     /** Telemetry: the top-level conversation id (shared session across the tree). */
@@ -2173,7 +2212,12 @@ export function createRuntime<P, RC = unknown>(
     const message = userMessageOf(prompt);
     await storage.appendMessages(subChatId, [message]);
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agent, principal);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      agent,
+      principal,
+      undefined,
+      turnContext,
+    );
     const { run, lease } = await openRun(principal, subChatId, agent);
     const res = await buildTurn({
       resolvedChatId: subChatId,
@@ -2343,8 +2387,8 @@ export function createRuntime<P, RC = unknown>(
     tick: reapTick,
     handleChat,
     runTurnStream,
-    runAgent: ({ principal, agent, prompt, threadId, blockGated = true }) =>
-      runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated }),
+    runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext }) =>
+      runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated, turnContext }),
     loadHistory,
     listChats,
     listRuns,
