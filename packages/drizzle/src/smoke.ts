@@ -13,7 +13,8 @@ type P = { org: string; user?: string };
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const store = createSqliteAdapter<P>(drizzle(client, { schema }), {
+  const db = drizzle(client, { schema });
+  const store = createSqliteAdapter<P>(db, {
     owner: (p) => (p.user ? [p.org, p.user] : [p.org]),
   });
 
@@ -77,7 +78,7 @@ async function main() {
 
   // Memory job store: extraction/consolidation state machine + usage.
   await memoryJobStoreSmoke({
-    jobs: createMemoryJobStore(drizzle(client, { schema })),
+    jobs: createMemoryJobStore(db),
     store,
     principal: me,
     assert,

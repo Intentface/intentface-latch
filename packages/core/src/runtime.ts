@@ -1053,14 +1053,19 @@ export function createRuntime<P, RC = unknown>(
     let instructions = cfg.instructions;
     if (cfg.memory && config.memory) {
       const memArgs = { principal, agent: run.agent, memory: cfg.memory };
-      for (const [name, t] of Object.entries(config.memory.toolsFor(memArgs))) {
-        tools[name] = t;
-        capabilityTools.push(name);
+      try {
+        // Resolve both hooks BEFORE mutating the toolset, so a failure in
+        // either leaves the turn exactly as it was without memory.
+        const memoryTools = Object.entries(config.memory.toolsFor(memArgs));
+        const block = await config.memory.instructionsFor(memArgs);
+        for (const [name, t] of memoryTools) {
+          tools[name] = t;
+          capabilityTools.push(name);
+        }
+        if (block) instructions = [instructions, block].filter(Boolean).join("\n\n");
+      } catch {
+        // Memory is optional and degradable — continue without it.
       }
-      const block = await config.memory
-        .instructionsFor(memArgs)
-        .catch(() => undefined);
-      if (block) instructions = [instructions, block].filter(Boolean).join("\n\n");
     }
     for (const name of cfg.disableTools ?? []) delete tools[name];
 

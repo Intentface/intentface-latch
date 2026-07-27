@@ -128,6 +128,20 @@ function AgentEditor() {
   const [memoryConnection, setMemoryConnection] = useState(
     initial?.exec?.memory?.connection ?? "",
   );
+  // Keep the memory picks coherent with the rest of the form: re-pick the
+  // connection if its checkbox is later un-ticked (otherwise the save path
+  // would silently drop memory), and fall back from org-shared scope when the
+  // agent stops being org-visible (the server rejects that combination).
+  useEffect(() => {
+    if (memoryOn && memoryConnection && !picked.includes(memoryConnection)) {
+      setMemoryConnection(picked.includes("loredex") ? "loredex" : (picked[0] ?? ""));
+    }
+  }, [picked, memoryOn, memoryConnection]);
+  useEffect(() => {
+    if (memoryOn && memoryScope === "agent-org" && scope !== "org") {
+      setMemoryScope("agent-user");
+    }
+  }, [scope, memoryOn, memoryScope]);
   // Org agents may only attach org-scoped tools (a personal tool wouldn't resolve
   // for other members); personal agents see all (dedup by name, personal wins).
   const visibleAuthored =
@@ -596,16 +610,15 @@ function AgentEditor() {
             <Switch
               checked={memoryOn}
               onCheckedChange={() => {
-                setMemoryOn((v) => {
-                  const next = !v;
-                  // Sensible default pick on first enable: loredex when declared.
-                  if (next && !memoryConnection) {
-                    setMemoryConnection(
-                      picked.includes("loredex") ? "loredex" : (picked[0] ?? ""),
-                    );
-                  }
-                  return next;
-                });
+                const next = !memoryOn;
+                // Sensible default pick on first enable: loredex when declared.
+                // (Outside the updater — updaters must stay pure.)
+                if (next && !memoryConnection) {
+                  setMemoryConnection(
+                    picked.includes("loredex") ? "loredex" : (picked[0] ?? ""),
+                  );
+                }
+                setMemoryOn(next);
               }}
             />
             <span>
@@ -614,9 +627,10 @@ function AgentEditor() {
               <span className="font-mono">memory_search / memory_save</span>
             </span>
           </label>
-          {memoryOn && picked.length === 0 && (
+          {memoryOn && (picked.length === 0 || !picked.includes(memoryConnection)) && (
             <p className="text-destructive text-xs">
-              Memory needs a connection — add one above (memory files live in its workspace).
+              Memory needs a valid connection — add or re-select one above (memory files live in
+              its workspace). Saving without one drops the memory setting.
             </p>
           )}
           {memoryOn && picked.length > 0 && (
@@ -630,7 +644,9 @@ function AgentEditor() {
                   }
                 >
                   <option value="agent-user">Per user — this agent’s memory of each user</option>
-                  <option value="agent-org">Org-shared — one memory for the whole org</option>
+                  <option value="agent-org" disabled={scope !== "org"}>
+                    Org-shared — one memory for the whole org (org-visible agents only)
+                  </option>
                   <option value="user">User-wide — shared with the user’s other agents</option>
                 </Select>
               </label>

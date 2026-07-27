@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionRegistry, OpenToolSet } from "@intentface/latch-core";
 import { createLoredexStore } from "./loredex.js";
 import type { ScopeRef } from "../types.js";
+import { MemoryStoreUnreachableError } from "../types.js";
 
 /**
  * Fake Loredex-shaped connection: an in-memory file map behind MCP-ish tools
@@ -190,6 +191,14 @@ describe("createLoredexStore", () => {
     ).toBeUndefined();
   });
 
+  it("writeIndex signals an unreachable store with MemoryStoreUnreachableError", async () => {
+    const { registry } = fakeRegistry({ unauthorized: true });
+    const store = createLoredexStore({ connections: registry });
+    await expect(store.writeIndex(P, SCOPE, VALID_INDEX)).rejects.toBeInstanceOf(
+      MemoryStoreUnreachableError,
+    );
+  });
+
   it("search scopes to the memory folder and extracts memory ids", async () => {
     const { registry, calls } = fakeRegistry();
     const store = createLoredexStore({ connections: registry });
@@ -219,5 +228,22 @@ describe("createLoredexStore", () => {
       "_memory/coach/u-1/episodes/missing.md",
     ]);
     expect(out).toEqual([{ path: "_memory/coach/u-1/episodes/a.md", text: "A" }]);
+  });
+
+  it("readEpisodes rejects paths outside the scope root (traversal, prefix-sibling)", async () => {
+    const { registry, files, calls } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    files.set("_memory/coach/u-1/episodes/a.md", "A");
+    files.set("_memory/coach/u-12/episodes/b.md", "OTHER USER");
+    const out = await store.readEpisodes(P, SCOPE, [
+      "_memory/coach/u-1/episodes/a.md",
+      "_memory/coach/u-1/../u-12/episodes/b.md", // traversal
+      "_memory/coach/u-12/episodes/b.md", // sibling, not under root
+      "_memory/coach/u-1", // the root itself, not strictly under it
+    ]);
+    expect(out).toEqual([{ path: "_memory/coach/u-1/episodes/a.md", text: "A" }]);
+    // Out-of-scope paths never even reach the connection.
+    const reads = calls.filter((c) => c.tool === "read_file");
+    expect(reads).toHaveLength(1);
   });
 });

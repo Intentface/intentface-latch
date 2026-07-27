@@ -49,7 +49,32 @@ describe("scopeRefOf", () => {
     });
     expect(s?.root).not.toContain("..");
     expect(s?.root.split("/").length).toBe(3);
-    expect(s?.root).toBe("_memory/my-agent-etc/u-u-1-2");
+    // Lossy cleaning appends a stable hash of the raw id — see the collision test.
+    expect(s?.root).toMatch(/^_memory\/my-agent-etc-[0-9a-f]{8}\/u-u-1-2-[0-9a-f]{8}$/);
+  });
+
+  it("distinct hostile ids never collapse to one scope (hash-pinned)", () => {
+    const memory = { scope: "agent-user" as const, connection: "loredex" };
+    const hostile = scopeRefOf({ agent: "my agent/../etc", memory, userId: "u1" });
+    const clean = scopeRefOf({ agent: "my-agent-etc", memory, userId: "u1" });
+    expect(hostile?.key).not.toBe(clean?.key);
+    // Clean ids stay byte-identical to their raw form (existing roots stable).
+    expect(clean?.root).toBe("_memory/my-agent-etc/u-u1");
+
+    const userA = scopeRefOf({ agent: "a", memory, userId: "alice/../bob" });
+    const userB = scopeRefOf({ agent: "a", memory, userId: "alice-bob" });
+    expect(userA?.key).not.toBe(userB?.key);
+
+    // Same raw id always derives the same root (deterministic).
+    expect(scopeRefOf({ agent: "my agent/../etc", memory, userId: "u1" })?.key).toBe(
+      hostile?.key,
+    );
+
+    // Even ids that clean to nothing stay distinct.
+    const dotA = scopeRefOf({ agent: "..", memory, userId: "u1" });
+    const dotB = scopeRefOf({ agent: "...", memory, userId: "u1" });
+    expect(dotA?.key).not.toBe(dotB?.key);
+    expect(dotA?.root).not.toContain("..");
   });
 
   it("labels every scope", () => {

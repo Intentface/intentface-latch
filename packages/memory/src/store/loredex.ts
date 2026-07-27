@@ -1,5 +1,7 @@
 import type { ConnectionRegistry } from "@intentface/latch-core";
 import type { EpisodeMeta, MemorySearchHit, MemoryStore, ScopeRef } from "../types.js";
+import { MemoryStoreUnreachableError } from "../types.js";
+import { isUnderScopeRoot } from "../scope.js";
 import {
   IndexValidationError,
   MEMORY_INDEX_FILENAME,
@@ -160,6 +162,13 @@ export function createLoredexStore<P>(opts: {
     },
 
     async writeIndex(principal, scope, text) {
+      // Unreachable store (open failed / tools absent) → MemoryStoreUnreachableError
+      // ("retry later"); a rejected rewrite → IndexValidationError ("fix content").
+      const fail = (what: string, res: { error: string } & Record<string, unknown>): never => {
+        if (res.unavailable)
+          throw new MemoryStoreUnreachableError(`memory store unreachable (${res.error})`);
+        throw new Error(`${what}: ${res.error}`);
+      };
       const result = await withConnection(principal, scope, async (call) => {
         const prev = await readIndexWith(call, scope);
         const problems = validateIndexRewrite(prev, text);
@@ -177,12 +186,12 @@ export function createLoredexStore<P>(opts: {
             content: prev,
             summary: "Memory index snapshot (pre-consolidation)",
           });
-          if (!snap.ok) throw new Error(`memory index snapshot failed: ${snap.error}`);
+          if (!snap.ok) fail("memory index snapshot failed", snap);
           const edit = await call(names.edit, {
             fileId: indexPath(scope),
             replacements: [{ oldContent: prev, newContent: text }],
           });
-          if (!edit.ok) throw new Error(`memory index rewrite failed: ${edit.error}`);
+          if (!edit.ok) fail("memory index rewrite failed", edit);
         } else {
           await ensureFolders(call, scope.key, scope.root);
           const created = await call(names.create, {
@@ -192,11 +201,12 @@ export function createLoredexStore<P>(opts: {
             content: text,
             summary: "Compiled memory index (managed by the memory consolidator)",
           });
-          if (!created.ok) throw new Error(`memory index create failed: ${created.error}`);
+          if (!created.ok) fail("memory index create failed", created);
         }
         return true;
       });
-      if (result === undefined) throw new Error("memory store unreachable (connection failed)");
+      if (result === undefined)
+        throw new MemoryStoreUnreachableError("memory store unreachable (connection failed)");
     },
 
     async writeEpisode(principal, scope, episode) {
@@ -245,11 +255,14 @@ export function createLoredexStore<P>(opts: {
     },
 
     async readEpisodes(principal, scope, paths) {
+      // Defense-in-depth: enforce the scope boundary here too, so a future
+      // caller that forgets to pre-filter can't read outside the scope root.
+      const safePaths = paths.filter((p) => isUnderScopeRoot(scope.root, p));
       const result = await withConnection(principal, scope, async (call) => {
         // Individual reads (not the batch form): per-file failures skip that
         // file instead of poisoning a combined result we'd have to re-split.
         const out: Array<{ path: string; text: string }> = [];
-        for (const path of paths) {
+        for (const path of safePaths) {
           const res = await call(names.read, { fileId: path });
           if (res.ok) out.push({ path, text: res.text });
         }

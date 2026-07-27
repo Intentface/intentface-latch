@@ -35,7 +35,7 @@ const CAPABILITIES = z
         scope: z
           .enum(["agent-user", "agent-org", "user"])
           .describe(
-            "'agent-user' = this agent's memory of each user (default choice); 'agent-org' = one shared memory for the whole org; 'user' = shared across all the user's agents.",
+            "'agent-user' = this agent's memory of each user (default choice); 'agent-org' = one shared memory for the whole org (requires the agent itself to have scope 'org'); 'user' = shared across all the user's agents.",
           ),
         connection: z
           .string()
@@ -207,6 +207,11 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (RESERVED_NAMES.has(name)) {
           return { error: `"${name}" is a built-in agent and can't be overwritten — pick another name.` };
         }
+        // The whole memory-* prefix is reserved: the platform's memory system
+        // agents live there and pickers hide every name matching it.
+        if (name.startsWith("memory-")) {
+          return { error: `"${name}" is reserved (memory-* are platform system agents) — pick another name.` };
+        }
         if (!models.some((m) => m.id === input.modelId)) {
           return { error: `Unknown modelId "${input.modelId}". Call list_models and use one of those.` };
         }
@@ -222,6 +227,13 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (memConn && !(input.connections ?? []).includes(memConn)) {
           return {
             error: `Memory connection "${memConn}" must also be listed in the agent's connections.`,
+          };
+        }
+        // agent-org memory is keyed by agent name alone — restrict it to
+        // org-visible agents so same-named personal agents can't share a store.
+        if (input.capabilities?.memory?.scope === "agent-org" && input.scope !== "org") {
+          return {
+            error: `Org-shared memory ('agent-org') requires scope: "org" on the agent itself.`,
           };
         }
         const knownAgents = new Set((await runtime.listAgents(principal)).map((a) => a.name));

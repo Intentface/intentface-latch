@@ -25,13 +25,17 @@ export interface MemoryConsolidationTurnContext {
 export function asMemoryExtractionContext(
   tc: unknown,
 ): MemoryExtractionTurnContext | undefined {
-  const t = tc as MemoryExtractionTurnContext | undefined;
-  return t && t.kind === "memory-extraction" && t.scope?.key ? t : undefined;
+  const t = tc as { kind?: unknown; scope?: { key?: unknown } } | undefined;
+  return t?.kind === "memory-extraction" && typeof t.scope?.key === "string"
+    ? (tc as MemoryExtractionTurnContext)
+    : undefined;
 }
 
 export function asMemoryConsolidationContext(
   tc: unknown,
 ): MemoryConsolidationTurnContext | undefined {
-  const t = tc as MemoryConsolidationTurnContext | undefined;
-  return t && t.kind === "memory-consolidation" && t.scope?.key ? t : undefined;
+  const t = tc as { kind?: unknown; scope?: { key?: unknown } } | undefined;
+  return t?.kind === "memory-consolidation" && typeof t.scope?.key === "string"
+    ? (tc as MemoryConsolidationTurnContext)
+    : undefined;
 }

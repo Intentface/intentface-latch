@@ -28,6 +28,8 @@ interface MemoryJobSchema {
 }
 
 const PENDING_EPISODES_MAX = 100;
+/** Safety valve: never load more rows than could plausibly fill the char cap. */
+const MESSAGES_AFTER_ROW_CAP = 500;
 
 function textOfParts(parts: unknown): string {
   if (!Array.isArray(parts)) return "";
@@ -115,7 +117,8 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
         .select({ seq: s.messages.seq, role: s.messages.role, parts: s.messages.parts })
         .from(s.messages)
         .where(and(eq(s.messages.chatId, chatId), sql`${s.messages.seq} > ${afterSeq}`))
-        .orderBy(s.messages.seq);
+        .orderBy(s.messages.seq)
+        .limit(MESSAGES_AFTER_ROW_CAP);
       const out: Array<{ seq: number; role: string; text: string }> = [];
       let used = 0;
       for (const r of rows as Array<{ seq: number; role: string; parts: unknown }>) {
@@ -221,7 +224,9 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
             row.nextEligibleAt ?? 0,
             (row.lastConsolidatedAt ?? 0) + cooldownMs,
           ),
-          updatedAt: now,
+          // Strictly increasing, so completeScopeConsolidation's updatedAt CAS
+          // always sees a same-millisecond touch as a conflict.
+          updatedAt: Math.max(now, (row.updatedAt ?? 0) + 1),
         })
         .where(eq(ss.scopeKey, args.scopeKey));
     },
@@ -264,19 +269,37 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
     },
 
     async completeScopeConsolidation(scopeKey, patch, leaseOwner) {
-      const now = Date.now();
-      const row = (
+      if (!patch.ok) {
+        // Failure path touches no episode state — a plain fenced update is safe.
         await db
-          .select()
-          .from(ss)
-          .where(and(eq(ss.scopeKey, scopeKey), eq(ss.leaseOwner, leaseOwner)))
-          .limit(1)
-      )[0] as any;
-      if (!row) return; // lease lost — another node owns the row now
-      if (patch.ok) {
-        const consumed = new Set(patch.consumedEpisodes ?? []);
+          .update(ss)
+          .set({
+            failures: sql`${ss.failures} + 1`,
+            nextEligibleAt: patch.nextEligibleAt,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: Date.now(),
+          })
+          .where(and(eq(ss.scopeKey, scopeKey), eq(ss.leaseOwner, leaseOwner)));
+        return;
+      }
+      // Success rewrites pendingEpisodes/hasNew from a read — a touchScope
+      // landing between the read and the write would be clobbered (its new
+      // episode dropped AND the dirty flag cleared). CAS on updatedAt and
+      // retry so a concurrent touch's episode always survives.
+      const consumed = new Set(patch.consumedEpisodes ?? []);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const now = Date.now();
+        const row = (
+          await db
+            .select()
+            .from(ss)
+            .where(and(eq(ss.scopeKey, scopeKey), eq(ss.leaseOwner, leaseOwner)))
+            .limit(1)
+        )[0] as any;
+        if (!row) return; // lease lost — another node owns the row now
         const remaining = pendingOf(row.pendingEpisodes).filter((p) => !consumed.has(p));
-        await db
+        const updated = await db
           .update(ss)
           .set({
             hasNew: remaining.length > 0 ? 1 : 0,
@@ -287,21 +310,33 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
             failures: 0,
             leaseOwner: null,
             leaseExpiresAt: null,
-            updatedAt: now,
+            updatedAt: Math.max(now, row.updatedAt + 1), // CAS token must move
           })
-          .where(and(eq(ss.scopeKey, scopeKey), eq(ss.leaseOwner, leaseOwner)));
-      } else {
-        await db
-          .update(ss)
-          .set({
-            failures: sql`${ss.failures} + 1`,
-            nextEligibleAt: patch.nextEligibleAt,
-            leaseOwner: null,
-            leaseExpiresAt: null,
-            updatedAt: now,
-          })
-          .where(and(eq(ss.scopeKey, scopeKey), eq(ss.leaseOwner, leaseOwner)));
+          .where(
+            and(
+              eq(ss.scopeKey, scopeKey),
+              eq(ss.leaseOwner, leaseOwner),
+              eq(ss.updatedAt, row.updatedAt),
+            ),
+          )
+          .returning({ scopeKey: ss.scopeKey });
+        if (updated.length > 0) return;
+        // CAS conflict: a touch moved the row — re-read and re-apply.
       }
+      // Persistently contended (shouldn't happen): release the lease and
+      // advance eligibility WITHOUT touching pendingEpisodes/hasNew — the
+      // consumed episodes get re-consolidated next pass, nothing is lost.
+      await db
+        .update(ss)
+        .set({
+          lastConsolidatedAt: Date.now(),
+          nextEligibleAt: patch.nextEligibleAt,
+          failures: 0,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          updatedAt: Date.now(),
+        })
+        .where(and(eq(ss.scopeKey, scopeKey), eq(ss.leaseOwner, leaseOwner)));
     },
 
     async recordUsage(scopeKey, memoryIds, at) {

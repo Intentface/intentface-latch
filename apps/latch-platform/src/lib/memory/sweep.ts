@@ -19,9 +19,9 @@ import {
   MEMORY_COOLDOWN_MS,
   MEMORY_EXPIRE_MS,
   MEMORY_EXTRACTION_CANDIDATES,
+  MEMORY_EXTRACTION_CONCURRENCY,
   MEMORY_EXTRACTION_LEASE_MS,
   MEMORY_EXTRACTION_MAX_CHARS,
-  MEMORY_EXTRACTIONS_PER_TICK,
   MEMORY_FAILURE_BACKOFF_MS,
   MEMORY_IDLE_MS,
   MEMORY_PARK_MS,
@@ -57,7 +57,12 @@ const leaseId = () => `memsweep_${crypto.randomUUID().replace(/-/g, "").slice(0,
 async function memoryConfigFor(
   agent: string,
   principal: Principal,
-  agentStore: { getRecord(p: Principal, name: string): Promise<{ exec?: { memory?: MemoryConfig } } | undefined> },
+  agentStore: {
+    getRecord: (
+      p: Principal,
+      name: string,
+    ) => Promise<{ exec?: { memory?: MemoryConfig } } | undefined>;
+  },
 ): Promise<MemoryConfig | undefined> {
   const code = memoryEnabledCodeAgents[agent];
   if (code) return code;
@@ -87,9 +92,11 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       agents,
       limit: MEMORY_EXTRACTION_CANDIDATES,
     });
+    // The candidate query's `limit` is the per-tick work cap; this pool only
+    // bounds how many extractions run at once.
     const queue = [...candidates];
     const workers = Array.from(
-      { length: Math.min(MEMORY_EXTRACTIONS_PER_TICK, queue.length) },
+      { length: Math.min(MEMORY_EXTRACTION_CONCURRENCY, queue.length) },
       async () => {
         for (;;) {
           const cand = queue.shift();
@@ -200,7 +207,11 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         scope,
         chatId: cand.chatId,
         targetAgent: cand.agent,
-        cooldownMs: (memory.consolidation?.cooldownHours ?? 0) * 3_600_000 || MEMORY_COOLDOWN_MS,
+        // `!= null` (not `||`): an explicit cooldownHours of 0 is a real choice.
+        cooldownMs:
+          memory.consolidation?.cooldownHours != null
+            ? memory.consolidation.cooldownHours * 3_600_000
+            : MEMORY_COOLDOWN_MS,
       };
       await runtime.runAgent({
         principal,
@@ -290,12 +301,15 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
               );
               return lastTouch > 0 && now - lastTouch > MEMORY_EXPIRE_MS;
             })
-            .map((e) => ({
-              memoryId: e.id,
-              lastUsedAt: usage.get(e.id)?.lastUsedAt
-                ? new Date(usage.get(e.id)!.lastUsedAt!).toISOString().slice(0, 10)
-                : undefined,
-            }))
+            .map((e) => {
+              const lastUsedAt = usage.get(e.id)?.lastUsedAt;
+              return {
+                memoryId: e.id,
+                lastUsedAt: lastUsedAt
+                  ? new Date(lastUsedAt).toISOString().slice(0, 10)
+                  : undefined,
+              };
+            })
         : [];
 
       const episodePaths = [...row.pendingEpisodes].sort();
@@ -316,7 +330,9 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         }),
       });
       const cooldownMs =
-        (memory.consolidation?.cooldownHours ?? 0) * 3_600_000 || MEMORY_COOLDOWN_MS;
+        memory.consolidation?.cooldownHours != null
+          ? memory.consolidation.cooldownHours * 3_600_000
+          : MEMORY_COOLDOWN_MS;
       await memoryJobs.completeScopeConsolidation(
         row.scopeKey,
         {

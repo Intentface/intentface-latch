@@ -362,6 +362,12 @@ export const saveAgentFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false, error: "unauthorized" };
     const name = normalizeAgentName(data.name);
     if (!name) return { ok: false, error: "name required" };
+    // `memory-*` is reserved for the platform's memory system agents —
+    // listAgentsFn hides the whole prefix, so a user agent named this way
+    // would save fine and then vanish from every picker.
+    if (name.startsWith("memory-")) {
+      return { ok: false, error: `"${name}" is reserved (memory-* are platform system agents).` };
+    }
     if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
     const { agentStore, authoredTools } = await getLatch();
     // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
@@ -391,6 +397,15 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         return {
           ok: false,
           error: `Memory connection "${mem.connection}" must be one of the agent's connections.`,
+        };
+      }
+      // `agent-org` memory is keyed by agent name alone (`_memory/<agent>/org`)
+      // — on a personal agent, two users' same-named agents on a shared
+      // connection would silently share one memory folder.
+      if (mem.scope === "agent-org" && data.scope !== "org") {
+        return {
+          ok: false,
+          error: "Org-shared memory requires an org-visible agent (set the agent's scope to org).",
         };
       }
     }
@@ -427,8 +442,8 @@ export const getMemoryStatusFn = createServerFn({ method: "GET" })
     const { agentStore, memoryJobs } = await getLatch();
     const rec = await agentStore.getRecord(principal, normalizeAgentName(data.name));
     const memory = rec?.exec?.memory;
-    if (!memory) return { enabled: false as const };
-    const scope = scopeRefOf({ agent: rec!.name, memory, userId: principal.userId });
+    if (!rec || !memory) return { enabled: false as const };
+    const scope = scopeRefOf({ agent: rec.name, memory, userId: principal.userId });
     if (!scope) {
       return {
         enabled: true as const,

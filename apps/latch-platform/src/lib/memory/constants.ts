@@ -17,8 +17,8 @@ export const MEMORY_EXPIRE_MS = int(process.env.MEMORY_EXPIRE_DAYS, 30) * 86_400
 /** Transcript excerpt cap handed to the extractor (characters). */
 export const MEMORY_EXTRACTION_MAX_CHARS = 30_000;
 /** Per-tick work caps — bound the cron function's runtime. */
-export const MEMORY_EXTRACTIONS_PER_TICK = 3;
-export const MEMORY_EXTRACTION_CANDIDATES = 10;
+export const MEMORY_EXTRACTION_CANDIDATES = 10; // max extractions per tick
+export const MEMORY_EXTRACTION_CONCURRENCY = 3; // parallel extraction workers
 export const MEMORY_CONSOLIDATIONS_PER_TICK = 2;
 /** Claim-lease TTLs. */
 export const MEMORY_EXTRACTION_LEASE_MS = 120_000;

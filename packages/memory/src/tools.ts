@@ -1,6 +1,7 @@
 import { tool, jsonSchema } from "ai";
 import type { EpisodeMeta, MemoryStore, Provenance, ScopeRef } from "./types.js";
 import { IndexValidationError } from "./index-file.js";
+import { isUnderScopeRoot } from "./scope.js";
 
 /**
  * Tool factories. Two families:
@@ -224,8 +225,9 @@ export function memoryReadEpisodesTool<P>(bound: BoundScope<P>): MemoryTool {
       additionalProperties: false,
     }),
     execute: async ({ paths }) => {
-      // Scope lock: only paths under this scope's root are readable.
-      const inScope = paths.filter((p) => p.startsWith(`${bound.scope.root}/`));
+      // Scope lock: only paths strictly under this scope's root are readable
+      // (segment-wise — a bare startsWith would pass `root-evil/x` and `..`).
+      const inScope = paths.filter((p) => isUnderScopeRoot(bound.scope.root, p));
       const episodes = await bound.store.readEpisodes(bound.principal, bound.scope, inScope);
       return { episodes };
     },

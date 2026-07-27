@@ -123,7 +123,7 @@ Minimal install = **core + drizzle** (+ server if standalone). Everything else i
 
 **Working today** also includes **memory** (`@intentface/latch-memory`): agents that declare `memory` get a compiled index injected per turn, `memory_search`/`memory_save` tools, and background extraction + consolidation via the cron sweep. Scopes: `agent-user` | `agent-org` | `user`. Caveat: on an org-shared connection, per-user separation is a folder convention — anyone with workspace access can read the `_memory/**` files.
 
-**Planned / not yet built:** files & attachments (`FileStore`), workspaces (Daytona/local sandboxes), code-mode (sandboxed composed tools), subagents, MCP elicitation, compaction (the projection plumbing exists; the operation doesn't), observability (OTel), OpenAPI/`/docs`, CLI, evals, and models.dev-backed live pricing. See [`PLAN.md`](./PLAN.md) for the roadmap.
+**Planned / not yet built:** files & attachments (`FileStore`), workspaces (Daytona/local sandboxes), code-mode (sandboxed composed tools), subagents, MCP elicitation, compaction (the projection plumbing exists; the operation doesn't), observability (OTel), OpenAPI/`/docs`, CLI, a general evals framework (the platform app already ships an eval runner plus a memory-consolidation eval set; a reusable package does not exist yet), and models.dev-backed live pricing. See [`PLAN.md`](./PLAN.md) for the roadmap.
 
 This is pre-1.0 and built on `ai@7.0.0-beta.*` — APIs will move.
 

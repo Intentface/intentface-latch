@@ -42,14 +42,30 @@ export interface MemorySearchHit {
 }
 
 /**
+ * Thrown by `writeIndex` when the backing store can't be reached (unauthorized
+ * connection, missing workspace) — the one operation with no in-band way to
+ * signal "nothing was written". Distinguishable from `IndexValidationError`:
+ * this means "retry later", that means "fix the content and retry".
+ */
+export class MemoryStoreUnreachableError extends Error {
+  constructor(message = "memory store unreachable") {
+    super(message);
+    this.name = "MemoryStoreUnreachableError";
+  }
+}
+
+/**
  * The storage seam. One implementation per backing (Loredex first); everything
  * above it (provider, tools, jobs) is backend-agnostic.
  *
- * Contract: operations NEVER throw for "store unreachable" (unauthorized
- * connection, missing workspace) — they return `undefined`/empty so a memory
- * failure degrades gracefully. They MAY throw for contract violations (e.g. an
- * index rewrite that fails validation), which tool wrappers surface to the
- * model as structured errors.
+ * Contract: read-side operations NEVER throw for "store unreachable"
+ * (unauthorized connection, missing workspace) — they return `undefined`/empty
+ * so a memory failure degrades gracefully. `writeIndex` is the carve-out: it
+ * returns nothing, so unreachability there throws
+ * `MemoryStoreUnreachableError`. Operations MAY also throw for contract
+ * violations (e.g. an index rewrite that fails validation →
+ * `IndexValidationError`), which tool wrappers surface to the model as
+ * structured errors.
  */
 export interface MemoryStore<P> {
   /** Cheap probe: is the scope's backing reachable for this principal? */

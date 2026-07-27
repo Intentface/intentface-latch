@@ -21,17 +21,22 @@ async function main() {
     url: process.env.DATABASE_URL ?? "file:./latch.db",
     authToken: process.env.TURSO_AUTH_TOKEN,
   });
-  await migrateEvals(client);
-  const store = createEvalStore(client);
-  await store.saveSet({
-    owner: encodeURIComponent(orgId),
-    agentName: "memory-consolidator",
-    name: "consolidation-quality",
-    cases: MEMORY_CONSOLIDATOR_EVAL_CASES,
-  });
-  console.log(
-    `[seed-memory-evals] saved "consolidation-quality" (${MEMORY_CONSOLIDATOR_EVAL_CASES.length} cases) for org ${orgId}`,
-  );
+  try {
+    await migrateEvals(client);
+    const store = createEvalStore(client);
+    await store.saveSet({
+      owner: encodeURIComponent(orgId),
+      agentName: "memory-consolidator",
+      name: "consolidation-quality",
+      cases: MEMORY_CONSOLIDATOR_EVAL_CASES,
+    });
+    console.log(
+      `[seed-memory-evals] saved "consolidation-quality" (${MEMORY_CONSOLIDATOR_EVAL_CASES.length} cases) for org ${orgId}`,
+    );
+  } finally {
+    // A remote Turso client keeps the process alive if left open.
+    client.close();
+  }
 }
 
 main().catch((e) => {
