@@ -679,6 +679,7 @@ export const correctScoreFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
     if (!data.comment.trim()) return { ok: false as const, error: "a note is required" };
+    if (!Number.isFinite(data.value)) return { ok: false as const, error: "value must be a finite number" };
     const { runtime, runScores } = await getLatch();
     // Ownership: the run must be the caller's (direct, principal-scoped).
     const run = await runtime.getRun({ principal, runId: data.runId });
@@ -687,7 +688,12 @@ export const correctScoreFn = createServerFn({ method: "POST" })
     const ownerTag = ownerTagOf(principal);
     const existing = await runScores.getOne(ownerTag, data.runId, data.rubricName);
     if (!existing) return { ok: false as const, error: "no score to correct" };
-    const value = existing.scale === "binary" ? (data.value >= 0.5 ? 1 : 0) : data.value;
+    // Binary → 1/0; graded → clamp to [0,1]. Never persist an out-of-range or
+    // NaN value (it would skew /observability aggregates and poison averages).
+    const value =
+      existing.scale === "binary"
+        ? (data.value >= 0.5 ? 1 : 0)
+        : Math.max(0, Math.min(1, data.value));
     // Preserve the judge's original verdict (unless already a human correction).
     const aiValue = existing.source === "human" ? existing.aiValue : existing.value;
     const aiComment = existing.source === "human" ? existing.aiComment : existing.comment;

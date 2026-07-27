@@ -22,6 +22,8 @@ async function main() {
   const principal: Principal = { orgId: "lf-verify-org", userId: "lf-verify-user" } as Principal;
   const { runtime, agentStore } = await getLatch();
 
+  let ok = false;
+  try {
   console.log("[1] upsert agent lf-verify with one binary rubric…");
   await agentStore.upsert(principal, {
     name: "lf-verify",
@@ -101,18 +103,25 @@ async function main() {
     htmlPath: row.htmlPath,
   });
 
-  const ok =
+  ok = Boolean(
     trace.tags?.includes(`run:${run.id}`) &&
-    trace.sessionId === threadId &&
-    trace.userId === ownerTagOf(principal) &&
-    mine.some((s) => s.name === "answers-directly") &&
-    mine.some((s) => s.name === "user-feedback") &&
-    !!row;
+      trace.sessionId === threadId &&
+      trace.userId === ownerTagOf(principal) &&
+      mine.some((s) => s.name === "answers-directly") &&
+      mine.some((s) => s.name === "user-feedback") &&
+      !!row,
+  );
   console.log(ok ? "\nALL CHECKS PASSED ✓" : "\nSOME CHECKS FAILED ✗");
-  process.exit(ok ? 0 : 1);
+  } finally {
+    // Always remove the seeded verification agent — even if a step above threw
+    // — so a failed run leaves no residue (mirrors verify-live-evals).
+    await agentStore.remove(principal, "user", "lf-verify").catch(() => {});
+  }
+  // exitCode (not exit()) so the finally block runs before the process ends.
+  process.exitCode = ok ? 0 : 1;
 }
 
 main().catch((e) => {
   console.error(e);
-  process.exit(1);
+  process.exitCode = 1;
 });

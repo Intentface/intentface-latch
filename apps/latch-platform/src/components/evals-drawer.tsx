@@ -63,12 +63,20 @@ export function EvalsDrawer({
   // Load the persisted rubrics once; seed the draft from them.
   useEffect(() => {
     let cancelled = false;
-    void getAgentEvalsFn({ data: agent }).then((res) => {
-      if (cancelled) return;
-      setSaved(res.evals);
-      setDraft(res.evals);
-      setLoading(false);
-    });
+    getAgentEvalsFn({ data: agent })
+      .then((res) => {
+        if (cancelled) return;
+        setSaved(res.evals);
+        setDraft(res.evals);
+        setLoading(false);
+      })
+      .catch((e) => {
+        // Always clear loading + surface the error, else the drawer is stuck on
+        // "Loading rubrics…" forever (plus an unhandled rejection).
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Failed to load rubrics.");
+        setLoading(false);
+      });
     return () => {
       cancelled = true;
     };

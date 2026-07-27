@@ -33,6 +33,7 @@ export function FeedbackDialog({
   const [value, setValue] = useState<0 | 1 | undefined>(initialValue);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const reset = (next: boolean) => {
     onOpenChange(next);
@@ -40,16 +41,20 @@ export function FeedbackDialog({
       setValue(initialValue);
       setComment("");
       setBusy(false);
+      setError(null);
     }
   };
 
   const submit = async () => {
     if (value === undefined || busy) return;
     setBusy(true);
+    setError(null);
     try {
       await onSubmit({ value, comment: comment.trim() || undefined });
       reset(false);
-    } catch {
+    } catch (e) {
+      // Show why the dialog stayed open instead of silently re-enabling.
+      setError(e instanceof Error ? e.message : "Couldn't submit feedback.");
       setBusy(false);
     }
   };
@@ -84,6 +89,7 @@ export function FeedbackDialog({
           rows={3}
           className="border-secondary-border text-ink-primary placeholder:text-ink-tertiary bg-secondary w-full resize-none rounded-lg border p-2.5 text-sm outline-none focus-visible:ring-2"
         />
+        {error && <p className="text-sm text-red-500">{error}</p>}
         <div className="flex justify-end gap-2">
           <Dialog.Close
             className="text-ink-secondary hover:text-ink-primary cursor-pointer rounded-lg px-3 text-sm"

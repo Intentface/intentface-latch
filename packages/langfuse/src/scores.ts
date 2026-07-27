@@ -1,4 +1,5 @@
 import { getLangfuseClient } from "./client.js";
+import { tracingEnvironment } from "./otel.js";
 import { scoreIdForRun, traceIdForRun } from "./trace-id.js";
 
 export interface PostScoreInput {
@@ -28,6 +29,12 @@ export interface PostScoreInput {
    * idempotent across days. Defaults to now (same-day writes still dedupe).
    */
   timestamp?: number;
+  /**
+   * Langfuse environment for the score. Defaults to the environment tracing was
+   * set up with (so scores match their trace), then `LANGFUSE_TRACING_ENVIRONMENT`.
+   * Pass explicitly to override.
+   */
+  environment?: string;
 }
 
 /** Default hard bound on the ingest network call (ms). */
@@ -66,9 +73,13 @@ export async function postScore(
       value: input.value,
       comment: input.comment,
       dataType: input.dataType,
-      // Same env source the SDK's score.create uses, so scores land alongside
-      // their trace instead of in a mismatched environment.
-      environment: process.env.LANGFUSE_TRACING_ENVIRONMENT,
+      // Match the trace's environment (from ensureTracing) so scores land
+      // alongside their trace, not in a mismatched Langfuse environment; fall
+      // back to the env var on a cold, score-only invocation.
+      environment:
+        input.environment ??
+        tracingEnvironment() ??
+        process.env.LANGFUSE_TRACING_ENVIRONMENT,
       ...(input.metadata ? { metadata: input.metadata } : {}),
     },
   };

@@ -149,11 +149,16 @@ export function Chat({
   const [reevaluating, setReevaluating] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    void getAgentEvalsFn({ data: agent }).then((res) => {
-      if (cancelled) return;
-      setEditable(res.editable);
-      setHasRubrics(res.evals.some((e) => e.enabled));
-    });
+    getAgentEvalsFn({ data: agent })
+      .then((res) => {
+        if (cancelled) return;
+        setEditable(res.editable);
+        setHasRubrics(res.evals.some((e) => e.enabled));
+      })
+      .catch((e) => {
+        // Non-fatal: leave eval UI at its defaults (off) if the lookup fails.
+        if (!cancelled) console.warn("getAgentEvals failed:", e);
+      });
     return () => {
       cancelled = true;
     };
@@ -167,6 +172,10 @@ export function Chat({
         .filter((id): id is string => !!id),
     ),
   );
+  // The freshest assistant run — the only one still awaiting a live judge.
+  // Bounding "judging…" to it avoids a permanent spinner on older runs that
+  // predate the rubrics (or whose judge failed) and will never get scores.
+  const latestRunId = runIds.at(-1);
   const showEvals = editable && drawerOn;
   const { scores, merge } = useEvalScores(runIds, editable && (drawerOn || hasRubrics));
 
@@ -175,12 +184,18 @@ export function Chat({
     if (reevaluating || draft.length === 0) return;
     setReevaluating(true);
     try {
-      await Promise.all(
+      // allSettled: one bad run (thrown/network error, or `{ ok: false }`) must
+      // not reject the whole batch or surface as an unhandled rejection — this
+      // is called from a `() => void` handler that never awaits it.
+      const results = await Promise.allSettled(
         runIds.map(async (runId) => {
           const res = await rejudgeRunFn({ data: { chatId, runId, evals: draft } });
-          if (res.ok) merge(runId, res.scores);
+          if (!res.ok) throw new Error(res.error);
+          merge(runId, res.scores);
         }),
       );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) console.warn(`re-evaluate: ${failed}/${runIds.length} run(s) failed`);
     } finally {
       setReevaluating(false);
     }
@@ -475,7 +490,7 @@ export function Chat({
                   <ScoreBadges
                     runId={runId}
                     scores={runId ? scores[runId] : undefined}
-                    pending={hasRubrics}
+                    pending={hasRubrics && runId === latestRunId}
                     canCorrect={editable}
                     onCorrected={(rid, updated) =>
                       merge(rid, (scores[rid] ?? []).map((s) => (s.name === updated.name ? updated : s)))

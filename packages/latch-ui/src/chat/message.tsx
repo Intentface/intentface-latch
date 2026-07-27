@@ -209,7 +209,16 @@ export function Message({
       )}
 
       {!isUser && !isStreaming && (copyText || onRegenerate || onFeedback) && (
-        <div className="pointer-events-none flex items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+        <div
+          className={cn(
+            "flex items-center gap-1 transition-opacity",
+            // Keep the bar visible once feedback is recorded so the chosen-thumb
+            // highlight is actually seen; otherwise reveal it on hover only.
+            feedbackValue !== undefined
+              ? "opacity-100"
+              : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",
+          )}
+        >
           {copyText && <CopyButton text={copyText} />}
           {onRegenerate && (
             <button

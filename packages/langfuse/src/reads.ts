@@ -62,28 +62,37 @@ export async function listOwnerTraces(args: {
   // attach to the current page instead of a fixed 100-row owner-wide slice.
   const scoresByTrace = new Map<string, TraceScore[]>();
   if (traceRows.length > 0) {
-    const scores = await client.api.scoresV3.getManyV3({
-      traceId: traceRows.map((t) => t.id).join(","),
-      fields: "details,subject",
-      limit: 100,
-    });
-    for (const s of scores.data ?? []) {
-      const subject = (s as { subject?: { kind?: string; id?: string } }).subject;
-      if (subject?.kind !== "trace" || !subject.id) continue;
-      const list = scoresByTrace.get(subject.id) ?? [];
-      // v3 returns BOOLEAN scores as a JS boolean (v2 returned 1/0). Normalize
-      // to a number so binary and numeric scores share one numeric contract
-      // (aggregates/averaging); categorical scores stay strings.
-      const raw = (s as { value?: number | string | boolean | null }).value;
-      const value = typeof raw === "boolean" ? (raw ? 1 : 0) : (raw ?? null);
-      list.push({
-        name: s.name,
-        value,
-        comment: s.comment ?? undefined,
-        dataType: (s as { dataType?: string }).dataType,
+    const traceIdFilter = traceRows.map((t) => t.id).join(",");
+    // `getManyV3` is cursor-paginated (max 100/page). A single page of traces
+    // can carry >100 scores (rubrics + feedback per run), so follow the cursor
+    // until it's absent — otherwise later scores silently drop off the feed.
+    let cursor: string | undefined;
+    do {
+      const scores = await client.api.scoresV3.getManyV3({
+        traceId: traceIdFilter,
+        fields: "details,subject",
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
       });
-      scoresByTrace.set(subject.id, list);
-    }
+      for (const s of scores.data ?? []) {
+        const subject = (s as { subject?: { kind?: string; id?: string } }).subject;
+        if (subject?.kind !== "trace" || !subject.id) continue;
+        const list = scoresByTrace.get(subject.id) ?? [];
+        // v3 returns BOOLEAN scores as a JS boolean (v2 returned 1/0). Normalize
+        // to a number so binary and numeric scores share one numeric contract
+        // (aggregates/averaging); categorical scores stay strings.
+        const raw = (s as { value?: number | string | boolean | null }).value;
+        const value = typeof raw === "boolean" ? (raw ? 1 : 0) : (raw ?? null);
+        list.push({
+          name: s.name,
+          value,
+          comment: s.comment ?? undefined,
+          dataType: (s as { dataType?: string }).dataType,
+        });
+        scoresByTrace.set(subject.id, list);
+      }
+      cursor = scores.meta?.cursor;
+    } while (cursor);
   }
 
   return traceRows.map((t) => ({

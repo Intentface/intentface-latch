@@ -213,6 +213,12 @@ export async function rejudgeRun(args: {
     answer,
     tools,
     sink: async (v) => {
+      // Never let a tuning re-judge clobber a human correction: the human value
+      // (and the AI original it preserves) is authoritative. Skip persisting AND
+      // returning it, so both the local store and /observability's overlay keep
+      // showing the correction.
+      const existing = await latch.runScores.getOne(ownerTag, args.runId, v.rubric.name);
+      if (existing?.source === "human") return;
       results.push(v);
       await putLocal(latch, ownerTag, args.runId, v, "rejudge", now);
     },

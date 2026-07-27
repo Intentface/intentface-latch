@@ -6,6 +6,8 @@ const OTEL_KEY = "__latchLangfuseOtel";
 interface OtelSingleton {
   provider: NodeTracerProvider;
   processor: LangfuseSpanProcessor;
+  /** The environment traces are recorded under (so scores can match it). */
+  environment?: string;
 }
 
 /**
@@ -25,9 +27,25 @@ export function ensureTracing(opts?: {
     });
     const provider = new NodeTracerProvider({ spanProcessors: [processor] });
     provider.register();
-    g[OTEL_KEY] = { provider, processor } satisfies OtelSingleton;
+    g[OTEL_KEY] = {
+      provider,
+      processor,
+      environment: opts?.environment,
+    } satisfies OtelSingleton;
   }
   return (g[OTEL_KEY] as OtelSingleton).processor;
+}
+
+/**
+ * The environment tracing was set up with (via `ensureTracing`), so out-of-band
+ * score writes can be recorded in the SAME Langfuse environment as their trace
+ * instead of a mismatched one. Undefined until `ensureTracing` has run in this
+ * process (e.g. a cold invocation that only posts a score) — callers fall back
+ * to the env var.
+ */
+export function tracingEnvironment(): string | undefined {
+  const g = globalThis as Record<string, unknown>;
+  return (g[OTEL_KEY] as OtelSingleton | undefined)?.environment;
 }
 
 /** Flush pending spans to Langfuse (serverless-safe; no-op if never set up). */

@@ -154,7 +154,11 @@ function ObservabilityPage() {
                       <Badge
                         key={`${s.name}-${i}`}
                         variant={
-                          typeof s.value === "number" && s.value >= 0.5 ? "secondary" : "destructive"
+                          // Categorical (string) scores are neutral, not failures;
+                          // only a numeric value below 0.5 reads as "failed".
+                          typeof s.value === "string" || (typeof s.value === "number" && s.value >= 0.5)
+                            ? "secondary"
+                            : "destructive"
                         }
                         title={s.comment}
                       >
