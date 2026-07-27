@@ -39,6 +39,7 @@ const CAPABILITIES = z
           ),
         connection: z
           .string()
+          .min(1)
           .describe("Which of the agent's connections holds the memory files (must be in `connections`; typically 'loredex')."),
       })
       .optional()
@@ -48,7 +49,8 @@ const CAPABILITIES = z
   })
   .optional();
 
-const SAVE_INPUT = z.object({
+// Exported for schema regression tests only.
+export const SAVE_INPUT = z.object({
   name: z.string().describe("Unique kebab-case id. Reusing an existing name UPDATES that agent."),
   title: z.string().optional().describe("Short human label for the picker."),
   description: z.string().optional().describe("One line on what the agent does."),
@@ -223,8 +225,10 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           return { error: `Unknown connection(s): ${badConn.join(", ")}. Use list_connections.` };
         }
         // Memory files live in one of the agent's OWN connections.
+        // `!== undefined` (not truthy): an empty string must fail the
+        // membership check below, not skip it.
         const memConn = input.capabilities?.memory?.connection;
-        if (memConn && !(input.connections ?? []).includes(memConn)) {
+        if (memConn !== undefined && !(input.connections ?? []).includes(memConn)) {
           return {
             error: `Memory connection "${memConn}" must also be listed in the agent's connections.`,
           };
