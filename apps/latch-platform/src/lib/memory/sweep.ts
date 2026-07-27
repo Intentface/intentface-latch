@@ -1,0 +1,345 @@
+import type { MemoryConfig } from "@intentface/latch-core";
+import {
+  buildConsolidationPrompt,
+  buildExtractionPrompt,
+  parseIndex,
+  scopeLabelOf,
+  scopeRefOf,
+} from "@intentface/latch-memory";
+import type { ScopeRef } from "@intentface/latch-memory";
+import { memoryEnabledCodeAgents } from "@/agents/memory-enabled";
+import type { Principal } from "../session";
+import type {
+  MemoryConsolidationTurnContext,
+  MemoryExtractionTurnContext,
+} from "./turn-context";
+import {
+  MEMORY_CONSOLIDATION_LEASE_MS,
+  MEMORY_CONSOLIDATIONS_PER_TICK,
+  MEMORY_COOLDOWN_MS,
+  MEMORY_EXPIRE_MS,
+  MEMORY_EXTRACTION_CANDIDATES,
+  MEMORY_EXTRACTION_LEASE_MS,
+  MEMORY_EXTRACTION_MAX_CHARS,
+  MEMORY_EXTRACTIONS_PER_TICK,
+  MEMORY_FAILURE_BACKOFF_MS,
+  MEMORY_IDLE_MS,
+  MEMORY_PARK_MS,
+} from "./constants";
+
+/**
+ * The background memory sweep — the platform's Codex-style two-phase pipeline,
+ * run from the cron entrypoint (prod: /api/cron every minute; dev: the
+ * in-process tick):
+ *
+ *   1. EXTRACTION (parallel, capped): idle user chats of memory-enabled agents
+ *      with unseen messages → an internal `memory-extractor` run under the
+ *      chat's own reconstructed principal → one episode file per chat batch.
+ *   2. CONSOLIDATION (serialized per scope by row lease, capped): scopes with
+ *      pending episodes past their cooldown → an internal `memory-consolidator`
+ *      run → MEMORY.md rewritten (snapshot-first, validated).
+ *
+ * Anti-hot-loop invariant (from runDue): EVERY completion path advances
+ * `next_eligible_at` — success, failure, or "not actually memory-enabled" —
+ * so no chat or scope can wedge the sweep.
+ */
+
+interface SweepResult {
+  extractions: number;
+  consolidations: number;
+  skipped: number;
+  errors: number;
+}
+
+const leaseId = () => `memsweep_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+
+/** The memory config for an agent under a specific caller, or undefined. */
+async function memoryConfigFor(
+  agent: string,
+  principal: Principal,
+  agentStore: { getRecord(p: Principal, name: string): Promise<{ exec?: { memory?: MemoryConfig } } | undefined> },
+): Promise<MemoryConfig | undefined> {
+  const code = memoryEnabledCodeAgents[agent];
+  if (code) return code;
+  try {
+    return (await agentStore.getRecord(principal, agent))?.exec?.memory;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function memorySweep(opts?: { now?: number; force?: boolean }): Promise<SweepResult> {
+  const { getLatch } = await import("../latch"); // lazy: latch.ts ↔ sweep would cycle statically
+  const { runtime, agentStore, memoryJobs, memoryStore } = await getLatch();
+  const now = opts?.now ?? Date.now();
+  const idleMs = opts?.force ? 0 : MEMORY_IDLE_MS;
+  const result: SweepResult = { extractions: 0, consolidations: 0, skipped: 0, errors: 0 };
+
+  // ---- discovery: which agents have memory at all ----
+  const uiNames = await agentStore.listMemoryEnabledNames().catch(() => [] as string[]);
+  const agents = Array.from(new Set([...Object.keys(memoryEnabledCodeAgents), ...uiNames]));
+
+  // ---- phase 1: extraction ----
+  if (agents.length > 0) {
+    const candidates = await memoryJobs.listExtractionCandidates({
+      now,
+      idleMs,
+      agents,
+      limit: MEMORY_EXTRACTION_CANDIDATES,
+    });
+    const queue = [...candidates];
+    const workers = Array.from(
+      { length: Math.min(MEMORY_EXTRACTIONS_PER_TICK, queue.length) },
+      async () => {
+        for (;;) {
+          const cand = queue.shift();
+          if (!cand) return;
+          try {
+            const outcome = await extractOne(cand);
+            result[outcome]++;
+          } catch (error) {
+            result.errors++;
+            console.warn(`[memory] extraction failed for chat ${cand.chatId}:`, error);
+          }
+        }
+      },
+    );
+    await Promise.all(workers);
+  }
+
+  async function extractOne(cand: {
+    chatId: string;
+    owner: string;
+    agent: string;
+    lastExtractedSeq: number;
+    maxSeq: number;
+  }): Promise<"extractions" | "skipped"> {
+    const lease = leaseId();
+    // Identity + config first (read-only), then claim with the derived scope.
+    const identity = await memoryJobs.latestRunIdentity(cand.chatId);
+    if (!identity) {
+      // No run ever recorded a principal — park it (fenced complete needs a
+      // claim, so claim with a placeholder scope first).
+      if (
+        await memoryJobs.claimChatExtraction(
+          cand.chatId,
+          { owner: cand.owner, agent: cand.agent, scopeKey: "unresolvable" },
+          lease,
+          MEMORY_EXTRACTION_LEASE_MS,
+          now,
+        )
+      ) {
+        await memoryJobs.completeChatExtraction(
+          cand.chatId,
+          { ok: false, nextEligibleAt: now + MEMORY_PARK_MS },
+          lease,
+        );
+      }
+      return "skipped";
+    }
+    const principal = identity as Principal;
+    const memory = await memoryConfigFor(cand.agent, principal, agentStore);
+    const scope: ScopeRef | undefined = memory
+      ? scopeRefOf({ agent: cand.agent, memory, userId: principal.userId })
+      : undefined;
+    if (!memory || !scope) {
+      // Not actually memory-enabled for THIS owner (LIKE prefilter false
+      // positive / scope unresolvable): park WITHOUT advancing the seq
+      // watermark, so enabling memory later picks the backlog up.
+      if (
+        await memoryJobs.claimChatExtraction(
+          cand.chatId,
+          { owner: cand.owner, agent: cand.agent, scopeKey: "unresolvable" },
+          lease,
+          MEMORY_EXTRACTION_LEASE_MS,
+          now,
+        )
+      ) {
+        await memoryJobs.completeChatExtraction(
+          cand.chatId,
+          { ok: true, nextEligibleAt: now + MEMORY_PARK_MS },
+          lease,
+        );
+      }
+      return "skipped";
+    }
+
+    if (
+      !(await memoryJobs.claimChatExtraction(
+        cand.chatId,
+        { owner: cand.owner, agent: cand.agent, scopeKey: scope.key },
+        lease,
+        MEMORY_EXTRACTION_LEASE_MS,
+        now,
+      ))
+    ) {
+      return "skipped"; // lost the race to another node
+    }
+
+    try {
+      const msgs = await memoryJobs.messagesAfter(
+        cand.chatId,
+        cand.lastExtractedSeq,
+        MEMORY_EXTRACTION_MAX_CHARS,
+      );
+      if (msgs.length === 0) {
+        // Nothing textual to archive — advance past it.
+        await memoryJobs.completeChatExtraction(
+          cand.chatId,
+          { lastExtractedSeq: cand.maxSeq, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
+          lease,
+        );
+        return "skipped";
+      }
+      // The excerpt may be char-capped short of maxSeq — advance the watermark
+      // only to what the extractor actually saw; the tail is next tick's work.
+      const lastSeenSeq = msgs[msgs.length - 1]!.seq;
+      const transcript = msgs.map((m) => `${m.role}: ${m.text}`).join("\n\n");
+      const turnContext: MemoryExtractionTurnContext = {
+        kind: "memory-extraction",
+        scope,
+        chatId: cand.chatId,
+        targetAgent: cand.agent,
+        cooldownMs: (memory.consolidation?.cooldownHours ?? 0) * 3_600_000 || MEMORY_COOLDOWN_MS,
+      };
+      await runtime.runAgent({
+        principal,
+        agent: "memory-extractor",
+        blockGated: false,
+        turnContext,
+        prompt: buildExtractionPrompt({
+          agent: cand.agent,
+          scopeLabel: scopeLabelOf(memory),
+          chatId: cand.chatId,
+          transcript,
+          seqRange: { from: msgs[0]!.seq, to: lastSeenSeq },
+        }),
+      });
+      await memoryJobs.completeChatExtraction(
+        cand.chatId,
+        { lastExtractedSeq: lastSeenSeq, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
+        lease,
+      );
+      return "extractions";
+    } catch (error) {
+      await memoryJobs
+        .completeChatExtraction(
+          cand.chatId,
+          { ok: false, nextEligibleAt: now + MEMORY_FAILURE_BACKOFF_MS },
+          lease,
+        )
+        .catch(() => {});
+      throw error;
+    }
+  }
+
+  // ---- phase 2: consolidation ----
+  const scopes = await memoryJobs.listConsolidationCandidates({
+    now,
+    limit: MEMORY_CONSOLIDATIONS_PER_TICK,
+  });
+  for (const row of scopes) {
+    const lease = leaseId();
+    if (
+      !(await memoryJobs.claimScopeConsolidation(
+        row.scopeKey,
+        lease,
+        MEMORY_CONSOLIDATION_LEASE_MS,
+        now,
+      ))
+    ) {
+      result.skipped++;
+      continue;
+    }
+    try {
+      const principal = row.identity as Principal | undefined;
+      const memory = principal
+        ? await memoryConfigFor(row.agent, principal, agentStore)
+        : undefined;
+      const scope: ScopeRef | undefined =
+        memory && principal
+          ? scopeRefOf({ agent: row.agent, memory, userId: principal.userId })
+          : undefined;
+      if (!principal || !memory || !scope || scope.key !== row.scopeKey) {
+        // Identity lost or agent no longer memory-enabled — park the scope
+        // (episodes stay pending; a future touch re-stamps a fresh identity).
+        await memoryJobs.completeScopeConsolidation(
+          row.scopeKey,
+          { ok: false, nextEligibleAt: now + MEMORY_PARK_MS },
+          lease,
+        );
+        result.skipped++;
+        continue;
+      }
+
+      // Expiry candidates: ACTIVE index entries not recalled (and not updated)
+      // within the expiry window. Usage rows only exist for recalled ids, so
+      // fall back to the entry's own date.
+      const usage = new Map(
+        (await memoryJobs.usageFor(row.scopeKey)).map((u) => [u.memoryId, u]),
+      );
+      const index = await memoryStore.readIndex(principal, scope);
+      const expireCandidates = index
+        ? parseIndex(index)
+            .entries.filter((e) => !e.archived)
+            .filter((e) => {
+              const entryDate = e.date ? Date.parse(e.date) : undefined;
+              const lastTouch = Math.max(
+                usage.get(e.id)?.lastUsedAt ?? 0,
+                entryDate ?? 0,
+              );
+              return lastTouch > 0 && now - lastTouch > MEMORY_EXPIRE_MS;
+            })
+            .map((e) => ({
+              memoryId: e.id,
+              lastUsedAt: usage.get(e.id)?.lastUsedAt
+                ? new Date(usage.get(e.id)!.lastUsedAt!).toISOString().slice(0, 10)
+                : undefined,
+            }))
+        : [];
+
+      const episodePaths = [...row.pendingEpisodes].sort();
+      const turnContext: MemoryConsolidationTurnContext = {
+        kind: "memory-consolidation",
+        scope,
+      };
+      await runtime.runAgent({
+        principal,
+        agent: "memory-consolidator",
+        blockGated: false,
+        turnContext,
+        prompt: buildConsolidationPrompt({
+          scopeLabel: scopeLabelOf(memory),
+          episodePaths,
+          expireCandidates,
+          today: new Date(now).toISOString().slice(0, 10),
+        }),
+      });
+      const cooldownMs =
+        (memory.consolidation?.cooldownHours ?? 0) * 3_600_000 || MEMORY_COOLDOWN_MS;
+      await memoryJobs.completeScopeConsolidation(
+        row.scopeKey,
+        {
+          ok: true,
+          watermark: episodePaths.at(-1)?.split("/").pop(),
+          nextEligibleAt: now + (opts?.force ? 0 : cooldownMs),
+          consumedEpisodes: episodePaths,
+        },
+        lease,
+      );
+      result.consolidations++;
+    } catch (error) {
+      result.errors++;
+      console.warn(`[memory] consolidation failed for scope ${row.scopeKey}:`, error);
+      await memoryJobs
+        .completeScopeConsolidation(
+          row.scopeKey,
+          { ok: false, nextEligibleAt: now + MEMORY_FAILURE_BACKOFF_MS },
+          lease,
+        )
+        .catch(() => {});
+    }
+  }
+
+  return result;
+}

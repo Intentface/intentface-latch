@@ -1,6 +1,11 @@
 import type { Client } from "@libsql/client";
 import type { LanguageModel } from "ai";
-import type { AgentConfig, AgentInfo, DynamicAgentStore } from "@intentface/latch-core";
+import type {
+  AgentConfig,
+  AgentInfo,
+  DynamicAgentStore,
+  MemoryConfig,
+} from "@intentface/latch-core";
 import type { Principal } from "./session";
 import type { CredentialScope } from "./credentials";
 
@@ -51,6 +56,13 @@ export interface AgentRecord {
     authoredTools?: string[];
     /** Reasoning/thinking effort (gated to reasoning-capable models). */
     effort?: "minimal" | "low" | "medium" | "high";
+    /**
+     * Persistent cross-session memory (see `@intentface/latch-memory`): scope
+     * (`agent-user` | `agent-org` | `user`) + the connection whose workspace
+     * holds the memory files. The background sweep discovers memory-enabled
+     * agents by this field (`listMemoryEnabledNames`).
+     */
+    memory?: MemoryConfig;
   };
   /** Agents this one may delegate to via the `spawn_agent` tool. */
   subagents?: string[];
@@ -123,6 +135,14 @@ export interface AgentStore extends DynamicAgentStore<Principal> {
   getRecord: (p: Principal, name: string) => Promise<AgentRecord | undefined>;
   upsert: (p: Principal, rec: AgentRecord) => Promise<void>;
   remove: (p: Principal, scope: CredentialScope, name: string) => Promise<void>;
+  /**
+   * SYSTEM op (principal-free, cross-tenant): distinct names of UI agents that
+   * look memory-enabled — a cheap LIKE prefilter for the background memory
+   * sweep. The sweep re-checks each candidate authoritatively (via `getRecord`
+   * under the chat's own reconstructed principal), so false positives here are
+   * harmless; results must never feed anything but that per-principal check.
+   */
+  listMemoryEnabledNames: () => Promise<string[]>;
 }
 
 export function createAgentStore(
@@ -244,6 +264,7 @@ export function createAgentStore(
         providerWebTools: rec.exec?.providerWebTools || undefined,
         renderTools: rec.exec?.renderTools || undefined,
         effort: rec.exec?.effort,
+        memory: rec.exec?.memory,
         smoothStream: true,
       };
     },
@@ -262,6 +283,13 @@ export function createAgentStore(
 
     async getRecord(principal, name) {
       return find(principal, name);
+    },
+
+    async listMemoryEnabledNames() {
+      const res = await client.execute(
+        `SELECT DISTINCT name FROM latch_agents WHERE exec LIKE '%"memory"%'`,
+      );
+      return (res.rows as unknown as Record<string, unknown>[]).map((r) => String(r.name));
     },
 
     async listRecords(principal) {

@@ -106,6 +106,9 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 @intentface/latch-server     one mountable Web handler (chat, approvals, lists,
                              connection OAuth) — framework-agnostic; Hono in /hono
 @intentface/latch-mcp        MCP host: SSRF allowlist, vault auth, OAuth.   deps: @ai-sdk/mcp
+@intentface/latch-memory     agent memory: always-loaded compiled index, episodic
+                             store + search/save tools, background extraction &
+                             consolidation over a MemoryStore seam (Loredex first)
 
 apps/example                 runnable example + the smoke-test suite (not published)
 ```
@@ -118,7 +121,9 @@ Minimal install = **core + drizzle** (+ server if standalone). Everything else i
 
 **Working today** (exercised by 17 smoke suites, both SQLite & Postgres): agents & context, persistence, streaming + Hono routes, tools, MCP host + OAuth, vault, durability (lease/heartbeat/reaper/fencing/resume/checkpoint), scheduler, tool approvals, writer/data parts, message projections, usage & cost.
 
-**Planned / not yet built:** files & attachments (`FileStore`), memory, workspaces (Daytona/local sandboxes), code-mode (sandboxed composed tools), subagents, MCP elicitation, compaction (the projection plumbing exists; the operation doesn't), observability (OTel), OpenAPI/`/docs`, CLI, evals, and models.dev-backed live pricing. See [`PLAN.md`](./PLAN.md) for the roadmap.
+**Working today** also includes **memory** (`@intentface/latch-memory`): agents that declare `memory` get a compiled index injected per turn, `memory_search`/`memory_save` tools, and background extraction + consolidation via the cron sweep. Scopes: `agent-user` | `agent-org` | `user`. Caveat: on an org-shared connection, per-user separation is a folder convention — anyone with workspace access can read the `_memory/**` files.
+
+**Planned / not yet built:** files & attachments (`FileStore`), workspaces (Daytona/local sandboxes), code-mode (sandboxed composed tools), subagents, MCP elicitation, compaction (the projection plumbing exists; the operation doesn't), observability (OTel), OpenAPI/`/docs`, CLI, evals, and models.dev-backed live pricing. See [`PLAN.md`](./PLAN.md) for the roadmap.
 
 This is pre-1.0 and built on `ai@7.0.0-beta.*` — APIs will move.
 

@@ -30,6 +30,21 @@ const CAPABILITIES = z
     sandbox: z.boolean().optional().describe("Per-session workspace + file/shell tools (bash, read_file, …)."),
     providerWebTools: z.boolean().optional().describe("Native provider web search/fetch (Anthropic/OpenAI)."),
     defaultTools: z.boolean().optional().describe("App harness tools: web_fetch + askUser."),
+    memory: z
+      .object({
+        scope: z
+          .enum(["agent-user", "agent-org", "user"])
+          .describe(
+            "'agent-user' = this agent's memory of each user (default choice); 'agent-org' = one shared memory for the whole org; 'user' = shared across all the user's agents.",
+          ),
+        connection: z
+          .string()
+          .describe("Which of the agent's connections holds the memory files (must be in `connections`; typically 'loredex')."),
+      })
+      .optional()
+      .describe(
+        "Persistent cross-session memory: the platform archives durable facts from idle chats into the connection's workspace, injects a compiled index each turn, and adds memory_search/memory_save tools.",
+      ),
   })
   .optional();
 
@@ -92,6 +107,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       codeMode: c?.codeMode ? {} : undefined,
       authoredTools: authored?.length ? authored : undefined,
       effort,
+      memory: c?.memory ?? undefined,
     };
     const hasAny =
       !!c?.sandbox ||
@@ -99,7 +115,8 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       !!c?.providerWebTools ||
       !!c?.codeMode ||
       !!authored?.length ||
-      effort !== undefined;
+      effort !== undefined ||
+      !!c?.memory;
     return hasAny ? exec : undefined;
   };
 
@@ -199,6 +216,13 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const badConn = (input.connections ?? []).filter((n) => !knownConnections.has(n));
         if (badConn.length) {
           return { error: `Unknown connection(s): ${badConn.join(", ")}. Use list_connections.` };
+        }
+        // Memory files live in one of the agent's OWN connections.
+        const memConn = input.capabilities?.memory?.connection;
+        if (memConn && !(input.connections ?? []).includes(memConn)) {
+          return {
+            error: `Memory connection "${memConn}" must also be listed in the agent's connections.`,
+          };
         }
         const knownAgents = new Set((await runtime.listAgents(principal)).map((a) => a.name));
         const badSub = (input.subagents ?? []).filter((n) => !knownAgents.has(n) && n !== name);

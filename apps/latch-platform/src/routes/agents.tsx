@@ -33,6 +33,7 @@ export interface AgentRec {
     renderTools?: boolean;
     authoredTools?: string[];
     effort?: "minimal" | "low" | "medium" | "high";
+    memory?: { scope: "agent-user" | "agent-org" | "user"; connection: string };
   };
   subagents?: string[];
   scope: "user" | "org";

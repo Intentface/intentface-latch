@@ -23,6 +23,7 @@ import {
 import {
   connectionToolsFn,
   createSlackAppFn,
+  getMemoryStatusFn,
   createTelegramBotFn,
   createWhatsappBotFn,
   deleteTelegramBotFn,
@@ -119,6 +120,14 @@ function AgentEditor() {
     setAuthoredSel((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
   const [effort, setEffort] = useState<string>(initial?.exec?.effort ?? "");
   const modelSupportsReasoning = !!models.find((m) => m.id === modelId)?.reasoning;
+  // Memory: persistent cross-session memory in one of the agent's connections.
+  const [memoryOn, setMemoryOn] = useState(!!initial?.exec?.memory);
+  const [memoryScope, setMemoryScope] = useState<"agent-user" | "agent-org" | "user">(
+    initial?.exec?.memory?.scope ?? "agent-user",
+  );
+  const [memoryConnection, setMemoryConnection] = useState(
+    initial?.exec?.memory?.connection ?? "",
+  );
   // Org agents may only attach org-scoped tools (a personal tool wouldn't resolve
   // for other members); personal agents see all (dedup by name, personal wins).
   const visibleAuthored =
@@ -252,8 +261,14 @@ function AgentEditor() {
           : [];
       const toolNames = [...(webTools ? ["web_fetch"] : []), ...preserved];
       const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
+      // Memory only saves with a valid connection pick (the picker defaults to
+      // loredex when the agent declares it).
+      const memory =
+        memoryOn && memoryConnection && picked.includes(memoryConnection)
+          ? { scope: memoryScope, connection: memoryConnection }
+          : undefined;
       const exec =
-        sandbox || defaultTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort
+        sandbox || defaultTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort || memory
           ? {
               sandbox: sandbox || undefined,
               provider: sandbox ? provider : undefined,
@@ -262,6 +277,7 @@ function AgentEditor() {
               providerWebTools: providerWebTools || undefined,
               authoredTools: validAuthoredSel.length ? validAuthoredSel : undefined,
               effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,
+              memory,
             }
           : undefined;
       const res = await saveAgentFn({
@@ -574,6 +590,77 @@ function AgentEditor() {
           )}
         </div>
 
+        <div className="border-primary-border space-y-3 rounded-lg border p-3">
+          <FieldLabel>Memory</FieldLabel>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch
+              checked={memoryOn}
+              onCheckedChange={() => {
+                setMemoryOn((v) => {
+                  const next = !v;
+                  // Sensible default pick on first enable: loredex when declared.
+                  if (next && !memoryConnection) {
+                    setMemoryConnection(
+                      picked.includes("loredex") ? "loredex" : (picked[0] ?? ""),
+                    );
+                  }
+                  return next;
+                });
+              }}
+            />
+            <span>
+              Persistent memory — the platform archives durable facts from idle chats, keeps a
+              compiled index in the system prompt, and gives the agent{" "}
+              <span className="font-mono">memory_search / memory_save</span>
+            </span>
+          </label>
+          {memoryOn && picked.length === 0 && (
+            <p className="text-destructive text-xs">
+              Memory needs a connection — add one above (memory files live in its workspace).
+            </p>
+          )}
+          {memoryOn && picked.length > 0 && (
+            <div className="ml-12 space-y-2">
+              <label className="text-ink-secondary flex items-center gap-2 text-xs">
+                Scope
+                <Select
+                  value={memoryScope}
+                  onChange={(e) =>
+                    setMemoryScope(e.target.value as "agent-user" | "agent-org" | "user")
+                  }
+                >
+                  <option value="agent-user">Per user — this agent’s memory of each user</option>
+                  <option value="agent-org">Org-shared — one memory for the whole org</option>
+                  <option value="user">User-wide — shared with the user’s other agents</option>
+                </Select>
+              </label>
+              <label className="text-ink-secondary flex items-center gap-2 text-xs">
+                Connection
+                <Select
+                  value={memoryConnection}
+                  onChange={(e) => setMemoryConnection(e.target.value)}
+                >
+                  {picked.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </Select>
+                <span className="text-ink-tertiary">
+                  files land under <span className="font-mono">_memory/</span> in its workspace
+                </span>
+              </label>
+              {memoryScope !== "agent-org" && (
+                <p className="text-ink-tertiary text-xs">
+                  Note: on an org-shared connection, per-user separation is a folder convention —
+                  anyone with workspace access can read the files.
+                </p>
+              )}
+              {editing && <MemoryStatus agent={name} />}
+            </div>
+          )}
+        </div>
+
         {error && <p className="text-destructive text-sm">{error}</p>}
         <div className="flex gap-2">
           <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
@@ -588,6 +675,67 @@ function AgentEditor() {
       {editing && <SlackSection agent={name} />}
       {editing && <TelegramSection agent={name} />}
       {editing && <WhatsappSection agent={name} />}
+    </div>
+  );
+}
+
+/**
+ * Live memory status for the SAVED agent config (the caller's own scope):
+ * pending episodes, last consolidation, failures — plus a Loredex link when
+ * the deployment configures one. Unsaved editor changes aren't reflected.
+ */
+function MemoryStatus({ agent }: { agent: string }) {
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof getMemoryStatusFn>> | null>(
+    null,
+  );
+  useEffect(() => {
+    let alive = true;
+    getMemoryStatusFn({ data: { name: agent } })
+      .then((s) => alive && setStatus(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [agent]);
+  if (!status || !("enabled" in status) || !status.enabled) return null;
+  if (!status.resolvable) {
+    return (
+      <p className="text-ink-tertiary text-xs">
+        Memory is configured but the scope can’t be resolved for your session (per-user scope
+        without a user).
+      </p>
+    );
+  }
+  return (
+    <div className="text-ink-tertiary space-y-0.5 text-xs">
+      <p>
+        Your store: <span className="font-mono">{status.root}</span>
+        {status.loredexUrl && (
+          <>
+            {" · "}
+            <a
+              href={status.loredexUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-ink-secondary underline"
+            >
+              open Loredex
+            </a>
+          </>
+        )}
+      </p>
+      <p>
+        {status.pendingEpisodes} episode{status.pendingEpisodes === 1 ? "" : "s"} awaiting
+        consolidation · last consolidated{" "}
+        {status.lastConsolidatedAt
+          ? new Date(status.lastConsolidatedAt).toLocaleString()
+          : "never"}
+        {" · "}
+        {status.trackedMemories} recalled entr{status.trackedMemories === 1 ? "y" : "ies"} tracked
+        {status.failures > 0 && (
+          <span className="text-destructive"> · {status.failures} recent failures</span>
+        )}
+      </p>
     </div>
   );
 }

@@ -10,6 +10,8 @@ import { anchorFrameKeeper } from "./anchor-frame-keeper";
 import { edgeOnboarding } from "./edge-onboarding";
 import { edgeAdvisor } from "./edge-advisor";
 import { clientWorkInterview } from "./anchor-client-work-interview";
+import { memoryExtractor } from "./memory-extractor";
+import { memoryConsolidator } from "./memory-consolidator";
 
 /**
  * The platform's agents, keyed by name. Each agent file is a self-contained
@@ -30,4 +32,8 @@ export const agents = {
   "anchor-frame-keeper": anchorFrameKeeper,
   "edge-onboarding": edgeOnboarding,
   "edge-advisor": edgeAdvisor,
+  // System agents spawned by the memory sweep (filtered from user-facing
+  // pickers by the `memory-` prefix).
+  "memory-extractor": memoryExtractor,
+  "memory-consolidator": memoryConsolidator,
 };
