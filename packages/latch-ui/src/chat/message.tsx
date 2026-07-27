@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "motion/react";
-import { Check, ChevronDown, CircleHelp, Copy, FileText, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Copy, FileText, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
@@ -34,6 +34,8 @@ export function Message({
   renderSubagent,
   renderTool,
   onRegenerate,
+  onFeedback,
+  feedbackValue,
   className,
 }: {
   message: AppUIMessage;
@@ -50,6 +52,10 @@ export function Message({
   renderTool?: (part: ToolPart) => ReactNode | undefined;
   /** Called when the user clicks the regenerate action (assistant messages). */
   onRegenerate?: () => void;
+  /** Called when the user clicks 👍 (1) / 👎 (0) — e.g. to open a feedback dialog. */
+  onFeedback?: (value: 0 | 1) => void;
+  /** Feedback already recorded for this message (highlights that thumb). */
+  feedbackValue?: 0 | 1;
   className?: string;
 }) {
   const isUser = message.role === "user";
@@ -202,8 +208,17 @@ export function Message({
         </div>
       )}
 
-      {!isUser && !isStreaming && (copyText || onRegenerate) && (
-        <div className="pointer-events-none flex items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+      {!isUser && !isStreaming && (copyText || onRegenerate || onFeedback) && (
+        <div
+          className={cn(
+            "flex items-center gap-1 transition-opacity",
+            // Keep the bar visible once feedback is recorded so the chosen-thumb
+            // highlight is actually seen; otherwise reveal it on hover only.
+            feedbackValue !== undefined
+              ? "opacity-100"
+              : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",
+          )}
+        >
           {copyText && <CopyButton text={copyText} />}
           {onRegenerate && (
             <button
@@ -214,6 +229,34 @@ export function Message({
             >
               <RotateCcw className="size-3.5" />
             </button>
+          )}
+          {onFeedback && (
+            <>
+              <button
+                type="button"
+                aria-label="Good response"
+                aria-pressed={feedbackValue === 1}
+                onClick={() => onFeedback(1)}
+                className={cn(
+                  "text-ink-tertiary hover:text-ink-primary hover:bg-primary-hover grid size-7 place-items-center rounded-md transition-colors",
+                  feedbackValue === 1 && "text-accent",
+                )}
+              >
+                <ThumbsUp className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-label="Bad response"
+                aria-pressed={feedbackValue === 0}
+                onClick={() => onFeedback(0)}
+                className={cn(
+                  "text-ink-tertiary hover:text-ink-primary hover:bg-primary-hover grid size-7 place-items-center rounded-md transition-colors",
+                  feedbackValue === 0 && "text-accent",
+                )}
+              >
+                <ThumbsDown className="size-3.5" />
+              </button>
+            </>
           )}
         </div>
       )}

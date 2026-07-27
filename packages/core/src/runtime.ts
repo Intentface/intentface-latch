@@ -24,6 +24,7 @@ import type {
 } from "./agent.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
+import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import type {
   ChatRecord,
   RunLease,
@@ -178,6 +179,14 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     tools: Record<string, unknown>,
     opts?: { agent: string },
   ) => unknown;
+  /**
+   * Tracing seam (kept out of core — no OTEL/vendor dep). Supplies per-run AI
+   * SDK telemetry options, an optional trace wrapper around the model call, and
+   * a post-turn hook (e.g. `@intentface/latch-langfuse`). This is the OTEL/span
+   * plumbing — the `observability` seam below is for plain event callbacks.
+   * Optional — without it, nothing is traced and behavior is unchanged.
+   */
+  telemetry?: LatchTelemetry<P>;
   /**
    * Optional observability seam — consumer telemetry (usage rollups, per-tool
    * analytics, tracing) attached WITHOUT wrapping `handleChat`. Complements the
@@ -338,6 +347,12 @@ export interface Runtime<P> {
     principal: P;
     limit?: number;
   }): Promise<RunRecord[]>;
+  /**
+   * One run by id, scoped to the caller: returns it only when the run's chat is
+   * owned by `principal` (else null). A direct lookup — no capped scan — so it's
+   * safe for ownership checks on arbitrarily old runs.
+   */
+  getRun(input: { principal: P; runId: string }): Promise<RunRecord | null>;
   /**
    * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
    * Returns the reaped runs. No-op-safe to call on every node.
@@ -530,6 +545,15 @@ function firstText(message: AppMessage): string | undefined {
   return text.length > 0 ? text : undefined;
 }
 
+/** The text of the turn's incoming user message (for telemetry). */
+function lastUserText(messages: AppMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "user") return firstText(m);
+  }
+  return undefined;
+}
+
 /** True if any message has a tool part still awaiting an approval decision. */
 /**
  * Thrown by `handleChat` when a new message arrives while the previous turn is
@@ -556,6 +580,14 @@ type SubApprovalPart = {
     approved?: boolean;
     reason?: string;
     resolved?: boolean;
+    /**
+     * Telemetry linkage of the paused subagent turn, persisted here so the
+     * resumed turn (post-approval) keeps nesting under the same trace/session
+     * instead of defaulting `rootChatId` to its own `sub_…` chat and dropping
+     * `parentRunId`. Set at bubble time; forwarded into the resumed `buildTurn`.
+     */
+    parentRunId?: string;
+    rootChatId?: string;
   };
 };
 
@@ -863,6 +895,11 @@ export function createRuntime<P, RC = unknown>(
     blockGated?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
+    /** Telemetry linkage: the run that spawned this subagent turn (if any). */
+    parentRunId?: string;
+    /** Telemetry linkage: the top-level conversation id (threaded through
+     *  subagent turns so a delegation tree shares one trace session). */
+    rootChatId?: string;
     /**
      * Ephemeral turn (`runTurnStream`): stream a full tool-loop turn WITHOUT
      * persisting anything — no run/lease, no message/run/usage writes. The
@@ -901,6 +938,10 @@ export function createRuntime<P, RC = unknown>(
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
     const ephemeral = args.ephemeral ?? false;
+    // The top-level conversation id — this turn's own chat unless a spawn
+    // threaded a root down. Subagent turns spawned below inherit it, so a whole
+    // delegation tree shares one telemetry session (see telemetryMeta).
+    const rootChatId = args.rootChatId ?? resolvedChatId;
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -1076,6 +1117,10 @@ export function createRuntime<P, RC = unknown>(
             depth: depth + 1,
             autoApprove,
             onProgress,
+            // Telemetry linkage: this turn is the parent; carry the root chat
+            // down so the subagent's trace nests under this conversation.
+            parentRunId: run.id,
+            rootChatId,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -1093,6 +1138,10 @@ export function createRuntime<P, RC = unknown>(
                 subApprovalIds: result.pending.map((p) => p.approvalId),
                 spawnToolCallId: options.toolCallId,
                 summaries: result.pending.map((p) => p.summary),
+                // Persist the sub-turn's telemetry linkage so its resumed turn
+                // (after approval) stays nested under this conversation/run.
+                parentRunId: run.id,
+                rootChatId,
               },
             });
             return {
@@ -1197,6 +1246,30 @@ export function createRuntime<P, RC = unknown>(
       ? config.resolveReasoningOptions(modelId, cfg.effort ?? "")
       : undefined;
 
+    // Telemetry seam: per-run AI SDK telemetry options + trace correlation
+    // identity, resolved once per turn (undefined → nothing traced).
+    const telemetryMeta: TelemetryRunMeta<P> = {
+      runId: run.id,
+      chatId: resolvedChatId,
+      agent: run.agent,
+      modelId,
+      principal,
+      startedAt: run.startedAt,
+      depth,
+      parentRunId: args.parentRunId,
+      // Top-level turns are their own root; subagent turns inherit the root the
+      // spawn threaded down, so a whole delegation tree shares one session id.
+      rootChatId,
+    };
+    const telemetryOptions = config.telemetry?.telemetryFor?.(telemetryMeta);
+    // A telemetry impl that defines `telemetryFor` but returns undefined is
+    // opting THIS run out — so the span wrapper and finish/flush hooks must go
+    // silent too, not just the AI SDK settings. If `telemetryFor` is absent
+    // entirely, the impl simply isn't customizing settings, so tracing stays on.
+    const telemetryOn =
+      !!config.telemetry &&
+      !(config.telemetry.telemetryFor && telemetryOptions === undefined);
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
       instructions: cfg.instructions,
@@ -1206,12 +1279,55 @@ export function createRuntime<P, RC = unknown>(
       activeTools,
       ...(reasoning?.providerOptions ? { providerOptions: reasoning.providerOptions } : {}),
       ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
+      ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
     let outputTokens = 0;
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
+
+    // Post-turn telemetry: fired after persistence on every terminal path
+    // (completed / awaiting_input / errored). Must never fail the turn.
+    const reportRunFinished = async (
+      status: "completed" | "awaiting_input" | "errored",
+      messages: AppMessage[],
+      error?: string,
+    ) => {
+      const t = config.telemetry;
+      if (!t || !telemetryOn) return;
+      try {
+        await t.onRunFinished?.(telemetryMeta, {
+          status,
+          ...(error !== undefined ? { error } : {}),
+          inputText: lastUserText(uiMessages),
+          messages,
+          usage: {
+            inputTokens,
+            outputTokens,
+            ...(cacheReadTokens ? { cacheReadTokens } : {}),
+            ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+          },
+          cost: computeCost(config.pricing?.(modelId), {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+          }),
+          endedAt: Date.now(),
+        });
+      } catch (e) {
+        console.warn("latch telemetry onRunFinished failed:", e);
+      } finally {
+        // Always flush, even when the finish hook threw — otherwise a failed
+        // judge/score pass would drop the turn's spans in serverless.
+        try {
+          await t.flush?.();
+        } catch (e) {
+          console.warn("latch telemetry flush failed:", e);
+        }
+      }
+    };
 
     // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
     // UI-stream `onStepEnd` (per-step persistence) and the `writer`. The model
@@ -1238,7 +1354,10 @@ export function createRuntime<P, RC = unknown>(
               provider: cfg.sandboxProvider,
             })
           : undefined;
-        const result = await agent.stream({
+        // Start the model call inside the telemetry run span (when provided)
+        // so the impl can root every AI SDK span in one seeded trace.
+        const startStream = () =>
+          agent.stream({
           prompt: modelMessages,
           experimental_sandbox: sandbox,
           abortSignal: dur.enabled ? abort.signal : undefined,
@@ -1302,13 +1421,24 @@ export function createRuntime<P, RC = unknown>(
             });
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
+        const result =
+          telemetryOn && config.telemetry?.withRunSpan
+            ? await config.telemetry.withRunSpan(telemetryMeta, startStream)
+            : await startStream();
         // Fold the model's own output into the stream.
         writer.merge(
           toUIMessageStream({
             stream: result.stream,
             messageMetadata: ({ part }: { part: { type: string } }) =>
               part.type === "start"
-                ? { visibility: "user", model: modelId, createdAt: Date.now() }
+                ? {
+                    visibility: "user",
+                    model: modelId,
+                    createdAt: Date.now(),
+                    // Correlates the assistant message to its run (and trace)
+                    // — e.g. per-message feedback posts against this id.
+                    runId: run.id,
+                  }
                 : undefined,
           } as Parameters<typeof toUIMessageStream>[0]) as ReadableStream<unknown>,
         );
@@ -1376,17 +1506,22 @@ export function createRuntime<P, RC = unknown>(
             cost,
             messages,
           });
+          await reportRunFinished("errored", messages, "aborted");
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
+        // Ephemeral turns aren't fenced (no lease/run row) — they always finish
+        // here. For persisted turns, `applied` reflects whether our lease still
+        // owns the run (see below).
+        let applied = true;
         if (!ephemeral) {
           // Fenced finish: settle the run FIRST. If the guarded update doesn't
           // apply (our lease was reaped + the run re-claimed elsewhere), we're
           // a stale writer — skip the final message/usage persistence so we
           // don't overwrite the new owner's state.
-          const applied = await storage.updateRun(
+          applied = await storage.updateRun(
             run.id,
             {
               status: paused ? "awaiting_input" : "completed",
@@ -1429,10 +1564,18 @@ export function createRuntime<P, RC = unknown>(
             console.error("[runtime] onComplete hook failed:", e);
           }
         }
+        // Only the winning writer reports terminal telemetry. If our lease was
+        // reaped and the run re-claimed elsewhere (`!applied`), that node will
+        // finish it — a stale writer must not re-run the judge or emit a
+        // duplicate "completed"/"awaiting_input" trace.
+        if (applied)
+          await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
       },
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
+        const message =
+          error instanceof Error ? error.message : "An error occurred.";
         fireObs(config.observability?.onError, {
           principal,
           chatId: resolvedChatId,
@@ -1442,7 +1585,12 @@ export function createRuntime<P, RC = unknown>(
           depth,
           error,
         });
-        return error instanceof Error ? error.message : "An error occurred.";
+        // The AI SDK's onError must return the client string synchronously, so
+        // the terminal telemetry can't be awaited here. A serverless-safe impl
+        // keeps its own flush alive (e.g. via waitUntil) so the errored trace
+        // still lands; failures are swallowed inside reportRunFinished.
+        void reportRunFinished("errored", [], message);
+        return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);
 
@@ -1736,6 +1884,7 @@ export function createRuntime<P, RC = unknown>(
             approved: sa.approved as boolean,
             reason: sa.reason,
           })),
+          { parentRunId: sa.parentRunId, rootChatId: sa.rootChatId },
         );
         if (resumed.pending?.length) {
           // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
@@ -1750,6 +1899,9 @@ export function createRuntime<P, RC = unknown>(
             subApprovalIds: resumed.pending.map((p) => p.approvalId),
             spawnToolCallId: sa.spawnToolCallId,
             summaries: resumed.pending.map((p) => p.summary),
+            // Carry the linkage forward so each further resume stays nested.
+            parentRunId: sa.parentRunId,
+            rootChatId: sa.rootChatId,
           });
           if (sa.spawnToolCallId) {
             overwriteToolResult(messages, sa.spawnToolCallId, {
@@ -1894,6 +2046,21 @@ export function createRuntime<P, RC = unknown>(
     return storage.listRuns(principal, { limit });
   }
 
+  async function getRun({
+    principal,
+    runId,
+  }: {
+    principal: P;
+    runId: string;
+  }): Promise<RunRecord | null> {
+    const run = await storage.getRun(runId);
+    if (!run) return null;
+    // Ownership: the run is the caller's only if its chat is (getChat is
+    // principal-scoped). Guards cross-tenant reads/writes keyed by runId.
+    const chat = await storage.getChat(principal, run.chatId);
+    return chat ? run : null;
+  }
+
   /** A fresh user message from plain text (for cron-fired turns). */
   function userMessageOf(text: string): AppMessage {
     return {
@@ -1963,6 +2130,8 @@ export function createRuntime<P, RC = unknown>(
     blockGated,
     autoApprove = true,
     onProgress,
+    parentRunId,
+    rootChatId,
   }: {
     principal: P;
     agent: string;
@@ -1970,6 +2139,10 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
+    /** Telemetry: the run that spawned this subagent (nests its trace). */
+    parentRunId?: string;
+    /** Telemetry: the top-level conversation id (shared session across the tree). */
+    rootChatId?: string;
     /**
      * Waive HITL approvals inside the subagent. Default true (autonomous runs —
      * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
@@ -2010,6 +2183,8 @@ export function createRuntime<P, RC = unknown>(
       autoApprove,
       blockGated,
       depth,
+      parentRunId,
+      rootChatId,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
       // streams them into the parent turn). Observation must never break the
       // run — the primary stream is drained independently below.
@@ -2058,6 +2233,8 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     subChatId: string,
     decisions: ApprovalDecision[],
+    /** Telemetry linkage of the original sub-turn, so the trace stays nested. */
+    linkage?: { parentRunId?: string; rootChatId?: string },
   ): Promise<{ answer: string; pending?: SubagentPending[] }> {
     const subChat = await storage.getChat(principal, subChatId);
     if (!subChat) return { answer: "" };
@@ -2083,6 +2260,9 @@ export function createRuntime<P, RC = unknown>(
       runtimeCtx,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
+      // Keep the resumed turn nested under the original trace/session.
+      parentRunId: linkage?.parentRunId,
+      rootChatId: linkage?.rootChatId,
     });
     await res.text();
     const after = await storage.loadMessages(principal, subChatId);
@@ -2164,6 +2344,7 @@ export function createRuntime<P, RC = unknown>(
     loadHistory,
     listChats,
     listRuns,
+    getRun,
     resume: resumeRun,
     sweep,
     applyApproval,

@@ -13,6 +13,7 @@ import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as RunsRouteImport } from './routes/runs'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as ObservabilityRouteImport } from './routes/observability'
 import { Route as MembersRouteImport } from './routes/members'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ConnectionsRouteImport } from './routes/connections'
@@ -53,6 +54,11 @@ const RunsRoute = RunsRouteImport.update({
 const ResetPasswordRoute = ResetPasswordRouteImport.update({
   id: '/reset-password',
   path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ObservabilityRoute = ObservabilityRouteImport.update({
+  id: '/observability',
+  path: '/observability',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MembersRoute = MembersRouteImport.update({
@@ -169,6 +175,7 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
+  '/observability': typeof ObservabilityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
@@ -194,6 +201,7 @@ export interface FileRoutesByTo {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
+  '/observability': typeof ObservabilityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
@@ -222,6 +230,7 @@ export interface FileRoutesById {
   '/connections': typeof ConnectionsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
+  '/observability': typeof ObservabilityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/runs': typeof RunsRoute
   '/schedules': typeof SchedulesRoute
@@ -251,6 +260,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/members'
+    | '/observability'
     | '/reset-password'
     | '/runs'
     | '/schedules'
@@ -276,6 +286,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/members'
+    | '/observability'
     | '/reset-password'
     | '/runs'
     | '/schedules'
@@ -303,6 +314,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/login'
     | '/members'
+    | '/observability'
     | '/reset-password'
     | '/runs'
     | '/schedules'
@@ -331,6 +343,7 @@ export interface RootRouteChildren {
   ConnectionsRoute: typeof ConnectionsRoute
   LoginRoute: typeof LoginRoute
   MembersRoute: typeof MembersRoute
+  ObservabilityRoute: typeof ObservabilityRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   RunsRoute: typeof RunsRoute
   SchedulesRoute: typeof SchedulesRoute
@@ -374,6 +387,13 @@ declare module '@tanstack/react-router' {
       path: '/reset-password'
       fullPath: '/reset-password'
       preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/observability': {
+      id: '/observability'
+      path: '/observability'
+      fullPath: '/observability'
+      preLoaderRoute: typeof ObservabilityRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/members': {
@@ -571,6 +591,7 @@ const rootRouteChildren: RootRouteChildren = {
   ConnectionsRoute: ConnectionsRoute,
   LoginRoute: LoginRoute,
   MembersRoute: MembersRoute,
+  ObservabilityRoute: ObservabilityRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   RunsRoute: RunsRoute,
   SchedulesRoute: SchedulesRoute,

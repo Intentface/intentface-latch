@@ -15,6 +15,8 @@ import {
   migrate,
   schema,
 } from "@intentface/latch-drizzle";
+import { isLangfuseConfigured, langfuseTelemetry } from "@intentface/latch-langfuse";
+import { waitUntil } from "@vercel/functions";
 import { createMcpConnections  } from "@intentface/latch-mcp";
 import type {McpConnections} from "@intentface/latch-mcp";
 import { createLatchHandler  } from "@intentface/latch-server";
@@ -43,6 +45,8 @@ import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
 import { createEvalStore, migrateEvals } from "./evals/store";
 import type {EvalStore} from "./evals/store";
+import { createRunScoresStore, migrateRunScores } from "./observability/run-scores-store";
+import type {RunScoresStore} from "./observability/run-scores-store";
 import { createAuthoredTools  } from "./tools";
 import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
@@ -60,6 +64,15 @@ import { makeResolveReasoningOptions } from "./reasoning";
 interface Ctx {
   orgId: string;
 }
+
+/**
+ * The Langfuse tenant tag for a principal — the same derivation as the
+ * storage owner key, URL-encoded and joined. Telemetry WRITES tag traces with
+ * it (userId + `owner:` tag) and observability READS filter on it, so both
+ * sides must use this one function.
+ */
+export const ownerTagOf = (p: Principal): string =>
+  (p.userId ? [p.orgId, p.userId] : [p.orgId]).map(encodeURIComponent).join("/");
 
 /**
  * The platform's Latch composition root — built lazily, memoized per process.
@@ -84,6 +97,7 @@ let cached:
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
+      runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
       handler: LatchHandler;
@@ -104,6 +118,7 @@ export async function getLatch(): Promise<{
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
+  runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
   handler: LatchHandler;
@@ -122,6 +137,7 @@ export async function getLatch(): Promise<{
   await migrateWhatsapp(client); // latch_whatsapp_* (WhatsApp channel)
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
+  await migrateRunScores(client); // latch_run_scores (fast local mirror for the chat evals panel)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
@@ -163,6 +179,8 @@ export async function getLatch(): Promise<{
   const whatsappStore = createWhatsappStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
   const evalStore = createEvalStore(client);
+  // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
+  const runScores = createRunScoresStore(client);
 
   const context = defineContext<Principal, Ctx>({
     build: ({ principal }) => ({ orgId: principal.orgId }),
@@ -294,6 +312,29 @@ export async function getLatch(): Promise<{
     resolveProviderTools,
     // Per-agent reasoning effort → provider options (gated to reasoning models).
     resolveReasoningOptions: makeResolveReasoningOptions(catalog.models),
+    // Langfuse observability (opt-in via LANGFUSE_* env): every run becomes a
+    // trace tagged owner/agent/run; attached-eval judges + user feedback land
+    // on it as scores. Absent keys → undefined → zero behavior change.
+    telemetry: isLangfuseConfigured()
+      ? langfuseTelemetry<Principal>({
+          ownerTag: ownerTagOf,
+          // VERCEL is "1" on every target (preview/dev too), so gate the trace
+          // environment on VERCEL_ENV to keep preview/dev traces out of prod.
+          environment: process.env.VERCEL_ENV === "production" ? "production" : "development",
+          waitUntil: process.env.VERCEL ? waitUntil : undefined,
+          afterRun: async ({ meta, outcome }) => {
+            if (outcome.status !== "completed") return;
+            // Lazy import: judge-run pulls getLatch back (agent store + models).
+            const { judgeLiveRun } = await import("./observability/judge-run");
+            // Best-effort: on non-Vercel hosts this is awaited inline in the
+            // run-finalization path, so a judge/persistence failure must never
+            // propagate and break run completion.
+            await judgeLiveRun({ meta, outcome }).catch((error) => {
+              console.warn(`online judge failed (run ${meta.runId}):`, error);
+            });
+          },
+        })
+      : undefined,
   });
 
   // The connection registry the handler's OAuth/status/test routes see: code
@@ -357,6 +398,7 @@ export async function getLatch(): Promise<{
     toolStore,
     authoredTools,
     evalStore,
+    runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
     handler,

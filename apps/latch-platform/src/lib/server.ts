@@ -6,11 +6,19 @@ import {
   createFromManifestUrl,
   SLACK_BOT_SCOPES,
 } from "@intentface/latch-channels/slack";
+import {
+  isLangfuseConfigured,
+  listOwnerTraces,
+  postScore,
+} from "@intentface/latch-langfuse";
 import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { getPrincipal } from "./session";
-import { getLatch } from "./latch";
+import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName } from "./agent-store";
+import type { AttachedEval } from "./agent-store";
+import { validateRubrics } from "./observability/rubrics";
+import { rejudgeRun } from "./observability/judge-run";
 import {
   slackVaultKeys,
   SLACK_CONFIG_TOKEN_KEY,
@@ -367,6 +375,9 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         };
       }
     }
+    // The editor doesn't manage attached evals — carry them over so a save
+    // never silently wipes the agent's online-eval rubrics.
+    const existing = await agentStore.getRecord(principal, name);
     await agentStore.upsert(principal, {
       name,
       title: data.title?.trim() || undefined,
@@ -378,6 +389,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       tools: data.tools,
       exec: data.exec,
       subagents: data.subagents,
+      attachedEvals: existing?.attachedEvals,
       scope: data.scope,
     });
     return { ok: true };
@@ -410,6 +422,367 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async (
     enabled: s.enabled,
   }));
 });
+
+// ── Observability (Langfuse): feedback scores + the live trace feed ─────────
+
+/**
+ * Record 👍/👎 (+ optional comment) on a run's trace as the Langfuse
+ * `user-feedback` score. Ownership-checked: the run must belong to the
+ * caller's tenant — a forged runId from another org is rejected.
+ */
+export const submitFeedbackFn = createServerFn({ method: "POST" })
+  .validator((data: { runId: string; value: 0 | 1; comment?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!isLangfuseConfigured()) return { ok: false as const, error: "langfuse not configured" };
+    if (data.value !== 0 && data.value !== 1) return { ok: false as const, error: "bad value" };
+    const { runtime } = await getLatch();
+    // Direct, principal-scoped lookup (no capped scan) — an unowned or unknown
+    // runId returns null, so this both authorizes and validates in one O(1) hop.
+    const run = await runtime.getRun({ principal, runId: data.runId });
+    if (!run) return { ok: false as const, error: "unknown run" };
+    // Best-effort: a thumbs signal is non-critical, so a slow/down Langfuse
+    // shouldn't fail the click. postScore is already bounded + retry-free.
+    try {
+      await postScore({
+        runId: data.runId,
+        name: "user-feedback",
+        value: data.value,
+        comment: data.comment?.slice(0, 2000),
+        // NUMERIC (1/0) so Langfuse can average it into a satisfaction rate.
+        dataType: "NUMERIC",
+        // Pin to the run's start so flipping 👍↔👎 later upserts one score.
+        timestamp: run.startedAt,
+      });
+    } catch (e) {
+      console.warn(`feedback postScore failed (run ${data.runId}):`, e);
+      return { ok: false as const, error: "feedback could not be saved" };
+    }
+    return { ok: true as const };
+  });
+
+/** One row of the observability feed (a run's trace + its scores). */
+export interface ObservabilityRow {
+  runId: string | null;
+  traceId: string;
+  agent: string | null;
+  timestamp: string;
+  inputPreview: string;
+  outputPreview: string;
+  latencySeconds: number | null;
+  cost: number | null;
+  scores: { name: string; value: number | string | null; comment?: string; dataType?: string }[];
+  deepLink: string | null;
+}
+
+const preview = (v: unknown): string => {
+  if (v == null) return "";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+};
+
+/**
+ * The live observability feed: the tenant's recent traces with judge scores
+ * and user feedback joined in, plus per-rubric aggregates over the window.
+ * Polled by /observability (~5s) — all Langfuse reads stay server-side and
+ * owner-filtered (tenants never get Langfuse credentials).
+ */
+export const listObservabilityFn = createServerFn({ method: "GET" })
+  .validator((data: { agent?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { configured: false as const, rows: [], aggregates: [], feedback: null };
+    if (!isLangfuseConfigured()) {
+      return { configured: false as const, rows: [], aggregates: [], feedback: null };
+    }
+    const base = (process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com").replace(/\/$/, "");
+    const traces = await listOwnerTraces({
+      ownerTag: ownerTagOf(principal),
+      agent: data.agent || undefined,
+      limit: 50,
+    });
+    const rows: ObservabilityRow[] = traces.map((t) => ({
+      runId: t.runId ?? null,
+      traceId: t.id,
+      agent: t.agent ?? null,
+      timestamp: t.timestamp,
+      inputPreview: preview(t.input),
+      outputPreview: preview(t.output),
+      latencySeconds: t.latency ?? null,
+      cost: t.totalCost ?? null,
+      scores: t.scores,
+      deepLink: t.htmlPath ? `${base}${t.htmlPath}` : null,
+    }));
+
+    // Overlay local human corrections onto the Langfuse-derived scores. Langfuse
+    // is the record of truth but has read-side ingestion lag (~20–45s), and a
+    // correction of a rubric that the live judge already scored can briefly show
+    // as two same-named scores until ingestion settles. The local store holds the
+    // authoritative human verdict immediately, so we replace by (runId, name):
+    // this both dedups and reflects corrections without waiting on Langfuse.
+    const runIds = rows.map((r) => r.runId).filter((id): id is string => !!id);
+    if (runIds.length > 0) {
+      const { runScores } = await getLatch();
+      const localByRun = await runScores.getForRuns(ownerTagOf(principal), runIds);
+      for (const row of rows) {
+        if (!row.runId) continue;
+        const corrections = localByRun.get(row.runId)?.filter((s) => s.source === "human");
+        if (!corrections?.length) continue;
+        const byName = new Map(row.scores.map((s) => [s.name, s]));
+        for (const c of corrections) {
+          byName.set(c.rubricName, {
+            name: c.rubricName,
+            value: c.value,
+            comment: c.comment,
+            dataType: c.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          });
+        }
+        row.scores = Array.from(byName.values());
+      }
+    }
+    // Per-rubric aggregates over the window; user-feedback becomes a 👍 rate.
+    const byName = new Map<string, { sum: number; count: number }>();
+    for (const row of rows) {
+      for (const s of row.scores) {
+        if (typeof s.value !== "number") continue;
+        const agg = byName.get(s.name) ?? { sum: 0, count: 0 };
+        agg.sum += s.value;
+        agg.count += 1;
+        byName.set(s.name, agg);
+      }
+    }
+    const fb = byName.get("user-feedback");
+    byName.delete("user-feedback");
+    return {
+      configured: true as const,
+      rows,
+      aggregates: Array.from(byName, ([name, a]) => ({
+        name,
+        average: a.sum / a.count,
+        count: a.count,
+      })).sort((a, b) => a.name.localeCompare(b.name)),
+      feedback: fb ? { rate: fb.sum / fb.count, count: fb.count } : null,
+    };
+  });
+
+// ── Chat evals panel: rubric CRUD, live scores, on-demand re-judge ──────────
+
+/** The chatted agent's rubrics + whether the caller can edit them (owns it). */
+export const getAgentEvalsFn = createServerFn({ method: "GET" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { editable: false as const, evals: [] as AttachedEval[] };
+    const { agentStore } = await getLatch();
+    // Only the user's own (editable) agents resolve here; built-ins/others → null.
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(agent));
+    return { editable: !!rec, evals: rec?.attachedEvals ?? [] };
+  });
+
+/** Persist the drawer's rubric set to the agent (the explicit "Save to agent"). */
+export const saveAgentEvalsFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; evals: AttachedEval[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore, models } = await getLatch();
+    const name = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, name);
+    if (!rec) return { ok: false as const, error: `No editable agent "${name}".` };
+    const valid = validateRubrics(data.evals, (id) => models.some((m) => m.id === id));
+    if (!valid.ok) return { ok: false as const, error: valid.error };
+    await agentStore.upsert(principal, { ...rec, attachedEvals: valid.rubrics });
+    return { ok: true as const, evals: valid.rubrics };
+  });
+
+/** Local (fast) eval verdicts for the given run ids — the chat badges poll this. */
+export const getRunScoresFn = createServerFn({ method: "POST" })
+  .validator((runIds: string[]) => runIds)
+  .handler(async ({ data: runIds }) => {
+    const principal = await getPrincipal();
+    if (!principal || runIds.length === 0) return {} as Record<string, AttachedEvalScore[]>;
+    const { runScores } = await getLatch();
+    const byRun = await runScores.getForRuns(ownerTagOf(principal), runIds);
+    const out: Record<string, AttachedEvalScore[]> = {};
+    for (const [runId, scores] of byRun) {
+      out[runId] = scores.map((s) => ({
+        name: s.rubricName,
+        value: s.value,
+        comment: s.comment,
+        scale: s.scale,
+        source: s.source,
+        aiValue: s.aiValue,
+        aiComment: s.aiComment,
+      }));
+    }
+    return out;
+  });
+
+export interface AttachedEvalScore {
+  name: string;
+  value: number;
+  comment?: string;
+  scale: "binary" | "score";
+  source: "live" | "rejudge" | "human";
+  /** Present when source="human": the judge's original value/reason. */
+  aiValue?: number;
+  aiComment?: string;
+}
+
+/** Re-judge one already-sent message against the (draft) rubric set — no re-chat. */
+export const rejudgeRunFn = createServerFn({ method: "POST" })
+  .validator((data: { chatId: string; runId: string; evals: AttachedEval[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    // Client-supplied rubrics: enforce the same limits as the save path
+    // (≤7, kebab names, prompt length, known judge model) before judging so a
+    // caller can't fan out hundreds of judge calls or pin an arbitrary model.
+    const { models } = await getLatch();
+    const valid = validateRubrics(data.evals, (id) => models.some((m) => m.id === id));
+    if (!valid.ok) return { ok: false as const, error: valid.error };
+    try {
+      const verdicts = await rejudgeRun({
+        principal,
+        chatId: data.chatId,
+        runId: data.runId,
+        rubrics: valid.rubrics,
+      });
+      return {
+        ok: true as const,
+        scores: verdicts.map((v) => ({
+          name: v.rubric.name,
+          value: v.value,
+          comment: v.comment,
+          scale: v.rubric.scale,
+          source: "rejudge" as const,
+        })),
+      };
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : "re-judge failed" };
+    }
+  });
+
+/**
+ * Human correction of a judge verdict: the human sets the authoritative value
+ * (+ required note). Updates the local store (source "human", preserving the
+ * judge's original value/reason) so the badge flips immediately, AND overwrites
+ * the score in Langfuse (human value + note, AI original in metadata) so
+ * /observability and Langfuse aggregates reflect the corrected truth.
+ */
+export const correctScoreFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { runId: string; rubricName: string; value: number; comment: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!data.comment.trim()) return { ok: false as const, error: "a note is required" };
+    if (!Number.isFinite(data.value)) return { ok: false as const, error: "value must be a finite number" };
+    const { runtime, runScores } = await getLatch();
+    // Ownership: the run must be the caller's (direct, principal-scoped).
+    const run = await runtime.getRun({ principal, runId: data.runId });
+    if (!run) return { ok: false as const, error: "unknown run" };
+
+    const ownerTag = ownerTagOf(principal);
+    const existing = await runScores.getOne(ownerTag, data.runId, data.rubricName);
+    if (!existing) return { ok: false as const, error: "no score to correct" };
+    // Binary → 1/0; graded → clamp to [0,1]. Never persist an out-of-range or
+    // NaN value (it would skew /observability aggregates and poison averages).
+    const value =
+      existing.scale === "binary"
+        ? (data.value >= 0.5 ? 1 : 0)
+        : Math.max(0, Math.min(1, data.value));
+    // Preserve the judge's original verdict (unless already a human correction).
+    const aiValue = existing.source === "human" ? existing.aiValue : existing.value;
+    const aiComment = existing.source === "human" ? existing.aiComment : existing.comment;
+
+    await runScores.put(ownerTag, {
+      runId: data.runId,
+      rubricName: data.rubricName,
+      value,
+      comment: data.comment.trim(),
+      scale: existing.scale,
+      source: "human",
+      aiValue,
+      aiComment,
+      updatedAt: Date.now(),
+    });
+    if (isLangfuseConfigured()) {
+      // The correction is already persisted locally (above) and /observability
+      // overlays local human corrections, so it's applied regardless — a
+      // slow/down Langfuse must not fail the user's save. Best-effort mirror.
+      try {
+        await postScore({
+          runId: data.runId,
+          name: data.rubricName,
+          value,
+          comment: data.comment.trim(),
+          dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          // Same timestamp as the original live verdict (the run's start) so this
+          // correction overwrites it in Langfuse instead of adding a second score.
+          timestamp: run.startedAt,
+          metadata: {
+            corrected: true,
+            correctedBy: principal.userId ?? principal.orgId,
+            ...(aiValue != null ? { aiValue } : {}),
+            ...(aiComment ? { aiComment } : {}),
+          },
+        });
+      } catch (e) {
+        console.warn(`correction postScore failed (run ${data.runId}):`, e);
+      }
+    }
+    return {
+      ok: true as const,
+      score: {
+        name: data.rubricName,
+        value,
+        comment: data.comment.trim(),
+        scale: existing.scale,
+        source: "human" as const,
+        aiValue,
+        aiComment,
+      },
+    };
+  });
+
+/** Extract the single fenced ```json block the eval-author is contracted to emit. */
+function parseFencedJson<T>(answer: string): T | null {
+  const fence = answer.match(/```json\s*([\s\S]*?)```/i);
+  const body = (fence ? fence[1] : answer).trim();
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Draft a rubric for a described quality via the eval-author subagent. */
+export const draftRubricFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; quality: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const quality = data.quality.trim();
+    if (!quality) return { ok: false as const, error: "describe the quality to measure" };
+    const { runtime } = await getLatch();
+    const brief =
+      `Agent: ${normalizeAgentName(data.agent)}. Author ONE online-eval rubric that measures this quality: ` +
+      `"${quality}". Return the JSON array (a single rubric) per your output contract.`;
+    const { answer } = await runtime.runAgent({
+      principal,
+      agent: "eval-author",
+      prompt: brief,
+    });
+    const parsed = parseFencedJson<AttachedEval[] | { error: string }>(answer);
+    if (!parsed) return { ok: false as const, error: "eval-author returned no valid JSON" };
+    if (!Array.isArray(parsed)) {
+      return { ok: false as const, error: parsed.error ?? "eval-author could not draft a rubric" };
+    }
+    return { ok: true as const, rubrics: parsed };
+  });
 
 // ── Slack channel: per-agent app onboarding ─────────────────────────────────
 

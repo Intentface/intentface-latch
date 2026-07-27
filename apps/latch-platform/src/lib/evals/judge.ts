@@ -21,6 +21,11 @@ const VERDICT = z.object({
   reason: z.string().describe("One short sentence on why."),
 });
 
+const GRADED_VERDICT = z.object({
+  score: z.number().min(0).max(1).describe("0 = clearly fails, 1 = fully satisfies."),
+  reason: z.string().describe("One short sentence on why."),
+});
+
 /** The judge only ever sees a bounded slice of the answer. */
 const ANSWER_CAP = 8_000;
 /** Hard wall-clock bound per judge call — a stalled provider must not hang the run. */
@@ -53,11 +58,43 @@ export async function judgeRubric({
   );
 }
 
-async function judgeCriterion(
+/** One generalized judge verdict — binary (pass) or graded (score 0–1). */
+export interface JudgeVerdict {
+  /** Set when scale is "binary". */
+  pass?: boolean;
+  /** Set when scale is "score" (0–1). */
+  score?: number;
+  reason: string;
+  /** Judge INFRA error (bad JSON after retry, API down) — never a fail. */
+  error?: string;
+}
+
+/**
+ * Grade one criterion of one answer — the single judge call both tiers share:
+ * the batch rubric path (binary) and the online attached-eval path (binary or
+ * graded). Same prompt frame, caps, timeout, and retry-once semantics.
+ */
+export async function judgeOnce(
   model: LanguageModel,
-  { input, answer, tools, criterion }: { input: string; answer: string; tools: string; criterion: string },
-): Promise<RubricVerdict> {
-  const prompt = `You are grading ONE criterion of an AI agent's answer inside an automated eval. Judge ONLY the stated criterion — not overall quality, tone, or anything the criterion doesn't say. pass=true only if the answer clearly satisfies it; when genuinely ambiguous, fail with the ambiguity as the reason.
+  {
+    input,
+    answer,
+    tools,
+    criterion,
+    scale = "binary",
+  }: {
+    input: string;
+    answer: string;
+    tools: string;
+    criterion: string;
+    scale?: "binary" | "score";
+  },
+): Promise<JudgeVerdict> {
+  const graded = scale === "score";
+  const verdictLine = graded
+    ? `Give a score from 0 to 1 for how well the answer satisfies it; when genuinely ambiguous, score low with the ambiguity as the reason.`
+    : `pass=true only if the answer clearly satisfies it; when genuinely ambiguous, fail with the ambiguity as the reason.`;
+  const prompt = `You are grading ONE criterion of an AI agent's answer inside an automated eval. Judge ONLY the stated criterion — not overall quality, tone, or anything the criterion doesn't say. ${verdictLine}
 
 CRITERION: ${criterion}
 
@@ -67,13 +104,24 @@ ${input}
 AGENT'S ANSWER:
 ${answer.slice(0, ANSWER_CAP)}
 
-TOOLS THE AGENT CALLED (names, in order): ${tools}`;
+TOOLS THE AGENT CALLED (in order, with key arguments — long values truncated):
+${tools}`;
 
   let lastError = "";
   // One retry on a malformed verdict; then an error marker (never a case fail).
   // Each attempt gets its own hard timeout — a hung call counts as an attempt.
   for (let i = 0; i < 2; i++) {
     try {
+      if (graded) {
+        const { object } = await generateObject({
+          model,
+          schema: GRADED_VERDICT,
+          temperature: 0,
+          prompt,
+          abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
+        });
+        return { score: object.score, reason: object.reason };
+      }
       const { object } = await generateObject({
         model,
         schema: VERDICT,
@@ -81,10 +129,22 @@ TOOLS THE AGENT CALLED (names, in order): ${tools}`;
         prompt,
         abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
       });
-      return { criterion, pass: object.pass, reason: object.reason };
+      return { pass: object.pass, reason: object.reason };
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);
     }
   }
-  return { criterion, pass: false, reason: "", error: `judge call failed: ${lastError.slice(0, 200)}` };
+  return {
+    ...(graded ? { score: 0 } : { pass: false }),
+    reason: "",
+    error: `judge call failed: ${lastError.slice(0, 200)}`,
+  };
+}
+
+async function judgeCriterion(
+  model: LanguageModel,
+  args: { input: string; answer: string; tools: string; criterion: string },
+): Promise<RubricVerdict> {
+  const v = await judgeOnce(model, { ...args, scale: "binary" });
+  return { criterion: args.criterion, pass: v.pass ?? false, reason: v.reason, ...(v.error ? { error: v.error } : {}) };
 }
