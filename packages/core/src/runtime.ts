@@ -22,6 +22,7 @@ import type {
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
+import { currentDateLine } from "./current-date.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
@@ -1274,7 +1275,9 @@ export function createRuntime<P, RC = unknown>(
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
-      instructions: cfg.instructions,
+      // Every agent gets a trailing "today's date" line. Day-granularity by
+      // design — see `currentDateLine` for the prompt-cache reasoning.
+      instructions: [cfg.instructions, currentDateLine()].filter(Boolean).join("\n\n"),
       tools,
       toolApproval,
       stopWhen,
