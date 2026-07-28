@@ -1,0 +1,32 @@
+[
+  {
+    "id": "implicit-01",
+    "preference": "Prefers metric units: logs distance in kilometers and pace in minutes per kilometer, never miles.",
+    "evidence": [
+      "s01:6",
+      "s05:4",
+      "s08:4"
+    ],
+    "note": "Never stated as a preference; inferable only from consistently metric phrasing across sessions."
+  },
+  {
+    "id": "implicit-02",
+    "preference": "Prefers training early in the morning, before work (typically out by 5:45-6:15).",
+    "evidence": [
+      "s01:0",
+      "s04:0",
+      "s07:0"
+    ],
+    "note": "Never stated as a preference; inferable from a repeated early-morning pattern across the week."
+  },
+  {
+    "id": "implicit-03",
+    "preference": "Prefers plans delivered as short bullet lists with no long explanations.",
+    "evidence": [
+      "s02:8",
+      "s06:10",
+      "s10:8"
+    ],
+    "note": "Each request is one-off phrasing; the durable preference emerges only from the repetition."
+  }
+]

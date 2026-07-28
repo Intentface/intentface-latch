@@ -14,6 +14,7 @@ export * from "./sanitize.js";
 export * from "./provider.js";
 export * from "./tools.js";
 export * from "./store/loredex.js";
+export * from "./store/memory.js";
 export * from "./prompts/inject.js";
 export * from "./prompts/extractor.js";
 export * from "./prompts/consolidator.js";
