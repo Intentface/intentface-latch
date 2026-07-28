@@ -8,6 +8,7 @@ import type {
 } from "@intentface/latch-core";
 import type { Principal } from "./session";
 import type { CredentialScope } from "./credentials";
+import type { EvalContextScope, EvalTrigger } from "./observability/trigger";
 
 /**
  * UI-created agents, stored in a `latch_agents` table (config isn't secret).
@@ -67,9 +68,10 @@ export interface AgentRecord {
   /** Agents this one may delegate to via the `spawn_agent` tool. */
   subagents?: string[];
   /**
-   * Online evals attached to this agent: LLM-judge rubrics run against every
-   * completed live run, with verdicts pushed to Langfuse as scores (the score
-   * name is the rubric name). Authored via the eval-author / attach_evals.
+   * Online evals attached to this agent: LLM-judge rubrics run against
+   * completed live runs (each rubric's `trigger` decides which turns), with
+   * verdicts pushed to Langfuse as scores (the score name is the rubric name).
+   * Authored via the eval-author / attach_evals.
    */
   attachedEvals?: AttachedEval[];
   scope: CredentialScope;
@@ -86,6 +88,18 @@ export interface AttachedEval {
   /** binary → pass/fail (1/0, BOOLEAN); score → graded 0–1 (NUMERIC). */
   scale: "binary" | "score";
   enabled: boolean;
+  /**
+   * When the judge runs (structural predicate — see observability/trigger.ts).
+   * Absent → every completed turn. Either way, subagent (depth>0) turns are
+   * skipped unless the trigger itself mentions depth.
+   */
+  trigger?: EvalTrigger;
+  /**
+   * What the judge sees: "turn" (last user msg + final answer + tool summary,
+   * the default), "chat" (plus the conversation so far), or "loop" (this
+   * turn full-fidelity: all assistant text + tool calls WITH outputs).
+   */
+  context?: EvalContextScope;
 }
 
 /** Column value (INTEGER) ↔ AgentConfig.maxSteps: NULL=default, 0=unlimited, N=cap. */
@@ -208,7 +222,7 @@ export function createAgentStore(
       // agent the binding was created for.
       const pin = /^(org|user):(.+)$/.exec(name);
       const rec = pin
-        ? await find(principal, pin[2]!, pin[1] as CredentialScope)
+        ? await find(principal, pin[2], pin[1] as CredentialScope)
         : await find(principal, name);
       if (!rec) return undefined;
       const sel = rec.tools;
