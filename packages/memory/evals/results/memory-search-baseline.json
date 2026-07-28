@@ -113,7 +113,7 @@
         "runs-four-times-weekly",
         "sleep-target-seven-and-a-half",
         "no-caffeine-after-noon",
-        "tempo-pace-four-fifty"
+        "prefers-metric-units"
       ],
       "p_at_5": 0.2,
       "r_at_5": 1,
@@ -250,8 +250,8 @@
         "trains-early-morning",
         "quarter-close-evenings-blocked",
         "office-gym-treadmill",
-        "long-runs-on-sunday",
-        "sleep-target-seven-and-a-half"
+        "sleep-target-seven-and-a-half",
+        "long-runs-on-sunday"
       ],
       "p_at_5": 0.2,
       "r_at_5": 1,
@@ -354,7 +354,7 @@
         "trains-early-morning",
         "quarter-close-evenings-blocked",
         "sleep-target-seven-and-a-half",
-        "foam-rolls-after-hard-runs"
+        "no-caffeine-after-noon"
       ],
       "p_at_5": 0.2,
       "r_at_5": 1,

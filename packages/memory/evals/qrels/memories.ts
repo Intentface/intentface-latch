@@ -68,7 +68,7 @@ export const MEMORY_FILES: readonly MemoryFileDef[] = [
     name: "runs-four-times-weekly",
     type: "fact",
     description: "Realistic training frequency is four runs per week.",
-    body: "Jamie averages four runs per week; six happens only in a perfect week. Self-corrected on 2026-03-06 from an earlier six-days-a-week claim. Plans should assume four quality runs.",
+    body: "Jamie averages four runs per week; six happens only in a perfect week. Self-corrected on 2026-03-06 from an earlier six-days-a-week claim. Plans should assume four total runs per week.",
   },
   {
     name: "recent-10k-benchmark",
@@ -98,7 +98,7 @@ export const MEMORY_FILES: readonly MemoryFileDef[] = [
     name: "prefers-metric-units",
     type: "preference",
     description: "Logs distance in kilometers and pace in minutes per kilometer.",
-    body: "Jamie consistently reports kilometers and min/km paces (8 km at 6:00/km, 5:20/km, 34 km weekly volume) and the watch is set to metric. Give all distances and paces in metric units.",
+    body: "Jamie consistently reports kilometers and min/km paces (8 km at 6:00/km, 5:20/km, 34 km weekly volume). Give all distances and paces in metric units.",
   },
   {
     name: "trains-early-morning",

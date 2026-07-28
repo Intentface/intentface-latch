@@ -21,6 +21,7 @@ export function recallAtK(
   relevant: ReadonlySet<string>,
   k: number,
 ): number {
+  if (k <= 0) return 0;
   if (relevant.size === 0) return 0;
   const hits = ranked.slice(0, k).filter((name) => relevant.has(name)).length;
   return hits / relevant.size;
@@ -42,6 +43,7 @@ export function ndcgAtK(
   grades: ReadonlyMap<string, number>,
   k: number,
 ): number {
+  if (k <= 0) return 0;
   const gain = (grade: number) => Math.pow(2, grade) - 1;
   const dcg = ranked
     .slice(0, k)

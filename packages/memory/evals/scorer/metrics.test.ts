@@ -41,6 +41,11 @@ describe("recallAtK", () => {
   it("is 0 when there are no relevant items", () => {
     expect(recallAtK(ranked, new Set(), 5)).toBe(0);
   });
+
+  it("is 0 for k <= 0", () => {
+    expect(recallAtK(ranked, relevant, 0)).toBe(0);
+    expect(recallAtK(ranked, relevant, -1)).toBe(0);
+  });
 });
 
 describe("reciprocalRank", () => {
@@ -87,6 +92,12 @@ describe("ndcgAtK", () => {
   it("is 0 with no judged items or nothing retrieved", () => {
     expect(ndcgAtK(ranked, new Map(), 5)).toBe(0);
     expect(ndcgAtK([], new Map([["a", 3]]), 5)).toBe(0);
+  });
+
+  it("is 0 for k <= 0", () => {
+    const grades = new Map([["a", 3]]);
+    expect(ndcgAtK(ranked, grades, 0)).toBe(0);
+    expect(ndcgAtK(ranked, grades, -1)).toBe(0);
   });
 });
 
