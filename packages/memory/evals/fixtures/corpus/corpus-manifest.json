@@ -1,0 +1,67 @@
+{
+  "generator_version": "1.0.0",
+  "seed": 42,
+  "corpus_sha256": "6d1db08f1c5a54e0b6d565314d9550caeb810c80dad9efcf9a015f2ebb35ecaa",
+  "sessions": [
+    {
+      "id": "s01",
+      "messages": 12,
+      "sha256": "c02f3b3c3e6921c5a56e645a4b51aef75c3ea07c0c27a8d8dc002b888f33ac9c"
+    },
+    {
+      "id": "s02",
+      "messages": 10,
+      "sha256": "480975eff91b51e692026189543dbae5144bf672786863f0f6f51e07005868f5"
+    },
+    {
+      "id": "s03",
+      "messages": 10,
+      "sha256": "4340fc5a4a0f63c40ecfd7c87c0c7518c78d26e22bd409c76b182a834355ecfa"
+    },
+    {
+      "id": "s04",
+      "messages": 10,
+      "sha256": "e35bb5d5c1bc4a984500ea2e2476b78dd75439028ab200d2d2184e2f267b197c"
+    },
+    {
+      "id": "s05",
+      "messages": 10,
+      "sha256": "e335627f571282cb1d73d5eaa64d44c93e2d7c454932a8e5c2a1b493e2cfc4f3"
+    },
+    {
+      "id": "s06",
+      "messages": 12,
+      "sha256": "62fd1631f2d3265df2a7d7404fe05a8360e788f3aa5c274ea73e1c85fced9ab9"
+    },
+    {
+      "id": "s07",
+      "messages": 8,
+      "sha256": "4753053ef90bab506ce97ffdd004c7499f2945ea4b05e8f08d99382473f334cb"
+    },
+    {
+      "id": "s08",
+      "messages": 10,
+      "sha256": "8b6a9878fe1d2be3d1aa12ddca7f2ce3be26b5e1b6b54ac2b797200e4557b742"
+    },
+    {
+      "id": "s09",
+      "messages": 10,
+      "sha256": "a1faa79bf401352ec53067d11e71b02164e66b26d3151a4b57a65e32c3a436d2"
+    },
+    {
+      "id": "s10",
+      "messages": 10,
+      "sha256": "f5b0e8b76c5a4b9c7b7a33776d5110a29aff8886a6a3f2905c69f74fbda0e027"
+    },
+    {
+      "id": "s11",
+      "messages": 8,
+      "sha256": "b428452cb47e84dad9c24bdbd4370117848ac1a19eb4810218f87048a2d9fc28"
+    },
+    {
+      "id": "s12",
+      "messages": 8,
+      "sha256": "d33c95c051d350e53ea30ea1b1a1d79f7057006a2ca3d28d9ba7062f196575f0"
+    }
+  ]
+}

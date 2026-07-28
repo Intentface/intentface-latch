@@ -1,0 +1,679 @@
+{
+  "config": {
+    "seed": 42,
+    "k": 5,
+    "search_limit": 10,
+    "memory_files": 24,
+    "queries": 37
+  },
+  "overall": {
+    "queries": 37,
+    "p_at_5": 0.2324,
+    "r_at_5": 0.7883,
+    "mrr": 0.8649,
+    "ndcg_at_5": 0.8511,
+    "top1_hit_rate": 0.8649
+  },
+  "tiers": {
+    "name-paraphrase": {
+      "queries": 11,
+      "p_at_5": 0.2545,
+      "r_at_5": 0.9545,
+      "mrr": 1,
+      "ndcg_at_5": 0.9909,
+      "top1_hit_rate": 1
+    },
+    "description-keywords": {
+      "queries": 10,
+      "p_at_5": 0.3,
+      "r_at_5": 0.85,
+      "mrr": 1,
+      "ndcg_at_5": 0.9752,
+      "top1_hit_rate": 1
+    },
+    "body-phrase": {
+      "queries": 11,
+      "p_at_5": 0.2545,
+      "r_at_5": 0.9242,
+      "mrr": 1,
+      "ndcg_at_5": 0.9854,
+      "top1_hit_rate": 1
+    },
+    "adversarial": {
+      "queries": 5,
+      "p_at_5": 0,
+      "r_at_5": 0,
+      "mrr": 0,
+      "ndcg_at_5": 0,
+      "top1_hit_rate": 0
+    }
+  },
+  "per_query": [
+    {
+      "id": "q01",
+      "tier": "name-paraphrase",
+      "query": "race riverdale spring 10k",
+      "expected": "race-riverdale-spring-10k",
+      "got": [
+        "race-riverdale-spring-10k",
+        "goal-sub-48-spring-10k",
+        "strength-once-per-week",
+        "recent-10k-benchmark",
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q02",
+      "tier": "description-keywords",
+      "query": "current race goal finish spring 10k",
+      "expected": "goal-sub-48-spring-10k",
+      "got": [
+        "goal-sub-48-spring-10k",
+        "race-riverdale-spring-10k",
+        "strength-once-per-week",
+        "recent-10k-benchmark",
+        "shoes-cloudfoam-peak-3"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q03",
+      "tier": "body-phrase",
+      "query": "saturdays reserved family swim mornings superseding earlier saturday",
+      "expected": "long-runs-on-sunday",
+      "got": [
+        "long-runs-on-sunday",
+        "quarter-close-evenings-blocked",
+        "favorite-route-river-loop",
+        "trains-early-morning",
+        "no-caffeine-after-noon"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 0.6667,
+      "rr": 1,
+      "ndcg_at_5": 0.9224,
+      "top1": 1
+    },
+    {
+      "id": "q04",
+      "tier": "name-paraphrase",
+      "query": "strength once per week",
+      "expected": "strength-once-per-week",
+      "got": [
+        "strength-once-per-week",
+        "runs-four-times-weekly",
+        "sleep-target-seven-and-a-half",
+        "no-caffeine-after-noon",
+        "tempo-pace-four-fifty"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q05",
+      "tier": "description-keywords",
+      "query": "left achilles flared off since episode",
+      "expected": "achilles-flare-history",
+      "got": [
+        "achilles-flare-history",
+        "physio-northside-achilles",
+        "foam-rolls-after-hard-runs"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q06",
+      "tier": "body-phrase",
+      "query": "self corrected 2026 03 06 earlier six days",
+      "expected": "runs-four-times-weekly",
+      "got": [
+        "runs-four-times-weekly",
+        "recent-10k-benchmark",
+        "easy-pace-six-minutes",
+        "office-gym-treadmill",
+        "long-runs-on-sunday"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q07",
+      "tier": "name-paraphrase",
+      "query": "recent 10k benchmark",
+      "expected": "recent-10k-benchmark",
+      "got": [
+        "recent-10k-benchmark",
+        "race-riverdale-spring-10k",
+        "goal-sub-48-spring-10k",
+        "tempo-pace-four-fifty",
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q08",
+      "tier": "description-keywords",
+      "query": "avoids caffeine after noon dropping afternoon",
+      "expected": "no-caffeine-after-noon",
+      "got": [
+        "no-caffeine-after-noon",
+        "foam-rolls-after-hard-runs",
+        "tempo-pace-four-fifty",
+        "work-trip-treadmill-window",
+        "achilles-flare-history"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 0.5,
+      "rr": 1,
+      "ndcg_at_5": 0.9173,
+      "top1": 1
+    },
+    {
+      "id": "q09",
+      "tier": "body-phrase",
+      "query": "earlier remark about owning monitor outdated",
+      "expected": "owns-heart-rate-strap",
+      "got": [
+        "owns-heart-rate-strap",
+        "quarter-close-evenings-blocked",
+        "achilles-flare-history",
+        "foam-rolls-after-hard-runs",
+        "sleep-target-seven-and-a-half"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q10",
+      "tier": "name-paraphrase",
+      "query": "quarter close evenings unavailable",
+      "expected": "quarter-close-evenings-blocked",
+      "got": [
+        "quarter-close-evenings-blocked"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q11",
+      "tier": "description-keywords",
+      "query": "logs distance kilometers pace minutes per",
+      "expected": "prefers-metric-units",
+      "got": [
+        "prefers-metric-units",
+        "easy-pace-six-minutes",
+        "tempo-pace-four-fifty",
+        "strength-once-per-week",
+        "foam-rolls-after-hard-runs"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q12",
+      "tier": "body-phrase",
+      "query": "mornings default training slot schedule quality sessions there",
+      "expected": "trains-early-morning",
+      "got": [
+        "trains-early-morning",
+        "quarter-close-evenings-blocked",
+        "office-gym-treadmill",
+        "long-runs-on-sunday",
+        "sleep-target-seven-and-a-half"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q13",
+      "tier": "name-paraphrase",
+      "query": "likes bullet plans",
+      "expected": "prefers-bullet-plans",
+      "got": [
+        "prefers-bullet-plans",
+        "trains-early-morning",
+        "runs-four-times-weekly"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q14",
+      "tier": "description-keywords",
+      "query": "comfortable easy pace around 00 per",
+      "expected": "easy-pace-six-minutes",
+      "got": [
+        "easy-pace-six-minutes",
+        "tempo-pace-four-fifty",
+        "prefers-metric-units",
+        "favorite-route-river-loop",
+        "strength-once-per-week"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q15",
+      "tier": "body-phrase",
+      "query": "use 50 km threshold work revisit after next",
+      "expected": "tempo-pace-four-fifty",
+      "got": [
+        "tempo-pace-four-fifty",
+        "easy-pace-six-minutes",
+        "goal-sub-48-spring-10k",
+        "work-trip-treadmill-window",
+        "prefers-metric-units"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q16",
+      "tier": "name-paraphrase",
+      "query": "preferred route river loop",
+      "expected": "favorite-route-river-loop",
+      "got": [
+        "favorite-route-river-loop",
+        "easy-pace-six-minutes"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q17",
+      "tier": "description-keywords",
+      "query": "runs cloudfoam peak third consecutive pair",
+      "expected": "shoes-cloudfoam-peak-3",
+      "got": [
+        "shoes-cloudfoam-peak-3",
+        "electrolytes-on-long-runs",
+        "runs-four-times-weekly",
+        "long-runs-on-sunday",
+        "foam-rolls-after-hard-runs"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q18",
+      "tier": "body-phrase",
+      "query": "valid venue quality sessions",
+      "expected": "office-gym-treadmill",
+      "got": [
+        "office-gym-treadmill",
+        "trains-early-morning",
+        "quarter-close-evenings-blocked",
+        "sleep-target-seven-and-a-half",
+        "foam-rolls-after-hard-runs"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q19",
+      "tier": "name-paraphrase",
+      "query": "vegetarian pre run nutrition",
+      "expected": "vegetarian-pre-run-fueling",
+      "got": [
+        "vegetarian-pre-run-fueling",
+        "electrolytes-on-long-runs",
+        "long-runs-on-sunday",
+        "easy-pace-six-minutes",
+        "sleep-target-seven-and-a-half"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q20",
+      "tier": "description-keywords",
+      "query": "protects about hours sleep evening sessions",
+      "expected": "sleep-target-seven-and-a-half",
+      "got": [
+        "sleep-target-seven-and-a-half",
+        "quarter-close-evenings-blocked",
+        "foam-rolls-after-hard-runs",
+        "vegetarian-pre-run-fueling",
+        "owns-heart-rate-strap"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 0.5,
+      "rr": 1,
+      "ndcg_at_5": 0.9173,
+      "top1": 1
+    },
+    {
+      "id": "q21",
+      "tier": "body-phrase",
+      "query": "after hard sessions jamie foam rolls calves about",
+      "expected": "foam-rolls-after-hard-runs",
+      "got": [
+        "foam-rolls-after-hard-runs",
+        "achilles-flare-history",
+        "sleep-target-seven-and-a-half",
+        "no-caffeine-after-noon",
+        "vegetarian-pre-run-fueling"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q22",
+      "tier": "name-paraphrase",
+      "query": "electrolytes on long running",
+      "expected": "electrolytes-on-long-runs",
+      "got": [
+        "electrolytes-on-long-runs",
+        "long-runs-on-sunday",
+        "favorite-route-river-loop",
+        "prefers-bullet-plans"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q23",
+      "tier": "description-keywords",
+      "query": "work trip tue thu 2026 03",
+      "expected": "work-trip-treadmill-window",
+      "got": [
+        "work-trip-treadmill-window",
+        "tempo-pace-four-fifty",
+        "quarter-close-evenings-blocked",
+        "achilles-flare-history",
+        "trains-early-morning"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 0.5,
+      "rr": 1,
+      "ndcg_at_5": 0.9173,
+      "top1": 1
+    },
+    {
+      "id": "q24",
+      "tier": "body-phrase",
+      "query": "physio guidance informs how calf loading progressed",
+      "expected": "physio-northside-achilles",
+      "got": [
+        "physio-northside-achilles",
+        "achilles-flare-history"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q25",
+      "tier": "body-phrase",
+      "query": "registration confirmed 2026 03 02 giving roughly seven",
+      "expected": "race-riverdale-spring-10k",
+      "got": [
+        "race-riverdale-spring-10k",
+        "sleep-target-seven-and-a-half",
+        "easy-pace-six-minutes",
+        "work-trip-treadmill-window",
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 0.5,
+      "rr": 1,
+      "ndcg_at_5": 0.9173,
+      "top1": 1
+    },
+    {
+      "id": "q26",
+      "tier": "name-paraphrase",
+      "query": "target sub 48 spring 10k",
+      "expected": "goal-sub-48-spring-10k",
+      "got": [
+        "goal-sub-48-spring-10k",
+        "race-riverdale-spring-10k",
+        "sleep-target-seven-and-a-half",
+        "recent-10k-benchmark",
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q27",
+      "tier": "description-keywords",
+      "query": "long runs happen sunday mornings saturdays",
+      "expected": "long-runs-on-sunday",
+      "got": [
+        "long-runs-on-sunday",
+        "favorite-route-river-loop",
+        "electrolytes-on-long-runs",
+        "trains-early-morning",
+        "runs-four-times-weekly"
+      ],
+      "p_at_5": 0.6,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q28",
+      "tier": "body-phrase",
+      "query": "during 10k race prep block jamie one focused",
+      "expected": "strength-once-per-week",
+      "got": [
+        "strength-once-per-week",
+        "race-riverdale-spring-10k",
+        "goal-sub-48-spring-10k",
+        "sleep-target-seven-and-a-half",
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q29",
+      "tier": "name-paraphrase",
+      "query": "achilles flare history",
+      "expected": "achilles-flare-history",
+      "got": [
+        "achilles-flare-history",
+        "foam-rolls-after-hard-runs",
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0.4,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 0.9828,
+      "top1": 1
+    },
+    {
+      "id": "q30",
+      "tier": "description-keywords",
+      "query": "realistic training frequency four runs per",
+      "expected": "runs-four-times-weekly",
+      "got": [
+        "runs-four-times-weekly",
+        "tempo-pace-four-fifty",
+        "easy-pace-six-minutes",
+        "strength-once-per-week",
+        "trains-early-morning"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q31",
+      "tier": "body-phrase",
+      "query": "jamie initially misremembered 52 minutes corrected figure 2026",
+      "expected": "recent-10k-benchmark",
+      "got": [
+        "recent-10k-benchmark",
+        "easy-pace-six-minutes",
+        "runs-four-times-weekly",
+        "goal-sub-48-spring-10k",
+        "foam-rolls-after-hard-runs"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 1,
+      "rr": 1,
+      "ndcg_at_5": 1,
+      "top1": 1
+    },
+    {
+      "id": "q32",
+      "tier": "name-paraphrase",
+      "query": "no caffeine after noon",
+      "expected": "no-caffeine-after-noon",
+      "got": [
+        "no-caffeine-after-noon",
+        "foam-rolls-after-hard-runs",
+        "tempo-pace-four-fifty",
+        "work-trip-treadmill-window",
+        "achilles-flare-history"
+      ],
+      "p_at_5": 0.2,
+      "r_at_5": 0.5,
+      "rr": 1,
+      "ndcg_at_5": 0.9173,
+      "top1": 1
+    },
+    {
+      "id": "q33",
+      "tier": "adversarial",
+      "query": "what time of day does the athlete like to lace up",
+      "expected": "trains-early-morning",
+      "got": [
+        "work-trip-treadmill-window"
+      ],
+      "p_at_5": 0,
+      "r_at_5": 0,
+      "rr": 0,
+      "ndcg_at_5": 0,
+      "top1": 0
+    },
+    {
+      "id": "q34",
+      "tier": "adversarial",
+      "query": "post lunch coffee rule",
+      "expected": "no-caffeine-after-noon",
+      "got": [],
+      "p_at_5": 0,
+      "r_at_5": 0,
+      "rr": 0,
+      "ndcg_at_5": 0,
+      "top1": 0
+    },
+    {
+      "id": "q35",
+      "tier": "adversarial",
+      "query": "footwear worn for jogging",
+      "expected": "shoes-cloudfoam-peak-3",
+      "got": [],
+      "p_at_5": 0,
+      "r_at_5": 0,
+      "rr": 0,
+      "ndcg_at_5": 0,
+      "top1": 0
+    },
+    {
+      "id": "q36",
+      "tier": "adversarial",
+      "query": "how much shut eye does the user try to get",
+      "expected": "sleep-target-seven-and-a-half",
+      "got": [
+        "physio-northside-achilles"
+      ],
+      "p_at_5": 0,
+      "r_at_5": 0,
+      "rr": 0,
+      "ndcg_at_5": 0,
+      "top1": 0
+    },
+    {
+      "id": "q37",
+      "tier": "adversarial",
+      "query": "weekly workout summary formatting taste",
+      "expected": "prefers-bullet-plans",
+      "got": [
+        "runs-four-times-weekly",
+        "prefers-metric-units"
+      ],
+      "p_at_5": 0,
+      "r_at_5": 0,
+      "rr": 0,
+      "ndcg_at_5": 0,
+      "top1": 0
+    }
+  ]
+}

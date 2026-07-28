@@ -1,0 +1,128 @@
+[
+  {
+    "id": "contra-01",
+    "kind": "contradiction",
+    "earlier": {
+      "fixture_id": "s01:8",
+      "statement": "I've never had any real injuries — my legs have always held up fine."
+    },
+    "later": {
+      "fixture_id": "s05:6",
+      "statement": "One thing I should have mentioned earlier: my left achilles has been cranky on and off since a flare-up two years ago, so let's keep an eye on it."
+    },
+    "canonical": "later",
+    "reason": "Later and more specific: the earlier claim was an offhand generalization, contradicted by a concrete, self-corrected injury history."
+  },
+  {
+    "id": "contra-02",
+    "kind": "contradiction",
+    "earlier": {
+      "fixture_id": "s02:2",
+      "statement": "I run six days a week, always have."
+    },
+    "later": {
+      "fixture_id": "s07:2",
+      "statement": "Being honest with myself: I average four runs a week, not six. Six only happens on a perfect week."
+    },
+    "canonical": "later",
+    "reason": "Later and explicit self-correction of an inflated earlier claim."
+  },
+  {
+    "id": "contra-03",
+    "kind": "contradiction",
+    "earlier": {
+      "fixture_id": "s03:2",
+      "statement": "For reference, I did my last 10K in 52 minutes."
+    },
+    "later": {
+      "fixture_id": "s08:2",
+      "statement": "Correction to what I told you before: that 10K last autumn was actually 55:40, not 52 minutes — I misremembered."
+    },
+    "canonical": "later",
+    "reason": "Later, explicit, and evidence-backed: the user checked the watch record and corrected the number."
+  },
+  {
+    "id": "contra-04",
+    "kind": "contradiction",
+    "earlier": {
+      "fixture_id": "s04:6",
+      "statement": "Caffeine doesn't affect me at all — I can drink an espresso at 9pm and sleep fine."
+    },
+    "later": {
+      "fixture_id": "s09:4",
+      "statement": "By the way, skipping the afternoon espresso completely fixed my sleep this week — so no caffeine after noon for me from here on."
+    },
+    "canonical": "later",
+    "reason": "Later and grounded in observed outcome: the earlier belief was disproven by the week's experiment."
+  },
+  {
+    "id": "contra-05",
+    "kind": "contradiction",
+    "earlier": {
+      "fixture_id": "s02:6",
+      "statement": "One thing: I don't own a heart-rate monitor, so keep the plan pace-based."
+    },
+    "later": {
+      "fixture_id": "s06:2",
+      "statement": "My heart-rate strap was reading 152 average for the tempo portion — does that seem right?"
+    },
+    "canonical": "later",
+    "reason": "Later and demonstrated by use: reporting readings from a strap implies ownership, contradicting the earlier claim."
+  },
+  {
+    "id": "contra-06",
+    "kind": "contradiction",
+    "earlier": {
+      "fixture_id": "s05:8",
+      "statement": "Work is quiet this month, so I can train at pretty much any time of day."
+    },
+    "later": {
+      "fixture_id": "s10:2",
+      "statement": "Scheduling reality check: this month is actually our busiest quarter-close at work, so evenings are impossible for training."
+    },
+    "canonical": "later",
+    "reason": "Later and explicit ('reality check'): the same month cannot be both quiet and the busiest quarter-close."
+  },
+  {
+    "id": "contra-07",
+    "kind": "temporal-supersession",
+    "earlier": {
+      "fixture_id": "s01:4",
+      "statement": "My goal is to finish the Spring 10K under 50 minutes."
+    },
+    "later": {
+      "fixture_id": "s09:2",
+      "statement": "Training has gone better than I hoped — let's change the target and aim for sub-48 at the Spring 10K instead."
+    },
+    "canonical": "later",
+    "reason": "Legitimate update, not an error: the user deliberately raised the goal; canonical = newer statement."
+  },
+  {
+    "id": "contra-08",
+    "kind": "temporal-supersession",
+    "earlier": {
+      "fixture_id": "s03:4",
+      "statement": "Keep my long runs on Saturday mornings — that's when I have time."
+    },
+    "later": {
+      "fixture_id": "s11:2",
+      "statement": "Let's move my long runs to Sunday from now on — Saturdays are now family swim mornings."
+    },
+    "canonical": "later",
+    "reason": "Legitimate schedule change with a stated cause; canonical = newer statement, older should be archived as superseded."
+  },
+  {
+    "id": "contra-09",
+    "kind": "temporal-supersession",
+    "earlier": {
+      "fixture_id": "s04:2",
+      "statement": "Let's keep two strength sessions a week in the plan."
+    },
+    "later": {
+      "fixture_id": "s12:2",
+      "statement": "One tweak for race prep: let's drop to one strength session a week so the legs stay fresher."
+    },
+    "canonical": "later",
+    "reason": "Legitimate plan revision for race prep; canonical = newer statement (user changed their mind)."
+  }
+]

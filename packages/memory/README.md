@@ -89,6 +89,35 @@ This package ships the ingredients, not the jobs — a host app (see
    `defineAgent` config or the UI agent record; the connection must be one the
    agent itself declares.
 
+## Offline evals
+
+`evals/` holds the deterministic (zero-LLM, zero-network) evaluation
+foundation for this package:
+
+- **Synthetic corpus** — a seeded, byte-deterministic week of running-coach
+  conversations (`evals/corpus/`, seed 42, mulberry32 PRNG) with planted
+  contradictions, temporal supersessions, stale facts, paraphrased
+  prompt-injection attempts, and implicit preferences. Gold labels live in
+  `evals/fixtures/corpus/gold/`, referenced by `fixture_id`
+  (`<session>:<messageIndex>`).
+- **Retrieval benchmark** — a reference memory-file set
+  (`evals/fixtures/memory-files/`), sealed qrels (`evals/fixtures/qrels.json`;
+  the search path only ever sees a `PublicQuery {id, text}` projection), and a
+  pure scorer (P@k, R@k, MRR, graded nDCG@k, top-1).
+
+Commands (from `packages/memory/`):
+
+- `pnpm eval:memory-search` — run every qrels query through the real
+  `memory_search` tool over the in-memory store; prints a per-tier report and
+  rewrites the committed baseline
+  (`evals/results/memory-search-baseline.json`).
+- `pnpm eval:regen-fixtures` — regenerate all committed fixtures after a
+  deliberate template change (`determinism.test.ts` fails on any drift).
+
+The adversarial qrels tier (paraphrases sharing <30% content words with their
+target) is EXPECTED to score ~0 on keyword search — it exists to measure the
+gap, not to be tuned away.
+
 ## Caveat
 
 On an org-shared connection, per-user scope separation is a **folder
