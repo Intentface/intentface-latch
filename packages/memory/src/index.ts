@@ -9,6 +9,7 @@ export * from "./types.js";
 export * from "./scope.js";
 export * from "./index-file.js";
 export * from "./extraction-key.js";
+export * from "./search-evidence.js";
 export * from "./sanitize.js";
 export * from "./provider.js";
 export * from "./tools.js";

@@ -29,6 +29,8 @@ export function buildMemoryInstructionBlock(
     "  note corrections with memory_save so the record gets fixed.",
     "- Each entry shows the date it was recorded and links its source notes (← episodes/…).",
     "  Memory can be stale — check dates before acting on time-sensitive entries.",
+    "- Entries marked `unverified` were extracted automatically and not yet confirmed —",
+    "  still visible on purpose, but prefer checking with the user before acting on them.",
     "- Use memory_search when the conversation touches something you may already know",
     "  (a preference, an injury, a past decision) — it searches your full episodic memory,",
     "  not just the index above. Search before asking the user to repeat themselves.",

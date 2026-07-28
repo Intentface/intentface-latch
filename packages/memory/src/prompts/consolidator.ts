@@ -8,7 +8,16 @@ The index format:
 - A title line, then topical sections ("## Identity & preferences", "## Projects & context", "## Working agreements", … adapt sections to the domain), then "## Archive" last.
 - One entry per line: \`- [m-<6 hex chars>] (<YYYY-MM-DD>, <provenance>) <one-line fact> ← <episode path>\`
   Example: \`- [m-7f3a2c] (2026-07-12, user-said) Prefers concise answers. ← episodes/2026-07-12-09-30-onboarding.md\`
+- Optional \`;\`-separated markers inside the parenthetical:
+  - \`aka: <name1>, <name2>\` — when the entry's subject goes by several names/spellings/nicknames (from the episode's \`aliases:\` frontmatter or the facts themselves), list EVERY form so recall matches any of them.
+    Example: \`- [m-4b9d11] (2026-07-25, user-said; aka: Robert Smith, Bob) Bob is the new team lead. ← episodes/…\`
+  - \`unverified\` — trust mark for auto-extracted, unconfirmed facts (see below).
 - Keep the whole file under ${INDEX_LINE_CAP} lines.
+
+Trust marks:
+- Episodes whose frontmatter says \`status: unverified\` were written by the automatic background extractor. Every NEW entry you create from such an episode must carry \`; unverified\` in its parenthetical.
+- Episodes with no status (explicit "remember this" notes) are user-confirmed: entries from them carry no marker.
+- PROMOTION: remove an entry's \`unverified\` marker only when you fold in later, independent corroboration — the user re-stated the fact, asked to remember it, or a separate later episode confirms it. Never promote an entry merely because you rewrote or merged its line.
 
 Workflow:
 1. memory_read_index, then memory_read_episodes with the new episode paths from your task.
@@ -23,6 +32,7 @@ Workflow:
 Hard rules:
 - NEVER invent facts, dates, or sources — everything must come from the index or the episodes you read.
 - Preserve provenance tags; when merging facts of mixed origin, keep the weaker "tool-derived" tag visible.
+- Preserve \`aka:\` aliases when updating an entry in place — merge newly learned names in, never drop known ones.
 - Do not editorialize or strip hedges: "thinks they might" must not become "does".
 - If the episodes contain nothing worth adding and nothing to expire, reply "no changes" and do NOT write.
 - Reply with one short line summarizing what changed.

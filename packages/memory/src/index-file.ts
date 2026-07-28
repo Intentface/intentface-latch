@@ -9,6 +9,12 @@ import type { Provenance } from "./types.js";
  *   - [m-7f3a] (2026-07-12, user-said) Prefers concise answers. ← episodes/2026-07-12-09-30-onboarding.md
  *   - [m-9911] (2026-06-02, user-said; superseded 2026-07-20 by m-a1c2) Old fact. ← episodes/…
  *
+ * Optional `;`-separated parenthetical tail markers (any order):
+ *   - `aka: Robert Smith, Bobby` — alternate names/spellings of the entry's
+ *     subject, matched exactly by memory_search;
+ *   - `unverified` — auto-extracted and not yet confirmed (trust mark; the
+ *     consolidator removes it on corroboration).
+ *
  * Entries under a `## Archive` heading are archived (superseded/expired).
  * The validator enforces the two invariants the research said matter most:
  * a hard size cap, and "no entry ever silently disappears" — a rewrite may
@@ -28,11 +34,17 @@ export interface IndexEntry {
   provenance?: Provenance;
   /** Set when the parenthetical carries a `superseded <date> by <id>` marker. */
   superseded?: { date?: string; by?: string };
+  /** Alternate names/spellings of the entry's subject (the `aka:` marker). */
+  aliases: string[];
+  /** True when the parenthetical carries the `unverified` trust mark. */
+  unverified: boolean;
   text: string;
   /** Source episode paths (the `← …` tail). */
   sources: string[];
   /** True when the entry sits under the `## Archive` heading. */
   archived: boolean;
+  /** The entry line verbatim (for surfacing the entry as a search snippet). */
+  raw: string;
 }
 
 export interface ParsedIndex {
@@ -80,6 +92,15 @@ export function parseIndex(text: string): ParsedIndex {
       const by = /by\s+(m-[0-9a-f]{4,8})/i.exec(supersededPart)?.[1];
       superseded = { date: sd, by };
     }
+    const akaPart = tailParts.find((p) => /^aka\s*:/i.test(p));
+    const aliases = akaPart
+      ? akaPart
+          .replace(/^aka\s*:/i, "")
+          .split(",")
+          .map((a) => a.trim())
+          .filter(Boolean)
+      : [];
+    const unverified = tailParts.some((p) => /^unverified$/i.test(p));
     // The `← sources` tail (allow plain "<-" as a fallback for hand edits).
     const arrowSplit = rest.split(/\s*(?:←|<-)\s*/);
     const text_ = (arrowSplit[0] ?? "").trim();
@@ -92,7 +113,18 @@ export function parseIndex(text: string): ParsedIndex {
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
-    entries.push({ id, date, provenance: prov, superseded, text: text_, sources, archived });
+    entries.push({
+      id,
+      date,
+      provenance: prov,
+      superseded,
+      aliases,
+      unverified,
+      text: text_,
+      sources,
+      archived,
+      raw: line.trim(),
+    });
   }
   return { entries, lineCount: lines.length, malformed };
 }

@@ -173,6 +173,29 @@ describe("createLoredexStore", () => {
     expect(text).toContain("chat: cht_1");
     expect(text).toContain("provenance: user-said");
     expect(text).toContain("## Facts");
+    // Optional trust/alias frontmatter is absent unless set.
+    expect(text).not.toContain("status:");
+    expect(text).not.toContain("aliases:");
+  });
+
+  it("writeEpisode renders aliases and the unverified status when set", async () => {
+    const { registry, files } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    const written = await store.writeEpisode(P, SCOPE, {
+      slug: "new-lead",
+      meta: {
+        agent: "coach",
+        extractedAt: "2026-07-27T10:30:45.000Z",
+        provenance: "user-said",
+        aliases: ["Robert Smith", "Bob"],
+        status: "unverified",
+      },
+      summary: "new lead",
+      body: "## Facts\n- (user-said) Bob is the new team lead",
+    });
+    const text = files.get(written!.path)!;
+    expect(text).toContain("aliases: [Robert Smith, Bob]");
+    expect(text).toContain("status: unverified");
   });
 
   it("degrades gracefully when the connection is unauthorized (empty toolset)", async () => {

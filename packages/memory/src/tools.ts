@@ -1,7 +1,11 @@
 import { tool, jsonSchema } from "ai";
 import type { EpisodeMeta, MemoryStore, Provenance, ScopeRef } from "./types.js";
-import { IndexValidationError } from "./index-file.js";
+import { IndexValidationError, MEMORY_INDEX_FILENAME, parseIndex } from "./index-file.js";
+import type { IndexEntry } from "./index-file.js";
 import { isUnderScopeRoot } from "./scope.js";
+import { createSafetyOf, entryEvidence, EVIDENCE_RANK } from "./search-evidence.js";
+import type { MatchEvidence } from "./search-evidence.js";
+import { sanitizeMemoryText } from "./sanitize.js";
 
 /**
  * Tool factories. Two families:
@@ -41,7 +45,9 @@ export function memorySearchTool<P>(
     description:
       "Search your long-term episodic memory (notes from past sessions plus archived facts). " +
       "Use it when the conversation touches something you may already know — a preference, " +
-      "an earlier decision, an ongoing issue — before asking the user to repeat themselves.",
+      "an earlier decision, an ongoing issue — before asking the user to repeat themselves. " +
+      "Each hit carries matchedOn evidence (alias-exact | description | body) and the response " +
+      "carries create_safety — consult it before creating anything with memory_save.",
     inputSchema: jsonSchema<{ query: string; limit?: number }>({
       type: "object",
       properties: {
@@ -53,14 +59,71 @@ export function memorySearchTool<P>(
     }),
     execute: async ({ query, limit }) => {
       const hits = await bound.store.search(bound.principal, bound.scope, query, limit ?? 6);
-      if (hits.length > 0 && opts?.recordUsage) {
-        const ids = Array.from(new Set(hits.flatMap((h) => h.memoryIds)));
-        // Fire-and-forget: retention bookkeeping must never fail or slow recall.
-        void Promise.resolve(opts.recordUsage(bound.scope.key, ids)).catch(() => {});
+      // Evidence pass over the compiled index: the backend ranks free text,
+      // but create_safety needs EXACT signals (normalized alias equality) the
+      // backend can't provide — so match active entries ourselves and merge,
+      // strongest signal winning per result. Index unavailability degrades to
+      // body-only evidence, never a failed search.
+      let entries: IndexEntry[] = [];
+      try {
+        const index = await bound.store.readIndex(bound.principal, bound.scope);
+        if (index) entries = parseIndex(index).entries.filter((e) => !e.archived);
+      } catch {
+        // body-only evidence
       }
-      return hits.length > 0
-        ? { hits: hits.map((h) => ({ path: h.path, snippet: h.snippet })) }
-        : { hits: [], note: "no matching memories" };
+      const evidenceById = new Map<string, MatchEvidence>();
+      for (const e of entries) {
+        const evidence = entryEvidence(query, e);
+        if (evidence) evidenceById.set(e.id, evidence);
+      }
+      const unverifiedIds = new Set(entries.filter((e) => e.unverified).map((e) => e.id));
+
+      const results = hits.map((h) => {
+        let matchedOn: MatchEvidence = "body";
+        // Trust mark: label (never hide) hits on unverified entries/episodes.
+        let unverified = /^status:\s*unverified\b/m.test(h.snippet);
+        for (const id of h.memoryIds) {
+          const evidence = evidenceById.get(id);
+          if (evidence && EVIDENCE_RANK[evidence] > EVIDENCE_RANK[matchedOn]) {
+            matchedOn = evidence;
+          }
+          if (unverifiedIds.has(id)) unverified = true;
+        }
+        return {
+          path: h.path,
+          snippet: sanitizeMemoryText(h.snippet),
+          matchedOn,
+          ...(unverified ? { unverified: true } : {}),
+        };
+      });
+      // Index entries with evidence the backend didn't surface (e.g. an alias
+      // spelled differently than the stored text ranks): synthesize a hit from
+      // the entry line itself so the exact match is never lost.
+      const surfacedIds = new Set(hits.flatMap((h) => h.memoryIds));
+      const syntheticIds: string[] = [];
+      for (const e of entries) {
+        const evidence = evidenceById.get(e.id);
+        if (!evidence || surfacedIds.has(e.id)) continue;
+        syntheticIds.push(e.id);
+        results.push({
+          path: `${bound.scope.root}/${MEMORY_INDEX_FILENAME}`,
+          snippet: sanitizeMemoryText(e.raw),
+          matchedOn: evidence,
+          ...(e.unverified ? { unverified: true } : {}),
+        });
+      }
+      const create_safety = createSafetyOf(results.map((r) => r.matchedOn));
+
+      const recalledIds = Array.from(
+        new Set([...hits.flatMap((h) => h.memoryIds), ...syntheticIds]),
+      );
+      if (recalledIds.length > 0 && opts?.recordUsage) {
+        // Fire-and-forget: retention bookkeeping must never fail or slow recall.
+        void Promise.resolve(opts.recordUsage(bound.scope.key, recalledIds)).catch(() => {});
+      }
+      return results.length > 0
+        ? { hits: results, create_safety }
+        : { hits: [], create_safety, note: "no matching memories" };
     },
   });
 }
@@ -78,7 +141,10 @@ export function memorySaveTool<P>(
     description:
       "Save a durable note to your long-term memory NOW — use when the user explicitly asks " +
       "you to remember something, or states a lasting fact, preference, or decision. " +
-      "Not for transient task details.",
+      "Search first: call memory_search and only save something NEW when its create_safety " +
+      'is not "exists". When it IS "exists", update the existing memory instead — save a ' +
+      "correction/update note that names it (quote its [m-…] id) rather than restating the " +
+      "fact as if new. Not for transient task details.",
     inputSchema: jsonSchema<{ note: string; slug?: string }>({
       type: "object",
       properties: {
@@ -154,6 +220,7 @@ export function memoryWriteEpisodeTool<P>(
       summary: string;
       happened?: string;
       facts: Array<{ text: string; provenance: "user-said" | "tool-derived" }>;
+      aliases?: string[];
     }>({
       type: "object",
       properties: {
@@ -179,11 +246,18 @@ export function memoryWriteEpisodeTool<P>(
             additionalProperties: false,
           },
         },
+        aliases: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Alternate names/spellings/nicknames of entities the facts mention " +
+            "(e.g. ['Robert Smith', 'Bob']) so later recall matches any form.",
+        },
       },
       required: ["slug", "summary", "facts"],
       additionalProperties: false,
     }),
-    execute: async ({ slug, summary, happened, facts }) => {
+    execute: async ({ slug, summary, happened, facts, aliases }) => {
       if (facts.length === 0) return { saved: false, error: "no facts provided" };
       const provs = new Set(facts.map((f) => f.provenance));
       const provenance: Provenance = provs.size === 1 ? [...provs][0] : "mixed";
@@ -192,6 +266,11 @@ export function memoryWriteEpisodeTool<P>(
         agent: opts.agent,
         extractedAt: new Date().toISOString(),
         provenance,
+        ...(aliases?.length ? { aliases } : {}),
+        // Trust mark: everything the background extractor writes is
+        // machine-inferred until the consolidator sees corroboration —
+        // explicit memory_save episodes carry no status.
+        status: "unverified",
       };
       const body = [
         ...(happened ? ["## What happened", happened.trim(), ""] : []),

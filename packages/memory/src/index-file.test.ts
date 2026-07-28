@@ -38,6 +38,31 @@ describe("parseIndex", () => {
     expect(c.superseded).toEqual({ date: "2026-07-20", by: "m-a1c2b3" });
   });
 
+  it("parses aka: aliases and the unverified trust mark from the parenthetical tail", () => {
+    const parsed = parseIndex(
+      [
+        "- [m-4b9d11] (2026-07-25, user-said; aka: Robert Smith, Bob) Bob is the new team lead. ← episodes/d.md",
+        "- [m-5c0e22] (2026-07-26, tool-derived; unverified) Threshold pace ~5:15/km. ← episodes/e.md",
+        "- [m-6d1f33] (2026-07-27, tool-derived; aka: ACME; unverified; superseded 2026-07-28 by m-4b9d11) Old. ← episodes/f.md",
+      ].join("\n"),
+    );
+    expect(parsed.malformed).toHaveLength(0);
+    const [a, b, c] = parsed.entries;
+    expect(a).toMatchObject({ aliases: ["Robert Smith", "Bob"], unverified: false });
+    expect(a!.raw).toContain("[m-4b9d11]");
+    expect(b).toMatchObject({ aliases: [], unverified: true });
+    expect(c).toMatchObject({
+      aliases: ["ACME"],
+      unverified: true,
+      superseded: { date: "2026-07-28", by: "m-4b9d11" },
+    });
+  });
+
+  it("plain entries default to no aliases and verified", () => {
+    const [entry] = parseIndex(SAMPLE).entries;
+    expect(entry).toMatchObject({ aliases: [], unverified: false });
+  });
+
   it("flags entry-shaped lines that do not parse", () => {
     const parsed = parseIndex("- [m-abc] no parenthetical here");
     expect(parsed.entries).toHaveLength(0);
@@ -91,6 +116,13 @@ describe("validateIndexRewrite", () => {
   it("rejects malformed entry lines", () => {
     const next = SAMPLE + "\n- [m-deadbe] broken";
     expect(validateIndexRewrite(SAMPLE, next).join(" ")).toContain("malformed");
+  });
+
+  it("accepts entries carrying aka:/unverified markers", () => {
+    const next =
+      SAMPLE +
+      "- [m-4b9d11] (2026-07-27, tool-derived; aka: Bob, Robert; unverified) New lead. ← episodes/d.md\n";
+    expect(validateIndexRewrite(SAMPLE, next)).toEqual([]);
   });
 });
 

@@ -22,7 +22,7 @@ Workflow:
    - corrections the user made ("no, actually…")
    - open loops that future sessions must pick up
    NOT durable: task mechanics, one-off questions, pleasantries, anything fully resolved within the session and unlikely to recur.
-3. If anything durable exists, call memory_write_episode ONCE with all of it. Tag every fact with its origin: "user-said" for things the user stated, "tool-derived" for things that came from tool output or documents. Tool-derived facts are less trustworthy — record them as observations, not certainties.
+3. If anything durable exists, call memory_write_episode ONCE with all of it. Tag every fact with its origin: "user-said" for things the user stated, "tool-derived" for things that came from tool output or documents. Tool-derived facts are less trustworthy — record them as observations, not certainties. When a fact concerns an entity the transcript calls by more than one name — spellings, nicknames, abbreviations ("Robert" / "Bob", "Acme Corp" / "ACME") — pass every form in the episode's aliases list so later recall matches any of them.
 4. If nothing durable exists, do NOT write an episode.
 
 Hard rules:

@@ -332,6 +332,8 @@ describe("memory pipeline (integration)", () => {
     expect(episode).toContain("chat: chat_mem");
     expect(episode).toContain("agent: coach");
     expect(episode).toContain("(user-said) Prefers morning runs before work");
+    // Auto-extracted episodes carry the trust mark; explicit saves would not.
+    expect(episode).toContain("status: unverified");
 
     const index = files.get(`${scope.root}/MEMORY.md`);
     expect(index, "compiled index written").toBeDefined();

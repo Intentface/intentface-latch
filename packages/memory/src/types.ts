@@ -29,6 +29,18 @@ export interface EpisodeMeta {
   /** ISO timestamp; also drives the episode's filename stamp. */
   extractedAt: string;
   provenance: Provenance;
+  /**
+   * Alternate names/spellings/nicknames of entities the episode mentions —
+   * the consolidator carries them onto index entries (`aka:`) so recall
+   * matches any form.
+   */
+  aliases?: string[];
+  /**
+   * Trust mark: `unverified` on episodes written by the background extractor
+   * (auto-extracted, unconfirmed). Explicit `memory_save` episodes carry no
+   * status. The consolidator labels/promotes index entries accordingly.
+   */
+  status?: "unverified";
 }
 
 export interface MemorySearchHit {

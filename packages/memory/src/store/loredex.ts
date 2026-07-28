@@ -227,6 +227,10 @@ export function createLoredexStore<P>(opts: {
           `agent: ${episode.meta.agent}`,
           `extracted_at: ${episode.meta.extractedAt}`,
           `provenance: ${episode.meta.provenance}`,
+          ...(episode.meta.aliases?.length
+            ? [`aliases: [${episode.meta.aliases.join(", ")}]`]
+            : []),
+          ...(episode.meta.status ? [`status: ${episode.meta.status}`] : []),
           "---",
         ].join("\n");
         const content = `${frontmatter}\n\n${episode.body.trim()}\n`;
