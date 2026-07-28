@@ -2,6 +2,7 @@ import type { MemoryConfig } from "@intentface/latch-core";
 import {
   buildConsolidationPrompt,
   buildExtractionPrompt,
+  extractionRunKey,
   parseIndex,
   scopeLabelOf,
   scopeRefOf,
@@ -119,6 +120,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     owner: string;
     agent: string;
     lastExtractedSeq: number;
+    lastExtractedKey?: string;
     maxSeq: number;
   }): Promise<"extractions" | "skipped"> {
     const lease = leaseId();
@@ -201,6 +203,21 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // The excerpt may be char-capped short of maxSeq — advance the watermark
       // only to what the extractor actually saw; the tail is next tick's work.
       const lastSeenSeq = msgs[msgs.length - 1]!.seq;
+      // Idempotency gate: identical content + prompt version to the last
+      // COMPLETED run (seq-watermark reset, replayed/re-sequenced rows) must
+      // never re-trigger a paid extraction — including windows the last run
+      // extracted NOTHING from (the recorded key is that run's tombstone).
+      // Advance the watermark for free instead. Failed runs never recorded a
+      // key, so they fall through to a retry as intended.
+      const extractionKey = extractionRunKey(msgs);
+      if (extractionKey === cand.lastExtractedKey) {
+        await memoryJobs.completeChatExtraction(
+          cand.chatId,
+          { lastExtractedSeq: lastSeenSeq, extractionKey, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
+          lease,
+        );
+        return "skipped";
+      }
       const transcript = msgs.map((m) => `${m.role}: ${m.text}`).join("\n\n");
       const turnContext: MemoryExtractionTurnContext = {
         kind: "memory-extraction",
@@ -213,7 +230,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
             ? memory.consolidation.cooldownHours * 3_600_000
             : MEMORY_COOLDOWN_MS,
       };
-      await runtime.runAgent({
+      const { answer } = await runtime.runAgent({
         principal,
         agent: "memory-extractor",
         blockGated: false,
@@ -226,9 +243,20 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
           seqRange: { from: msgs[0]!.seq, to: lastSeenSeq },
         }),
       });
+      // `runAgent` swallows in-run failures (an LLM error mid-stream resolves
+      // with an EMPTY answer — the run row/telemetry get "errored", but the
+      // promise doesn't reject). The extractor's contract is to always reply
+      // one short line, so an empty answer means the run FAILED: throw into
+      // the failure path rather than tombstoning content that was never
+      // actually processed. Conservative on purpose — an ambiguous run costs
+      // one backoff'd retry, a wrong tombstone loses memories forever.
+      if (!answer.trim()) throw new Error("extractor run finished without an answer");
+      // Completed (with or without an episode written): record the window's
+      // key. Zero-yield completions tombstone the content; failures above
+      // (throw / empty answer) skip this and stay eligible for retry.
       await memoryJobs.completeChatExtraction(
         cand.chatId,
-        { lastExtractedSeq: lastSeenSeq, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
+        { lastExtractedSeq: lastSeenSeq, extractionKey, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
         lease,
       );
       return "extractions";
@@ -317,7 +345,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         kind: "memory-consolidation",
         scope,
       };
-      await runtime.runAgent({
+      const { answer } = await runtime.runAgent({
         principal,
         agent: "memory-consolidator",
         blockGated: false,
@@ -329,6 +357,11 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
           today: new Date(now).toISOString().slice(0, 10),
         }),
       });
+      // Same in-run-failure blindspot as extraction: `runAgent` resolves with
+      // an empty answer when the model errors mid-stream. Marking THAT ok
+      // would consume the pending episodes without ever folding them in —
+      // throw into the failure path so they survive for the retry.
+      if (!answer.trim()) throw new Error("consolidator run finished without an answer");
       const cooldownMs =
         memory.consolidation?.cooldownHours != null
           ? memory.consolidation.cooldownHours * 3_600_000

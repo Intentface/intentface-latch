@@ -134,6 +134,8 @@ export const memoryChatState = sqliteTable(
     scopeKey: text("scope_key").notNull(),
     /** Last message seq folded into an episode (-1 = never). */
     lastExtractedSeq: integer("last_extracted_seq").notNull().default(-1),
+    /** Idempotency key of the last COMPLETED run (content hash + prompt version). */
+    lastExtractedKey: text("last_extracted_key"),
     nextEligibleAt: integer("next_eligible_at").notNull().default(0),
     failures: integer("failures").notNull().default(0),
     leaseOwner: text("lease_owner"),

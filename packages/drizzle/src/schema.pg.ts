@@ -124,6 +124,8 @@ export const memoryChatState = pgTable(
     agent: text("agent").notNull(),
     scopeKey: text("scope_key").notNull(),
     lastExtractedSeq: integer("last_extracted_seq").notNull().default(-1),
+    /** Idempotency key of the last COMPLETED run (content hash + prompt version). */
+    lastExtractedKey: text("last_extracted_key"),
     nextEligibleAt: bigint("next_eligible_at", { mode: "number" }).notNull().default(0),
     failures: integer("failures").notNull().default(0),
     leaseOwner: text("lease_owner"),

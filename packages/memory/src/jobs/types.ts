@@ -17,6 +17,13 @@ export interface ExtractionCandidate {
   updatedAt: number;
   /** Last message seq already extracted (-1 = never). */
   lastExtractedSeq: number;
+  /**
+   * Idempotency key of the last COMPLETED extraction run (see
+   * `extractionRunKey`) — content hash + prompt version. Recorded even for
+   * zero-yield runs (a tombstone), never for failed ones. Absent until a run
+   * completes.
+   */
+  lastExtractedKey?: string;
   /** Highest message seq currently in the chat. */
   maxSeq: number;
 }
@@ -72,11 +79,20 @@ export interface MemoryJobStore {
   ): Promise<boolean>;
   /**
    * Finish an extraction attempt. `nextEligibleAt` must ALWAYS advance (the
-   * anti-hot-loop invariant); `lastExtractedSeq` advances only on success.
+   * anti-hot-loop invariant); `lastExtractedSeq` and `extractionKey` advance
+   * only on success. `extractionKey` is the window's idempotency key and MUST
+   * be recorded for every completed run — including zero-yield ones, where it
+   * is the tombstone that stops the same content being re-extracted. Failed
+   * runs (`ok: false`) never record a key, so they stay retryable.
    */
   completeChatExtraction(
     chatId: string,
-    patch: { lastExtractedSeq?: number; ok: boolean; nextEligibleAt: number },
+    patch: {
+      lastExtractedSeq?: number;
+      extractionKey?: string;
+      ok: boolean;
+      nextEligibleAt: number;
+    },
     leaseOwner: string,
   ): Promise<void>;
 

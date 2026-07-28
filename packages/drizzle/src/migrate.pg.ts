@@ -50,7 +50,7 @@ const DDL = [
   // column, which pre-existing DBs only gain from the ALTER below.)
   `CREATE TABLE IF NOT EXISTS latch_memory_chat_state (
      chat_id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, scope_key TEXT NOT NULL,
-     last_extracted_seq INTEGER NOT NULL DEFAULT -1,
+     last_extracted_seq INTEGER NOT NULL DEFAULT -1, last_extracted_key TEXT,
      next_eligible_at BIGINT NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
      lease_owner TEXT, lease_expires_at BIGINT,
      created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
@@ -75,6 +75,7 @@ const ALTERS = [
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS usage_cache_read_tokens INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS usage_cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'`,
+  `ALTER TABLE latch_memory_chat_state ADD COLUMN IF NOT EXISTS last_extracted_key TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];

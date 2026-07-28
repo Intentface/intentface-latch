@@ -87,7 +87,7 @@ export async function memoryJobStoreSmoke<P extends { org: string; user?: string
   );
   await jobs.completeChatExtraction(
     chat.id,
-    { lastExtractedSeq: 1, ok: true, nextEligibleAt: t1 + HOUR },
+    { lastExtractedSeq: 1, extractionKey: "x1:aaaa", ok: true, nextEligibleAt: t1 + HOUR },
     "node1",
   );
   const afterDone = await jobs.listExtractionCandidates({
@@ -97,6 +97,61 @@ export async function memoryJobStoreSmoke<P extends { org: string; user?: string
     limit: 10,
   });
   assert(afterDone.length === 0, "fully extracted chat (watermark = maxSeq) is not a candidate");
+
+  // ---- extraction idempotency key ----
+  await store.appendMessages(chat.id, [msg("m3", "user", "one more thing")]);
+  const withKey = await jobs.listExtractionCandidates({
+    now: t1 + 5 * HOUR,
+    idleMs: HOUR,
+    agents: ["mem-coach"],
+    limit: 10,
+  });
+  assert(
+    withKey.length === 1 && withKey[0]!.lastExtractedKey === "x1:aaaa",
+    "candidate carries the last completed run's idempotency key",
+  );
+  assert(
+    (await jobs.claimChatExtraction(chat.id, meta, "node1", 60_000, t1 + 5 * HOUR)) === true,
+    "chat with new messages is claimable again",
+  );
+  // A FAILED attempt must not clobber the key (nor advance the watermark) —
+  // the window stays retryable under its previous identity.
+  await jobs.completeChatExtraction(
+    chat.id,
+    { extractionKey: "x1:bbbb", ok: false, nextEligibleAt: t1 + 5 * HOUR },
+    "node1",
+  );
+  const afterFail = await jobs.listExtractionCandidates({
+    now: t1 + 6 * HOUR,
+    idleMs: HOUR,
+    agents: ["mem-coach"],
+    limit: 10,
+  });
+  assert(
+    afterFail.length === 1 &&
+      afterFail[0]!.lastExtractedKey === "x1:aaaa" &&
+      afterFail[0]!.lastExtractedSeq === 1,
+    "failed completion leaves key and watermark untouched (retryable)",
+  );
+  assert(
+    (await jobs.claimChatExtraction(chat.id, meta, "node1", 60_000, t1 + 6 * HOUR)) === true,
+    "failed chat is claimable again after backoff",
+  );
+  await jobs.completeChatExtraction(
+    chat.id,
+    { lastExtractedSeq: 2, extractionKey: "x1:cccc", ok: true, nextEligibleAt: t1 + 7 * HOUR },
+    "node1",
+  );
+  const afterTombstone = await jobs.listExtractionCandidates({
+    now: t1 + 9 * HOUR,
+    idleMs: HOUR,
+    agents: ["mem-coach"],
+    limit: 10,
+  });
+  assert(
+    afterTombstone.length === 0,
+    "completed run (even zero-yield) tombstones the window via watermark + key",
+  );
 
   // ---- scope consolidation state ----
   const scopeKey = "conn:_memory/mem-coach/u-x";

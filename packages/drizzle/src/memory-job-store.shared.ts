@@ -77,6 +77,7 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
           agent: s.chats.agent,
           updatedAt: s.chats.updatedAt,
           lastExtractedSeq: sql<number>`coalesce(${cs.lastExtractedSeq}, -1)`,
+          lastExtractedKey: cs.lastExtractedKey,
           maxSeq: maxSeqExpr,
         })
         .from(s.chats)
@@ -99,7 +100,14 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
         )
         .orderBy(desc(s.chats.updatedAt))
         .limit(limit);
-      return rows.filter((r: any) => r.maxSeq != null) as ExtractionCandidate[];
+      return rows
+        .filter((r: any) => r.maxSeq != null)
+        .map(
+          (r: any): ExtractionCandidate => ({
+            ...r,
+            lastExtractedKey: r.lastExtractedKey ?? undefined,
+          }),
+        );
     },
 
     async latestRunIdentity(chatId) {
@@ -169,6 +177,11 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
         .set({
           ...(patch.ok && patch.lastExtractedSeq !== undefined
             ? { lastExtractedSeq: patch.lastExtractedSeq }
+            : {}),
+          // The idempotency key advances only with a COMPLETED run — a failed
+          // attempt must leave the previous key (and thus retryability) intact.
+          ...(patch.ok && patch.extractionKey !== undefined
+            ? { lastExtractedKey: patch.extractionKey }
             : {}),
           failures: patch.ok ? 0 : sql`${cs.failures} + 1`,
           nextEligibleAt: patch.nextEligibleAt,
