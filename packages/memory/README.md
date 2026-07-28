@@ -48,6 +48,47 @@ following the Codex pattern: idle-gated parallel extraction, per-scope
 lease-serialized consolidation with cooldown + watermark, usage-based expiry
 (default 30 days unrecalled).
 
+## Wiring it into a host
+
+This package ships the ingredients, not the jobs — a host app (see
+`apps/latch-platform` for the reference implementation of every step) wires:
+
+1. **Tables + job store** — `@intentface/latch-drizzle`'s migrations create
+   `latch_memory_chat_state` / `latch_memory_scope_state` / `latch_memory_usage`;
+   build the store with `createMemoryJobStore(db)`.
+2. **Store + provider → runtime** — in the composition root:
+
+   ```ts
+   const memoryStore = createLoredexStore({ connections });
+   const memoryProvider = createMemoryProvider({
+     store: memoryStore,
+     scopeOf: ({ principal, agent, memory }) =>
+       scopeRefOf({ agent, memory, userId: principal.userId }),
+     recordUsage: (scopeKey, ids) => memoryJobs.recordUsage(scopeKey, ids, Date.now()),
+     onEpisodeWritten: (a) => memoryJobs.touchScope(/* mark scope dirty */),
+   });
+   const runtime = createRuntime({ ...rest, memory: memoryProvider });
+   ```
+
+   That alone gives every agent declaring `memory` the injected index block and
+   the `memory_search`/`memory_save` tools.
+3. **Two job agents** — register `memory-extractor` and `memory-consolidator`
+   as code agents (cheap model, no connections) built from the exported parts:
+   `EXTRACTOR_INSTRUCTIONS`/`CONSOLIDATOR_INSTRUCTIONS` + the scope-locked tool
+   factories (`memoryReadIndexTool`, `memoryWriteEpisodeTool`,
+   `memoryReadEpisodesTool`, `memoryWriteIndexTool`), bound from the sweep's
+   `turnContext`. Hide them from user-facing pickers (the platform reserves the
+   `memory-*` name prefix).
+4. **The sweep** — a cron-driven loop over `MemoryJobStore`: claim idle chats →
+   `runtime.runAgent("memory-extractor", …)` under the chat's own reconstructed
+   principal → advance the seq watermark; claim dirty scopes past cooldown →
+   `runtime.runAgent("memory-consolidator", …)` → clear consumed episodes.
+   Copy `apps/latch-platform/src/lib/memory/sweep.ts` — the always-advance
+   eligibility discipline (no hot loops) and the lease fencing live there.
+5. **Declare memory on agents** — `memory: { scope, connection }` in
+   `defineAgent` config or the UI agent record; the connection must be one the
+   agent itself declares.
+
 ## Caveat
 
 On an org-shared connection, per-user scope separation is a **folder
