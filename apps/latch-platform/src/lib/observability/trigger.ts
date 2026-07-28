@@ -177,8 +177,12 @@ function walkTrigger(
       return null;
     }
     case "chatKind":
-      if (typeof t.is !== "string" || !t.is.trim() || t.is.length > 200) {
-        return `"chatKind" needs a non-empty "is" string (≤200 chars)`;
+      // Restricted to what `chatKindOf` can actually produce — an unmatched
+      // trigger is a SILENT skip, so a typo ("Internal", "external") must be a
+      // save-time error, not a rubric that never fires. Widen alongside
+      // `chatKindOf` if chat kinds ever grow.
+      if (t.is !== "user" && t.is !== "internal") {
+        return `"chatKind".is must be "user" or "internal"`;
       }
       return null;
     default:

@@ -3,6 +3,7 @@ import {
   allAssistantText,
   extractRunView,
   renderChatContext,
+  summarizeToolCalls,
   summarizeToolLoop,
 } from "./extract";
 
@@ -39,10 +40,12 @@ describe("renderChatContext (the 'chat' scope)", () => {
     expect(out).toContain("c".repeat(60));
   });
 
-  it("always keeps at least the newest entry", () => {
+  it("keeps the newest entry but hard-truncates it to the cap", () => {
     const out = renderChatContext([textMsg("assistant", "z".repeat(500))], 100);
-    expect(out).toContain("z".repeat(500));
+    expect(out).toContain("z".repeat(80));
+    expect(out).not.toContain("z".repeat(200)); // one oversized message can't escape the budget
     expect(out).not.toContain("[earlier turns omitted]");
+    expect(out.length).toBeLessThanOrEqual(101);
   });
 });
 
@@ -90,6 +93,16 @@ describe("summarizeToolLoop (the 'loop' scope)", () => {
 
   it("returns 'none' without calls", () => {
     expect(summarizeToolLoop([])).toBe("none");
+  });
+});
+
+describe("summarizeToolCalls (the 'turn'/'chat' scopes)", () => {
+  it("never emits tool outputs — that's summarizeToolLoop's contract alone", () => {
+    const out = summarizeToolCalls([
+      { name: "web_fetch", args: { url: "u" }, output: "SECRET-OUTPUT" },
+    ]);
+    expect(out).toBe("web_fetch(url=u)");
+    expect(out).not.toContain("SECRET-OUTPUT");
   });
 });
 

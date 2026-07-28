@@ -80,7 +80,7 @@ export async function evaluateRubrics(opts: {
 }
 
 /** The judge-facing evidence for one turn, before scope-specific rendering. */
-interface TurnEvidence {
+export interface TurnEvidence {
   /** The turn's last user text. */
   input: string;
   /** Final assistant text + tool calls of the turn under judgment. */
@@ -95,8 +95,9 @@ interface TurnEvidence {
  * Judge a gated rubric set, grouping by context scope so each scope's evidence
  * is rendered once and all groups run concurrently. Both the live path and the
  * re-judge path funnel through here — the scope semantics can't drift.
+ * Exported for tests only; production callers are in this module.
  */
-async function judgeScopeGroups(opts: {
+export async function judgeScopeGroups(opts: {
   runId: string;
   modelFor: (id: string) => LanguageModel;
   rubrics: AttachedEval[];
@@ -187,7 +188,11 @@ export async function judgeLiveRun({
     if (evals.length === 0) return;
 
     const view = extractRunView(outcome.messages);
-    if (!view.outputText) return; // nothing judgeable (e.g. pure tool-approval turn)
+    // Nothing judgeable (e.g. pure tool-approval turn) — except for a "loop"
+    // rubric, whose evidence IS the tool trace + intermediate narration, so a
+    // final-text-less turn with tool activity still qualifies (for it alone).
+    const anyLoop = evals.some((e) => e.context === "loop");
+    if (!view.outputText && !(anyLoop && view.toolCalls.length > 0)) return;
 
     // Chat history is only worth a read when some rubric can consume it — a
     // turn-ordinal trigger or a "chat" context scope. Judged post-persist, so
@@ -210,6 +215,8 @@ export async function judgeLiveRun({
       chatKind: chatKindOf(meta.chatId),
     };
     due = evals.filter((e) => rubricIsDue(e.trigger, facts));
+    // Without a final answer, only "loop" rubrics have evidence to judge.
+    if (!view.outputText) due = due.filter((e) => e.context === "loop");
     if (due.length === 0) return;
 
     evidence = {
@@ -296,15 +303,18 @@ export async function rejudgeRun(args: {
     }
   }
 
-  // Same gate as the live path, on the SAME facts this run had then — a rubric
-  // whose trigger doesn't match this turn is silently absent from the results,
-  // exactly like the live judge writing nothing. The drawer only ever opens on
-  // a user-facing chat, so depth is derived structurally from the chat id.
+  // Same gate as the live path — a rubric whose trigger doesn't match this
+  // turn is silently absent from the results, exactly like the live judge
+  // writing nothing. Depth isn't persisted on runs, so it's approximated from
+  // the chat kind: exact for the drawer's user-facing chats (always depth 0);
+  // a nested subagent's true depth (≥2) is unrecoverable here, so a trigger
+  // like `depth gte 2` may diverge from the live verdict on a `sub_…` thread.
+  const chatKind = chatKindOf(args.chatId);
   const facts: TriggerFacts = {
     turnOrdinal: turnOrdinalOf(history, args.runId),
     toolsCalled: view.toolCalls.map((c) => c.name),
-    depth: args.chatId.startsWith("sub_") ? 1 : 0,
-    chatKind: chatKindOf(args.chatId),
+    depth: chatKind === "internal" ? 1 : 0,
+    chatKind,
   };
   const due = args.rubrics.filter((r) => r.enabled && rubricIsDue(r.trigger, facts));
 

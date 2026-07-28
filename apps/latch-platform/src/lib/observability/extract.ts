@@ -105,7 +105,12 @@ export function renderChatContext(messages: unknown[], cap = CHAT_CONTEXT_CAP): 
     size -= lines[start].length + 2;
     start++;
   }
-  const kept = lines.slice(start);
+  // The loop always keeps the newest line, so a single oversized message could
+  // escape the budget — hard-truncate retained lines to make the bound real
+  // (judgeOnce documents `conversation` as pre-capped by the caller).
+  const kept = lines
+    .slice(start)
+    .map((l) => (l.length > cap ? `${l.slice(0, cap)}…` : l));
   return (start > 0 ? ["[earlier turns omitted]", ...kept] : kept).join("\n\n");
 }
 

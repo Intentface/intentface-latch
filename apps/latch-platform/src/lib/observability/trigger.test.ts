@@ -128,7 +128,11 @@ describe("validateTrigger", () => {
     expect(validateTrigger({ kind: "depth" })).toMatch(/at least one/);
     expect(validateTrigger({ kind: "depth", gte: -1 })).toMatch(/non-negative/);
     expect(validateTrigger({ kind: "all", of: [] })).toMatch(/non-empty/);
-    expect(validateTrigger({ kind: "chatKind" })).toMatch(/non-empty "is"/);
+    // chatKind is restricted to what chatKindOf produces — a typo would
+    // otherwise save fine and then never match (a silent skip).
+    expect(validateTrigger({ kind: "chatKind", is: "user" })).toBeNull();
+    expect(validateTrigger({ kind: "chatKind" })).toMatch(/"user" or "internal"/);
+    expect(validateTrigger({ kind: "chatKind", is: "Internal" })).toMatch(/"user" or "internal"/);
     expect(validateTrigger({ kind: "toolCalled", name: "" })).toMatch(/non-empty string/);
   });
 

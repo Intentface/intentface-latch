@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import type { AttachedEval } from "@/lib/agent-store";
+import { validateTrigger } from "@/lib/observability/trigger";
 import type { EvalTrigger } from "@/lib/observability/trigger";
 import {
   draftRubricFn,
@@ -166,28 +167,34 @@ export function EvalsDrawer({
     update(i, { trigger: triggerFor(preset, n, subagents) });
   };
 
+  // A custom trigger must parse AND pass the DSL validator (trigger.ts is
+  // dependency-free, so it runs client-side) — a structurally wrong value
+  // would otherwise land in the draft silently and only error at Save time.
+  const parseCustom = (text: string): EvalTrigger | null => {
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    return validateTrigger(value) === null ? (value as EvalTrigger) : null;
+  };
+
   const setCustomText = (i: number, text: string) => {
     setCustomJson({ ...customJson, [i]: text });
     if (!text.trim()) {
       update(i, { trigger: undefined });
       return;
     }
-    try {
-      update(i, { trigger: JSON.parse(text) as EvalTrigger });
-    } catch {
-      /* keep the last parseable trigger; the field shows the error state */
-    }
+    const trigger = parseCustom(text);
+    // Invalid → keep the last valid trigger; the field shows the error state.
+    if (trigger) update(i, { trigger });
   };
 
   const customInvalid = (i: number): boolean => {
     const text = customJson[i];
     if (text === undefined || !text.trim()) return false;
-    try {
-      JSON.parse(text);
-      return false;
-    } catch {
-      return true;
-    }
+    return parseCustom(text) === null;
   };
 
   const save = async () => {
