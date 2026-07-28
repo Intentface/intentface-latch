@@ -22,6 +22,7 @@ import type {
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
+import { currentDateLine } from "./current-date.js";
 import type { MemoryProvider } from "./memory.js";
 import { toClientMessages, toModelMessages } from "./projections.js";
 import { computeCost, type Pricing } from "./pricing.js";
@@ -1310,7 +1311,10 @@ export function createRuntime<P, RC = unknown>(
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
-      instructions,
+      // Every agent gets a trailing "today's date" line — after the memory
+      // block, so it stays the tail. Day-granularity by design — see
+      // `currentDateLine` for the prompt-cache reasoning.
+      instructions: [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
       tools,
       toolApproval,
       stopWhen,
