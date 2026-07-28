@@ -9,6 +9,7 @@ export * from "./principal.js";
 export * from "./message.js";
 export * from "./storage.js";
 export * from "./context.js";
+export * from "./current-date.js";
 export * from "./agent.js";
 export * from "./runtime.js";
 export * from "./connections.js";
