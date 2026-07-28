@@ -23,7 +23,11 @@ export const chats = sqliteTable(
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [index("latch_chats_owner_idx").on(t.owner)],
+  (t) => [
+    index("latch_chats_owner_idx").on(t.owner),
+    // The memory sweep enumerates idle chats system-wide (no owner filter).
+    index("latch_chats_sweep_idx").on(t.kind, t.updatedAt),
+  ],
 );
 
 export const messages = sqliteTable(
@@ -113,6 +117,81 @@ export const usage = sqliteTable(
     createdAt: integer("created_at").notNull(),
   },
   (t) => [index("latch_usage_owner_idx").on(t.owner)],
+);
+
+/**
+ * Memory-sweep state, per chat: which messages have been extracted into
+ * episodic memory. Lease columns mirror `latch_schedules` (claim/complete,
+ * fenced by lease owner). `next_eligible_at` ALWAYS advances on completion —
+ * success or failure — so a broken chat can't hot-loop the sweep.
+ */
+export const memoryChatState = sqliteTable(
+  "latch_memory_chat_state",
+  {
+    chatId: text("chat_id").primaryKey(),
+    owner: text("owner").notNull(),
+    agent: text("agent").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    /** Last message seq folded into an episode (-1 = never). */
+    lastExtractedSeq: integer("last_extracted_seq").notNull().default(-1),
+    /** Idempotency key of the last COMPLETED run (content hash + prompt version). */
+    lastExtractedKey: text("last_extracted_key"),
+    nextEligibleAt: integer("next_eligible_at").notNull().default(0),
+    failures: integer("failures").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: integer("lease_expires_at"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [index("latch_memory_chat_state_scope_idx").on(t.scopeKey)],
+);
+
+/**
+ * Memory-sweep state, per scope: consolidation cooldown/watermark/lease plus
+ * the pending episode paths written since the last successful consolidation.
+ * `identity` is the serialized principal captured at the last episode write —
+ * consolidation runs under the scope's own reconstructed caller.
+ */
+export const memoryScopeState = sqliteTable(
+  "latch_memory_scope_state",
+  {
+    /** `${connection}:${root}` (see `@intentface/latch-memory` ScopeRef). */
+    scopeKey: text("scope_key").primaryKey(),
+    owner: text("owner").notNull(),
+    agent: text("agent").notNull(),
+    connection: text("connection").notNull(),
+    identity: text("identity", { mode: "json" }),
+    hasNew: integer("has_new").notNull().default(0),
+    /** JSON string[] of episode paths awaiting consolidation (bounded). */
+    pendingEpisodes: text("pending_episodes", { mode: "json" }),
+    /** Last episode NAME folded in — names sort chronologically. */
+    consolidationWatermark: text("consolidation_watermark"),
+    lastConsolidatedAt: integer("last_consolidated_at"),
+    nextEligibleAt: integer("next_eligible_at").notNull().default(0),
+    failures: integer("failures").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: integer("lease_expires_at"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [index("latch_memory_scope_due_idx").on(t.hasNew, t.nextEligibleAt)],
+);
+
+/**
+ * Recall tracking: bumped whenever `memory_search` surfaces an entry/episode.
+ * Retention signal — entries unrecalled for N days become expiry candidates.
+ */
+export const memoryUsage = sqliteTable(
+  "latch_memory_usage",
+  {
+    scopeKey: text("scope_key").notNull(),
+    /** `[m-…]` entry id or an episode path. */
+    memoryId: text("memory_id").notNull(),
+    usageCount: integer("usage_count").notNull().default(0),
+    lastUsedAt: integer("last_used_at"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.scopeKey, t.memoryId] })],
 );
 
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */

@@ -30,10 +30,64 @@ const CAPABILITIES = z
     sandbox: z.boolean().optional().describe("Per-session workspace + file/shell tools (bash, read_file, …)."),
     providerWebTools: z.boolean().optional().describe("Native provider web search/fetch (Anthropic/OpenAI)."),
     defaultTools: z.boolean().optional().describe("App harness tools: web_fetch + askUser."),
+    memory: z
+      .object({
+        scope: z
+          .enum(["agent-user", "agent-org", "user"])
+          .describe(
+            "'agent-user' = this agent's memory of each user (default choice); 'agent-org' = one shared memory for the whole org (requires the agent itself to have scope 'org'); 'user' = shared across all the user's agents.",
+          ),
+        connection: z
+          .string()
+          .min(1)
+          .describe("Which of the agent's connections holds the memory files (must be in `connections`; typically 'loredex')."),
+      })
+      .optional()
+      .describe(
+        "Persistent cross-session memory: the platform archives durable facts from idle chats into the connection's workspace, injects a compiled index each turn, and adds memory_search/memory_save tools.",
+      ),
   })
   .optional();
 
-const SAVE_INPUT = z.object({
+/**
+ * The service-free save_agent preflight: name reservations + the memory-config
+ * invariants. Returns the rejection message, or undefined to proceed. Exported
+ * (with SAVE_INPUT) so the guards are regression-testable without standing up
+ * the live service bundle; the service-backed checks (models, connections,
+ * subagents, tools) stay inline in the tool.
+ */
+export function saveAgentPreflight(input: {
+  name: string;
+  scope: "user" | "org";
+  connections?: string[];
+  capabilities?: { memory?: { scope: string; connection: string } };
+}): string | undefined {
+  const name = normalizeAgentName(input.name);
+  if (!name) return "invalid name";
+  if (RESERVED_NAMES.has(name)) {
+    return `"${name}" is a built-in agent and can't be overwritten — pick another name.`;
+  }
+  // The whole memory-* prefix is reserved: the platform's memory system
+  // agents live there and pickers hide every name matching it.
+  if (name.startsWith("memory-")) {
+    return `"${name}" is reserved (memory-* are platform system agents) — pick another name.`;
+  }
+  // Memory files live in one of the agent's OWN connections. `!== undefined`
+  // (not truthy): an empty string must fail the membership check, not skip it.
+  const memConn = input.capabilities?.memory?.connection;
+  if (memConn !== undefined && !(input.connections ?? []).includes(memConn)) {
+    return `Memory connection "${memConn}" must also be listed in the agent's connections.`;
+  }
+  // agent-org memory is keyed by agent name alone — restrict it to
+  // org-visible agents so same-named personal agents can't share a store.
+  if (input.capabilities?.memory?.scope === "agent-org" && input.scope !== "org") {
+    return `Org-shared memory ('agent-org') requires scope: "org" on the agent itself.`;
+  }
+  return undefined;
+}
+
+// Exported for schema regression tests only.
+export const SAVE_INPUT = z.object({
   name: z.string().describe("Unique kebab-case id. Reusing an existing name UPDATES that agent."),
   title: z.string().optional().describe("Short human label for the picker."),
   description: z.string().optional().describe("One line on what the agent does."),
@@ -92,6 +146,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       codeMode: c?.codeMode ? {} : undefined,
       authoredTools: authored?.length ? authored : undefined,
       effort,
+      memory: c?.memory ?? undefined,
     };
     const hasAny =
       !!c?.sandbox ||
@@ -99,7 +154,8 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       !!c?.providerWebTools ||
       !!c?.codeMode ||
       !!authored?.length ||
-      effort !== undefined;
+      effort !== undefined ||
+      !!c?.memory;
     return hasAny ? exec : undefined;
   };
 
@@ -185,11 +241,9 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         "Create a new agent or update an existing one (upsert by name). Pauses for the user's approval.",
       inputSchema: SAVE_INPUT,
       execute: async (input) => {
+        const rejected = saveAgentPreflight(input);
+        if (rejected) return { error: rejected };
         const name = normalizeAgentName(input.name);
-        if (!name) return { error: "invalid name" };
-        if (RESERVED_NAMES.has(name)) {
-          return { error: `"${name}" is a built-in agent and can't be overwritten — pick another name.` };
-        }
         if (!models.some((m) => m.id === input.modelId)) {
           return { error: `Unknown modelId "${input.modelId}". Call list_models and use one of those.` };
         }

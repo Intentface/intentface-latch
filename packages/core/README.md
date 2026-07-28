@@ -10,7 +10,7 @@ The framework core for building agents on the **AI SDK v7** — the runtime, the
   - **Subagents**: a `spawn_agent` tool that runs another agent in an isolated child run.
   - **Schedules**: cron/one-shot agent runs (`schedule`/`runDue`) via a pluggable cron seam.
 - **Message model** — `AppMessage` = a typed AI SDK `UIMessage` with `metadata` (visibility, usage, cost, model). The source of truth; usage/cost incl. cached-prompt split live here.
-- **Seams** (interfaces the platform fills): `StorageAdapter`, `ConnectionRegistry`, `Vault`, `Pricing`, the `cron`/`sandbox`/`harnessTools`/`resolveProviderTools` runtime hooks, and `Principal` (opaque identity — authz is the integrator's job).
+- **Seams** (interfaces the platform fills): `StorageAdapter`, `ConnectionRegistry`, `Vault`, `Pricing`, `MemoryProvider` (agents declaring `memory` get an injected index block + scope-bound recall/save tools — see `@intentface/latch-memory`), the `cron`/`sandbox`/`harnessTools`/`resolveProviderTools` runtime hooks, and `Principal` (opaque identity — authz is the integrator's job).
 - **Helpers** — `defineAgent`, `defineContext`, `mergeConnections`, `computeCost`/`staticPricing`, projections (`toModelMessages`/`toClientMessages`).
 
 ## Usage

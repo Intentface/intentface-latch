@@ -114,6 +114,9 @@ importers:
       '@intentface/latch-mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@intentface/latch-memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
       '@intentface/latch-net':
         specifier: workspace:*
         version: link:../../packages/net
@@ -308,6 +311,9 @@ importers:
       '@intentface/latch-core':
         specifier: workspace:*
         version: link:../core
+      '@intentface/latch-memory':
+        specifier: workspace:*
+        version: link:../memory
       '@libsql/client':
         specifier: ^0.15.0
         version: 0.15.15
@@ -484,6 +490,28 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+
+  packages/memory:
+    dependencies:
+      '@intentface/latch-core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.21
+      ai:
+        specifier: ^7.0.2
+        version: 7.0.2(zod@4.4.3)
+      tsx:
+        specifier: ^4.19.0
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@22.19.21)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@8.0.16(@types/node@22.19.21)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
   packages/net:
     devDependencies:

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "stale-01",
+    "fixture_id": "s02:4",
+    "statement": "There's a local parkrun this Saturday, March 7 — I want to jog it easy with a friend.",
+    "stated_on": "2026-03-02",
+    "expires_after": "2026-03-07",
+    "note": "One-off event; meaningless after the Saturday it names."
+  },
+  {
+    "id": "stale-02",
+    "fixture_id": "s04:4",
+    "statement": "Heads up, my gym's pool is closed until Friday for maintenance, so no swim cross-training.",
+    "stated_on": "2026-03-04",
+    "expires_after": "2026-03-06",
+    "note": "Facility closure with an explicit end day."
+  },
+  {
+    "id": "stale-03",
+    "fixture_id": "s06:6",
+    "statement": "Reminder: I'm on a work trip Tuesday to Thursday next week, so I'll only have the hotel treadmill.",
+    "stated_on": "2026-03-05",
+    "expires_after": "2026-03-12",
+    "note": "Travel window 2026-03-10 → 2026-03-12; irrelevant afterwards."
+  },
+  {
+    "id": "stale-04",
+    "fixture_id": "s08:6",
+    "statement": "I have a physio appointment tomorrow at 4pm at Northside Physio to get the achilles checked.",
+    "stated_on": "2026-03-06",
+    "expires_after": "2026-03-07",
+    "note": "Appointment reminder; the durable part (works with a physio) belongs in a separate memory."
+  },
+  {
+    "id": "stale-05",
+    "fixture_id": "s10:6",
+    "statement": "The running store downtown has a shoe fitting event next Sunday, March 15 — thinking of going.",
+    "stated_on": "2026-03-07",
+    "expires_after": "2026-03-15",
+    "note": "One-off event with an explicit date."
+  }
+]

@@ -33,6 +33,8 @@ work. Use a hosted libsql (Turso) or Postgres. For Turso:
 | `GOOGLE_CALENDAR_CLIENT_ID/SECRET` | (optional) Calendar MCP client |
 | `RESEND_API_KEY`, `EMAIL_FROM` | password-reset mail (verified sender) |
 | `CRON_SECRET` | set by Vercel Cron; `/api/cron` checks `Authorization: Bearer` |
+| `LOREDEX_APP_URL` | (optional) Loredex web origin — enables the "open in Loredex" link in the agent editor's memory panel |
+| `MEMORY_IDLE_MINUTES`, `MEMORY_COOLDOWN_HOURS`, `MEMORY_EXPIRE_DAYS` | (optional) memory-sweep tuning; defaults 60 / 6 / 30 |
 
 Add the production **OAuth redirect URIs** in Google Cloud:
 - `https://<domain>/api/auth/callback/google` (login)
@@ -52,6 +54,9 @@ Functions**:
 `vercel.json` points Vercel Cron at `/api/cron` every minute. That route:
 - `runDue()` — fires due scheduled agents (min interval 1/min on Pro).
 - `sweep()` — reaps lease-expired/crashed runs and **resumes** them.
+- `memorySweep()` — agent memory upkeep: extracts durable facts from idle chats
+  and consolidates them into each scope's MEMORY.md (per-tick caps bound the
+  function's runtime; every path advances eligibility, so nothing hot-loops).
 
 The dev in-process 30s tick is skipped on Vercel (gated on the `VERCEL` env).
 Consider raising `durability.leaseTtlMs` (currently 30s) toward ~90s so a turn

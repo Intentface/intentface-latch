@@ -3,6 +3,8 @@ import { drizzle } from "drizzle-orm/pglite";
 import type { AppMessage } from "@intentface/latch-core";
 import { migratePostgres } from "./migrate.pg.js";
 import { createPostgresAdapter } from "./adapter.pg.js";
+import { createPostgresMemoryJobStore } from "./memory-job-store.pg.js";
+import { memoryJobStoreSmoke } from "./memory-job-store.smoke.shared.js";
 import * as schema from "./schema.pg.js";
 
 /** Same checks as the SQLite smoke, against in-memory Postgres (PGlite, WASM). */
@@ -67,6 +69,14 @@ async function main() {
   });
   const gotRun = await store.getRun(run.id);
   assert(gotRun?.status === "completed", "run updated to completed");
+
+  // Memory job store: extraction/consolidation state machine + usage.
+  await memoryJobStoreSmoke({
+    jobs: createPostgresMemoryJobStore(db),
+    store,
+    principal: me,
+    assert,
+  });
 
   console.log("✅ pg smoke passed — same StorageAdapter, Postgres dialect (PGlite)");
 }

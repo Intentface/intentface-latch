@@ -13,6 +13,7 @@ import {
 } from "@intentface/latch-langfuse";
 import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
+import { scopeRefOf } from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
 import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName } from "./agent-store";
@@ -266,7 +267,9 @@ export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () =
   const principal = await getPrincipal();
   if (!principal) return [];
   const { runtime } = await getLatch();
-  return runtime.listAgents(principal);
+  // `memory-*` are system agents spawned only by the memory sweep — hide them
+  // from the user-facing picker (they stay runnable by name for the sweep).
+  return (await runtime.listAgents(principal)).filter((a) => !a.name.startsWith("memory-"));
 });
 
 /** The model catalog (id + label) for the agent editor's dropdown (from models.dev). */
@@ -348,6 +351,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         providerWebTools?: boolean;
         authoredTools?: string[];
         effort?: "minimal" | "low" | "medium" | "high";
+        memory?: { scope: "agent-user" | "agent-org" | "user"; connection: string };
       };
       subagents?: string[];
       scope: "user" | "org";
@@ -358,6 +362,12 @@ export const saveAgentFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false, error: "unauthorized" };
     const name = normalizeAgentName(data.name);
     if (!name) return { ok: false, error: "name required" };
+    // `memory-*` is reserved for the platform's memory system agents —
+    // listAgentsFn hides the whole prefix, so a user agent named this way
+    // would save fine and then vanish from every picker.
+    if (name.startsWith("memory-")) {
+      return { ok: false, error: `"${name}" is reserved (memory-* are platform system agents).` };
+    }
     if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
     const { agentStore, authoredTools } = await getLatch();
     // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
@@ -372,6 +382,30 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         return {
           ok: false,
           error: `Org agents can only use org-scoped tools. Make these org-scoped first: ${personal.join(", ")}.`,
+        };
+      }
+    }
+    // Memory must point at a connection the agent itself declares — the memory
+    // files live in that workspace, and a dangling name would silently disable
+    // recall while looking configured.
+    const mem = data.exec?.memory;
+    if (mem) {
+      if (!["agent-user", "agent-org", "user"].includes(mem.scope)) {
+        return { ok: false, error: `Unknown memory scope: ${mem.scope}` };
+      }
+      if (!data.connections.includes(mem.connection)) {
+        return {
+          ok: false,
+          error: `Memory connection "${mem.connection}" must be one of the agent's connections.`,
+        };
+      }
+      // `agent-org` memory is keyed by agent name alone (`_memory/<agent>/org`)
+      // — on a personal agent, two users' same-named agents on a shared
+      // connection would silently share one memory folder.
+      if (mem.scope === "agent-org" && data.scope !== "org") {
+        return {
+          ok: false,
+          error: "Org-shared memory requires an org-visible agent (set the agent's scope to org).",
         };
       }
     }
@@ -393,6 +427,47 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       scope: data.scope,
     });
     return { ok: true };
+  });
+
+/**
+ * Memory status for one agent under the CALLER's scope resolution (the agent
+ * editor's Memory panel). Per-user scopes show the caller's own store — other
+ * users' stores are theirs.
+ */
+export const getMemoryStatusFn = createServerFn({ method: "GET" })
+  .validator((data: { name: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { agentStore, memoryJobs } = await getLatch();
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(data.name));
+    const memory = rec?.exec?.memory;
+    if (!rec || !memory) return { enabled: false as const };
+    const scope = scopeRefOf({ agent: rec.name, memory, userId: principal.userId });
+    if (!scope) {
+      return {
+        enabled: true as const,
+        resolvable: false as const,
+        scope: memory.scope,
+        connection: memory.connection,
+      };
+    }
+    const state = await memoryJobs.scopeState(scope.key);
+    const usage = await memoryJobs.usageFor(scope.key);
+    return {
+      enabled: true as const,
+      resolvable: true as const,
+      scope: memory.scope,
+      connection: memory.connection,
+      root: scope.root,
+      pendingEpisodes: state?.pendingEpisodes.length ?? 0,
+      lastConsolidatedAt: state?.lastConsolidatedAt ?? null,
+      failures: state?.failures ?? 0,
+      trackedMemories: usage.length,
+      // The Loredex web app isn't derivable from the MCP URL — deep-link only
+      // when the deployment configures it.
+      loredexUrl: process.env.LOREDEX_APP_URL || null,
+    };
   });
 
 /** Delete a UI agent at its scope. */

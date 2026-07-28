@@ -1,12 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
 import { createFileRoute } from "@tanstack/react-router";
 import { getLatch } from "@/lib/latch";
+import { memorySweep } from "@/lib/memory/sweep";
 
 /**
  * System cron entrypoint (prod replacement for the dev in-process tick).
- * Point Vercel Cron at `/api/cron` (see vercel.json). It does two things:
- *   • runDue()  — fire all tenants' due scheduled agents
- *   • sweep()   — reap lease-expired/crashed runs and resume them (durability)
+ * Point Vercel Cron at `/api/cron` (see vercel.json). It does three things:
+ *   • runDue()      — fire all tenants' due scheduled agents
+ *   • sweep()       — reap lease-expired/crashed runs and resume them (durability)
+ *   • memorySweep() — extract idle chats into episodic memory + consolidate
  *
  * Guarded by Vercel's `CRON_SECRET` (Vercel sends it as `Authorization:
  * Bearer …`). Unauthenticated and system-wide, so it fails CLOSED: in production
@@ -29,7 +31,13 @@ async function runCron(request: Request): Promise<Response> {
   const { runtime } = await getLatch();
   const due = await runtime.runDue().catch((e: unknown) => ({ error: String(e) }));
   const swept = await runtime.sweep().catch((e: unknown) => ({ error: String(e) }));
-  return Response.json({ ok: true, due, swept });
+  // Dev-only escape hatch: `?force=1` drops the idle gate so a fresh chat can
+  // be extracted immediately (manual e2e testing). Never honored in prod.
+  const force =
+    process.env.NODE_ENV !== "production" &&
+    new URL(request.url).searchParams.get("force") === "1";
+  const memory = await memorySweep({ force }).catch((e: unknown) => ({ error: String(e) }));
+  return Response.json({ ok: true, due, swept, memory });
 }
 
 export const Route = createFileRoute("/api/cron")({

@@ -11,6 +11,7 @@ export * from "./storage.js";
 export * from "./context.js";
 export * from "./current-date.js";
 export * from "./agent.js";
+export * from "./memory.js";
 export * from "./runtime.js";
 export * from "./connections.js";
 export * from "./scheduler.js";

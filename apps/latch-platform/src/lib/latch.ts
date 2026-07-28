@@ -10,11 +10,14 @@ import {
 import type { LanguageModel } from "ai";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
+  createMemoryJobStore,
   createSqliteAdapter,
   createSqliteSecretStore,
   migrate,
   schema,
 } from "@intentface/latch-drizzle";
+import { createLoredexStore, createMemoryProvider, scopeRefOf } from "@intentface/latch-memory";
+import type { MemoryJobStore, MemoryStore } from "@intentface/latch-memory";
 import { isLangfuseConfigured, langfuseTelemetry } from "@intentface/latch-langfuse";
 import { waitUntil } from "@vercel/functions";
 import { createMcpConnections  } from "@intentface/latch-mcp";
@@ -103,6 +106,8 @@ let cached:
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
       handler: LatchHandler;
+      memoryStore: MemoryStore<Principal>;
+      memoryJobs: MemoryJobStore;
     }
   | undefined;
 
@@ -124,6 +129,8 @@ export async function getLatch(): Promise<{
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
   handler: LatchHandler;
+  memoryStore: MemoryStore<Principal>;
+  memoryJobs: MemoryJobStore;
 }> {
   if (cached) return cached;
 
@@ -312,6 +319,34 @@ export async function getLatch(): Promise<{
   // the approval-gated gmail_send.)
   const allConnections = mergeConnections(builtinConnections, dynamic);
 
+  // Agent memory (see @intentface/latch-memory + PLAN.md "MemoryProvider"):
+  // markdown in the agent's own Loredex connection, compiled index injected per
+  // turn, background extraction/consolidation via the memory sweep (cron).
+  const memoryJobs = createMemoryJobStore(db);
+  const memoryStore = createLoredexStore<Principal>({ connections: allConnections });
+  const MEMORY_TOUCH_COOLDOWN_MS = 6 * 3_600_000; // refined per agent by the sweep
+  const memoryProvider = createMemoryProvider<Principal>({
+    store: memoryStore,
+    scopeOf: ({ principal, agent, memory }) =>
+      scopeRefOf({ agent, memory, userId: principal.userId }),
+    // Retention signal: recalled ids bump usage (expiry works off this).
+    recordUsage: (scopeKey, ids) => memoryJobs.recordUsage(scopeKey, ids, Date.now()),
+    // A memory_save episode marks the scope dirty for the next consolidation,
+    // stamping the caller so the job can run under the scope's own principal.
+    onEpisodeWritten: ({ scopeKey, connection, agent, principal, path }) =>
+      memoryJobs.touchScope(
+        {
+          scopeKey,
+          owner: ownerTagOf(principal),
+          agent,
+          connection,
+          identity: principal,
+          episodePath: path,
+        },
+        { cooldownMs: MEMORY_TOUCH_COOLDOWN_MS, now: Date.now() },
+      ),
+  });
+
   const runtime = createRuntime<Principal, Ctx>({
     storage,
     context,
@@ -321,6 +356,9 @@ export async function getLatch(): Promise<{
     connections: allConnections,
     // UI-created agents (not in the static `agents` registry).
     dynamicAgents: agentStore,
+    // Persistent agent memory: injects the compiled index + memory tools into
+    // any agent (code or UI) that declares `memory`.
+    memory: memoryProvider,
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
@@ -429,6 +467,14 @@ export async function getLatch(): Promise<{
       void runtime.tick().catch((e) => console.warn("tick failed:", e));
     }, 30_000);
     (tick as { unref?: () => void }).unref?.();
+    // Memory sweep on a slower cadence (extraction is idle-gated anyway).
+    // Lazy import — sweep.ts imports this module back.
+    const memTick = setInterval(() => {
+      void import("./memory/sweep")
+        .then((m) => m.memorySweep())
+        .catch((e) => console.warn("memory sweep failed:", e));
+    }, 5 * 60_000);
+    (memTick as { unref?: () => void }).unref?.();
   }
 
   cached = {
@@ -451,6 +497,8 @@ export async function getLatch(): Promise<{
     models: catalog.models,
     modelFor: catalog.modelFor,
     handler,
+    memoryStore,
+    memoryJobs,
   };
   return cached;
 }
