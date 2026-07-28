@@ -82,29 +82,35 @@ export async function judgeOnce(
     tools,
     criterion,
     scale = "binary",
+    conversation,
   }: {
     input: string;
     answer: string;
     tools: string;
     criterion: string;
     scale?: "binary" | "score";
+    /** Prior conversation text (the "chat" context scope) — pre-capped by the caller. */
+    conversation?: string;
   },
 ): Promise<JudgeVerdict> {
   const graded = scale === "score";
   const verdictLine = graded
     ? `Give a score from 0 to 1 for how well the answer satisfies it; when genuinely ambiguous, score low with the ambiguity as the reason.`
     : `pass=true only if the answer clearly satisfies it; when genuinely ambiguous, fail with the ambiguity as the reason.`;
+  const conversationBlock = conversation
+    ? `\nCONVERSATION SO FAR (oldest first, tool activity excluded — the turn under judgment is the last exchange):\n${conversation}\n`
+    : "";
   const prompt = `You are grading ONE criterion of an AI agent's answer inside an automated eval. Judge ONLY the stated criterion — not overall quality, tone, or anything the criterion doesn't say. ${verdictLine}
 
 CRITERION: ${criterion}
-
+${conversationBlock}
 USER MESSAGE:
 ${input}
 
 AGENT'S ANSWER:
 ${answer.slice(0, ANSWER_CAP)}
 
-TOOLS THE AGENT CALLED (in order, with key arguments — long values truncated):
+TOOLS THE AGENT CALLED (in order; long values truncated):
 ${tools}`;
 
   let lastError = "";

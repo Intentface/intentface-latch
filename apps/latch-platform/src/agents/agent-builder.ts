@@ -71,6 +71,18 @@ const ATTACHED_EVAL_INPUT = z.object({
     .default("binary")
     .describe("binary → pass/fail; score → graded 0–1 (only for genuinely graded qualities)."),
   enabled: z.boolean().default(true),
+  trigger: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      'WHEN the judge runs — a structural predicate tree; omit to judge every turn. Leaves: {"kind":"turn","eq"|"gte"|"lte"|"everyNth":N} (1-based turn # in the chat; everyNth matches turns N, 2N, …), {"kind":"toolCalled","name"?:string}, {"kind":"depth","eq"|"gte"|"lte":N} (0 = top-level; mentioning depth is the ONLY way to judge subagent turns), {"kind":"chatKind","is":"user"|"internal"}. Combinators: {"kind":"all"|"any","of":[…]}, {"kind":"not","of":…}. E.g. greet-on-first-message → {"kind":"turn","eq":1}.',
+    ),
+  context: z
+    .enum(["turn", "chat", "loop"])
+    .optional()
+    .describe(
+      "WHAT the judge sees: turn (default: last user msg + final answer + tool-name summary), chat (plus the conversation so far), loop (this turn full-fidelity: all assistant text + tool calls WITH outputs, subagents as one-line summaries).",
+    ),
 });
 
 /** Build the management toolset bound to one Principal + the live Latch services. */
@@ -317,7 +329,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
 
     attach_evals: tool({
       description:
-        "Attach ONLINE evals to an agent: LLM-judge rubrics that run automatically on EVERY live run, pushing verdicts to Langfuse as scores the user watches on the Observability page. REPLACES the agent's current attached evals (pass the full list). Pauses for the user's approval.",
+        "Attach ONLINE evals to an agent: LLM-judge rubrics that run automatically on live runs — every top-level turn by default, or only the turns a rubric's `trigger` selects — pushing verdicts to Langfuse as scores the user watches on the Observability page. REPLACES the agent's current attached evals (pass the full list). Pauses for the user's approval.",
       inputSchema: z.object({
         agentName: z.string().describe("The agent to attach the rubrics to."),
         evals: z
@@ -329,7 +341,13 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const name = normalizeAgentName(agentName);
         const rec = await agentStore.getRecord(principal, name);
         if (!rec) return { error: `No editable agent named "${name}". Use list_agents.` };
-        const valid = validateRubrics(evals, (id) => models.some((m) => m.id === id));
+        // `trigger` arrives as loose JSON — validateRubrics runs the real AST
+        // validation (validateTrigger) and rejects malformed trees with a
+        // message the model can act on.
+        const valid = validateRubrics(
+          evals as unknown as Parameters<typeof validateRubrics>[0],
+          (id) => models.some((m) => m.id === id),
+        );
         if (!valid.ok) return { error: valid.error };
         const attached = valid.rubrics;
         await agentStore.upsert(principal, { ...rec, attachedEvals: attached });

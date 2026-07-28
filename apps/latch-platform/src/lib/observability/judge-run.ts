@@ -9,7 +9,21 @@ import type { AttachedEval } from "../agent-store";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
 import { JUDGE_MODEL_ID, judgeOnce } from "../evals/judge";
-import { extractRunView, summarizeToolCalls } from "./extract";
+import {
+  allAssistantText,
+  extractRunView,
+  renderChatContext,
+  summarizeToolCalls,
+  summarizeToolLoop,
+} from "./extract";
+import type { ToolCallView } from "./extract";
+import {
+  chatKindOf,
+  rubricIsDue,
+  triggerNeedsTurnOrdinal,
+  turnOrdinalOf,
+} from "./trigger";
+import type { EvalContextScope, TriggerFacts } from "./trigger";
 import type { RunScore } from "./run-scores-store";
 
 type Latch = Awaited<ReturnType<typeof getLatch>>;
@@ -35,6 +49,8 @@ export async function evaluateRubrics(opts: {
   input: string;
   answer: string;
   tools: string;
+  /** Prior conversation text (the "chat" context scope), when the rubrics want it. */
+  conversation?: string;
   sink: (v: RubricVerdictResult) => Promise<void>;
 }): Promise<void> {
   await Promise.all(
@@ -45,6 +61,7 @@ export async function evaluateRubrics(opts: {
           input: opts.input,
           answer: opts.answer,
           tools: opts.tools,
+          conversation: opts.conversation,
           criterion: ev.prompt,
           scale: ev.scale,
         });
@@ -59,6 +76,63 @@ export async function evaluateRubrics(opts: {
         console.warn(`judge "${ev.name}" (run ${opts.runId}) failed:`, e);
       }
     }),
+  );
+}
+
+/** The judge-facing evidence for one turn, before scope-specific rendering. */
+interface TurnEvidence {
+  /** The turn's last user text. */
+  input: string;
+  /** Final assistant text + tool calls of the turn under judgment. */
+  view: { outputText?: string; toolCalls: ToolCallView[] };
+  /** The turn's raw persisted messages (the "loop" scope re-walks them). */
+  turnMessages: unknown[];
+  /** Chat history up to AND including this turn (the "chat" scope renders it). */
+  historyForChat: unknown[];
+}
+
+/**
+ * Judge a gated rubric set, grouping by context scope so each scope's evidence
+ * is rendered once and all groups run concurrently. Both the live path and the
+ * re-judge path funnel through here — the scope semantics can't drift.
+ */
+async function judgeScopeGroups(opts: {
+  runId: string;
+  modelFor: (id: string) => LanguageModel;
+  rubrics: AttachedEval[];
+  evidence: TurnEvidence;
+  sink: (v: RubricVerdictResult) => Promise<void>;
+}): Promise<void> {
+  const groups = new Map<EvalContextScope, AttachedEval[]>();
+  for (const ev of opts.rubrics) {
+    const scope = ev.context ?? "turn";
+    const group = groups.get(scope);
+    if (group) group.push(ev);
+    else groups.set(scope, [ev]);
+  }
+  const { input, view, turnMessages, historyForChat } = opts.evidence;
+  await Promise.all(
+    [...groups].map(([scope, rubrics]) =>
+      evaluateRubrics({
+        runId: opts.runId,
+        modelFor: opts.modelFor,
+        rubrics,
+        input,
+        // "loop" sees every assistant text part of the turn (not just the last)
+        // and the tool trace WITH outputs; "turn"/"chat" see the final answer +
+        // the compact name(args) summary; "chat" adds the conversation so far.
+        answer:
+          scope === "loop"
+            ? allAssistantText(turnMessages) || (view.outputText ?? "")
+            : (view.outputText ?? ""),
+        tools:
+          scope === "loop"
+            ? summarizeToolLoop(view.toolCalls)
+            : summarizeToolCalls(view.toolCalls),
+        conversation: scope === "chat" ? renderChatContext(historyForChat) : undefined,
+        sink: opts.sink,
+      }),
+    ),
   );
 }
 
@@ -102,23 +176,48 @@ export async function judgeLiveRun({
   // DB/store error here must be swallowed — the contract is that a judge pass
   // never disrupts run completion.
   let latch: Latch;
-  let evals: AttachedEval[];
-  let answer: string;
-  let input = "";
-  let tools = "none";
+  let due: AttachedEval[];
+  let evidence: TurnEvidence;
   try {
     // Lazy import keeps this module load-safe from latch.ts (composition root).
     const { getLatch } = await import("../latch");
     latch = await getLatch();
     const rec = await latch.agentStore.getRecord(meta.principal, meta.agent);
-    evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
+    const evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
     if (evals.length === 0) return;
 
     const view = extractRunView(outcome.messages);
     if (!view.outputText) return; // nothing judgeable (e.g. pure tool-approval turn)
-    answer = view.outputText;
-    input = outcome.inputText ?? "";
-    tools = summarizeToolCalls(view.toolCalls);
+
+    // Chat history is only worth a read when some rubric can consume it — a
+    // turn-ordinal trigger or a "chat" context scope. Judged post-persist, so
+    // the history already contains this turn.
+    const needsHistory = evals.some(
+      (e) => triggerNeedsTurnOrdinal(e.trigger) || (e.context ?? "turn") === "chat",
+    );
+    const history = needsHistory
+      ? await latch.runtime.loadHistory({ chatId: meta.chatId, principal: meta.principal })
+      : [];
+
+    // Per-rubric gate: the trigger must match, and — unless the trigger itself
+    // mentions depth — the turn must be top-level. A skipped rubric writes
+    // NOTHING (no local row, no Langfuse score), so aggregates only ever
+    // average turns the rubric was meant to judge.
+    const facts: TriggerFacts = {
+      turnOrdinal: turnOrdinalOf(history, meta.runId),
+      toolsCalled: view.toolCalls.map((c) => c.name),
+      depth: meta.depth,
+      chatKind: chatKindOf(meta.chatId),
+    };
+    due = evals.filter((e) => rubricIsDue(e.trigger, facts));
+    if (due.length === 0) return;
+
+    evidence = {
+      input: outcome.inputText ?? "",
+      view,
+      turnMessages: outcome.messages,
+      historyForChat: history,
+    };
   } catch (e) {
     console.warn(`online judge setup failed (run ${meta.runId}):`, e);
     return;
@@ -126,13 +225,11 @@ export async function judgeLiveRun({
 
   const ownerTag = ownerTagOf(meta.principal);
   const now = Date.now();
-  await evaluateRubrics({
+  await judgeScopeGroups({
     runId: meta.runId,
     modelFor: latch.modelFor,
-    rubrics: evals,
-    input,
-    answer,
-    tools,
+    rubrics: due,
+    evidence,
     sink: async (v) => {
       // Local mirror first (fast, always-on) so the chat evals panel has the
       // verdict even if Langfuse is slow/unreachable — then best-effort to
@@ -189,8 +286,7 @@ export async function rejudgeRun(args: {
   );
   if (idx < 0) throw new Error(`No readable run "${args.runId}" in this chat.`);
 
-  const { toolCalls } = extractRunView([history[idx]]);
-  const answer = messageText(history[idx]);
+  const view = extractRunView([history[idx]]);
   // Input: the nearest preceding user message's text.
   let input = "";
   for (let i = idx - 1; i >= 0; i--) {
@@ -199,19 +295,33 @@ export async function rejudgeRun(args: {
       break;
     }
   }
-  const tools = summarizeToolCalls(toolCalls);
 
-  const enabled = args.rubrics.filter((r) => r.enabled);
+  // Same gate as the live path, on the SAME facts this run had then — a rubric
+  // whose trigger doesn't match this turn is silently absent from the results,
+  // exactly like the live judge writing nothing. The drawer only ever opens on
+  // a user-facing chat, so depth is derived structurally from the chat id.
+  const facts: TriggerFacts = {
+    turnOrdinal: turnOrdinalOf(history, args.runId),
+    toolsCalled: view.toolCalls.map((c) => c.name),
+    depth: args.chatId.startsWith("sub_") ? 1 : 0,
+    chatKind: chatKindOf(args.chatId),
+  };
+  const due = args.rubrics.filter((r) => r.enabled && rubricIsDue(r.trigger, facts));
+
   const results: RubricVerdictResult[] = [];
   const ownerTag = ownerTagOf(args.principal);
   const now = Date.now();
-  await evaluateRubrics({
+  await judgeScopeGroups({
     runId: args.runId,
     modelFor: latch.modelFor,
-    rubrics: enabled,
-    input,
-    answer,
-    tools,
+    rubrics: due,
+    evidence: {
+      input,
+      view,
+      turnMessages: [history[idx]],
+      // "So far" as of the judged turn — not the whole chat's later tail.
+      historyForChat: history.slice(0, idx + 1),
+    },
     sink: async (v) => {
       // Never let a tuning re-judge clobber a human correction: the human value
       // (and the AI original it preserves) is authoritative. Skip persisting AND

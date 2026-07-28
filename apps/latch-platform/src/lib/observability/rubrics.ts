@@ -1,5 +1,9 @@
 import type { AttachedEval } from "../agent-store";
 import { JUDGE_MODEL_ID } from "../evals/judge";
+import { validateTrigger } from "./trigger";
+
+/** Context scopes a rubric may ask the judge to see. */
+const CONTEXT_SCOPES = new Set(["turn", "chat", "loop"]);
 
 /**
  * Score names the observability layer treats specially — a rubric may not claim
@@ -44,6 +48,21 @@ export function validateRubrics(
   if (tooLong.length) {
     return { ok: false, error: `Rubric prompt over 1000 chars: ${tooLong.map((e) => e.name).join(", ")}.` };
   }
+  // Trigger/context arrive as untrusted JSON (drawer's advanced field, tool
+  // calls, eval-author output) — validate the AST shape and scope enum here so
+  // a malformed condition is a save-time error, never a silent judge-time skip.
+  for (const e of evals) {
+    if (e.trigger !== undefined) {
+      const err = validateTrigger(e.trigger);
+      if (err) return { ok: false, error: `Invalid trigger on "${e.name}": ${err}.` };
+    }
+    if (e.context !== undefined && !CONTEXT_SCOPES.has(e.context)) {
+      return {
+        ok: false,
+        error: `Invalid context "${String(e.context)}" on "${e.name}" (turn | chat | loop).`,
+      };
+    }
+  }
   // The judge model must exist in the catalog — modelFor() silently falls back
   // to the default model, which would silently change the judge.
   const judgeIds = new Set(evals.map((e) => e.judgeModelId ?? JUDGE_MODEL_ID));
@@ -59,6 +78,8 @@ export function validateRubrics(
       judgeModelId: e.judgeModelId,
       scale: e.scale,
       enabled: e.enabled,
+      ...(e.trigger !== undefined ? { trigger: e.trigger } : {}),
+      ...(e.context !== undefined ? { context: e.context } : {}),
     })),
   };
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import type { AttachedEval } from "@/lib/agent-store";
+import type { EvalTrigger } from "@/lib/observability/trigger";
 import {
   draftRubricFn,
   getAgentEvalsFn,
@@ -31,6 +32,60 @@ const blankRubric = (): AttachedEval => ({
   enabled: true,
 });
 
+// ── Trigger presets: the form face of the structural trigger DSL ────────────
+// The common conditions are a select + number + checkbox; anything the form
+// can't express round-trips through the "custom" JSON field untouched.
+
+type TriggerPreset = "always" | "first" | "turnN" | "everyN" | "custom";
+
+const isDepthOptIn = (t: EvalTrigger): boolean =>
+  t.kind === "depth" && t.gte === 0 && t.eq === undefined && t.lte === undefined;
+
+/** Recognize a bare form-shaped turn leaf (exactly one comparator, no extras). */
+function turnPresetOf(t: EvalTrigger): { preset: TriggerPreset; n: number } | null {
+  if (t.kind !== "turn") return null;
+  const { eq, gte, lte, everyNth } = t;
+  if (eq !== undefined && gte === undefined && lte === undefined && everyNth === undefined) {
+    return { preset: eq === 1 ? "first" : "turnN", n: eq };
+  }
+  if (everyNth !== undefined && eq === undefined && gte === undefined && lte === undefined) {
+    return { preset: "everyN", n: everyNth };
+  }
+  return null;
+}
+
+/** Map a stored trigger back to form state; unrecognized shapes → "custom". */
+function presetOf(t: EvalTrigger | undefined): {
+  preset: TriggerPreset;
+  n: number;
+  subagents: boolean;
+} {
+  if (!t) return { preset: "always", n: 1, subagents: false };
+  if (isDepthOptIn(t)) return { preset: "always", n: 1, subagents: true };
+  const bare = turnPresetOf(t);
+  if (bare) return { ...bare, subagents: false };
+  if (t.kind === "all" && t.of.length === 2 && isDepthOptIn(t.of[1])) {
+    const inner = turnPresetOf(t.of[0]);
+    if (inner) return { ...inner, subagents: true };
+  }
+  return { preset: "custom", n: 1, subagents: false };
+}
+
+/** Build the trigger a form state means; "always at the top level" → undefined. */
+function triggerFor(preset: TriggerPreset, n: number, subagents: boolean): EvalTrigger | undefined {
+  const base: EvalTrigger | undefined =
+    preset === "first"
+      ? { kind: "turn", eq: 1 }
+      : preset === "turnN"
+        ? { kind: "turn", eq: Math.max(1, Math.round(n) || 1) }
+        : preset === "everyN"
+          ? { kind: "turn", everyNth: Math.max(1, Math.round(n) || 1) }
+          : undefined;
+  if (!subagents) return base;
+  const depth: EvalTrigger = { kind: "depth", gte: 0 };
+  return base ? { kind: "all", of: [base, depth] } : depth;
+}
+
 /**
  * The right-side evals drawer: a DRAFT scratchpad over the agent's attached
  * rubrics. Edits/toggles/adds stay local until "Save to agent"; the parent owns
@@ -59,6 +114,9 @@ export function EvalsDrawer({
   const [drafting, setDrafting] = useState(false);
   const [quality, setQuality] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  // Raw text of per-rubric "custom" trigger JSON while it's being edited —
+  // the draft only takes a trigger once the text parses.
+  const [customJson, setCustomJson] = useState<Record<number, string | undefined>>({});
 
   // Load the persisted rubrics once; seed the draft from them.
   useEffect(() => {
@@ -87,7 +145,50 @@ export function EvalsDrawer({
 
   const update = (i: number, patch: Partial<AttachedEval>) =>
     setDraft(draft.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const remove = (i: number) => setDraft(draft.filter((_, j) => j !== i));
+  const remove = (i: number) => {
+    setDraft(draft.filter((_, j) => j !== i));
+    // Indices shift — drop in-progress custom JSON rather than misattach it.
+    setCustomJson({});
+  };
+
+  const setPreset = (i: number, r: AttachedEval, preset: TriggerPreset, n: number, subagents: boolean) => {
+    if (preset === "custom") {
+      const seed = r.trigger ?? { kind: "turn", eq: 1 };
+      setCustomJson({ ...customJson, [i]: JSON.stringify(seed) });
+      update(i, { trigger: seed });
+      return;
+    }
+    setCustomJson((prev) => {
+      const next = { ...prev };
+      delete next[i];
+      return next;
+    });
+    update(i, { trigger: triggerFor(preset, n, subagents) });
+  };
+
+  const setCustomText = (i: number, text: string) => {
+    setCustomJson({ ...customJson, [i]: text });
+    if (!text.trim()) {
+      update(i, { trigger: undefined });
+      return;
+    }
+    try {
+      update(i, { trigger: JSON.parse(text) as EvalTrigger });
+    } catch {
+      /* keep the last parseable trigger; the field shows the error state */
+    }
+  };
+
+  const customInvalid = (i: number): boolean => {
+    const text = customJson[i];
+    if (text === undefined || !text.trim()) return false;
+    try {
+      JSON.parse(text);
+      return false;
+    } catch {
+      return true;
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -146,7 +247,10 @@ export function EvalsDrawer({
           </div>
         )}
 
-        {draft.map((r, i) => (
+        {draft.map((r, i) => {
+          const isCustom = customJson[i] !== undefined || presetOf(r.trigger).preset === "custom";
+          const form = presetOf(r.trigger);
+          return (
           <div key={i} className="border-secondary-border bg-primary rounded-lg border p-3">
             <div className="mb-2 flex items-center gap-2">
               <input
@@ -185,8 +289,78 @@ export function EvalsDrawer({
               rows={3}
               className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
             />
+            <div className="text-ink-tertiary mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <span>When</span>
+              <select
+                value={isCustom ? "custom" : form.preset}
+                onChange={(e) =>
+                  setPreset(i, r, e.target.value as TriggerPreset, form.n, form.subagents)
+                }
+                aria-label="When the judge runs"
+                className="border-secondary-border rounded border bg-transparent px-1 py-0.5"
+              >
+                <option value="always">every turn</option>
+                <option value="first">first turn</option>
+                <option value="turnN">turn №</option>
+                <option value="everyN">every Nth turn</option>
+                <option value="custom">custom (JSON)</option>
+              </select>
+              {!isCustom && (form.preset === "turnN" || form.preset === "everyN") && (
+                <input
+                  type="number"
+                  min={1}
+                  value={form.n}
+                  onChange={(e) =>
+                    setPreset(i, r, form.preset, Number(e.target.value), form.subagents)
+                  }
+                  aria-label="Turn number"
+                  className="border-secondary-border w-14 rounded border bg-transparent px-1 py-0.5"
+                />
+              )}
+              {!isCustom && (
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={form.subagents}
+                    onChange={(e) => setPreset(i, r, form.preset, form.n, e.target.checked)}
+                  />
+                  subagents
+                </label>
+              )}
+              <span className="ml-auto">Sees</span>
+              <select
+                value={r.context ?? "turn"}
+                onChange={(e) =>
+                  update(i, {
+                    context:
+                      e.target.value === "turn"
+                        ? undefined
+                        : (e.target.value as "chat" | "loop"),
+                  })
+                }
+                aria-label="What the judge sees"
+                className="border-secondary-border rounded border bg-transparent px-1 py-0.5"
+              >
+                <option value="turn">this turn</option>
+                <option value="chat">whole chat</option>
+                <option value="loop">full loop</option>
+              </select>
+            </div>
+            {isCustom && (
+              <textarea
+                value={customJson[i] ?? JSON.stringify(r.trigger ?? null)}
+                onChange={(e) => setCustomText(i, e.target.value)}
+                placeholder='e.g. {"kind":"all","of":[{"kind":"turn","gte":2},{"kind":"toolCalled","name":"spawn_agent"}]}'
+                rows={2}
+                aria-label="Custom trigger JSON"
+                className={`mt-2 w-full resize-none rounded border bg-transparent p-2 font-mono text-xs ${
+                  customInvalid(i) ? "border-red-500" : "border-secondary-border"
+                } text-ink-primary`}
+              />
+            )}
           </div>
-        ))}
+          );
+        })}
 
         {showAdd ? (
           <div className="border-secondary-border bg-primary space-y-2 rounded-lg border p-3">
