@@ -354,16 +354,39 @@ export function EvalsDrawer({
               </select>
             </div>
             {isCustom && (
-              <textarea
-                value={customJson[i] ?? JSON.stringify(r.trigger ?? null)}
-                onChange={(e) => setCustomText(i, e.target.value)}
-                placeholder='e.g. {"kind":"all","of":[{"kind":"turn","gte":2},{"kind":"toolCalled","name":"spawn_agent"}]}'
-                rows={2}
-                aria-label="Custom trigger JSON"
-                className={`mt-2 w-full resize-none rounded border bg-transparent p-2 font-mono text-xs ${
-                  customInvalid(i) ? "border-red-500" : "border-secondary-border"
-                } text-ink-primary`}
-              />
+              <>
+                <textarea
+                  value={customJson[i] ?? JSON.stringify(r.trigger ?? null)}
+                  onChange={(e) => setCustomText(i, e.target.value)}
+                  placeholder='e.g. {"kind":"all","of":[{"kind":"turn","gte":2},{"kind":"toolCalled","name":"spawn_agent"}]}'
+                  rows={2}
+                  aria-label="Custom trigger JSON"
+                  className={`mt-2 w-full resize-none rounded border bg-transparent p-2 font-mono text-xs ${
+                    customInvalid(i) ? "border-red-500" : "border-secondary-border"
+                  } text-ink-primary`}
+                />
+                <details className="text-ink-tertiary mt-1 text-xs">
+                  <summary className="hover:text-ink-primary cursor-pointer select-none">
+                    Trigger JSON reference
+                  </summary>
+                  <div className="mt-2 space-y-1.5">
+                    <p>
+                      Conditions test <em>facts</em> of the finished turn — never message
+                      content (put content rules in the rubric prompt as English, e.g.
+                      &ldquo;IF the user asks about pricing…&rdquo;). No match → the turn simply
+                      isn&rsquo;t judged; no score is recorded anywhere.
+                    </p>
+                    <div className="space-y-1 font-mono text-[11px] leading-4">
+                      <div>{'{"kind":"turn","eq":1}'} — 1-based turn # in the chat (also gte / lte)</div>
+                      <div>{'{"kind":"turn","everyNth":5}'} — turns 5, 10, 15, …</div>
+                      <div>{'{"kind":"toolCalled","name":"web_fetch"}'} — this turn used the tool (omit name = any tool)</div>
+                      <div>{'{"kind":"depth","gte":1}'} — subagent turns; 0 = top-level. Rubrics skip subagents unless depth is mentioned</div>
+                      <div>{'{"kind":"chatKind","is":"internal"}'} — "user" or "internal" (subagent threads)</div>
+                      <div>{'{"kind":"all","of":[…]}'} / {'{"kind":"any","of":[…]}'} / {'{"kind":"not","of":…}'} — combine freely (≤25 nodes, ≤5 deep)</div>
+                    </div>
+                  </div>
+                </details>
+              </>
             )}
           </div>
           );
