@@ -28,8 +28,32 @@ agent and the platform does all upkeep:
   without memory, never a failed turn.
 - **Anti-hot-loop**: every job completion advances its eligibility timestamp —
   success, failure, or "not actually memory-enabled".
+- **Extraction idempotency**: every completed extraction records an idempotency
+  key (`extractionRunKey` — content hash of the message window + the extraction
+  prompt version). An unchanged window never re-buys a run, and a run that
+  found NOTHING tombstones its content via the same key. Failed runs never
+  record a key, so they stay retryable. Bump `EXTRACTION_PROMPT_VERSION` to
+  invalidate old keys after a material prompt change.
 - **Provenance**: every fact is tagged `user-said` / `tool-derived` /
   `user-requested`; the extractor is instructed to scrub secrets/PII.
+- **Trust marks**: extractor-written episodes carry `status: unverified`
+  frontmatter; index entries folded from them carry an `unverified` marker
+  (labeled — in the injected block and in search results — never hidden). The
+  consolidator promotes an entry only on later, independent corroboration.
+  Explicit `memory_save` notes are never marked unverified.
+- **Aliases + create-safety**: entries can carry `aka:` aliases (episodes:
+  `aliases:` frontmatter) for subjects with several names/spellings.
+  `memory_search` matches them exactly (NFKC/case/whitespace-normalized),
+  tags every hit with `matchedOn` evidence (`alias-exact` | `description` |
+  `body`), and derives a response-level `create_safety`
+  (`exists` | `probable` | `unknown`) that `memory_save` instructs the agent
+  to consult before creating anything new.
+- **Injection hardening**: memory text is LLM-authored from user conversation —
+  a prompt-injection persistence vector. At injection time (the `<memory>`
+  block, search snippets) it passes through `sanitizeMemoryText`, which
+  de-fangs envelope/role tags and strips a named set of known injection
+  phrasings. Volume reduction, not a guarantee — the standing instructions
+  additionally declare the envelope's content to be data, never instructions.
 
 ## Pieces
 
