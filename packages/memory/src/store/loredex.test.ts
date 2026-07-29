@@ -9,7 +9,12 @@ import { MemoryStoreUnreachableError } from "../types.js";
  * (`{ content: [{type:"text",text}], isError? }` results), recording every
  * call and close so tests can assert behavior AND ordering.
  */
-function fakeRegistry(opts?: { unauthorized?: boolean; failCreate?: boolean }) {
+function fakeRegistry(opts?: {
+  unauthorized?: boolean;
+  failCreate?: boolean;
+  /** Override the search tool's `results` array (e.g. the live Loredex shape). */
+  searchResults?: Array<Record<string, unknown>>;
+}) {
   const files = new Map<string, string>();
   const calls: Array<{ tool: string; input: Record<string, unknown> }> = [];
   let closes = 0;
@@ -65,7 +70,7 @@ function fakeRegistry(opts?: { unauthorized?: boolean; failCreate?: boolean }) {
             calls.push({ tool: "search", input });
             return ok(
               JSON.stringify({
-                results: [
+                results: opts?.searchResults ?? [
                   {
                     path: "_memory/coach/u-1/episodes/2026-07-01-10-00-tempo.md",
                     snippet: "…[m-7f3a2c] tempo…",
@@ -232,6 +237,47 @@ describe("createLoredexStore", () => {
     expect(hits).toHaveLength(1);
     expect(hits[0].memoryIds).toContain("m-7f3a2c");
     expect(hits[0].memoryIds).toContain(hits[0].path);
+  });
+
+  it("search maps the live Loredex result shape (id/title, no path) to a scoped path", async () => {
+    // Observed live shape (2026-07-29): results carry an opaque `id` and the
+    // filename as `title` — no path field. Regression: the parser used to fall
+    // back to the bare scope root, erasing every hit's file identity.
+    const { registry } = fakeRegistry({
+      searchResults: [
+        {
+          id: "file_QE2DrP_XTDLrimGtIKQEf",
+          title: "no-caffeine-after-noon.md",
+          fileType: ".md",
+          score: 1000000000,
+          snippet: "no-caffeine-after-noon.md",
+          url: "https://app.loredex.ai/memory-eval/file_QE2DrP_XTDLrimGtIKQEf",
+        },
+        { id: "file_noTitle123", score: 1, snippet: "orphan snippet" },
+      ],
+    });
+    const store = createLoredexStore({ connections: registry });
+    const hits = await store.search(P, SCOPE, "caffeine", 5);
+    expect(hits[0].path).toBe(`${SCOPE.root}/no-caffeine-after-noon.md`);
+    expect(hits[0].snippet).toBe("no-caffeine-after-noon.md");
+    // No title → the opaque id (still resolvable by read tools), never the bare root.
+    expect(hits[1].path).toBe("file_noTitle123");
+    expect(hits[1].snippet).toBe("orphan snippet");
+  });
+
+  it("search keeps an identity-less hit under the bare root with its snippet intact", async () => {
+    // No path/file/fileId/title/id at all: the bare root is the documented
+    // "no per-file identity" contract (same as plain-text results) — the
+    // snippet still reaches the model, and id-dependent consumers skip it.
+    const { registry } = fakeRegistry({
+      searchResults: [{ score: 1, snippet: "mystery snippet with [m-9a8b7c]" }],
+    });
+    const store = createLoredexStore({ connections: registry });
+    const hits = await store.search(P, SCOPE, "mystery", 5);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].path).toBe(SCOPE.root);
+    expect(hits[0].snippet).toBe("mystery snippet with [m-9a8b7c]");
+    expect(hits[0].memoryIds).toContain("m-9a8b7c");
   });
 
   it("always closes the connection, including on failure paths", async () => {
