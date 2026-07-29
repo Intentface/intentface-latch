@@ -309,10 +309,23 @@ function parseSearchHits(text: string, scope: ScopeRef, limit: number): MemorySe
     if (Array.isArray(arr)) {
       return arr.slice(0, limit).map((raw) => {
         const r = raw as Record<string, unknown>;
+        const str = (v: unknown): string | undefined =>
+          typeof v === "string" && v.length > 0 ? v : undefined;
+        // Loredex (live) returns `{ id: "file_…", title: "<filename>", snippet }`
+        // with no path field. A title under the searched scope root is the best
+        // file identity available without extra lookups; the opaque id still
+        // resolves in read tools, so it is the next fallback — never the bare
+        // scope root, which erases the hit's identity for every consumer
+        // (ranking evals, episode detection, usage tracking).
         const path =
-          (r.path as string) ?? (r.file as string) ?? (r.fileId as string) ?? scope.root;
+          str(r.path) ??
+          str(r.file) ??
+          str(r.fileId) ??
+          (str(r.title) ? `${scope.root}/${str(r.title)}` : undefined) ??
+          str(r.id) ??
+          scope.root;
         const snippet =
-          (r.snippet as string) ?? (r.content as string) ?? (r.text as string) ?? textOfRaw(r);
+          str(r.snippet) ?? str(r.content) ?? str(r.text) ?? str(r.title) ?? textOfRaw(r);
         return { path, snippet, memoryIds: hitIds(path, snippet) };
       });
     }
