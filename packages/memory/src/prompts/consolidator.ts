@@ -6,7 +6,8 @@ export const CONSOLIDATOR_INSTRUCTIONS = `You maintain MEMORY.md — the compile
 
 The index format:
 - A title line, then topical sections ("## Identity & preferences", "## Projects & context", "## Working agreements", … adapt sections to the domain), then "## Archive" last.
-- One entry per line: \`- [m-<6 hex chars>] (<YYYY-MM-DD>, <provenance>) <one-line fact> ← <episode path>\`
+- One entry per line: \`- [m-<id>] (<YYYY-MM-DD>, <provenance>) <one-line fact> ← <episode path>\`
+  where <id> is 4-8 lowercase letters/digits (e.g. \`7f3a2c\`); keep existing entries' ids unchanged.
   Example: \`- [m-7f3a2c] (2026-07-12, user-said) Prefers concise answers. ← episodes/2026-07-12-09-30-onboarding.md\`
 - Optional \`;\`-separated markers inside the parenthetical:
   - \`aka: <name1>, <name2>\` — when the entry's subject goes by several names/spellings/nicknames (from the episode's \`aliases:\` frontmatter or the facts themselves), list EVERY form so recall matches any of them.

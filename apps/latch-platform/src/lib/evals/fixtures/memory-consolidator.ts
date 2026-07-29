@@ -65,7 +65,7 @@ export const MEMORY_CONSOLIDATOR_EVAL_CASES: EvalCase[] = [
       assertions: {
         // Both prior entries survive (no silent deletion) + the new fact lands.
         contains: ["[m-7f3a2c]", "[m-a1c2b3]", "morning runs"],
-        regex: ["- \\[m-[0-9a-f]{4,8}\\] \\(2026-07-27, user-said\\)[^\\n]*morning runs"],
+        regex: ["- \\[m-[0-9a-z]{4,8}\\] \\(2026-07-27, user-said\\)[^\\n]*morning runs"],
       },
     },
   },

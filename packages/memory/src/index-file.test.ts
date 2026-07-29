@@ -69,6 +69,19 @@ describe("parseIndex", () => {
     expect(parsed.malformed).toHaveLength(1);
   });
 
+  it("accepts model-minted non-hex ids (regression: m-g8d7e9 rewrite loop)", () => {
+    // The consolidator model mints ids itself; "hex-looking" ids with g-z
+    // letters must parse — rejecting them looped the model on rewrites.
+    const parsed = parseIndex(
+      "- [m-g8d7e9] (2026-07-29, tool-derived; unverified) Recommended beginner gels: Maurten 100, SiS Go Isotonic (no caffeine) ← episodes/2026-07-29-06-42-gels.md\n" +
+        "- [m-h2c4f5] (2026-07-29, tool-derived; superseded 2026-07-30 by m-zz99aa) Old strategy. ← episodes/old.md\n",
+    );
+    expect(parsed.malformed).toHaveLength(0);
+    expect(parsed.entries.map((e) => e.id)).toEqual(["m-g8d7e9", "m-h2c4f5"]);
+    expect(parsed.entries[1]!.superseded).toMatchObject({ by: "m-zz99aa" });
+    expect(memoryIdsIn(parsed.entries[0]!.raw)).toEqual(["m-g8d7e9"]);
+  });
+
   it("ignores prose and headings", () => {
     const parsed = parseIndex("# Title\nsome prose\n- a plain bullet\n");
     expect(parsed.entries).toHaveLength(0);
