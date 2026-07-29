@@ -1,4 +1,4 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { currentPrincipalFn, listRunsFn } from "@/lib/server";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -70,7 +70,16 @@ function RunsPage() {
                 <TableCell>
                   <Badge variant={statusVariant[r.status] ?? "outline"}>{r.status}</Badge>
                 </TableCell>
-                <TableCell>{r.agent}</TableCell>
+                <TableCell>
+                  <Link
+                    to="/chat/$chatId"
+                    params={{ chatId: r.chatId }}
+                    search={{ agent: undefined }}
+                    className="hover:underline"
+                  >
+                    {r.agent}
+                  </Link>
+                </TableCell>
                 <TableCell className="text-right tabular-nums">{r.inputTokens}</TableCell>
                 <TableCell className="text-muted-foreground text-right tabular-nums">
                   {r.cacheReadTokens ? r.cacheReadTokens.toLocaleString() : "—"}
