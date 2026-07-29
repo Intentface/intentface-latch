@@ -265,6 +265,21 @@ describe("createLoredexStore", () => {
     expect(hits[1].snippet).toBe("orphan snippet");
   });
 
+  it("search keeps an identity-less hit under the bare root with its snippet intact", async () => {
+    // No path/file/fileId/title/id at all: the bare root is the documented
+    // "no per-file identity" contract (same as plain-text results) — the
+    // snippet still reaches the model, and id-dependent consumers skip it.
+    const { registry } = fakeRegistry({
+      searchResults: [{ score: 1, snippet: "mystery snippet with [m-9a8b7c]" }],
+    });
+    const store = createLoredexStore({ connections: registry });
+    const hits = await store.search(P, SCOPE, "mystery", 5);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].path).toBe(SCOPE.root);
+    expect(hits[0].snippet).toBe("mystery snippet with [m-9a8b7c]");
+    expect(hits[0].memoryIds).toContain("m-9a8b7c");
+  });
+
   it("always closes the connection, including on failure paths", async () => {
     const { registry, closeCount } = fakeRegistry({ failCreate: true });
     const store = createLoredexStore({ connections: registry });

@@ -323,6 +323,10 @@ function parseSearchHits(text: string, scope: ScopeRef, limit: number): MemorySe
           str(r.fileId) ??
           (str(r.title) ? `${scope.root}/${str(r.title)}` : undefined) ??
           str(r.id) ??
+          // No identity fields at all: keep the hit under the bare root —
+          // the same contract as the plain-text fallback below, where
+          // `scope.root` means "no per-file identity" (hitIds skips it,
+          // evals filter it) but the snippet is still useful to the model.
           scope.root;
         const snippet =
           str(r.snippet) ?? str(r.content) ?? str(r.text) ?? str(r.title) ?? textOfRaw(r);
