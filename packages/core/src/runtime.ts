@@ -850,6 +850,20 @@ function fireObs<E>(
   }
 }
 
+/**
+ * The one place an error becomes a client-visible string. Latch deliberately
+ * forwards `Error` messages — they are the debugging surface for sandbox and
+ * tool failures, and the audience is the org's own authenticated users — but
+ * every stream/tool error path must route through here so the exposure policy
+ * can be tightened in a single place. Non-`Error` throws and unbounded
+ * payloads never pass through verbatim.
+ */
+function clientErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (!message) return "An error occurred.";
+  return message.length > 500 ? `${message.slice(0, 499)}…` : message;
+}
+
 export function createRuntime<P, RC = unknown>(
   config: RuntimeConfig<P, RC>,
 ): Runtime<P> {
@@ -1471,6 +1485,11 @@ export function createRuntime<P, RC = unknown>(
         writer.merge(
           toUIMessageStream({
             stream: result.stream,
+            // Without this the AI SDK collapses every tool `execute` throw to
+            // the literal "An error occurred." — surface the real message so
+            // failures (sandbox init, credential lookups, …) are debuggable
+            // from the chat itself.
+            onError: clientErrorMessage,
             messageMetadata: ({ part }: { part: { type: string } }) =>
               part.type === "start"
                 ? {
@@ -1616,8 +1635,7 @@ export function createRuntime<P, RC = unknown>(
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
-        const message =
-          error instanceof Error ? error.message : "An error occurred.";
+        const message = clientErrorMessage(error);
         fireObs(config.observability?.onError, {
           principal,
           chatId: resolvedChatId,
