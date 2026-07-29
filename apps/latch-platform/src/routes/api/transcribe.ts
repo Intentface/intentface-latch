@@ -26,12 +26,13 @@ export const Route = createFileRoute("/api/transcribe")({
   server: {
     handlers: {
       POST: async ({ request }) => {
+        const session = await auth.api.getSession({ headers: request.headers });
+        if (!session) return json(401, { error: "unauthorized" });
+
+        // After auth — unauthenticated callers shouldn't learn deployment config.
         if (!process.env.ELEVEN_LABS_API_KEY) {
           return json(502, { error: "transcription is not configured" });
         }
-
-        const session = await auth.api.getSession({ headers: request.headers });
-        if (!session) return json(401, { error: "unauthorized" });
         // Keyterm bias: the speaker's own name and org (from their email
         // domain) — the proper nouns ASR most often mangles.
         const orgWord = session.user.email?.split("@")[1]?.split(".")[0];

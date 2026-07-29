@@ -318,18 +318,19 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     const failedAudio: string[] = [];
     for (const m of ctx.media ?? []) {
       const isAudio = m.mediaType.startsWith("audio/");
+      const markFailed = () => (isAudio ? failedAudio : skipped).push(m.name);
       if (isAudio && !config.transcribe) {
-        failedAudio.push(m.name);
+        markFailed();
         continue;
       }
       if ((m.ref.file_size ?? 0) > MAX_INLINE_FILE_BYTES) {
-        (isAudio ? failedAudio : skipped).push(m.name);
+        markFailed();
         continue;
       }
       try {
         const { filePath, fileSize } = await api.getFile(m.ref.file_id);
         if (!filePath || (fileSize ?? 0) > MAX_INLINE_FILE_BYTES) {
-          (isAudio ? failedAudio : skipped).push(m.name);
+          markFailed();
           continue;
         }
         const bytes = await api.downloadFile(filePath);
@@ -351,8 +352,8 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
           });
         }
       } catch (e) {
-        console.error(`[telegram] ${isAudio ? "transcription" : "file download"} failed (${m.name}):`, e);
-        (isAudio ? failedAudio : skipped).push(m.name);
+        console.error(`[telegram] media processing failed (${m.name}):`, e);
+        markFailed();
       }
     }
 
