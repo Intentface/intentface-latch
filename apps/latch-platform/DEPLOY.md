@@ -35,6 +35,7 @@ work. Use a hosted libsql (Turso) or Postgres. For Turso:
 | `CRON_SECRET` | set by Vercel Cron; `/api/cron` checks `Authorization: Bearer` |
 | `LOREDEX_APP_URL` | (optional) Loredex web origin — enables the "open in Loredex" link in the agent editor's memory panel |
 | `MEMORY_IDLE_MINUTES`, `MEMORY_COOLDOWN_HOURS`, `MEMORY_EXPIRE_DAYS` | (optional) memory-sweep tuning; defaults 60 / 6 / 30 |
+| `LATCH_SANDBOX_DIR` | (optional) base dir for just-bash/mirage sandbox workspaces. On Vercel/Lambda it defaults to the OS tmpdir (the deploy dir is read-only), so sandbox files only survive within a warm instance — use the Daytona provider for durable files |
 
 Add the production **OAuth redirect URIs** in Google Cloud:
 - `https://<domain>/api/auth/callback/google` (login)

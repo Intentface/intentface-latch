@@ -1471,6 +1471,12 @@ export function createRuntime<P, RC = unknown>(
         writer.merge(
           toUIMessageStream({
             stream: result.stream,
+            // Without this the AI SDK collapses every tool `execute` throw to
+            // the literal "An error occurred." — surface the real message so
+            // failures (sandbox init, credential lookups, …) are debuggable
+            // from the chat itself.
+            onError: (error: unknown) =>
+              error instanceof Error ? error.message : String(error),
             messageMetadata: ({ part }: { part: { type: string } }) =>
               part.type === "start"
                 ? {

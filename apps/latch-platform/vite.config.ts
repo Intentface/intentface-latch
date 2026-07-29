@@ -16,9 +16,15 @@ const config = defineConfig({
   // Keep mirage-node out of the server bundle: it loads tree-sitter .wasm and
   // several deps via runtime require, which only works from a real
   // node_modules layout. `traceDeps` externalizes it; the tracer misses its
-  // dynamic-require edges, so scripts/copy-mirage-deps.mjs (postbuild) copies
-  // the full dependency closure into the server output.
+  // dynamic-require edges, so scripts/copy-server-deps.mjs (postbuild) copies
+  // the full dependency closure into the server output (plus the `_ssr`
+  // service environment's runtime externals — react and friends).
   nitro: { traceDeps: ["@struktoai/mirage-node*"] },
+  // The `_ssr` service environment keeps Vite's default SSR externalization,
+  // but nothing traces its externals into the deployed function — page SSR
+  // then dies at runtime with "Cannot find module 'react'". Bundle them
+  // instead (mirage-node must stay external, see above).
+  ssr: { noExternal: ["react", "react-dom", /^better-auth/, /^framer-motion/, /^motion/] },
   plugins: [devtools(), tailwindcss(), tanstackStart(), nitro(), viteReact()],
 })
 

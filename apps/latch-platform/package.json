@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 3000",
-    "build": "vite build && node scripts/copy-mirage-deps.mjs",
+    "build": "vite build && node scripts/copy-server-deps.mjs",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/scripts/migrate.ts",
     "backfill:personal-orgs": "node --env-file-if-exists=.env --import tsx src/scripts/backfill-personal-orgs.ts",
     "preview": "vite preview",
