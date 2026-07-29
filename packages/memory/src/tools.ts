@@ -46,6 +46,9 @@ export function memorySearchTool<P>(
       "Search your long-term episodic memory (notes from past sessions plus archived facts). " +
       "Use it when the conversation touches something you may already know — a preference, " +
       "an earlier decision, an ongoing issue — before asking the user to repeat themselves. " +
+      "Phrase the query in the vocabulary of your memory index (in your instructions) rather " +
+      "than the user's wording — search is keyword-based, so the index's exact terms and " +
+      "aliases match best. " +
       "Each hit carries matchedOn evidence (alias-exact | description | body) and the response " +
       "carries create_safety — consult it before creating anything with memory_save.",
     inputSchema: jsonSchema<{ query: string; limit?: number }>({
@@ -250,8 +253,10 @@ export function memoryWriteEpisodeTool<P>(
           type: "array",
           items: { type: "string" },
           description:
-            "Alternate names/spellings/nicknames of entities the facts mention " +
-            "(e.g. ['Robert Smith', 'Bob']) so later recall matches any form.",
+            "Alternate lookup terms for the facts: names/spellings/nicknames of entities " +
+            "(e.g. ['Robert Smith', 'Bob']) plus everyday recall keys when a fact's own " +
+            "wording is technical or unusual (e.g. 'coffee' for a caffeine rule) — so " +
+            "later keyword recall matches any form.",
         },
       },
       required: ["slug", "summary", "facts"],
