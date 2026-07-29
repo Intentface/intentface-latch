@@ -54,7 +54,11 @@ export interface ParsedIndex {
   malformed: string[];
 }
 
-const ENTRY_RE = /^\s*-\s*\[(m-[0-9a-f]{4,8})\]\s*\(([^)]*)\)\s*(.*)$/;
+// Id charset is deliberately wider than what `mintMemoryId` produces (hex):
+// the consolidator model mints ids itself and "hex-looking" ids like m-g8d7e9
+// are common. Ids are opaque keys — uniqueness matters, the alphabet doesn't,
+// and rejecting them sends the model into pointless rewrite loops.
+const ENTRY_RE = /^\s*-\s*\[(m-[0-9a-z]{4,8})\]\s*\(([^)]*)\)\s*(.*)$/;
 const PROVENANCES = new Set(["user-said", "tool-derived", "user-requested", "mixed"]);
 
 export function parseIndex(text: string): ParsedIndex {
@@ -89,7 +93,9 @@ export function parseIndex(text: string): ParsedIndex {
     const supersededPart = tailParts.find((p) => /^superseded\b/i.test(p));
     if (supersededPart) {
       const sd = /(\d{4}-\d{2}-\d{2})/.exec(supersededPart)?.[1];
-      const by = /by\s+(m-[0-9a-f]{4,8})/i.exec(supersededPart)?.[1];
+      // Bounded lookahead: an overlong id (m-abcdefghi) must not silently
+      // truncate into a valid-looking — but wrong — supersession pointer.
+      const by = /\bby\s+(m-[0-9a-z]{4,8})(?![0-9A-Za-z])/.exec(supersededPart)?.[1];
       superseded = { date: sd, by };
     }
     const akaPart = tailParts.find((p) => /^aka\s*:/i.test(p));
@@ -160,7 +166,10 @@ export function validateIndexRewrite(prev: string | undefined, next: string): st
     );
   }
   for (const line of parsed.malformed) {
-    problems.push(`malformed entry line: "${line}"`);
+    problems.push(
+      `malformed entry line (expected \`- [m-<4-8 lowercase letters/digits>] ` +
+        `(<YYYY-MM-DD>, <provenance>) <fact> ← <sources>\`): "${line}"`,
+    );
   }
   const seen = new Set<string>();
   for (const e of parsed.entries) {
@@ -194,5 +203,5 @@ export function mintMemoryId(taken: ReadonlySet<string>): string {
 
 /** All `[m-…]` ids referenced in a blob of text (for usage tracking). */
 export function memoryIdsIn(text: string): string[] {
-  return Array.from(new Set(Array.from(text.matchAll(/\[(m-[0-9a-f]{4,8})\]/g), (m) => m[1])));
+  return Array.from(new Set(Array.from(text.matchAll(/\[(m-[0-9a-z]{4,8})\]/g), (m) => m[1])));
 }
