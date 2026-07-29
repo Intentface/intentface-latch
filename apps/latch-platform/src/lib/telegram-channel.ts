@@ -5,6 +5,7 @@ import { isOrgMember } from "./auth";
 import { telegramVaultKeys, type TelegramBot } from "./telegram-store";
 import { buildTelegramLinkUrl } from "./telegram-link";
 import { baseUrl } from "./base-url";
+import { transcribeAudio } from "./transcribe";
 import type { Principal } from "./session";
 
 /**
@@ -40,6 +41,10 @@ export async function getTelegramChannelForBot(botId: string) {
       loadHistory: (i) => runtime.loadHistory(i),
     },
     waitUntil: (p) => waitUntil(p),
+    // Voice/audio messages reach the agent as transcribed text (ElevenLabs).
+    transcribe: ({ bytes, mediaType, filename }) =>
+      // fresh copy pins the buffer type to ArrayBuffer (BlobPart rejects ArrayBufferLike)
+      transcribeAudio({ audio: new Blob([new Uint8Array(bytes)], { type: mediaType }), filename }),
     seen: (key) => telegramStore.seenDelivery(key),
     claimTurn: (chatId) => telegramStore.claimTurn(chatId),
     releaseTurn: (chatId, token) => telegramStore.releaseTurn(chatId, token),

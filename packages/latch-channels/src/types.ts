@@ -76,6 +76,18 @@ export interface ChannelRunOps<P> {
   loadHistory(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
 }
 
+/**
+ * Host-provided speech-to-text for inbound voice/audio messages. Channels call
+ * it with the downloaded audio and put the returned transcript in the user
+ * message as text (the audio itself is never sent to the model — chat models
+ * generally don't accept audio input). Throws on failure.
+ */
+export type TranscribeAudio = (audio: {
+  bytes: Uint8Array;
+  mediaType: string;
+  filename: string;
+}) => Promise<string>;
+
 /** A tool-name → approval policy view, for rendering an agent's capabilities. */
 export interface ToolCapability {
   name: string;

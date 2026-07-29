@@ -1,5 +1,5 @@
 import type { AppMessage } from "@intentface/latch-core";
-import type { ChannelRunOps } from "../types.js";
+import type { ChannelRunOps, TranscribeAudio } from "../types.js";
 import { consumeRun, pendingApprovals } from "../render.js";
 import { telegramApi, type TelegramApiOptions, type TelegramToken } from "./api.js";
 import { verifyTelegramSecretToken } from "./verify.js";
@@ -22,6 +22,8 @@ import { escapeHtml } from "./html.js";
 /** ~10 MB — files above this are skipped with a note (Telegram's own bot download cap is 20 MB). */
 const MAX_INLINE_FILE_BYTES = 10 * 1024 * 1024;
 const STILL_WORKING_MESSAGE = "I am still working on the previous message in this chat.";
+const TRANSCRIBE_FAILED_MESSAGE =
+  "⚠️ Couldn't transcribe your voice message — please try again or type it instead.";
 
 export interface TelegramAuthResult<P> {
   allowed: boolean;
@@ -84,6 +86,13 @@ export interface TelegramChannelConfig<P> {
     connectionName: string,
     ctx: { chatId: string; telegramUserId: string; approvalId: string },
   ) => string;
+  /**
+   * Host-provided speech-to-text. When set, inbound voice/audio messages are
+   * transcribed and reach the agent as `[Voice message]: <transcript>` text —
+   * the audio itself never becomes a file part (chat models generally reject
+   * audio input). Without it, voice-only messages get a friendly refusal.
+   */
+  transcribe?: TranscribeAudio;
   /** Keep a serverless function alive after the fast ACK (Vercel: `waitUntil`). */
   waitUntil?: (p: Promise<unknown>) => void;
   /** Test seam: base URL / fetch for the Bot API client. */
@@ -300,34 +309,67 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
   }): Promise<void> {
     const chatId = chatIdFor(ctx.telegramUserId);
 
-    // Media → inline data-URL file parts (≤10 MB each); oversized listed in a note.
+    // Media → inline data-URL file parts (≤10 MB each); oversized listed in a
+    // note. Audio is the exception: it's transcribed to text (never a file
+    // part) because the agent's chat model can't be assumed to accept audio.
     const fileParts: { type: "file"; mediaType: string; filename: string; url: string }[] = [];
+    const transcripts: string[] = [];
     const skipped: string[] = [];
+    const failedAudio: string[] = [];
     for (const m of ctx.media ?? []) {
+      const isAudio = m.mediaType.startsWith("audio/");
+      const markFailed = () => (isAudio ? failedAudio : skipped).push(m.name);
+      if (isAudio && !config.transcribe) {
+        markFailed();
+        continue;
+      }
       if ((m.ref.file_size ?? 0) > MAX_INLINE_FILE_BYTES) {
-        skipped.push(m.name);
+        markFailed();
         continue;
       }
       try {
         const { filePath, fileSize } = await api.getFile(m.ref.file_id);
         if (!filePath || (fileSize ?? 0) > MAX_INLINE_FILE_BYTES) {
-          skipped.push(m.name);
+          markFailed();
           continue;
         }
         const bytes = await api.downloadFile(filePath);
-        fileParts.push({
-          type: "file",
-          mediaType: m.mediaType,
-          filename: m.name,
-          url: `data:${m.mediaType};base64,${Buffer.from(bytes).toString("base64")}`,
-        });
+        if (isAudio) {
+          const transcript = (
+            await config.transcribe!({ bytes, mediaType: m.mediaType, filename: m.name })
+          ).trim();
+          if (!transcript) {
+            failedAudio.push(m.name);
+            continue;
+          }
+          transcripts.push(`[Voice message]: ${transcript}`);
+        } else {
+          fileParts.push({
+            type: "file",
+            mediaType: m.mediaType,
+            filename: m.name,
+            url: `data:${m.mediaType};base64,${Buffer.from(bytes).toString("base64")}`,
+          });
+        }
       } catch (e) {
-        console.error(`[telegram] file download failed (${m.name}):`, e);
-        skipped.push(m.name);
+        console.error(`[telegram] media processing failed (${m.name}):`, e);
+        markFailed();
       }
     }
 
-    let text = ctx.text;
+    let text = [ctx.text, ...transcripts].filter(Boolean).join("\n\n");
+    // A voice message that produced nothing usable: tell the sender instead of
+    // running a turn the agent would have no content to answer.
+    if (failedAudio.length && !text && fileParts.length === 0) {
+      await api
+        .sendMessage({ chat_id: ctx.telegramChatId, text: TRANSCRIBE_FAILED_MESSAGE })
+        .catch(() => {});
+      return;
+    }
+    if (failedAudio.length) {
+      const note = `[A voice/audio message could not be transcribed: ${failedAudio.join(", ")}]`;
+      text = text ? `${text}\n\n${note}` : note;
+    }
     if (skipped.length) {
       const note = `[Some attached files could not be included (too large or unavailable): ${skipped.join(", ")}]`;
       text = text ? `${text}\n\n${note}` : note;
