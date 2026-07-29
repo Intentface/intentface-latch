@@ -39,7 +39,11 @@ function harness(overrides: Partial<TelegramChannelConfig<{ userId: string }>> =
     const method = String(url).split("/").pop()!;
     calls.push({ method, body: JSON.parse(String(init?.body ?? "{}")) });
     const result =
-      method === "sendMessage" ? { message_id: 77 } : method === "getFile" ? {} : true;
+      method === "sendMessage"
+        ? { message_id: 77 }
+        : method === "getFile"
+          ? { file_path: "files/f1.bin", file_size: 4 }
+          : true;
     return new Response(JSON.stringify({ ok: true, result }), { status: 200 });
   });
 
@@ -305,5 +309,113 @@ describe("telegramChannel.handleRequest", () => {
     expect(String(settled!.body.text)).toContain("Approved");
     // the continuation stream posted its text
     expect(h.of("sendMessage").some((c) => c.body.text === "Resumed.")).toBe(true);
+  });
+});
+
+describe("telegramChannel voice messages", () => {
+  const voice = { file_id: "v1", file_size: 4, mime_type: "audio/ogg" };
+  const voiceDm = (over: Record<string, unknown> = {}) =>
+    dm("", { text: undefined, voice, ...over });
+
+  const sentMessage = (h: ReturnType<typeof harness>) =>
+    h.runtime.handleChat.mock.calls[0]![0] as { message: AppMessage };
+
+  it("transcribes a voice note into a text part — no file part reaches the agent", async () => {
+    const transcribe = vi.fn(
+      async (_audio: { bytes: Uint8Array; mediaType: string; filename: string }) =>
+        "legs felt great today",
+    );
+    const h = harness({ transcribe });
+    await h.channel.handleRequest(webhookRequest(voiceDm()));
+    await h.flush();
+
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    const arg = transcribe.mock.calls[0]![0];
+    expect(arg.mediaType).toBe("audio/ogg");
+    expect(arg.filename).toBe("voice.ogg");
+    expect(arg.bytes).toBeInstanceOf(Uint8Array);
+
+    const { message } = sentMessage(h);
+    expect(message.parts).toEqual([
+      { type: "text", text: "[Voice message]: legs felt great today" },
+    ]);
+  });
+
+  it("keeps the caption first, transcript after", async () => {
+    const h = harness({ transcribe: async () => "the audio part" });
+    await h.channel.handleRequest(
+      webhookRequest(
+        dm("", {
+          text: undefined,
+          caption: "typed caption",
+          audio: { file_id: "a1", file_size: 4, mime_type: "audio/mpeg" },
+        }),
+      ),
+    );
+    await h.flush();
+
+    const { message } = sentMessage(h);
+    expect(message.parts).toEqual([
+      { type: "text", text: "typed caption\n\n[Voice message]: the audio part" },
+    ]);
+  });
+
+  it("replies with an error and skips the turn when transcription fails on a voice-only message", async () => {
+    const releaseTurn = vi.fn(async () => {});
+    const h = harness({
+      transcribe: async () => {
+        throw new Error("scribe down");
+      },
+      claimTurn: async () => "lease-9",
+      releaseTurn,
+    });
+    await h.channel.handleRequest(webhookRequest(voiceDm()));
+    await h.flush();
+
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(String(h.of("sendMessage")[0]!.body.text)).toContain("Couldn't transcribe");
+    expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-9"); // lease not leaked
+  });
+
+  it("replies with an error when no transcribe hook is configured", async () => {
+    const h = harness();
+    await h.channel.handleRequest(webhookRequest(voiceDm()));
+    await h.flush();
+
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(String(h.of("sendMessage")[0]!.body.text)).toContain("Couldn't transcribe");
+  });
+
+  it("folds a failed transcription into a note when the message has other content", async () => {
+    const h = harness({
+      transcribe: async () => {
+        throw new Error("scribe down");
+      },
+    });
+    await h.channel.handleRequest(webhookRequest(voiceDm({ caption: "also this text" })));
+    await h.flush();
+
+    const { message } = sentMessage(h);
+    expect(message.parts).toEqual([
+      {
+        type: "text",
+        text: "also this text\n\n[A voice/audio message could not be transcribed: voice.ogg]",
+      },
+    ]);
+  });
+
+  it("still inlines non-audio media as file parts (regression)", async () => {
+    const h = harness({ transcribe: async () => "unused" });
+    const photo = [{ file_id: "p1", file_size: 4 }];
+    await h.channel.handleRequest(webhookRequest(dm("", { text: undefined, caption: "look", photo })));
+    await h.flush();
+
+    const { message } = sentMessage(h);
+    expect(message.parts[0]).toEqual({ type: "text", text: "look" });
+    expect(message.parts[1]).toMatchObject({
+      type: "file",
+      mediaType: "image/jpeg",
+      filename: "photo.jpg",
+    });
   });
 });

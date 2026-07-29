@@ -1,20 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { auth } from "@/lib/auth";
+import { transcribeAudio } from "@/lib/transcribe";
 
 /**
  * Voice-message transcription. The client records audio (mic → MediaRecorder),
  * POSTs it here as multipart/form-data, and sends the returned transcript as a
  * normal text chat message — the audio itself is discarded, never stored.
  *
- * ElevenLabs scribe_v2, chosen over gpt-4o-transcribe in a head-to-head:
- * accuracy tied on Finnish + English, but scribe keeps strict verbatim
- * (fillers preserved — hesitation is signal for an interview agent), tags
- * audio events like (laughs), and takes `keyterms` to bias proper nouns.
- * Language is auto-detected per clip (a single language_code would break
- * bilingual use). Called via raw fetch — one endpoint, no SDK dependency.
+ * The ElevenLabs call itself lives in lib/transcribe.ts, shared with the
+ * Telegram channel's voice-message hook.
  */
-const SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text";
-const SCRIBE_MODEL = "scribe_v2";
 
 // Vercel serverless caps request bodies at ~4.5MB; the client records Opus/AAC
 // at 48kbps so a full 10-minute message stays under this (~3.6MB).
@@ -31,8 +26,9 @@ export const Route = createFileRoute("/api/transcribe")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const apiKey = process.env.ELEVEN_LABS_API_KEY;
-        if (!apiKey) return json(502, { error: "transcription is not configured" });
+        if (!process.env.ELEVEN_LABS_API_KEY) {
+          return json(502, { error: "transcription is not configured" });
+        }
 
         const session = await auth.api.getSession({ headers: request.headers });
         if (!session) return json(401, { error: "unauthorized" });
@@ -57,37 +53,12 @@ export const Route = createFileRoute("/api/transcribe")({
           return json(400, { error: "invalid duration" });
         }
 
-        const scribe = new FormData();
-        scribe.append("model_id", SCRIBE_MODEL);
-        scribe.append("file", audio, "voice-message");
-        scribe.append("tag_audio_events", "true"); // (laughs) etc. — delivery nuance
-        scribe.append("temperature", "0");
-        for (const term of keyterms) scribe.append("keyterms", term);
-
-        // Bound the upstream call — a stalled ElevenLabs response must fail the
-        // request, not hang the serverless invocation until the platform timeout.
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 60_000);
         try {
-          const res = await fetch(SCRIBE_URL, {
-            method: "POST",
-            headers: { "xi-api-key": apiKey },
-            body: scribe,
-            signal: controller.signal,
-          });
-          if (!res.ok) {
-            console.error("transcription failed:", res.status, (await res.text()).slice(0, 300));
-            return json(502, { error: "transcription failed — try again" });
-          }
-          const result = (await res.json()) as { text?: string };
-          const text = result.text?.trim();
-          if (!text) return json(502, { error: "transcription came back empty" });
+          const text = await transcribeAudio({ audio, keyterms });
           return json(200, { text, durationMs });
         } catch (e) {
           console.error("transcription failed:", e);
           return json(502, { error: "transcription failed — try again" });
-        } finally {
-          clearTimeout(timeout);
         }
       },
     },
