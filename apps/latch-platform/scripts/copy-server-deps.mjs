@@ -31,7 +31,13 @@ const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // imports bare at runtime must either be listed here or bundled via
 // `ssr.noExternal` (see vite.config.ts) — mind Vercel's 250 MB function
 // limit before adding closures here.
-const ROOTS = [{ from: appDir, chain: ["@struktoai/mirage-node"] }];
+const ROOTS = [
+  { from: appDir, chain: ["@struktoai/mirage-node"] },
+  // react/react-dom are runtime-external in BOTH server environments (see
+  // vite.config.ts) so that exactly one copy exists at SSR time — ship it.
+  { from: appDir, chain: ["react"] },
+  { from: appDir, chain: ["react-dom"] },
+];
 
 /** `.pnpm/<id>` store entry that contains a real package dir, or null. */
 function storeEntryOf(realPkgDir) {
