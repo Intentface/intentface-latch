@@ -82,6 +82,13 @@ describe("parseIndex", () => {
     expect(memoryIdsIn(parsed.entries[0]!.raw)).toEqual(["m-g8d7e9"]);
   });
 
+  it("does not truncate an overlong supersession id into a wrong pointer", () => {
+    const [entry] = parseIndex(
+      "- [m-9911aa] (2026-06-02, user-said; superseded 2026-07-20 by m-abcdefghi) Old. ← episodes/old.md",
+    ).entries;
+    expect(entry!.superseded).toMatchObject({ date: "2026-07-20", by: undefined });
+  });
+
   it("ignores prose and headings", () => {
     const parsed = parseIndex("# Title\nsome prose\n- a plain bullet\n");
     expect(parsed.entries).toHaveLength(0);

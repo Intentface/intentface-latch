@@ -93,7 +93,9 @@ export function parseIndex(text: string): ParsedIndex {
     const supersededPart = tailParts.find((p) => /^superseded\b/i.test(p));
     if (supersededPart) {
       const sd = /(\d{4}-\d{2}-\d{2})/.exec(supersededPart)?.[1];
-      const by = /by\s+(m-[0-9a-z]{4,8})/i.exec(supersededPart)?.[1];
+      // Bounded lookahead: an overlong id (m-abcdefghi) must not silently
+      // truncate into a valid-looking — but wrong — supersession pointer.
+      const by = /\bby\s+(m-[0-9a-z]{4,8})(?![0-9A-Za-z])/.exec(supersededPart)?.[1];
       superseded = { date: sd, by };
     }
     const akaPart = tailParts.find((p) => /^aka\s*:/i.test(p));
