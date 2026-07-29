@@ -43,7 +43,9 @@ async function main(): Promise<void> {
       if (code) resolve({ code, state: url.searchParams.get("state") ?? undefined });
       else reject(new Error(`authorization failed: ${error ?? "no code returned"}`));
     });
-    server.listen(REDIRECT_PORT, () => {
+    // Loopback only — this one-shot callback endpoint must not be reachable
+    // from other hosts on the network.
+    server.listen(REDIRECT_PORT, "127.0.0.1", () => {
       console.log(`Authorize the eval client for ${liveUrl()}\n`);
       console.log(`  OPEN THIS URL IN YOUR BROWSER:\n\n  ${started.authorizationUrl}\n`);
       console.log(`waiting for the callback on localhost:${REDIRECT_PORT} …`);

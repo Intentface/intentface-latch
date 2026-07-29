@@ -42,6 +42,14 @@ async function main(): Promise<void> {
     let created = 0;
     let skipped = 0;
     for (const file of fixtures) {
+      // Read-first idempotency: a resolvable path means the file exists —
+      // no parsing of the create tool's error wording for the skip path.
+      const existing = await conn.call("read_file", { fileId: `${dir}/${file}` });
+      if (existing.ok) {
+        skipped++;
+        console.log(`  exists  ${dir}/${file} (skipped)`);
+        continue;
+      }
       const content = readFileSync(path.join(MEMORY_FILES_DIR, file), "utf8");
       const summaryLine =
         content
@@ -56,15 +64,9 @@ async function main(): Promise<void> {
         content,
         summary: summaryLine,
       });
-      if (res.ok) {
-        created++;
-        console.log(`  created ${dir}/${file}`);
-      } else if (/exist/i.test(res.text)) {
-        skipped++;
-        console.log(`  exists  ${dir}/${file} (skipped)`);
-      } else {
-        throw new Error(`creating "${file}" failed: ${res.text}`);
-      }
+      if (!res.ok) throw new Error(`creating "${file}" failed: ${res.text}`);
+      created++;
+      console.log(`  created ${dir}/${file}`);
     }
     console.log(`\nseeded ${created} file(s), ${skipped} already present, of ${fixtures.length}.`);
   } finally {

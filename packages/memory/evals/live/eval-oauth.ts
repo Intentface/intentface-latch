@@ -38,8 +38,10 @@ function createFileVault(): Vault<unknown> {
       ? (JSON.parse(readFileSync(VAULT_PATH, "utf8")) as Record<string, string>)
       : {};
   const save = (data: Record<string, string>): void => {
-    mkdirSync(VAULT_DIR, { recursive: true });
-    writeFileSync(VAULT_PATH, JSON.stringify(data, null, 2), "utf8");
+    mkdirSync(VAULT_DIR, { recursive: true, mode: 0o700 });
+    // mode applies at creation (no default-mode window); chmod covers a file
+    // that already existed with wider permissions.
+    writeFileSync(VAULT_PATH, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
     chmodSync(VAULT_PATH, 0o600);
   };
   return {
