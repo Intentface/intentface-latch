@@ -46,9 +46,9 @@ export function memorySearchTool<P>(
       "Search your long-term episodic memory (notes from past sessions plus archived facts). " +
       "Use it when the conversation touches something you may already know — a preference, " +
       "an earlier decision, an ongoing issue — before asking the user to repeat themselves. " +
-      "Phrase the query in the vocabulary of your memory index (in your instructions) rather " +
-      "than the user's wording — search is keyword-based, so the index's exact terms and " +
-      "aliases match best. " +
+      "Search is keyword-based: prefer the vocabulary of your memory index (in your " +
+      "instructions) — its exact terms and aliases match best — and when no index line " +
+      "obviously matches, keep the user's key words in the query too. " +
       "Each hit carries matchedOn evidence (alias-exact | description | body) and the response " +
       "carries create_safety — consult it before creating anything with memory_save.",
     inputSchema: jsonSchema<{ query: string; limit?: number }>({
