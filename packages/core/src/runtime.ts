@@ -861,7 +861,7 @@ function fireObs<E>(
 function clientErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
   if (!message) return "An error occurred.";
-  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+  return message.length > 500 ? `${message.slice(0, 499)}…` : message;
 }
 
 export function createRuntime<P, RC = unknown>(
