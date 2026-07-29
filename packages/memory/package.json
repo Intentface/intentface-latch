@@ -26,6 +26,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "eval:memory-search": "tsx evals/run.ts",
+    "eval:auth-live": "tsx evals/live/auth.ts",
+    "eval:memory-search:live": "tsx evals/live/run-live.ts",
+    "eval:seed-live": "tsx evals/live/seed.ts",
     "eval:regen-fixtures": "tsx evals/generate.ts"
   },
   "dependencies": {
@@ -35,6 +38,7 @@
     "ai": ">=7.0.0"
   },
   "devDependencies": {
+    "@intentface/latch-mcp": "workspace:*",
     "@types/node": "^22",
     "ai": "^7.0.2",
     "tsx": "^4.19.0",
