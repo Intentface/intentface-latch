@@ -7,7 +7,9 @@ agent and the platform does all upkeep:
    line with date, provenance, and source links) is injected into the system
    prompt every turn, plus standing instructions for the tools.
 2. **Episodic store + recall** — immutable, timestamped episode notes live in
-   the agent's own connection workspace under `_memory/<agent>/<scope>/`;
+   the agent's own connection workspace: per-user scopes under the caller's
+   private root (`__private_root/_memory/<agent|_user>/u-<id>/`), `agent-org`
+   under the shared `_memory/<agent>/org/`;
    the agent searches them on demand with `memory_search` (every recall is
    usage-tracked — the retention signal) and saves explicit "remember this"
    notes with `memory_save`.
@@ -19,6 +21,13 @@ agent and the platform does all upkeep:
 
 - **Scopes** (`agent-user` | `agent-org` | `user`) are hard boundaries: tools
   are path-locked at construction, and consolidation never crosses a scope.
+  Per-user scopes live under the Loredex **private root** (owner-only ACL):
+  `__private_root/_memory/<agent>/u-<id>` for `agent-user`,
+  `__private_root/_memory/_user/u-<id>` for `user`. The `u-<id>` leaf is kept
+  even though the private root is already per-user: it keeps roots globally
+  unique (scope keys stay `${connection}:${root}`) and keeps users' stores
+  apart on a workspace-shared connection, where every caller resolves the
+  same private root.
 - **Non-destructive consolidation**: episodes are immutable; only the index is
   rewritten, every rewrite snapshots the previous version first, and the
   validator rejects any rewrite that silently drops a previously ACTIVE entry
@@ -144,6 +153,11 @@ gap, not to be tuned away.
 
 ## Caveat
 
-On an org-shared connection, per-user scope separation is a **folder
-convention** — anyone with workspace access can read `_memory/**`. Use a
-personal connection where that matters.
+Per-user scopes (`agent-user`, `user`) are stored under the caller's Loredex
+private root (owner-only ACL), which is real privacy **only when the
+connection authenticates as the end user**: on a workspace-shared connection
+every call resolves the connection identity's private root, not the end
+user's — all users' memory then lands in one private root, separated only by
+the `u-<id>` folder convention (as before, but now hidden from the rest of
+the workspace). Use a personal connection where per-user privacy matters.
+`agent-org` memory lives in the shared `_memory/**` tree by design.

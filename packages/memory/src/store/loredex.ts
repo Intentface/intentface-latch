@@ -1,7 +1,7 @@
 import type { ConnectionRegistry } from "@intentface/latch-core";
 import type { EpisodeMeta, MemorySearchHit, MemoryStore, ScopeRef } from "../types.js";
 import { MemoryStoreUnreachableError } from "../types.js";
-import { isUnderScopeRoot } from "../scope.js";
+import { isUnderScopeRoot, LOREDEX_PRIVATE_ROOT } from "../scope.js";
 import {
   IndexValidationError,
   MEMORY_INDEX_FILENAME,
@@ -126,7 +126,12 @@ export function createLoredexStore<P>(opts: {
     const cacheKey = `${scopeKey}:${path}`;
     if (ensuredFolders.has(cacheKey)) return;
     const parts = path.split("/").filter(Boolean);
-    for (let i = 0; i < parts.length; i++) {
+    // The caller's private root always exists (Loredex creates it on join)
+    // and must never be created here — a `create` for that name would mint a
+    // stray SHARED top-level folder shadowing it. Start below it; descendants
+    // then inherit `private` visibility from it.
+    const first = parts[0] === LOREDEX_PRIVATE_ROOT ? 1 : 0;
+    for (let i = first; i < parts.length; i++) {
       const parentId = parts.slice(0, i).join("/") || undefined;
       // "Already exists" comes back as an error — that's the common, fine case.
       await call(names.create, {

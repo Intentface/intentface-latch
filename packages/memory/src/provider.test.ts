@@ -133,7 +133,7 @@ describe("createMemoryProvider", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(onEpisodeWritten).toHaveBeenCalledWith(
       expect.objectContaining({
-        scopeKey: "loredex:_memory/coach/u-u1",
+        scopeKey: "loredex:__private_root/_memory/coach/u-u1",
         agent: "coach",
         connection: "loredex",
       }),
@@ -159,7 +159,7 @@ describe("createMemoryProvider", () => {
     const res = (await tools.memory_search.execute({ query: "x" }, {})) as { hits: unknown[] };
     expect(res.hits).toHaveLength(1);
     await new Promise((r) => setTimeout(r, 0));
-    expect(recordUsage).toHaveBeenCalledWith("loredex:_memory/coach/u-u1", [
+    expect(recordUsage).toHaveBeenCalledWith("loredex:__private_root/_memory/coach/u-u1", [
       "m-aaaaaa",
       "_memory/coach/u-u1/episodes/a.md",
     ]);

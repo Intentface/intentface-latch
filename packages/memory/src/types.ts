@@ -13,7 +13,9 @@ export type Provenance = "user-said" | "tool-derived" | "user-requested" | "mixe
  * - `key` is the canonical scope identity used everywhere outside the store
  *   (DB rows, caches, leases): `${connection}:${root}`.
  * - `root` is the folder inside the connection's workspace, e.g.
- *   `_memory/running-coach/u-usr123`.
+ *   `__private_root/_memory/running-coach/u-usr123` for per-user scopes (the
+ *   `__private_root` head resolves to the authenticated caller's Loredex
+ *   private root) or `_memory/<agent>/org` for `agent-org`.
  */
 export interface ScopeRef {
   key: string;
