@@ -38,6 +38,62 @@ function assertBalanced(model: unknown[]) {
   return { calls, results };
 }
 
+/**
+ * Regression: voice messages ingested before channel-side transcription were
+ * stored as audio/* file parts. Anthropic rejects audio input, so every later
+ * turn in such a chat 500s with AI_UnsupportedFunctionalityError — the
+ * projection must swap the part for a text placeholder.
+ */
+describe("toModelMessages audio file parts", () => {
+  const flatContent = (model: unknown[]) =>
+    (model as { content?: unknown }[]).flatMap((m) =>
+      Array.isArray(m.content) ? (m.content as { type?: string; mediaType?: string; text?: string }[]) : [],
+    );
+
+  it("replaces a stored voice-message file part with a text placeholder", async () => {
+    const model = await toModelMessages([
+      {
+        id: "u1",
+        role: "user",
+        parts: [
+          {
+            type: "file",
+            mediaType: "audio/ogg",
+            filename: "voice.ogg",
+            url: "data:audio/ogg;base64,T2dnUw==",
+          },
+        ],
+      } as never,
+      user("u2", "hello again"),
+    ]);
+    const content = flatContent(model);
+    expect(content.some((c) => c.mediaType?.startsWith("audio/"))).toBe(false);
+    expect(
+      content.some((c) => c.type === "text" && c.text?.includes('voice message ("voice.ogg")')),
+    ).toBe(true);
+  });
+
+  it("leaves non-audio file parts untouched", async () => {
+    const model = await toModelMessages([
+      {
+        id: "u1",
+        role: "user",
+        parts: [
+          { type: "text", text: "look at this" },
+          {
+            type: "file",
+            mediaType: "image/jpeg",
+            filename: "photo.jpg",
+            url: "data:image/jpeg;base64,/9j/4A==",
+          },
+        ],
+      } as never,
+    ]);
+    const content = flatContent(model);
+    expect(content.some((c) => c.mediaType === "image/jpeg" || c.type === "image")).toBe(true);
+  });
+});
+
 describe("toModelMessages dangling-call closure", () => {
   it("closes a buried approved call that never executed", async () => {
     const model = await toModelMessages([

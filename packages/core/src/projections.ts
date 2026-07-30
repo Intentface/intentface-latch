@@ -68,16 +68,44 @@ function closeDanglingToolCalls(messages: AppMessage[]): AppMessage[] {
 }
 
 /**
- * Model projection: drop `sendToModel === false`, close any dangling tool calls,
- * then convert to model messages. (`data-*` parts — e.g. a compaction marker —
- * are dropped by the SDK during conversion, so they never reach the model.)
+ * Replace audio file parts with a text placeholder. Voice messages ingested
+ * before channel-side transcription existed were stored as `audio/*` file
+ * parts, and a chat model without audio input (Anthropic) rejects the whole
+ * prompt — bricking every later turn of that chat. Projection-only — the
+ * stored history keeps the original part.
+ */
+function replaceAudioFileParts(messages: AppMessage[]): AppMessage[] {
+  return messages.map((m) => {
+    const parts = (m as { parts?: Record<string, unknown>[] }).parts;
+    if (!Array.isArray(parts)) return m;
+    let changed = false;
+    const next = parts.map((p) => {
+      const isAudio =
+        p.type === "file" && typeof p.mediaType === "string" && p.mediaType.startsWith("audio/");
+      if (!isAudio) return p;
+      changed = true;
+      const name = typeof p.filename === "string" ? p.filename : "audio";
+      return {
+        type: "text",
+        text: `[A voice message ("${name}") was attached here but could not be included — audio input is not supported.]`,
+      };
+    });
+    return changed ? ({ ...m, parts: next } as AppMessage) : m;
+  });
+}
+
+/**
+ * Model projection: drop `sendToModel === false`, neutralize audio file parts,
+ * close any dangling tool calls, then convert to model messages. (`data-*`
+ * parts — e.g. a compaction marker — are dropped by the SDK during conversion,
+ * so they never reach the model.)
  */
 export async function toModelMessages(
   messages: AppMessage[],
   opts?: { tools?: Record<string, unknown> },
 ): Promise<ModelMessage[]> {
   const forModel = closeDanglingToolCalls(
-    messages.filter((m) => m.metadata?.sendToModel !== false),
+    replaceAudioFileParts(messages.filter((m) => m.metadata?.sendToModel !== false)),
   );
   return convertToModelMessages(forModel as never, (opts ?? {}) as never);
 }
