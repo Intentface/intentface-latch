@@ -20,10 +20,23 @@ export interface StoredConnection {
    * Auth strategy. `bearer`/`header` carry a static token (brokered server-side).
    * `oauth` (MCP only) holds no secret — the per-user tokens come from the
    * interactive OAuth flow and live under the caller's own Vault scope.
+   * `oauth2` (OpenAPI only) is a classic pre-registered authorization-code
+   * client: explicit endpoints + client credentials stored in this encrypted
+   * blob (same trust model as static tokens), while the GRANTS are always
+   * per-user — each caller authorizes with their own account and their tokens
+   * live under their own Vault scope, even for org-shared connections.
    */
   auth?:
     | { kind: "bearer" | "header"; header?: string; token: string }
-    | { kind: "oauth"; scopes?: string[] };
+    | { kind: "oauth"; scopes?: string[] }
+    | {
+        kind: "oauth2";
+        authorizeUrl: string;
+        tokenUrl: string;
+        clientId: string;
+        clientSecret: string;
+        scopes?: string[];
+      };
 }
 
 /** A stored connection plus the scope it lives at (for listing/UI). */

@@ -15,6 +15,7 @@ import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { scopeRefOf } from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
+import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
@@ -30,6 +31,8 @@ import { telegramVaultKeys } from "./telegram-store";
 import { whatsappVaultKeys } from "./whatsapp-store";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
+import type { StoredConnection } from "./connection-store";
+import { assertPublicHttpsUrl } from "./oauth2-flow";
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
@@ -183,17 +186,66 @@ export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async
   const conns = await connectionStore.list(principal);
   // OAuth status for MCP connections (whether the caller has authorized).
   const status = new Map((await dynamic.status(principal)).map((s) => [s.name, s]));
-  // Never return the token to the client — just shape + whether auth is set.
+  // Never return tokens or client secrets to the client — just shape + whether
+  // auth is set. This explicit projection is the ONLY egress for stored
+  // connections; keep it field-by-field (no spreading of the raw blob).
   return conns.map((c) => ({
     name: c.name,
     kind: c.kind,
     scope: c.scope,
     target: c.mcp?.url ?? c.openapi?.spec ?? "",
     hasAuth: c.auth?.kind === "bearer" || c.auth?.kind === "header",
-    oauth: c.auth?.kind === "oauth",
+    oauth: c.auth?.kind === "oauth" || c.auth?.kind === "oauth2",
     authorized: status.get(c.name)?.authorized ?? true,
   }));
 });
+
+/**
+ * One connection's editable config, for prefilling the edit form. Secrets
+ * (static token, oauth2 client secret) stay server-side — the form signals
+ * their presence via the `has*` flags and keeps them unless a replacement is
+ * typed (see the carry-over in `addConnectionFn`).
+ */
+export const getConnectionFn = createServerFn({ method: "GET" })
+  .validator((data: { name: string; scope: "user" | "org" }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { connectionStore } = await getLatch();
+    // Scope-exact lookup — `get()`'s personal-wins precedence would return the
+    // wrong record when a personal connection shadows an org one.
+    const conns = await connectionStore.list(principal);
+    const c = conns.find((x) => x.name === data.name && x.scope === data.scope);
+    if (!c) return null;
+    const auth = c.auth;
+    return {
+      name: c.name,
+      kind: c.kind,
+      scope: c.scope,
+      url: c.mcp?.url,
+      spec: c.openapi?.spec,
+      baseUrl: c.openapi?.baseUrl,
+      operations: c.openapi?.operations?.join(", "),
+      authMode:
+        auth?.kind === "oauth"
+          ? ("oauth" as const)
+          : auth?.kind === "oauth2"
+            ? ("oauth2" as const)
+            : auth
+              ? ("token" as const)
+              : ("none" as const),
+      authHeader: auth?.kind === "header" ? auth.header : undefined,
+      hasToken: auth?.kind === "bearer" || auth?.kind === "header",
+      authorizeUrl: auth?.kind === "oauth2" ? auth.authorizeUrl : undefined,
+      tokenUrl: auth?.kind === "oauth2" ? auth.tokenUrl : undefined,
+      clientId: auth?.kind === "oauth2" ? auth.clientId : undefined,
+      hasClientSecret: auth?.kind === "oauth2",
+      scopes:
+        auth?.kind === "oauth2" || auth?.kind === "oauth"
+          ? auth.scopes?.join(" ")
+          : undefined,
+    };
+  });
 
 /** Add a UI-defined connection (stored encrypted in the Vault at its scope). */
 export const addConnectionFn = createServerFn({ method: "POST" })
@@ -206,28 +258,92 @@ export const addConnectionFn = createServerFn({ method: "POST" })
       spec?: string;
       baseUrl?: string;
       operations?: string;
-      /** MCP only: "oauth" uses the interactive flow (no token); else token/none. */
-      authMode?: "none" | "token" | "oauth";
+      /**
+       * "oauth" (MCP only) uses the interactive discovery flow (no token);
+       * "oauth2" (OpenAPI only) is a pre-registered client — requires the
+       * authorizeUrl/tokenUrl/clientId/clientSecret fields; else token/none.
+       */
+      authMode?: "none" | "token" | "oauth" | "oauth2";
       authHeader?: string;
       token?: string;
+      authorizeUrl?: string;
+      tokenUrl?: string;
+      clientId?: string;
+      clientSecret?: string;
+      /** oauth2: whitespace-separated scope items (a provider's own delimiter, e.g. Strava's commas, survives inside one item). */
+      scopes?: string;
     }) => data,
   )
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
+    // Org-shared connections are called by every member's agents — only
+    // owners/admins may create, overwrite or repoint them.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false, error: "only org admins can manage org-shared connections" };
+    }
     const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
     if (!name) return { ok: false, error: "name required" };
-    const auth =
-      data.kind === "mcp" && data.authMode === "oauth"
-        ? ({ kind: "oauth" } as const)
-        : data.token?.trim()
-          ? {
-              kind: (data.authHeader?.trim() ? "header" : "bearer") as "header" | "bearer",
-              header: data.authHeader?.trim() || undefined,
-              token: data.token.trim(),
-            }
-          : undefined;
     const { connectionStore } = await getLatch();
+    // Add is an upsert by (name, scope) — editing goes through here too. A
+    // blank secret field on an existing connection means "keep the current
+    // secret" (the edit form never sees stored secrets to send them back).
+    const existing = (await connectionStore.list(principal)).find(
+      (c) => c.name === name && c.scope === data.scope,
+    );
+    let auth: StoredConnection["auth"];
+    if (data.authMode === "oauth2") {
+      if (data.kind !== "openapi") {
+        return { ok: false, error: "oauth2 is supported for OpenAPI connections only" };
+      }
+      const authorizeUrl = data.authorizeUrl?.trim();
+      const tokenUrl = data.tokenUrl?.trim();
+      const clientId = data.clientId?.trim();
+      const clientSecret =
+        data.clientSecret?.trim() ||
+        (existing?.auth?.kind === "oauth2" ? existing.auth.clientSecret : undefined);
+      if (!authorizeUrl || !tokenUrl || !clientId || !clientSecret) {
+        return { ok: false, error: "oauth2 requires authorize URL, token URL, client ID and client secret" };
+      }
+      try {
+        await assertPublicHttpsUrl(authorizeUrl);
+        await assertPublicHttpsUrl(tokenUrl);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      const scopes = data.scopes?.split(/\s+/).filter(Boolean);
+      auth = {
+        kind: "oauth2",
+        authorizeUrl,
+        tokenUrl,
+        clientId,
+        clientSecret,
+        scopes: scopes && scopes.length > 0 ? scopes : undefined,
+      };
+    } else if (data.kind === "mcp" && data.authMode === "oauth") {
+      // Keep stored scopes on edit — the form doesn't round-trip them for MCP.
+      auth = {
+        kind: "oauth",
+        scopes: existing?.auth?.kind === "oauth" ? existing.auth.scopes : undefined,
+      };
+    } else if (data.authMode === "none") {
+      auth = undefined; // an explicit "none" clears auth even if a token was typed
+    } else {
+      // Blank token in token mode keeps the stored one (edit).
+      const token =
+        data.token?.trim() ||
+        (data.authMode === "token" &&
+        (existing?.auth?.kind === "bearer" || existing?.auth?.kind === "header")
+          ? existing.auth.token
+          : undefined);
+      auth = token
+        ? {
+            kind: data.authHeader?.trim() ? "header" : "bearer",
+            header: data.authHeader?.trim() || undefined,
+            token,
+          }
+        : undefined;
+    }
     if (data.kind === "mcp") {
       if (!data.url?.trim()) return { ok: false, error: "url required" };
       await connectionStore.add(principal, data.scope, { kind: "mcp", name, mcp: { url: data.url.trim() }, auth });
@@ -257,6 +373,10 @@ export const removeConnectionFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
+    // Same gate as addConnectionFn: org-shared connections are admin-managed.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false };
+    }
     const { connectionStore } = await getLatch();
     await connectionStore.remove(principal, data.scope, data.name);
     return { ok: true };
