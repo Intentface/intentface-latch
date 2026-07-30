@@ -108,10 +108,19 @@ function vettingLookup(base: BaseLookup, allowPrivate: boolean) {
       if (options.all) return callback(null, addrs);
       // Scalar shape: honor a requested family even if the base resolver
       // ignored the forwarded option (real dns.lookup honors it; the contract
-      // on BaseLookup doesn't require it).
-      const pick =
-        (options.family ? addrs.find((a) => a.family === options.family) : undefined) ??
-        addrs[0];
+      // on BaseLookup doesn't require it). No cross-family fallback — handing
+      // back the wrong family is worse than failing, and real dns.lookup
+      // reports ENOTFOUND for a family with no answers.
+      const pick = options.family
+        ? addrs.find((a) => a.family === options.family)
+        : addrs[0];
+      if (!pick) {
+        return callback(
+          new Error(
+            `lookup returned no addresses for family ${options.family}: ${hostname}`,
+          ),
+        );
+      }
       callback(null, pick.address, pick.family);
     });
   };

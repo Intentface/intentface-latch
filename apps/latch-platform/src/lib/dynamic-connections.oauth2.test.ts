@@ -163,10 +163,14 @@ describe("dynamic oauth2 OpenAPI connections", () => {
     expect((apiCall.init?.headers as Record<string, string>).Authorization).toBe(
       "Bearer at-live",
     );
-    // Wiring assertion: the spec download and the tool call must go through
-    // the DNS-pinned fetch — a dropped `fetch:` option in dynamic-connections
-    // would fall back to global fetch and pass every other test here.
-    expect(pinnedFetchMock).toHaveBeenCalled();
+    // Wiring assertion: BOTH outbound boundaries must go through the
+    // DNS-pinned fetch. Each is asserted separately — a dropped `fetch:`
+    // option on either the spec download or the tool request falls back to
+    // global fetch, which the mock aliases to, so every other assertion here
+    // would still pass.
+    const pinnedUrls = pinnedFetchMock.mock.calls.map(([input]) => String(input));
+    expect(pinnedUrls).toContain(SPEC_URL);
+    expect(pinnedUrls.some((u) => u.startsWith(`${API_BASE}/athlete`))).toBe(true);
     await opened.close();
   });
 

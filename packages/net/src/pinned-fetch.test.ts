@@ -168,6 +168,19 @@ describe("plumbing", () => {
     });
     expect(await rejection(pf("http://api.example/"))).toMatch(/192\.168\.1\.5/);
   });
+
+  it("never falls back across address families in the scalar shape", async () => {
+    // family 4 requested, resolver (ignoring the option) answers v6 only:
+    // erroring beats handing net.connect a mismatched-family address.
+    const pf = pinned({
+      allowPrivate: true,
+      lookup: tableLookup({ "pinned-test.example": [A("2606:2800:220:1::1", 6)] }),
+      connect: { autoSelectFamily: false, family: 4 },
+    });
+    expect(await rejection(pf("http://pinned-test.example/"))).toMatch(
+      /no addresses for family 4/,
+    );
+  });
 });
 
 describe("TLS validates against the original hostname", () => {
