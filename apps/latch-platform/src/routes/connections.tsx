@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { Braces, KeyRound, Plug, Plus, Trash2 } from "lucide-react";
+import { Braces, KeyRound, Pencil, Plug, Plus, Trash2 } from "lucide-react";
 import { Dialog } from "@intentface/latch-ui";
 import { cn } from "@/lib/utils";
 import {
@@ -9,6 +9,7 @@ import {
   connectionKeysFn,
   setConnectionKeyFn,
   listConnectionsFn,
+  getConnectionFn,
   addConnectionFn,
   removeConnectionFn,
 } from "@/lib/server";
@@ -111,29 +112,47 @@ function Section({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-function AddConnection({ onDone }: { onDone?: () => void }) {
+/** The prefill payload for edit mode — what `getConnectionFn` returns. */
+type EditableConnection = NonNullable<Awaited<ReturnType<typeof getConnectionFn>>>;
+
+function AddConnection({
+  onDone,
+  initial,
+}: {
+  onDone?: () => void;
+  /** When set, the form edits this connection: name/kind/scope are fixed and blank secrets keep the stored ones. */
+  initial?: EditableConnection;
+}) {
   const router = useRouter();
-  const [kind, setKind] = useState<"mcp" | "openapi">("openapi");
-  const [scope, setScope] = useState<"user" | "org">("user");
-  const [name, setName] = useState("");
-  const [target, setTarget] = useState(""); // url (mcp) or spec url (openapi)
-  const [baseUrl, setBaseUrl] = useState("");
-  const [operations, setOperations] = useState("");
-  const [mcpAuth, setMcpAuth] = useState<"none" | "token" | "oauth">("token");
-  const [apiAuth, setApiAuth] = useState<"none" | "token" | "oauth2">("token");
-  const [authHeader, setAuthHeader] = useState("");
-  const [token, setToken] = useState("");
-  const [authorizeEndpoint, setAuthorizeUrl] = useState("");
-  const [tokenEndpoint, setTokenUrl] = useState("");
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [scopes, setScopes] = useState("");
+  const editing = initial != null;
+  const [kind, setKind] = useState<"mcp" | "openapi">(initial?.kind ?? "openapi");
+  const [scope, setScope] = useState<"user" | "org">(initial?.scope ?? "user");
+  const [name, setName] = useState(initial?.name ?? "");
+  // url (mcp) or spec url (openapi)
+  const [target, setTarget] = useState(initial?.url ?? initial?.spec ?? "");
+  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? "");
+  const [operations, setOperations] = useState(initial?.operations ?? "");
+  const [mcpAuth, setMcpAuth] = useState<"none" | "token" | "oauth">(
+    initial?.kind === "mcp" && initial.authMode !== "oauth2" ? initial.authMode : "token",
+  );
+  const [apiAuth, setApiAuth] = useState<"none" | "token" | "oauth2">(
+    initial?.kind === "openapi" && initial.authMode !== "oauth" ? initial.authMode : "token",
+  );
+  const [authHeader, setAuthHeader] = useState(initial?.authHeader ?? "");
+  const [token, setToken] = useState(""); // never prefilled — secrets stay server-side
+  const [authorizeEndpoint, setAuthorizeUrl] = useState(initial?.authorizeUrl ?? "");
+  const [tokenEndpoint, setTokenUrl] = useState(initial?.tokenUrl ?? "");
+  const [clientId, setClientId] = useState(initial?.clientId ?? "");
+  const [clientSecret, setClientSecret] = useState(""); // never prefilled
+  const [scopes, setScopes] = useState(initial?.scopes ?? "");
   // Interactive OAuth has no static secret; the token row is irrelevant then.
   const oauth2Mode = kind === "openapi" && apiAuth === "oauth2";
   const oauthMode = (kind === "mcp" && mcpAuth === "oauth") || oauth2Mode;
+  // A blank secret is fine when editing a connection that already has one.
+  const secretOk = clientSecret.trim() !== "" || (editing && initial.hasClientSecret);
   const oauth2Missing =
     oauth2Mode &&
-    !(authorizeEndpoint.trim() && tokenEndpoint.trim() && clientId.trim() && clientSecret.trim());
+    !(authorizeEndpoint.trim() && tokenEndpoint.trim() && clientId.trim() && secretOk);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -187,31 +206,44 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
 
   return (
     <form className="space-y-2" onSubmit={submit}>
-      <div className="flex gap-2">
-            <Select value={kind} onChange={(e) => setKind(e.target.value as never)}>
-              <option value="openapi">OpenAPI</option>
-              <option value="mcp">MCP</option>
-            </Select>
-            <RichSelect
-              value={scope}
-              onValueChange={(v) => setScope(v as "user" | "org")}
-              className="min-w-[8rem]"
-              options={[
-                {
-                  value: "user",
-                  label: "Personal",
-                  description: "Only you can see and use this connection, with your own token.",
-                },
-                {
-                  value: "org",
-                  label: "Org",
-                  description: "Everyone in your org can use it — one shared token, or per-user with OAuth.",
-                },
-              ]}
-            />
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
-          </div>
-          <p className="text-ink-tertiary text-xs">{scopeHelp}</p>
+      {editing ? (
+            // Identity is fixed while editing — the store upserts by (name, scope),
+            // so changing either would create a second connection instead.
+            <p className="text-ink-secondary text-sm">
+              <span className="font-medium">{name}</span>
+              <span className="text-ink-tertiary">
+                {" "}· {kind.toUpperCase()} · {scope === "org" ? "org" : "personal"}
+              </span>
+            </p>
+          ) : (
+            <>
+              <div className="flex gap-2">
+                <Select value={kind} onChange={(e) => setKind(e.target.value as never)}>
+                  <option value="openapi">OpenAPI</option>
+                  <option value="mcp">MCP</option>
+                </Select>
+                <RichSelect
+                  value={scope}
+                  onValueChange={(v) => setScope(v as "user" | "org")}
+                  className="min-w-[8rem]"
+                  options={[
+                    {
+                      value: "user",
+                      label: "Personal",
+                      description: "Only you can see and use this connection, with your own token.",
+                    },
+                    {
+                      value: "org",
+                      label: "Org",
+                      description: "Everyone in your org can use it — one shared token, or per-user with OAuth.",
+                    },
+                  ]}
+                />
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
+              </div>
+              <p className="text-ink-tertiary text-xs">{scopeHelp}</p>
+            </>
+          )}
           <Input
             value={target}
             onChange={(e) => setTarget(e.target.value)}
@@ -278,7 +310,11 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
                   type="password"
                   value={clientSecret}
                   onChange={(e) => setClientSecret(e.target.value)}
-                  placeholder="client secret"
+                  placeholder={
+                    editing && initial.hasClientSecret
+                      ? "client secret (blank = keep current)"
+                      : "client secret"
+                  }
                 />
                 <Input
                   value={scopes}
@@ -300,7 +336,11 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
                 type="password"
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder="token / API key (optional)"
+                placeholder={
+                  editing && initial.hasToken
+                    ? "token / API key (blank = keep current)"
+                    : "token / API key (optional)"
+                }
               />
             </div>
           )}
@@ -316,7 +356,7 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
         className="w-full"
         disabled={busy || !name.trim() || !target.trim() || oauth2Missing}
       >
-        Add connection
+        {editing ? "Save changes" : "Add connection"}
       </Button>
     </form>
   );
@@ -337,6 +377,22 @@ function DynamicCard({
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editInitial, setEditInitial] = useState<EditableConnection | null>(null);
+  async function openEdit() {
+    setBusy(true);
+    try {
+      const c = await getConnectionFn({
+        data: { name: conn.name, scope: conn.scope as "user" | "org" },
+      });
+      if (c) {
+        setEditInitial(c);
+        setEditOpen(true);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
   async function remove() {
     setBusy(true);
     await removeConnectionFn({ data: { name: conn.name, scope: conn.scope as "user" | "org" } });
@@ -392,11 +448,32 @@ function DynamicCard({
                 Connect
               </Button>
             ))}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={openEdit} aria-label="Edit">
+            <Pencil className="size-4" />
+          </Button>
           <Button size="sm" variant="ghost" disabled={busy} onClick={remove} aria-label="Delete">
             <Trash2 className="size-4" />
           </Button>
         </div>
       </CardContent>
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <Dialog.Content className="max-w-md">
+          <Dialog.Title>Edit connection</Dialog.Title>
+          <Dialog.Description>
+            Name, kind and scope are fixed. Secret fields left blank keep the stored value.
+          </Dialog.Description>
+          <div className="mt-4">
+            {editInitial && (
+              // Remount per open so stale form state never leaks between edits.
+              <AddConnection
+                key={`${editInitial.scope}:${editInitial.name}:${editOpen}`}
+                initial={editInitial}
+                onDone={() => setEditOpen(false)}
+              />
+            )}
+          </div>
+        </Dialog.Content>
+      </Dialog>
     </Card>
   );
 }
