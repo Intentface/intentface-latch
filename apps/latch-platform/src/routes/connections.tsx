@@ -120,10 +120,20 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
   const [baseUrl, setBaseUrl] = useState("");
   const [operations, setOperations] = useState("");
   const [mcpAuth, setMcpAuth] = useState<"none" | "token" | "oauth">("token");
+  const [apiAuth, setApiAuth] = useState<"none" | "token" | "oauth2">("token");
   const [authHeader, setAuthHeader] = useState("");
   const [token, setToken] = useState("");
-  // OAuth has no static secret; the token row is irrelevant then.
-  const oauthMode = kind === "mcp" && mcpAuth === "oauth";
+  const [authorizeEndpoint, setAuthorizeUrl] = useState("");
+  const [tokenEndpoint, setTokenUrl] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [scopes, setScopes] = useState("");
+  // Interactive OAuth has no static secret; the token row is irrelevant then.
+  const oauth2Mode = kind === "openapi" && apiAuth === "oauth2";
+  const oauthMode = (kind === "mcp" && mcpAuth === "oauth") || oauth2Mode;
+  const oauth2Missing =
+    oauth2Mode &&
+    !(authorizeEndpoint.trim() && tokenEndpoint.trim() && clientId.trim() && clientSecret.trim());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -139,7 +149,7 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !target.trim() || busy) return;
+    if (!name.trim() || !target.trim() || oauth2Missing || busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -152,9 +162,14 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
           spec: kind === "openapi" ? target : undefined,
           baseUrl: baseUrl || undefined,
           operations: operations || undefined,
-          authMode: kind === "mcp" ? mcpAuth : undefined,
+          authMode: kind === "mcp" ? mcpAuth : apiAuth,
           authHeader: oauthMode ? undefined : authHeader || undefined,
           token: oauthMode ? undefined : token || undefined,
+          authorizeUrl: oauth2Mode ? authorizeEndpoint : undefined,
+          tokenUrl: oauth2Mode ? tokenEndpoint : undefined,
+          clientId: oauth2Mode ? clientId : undefined,
+          clientSecret: oauth2Mode ? clientSecret : undefined,
+          scopes: oauth2Mode ? scopes || undefined : undefined,
         },
       });
       if (!res.ok) {
@@ -162,6 +177,7 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
         return;
       }
       setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
+      setAuthorizeUrl(""); setTokenUrl(""); setClientId(""); setClientSecret(""); setScopes("");
       await router.invalidate();
       onDone?.();
     } finally {
@@ -222,6 +238,56 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
               />
             </label>
           )}
+          {kind === "openapi" && (
+            <label className="text-muted-foreground flex items-center gap-2 text-xs">
+              Authentication
+              <RichSelect
+                value={apiAuth}
+                onValueChange={(v) => setApiAuth(v as "none" | "token" | "oauth2")}
+                className="min-w-[11rem]"
+                options={[
+                  { value: "token", label: "Token / API key", description: "Static token (org = one shared key)" },
+                  { value: "oauth2", label: "OAuth2 app", description: "Pre-registered client — authorize in browser (per-user tokens)" },
+                  { value: "none", label: "None", description: "No authentication" },
+                ]}
+              />
+            </label>
+          )}
+          {oauth2Mode && (
+            <>
+              <div className="flex gap-2">
+                <Input
+                  value={authorizeEndpoint}
+                  onChange={(e) => setAuthorizeUrl(e.target.value)}
+                  placeholder="authorize URL (e.g. https://www.strava.com/oauth/authorize)"
+                />
+                <Input
+                  value={tokenEndpoint}
+                  onChange={(e) => setTokenUrl(e.target.value)}
+                  placeholder="token URL (e.g. https://www.strava.com/oauth/token)"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  className="max-w-[12rem]"
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  placeholder="client ID"
+                />
+                <Input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  placeholder="client secret"
+                />
+                <Input
+                  value={scopes}
+                  onChange={(e) => setScopes(e.target.value)}
+                  placeholder="scopes (space-separated; Strava: read,activity:read_all)"
+                />
+              </div>
+            </>
+          )}
           {!oauthMode && (
             <div className="flex gap-2">
               <Input
@@ -245,7 +311,11 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
             </p>
           )}
           {error && <p className="text-destructive text-sm">{error}</p>}
-      <Button type="submit" className="w-full" disabled={busy || !name.trim() || !target.trim()}>
+      <Button
+        type="submit"
+        className="w-full"
+        disabled={busy || !name.trim() || !target.trim() || oauth2Missing}
+      >
         Add connection
       </Button>
     </form>

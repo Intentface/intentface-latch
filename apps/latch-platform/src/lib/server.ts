@@ -30,6 +30,8 @@ import { telegramVaultKeys } from "./telegram-store";
 import { whatsappVaultKeys } from "./whatsapp-store";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
+import type { StoredConnection } from "./connection-store";
+import { assertPublicHttpsUrl } from "./oauth2-flow";
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
@@ -183,14 +185,16 @@ export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async
   const conns = await connectionStore.list(principal);
   // OAuth status for MCP connections (whether the caller has authorized).
   const status = new Map((await dynamic.status(principal)).map((s) => [s.name, s]));
-  // Never return the token to the client — just shape + whether auth is set.
+  // Never return tokens or client secrets to the client — just shape + whether
+  // auth is set. This explicit projection is the ONLY egress for stored
+  // connections; keep it field-by-field (no spreading of the raw blob).
   return conns.map((c) => ({
     name: c.name,
     kind: c.kind,
     scope: c.scope,
     target: c.mcp?.url ?? c.openapi?.spec ?? "",
     hasAuth: c.auth?.kind === "bearer" || c.auth?.kind === "header",
-    oauth: c.auth?.kind === "oauth",
+    oauth: c.auth?.kind === "oauth" || c.auth?.kind === "oauth2",
     authorized: status.get(c.name)?.authorized ?? true,
   }));
 });
@@ -206,10 +210,20 @@ export const addConnectionFn = createServerFn({ method: "POST" })
       spec?: string;
       baseUrl?: string;
       operations?: string;
-      /** MCP only: "oauth" uses the interactive flow (no token); else token/none. */
-      authMode?: "none" | "token" | "oauth";
+      /**
+       * "oauth" (MCP only) uses the interactive discovery flow (no token);
+       * "oauth2" (OpenAPI only) is a pre-registered client — requires the
+       * authorizeUrl/tokenUrl/clientId/clientSecret fields; else token/none.
+       */
+      authMode?: "none" | "token" | "oauth" | "oauth2";
       authHeader?: string;
       token?: string;
+      authorizeUrl?: string;
+      tokenUrl?: string;
+      clientId?: string;
+      clientSecret?: string;
+      /** oauth2: whitespace-separated scope items (a provider's own delimiter, e.g. Strava's commas, survives inside one item). */
+      scopes?: string;
     }) => data,
   )
   .handler(async ({ data }) => {
@@ -217,16 +231,45 @@ export const addConnectionFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false, error: "unauthorized" };
     const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
     if (!name) return { ok: false, error: "name required" };
-    const auth =
-      data.kind === "mcp" && data.authMode === "oauth"
-        ? ({ kind: "oauth" } as const)
-        : data.token?.trim()
-          ? {
-              kind: (data.authHeader?.trim() ? "header" : "bearer") as "header" | "bearer",
-              header: data.authHeader?.trim() || undefined,
-              token: data.token.trim(),
-            }
-          : undefined;
+    let auth: StoredConnection["auth"];
+    if (data.authMode === "oauth2") {
+      if (data.kind !== "openapi") {
+        return { ok: false, error: "oauth2 is supported for OpenAPI connections only" };
+      }
+      const authorizeUrl = data.authorizeUrl?.trim();
+      const tokenUrl = data.tokenUrl?.trim();
+      const clientId = data.clientId?.trim();
+      const clientSecret = data.clientSecret?.trim();
+      if (!authorizeUrl || !tokenUrl || !clientId || !clientSecret) {
+        return { ok: false, error: "oauth2 requires authorize URL, token URL, client ID and client secret" };
+      }
+      try {
+        await assertPublicHttpsUrl(authorizeUrl);
+        await assertPublicHttpsUrl(tokenUrl);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      const scopes = data.scopes?.split(/\s+/).filter(Boolean);
+      auth = {
+        kind: "oauth2",
+        authorizeUrl,
+        tokenUrl,
+        clientId,
+        clientSecret,
+        scopes: scopes && scopes.length > 0 ? scopes : undefined,
+      };
+    } else {
+      auth =
+        data.kind === "mcp" && data.authMode === "oauth"
+          ? { kind: "oauth" }
+          : data.token?.trim()
+            ? {
+                kind: data.authHeader?.trim() ? "header" : "bearer",
+                header: data.authHeader?.trim() || undefined,
+                token: data.token.trim(),
+              }
+            : undefined;
+    }
     const { connectionStore } = await getLatch();
     if (data.kind === "mcp") {
       if (!data.url?.trim()) return { ok: false, error: "url required" };
