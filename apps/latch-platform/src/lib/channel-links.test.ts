@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildTelegramLinkUrl, verifyTelegramLink } from "./telegram-link";
 import { buildWhatsappLinkUrl, verifyWhatsappLink } from "./whatsapp-link";
 import { buildLinkUrl, verifyLink } from "./slack-link";
+import { renderLinkConfirmPage } from "./channel-link-confirm";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -56,6 +57,23 @@ describe("telegram link tokens", () => {
     // Domain-separated signatures: same (bot, user) must not verify cross-channel.
     const p = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
     expect(verifyWhatsappLink(p.bot, p.user, p.exp, p.sig)).toBe(false);
+  });
+
+  it("binds the display username into the signature", () => {
+    // The username exists only so the confirm page can show "@who" — but it
+    // must be HMAC-covered, or a phisher could relabel their own link with
+    // the victim's handle.
+    const url = buildTelegramLinkUrl("https://x.example", "b1", "5", "klaus");
+    const u = new URL(url);
+    expect(u.searchParams.get("un")).toBe("klaus");
+    const p = parts(url);
+    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig, "klaus")).toBe(true);
+    // Stripping or swapping the username invalidates the link.
+    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig)).toBe(false);
+    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig, "aleksi")).toBe(false);
+    // And a username-less link stays verifiable without one (back-compat shape).
+    const bare = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
+    expect(verifyTelegramLink(bare.bot, bare.user, bare.exp, bare.sig)).toBe(true);
   });
 });
 
@@ -117,6 +135,38 @@ describe("slack link tokens", () => {
     expect(verifyWhatsappLink("b1", "5", s.exp, s.sig)).toBe(false);
     const t = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
     expect(verifyLink("b1", "5", t.exp, t.sig)).toBe(false);
+  });
+});
+
+describe("link confirmation page", () => {
+  it("shows both identities and only links via POST", async () => {
+    const res = renderLinkConfirmPage({
+      channelLabel: "Telegram",
+      externalIdentity: "@klaus (id 5)",
+      account: { name: "Aleksi", email: "aleksi@example.com" },
+      actionUrl: "/telegram/link?bot=b1&user=5",
+      switchAccountUrl: "/login?next=x",
+    });
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    const html = await res.text();
+    // Both sides of the link are visible — the whole point of the page.
+    expect(html).toContain("@klaus (id 5)");
+    expect(html).toContain("aleksi@example.com");
+    // The mutation is an explicit POST, never the GET that rendered this.
+    expect(html).toMatch(/<form method="post"/);
+  });
+
+  it("escapes attacker-influenced fields", async () => {
+    const res = renderLinkConfirmPage({
+      channelLabel: "Telegram",
+      externalIdentity: `<script>alert(1)</script>`,
+      account: { name: `"><img src=x>` },
+      actionUrl: `/telegram/link?un="><script>`,
+      switchAccountUrl: "/login",
+    });
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).not.toContain(`"><img src=x>`);
   });
 });
 

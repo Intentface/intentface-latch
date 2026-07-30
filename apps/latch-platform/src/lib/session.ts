@@ -30,3 +30,22 @@ export async function getPrincipalFromHeaders(
 export async function getPrincipal(): Promise<Principal | null> {
   return getPrincipalFromHeaders(getRequest().headers);
 }
+
+/**
+ * Principal plus the session user's display identity (name/email). For flows
+ * that bind an EXTERNAL identity to the logged-in account (channel link
+ * confirmations), where the page must show WHO the browser is signed in as —
+ * the whole point is catching a wrong-account session before it links.
+ */
+export async function getSessionUserFromHeaders(
+  headers: Headers,
+): Promise<{ principal: Principal; name?: string; email?: string } | null> {
+  const session = await auth.api.getSession({ headers });
+  if (!session) return null;
+  const orgId = session.session.activeOrganizationId ?? `user:${session.user.id}`;
+  return {
+    principal: { orgId, userId: session.user.id },
+    name: session.user.name ?? undefined,
+    email: session.user.email ?? undefined,
+  };
+}
