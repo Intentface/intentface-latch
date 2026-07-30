@@ -145,12 +145,16 @@ describe("createOAuth2Flow start/finish", () => {
     await f.finish(principal, { code: "auth-code", state });
     expect(await f.isAuthorized(principal)).toBe(true);
 
-    const body = String(fetchMock.mock.calls[0][1]!.body);
+    const init = fetchMock.mock.calls[0][1]!;
+    const body = String(init.body);
     expect(body).toContain("grant_type=authorization_code");
     expect(body).toContain("code=auth-code");
     expect(body).toContain(`code_verifier=${verifier}`);
     expect(body).toContain("client_id=cid-1");
     expect(body).toContain("client_secret=sec-1");
+    // Redirects would replay the secret to an unvetted host; a hung IdP must time out.
+    expect(init.redirect).toBe("error");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
 
     const stored = JSON.parse((await vault.get(principal, TOKENS_KEY))!);
     expect(stored).toMatchObject({ access_token: "at-1", refresh_token: "rt-1" });

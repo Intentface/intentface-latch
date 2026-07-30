@@ -5,20 +5,14 @@ import type {
   ToolSource,
   Vault,
 } from "@intentface/latch-core";
-import {
-  createMcpHost,
-  createMcpOAuth,
-  createOAuthDiscoveryFetch,
-  type McpAuth,
-  type McpOAuth,
-  type ConnectionStatus,
-} from "@intentface/latch-mcp";
+import type { ConnectionStatus, McpAuth, McpOAuth } from "@intentface/latch-mcp";
+import { createMcpHost, createMcpOAuth, createOAuthDiscoveryFetch } from "@intentface/latch-mcp";
+import type { OpenApiAuth } from "@intentface/latch-openapi";
 import {
   bearer as openApiBearer,
   createOpenApiConnections,
   defineOpenApiConnection,
   headers as openApiHeaders,
-  type OpenApiAuth,
 } from "@intentface/latch-openapi";
 import type { Principal } from "./session";
 import type { ConnectionStore, StoredConnection } from "./connection-store";
@@ -83,11 +77,11 @@ function connectTool(name: string) {
 /** A dynamic registry plus the OAuth/status/test surface the handler needs. */
 export interface DynamicConnections extends ConnectionRegistry<Principal> {
   /** The OAuth flow for a UI-added connection (always returns one; only meaningful for oauth MCP / oauth2 OpenAPI). */
-  oauth(name: string): McpOAuth<Principal>;
+  oauth: (name: string) => McpOAuth<Principal>;
   /** Status of the caller's interactive UI-added connections (oauth + authorized). */
-  status(principal: Principal): Promise<ConnectionStatus[]>;
+  status: (principal: Principal) => Promise<ConnectionStatus[]>;
   /** Open one connection and list its namespaced tool names (a connectivity probe). */
-  testTools(name: string, principal: Principal): Promise<string[]>;
+  testTools: (name: string, principal: Principal) => Promise<string[]>;
 }
 
 export function createDynamicConnections(opts: {

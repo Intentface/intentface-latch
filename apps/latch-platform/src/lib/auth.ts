@@ -128,6 +128,22 @@ export async function isOrgMember(userId: string, orgId: string): Promise<boolea
   return res.rows.length > 0;
 }
 
+/**
+ * May the user manage ORG-SHARED resources (org-scoped connections and their
+ * secrets)? Owner/admin only — a regular member must not be able to overwrite
+ * or repoint a connection every teammate's agents call. The `user:<id>`
+ * personal tenant is its owner's by construction.
+ */
+export async function isOrgAdmin(userId: string, orgId: string): Promise<boolean> {
+  if (orgId === `user:${userId}`) return true;
+  const res = await db.execute({
+    sql: `SELECT role FROM member WHERE userId = ? AND organizationId = ? LIMIT 1`,
+    args: [userId, orgId],
+  });
+  const role = (res.rows[0] as { role?: unknown } | undefined)?.role;
+  return role === "owner" || role === "admin";
+}
+
 export const auth = betterAuth({
   baseURL,
   trustedOrigins,

@@ -195,8 +195,12 @@ function AddConnection({
         setError(res.error ?? "Failed to add");
         return;
       }
-      setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
-      setAuthorizeUrl(""); setTokenUrl(""); setClientId(""); setClientSecret(""); setScopes("");
+      if (!editing) {
+        // Fresh-add form is reused for the next add; the edit dialog unmounts
+        // on close, and clearing it would flash blank fields mid-transition.
+        setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
+        setAuthorizeUrl(""); setTokenUrl(""); setClientId(""); setClientSecret(""); setScopes("");
+      }
       await router.invalidate();
       onDone?.();
     } finally {
@@ -379,16 +383,22 @@ function DynamicCard({
   const [busy, setBusy] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editInitial, setEditInitial] = useState<EditableConnection | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
   async function openEdit() {
     setBusy(true);
+    setEditError(null);
     try {
       const c = await getConnectionFn({
         data: { name: conn.name, scope: conn.scope as "user" | "org" },
       });
-      if (c) {
-        setEditInitial(c);
-        setEditOpen(true);
+      if (!c) {
+        setEditError("Connection not found — it may have been removed.");
+        return;
       }
+      setEditInitial(c);
+      setEditOpen(true);
+    } catch {
+      setEditError("Couldn't load the connection — try again.");
     } finally {
       setBusy(false);
     }
@@ -430,6 +440,7 @@ function DynamicCard({
           <p className="text-ink-tertiary truncate text-xs">
             {conn.kind.toUpperCase()} · {conn.target}
           </p>
+          {editError && <p className="text-destructive text-xs">{editError}</p>}
         </div>
         <div className="flex shrink-0 gap-1">
           {conn.oauth &&

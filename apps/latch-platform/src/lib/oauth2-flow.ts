@@ -59,9 +59,9 @@ export function oauth2ConfigFingerprint(cfg: OAuth2Endpoints): string {
     .digest("hex");
 }
 
-export interface OAuth2Flow<P> extends McpOAuth<P> {
+export interface OAuth2Flow<TPrincipal> extends McpOAuth<TPrincipal> {
   /** A live access token for the caller, refreshing if needed; throws when not connected. */
-  accessTokenFor: (principal: P) => Promise<string>;
+  accessTokenFor: (principal: TPrincipal) => Promise<string>;
 }
 
 interface StoredTokens {
@@ -112,8 +112,8 @@ export async function assertPublicHttpsUrl(raw: string): Promise<URL> {
   return url;
 }
 
-export function createOAuth2Flow<P>(opts: {
-  vault: Vault<P>;
+export function createOAuth2Flow<TPrincipal>(opts: {
+  vault: Vault<TPrincipal>;
   /** Connection name — namespaces the Vault keys and the callback route. */
   name: string;
   /** e.g. `${baseUrl}/api/latch/connections` — `/<name>/callback` is appended. */
@@ -123,15 +123,15 @@ export function createOAuth2Flow<P>(opts: {
    * stored connection) — re-adding a connection with new credentials needs no
    * cache invalidation here.
    */
-  config: (principal: P) => Promise<OAuth2Endpoints>;
+  config: (principal: TPrincipal) => Promise<OAuth2Endpoints>;
   /** Stable caller identity for the single-flight refresh map. */
-  ownerKey: (principal: P) => string;
-}): OAuth2Flow<P> {
+  ownerKey: (principal: TPrincipal) => string;
+}): OAuth2Flow<TPrincipal> {
   const { vault, name } = opts;
   const redirectUri = `${opts.callbackBaseUrl.replace(/\/$/, "")}/${name}/callback`;
   const vaultKey = (part: string) => `oauth2:${name}:${part}`;
 
-  const readTokens = async (principal: P): Promise<StoredTokens | null> => {
+  const readTokens = async (principal: TPrincipal): Promise<StoredTokens | null> => {
     const raw = await vault.get(principal, vaultKey("tokens"));
     if (!raw) return null;
     try {
@@ -146,7 +146,7 @@ export function createOAuth2Flow<P>(opts: {
    * minted for a previous config (edited endpoints/client/target) is dropped
    * lazily here, flipping the connection back to "not connected".
    */
-  const readValidTokens = async (principal: P): Promise<StoredTokens | null> => {
+  const readValidTokens = async (principal: TPrincipal): Promise<StoredTokens | null> => {
     const tokens = await readTokens(principal);
     if (!tokens) return null;
     if (tokens.cfg !== oauth2ConfigFingerprint(await opts.config(principal))) {
@@ -156,7 +156,7 @@ export function createOAuth2Flow<P>(opts: {
     return tokens;
   };
 
-  const writeTokens = (principal: P, tokens: StoredTokens) =>
+  const writeTokens = (principal: TPrincipal, tokens: StoredTokens) =>
     vault.set(principal, vaultKey("tokens"), JSON.stringify(tokens));
 
   const fresh = (tokens: StoredTokens): boolean =>
@@ -167,7 +167,7 @@ export function createOAuth2Flow<P>(opts: {
 
   /** POST the token endpoint (authorization_code or refresh_token grant). */
   async function exchange(
-    principal: P,
+    principal: TPrincipal,
     grant: Record<string, string>,
   ): Promise<TokenResponse> {
     const cfg = await opts.config(principal);
@@ -181,6 +181,12 @@ export function createOAuth2Flow<P>(opts: {
         client_secret: cfg.clientSecret,
         ...grant,
       }),
+      // The SSRF guard above only vets the FIRST hop — following a redirect
+      // would replay the client secret + refresh token to an unvetted (possibly
+      // internal) address. And a hanging IdP must not pin the single-flight
+      // refresh slot forever.
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       const body = await res.text();
@@ -210,7 +216,7 @@ export function createOAuth2Flow<P>(opts: {
   // the flight (a parallel instance's rotation is picked up, not refreshed over).
   const inflight = new Map<string, Promise<string>>();
 
-  async function refreshLocked(principal: P, retried = false): Promise<string> {
+  async function refreshLocked(principal: TPrincipal, retried = false): Promise<string> {
     const tokens = await readValidTokens(principal); // re-read: another flight may have rotated
     if (!tokens) throw notConnected();
     if (fresh(tokens)) return tokens.access_token;
@@ -247,7 +253,7 @@ export function createOAuth2Flow<P>(opts: {
     return data.access_token;
   }
 
-  const accessTokenFor = async (principal: P): Promise<string> => {
+  const accessTokenFor = async (principal: TPrincipal): Promise<string> => {
     const tokens = await readValidTokens(principal);
     if (!tokens) throw notConnected();
     if (fresh(tokens)) return tokens.access_token;
@@ -260,7 +266,7 @@ export function createOAuth2Flow<P>(opts: {
     return flight;
   };
 
-  const oauth: OAuth2Flow<P> = {
+  const oauth: OAuth2Flow<TPrincipal> = {
     accessTokenFor,
 
     async isAuthorized(principal) {
@@ -335,7 +341,7 @@ export function createOAuth2Flow<P>(opts: {
           await vault.delete(principal, vaultKey("verifier"));
         },
       };
-      return stub as unknown as ReturnType<McpOAuth<P>["provider"]>;
+      return stub as unknown as ReturnType<McpOAuth<TPrincipal>["provider"]>;
     },
   };
 

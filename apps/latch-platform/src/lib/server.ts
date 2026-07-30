@@ -15,6 +15,7 @@ import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { scopeRefOf } from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
+import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
@@ -276,6 +277,11 @@ export const addConnectionFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
+    // Org-shared connections are called by every member's agents — only
+    // owners/admins may create, overwrite or repoint them.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false, error: "only org admins can manage org-shared connections" };
+    }
     const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
     if (!name) return { ok: false, error: "name required" };
     const { connectionStore } = await getLatch();
@@ -315,9 +321,15 @@ export const addConnectionFn = createServerFn({ method: "POST" })
         scopes: scopes && scopes.length > 0 ? scopes : undefined,
       };
     } else if (data.kind === "mcp" && data.authMode === "oauth") {
-      auth = { kind: "oauth" };
+      // Keep stored scopes on edit — the form doesn't round-trip them for MCP.
+      auth = {
+        kind: "oauth",
+        scopes: existing?.auth?.kind === "oauth" ? existing.auth.scopes : undefined,
+      };
+    } else if (data.authMode === "none") {
+      auth = undefined; // an explicit "none" clears auth even if a token was typed
     } else {
-      // Blank token in token mode keeps the stored one (edit); "none" clears it.
+      // Blank token in token mode keeps the stored one (edit).
       const token =
         data.token?.trim() ||
         (data.authMode === "token" &&
@@ -361,6 +373,10 @@ export const removeConnectionFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
+    // Same gate as addConnectionFn: org-shared connections are admin-managed.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false };
+    }
     const { connectionStore } = await getLatch();
     await connectionStore.remove(principal, data.scope, data.name);
     return { ok: true };
