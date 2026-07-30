@@ -6,9 +6,14 @@ import {
 } from "@intentface/latch-net";
 import type { OpenApiAuth } from "./auth.js";
 
-/** A custom fetch (structurally `globalThis.fetch`). */
+/**
+ * A custom fetch. Input is `string | URL` only (all call sites pass strings)
+ * so that non-global fetch implementations — undici's own, the DNS-pinned
+ * `@intentface/latch-net/pinned` — are assignable: they reject foreign
+ * `Request` objects at runtime. `globalThis.fetch` still satisfies this.
+ */
 export type FetchFunction = (
-  input: RequestInfo | URL,
+  input: string | URL,
   init?: RequestInit,
 ) => Promise<Response>;
 

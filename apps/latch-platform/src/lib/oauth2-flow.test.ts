@@ -13,6 +13,15 @@ vi.mock("@intentface/latch-net", async (importOriginal) => {
   return { ...actual, isBlockedResolved: async () => false };
 });
 
+// Spy on the DNS-pinned default so the `opts.fetch ?? pinnedFetch` line is
+// actually exercised — every other test injects a fetch, which would leave a
+// regression of the default (back to rebinding-vulnerable global fetch)
+// invisible.
+const pinnedFetchMock = vi.hoisted(() =>
+  vi.fn((input: string | URL, init?: RequestInit) => globalThis.fetch(input, init)),
+);
+vi.mock("@intentface/latch-net/pinned", () => ({ pinnedFetch: pinnedFetchMock }));
+
 type P = { orgId: string; userId?: string };
 
 /** In-memory Vault stub — enough surface for the OAuth flow. */
@@ -214,6 +223,30 @@ describe("accessTokenFor", () => {
     const stored = JSON.parse((await vault.get(principal, TOKENS_KEY))!);
     expect(stored.refresh_token).toBe("rt-2"); // rotation persisted
     expect(stored.access_token).toBe("at-2");
+  });
+
+  it("defaults to the DNS-pinned fetch when none is injected", async () => {
+    // Construct WITHOUT the `flow()` helper: this is the one test of the
+    // `opts.fetch ?? pinnedFetch` default that production (which omits
+    // `fetch`) actually runs on.
+    const vault = memoryVault();
+    const f = createOAuth2Flow<P>({
+      vault,
+      name: "strava",
+      callbackBaseUrl: "http://localhost:3000/api/latch/connections",
+      config: async () => BASE_CFG,
+      ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
+    });
+    await seedTokens(vault, {
+      access_token: "at-1",
+      refresh_token: "rt-1",
+      expires_at: Date.now() - 1000,
+    });
+    pinnedFetchMock.mockResolvedValueOnce(
+      tokenResponse({ access_token: "at-pinned", expires_in: 3600 }),
+    );
+    expect(await f.accessTokenFor(principal)).toBe("at-pinned");
+    expect(pinnedFetchMock).toHaveBeenCalledWith(BASE_CFG.tokenUrl, expect.anything());
   });
 
   it("keeps the previous refresh token when the response omits one", async () => {

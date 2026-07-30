@@ -85,7 +85,17 @@ function compile(code: string): string {
 
 function stringifyErr(v: unknown): string {
   if (typeof v === "string") return v;
-  if (v && typeof v === "object" && "message" in v) return String((v).message);
+  if (v && typeof v === "object" && "message" in v) {
+    // undici wraps connect-time failures (incl. the pinned fetch's SSRF
+    // block) as `TypeError: fetch failed` with the reason in `cause` —
+    // surface it or the block looks like a network blip.
+    const cause = (v as { cause?: unknown }).cause;
+    const causeMsg =
+      cause && typeof cause === "object" && "message" in cause && cause.message
+        ? `: ${String(cause.message)}`
+        : "";
+    return String(v.message) + causeMsg;
+  }
   try {
     return JSON.stringify(v);
   } catch {

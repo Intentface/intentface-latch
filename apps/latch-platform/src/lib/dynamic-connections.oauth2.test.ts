@@ -14,11 +14,19 @@ vi.mock("@intentface/latch-net", async (importOriginal) => {
 });
 
 // The DNS-pinned fetch would vet fake hostnames at connect time (real
-// network); route it to the stubbed global so tests stay hermetic.
+// network); route it to the stubbed global so tests stay hermetic. A spy, not
+// a plain alias: asserting it was called is what catches an accidental revert
+// to global `fetch` (which these mocks would otherwise mask).
+const pinnedFetchMock = vi.hoisted(() =>
+  vi.fn((input: string | URL, init?: RequestInit) => globalThis.fetch(input, init)),
+);
 vi.mock("@intentface/latch-net/pinned", () => ({
-  pinnedFetch: (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init),
-  createPinnedFetch: () => (input: RequestInfo | URL, init?: RequestInit) =>
-    globalThis.fetch(input, init),
+  pinnedFetch: pinnedFetchMock,
+  createPinnedFetch: () =>
+    Object.assign(
+      (input: string | URL, init?: RequestInit) => globalThis.fetch(input, init),
+      { close: async () => {} },
+    ),
 }));
 
 /** In-memory Vault stub — enough surface for the store + OAuth flows. */
@@ -155,6 +163,10 @@ describe("dynamic oauth2 OpenAPI connections", () => {
     expect((apiCall.init?.headers as Record<string, string>).Authorization).toBe(
       "Bearer at-live",
     );
+    // Wiring assertion: the spec download and the tool call must go through
+    // the DNS-pinned fetch — a dropped `fetch:` option in dynamic-connections
+    // would fall back to global fetch and pass every other test here.
+    expect(pinnedFetchMock).toHaveBeenCalled();
     await opened.close();
   });
 

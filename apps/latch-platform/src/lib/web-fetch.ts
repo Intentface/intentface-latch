@@ -176,7 +176,12 @@ export async function webFetch(args: {
       e instanceof Error
         ? e.name === "TimeoutError" || e.name === "AbortError"
           ? `Request timed out after ${timeoutMs / 1000}s`
-          : e.message
+          : // undici wraps connect-time failures (incl. the pinned fetch's
+            // SSRF block) as `TypeError: fetch failed` with the reason in
+            // `cause` — surface it or the block looks like a network blip.
+            e.cause instanceof Error && e.cause.message
+            ? `${e.message}: ${e.cause.message}`
+            : e.message
         : "Fetch failed";
     return { ok: false, error: msg };
   }

@@ -14,11 +14,19 @@ vi.mock("@intentface/latch-net", async (importOriginal) => ({
 }));
 
 // The DNS-pinned fetch would vet fake hostnames at connect time (real
-// network); route it to the stubbed global so tests stay hermetic.
+// network); route it to the stubbed global so tests stay hermetic. A spy, not
+// a plain alias: asserting it was called is what catches an accidental revert
+// to global `fetch` (which these mocks would otherwise mask).
+const pinnedFetchMock = vi.hoisted(() =>
+  vi.fn((input: string | URL, init?: RequestInit) => globalThis.fetch(input, init)),
+);
 vi.mock("@intentface/latch-net/pinned", () => ({
-  pinnedFetch: (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init),
-  createPinnedFetch: () => (input: RequestInfo | URL, init?: RequestInit) =>
-    globalThis.fetch(input, init),
+  pinnedFetch: pinnedFetchMock,
+  createPinnedFetch: () =>
+    Object.assign(
+      (input: string | URL, init?: RequestInit) => globalThis.fetch(input, init),
+      { close: async () => {} },
+    ),
 }));
 
 const { webFetch } = await import("./web-fetch");
@@ -47,10 +55,13 @@ afterEach(() => {
 const attempted = () => fetchMock.mock.calls.map((c) => new URL(c[0]).hostname);
 
 describe("web_fetch SSRF gate", () => {
-  it("fetches a public URL", async () => {
+  it("fetches a public URL — through the DNS-pinned fetch", async () => {
     fetchMock.mockResolvedValue(page("hello"));
     const res = await webFetch({ url: "https://example.com/a", format: "text" });
     expect(res).toMatchObject({ ok: true, content: "hello" });
+    // Wiring assertion: a revert to global `fetch` would pass every other
+    // test here (the mock aliases to it) but fail this.
+    expect(pinnedFetchMock).toHaveBeenCalled();
   });
 
   it("blocks a private/loopback target before any request", async () => {

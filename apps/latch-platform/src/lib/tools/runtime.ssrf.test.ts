@@ -16,11 +16,19 @@ vi.mock("@intentface/latch-net", async (importOriginal) => ({
 }));
 
 // The DNS-pinned fetch would vet fake hostnames at connect time (real
-// network); route it to the stubbed global so tests stay hermetic.
+// network); route it to the stubbed global so tests stay hermetic. A spy, not
+// a plain alias: asserting it was called is what catches an accidental revert
+// to global `fetch` (which these mocks would otherwise mask).
+const pinnedFetchMock = vi.hoisted(() =>
+  vi.fn((input: string | URL, init?: RequestInit) => globalThis.fetch(input, init)),
+);
 vi.mock("@intentface/latch-net/pinned", () => ({
-  pinnedFetch: (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init),
-  createPinnedFetch: () => (input: RequestInfo | URL, init?: RequestInit) =>
-    globalThis.fetch(input, init),
+  pinnedFetch: pinnedFetchMock,
+  createPinnedFetch: () =>
+    Object.assign(
+      (input: string | URL, init?: RequestInit) => globalThis.fetch(input, init),
+      { close: async () => {} },
+    ),
 }));
 
 const { runTool } = await import("./runtime");
@@ -50,12 +58,15 @@ const fetchTool = (url: string) => `
 `;
 
 describe("authored-tool fetch: SSRF gate", () => {
-  it("fetches an allowlisted public host", async () => {
+  it("fetches an allowlisted public host — through the DNS-pinned fetch", async () => {
     const res = await runTool(fetchTool("https://api.example.com/v1"), {
       allowedHosts: ["api.example.com"],
     });
     expect(res.status).toBe("completed");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Wiring assertion: a revert to global `fetch` would pass every other
+    // test here (the mock aliases to it) but fail this.
+    expect(pinnedFetchMock).toHaveBeenCalled();
   });
 
   it("refuses a private literal even when the caller allowlists it", async () => {

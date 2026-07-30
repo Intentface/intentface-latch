@@ -19,15 +19,20 @@ import { isBlockedHost, isPrivateV4, isPrivateV6, parseIPv6 } from "./ssrf.js";
  * `rejectUnauthorized` keeps its default.
  *
  * Lives behind the `@intentface/latch-net/pinned` subpath (not the root
- * export) because it pulls in `undici` — the root entry stays built-ins-only
- * and safe to reach client bundles.
+ * export) because it pulls in `undici` — the root entry stays third-party-free.
  *
- * Callers must pass a string or `URL` as input: undici's `fetch` does not
- * accept `Request` objects built by another fetch implementation.
+ * Redirect hops dispatch through the same agent, so with `redirect: "follow"`
+ * every hop is connect-vetted too (call sites here still use "error"/"manual"
+ * for better messages and header hygiene).
  */
 
+/**
+ * Input is `string | URL` only — undici's `fetch` rejects `Request` objects
+ * built by another fetch implementation (cross-realm brand check), so the
+ * type must not admit them.
+ */
 export type FetchLike = (
-  input: RequestInfo | URL,
+  input: string | URL,
   init?: RequestInit,
 ) => Promise<Response>;
 
@@ -44,7 +49,7 @@ type Addr = { address: string; family: number };
  */
 export type BaseLookup = (
   hostname: string,
-  options: { all: true; family?: number },
+  options: { all: true; family?: number; hints?: number },
   callback: (err: NodeJS.ErrnoException | null, addresses?: Addr[]) => void,
 ) => void;
 
@@ -58,8 +63,9 @@ export interface PinnedFetchOptions {
   lookup?: BaseLookup;
   /**
    * Extra socket/TLS options for the connector (tests: a fixture `ca`).
-   * `autoSelectFamily` is widened in explicitly — a valid net.connect option
-   * undici passes through, but absent from its BuildOptions union.
+   * `autoSelectFamily` is widened in explicitly: it IS typed in the union's
+   * `TcpNetConnectOpts` member, but that member requires `port`, so a partial
+   * options object can never select it.
    */
   connect?: buildConnector.BuildOptions & { autoSelectFamily?: boolean };
 }
@@ -100,7 +106,13 @@ function vettingLookup(base: BaseLookup, allowPrivate: boolean) {
         }
       }
       if (options.all) return callback(null, addrs);
-      callback(null, addrs[0].address, addrs[0].family);
+      // Scalar shape: honor a requested family even if the base resolver
+      // ignored the forwarded option (real dns.lookup honors it; the contract
+      // on BaseLookup doesn't require it).
+      const pick =
+        (options.family ? addrs.find((a) => a.family === options.family) : undefined) ??
+        addrs[0];
+      callback(null, pick.address, pick.family);
     });
   };
 }
@@ -115,7 +127,9 @@ export function createPinnedFetch(options: PinnedFetchOptions = {}): PinnedFetch
     options;
   const base = buildConnector({
     ...options.connect,
-    // Untyped in BuildOptions' union but passed through to net/tls.connect.
+    // Passed through to net/tls.connect; spread AFTER options.connect so a
+    // caller can never displace the vetting resolver. (Cast for the same
+    // BuildOptions-union reason as `autoSelectFamily` above.)
     lookup: vettingLookup(lookup, allowPrivate),
   } as buildConnector.BuildOptions);
   // net.connect skips `lookup` entirely for IP-literal hosts — vet those here.
@@ -139,7 +153,12 @@ export function createPinnedFetch(options: PinnedFetchOptions = {}): PinnedFetch
   return Object.assign(fn, { close: () => agent.close() });
 }
 
-/** Shared default instance, constructed lazily (no Agent at import time). */
+/**
+ * Shared default instance, constructed lazily (no Agent at import time).
+ * Deliberately exposed WITHOUT `close()` — it is shared, so no caller may
+ * tear it down under the others; a long-lived server never closes it, and
+ * idle keep-alive sockets expire on undici's own timeout.
+ */
 let shared: PinnedFetch | undefined;
 export const pinnedFetch: FetchLike = (input, init) =>
   (shared ??= createPinnedFetch())(input, init);
