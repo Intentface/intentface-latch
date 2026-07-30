@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Vault } from "@intentface/latch-core";
 import type { McpOAuth, StartResult } from "@intentface/latch-mcp";
 import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
@@ -28,6 +29,34 @@ export interface OAuth2Endpoints {
   clientId: string;
   clientSecret: string;
   scopes?: string[];
+  /**
+   * Extra identity folded into the grant fingerprint (e.g. the API target the
+   * bearer token will be sent to). Changing it invalidates stored grants.
+   */
+  fingerprint?: string;
+}
+
+/**
+ * Identity of the config a grant was minted for. Stored inside the token blob
+ * and compared on every read: when a connection is reconfigured (endpoints,
+ * client, scopes, target), grants minted for the OLD config are dropped
+ * instead of reused — an old bearer token must never be sent to a newly
+ * configured API, and an old client's refresh token is useless to a new one.
+ * The client secret is deliberately excluded so a secret rotation on the SAME
+ * client keeps existing grants.
+ */
+export function oauth2ConfigFingerprint(cfg: OAuth2Endpoints): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        cfg.authorizeUrl,
+        cfg.tokenUrl,
+        cfg.clientId,
+        cfg.scopes ?? null,
+        cfg.fingerprint ?? null,
+      ]),
+    )
+    .digest("hex");
 }
 
 export interface OAuth2Flow<P> extends McpOAuth<P> {
@@ -40,6 +69,8 @@ interface StoredTokens {
   refresh_token?: string;
   /** Epoch ms when access_token expires; absent = no known expiry. */
   expires_at?: number;
+  /** Fingerprint of the connection config this grant was minted for. */
+  cfg?: string;
 }
 
 interface TokenResponse {
@@ -110,6 +141,21 @@ export function createOAuth2Flow<P>(opts: {
     }
   };
 
+  /**
+   * Stored tokens, validated against the CURRENT connection config — a grant
+   * minted for a previous config (edited endpoints/client/target) is dropped
+   * lazily here, flipping the connection back to "not connected".
+   */
+  const readValidTokens = async (principal: P): Promise<StoredTokens | null> => {
+    const tokens = await readTokens(principal);
+    if (!tokens) return null;
+    if (tokens.cfg !== oauth2ConfigFingerprint(await opts.config(principal))) {
+      await vault.delete(principal, vaultKey("tokens"));
+      return null;
+    }
+    return tokens;
+  };
+
   const writeTokens = (principal: P, tokens: StoredTokens) =>
     vault.set(principal, vaultKey("tokens"), JSON.stringify(tokens));
 
@@ -149,12 +195,13 @@ export function createOAuth2Flow<P>(opts: {
     return (await res.json()) as TokenResponse;
   }
 
-  const stored = (data: TokenResponse, prevRefresh?: string): StoredTokens => ({
+  const stored = (data: TokenResponse, cfg: string, prevRefresh?: string): StoredTokens => ({
     access_token: data.access_token,
     // Rotation: keep the newest refresh token; fall back to the previous one
     // when the provider omits it from the response.
     refresh_token: data.refresh_token ?? prevRefresh,
     expires_at: data.expires_in != null ? Date.now() + data.expires_in * 1000 : undefined,
+    cfg,
   });
 
   // Single-flight refresh per caller: with rotating refresh tokens (Strava),
@@ -163,8 +210,8 @@ export function createOAuth2Flow<P>(opts: {
   // the flight (a parallel instance's rotation is picked up, not refreshed over).
   const inflight = new Map<string, Promise<string>>();
 
-  async function refreshLocked(principal: P): Promise<string> {
-    const tokens = await readTokens(principal); // re-read: another flight may have rotated
+  async function refreshLocked(principal: P, retried = false): Promise<string> {
+    const tokens = await readValidTokens(principal); // re-read: another flight may have rotated
     if (!tokens) throw notConnected();
     if (fresh(tokens)) return tokens.access_token;
     if (!tokens.refresh_token) {
@@ -179,6 +226,15 @@ export function createOAuth2Flow<P>(opts: {
       });
     } catch (err) {
       if ((err as Error & { grantDead?: boolean }).grantDead) {
+        // Compare-and-delete: with rotation, invalid_grant can mean ANOTHER
+        // INSTANCE won the refresh race and our token is merely stale — never
+        // delete a grant someone else just rotated. Only kill it when the
+        // stored refresh token is still the one that failed; otherwise retry
+        // once against the rotated grant.
+        const current = await readTokens(principal);
+        if (current && current.refresh_token !== tokens.refresh_token && !retried) {
+          return refreshLocked(principal, true);
+        }
         await vault.delete(principal, vaultKey("tokens"));
         throw notConnected();
       }
@@ -186,12 +242,13 @@ export function createOAuth2Flow<P>(opts: {
     }
     // Persist (incl. the rotated refresh token) BEFORE resolving: a waiter
     // released earlier could start a second refresh with the dead old token.
-    await writeTokens(principal, stored(data, tokens.refresh_token));
+    const cfg = oauth2ConfigFingerprint(await opts.config(principal));
+    await writeTokens(principal, stored(data, cfg, tokens.refresh_token));
     return data.access_token;
   }
 
   const accessTokenFor = async (principal: P): Promise<string> => {
-    const tokens = await readTokens(principal);
+    const tokens = await readValidTokens(principal);
     if (!tokens) throw notConnected();
     if (fresh(tokens)) return tokens.access_token;
     const key = opts.ownerKey(principal);
@@ -207,7 +264,7 @@ export function createOAuth2Flow<P>(opts: {
     accessTokenFor,
 
     async isAuthorized(principal) {
-      const tokens = await readTokens(principal);
+      const tokens = await readValidTokens(principal);
       if (!tokens) return false;
       return tokens.refresh_token != null || fresh(tokens);
     },
@@ -239,7 +296,10 @@ export function createOAuth2Flow<P>(opts: {
         code_challenge_method: "S256",
       });
       if (cfg.scopes?.length) params.set("scope", cfg.scopes.join(" "));
-      authorizeUrl.search = params.toString();
+      // MERGE into the configured query — providers hang required parameters
+      // off the authorize URL (Auth0's audience, Google's access_type/prompt)
+      // and replacing the query would drop them. Ours win on a name clash.
+      for (const [k, v] of params) authorizeUrl.searchParams.set(k, v);
       return { status: "redirect", authorizationUrl: authorizeUrl.toString() };
     },
 
@@ -259,7 +319,8 @@ export function createOAuth2Flow<P>(opts: {
       if (!data.access_token) {
         throw new Error(`"${name}" token endpoint returned no access token`);
       }
-      await writeTokens(principal, stored(data));
+      const cfg = oauth2ConfigFingerprint(await opts.config(principal));
+      await writeTokens(principal, stored(data, cfg));
       return { status: "authorized" };
     },
 

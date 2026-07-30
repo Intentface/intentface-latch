@@ -3,6 +3,7 @@ import type * as latchNet from "@intentface/latch-net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createConnectionStore } from "./connection-store";
 import { createDynamicConnections } from "./dynamic-connections";
+import { oauth2ConfigFingerprint } from "./oauth2-flow";
 import type { Principal } from "./session";
 
 // Fake hostnames don't resolve; the DNS backstop fails closed and would block
@@ -91,6 +92,16 @@ async function setup() {
     vault,
     callbackBaseUrl: "http://localhost:3000/api/latch/connections",
   });
+  // Mirror the config the registry's resolver produces (auth + target folded
+  // into the fingerprint) so the seeded grant matches the live connection.
+  const cfg = oauth2ConfigFingerprint({
+    authorizeUrl: "https://idp.example.com/oauth/authorize",
+    tokenUrl: "https://idp.example.com/oauth/token",
+    clientId: "cid-1",
+    clientSecret: "sec-1",
+    scopes: ["read"],
+    fingerprint: JSON.stringify([SPEC_URL, API_BASE]),
+  });
   const authorize = () =>
     vault.set(
       principal,
@@ -99,6 +110,7 @@ async function setup() {
         access_token: "at-live",
         refresh_token: "rt-live",
         expires_at: Date.now() + 3_600_000,
+        cfg,
       }),
     );
   return { vault, store, dynamic, authorize };

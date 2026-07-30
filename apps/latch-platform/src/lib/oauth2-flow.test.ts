@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { Vault } from "@intentface/latch-core";
 import type * as latchNet from "@intentface/latch-net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertPublicHttpsUrl, createOAuth2Flow } from "./oauth2-flow";
+import type { OAuth2Endpoints } from "./oauth2-flow";
+import { assertPublicHttpsUrl, createOAuth2Flow, oauth2ConfigFingerprint } from "./oauth2-flow";
 
 // The DNS-rebinding backstop fails closed on lookup errors, which would block
 // the fake IdP hostnames used here. Literal-IP/localhost cases still exercise
@@ -31,21 +32,26 @@ function memoryVault(): Vault<P> {
 const principal: P = { orgId: "org1", userId: "user1" };
 const TOKENS_KEY = "oauth2:strava:tokens";
 
-function flow(vault = memoryVault()) {
+const BASE_CFG: OAuth2Endpoints = {
+  authorizeUrl: "https://idp.example.com/oauth/authorize",
+  tokenUrl: "https://idp.example.com/oauth/token",
+  clientId: "cid-1",
+  clientSecret: "sec-1",
+  scopes: ["read,activity:read_all"],
+};
+
+function flow(vault = memoryVault(), cfg: OAuth2Endpoints = BASE_CFG) {
+  // `box.cfg` is mutable so tests can reconfigure the connection mid-flight,
+  // like an edit through the UI would.
+  const box = { cfg };
   const f = createOAuth2Flow<P>({
     vault,
     name: "strava",
     callbackBaseUrl: "http://localhost:3000/api/latch/connections",
-    config: async () => ({
-      authorizeUrl: "https://idp.example.com/oauth/authorize",
-      tokenUrl: "https://idp.example.com/oauth/token",
-      clientId: "cid-1",
-      clientSecret: "sec-1",
-      scopes: ["read,activity:read_all"],
-    }),
+    config: async () => box.cfg,
     ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
   });
-  return { flow: f, vault };
+  return { flow: f, vault, box };
 }
 
 const tokenResponse = (body: Record<string, unknown>, status = 200) =>
@@ -57,7 +63,13 @@ const tokenResponse = (body: Record<string, unknown>, status = 200) =>
 const seedTokens = (
   vault: Vault<P>,
   tokens: { access_token: string; refresh_token?: string; expires_at?: number },
-) => vault.set(principal, TOKENS_KEY, JSON.stringify(tokens));
+  cfg: OAuth2Endpoints = BASE_CFG,
+) =>
+  vault.set(
+    principal,
+    TOKENS_KEY,
+    JSON.stringify({ ...tokens, cfg: oauth2ConfigFingerprint(cfg) }),
+  );
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -85,6 +97,22 @@ describe("createOAuth2Flow start/finish", () => {
     const expected = createHash("sha256").update(verifier!).digest("base64url");
     expect(url.searchParams.get("code_challenge")).toBe(expected);
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  });
+
+  it("start() merges standard params into a pre-configured query", async () => {
+    const { flow: f } = flow(memoryVault(), {
+      ...BASE_CFG,
+      authorizeUrl:
+        "https://idp.example.com/oauth/authorize?audience=https%3A%2F%2Fapi.example.com&prompt=consent",
+    });
+    const res = await f.start(principal);
+    const url = new URL((res as { authorizationUrl: string }).authorizationUrl);
+    // provider-specific params survive…
+    expect(url.searchParams.get("audience")).toBe("https://api.example.com");
+    expect(url.searchParams.get("prompt")).toBe("consent");
+    // …alongside the standard ones
+    expect(url.searchParams.get("client_id")).toBe("cid-1");
+    expect(url.searchParams.get("state")).toMatch(/^[0-9a-f]{32}\./);
   });
 
   it("start() short-circuits to authorized when tokens exist", async () => {
@@ -275,6 +303,63 @@ describe("accessTokenFor", () => {
   it("throws not-connected when no tokens exist", async () => {
     const { flow: f } = flow();
     await expect(f.accessTokenFor(principal)).rejects.toThrow(/not connected/);
+  });
+
+  it("survives losing the refresh race to another instance (compare-and-delete)", async () => {
+    const vault = memoryVault();
+    const { flow: f } = flow(vault);
+    await seedTokens(vault, {
+      access_token: "at-1",
+      refresh_token: "rt-stale",
+      expires_at: Date.now() - 1000,
+    });
+    // The IdP answers invalid_grant because ANOTHER INSTANCE already rotated
+    // this grant — simulate its write landing before our response is handled.
+    const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(
+      async () => {
+        await seedTokens(vault, {
+          access_token: "at-rotated",
+          refresh_token: "rt-rotated",
+          expires_at: Date.now() + 3_600_000,
+        });
+        return tokenResponse({ error: "invalid_grant" }, 400);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    // The rotated grant must win — not get deleted by our stale failure.
+    expect(await f.accessTokenFor(principal)).toBe("at-rotated");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const stored = JSON.parse((await vault.get(principal, TOKENS_KEY))!);
+    expect(stored.refresh_token).toBe("rt-rotated");
+  });
+});
+
+describe("config fingerprint", () => {
+  it("a reconfigured connection invalidates grants minted for the old config", async () => {
+    const { flow: f, vault, box } = flow();
+    await seedTokens(vault, {
+      access_token: "at-old",
+      refresh_token: "rt-old",
+      expires_at: Date.now() + 3_600_000,
+    });
+    expect(await f.isAuthorized(principal)).toBe(true);
+    // Edit the connection: same name, different client (or endpoints/target).
+    box.cfg = { ...BASE_CFG, clientId: "cid-2" };
+    expect(await f.isAuthorized(principal)).toBe(false);
+    expect(await vault.get(principal, TOKENS_KEY)).toBeUndefined();
+    await expect(f.accessTokenFor(principal)).rejects.toThrow(/not connected/);
+  });
+
+  it("rotating only the client secret keeps existing grants", async () => {
+    const { flow: f, vault, box } = flow();
+    await seedTokens(vault, {
+      access_token: "at",
+      refresh_token: "rt",
+      expires_at: Date.now() + 3_600_000,
+    });
+    box.cfg = { ...BASE_CFG, clientSecret: "sec-2" };
+    expect(await f.isAuthorized(principal)).toBe(true);
+    expect(await f.accessTokenFor(principal)).toBe("at");
   });
 });
 

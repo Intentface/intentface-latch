@@ -167,10 +167,16 @@ export function createDynamicConnections(opts: {
         callbackBaseUrl: callbackBase,
         config: async (p) => {
           const conn = await store.get(p, name);
-          if (!conn || conn.kind !== "openapi" || conn.auth?.kind !== "oauth2") {
+          if (!conn || conn.kind !== "openapi" || !conn.openapi || conn.auth?.kind !== "oauth2") {
             throw new Error(`Connection "${name}" is not configured for OAuth2`);
           }
-          return conn.auth;
+          return {
+            ...conn.auth,
+            // Fold the API target into the grant identity: retargeting the
+            // connection (new spec/baseUrl) must invalidate grants minted for
+            // the old API, not send its bearer tokens to the new host.
+            fingerprint: JSON.stringify([conn.openapi.spec, conn.openapi.baseUrl ?? null]),
+          };
         },
         ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
       });
