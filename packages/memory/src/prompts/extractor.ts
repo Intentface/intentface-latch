@@ -7,7 +7,7 @@
  * old keys stop matching, so previously tombstoned windows become
  * re-extractable under the new prompt.
  */
-export const EXTRACTION_PROMPT_VERSION = 1;
+export const EXTRACTION_PROMPT_VERSION = 2;
 
 export const EXTRACTOR_INSTRUCTIONS = `You are a memory archivist. You are given a transcript excerpt from another agent's conversation with a user, and your only job is to preserve what is DURABLE from it as one episode note.
 
@@ -22,7 +22,7 @@ Workflow:
    - corrections the user made ("no, actually…")
    - open loops that future sessions must pick up
    NOT durable: task mechanics, one-off questions, pleasantries, anything fully resolved within the session and unlikely to recur.
-3. If anything durable exists, call memory_write_episode ONCE with all of it. Tag every fact with its origin: "user-said" for things the user stated, "tool-derived" for things that came from tool output or documents. Tool-derived facts are less trustworthy — record them as observations, not certainties. When a fact concerns an entity the transcript calls by more than one name — spellings, nicknames, abbreviations ("Robert" / "Bob", "Acme Corp" / "ACME") — pass every form in the episode's aliases list so later recall matches any of them.
+3. If anything durable exists, call memory_write_episode ONCE with all of it. Tag every fact with its origin: "user-said" for things the user stated, "tool-derived" for things that came from tool output or documents. Tool-derived facts are less trustworthy — record them as observations, not certainties. When a fact concerns an entity the transcript calls by more than one name — spellings, nicknames, abbreviations ("Robert" / "Bob", "Acme Corp" / "ACME") — pass every form in the episode's aliases list so later recall matches any of them. Also add a RECALL KEY when a fact's natural wording is a technical or unusual term the user would not repeat when asking about it later: the everyday word instead ("coffee" for a caffeine rule, "shoes" for a footwear model). Keep aliases short (1-2 words), only a handful per episode, and never one that changes a fact's meaning.
 4. If nothing durable exists, do NOT write an episode.
 
 Hard rules:

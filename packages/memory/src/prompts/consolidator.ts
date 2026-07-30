@@ -6,11 +6,20 @@ export const CONSOLIDATOR_INSTRUCTIONS = `You maintain MEMORY.md — the compile
 
 The index format:
 - A title line, then topical sections ("## Identity & preferences", "## Projects & context", "## Working agreements", … adapt sections to the domain), then "## Archive" last.
-- One entry per line: \`- [m-<6 hex chars>] (<YYYY-MM-DD>, <provenance>) <one-line fact> ← <episode path>\`
+- One entry per line: \`- [m-<id>] (<YYYY-MM-DD>, <provenance>) <one-line fact> ← <episode path>\`
+  where <id> is 4-8 lowercase letters/digits (e.g. \`7f3a2c\`); keep existing entries' ids unchanged.
   Example: \`- [m-7f3a2c] (2026-07-12, user-said) Prefers concise answers. ← episodes/2026-07-12-09-30-onboarding.md\`
 - Optional \`;\`-separated markers inside the parenthetical:
-  - \`aka: <name1>, <name2>\` — when the entry's subject goes by several names/spellings/nicknames (from the episode's \`aliases:\` frontmatter or the facts themselves), list EVERY form so recall matches any of them.
-    Example: \`- [m-4b9d11] (2026-07-25, user-said; aka: Robert Smith, Bob) Bob is the new team lead. ← episodes/…\`
+  - \`aka: <term1>, <term2>\` — alternate ways this entry may be looked up later. Two kinds:
+    names (every spelling/nickname the subject goes by, from the episode's \`aliases:\`
+    frontmatter or the facts themselves) and RECALL KEYS — the everyday word a user would
+    use to ask about the fact when the entry's own wording is the technical or unusual
+    term ("coffee" for a caffeine rule, "shoes" for a footwear model). Recall matching is
+    keyword-based: an alias is the only bridge to a phrasing the entry's text doesn't
+    contain. Keep each alias short (1-2 words), at most a handful per entry, and never
+    invent one that changes the fact's meaning.
+    Examples: \`- [m-4b9d11] (2026-07-25, user-said; aka: Robert Smith, Bob) Bob is the new team lead. ← episodes/…\`
+              \`- [m-9e2f11] (2026-07-26, user-said; aka: coffee) No caffeine after noon. ← episodes/…\`
   - \`unverified\` — trust mark for auto-extracted, unconfirmed facts (see below).
 - Keep the whole file under ${INDEX_LINE_CAP} lines.
 
@@ -32,7 +41,7 @@ Workflow:
 Hard rules:
 - NEVER invent facts, dates, or sources — everything must come from the index or the episodes you read.
 - Preserve provenance tags; when merging facts of mixed origin, keep the weaker "tool-derived" tag visible.
-- Preserve \`aka:\` aliases when updating an entry in place — merge newly learned names in, never drop known ones.
+- Preserve \`aka:\` aliases when updating an entry in place — merge newly learned names and recall keys in, never drop known ones.
 - Do not editorialize or strip hedges: "thinks they might" must not become "does".
 - If the episodes contain nothing worth adding and nothing to expire, reply "no changes" and do NOT write.
 - Reply with one short line summarizing what changed.

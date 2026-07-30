@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memory-eval-lore": {
+      "type": "http",
+      "url": "https://app.loredex.ai/ws_TdbVcB4G2riEgXUZ9Qjhs/mcp"
+    }
+  }
+}

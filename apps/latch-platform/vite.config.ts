@@ -16,9 +16,22 @@ const config = defineConfig({
   // Keep mirage-node out of the server bundle: it loads tree-sitter .wasm and
   // several deps via runtime require, which only works from a real
   // node_modules layout. `traceDeps` externalizes it; the tracer misses its
-  // dynamic-require edges, so scripts/copy-mirage-deps.mjs (postbuild) copies
-  // the full dependency closure into the server output.
-  nitro: { traceDeps: ["@struktoai/mirage-node*"] },
+  // dynamic-require edges, so scripts/copy-server-deps.mjs (postbuild) copies
+  // the full dependency closure into the server output (plus the `_ssr`
+  // service environment's runtime externals — react and friends).
+  // react/react-dom must resolve to ONE runtime copy: the nitro env's `_libs`
+  // prebundle otherwise embeds its own react (used by react-dom's renderer)
+  // while `_ssr` app chunks resolve another — a null hooks dispatcher at SSR
+  // ("Cannot read properties of null (reading 'useCallback')"). traceDeps
+  // externalizes them out of `_libs`; scripts/copy-server-deps.mjs ships the
+  // packages so every bare import lands on the same node_modules copy.
+  nitro: { traceDeps: ["@struktoai/mirage-node*", "react", "react-dom"] },
+  // The `_ssr` service environment keeps Vite's default SSR externalization,
+  // but nothing traces its externals into the deployed function — page SSR
+  // then dies at runtime with "Cannot find module 'react'". Bundle the
+  // react-free ones (react itself must stay external, see above; mirage-node
+  // too).
+  ssr: { noExternal: [/^better-auth/, /^framer-motion/, /^motion/] },
   plugins: [devtools(), tailwindcss(), tanstackStart(), nitro(), viteReact()],
 })
 
