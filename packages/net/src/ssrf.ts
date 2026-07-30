@@ -12,12 +12,12 @@ import { isIP } from "node:net";
  * blocking). They complement, but do not replace, a positive allowlist — see
  * `@intentface/latch-mcp`'s per-tenant `allowedHosts`.
  *
- * KNOWN GAP (tracked follow-up): validation happens at CHECK time, not CONNECT
- * time. A name that resolves public here but private when the request actually
- * opens (DNS rebinding) is not fully closed — that needs resolving once and
- * pinning the connection to the vetted IP (a custom fetch/dispatcher threaded
- * through the MCP/OpenAPI transports). The allowlist is the primary defense
- * meanwhile.
+ * These checks validate at CHECK time, not CONNECT time — on their own they
+ * do not close DNS rebinding (a name that resolves public here but private
+ * when the request opens). For that, route the request through the pinned
+ * fetch in `pinned-fetch.ts` (`@intentface/latch-net/pinned`), which vets
+ * addresses inside the lookup the connection itself uses; the checks here
+ * remain useful as early, well-messaged pre-flight gates.
  */
 
 /** True if a dotted-decimal IPv4 (or a short form like 127.1) is private/loopback/link-local. */

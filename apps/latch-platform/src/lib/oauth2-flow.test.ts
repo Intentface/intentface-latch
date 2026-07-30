@@ -50,6 +50,9 @@ function flow(vault = memoryVault(), cfg: OAuth2Endpoints = BASE_CFG) {
     callbackBaseUrl: "http://localhost:3000/api/latch/connections",
     config: async () => box.cfg,
     ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
+    // Late-bound delegate so `vi.stubGlobal("fetch", ...)` in each test still
+    // intercepts (the default would be the DNS-pinned fetch → real network).
+    fetch: (input, init) => globalThis.fetch(input, init),
   });
   return { flow: f, vault, box };
 }

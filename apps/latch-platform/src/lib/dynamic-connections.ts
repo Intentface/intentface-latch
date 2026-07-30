@@ -7,6 +7,7 @@ import type {
 } from "@intentface/latch-core";
 import type { ConnectionStatus, McpAuth, McpOAuth } from "@intentface/latch-mcp";
 import { createMcpHost, createMcpOAuth, createOAuthDiscoveryFetch } from "@intentface/latch-mcp";
+import { pinnedFetch } from "@intentface/latch-net/pinned";
 import type { OpenApiAuth } from "@intentface/latch-openapi";
 import {
   bearer as openApiBearer,
@@ -202,6 +203,10 @@ export function createDynamicConnections(opts: {
           : openApiAuth(conn.auth);
       reg = createOpenApiConnections<Principal>({
         allowedHosts: hosts,
+        // DNS-pinned: vets addresses at connect time for BOTH the spec
+        // download and every tool call (the pre-checks inside the registry
+        // remain the well-messaged first gate).
+        fetch: pinnedFetch,
         connections: {
           [conn.name]: defineOpenApiConnection<Principal>({
             spec: o.spec,

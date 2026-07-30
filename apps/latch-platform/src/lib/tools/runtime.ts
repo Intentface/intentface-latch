@@ -3,6 +3,7 @@ import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 import type { QuickJSAsyncWASMModule } from "quickjs-emscripten-core";
 import variant from "@jitl/quickjs-singlefile-mjs-release-asyncify";
 import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
+import { pinnedFetch } from "@intentface/latch-net/pinned";
 
 /**
  * The tool-authoring runtime: runs a (human- or agent-) authored JS program in a
@@ -160,7 +161,9 @@ async function hostFetch(argJson: string, allowedHosts: string[], caps: ToolCaps
     for (let hop = 0; ; hop++) {
       const bad = await validate(current);
       if (bad) return JSON.stringify({ error: bad });
-      res = await fetch(current, {
+      // Pinned fetch: vets addresses inside the connection's own DNS lookup,
+      // closing the rebinding gap `validate` alone leaves open.
+      res = await pinnedFetch(current, {
         method: opts.method ?? "GET",
         headers: opts.headers ?? {},
         body: opts.body,

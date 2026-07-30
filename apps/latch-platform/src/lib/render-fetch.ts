@@ -136,6 +136,10 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   try {
+    // Deliberately NOT the DNS-pinned fetch: this request goes to the
+    // operator-configured render service (RENDER_FETCH_URL — localhost in
+    // dev), not to the attacker-controllable target URL. The renderer
+    // enforces its own SSRF guard on the target it navigates to.
     const res = await fetch(endpoint, {
       headers: {
         accept: "application/json",

@@ -13,6 +13,14 @@ vi.mock("@intentface/latch-net", async (importOriginal) => {
   return { ...actual, isBlockedResolved: async () => false };
 });
 
+// The DNS-pinned fetch would vet fake hostnames at connect time (real
+// network); route it to the stubbed global so tests stay hermetic.
+vi.mock("@intentface/latch-net/pinned", () => ({
+  pinnedFetch: (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init),
+  createPinnedFetch: () => (input: RequestInfo | URL, init?: RequestInit) =>
+    globalThis.fetch(input, init),
+}));
+
 /** In-memory Vault stub — enough surface for the store + OAuth flows. */
 function memoryVault(): Vault<Principal> {
   const data = new Map<string, string>();

@@ -1,5 +1,6 @@
 import TurndownService from "turndown";
 import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
+import { pinnedFetch } from "@intentface/latch-net/pinned";
 
 /**
  * Robust URL fetching for the `web_fetch` tool — mirrors eve's implementation
@@ -142,7 +143,10 @@ export async function webFetch(args: {
     for (let hop = 0; ; hop++) {
       const bad = await blockedReason(current);
       if (bad) return { error: bad };
-      const res = await fetch(current, { headers: reqHeaders, signal, redirect: "manual" });
+      // Pinned fetch: the SSRF vetting also runs inside the connection's own
+      // DNS lookup, so `blockedReason` above is the well-messaged pre-check,
+      // not the last line of defense against rebinding.
+      const res = await pinnedFetch(current, { headers: reqHeaders, signal, redirect: "manual" });
       const location =
         res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
       if (!location) return res;

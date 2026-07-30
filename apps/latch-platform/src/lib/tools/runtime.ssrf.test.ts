@@ -15,6 +15,14 @@ vi.mock("@intentface/latch-net", async (importOriginal) => ({
   isBlockedResolved: (host: string) => isBlockedResolved(host),
 }));
 
+// The DNS-pinned fetch would vet fake hostnames at connect time (real
+// network); route it to the stubbed global so tests stay hermetic.
+vi.mock("@intentface/latch-net/pinned", () => ({
+  pinnedFetch: (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init),
+  createPinnedFetch: () => (input: RequestInfo | URL, init?: RequestInit) =>
+    globalThis.fetch(input, init),
+}));
+
 const { runTool } = await import("./runtime");
 
 let fetchMock: ReturnType<typeof vi.fn>;

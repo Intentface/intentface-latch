@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Vault } from "@intentface/latch-core";
 import type { McpOAuth, StartResult } from "@intentface/latch-mcp";
 import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
+import { pinnedFetch, type FetchLike } from "@intentface/latch-net/pinned";
 
 /**
  * Generic OAuth2 authorization-code flow for a PRE-REGISTERED client with
@@ -126,8 +127,15 @@ export function createOAuth2Flow<TPrincipal>(opts: {
   config: (principal: TPrincipal) => Promise<OAuth2Endpoints>;
   /** Stable caller identity for the single-flight refresh map. */
   ownerKey: (principal: TPrincipal) => string;
+  /**
+   * Fetch for the token POST. Defaults to the DNS-pinned fetch, which vets
+   * addresses at connect time — `assertPublicHttpsUrl` alone leaves the
+   * validate-vs-connect rebinding gap. Injectable for tests.
+   */
+  fetch?: FetchLike;
 }): OAuth2Flow<TPrincipal> {
   const { vault, name } = opts;
+  const fetchFn = opts.fetch ?? pinnedFetch;
   const redirectUri = `${opts.callbackBaseUrl.replace(/\/$/, "")}/${name}/callback`;
   const vaultKey = (part: string) => `oauth2:${name}:${part}`;
 
@@ -173,7 +181,7 @@ export function createOAuth2Flow<TPrincipal>(opts: {
     const cfg = await opts.config(principal);
     // Re-validated on every POST, not just at save time (DNS drift).
     await assertPublicHttpsUrl(cfg.tokenUrl);
-    const res = await fetch(cfg.tokenUrl, {
+    const res = await fetchFn(cfg.tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
