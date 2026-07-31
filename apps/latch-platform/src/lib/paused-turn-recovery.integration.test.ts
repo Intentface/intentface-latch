@@ -219,6 +219,33 @@ describe("recovering a chat parked on a stale pause", () => {
     expect((await runtime.loadHistory({ chatId, principal })).length).toBe(after);
   });
 
+  it("answering an ABANDONED call is a no-op, not a spurious turn", async () => {
+    // A stale button (or a redelivered submit) for a question buried turns ago
+    // must not mutate dead history and must not resume an obsolete turn.
+    const chatId = "chat_stale_submit";
+    script = [() => callAskUser("call_dead", "Old?")];
+    await drain(await send(runtime, chatId, "hi"));
+
+    script = [() => sayText("Moving on.")];
+    await drain(await send(runtime, chatId, "never mind"));
+    const before = await runtime.loadHistory({ chatId, principal });
+
+    const res = await runtime.applyToolResult({
+      chatId,
+      principal,
+      toolCallId: "call_dead",
+      output: { "Old?": "Yes" },
+    });
+    expect(isStream(res)).toBe(false);
+
+    const after = await runtime.loadHistory({ chatId, principal });
+    expect(after.length).toBe(before.length); // no extra assistant turn
+    const dead = (after[1]!.parts as Record<string, unknown>[]).find(
+      (p) => p.toolCallId === "call_dead",
+    )!;
+    expect(dead.state).toBe("input-available"); // untouched in stored history
+  });
+
   it("with two parked calls in one step, only the second submit resumes", async () => {
     // `hasPendingToolResult` is scoped to the messages just touched, so a SIBLING
     // still awaiting a result must hold the resume — otherwise the re-run throws

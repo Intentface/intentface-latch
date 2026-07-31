@@ -839,19 +839,23 @@ function recordToolResult(
   toolCallId: string,
   output: unknown,
 ): AppMessage[] {
-  const changed: AppMessage[] = [];
-  for (const m of messages) {
-    let touched = false;
-    for (const p of (m.parts ?? []) as ResultPart[]) {
-      if (p.toolCallId === toolCallId && p.state === "input-available") {
-        p.state = "output-available";
-        p.output = output;
-        touched = true;
-      }
+  // Only the live pause point may be answered. A parked client tool call always
+  // sits on the assistant message the turn paused on (a resume starts a new
+  // one), so anything older was abandoned and buried by a later user turn.
+  // Recording onto it would mutate dead history AND resume an obsolete turn —
+  // a stale button, or a redelivered submit for a long-dead question, would
+  // trigger a spurious agent run instead of doing nothing.
+  const last = messages[messages.length - 1];
+  if (last?.role !== "assistant") return [];
+  let touched = false;
+  for (const p of (last.parts ?? []) as ResultPart[]) {
+    if (p.toolCallId === toolCallId && p.state === "input-available") {
+      p.state = "output-available";
+      p.output = output;
+      touched = true;
     }
-    if (touched) changed.push(m);
   }
-  return changed;
+  return touched ? [last] : [];
 }
 
 /** Invoke an observability hook fire-and-forget — a thrown/rejected hook is
