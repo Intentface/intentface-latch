@@ -75,6 +75,14 @@ export interface AgentRecord {
    */
   attachedEvals?: AttachedEval[];
   scope: CredentialScope;
+  /**
+   * READ-ONLY: the `owner` column of the row this record came from, set by the
+   * store on reads and ignored by `upsert` (which always derives owner from
+   * `scope`). This is the eval-visibility boundary — whoever holds this key may
+   * administer the agent, and therefore owns its eval verdicts. See
+   * `evalOwnerKeysOf`.
+   */
+  owner?: string;
 }
 
 /** One judge rubric attached to an agent (see AgentRecord.attachedEvals). */
@@ -108,10 +116,32 @@ const maxStepsToCol = (m: AgentRecord["maxSteps"]): number | null =>
 const maxStepsFromCol = (v: unknown): AgentRecord["maxSteps"] =>
   v == null ? undefined : Number(v) === 0 ? "unlimited" : Number(v);
 
+/**
+ * The `latch_agents.owner` key for a principal at a given scope: `org` → the org
+ * alone (shared with every member), `user` → the (org, user) pair. Exported as
+ * `agentOwnerKey` because it doubles as the eval-visibility boundary — see
+ * `evalOwnerKeysOf`.
+ */
 const ownerKey = (p: Principal, scope: CredentialScope): string =>
   (scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""])
     .map(encodeURIComponent)
     .join("/");
+
+export { ownerKey as agentOwnerKey };
+
+/**
+ * The owner keys whose agents this principal may administer, i.e. the eval
+ * verdicts it may see: its personal key and its org's shared key. The judge
+ * files each verdict under the resolved agent's own owner key, so reading with
+ * these two is exactly "the evals of agents I could edit" — a user who merely
+ * *runs* someone else's agent matches neither and sees nothing.
+ *
+ * Ordered personal-first to mirror `find`'s personal-wins-over-org precedence.
+ */
+export const evalOwnerKeysOf = (p: Principal): string[] => [
+  ownerKey(p, "user"),
+  ownerKey(p, "org"),
+];
 
 const newId = () => `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 
@@ -190,7 +220,20 @@ export function createAgentStore(
       ? (JSON.parse(String(row.attached_evals)) as AttachedEval[])
       : undefined,
     scope: String(row.scope) as CredentialScope,
+    owner: String(row.owner),
   });
+
+  /**
+   * Split a possibly scope-pinned agent ref into (name, scope). Channel bindings
+   * store `org:name` / `user:name` so a binding always runs the record it was
+   * created for (stored names never contain `:` — normalizeAgentName strips it),
+   * and `latch_runs.agent` keeps that pin verbatim. Every lookup that can be
+   * handed a run's agent name must therefore parse it, not just `resolve`.
+   */
+  function parseRef(ref: string): { name: string; scope?: CredentialScope } {
+    const pin = /^(org|user):(.+)$/.exec(ref);
+    return pin ? { name: pin[2], scope: pin[1] as CredentialScope } : { name: ref };
+  }
 
   async function find(
     p: Principal,
@@ -216,14 +259,10 @@ export function createAgentStore(
 
   return {
     async resolve(name, principal): Promise<AgentConfig<Principal> | undefined> {
-      // Channel bindings pin resolution to one scope with an `org:`/`user:`
-      // prefix (stored names never contain `:` — normalizeAgentName strips
-      // it), so a same-named record in the OTHER scope can never shadow the
-      // agent the binding was created for.
-      const pin = /^(org|user):(.+)$/.exec(name);
-      const rec = pin
-        ? await find(principal, pin[2], pin[1] as CredentialScope)
-        : await find(principal, name);
+      // Channel bindings pin resolution to one scope, so a same-named record in
+      // the OTHER scope can never shadow the agent the binding was created for.
+      const { name: bare, scope: pinned } = parseRef(name);
+      const rec = await find(principal, bare, pinned);
       if (!rec) return undefined;
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
@@ -296,7 +335,11 @@ export function createAgentStore(
     },
 
     async getRecord(principal, name) {
-      return find(principal, name);
+      // Pin-aware, like `resolve`: `latch_runs.agent` carries the channel's
+      // `org:`/`user:` prefix, and the online judge looks rubrics up by it. Without
+      // this, attached evals silently never fire for channel-bound agents.
+      const { name: bare, scope } = parseRef(name);
+      return find(principal, bare, scope);
     },
 
     async listMemoryEnabledNames() {

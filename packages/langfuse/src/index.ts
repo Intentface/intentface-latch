@@ -8,6 +8,8 @@ export {
 export { postScore, type PostScoreInput } from "./scores.js";
 export {
   listOwnerTraces,
+  listAdministeredTraces,
+  AGENT_OWNER_TAG,
   type TraceSummary,
   type TraceScore,
 } from "./reads.js";

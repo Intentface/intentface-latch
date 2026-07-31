@@ -22,6 +22,14 @@ export interface LangfuseTelemetryOptions<P> {
    * platform reads filter on it, so it must be stable per tenant.
    */
   ownerTag: (principal: P) => string;
+  /**
+   * The owner key of the AGENT being run, when the host can resolve one — becomes
+   * an `agent-owner:` tag. Distinct from `ownerTag` (who ran the turn): it lets a
+   * reader find every run of the agents it administers, including runs by other
+   * users. Return undefined for agents with no owner (e.g. code-registry ones),
+   * which simply omits the tag. Runs on the turn's hot path, so keep it cheap.
+   */
+  agentOwnerTag?: (run: TelemetryRunMeta<P>) => Promise<string | undefined>;
   /** Trace environment shown in Langfuse (default "development"). */
   environment?: string;
   /**
@@ -79,8 +87,9 @@ function lastAssistantText(messages: unknown[]): string | undefined {
  * ```
  *
  * Every run becomes one Langfuse trace with a deterministic id derived from
- * the runId (`traceIdForRun`), tagged `owner:` / `agent:` / `run:` and scoped
- * to `sessionId = chatId`, `userId = ownerTag`.
+ * the runId (`traceIdForRun`), tagged `owner:` / `agent:` / `run:` (plus
+ * `agent-owner:` when `agentOwnerTag` resolves one) and scoped to
+ * `sessionId = chatId`, `userId = ownerTag`.
  */
 export function langfuseTelemetry<P>(
   opts: LangfuseTelemetryOptions<P>,
@@ -132,6 +141,17 @@ export function langfuseTelemetry<P>(
       const sessionId = run.rootChatId ?? run.chatId;
       const tags = [`owner:${owner}`, `agent:${run.agent}`, `run:${run.runId}`];
       if (run.parentRunId) tags.push(`parent-run:${run.parentRunId}`, "subagent");
+      // `agent-owner:` is how the observability feed finds runs of the agents a
+      // reader administers — including runs by OTHER users. Best-effort: a failed
+      // lookup must not cost the turn its trace, it only costs that filter.
+      if (opts.agentOwnerTag) {
+        try {
+          const agentOwner = await opts.agentOwnerTag(run);
+          if (agentOwner) tags.push(`agent-owner:${agentOwner}`);
+        } catch (e) {
+          console.warn(`agentOwnerTag failed (run ${run.runId}):`, e);
+        }
+      }
       return otelContext.with(ctx, () =>
         propagateAttributes(
           {

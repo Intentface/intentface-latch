@@ -10,6 +10,11 @@ import type { Client } from "@libsql/client";
  * Keyed (owner, run_id, rubric_name): the live judge and any later re-judge of
  * the same run+rubric upsert the same row. `source` distinguishes the original
  * live verdict from a tuning re-judge.
+ *
+ * `owner` is the EVAL owner — the owner key of the agent whose rubrics produced
+ * the verdict (`agentOwnerKey`), NOT whoever ran the turn. That's what lets a
+ * colleague's run on my agent surface in my observations while staying invisible
+ * to them. Who ran it is recorded separately in `run_owner`, for attribution.
  */
 export interface RunScore {
   runId: string;
@@ -22,6 +27,18 @@ export interface RunScore {
   /** When a human corrected it: the judge's original value/reason, preserved. */
   aiValue?: number;
   aiComment?: string;
+  /**
+   * The `ownerTagOf` of the principal that ran the judged turn. Absent on rows
+   * written before the eval-owner split (where `owner` WAS the runner).
+   */
+  runOwner?: string;
+  /**
+   * READ-ONLY: the `owner` column this row was found under, set on reads and
+   * ignored by `put` (which takes the owner explicitly). Lets a caller that read
+   * across several keys upsert the row it actually matched instead of forking a
+   * duplicate under its preferred key.
+   */
+  owner?: string;
   updatedAt: number;
 }
 
@@ -53,6 +70,7 @@ export async function migrateRunScores(client: Client): Promise<void> {
   for (const [name, def] of [
     ["ai_value", "ai_value REAL"],
     ["ai_comment", "ai_comment TEXT"],
+    ["run_owner", "run_owner TEXT"],
   ] as const) {
     if (existing.has(name)) continue;
     try {
@@ -67,13 +85,24 @@ export async function migrateRunScores(client: Client): Promise<void> {
 }
 
 export interface RunScoresStore {
-  /** Upsert one verdict for a run+rubric (live or re-judge). `owner` is the
-   *  canonical owner key (see `ownerTagOf`). */
+  /** Upsert one verdict for a run+rubric (live or re-judge). `owner` is the eval
+   *  owner — the judged agent's owner key (see `agentOwnerKey`). */
   put: (owner: string, score: RunScore) => Promise<void>;
-  /** All scores for the given run ids, grouped by runId. */
-  getForRuns: (owner: string, runIds: string[]) => Promise<Map<string, RunScore[]>>;
-  /** One score for a run+rubric, or null. */
-  getOne: (owner: string, runId: string, rubricName: string) => Promise<RunScore | null>;
+  /**
+   * All scores for the given run ids, grouped by runId. `owner` accepts several
+   * keys (see `evalOwnerKeysOf`) so a caller can read its personal AND its org's
+   * agents in one hop; rows are matched on any of them.
+   */
+  getForRuns: (
+    owner: string | string[],
+    runIds: string[],
+  ) => Promise<Map<string, RunScore[]>>;
+  /** One score for a run+rubric under any of `owner`, or null. */
+  getOne: (
+    owner: string | string[],
+    runId: string,
+    rubricName: string,
+  ) => Promise<RunScore | null>;
 }
 
 const asSource = (v: unknown): RunScore["source"] =>
@@ -88,20 +117,34 @@ const rowToScore = (r: Record<string, unknown>): RunScore => ({
   source: asSource(r.source),
   aiValue: r.ai_value == null ? undefined : Number(r.ai_value),
   aiComment: (r.ai_comment as string) ?? undefined,
+  runOwner: (r.run_owner as string) ?? undefined,
+  owner: String(r.owner),
   updatedAt: Number(r.updated_at),
 });
+
+/**
+ * Normalize the owner argument to a non-empty key list. An empty array would
+ * compile to `owner IN ()` — a syntax error in SQLite — so callers that legibly
+ * pass a filtered-empty list get "no rows" instead of a thrown query.
+ */
+const ownerList = (owner: string | string[]): string[] =>
+  (typeof owner === "string" ? [owner] : owner).filter((o) => o.length > 0);
 
 export function createRunScoresStore(client: Client): RunScoresStore {
   return {
     async put(owner, score) {
       await client.execute({
         sql: `INSERT INTO latch_run_scores
-          (owner, run_id, rubric_name, value, comment, scale, source, ai_value, ai_comment, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (owner, run_id, rubric_name, value, comment, scale, source, ai_value, ai_comment, run_owner, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, run_id, rubric_name) DO UPDATE SET
             value=excluded.value, comment=excluded.comment, scale=excluded.scale,
             source=excluded.source, ai_value=excluded.ai_value,
-            ai_comment=excluded.ai_comment, updated_at=excluded.updated_at`,
+            ai_comment=excluded.ai_comment,
+            -- A human correction carries no runner (it isn't a run); keep the
+            -- attribution the live judge recorded instead of nulling it out.
+            run_owner=COALESCE(excluded.run_owner, run_owner),
+            updated_at=excluded.updated_at`,
         args: [
           owner,
           score.runId,
@@ -112,15 +155,23 @@ export function createRunScoresStore(client: Client): RunScoresStore {
           score.source,
           score.aiValue ?? null,
           score.aiComment ?? null,
+          score.runOwner ?? null,
           score.updatedAt,
         ],
       });
     },
 
     async getOne(owner, runId, rubricName) {
+      const owners = ownerList(owner);
+      if (owners.length === 0) return null;
       const res = await client.execute({
-        sql: `SELECT * FROM latch_run_scores WHERE owner = ? AND run_id = ? AND rubric_name = ?`,
-        args: [owner, runId, rubricName],
+        // Newest wins when the same verdict exists under two keys — see
+        // getForRuns for why that happens.
+        sql: `SELECT * FROM latch_run_scores
+          WHERE owner IN (${owners.map(() => "?").join(",")})
+            AND run_id = ? AND rubric_name = ?
+          ORDER BY updated_at DESC LIMIT 1`,
+        args: [...owners, runId, rubricName],
       });
       const row = (res.rows as unknown as Record<string, unknown>[])[0];
       return row ? rowToScore(row) : null;
@@ -128,21 +179,37 @@ export function createRunScoresStore(client: Client): RunScoresStore {
 
     async getForRuns(owner, runIds) {
       const byRun = new Map<string, RunScore[]>();
-      if (runIds.length === 0) return byRun;
+      const owners = ownerList(owner);
+      if (runIds.length === 0 || owners.length === 0) return byRun;
       // Bound the IN-list; visible messages per poll are few, but guard anyway.
       const ids = runIds.slice(0, 200);
       const placeholders = ids.map(() => "?").join(",");
       const res = await client.execute({
         sql: `SELECT * FROM latch_run_scores
-          WHERE owner = ? AND run_id IN (${placeholders})
+          WHERE owner IN (${owners.map(() => "?").join(",")})
+            AND run_id IN (${placeholders})
           ORDER BY rubric_name ASC`,
-        args: [owner, ...ids],
+        args: [...owners, ...ids],
       });
+      // One verdict can exist under two keys: a row written before the
+      // eval-owner split (keyed by the RUNNER, which for one's own runs equals
+      // one's personal key) plus a later row keyed by the agent's owner. Collapse
+      // to the newest so a rubric never renders twice — matching getOne, and
+      // keeping a human correction authoritative over an older live verdict.
+      const newest = new Map<string, RunScore>();
       for (const row of res.rows as unknown as Record<string, unknown>[]) {
         const s = rowToScore(row);
+        const key = `${s.runId} ${s.rubricName}`;
+        const prev = newest.get(key);
+        if (!prev || s.updatedAt > prev.updatedAt) newest.set(key, s);
+      }
+      for (const s of newest.values()) {
         const list = byRun.get(s.runId) ?? [];
         list.push(s);
         byRun.set(s.runId, list);
+      }
+      for (const list of byRun.values()) {
+        list.sort((a, b) => a.rubricName.localeCompare(b.rubricName));
       }
       return byRun;
     },

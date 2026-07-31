@@ -149,17 +149,40 @@ const turnMsg = (runId: string, text: string) => ({
 });
 const userMsg = (text: string) => ({ role: "user", parts: [{ type: "text", text }] });
 
-/** In-memory latch fake: records every local score write, counts judge calls. */
-function fakeLatch(evals: AttachedEval[], history: unknown[]) {
+/**
+ * In-memory latch fake: records every local score write (with the owner key it
+ * was filed under), counts judge calls.
+ */
+function fakeLatch(
+  evals: AttachedEval[],
+  history: unknown[],
+  /** The `owner` column of the agent record — the eval owner the judge should use. */
+  agentOwner?: string,
+) {
   const { model, prompts } = mockJudge();
-  const puts: { rubricName: string; source: string; value: number }[] = [];
+  const puts: {
+    owner: string;
+    rubricName: string;
+    source: string;
+    value: number;
+    runOwner?: string;
+  }[] = [];
   harness.latch = {
-    agentStore: { getRecord: async () => ({ attachedEvals: evals }) },
-    runtime: { loadHistory: async () => history },
+    agentStore: {
+      getRecord: async () => ({ attachedEvals: evals, owner: agentOwner }),
+    },
+    runtime: {
+      loadHistory: async () => history,
+      // rejudgeRun derives the agent (and so the eval owner) from the run itself.
+      getRun: async ({ runId }: { runId: string }) => ({ id: runId, agent: "my-agent" }),
+    },
     modelFor: () => model,
     runScores: {
-      put: async (_owner: string, s: { rubricName: string; source: string; value: number }) => {
-        puts.push(s);
+      put: async (
+        owner: string,
+        s: { rubricName: string; source: string; value: number; runOwner?: string },
+      ) => {
+        puts.push({ owner, ...s });
       },
       getOne: async () => undefined,
     },
@@ -222,6 +245,50 @@ describe("judgeLiveRun — trigger gating at the entry point", () => {
     expect(postScore).toHaveBeenCalledWith(
       expect.objectContaining({ runId: "r1", name: "greets", value: 1, timestamp: 1_000 }),
     );
+  });
+});
+
+describe("eval ownership — whose observations a verdict lands in", () => {
+  beforeEach(() => vi.mocked(postScore).mockClear());
+
+  it("files the verdict under the AGENT's owner, not the runner's tag", async () => {
+    // The mocked ownerTagOf is "org/user" — a colleague running an org agent.
+    // The verdict must be keyed to the agent's owner ("org") so the agent's
+    // administrators see it, with the runner recorded for attribution.
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts } = fakeLatch([rubric("greets")], history, "org");
+    await judgeLiveRun(liveArgs("r1", 0, [turnMsg("r1", "one")]));
+    expect(puts).toEqual([
+      expect.objectContaining({
+        owner: "org",
+        runOwner: "org/user",
+        rubricName: "greets",
+        source: "live",
+      }),
+    ]);
+  });
+
+  it("falls back to the runner's tag for an agent with no owner (code registry)", async () => {
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts } = fakeLatch([rubric("greets")], history, undefined);
+    await judgeLiveRun(liveArgs("r1", 0, [turnMsg("r1", "one")]));
+    expect(puts).toEqual([
+      expect.objectContaining({ owner: "org/user", runOwner: "org/user" }),
+    ]);
+  });
+
+  it("a re-judge lands on the same owner key as the live verdict", async () => {
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts } = fakeLatch([], history, "org");
+    await rejudgeRun({
+      principal: {} as never,
+      chatId: "chat1",
+      runId: "r1",
+      rubrics: [rubric("greets")],
+    });
+    expect(puts).toEqual([
+      expect.objectContaining({ owner: "org", runOwner: "org/user", source: "rejudge" }),
+    ]);
   });
 });
 

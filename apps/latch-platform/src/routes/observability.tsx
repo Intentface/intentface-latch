@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { ExternalLink, ThumbsUp } from "lucide-react";
+import { ExternalLink, ThumbsUp, EyeOff } from "lucide-react";
 import { currentPrincipalFn, listAgentsFn, listObservabilityFn } from "@/lib/server";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -39,6 +39,11 @@ function scoreLabel(s: { value: number | string | null; dataType?: string }): st
 function ObservabilityPage() {
   const initial = Route.useLoaderData();
   const [agent, setAgent] = useState<string>("");
+  // Narrow to one person's runs. Keyed by the server's opaque runner key, which
+  // is a pseudonym while anonymized — so switching modes clears the selection
+  // rather than silently filtering on a key the new mode never emits.
+  const [runner, setRunner] = useState<string>("");
+  const [anonymous, setAnonymous] = useState(false);
   const [feed, setFeed] = useState<Feed>(initial.feed);
 
   // Live poll (~5s), paused while the tab is hidden — this is the "watch your
@@ -48,7 +53,13 @@ function ObservabilityPage() {
     const tick = async () => {
       if (document.hidden) return;
       try {
-        const next = await listObservabilityFn({ data: { agent: agent || undefined } });
+        const next = await listObservabilityFn({
+          data: {
+            agent: agent || undefined,
+            runner: runner || undefined,
+            anonymous: anonymous || undefined,
+          },
+        });
         if (!cancelled) setFeed(next);
       } catch {
         /* transient poll failure — next tick retries */
@@ -60,7 +71,7 @@ function ObservabilityPage() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [agent]);
+  }, [agent, runner, anonymous]);
 
   if (!feed.configured) {
     return (
@@ -93,6 +104,43 @@ function ObservabilityPage() {
               </option>
             ))}
           </select>
+          {/* Only worth showing once someone other than you has used an agent
+              you administer — otherwise every row is "You". */}
+          {feed.runners.length > 1 && (
+            <select
+              value={runner}
+              onChange={(e) => setRunner(e.target.value)}
+              className="bg-background h-8 rounded-md border px-2 text-sm"
+              aria-label="Filter by who ran the agent"
+            >
+              <option value="">Everyone</option>
+              {feed.runners.map((r) => (
+                <option key={r.key} value={r.key}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              // The runner keys differ between modes; drop the filter with them.
+              setRunner("");
+              setAnonymous((v) => !v);
+            }}
+            aria-pressed={anonymous}
+            title={
+              anonymous
+                ? "Showing pseudonyms instead of names"
+                : "Hide who ran each turn (names are not sent to the browser)"
+            }
+            className={`flex h-8 items-center gap-1.5 rounded-md border px-2 text-sm ${
+              anonymous ? "bg-accent text-accent-foreground" : "bg-background"
+            }`}
+          >
+            <EyeOff className="size-3.5" />
+            Anonymize
+          </button>
           <span className="text-muted-foreground text-xs">live · {POLL_MS / 1000}s</span>
         </div>
       </div>
@@ -118,8 +166,9 @@ function ObservabilityPage() {
           <TableHeader>
             <TableRow>
               <TableHead>Agent</TableHead>
-              <TableHead className="w-[28%]">Input</TableHead>
-              <TableHead className="w-[28%]">Output</TableHead>
+              <TableHead>Who</TableHead>
+              <TableHead className="w-[26%]">Input</TableHead>
+              <TableHead className="w-[26%]">Output</TableHead>
               <TableHead>Scores</TableHead>
               <TableHead className="text-right">Latency</TableHead>
               <TableHead className="text-right">Cost</TableHead>
@@ -130,7 +179,7 @@ function ObservabilityPage() {
           <TableBody>
             {feed.rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="text-muted-foreground text-center text-sm">
+                <TableCell colSpan={9} className="text-muted-foreground text-center text-sm">
                   No traces yet — chat with an agent and its run appears here
                   within seconds.
                 </TableCell>
@@ -139,6 +188,15 @@ function ObservabilityPage() {
             {feed.rows.map((r) => (
               <TableRow key={r.traceId}>
                 <TableCell className="whitespace-nowrap">{r.agent ?? "—"}</TableCell>
+                <TableCell className="whitespace-nowrap text-sm">
+                  {r.runner ? (
+                    <span className={r.runner.isSelf ? "text-muted-foreground" : ""}>
+                      {r.runner.label}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
                 <TableCell className="text-muted-foreground max-w-0 truncate text-sm">
                   {r.inputPreview || "—"}
                 </TableCell>
