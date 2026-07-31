@@ -1,8 +1,11 @@
 import type { AppMessage } from "@intentface/latch-core";
-import type { ChannelRunOps } from "../types.js";
-import { consumeRun, pendingApprovals } from "../render.js";
+import type { AskSession, AskStateStore, ChannelRunOps, Question } from "../types.js";
+import { consumeRun, isPendingApprovalError, pendingApprovals, pendingQuestion } from "../render.js";
+import { nextAskStep, type AskEvent } from "../ask.js";
 import {
   whatsappApi,
+  MAX_LIST_ROWS,
+  MAX_REPLY_BUTTONS,
   type LazyString,
   type WhatsappApiOptions,
 } from "./api.js";
@@ -68,6 +71,12 @@ export interface WhatsappChannelConfig<P> {
     connectionName: string,
     ctx: { chatId: string; waId: string; approvalId: string },
   ) => string;
+  /**
+   * Host storage for in-flight `askUser` questionnaires (see the Telegram
+   * channel). Without it questions are posted as plain text and the turn stays
+   * paused, answerable in the web app.
+   */
+  askState?: AskStateStore;
   waitUntil?: (p: Promise<unknown>) => void;
   /** Test seam: base URL / fetch for the Graph API client. */
   apiOptions?: WhatsappApiOptions;
@@ -91,7 +100,11 @@ interface WaMessage {
   document?: WaMediaRef;
   audio?: WaMediaRef;
   video?: WaMediaRef;
-  interactive?: { type?: string; button_reply?: { id: string; title?: string } };
+  interactive?: {
+    type?: string;
+    button_reply?: { id: string; title?: string };
+    list_reply?: { id: string; title?: string };
+  };
 }
 
 interface WaChangeValue {
@@ -120,6 +133,48 @@ export function decodeWhatsappApprovalId(
   const m = CALLBACK_RE.exec(id);
   if (!m) return null;
   return { approved: m[1] === "1", approvalId: m[2]! };
+}
+
+// Questionnaire ids use the same `ltq:` wire format as Telegram (reply ids allow
+// 256 chars, so there's no budget pressure here — sharing the format keeps the
+// two channels' encoders from drifting).
+const QUESTION_RE = /^ltq:([sd])\|([^|]+)\|(\d+)(?:\|(\d+))?$/;
+
+export type WhatsappQuestionReply =
+  | { verb: "pick"; nonce: string; questionIndex: number; optionIndex: number }
+  | { verb: "done"; nonce: string; questionIndex: number };
+
+export function encodeWhatsappQuestionId(cb: WhatsappQuestionReply): string {
+  const tail = cb.verb === "pick" ? `|${cb.optionIndex}` : "";
+  return `ltq:${cb.verb === "pick" ? "s" : "d"}|${cb.nonce}|${cb.questionIndex}${tail}`;
+}
+
+export function decodeWhatsappQuestionId(id: string | undefined): WhatsappQuestionReply | null {
+  if (!id) return null;
+  const m = QUESTION_RE.exec(id);
+  if (!m) return null;
+  const nonce = m[2]!;
+  const questionIndex = Number(m[3]);
+  if (m[1] === "d") return { verb: "done", nonce, questionIndex };
+  if (m[4] === undefined) return null;
+  return { verb: "pick", nonce, questionIndex, optionIndex: Number(m[4]) };
+}
+
+function newNonce(): string {
+  const uuid = globalThis.crypto?.randomUUID?.() ?? String(Math.random());
+  return uuid.replace(/[^a-z0-9]/gi, "").slice(0, 6);
+}
+
+/** Question body text: the question plus numbered options (typed "2" answers it). */
+function questionBody(q: Question, index: number, total: number, numbered: boolean): string {
+  const head = total > 1 ? `*Question ${index + 1} of ${total}*\n` : "";
+  const title = q.header ? `_${q.header}_\n${q.question}` : q.question;
+  if (!numbered) return `${head}${title}`;
+  const opts = q.options.map((o, i) => `${i + 1}. ${o.label}`).join("\n");
+  const how = q.multiSelect
+    ? "\n\nReply with the numbers you want, e.g. 1,3"
+    : "\n\nReply with a number, or just tell me in your own words.";
+  return `${head}${title}\n\n${opts}${how}`;
 }
 
 /** Split text into ≤`max`-char messages, preferring paragraph/line breaks. */
@@ -214,13 +269,34 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     for (const chunk of splitWhatsappText(body)) {
       await api.sendText(ctx.waId, chunk);
     }
-    if (errorMessage) return; // don't look for approvals on a failed turn
+    if (errorMessage) return; // a failed turn has nothing new to decide
+    await renderPending(ctx);
+  }
 
+  /**
+   * Post whatever the turn is parked on. Approvals win over questionnaires: a
+   * gated tool blocks the run, so answering questions first would go nowhere.
+   */
+  async function renderPending(ctx: {
+    waId: string;
+    chatId: string;
+    principal: P;
+  }): Promise<void> {
     const history = await config.runtime.loadHistory({
       chatId: ctx.chatId,
       principal: ctx.principal,
     });
-    for (const pa of pendingApprovals(history)) {
+    const approvals = pendingApprovals(history);
+    await renderApprovals(approvals, ctx);
+    if (approvals.length) return;
+    await renderQuestions(pendingQuestion(history), ctx);
+  }
+
+  async function renderApprovals(
+    approvals: ReturnType<typeof pendingApprovals>,
+    ctx: { waId: string; chatId: string; principal: P },
+  ): Promise<void> {
+    for (const pa of approvals) {
       if (pa.isConnect && pa.connectionName && config.authorizeUrl) {
         const url = config.authorizeUrl(pa.connectionName, {
           chatId: ctx.chatId,
@@ -242,6 +318,152 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
         ]);
       }
     }
+  }
+
+  // ── Questionnaires (askUser) ───────────────────────────────────────────────
+
+  /**
+   * Post one question with the best affordance Meta allows: reply buttons up to
+   * 3 options, a tappable list up to 10, otherwise a numbered text prompt.
+   *
+   * Multi-select always falls back to numbers: WhatsApp cannot edit a sent
+   * message, so there's no way to tick options in place the way Telegram does.
+   */
+  async function sendQuestion(session: AskSession): Promise<void> {
+    const q = session.questions[session.cursor];
+    if (!q) return;
+    const total = session.questions.length;
+    const id = (optionIndex: number) =>
+      encodeWhatsappQuestionId({
+        verb: "pick",
+        nonce: session.nonce,
+        questionIndex: session.cursor,
+        optionIndex,
+      });
+
+    if (!q.multiSelect && q.options.length <= MAX_REPLY_BUTTONS) {
+      await api.sendReplyButtons(
+        session.promptChatId,
+        questionBody(q, session.cursor, total, false),
+        q.options.map((o, i) => ({ id: id(i), title: o.label })),
+      );
+      return;
+    }
+    if (!q.multiSelect && q.options.length <= MAX_LIST_ROWS) {
+      await api.sendList(
+        session.promptChatId,
+        questionBody(q, session.cursor, total, false),
+        "Choose",
+        q.options.map((o, i) => ({ id: id(i), title: o.label, description: o.description })),
+      );
+      return;
+    }
+    await api.sendText(session.promptChatId, questionBody(q, session.cursor, total, true));
+  }
+
+  /** Prompt the parked questionnaire, or retire a session that's no longer live. */
+  async function renderQuestions(
+    pending: { toolCallId: string; questions: Question[] } | null,
+    ctx: { waId: string; chatId: string; principal: P },
+  ): Promise<void> {
+    const store = config.askState;
+    if (!pending) {
+      await store?.clear(ctx.chatId).catch(() => null);
+      return;
+    }
+    if (!store) {
+      console.warn("[whatsapp] askUser pending but no askState configured — posting as text");
+      for (const [i, q] of pending.questions.entries()) {
+        await api
+          .sendText(ctx.waId, questionBody(q, i, pending.questions.length, true))
+          .catch(() => {});
+      }
+      return;
+    }
+    const session: Omit<AskSession, "rev"> = {
+      toolCallId: pending.toolCallId,
+      nonce: newNonce(),
+      questions: pending.questions,
+      cursor: 0,
+      answers: {},
+      selected: [],
+      promptChatId: ctx.waId,
+    };
+    if ((await store.begin(ctx.chatId, session)) === "already") return;
+    await sendQuestion({ ...session, rev: 0 });
+  }
+
+  /**
+   * Apply one questionnaire interaction. Only the final answer runs the agent,
+   * so only that path takes the turn lease.
+   */
+  async function answerQuestion(ctx: {
+    waId: string;
+    chatId: string;
+    principal: P;
+    session: AskSession;
+    event: AskEvent;
+  }): Promise<void> {
+    const store = config.askState;
+    if (!store) return;
+    const { session } = ctx;
+    const step = nextAskStep(session, ctx.event);
+
+    if (step.kind === "rejected") {
+      await api.sendText(ctx.waId, step.reason).catch(() => {});
+      return;
+    }
+    if (step.kind === "toggled") {
+      // Unreachable in practice: multi-select is answered by a numbered reply
+      // here, never by per-option taps, since messages can't be edited.
+      await store
+        .update(ctx.chatId, session.toolCallId, session.rev, { selected: step.selected })
+        .catch(() => null);
+      return;
+    }
+
+    if (step.kind === "advanced") {
+      const rev = await store.update(ctx.chatId, session.toolCallId, session.rev, {
+        cursor: step.cursor,
+        answers: step.answers,
+        selected: [],
+      });
+      if (rev === null) return; // a racing delivery already advanced this
+      await api.sendText(ctx.waId, `✓ ${step.answered.answer}`).catch(() => {});
+      await sendQuestion({
+        ...session,
+        cursor: step.cursor,
+        answers: step.answers,
+        selected: [],
+        rev,
+      });
+      return;
+    }
+
+    // Final answer: claim the lease BEFORE consuming the session, so a busy chat
+    // leaves the answers recoverable instead of destroying them.
+    await withTurnLease(ctx.chatId, ctx.waId, async () => {
+      if (!(await store.finish(ctx.chatId, session.toolCallId, session.rev))) return;
+      const submit = config.runtime.applyToolResult;
+      if (!submit) {
+        console.error("[whatsapp] runtime.applyToolResult not wired — cannot resume askUser");
+        return;
+      }
+      await api.sendText(ctx.waId, `✓ ${step.answered.answer}`).catch(() => {});
+      try {
+        const res = await submit({
+          chatId: ctx.chatId,
+          principal: ctx.principal,
+          toolCallId: session.toolCallId,
+          output: step.output,
+        });
+        await renderRun(res, ctx);
+      } catch (e) {
+        console.error("[whatsapp] applyToolResult failed:", e);
+        const m = e instanceof Error ? e.message : String(e);
+        await api.sendText(ctx.waId, `⚠️ ${m.slice(0, 3000)}`).catch(() => {});
+      }
+    });
   }
 
   /**
@@ -305,6 +527,13 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
       console.error("[whatsapp] runMessage failed:", e);
       const m = e instanceof Error ? e.message : String(e);
       await api.sendText(ctx.waId, `⚠️ ${m.slice(0, 3000)}`).catch(() => {});
+      // Refused because a decision is still outstanding — re-post the card, or
+      // the chat is a dead end: the same refusal every turn, no way to clear it.
+      if (isPendingApprovalError(e)) {
+        await renderPending({ waId: ctx.waId, chatId, principal: ctx.principal }).catch((err) =>
+          console.error("[whatsapp] re-render pending failed:", err),
+        );
+      }
     }
   }
 
@@ -336,15 +565,18 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     }
 
     // Approval button replies resume a paused run instead of starting a turn.
-    const decision = decodeWhatsappApprovalId(msg.interactive?.button_reply?.id);
+    const replyId = msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id;
+    const decision = decodeWhatsappApprovalId(replyId);
     if (decision) {
       await runDecision(waId, profileName, decision);
       return;
     }
+    // A questionnaire option tap (reply button or list row).
+    const questionReply = decodeWhatsappQuestionId(replyId);
 
     const text = (msg.text?.body ?? msg.image?.caption ?? msg.document?.caption ?? "").trim();
     const media = mediaRefs(msg);
-    if (!text && media.length === 0) return;
+    if (!questionReply && !text && media.length === 0) return;
 
     let auth: WhatsappAuthResult<P>;
     try {
@@ -374,9 +606,56 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     }
 
     const principal = auth.principal;
-    await withTurnLease(chatIdFor(waId), waId, () =>
-      runMessage({ waId, text, media, principal }),
-    );
+    const chatId = chatIdFor(waId);
+
+    // With a questionnaire on screen, an option tap or a plain reply answers the
+    // current question rather than starting a turn. Downstream of `seen()` so a
+    // redelivered update can't be applied as a second answer.
+    if (config.askState) {
+      const session = await config.askState.get(chatId).catch(() => null);
+      if (session) {
+        const stale =
+          questionReply &&
+          (session.nonce !== questionReply.nonce ||
+            session.cursor !== questionReply.questionIndex);
+        if (stale) {
+          await api.sendText(waId, "That question was already answered.").catch(() => {});
+          return;
+        }
+        if (questionReply) {
+          await answerQuestion({
+            waId,
+            chatId,
+            principal,
+            session,
+            event:
+              questionReply.verb === "pick"
+                ? { kind: "pick", option: questionReply.optionIndex }
+                : { kind: "done" },
+          });
+          return;
+        }
+        const command = text.startsWith("/");
+        if (!command && text) {
+          await answerQuestion({ waId, chatId, principal, session, event: { kind: "typed", text } });
+          return;
+        }
+        // A command, or media with no text — not an answer. Drop the questionnaire.
+        await config.askState.clear(chatId).catch(() => {});
+        if (command && /^\/(cancel|skip)\b/.test(text)) {
+          await api
+            .sendText(waId, "Dropped those questions. What would you like to do instead?")
+            .catch(() => {});
+          return;
+        }
+      } else if (questionReply) {
+        // Tapped a button whose questionnaire is gone (answered elsewhere, expired).
+        await api.sendText(waId, "That questionnaire is no longer active.").catch(() => {});
+        return;
+      }
+    }
+
+    await withTurnLease(chatId, waId, () => runMessage({ waId, text, media, principal }));
   }
 
   // ── Approve/Deny button reply → resume the run ──────────────────────────────

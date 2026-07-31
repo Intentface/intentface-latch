@@ -1,7 +1,9 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { AppMessage } from "@intentface/latch-core";
+import type { AskSession, AskStateStore } from "../types.js";
 import {
+  decodeWhatsappQuestionId,
   splitWhatsappText,
   whatsappChannel,
   type WhatsappChannelConfig,
@@ -28,6 +30,7 @@ function harness(overrides: Partial<WhatsappChannelConfig<{ userId: string }>> =
   const runtime = {
     handleChat: vi.fn(async (_input: unknown) => textRun("Answer!")),
     applyApproval: vi.fn(async (_input: unknown) => textRun("Resumed.")),
+    applyToolResult: vi.fn(async (_input: unknown) => textRun("Thanks!")),
     loadHistory: vi.fn(async (): Promise<AppMessage[]> => []),
   };
 
@@ -290,5 +293,281 @@ describe("splitWhatsappText", () => {
     const chunks = splitWhatsappText("x".repeat(9000), 4096);
     expect(chunks.length).toBe(3);
     expect(chunks.every((c) => c.length <= 4096)).toBe(true);
+  });
+});
+
+/** In-memory AskStateStore with the real rev/nonce/"already" semantics. */
+function fakeAskState() {
+  const rows = new Map<string, AskSession>();
+  return {
+    rows,
+    store: {
+      get: async (chatId: string) => rows.get(chatId) ?? null,
+      begin: async (chatId: string, session: Omit<AskSession, "rev">) => {
+        const existing = rows.get(chatId);
+        if (existing && existing.toolCallId === session.toolCallId) return "already" as const;
+        rows.set(chatId, { ...session, rev: 0 });
+        return "started" as const;
+      },
+      update: async (c: string, t: string, rev: number, patch: Partial<AskSession>) => {
+        const row = rows.get(c);
+        if (!row || row.toolCallId !== t || row.rev !== rev) return null;
+        rows.set(c, { ...row, ...patch, rev: rev + 1 });
+        return rev + 1;
+      },
+      finish: async (c: string, t: string, rev: number) => {
+        const row = rows.get(c);
+        if (!row || row.toolCallId !== t || row.rev !== rev) return false;
+        rows.delete(c);
+        return true;
+      },
+      clear: async (c: string) => {
+        const row = rows.get(c) ?? null;
+        rows.delete(c);
+        return row;
+      },
+    } satisfies AskStateStore,
+  };
+}
+
+function askHistory(toolCallId: string, questions: unknown[]): AppMessage[] {
+  return [
+    {
+      id: "a1",
+      role: "assistant",
+      parts: [
+        { type: "tool-askUser", toolCallId, state: "input-available", input: { questions } },
+      ],
+    } as unknown as AppMessage,
+  ];
+}
+
+describe("whatsappChannel questionnaires (askUser)", () => {
+  const two = {
+    question: "Goal?",
+    options: [
+      { label: "Speed", description: "faster" },
+      { label: "Finish", description: "just finish" },
+    ],
+  };
+  const many = {
+    question: "Which day?",
+    options: ["Mon", "Tue", "Wed", "Thu", "Fri"].map((d) => ({ label: d, description: `on ${d}` })),
+  };
+  const lots = {
+    question: "Pick a number",
+    options: Array.from({ length: 12 }, (_, i) => ({ label: `n${i}`, description: `num ${i}` })),
+  };
+  const multi = {
+    question: "Which sports?",
+    multiSelect: true,
+    options: [
+      { label: "Trail", description: "trail" },
+      { label: "Road", description: "road" },
+    ],
+  };
+
+  function askHarness(questions: unknown[], over: Record<string, unknown> = {}) {
+    const ask = fakeAskState();
+    const h = harness({ askState: ask.store, ...over });
+    h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", questions));
+    return { ...h, ask };
+  }
+
+  const lastSend = (h: ReturnType<typeof harness>) => h.sends().at(-1)!;
+
+  const tapReply = (h: ReturnType<typeof harness>, id: string, kind = "button_reply") =>
+    h.channel.handleRequest(
+      signedPost(
+        inbound({
+          id: `wamid.${id}`,
+          type: "interactive",
+          interactive: { type: kind === "button_reply" ? "button" : "list", [kind]: { id } },
+        }),
+      ),
+    );
+
+  it("uses reply buttons when a question has ≤3 options", async () => {
+    const h = askHarness([two]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    const body = lastSend(h) as {
+      type: string;
+      interactive: { type: string; action: { buttons: { reply: { id: string; title: string } }[] } };
+    };
+    expect(body.type).toBe("interactive");
+    expect(body.interactive.type).toBe("button");
+    expect(body.interactive.action.buttons.map((b) => b.reply.title)).toEqual(["Speed", "Finish"]);
+    expect(decodeWhatsappQuestionId(body.interactive.action.buttons[0]!.reply.id)).toMatchObject({
+      verb: "pick",
+      questionIndex: 0,
+      optionIndex: 0,
+    });
+  });
+
+  it("falls back to a list when a question has 4–10 options", async () => {
+    const h = askHarness([many]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    const body = lastSend(h) as {
+      interactive: { type: string; action: { sections: { rows: { title: string }[] }[] } };
+    };
+    expect(body.interactive.type).toBe("list");
+    expect(body.interactive.action.sections[0]!.rows).toHaveLength(5);
+  });
+
+  it("falls back to numbered text past the list limit", async () => {
+    const h = askHarness([lots]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    const body = lastSend(h) as { type: string; text?: { body: string } };
+    expect(body.type).toBe("text");
+    expect(body.text!.body).toContain("1. n0");
+    expect(body.text!.body).toContain("12. n11");
+  });
+
+  it("multi-select always uses numbered text (messages can't be edited)", async () => {
+    const h = askHarness([multi]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    const body = lastSend(h) as { type: string; text?: { body: string } };
+    expect(body.type).toBe("text");
+    expect(body.text!.body).toMatch(/numbers you want/i);
+  });
+
+  it("a button tap submits the answer map", async () => {
+    const h = askHarness([two]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+    const id = (
+      lastSend(h) as { interactive: { action: { buttons: { reply: { id: string } }[] } } }
+    ).interactive.action.buttons[0]!.reply.id;
+
+    await tapReply(h, id);
+    await h.flush();
+
+    expect(h.runtime.applyToolResult).toHaveBeenCalledWith({
+      chatId: "whatsapp_wb1_358401234567",
+      principal: { userId: "u1" },
+      toolCallId: "toolu_ask1",
+      output: { "Goal?": "Speed" },
+    });
+  });
+
+  it("a list-row tap answers too", async () => {
+    const h = askHarness([many]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+    const id = (
+      lastSend(h) as { interactive: { action: { sections: { rows: { id: string }[] }[] } } }
+    ).interactive.action.sections[0]!.rows[2]!.id;
+
+    await tapReply(h, id, "list_reply");
+    await h.flush();
+
+    expect(h.runtime.applyToolResult.mock.calls[0]![0]).toMatchObject({
+      output: { "Which day?": "Wed" },
+    });
+  });
+
+  it("a typed number answers the pending question instead of starting a turn", async () => {
+    const h = askHarness([two]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+    h.runtime.handleChat.mockClear();
+
+    await h.channel.handleRequest(
+      signedPost(inbound({ id: "wamid.in2", text: { body: "2" } })),
+    );
+    await h.flush();
+
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(h.runtime.applyToolResult.mock.calls[0]![0]).toMatchObject({
+      output: { "Goal?": "Finish" },
+    });
+  });
+
+  it("a multi-select numbered reply picks several options", async () => {
+    const h = askHarness([multi]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    await h.channel.handleRequest(
+      signedPost(inbound({ id: "wamid.in2", text: { body: "1,2" } })),
+    );
+    await h.flush();
+
+    expect(h.runtime.applyToolResult.mock.calls[0]![0]).toMatchObject({
+      output: { "Which sports?": "Trail, Road" },
+    });
+  });
+
+  it("walks two questions, submitting only after the last", async () => {
+    const h = askHarness([two, many]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    await h.channel.handleRequest(signedPost(inbound({ id: "wamid.a", text: { body: "1" } })));
+    await h.flush();
+    expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+    expect((lastSend(h) as { interactive?: { type: string } }).interactive?.type).toBe("list");
+
+    await h.channel.handleRequest(signedPost(inbound({ id: "wamid.b", text: { body: "1" } })));
+    await h.flush();
+    expect(h.runtime.applyToolResult.mock.calls[0]![0]).toMatchObject({
+      output: { "Goal?": "Speed", "Which day?": "Mon" },
+    });
+  });
+
+  it("a tap whose questionnaire is gone says so instead of answering", async () => {
+    const h = harness({ askState: fakeAskState().store });
+    await tapReply(h, "ltq:s|zzzzzz|0|0");
+    await h.flush();
+    expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+    expect(String((lastSend(h) as { text?: { body: string } }).text?.body)).toMatch(
+      /no longer active/i,
+    );
+  });
+
+  it("/cancel drops the questionnaire and runs no turn", async () => {
+    const h = askHarness([two]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+    h.runtime.handleChat.mockClear();
+
+    await h.channel.handleRequest(
+      signedPost(inbound({ id: "wamid.in2", text: { body: "/cancel" } })),
+    );
+    await h.flush();
+
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+    expect(h.ask.rows.size).toBe(0);
+  });
+
+  it("ignores an askUser call that is no longer the tail", async () => {
+    const h = askHarness([two]);
+    h.runtime.loadHistory.mockResolvedValue([
+      ...askHistory("toolu_old", [two]),
+      { id: "u9", role: "user", parts: [{ type: "text", text: "never mind" }] } as AppMessage,
+    ]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    expect(h.sends().some((b) => (b as { type?: string }).type === "interactive")).toBe(false);
+  });
+
+  it("without askState the questions are posted as text and nothing is submitted", async () => {
+    const h = harness();
+    h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [two]));
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    expect(String((lastSend(h) as { text?: { body: string } }).text?.body)).toContain("Goal?");
+    expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
   });
 });

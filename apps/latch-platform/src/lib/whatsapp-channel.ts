@@ -2,7 +2,7 @@ import { waitUntil } from "@vercel/functions";
 import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
-import { whatsappVaultKeys, type WhatsappBot } from "./whatsapp-store";
+import { whatsappVaultKeys } from "./whatsapp-store";
 import { buildWhatsappLinkUrl } from "./whatsapp-link";
 import { baseUrl } from "./base-url";
 import type { Principal } from "./session";
@@ -33,7 +33,18 @@ export async function getWhatsappChannelForBot(botId: string) {
     runtime: {
       handleChat: (i) => runtime.handleChat(i),
       applyApproval: (i) => runtime.applyApproval(i),
+      // Resumes a turn parked on `askUser` — makes questionnaires answerable here.
+      applyToolResult: (i) => runtime.applyToolResult(i),
       loadHistory: (i) => runtime.loadHistory(i),
+    },
+    // Holds the answers collected so far while a questionnaire is on screen.
+    askState: {
+      get: (chatId) => whatsappStore.getAsk(chatId),
+      begin: (chatId, session) => whatsappStore.beginAsk(chatId, session),
+      update: (chatId, toolCallId, rev, patch) =>
+        whatsappStore.updateAsk(chatId, toolCallId, rev, patch),
+      finish: (chatId, toolCallId, rev) => whatsappStore.finishAsk(chatId, toolCallId, rev),
+      clear: (chatId) => whatsappStore.clearAsk(chatId),
     },
     waitUntil: (p) => waitUntil(p),
     seen: (key) => whatsappStore.seenDelivery(key),
@@ -84,5 +95,5 @@ export async function getWhatsappChannelForBot(botId: string) {
     },
   });
 
-  return { channel, bot: bot as WhatsappBot };
+  return { channel, bot: bot };
 }
