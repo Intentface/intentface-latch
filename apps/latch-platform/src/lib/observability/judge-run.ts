@@ -6,6 +6,8 @@ import { postScore } from "@intentface/latch-langfuse";
 import type { LanguageModel } from "ai";
 import type { Principal } from "../session";
 import type { AttachedEval } from "../agent-store";
+import { evalOwnerOfRecord } from "../agent-store";
+import type { CredentialScope } from "../credentials";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
 import { JUDGE_MODEL_ID, judgeOnce } from "../evals/judge";
@@ -140,21 +142,39 @@ export async function judgeScopeGroups(opts: {
 /** Persist a verdict to the local fast-mirror store. */
 async function putLocal(
   latch: Latch,
-  ownerTag: string,
+  /** The judged agent's owner key — who may SEE this verdict. */
+  evalOwner: string,
+  /** The `ownerTagOf` of whoever ran the turn — who PRODUCED it. */
+  runOwner: string,
   runId: string,
   v: RubricVerdictResult,
   source: RunScore["source"],
   now: number,
 ): Promise<void> {
-  await latch.runScores.put(ownerTag, {
+  await latch.runScores.put(evalOwner, {
     runId,
     rubricName: v.rubric.name,
     value: v.value,
     comment: v.comment,
     scale: v.rubric.scale,
     source,
+    runOwner,
     updatedAt: now,
   });
+}
+
+/**
+ * Who owns the verdicts for a run: the owner key of the agent record the name
+ * resolved to — the org key for a shared agent, the (org,user) key for a personal
+ * one. Falls back to the runner's own tag for a code-registry agent (no row, so
+ * nobody administers it and its evals stay with whoever ran it).
+ */
+function evalOwnerFor(
+  principal: Principal,
+  record: { scope: CredentialScope } | undefined,
+  runOwner: string,
+): string {
+  return record ? evalOwnerOfRecord(principal, record) : runOwner;
 }
 
 /**
@@ -176,14 +196,19 @@ export async function judgeLiveRun({
   // `afterRun` is awaited directly in the turn's finish path, so a transient
   // DB/store error here must be swallowed — the contract is that a judge pass
   // never disrupts run completion.
+  const runOwner = ownerTagOf(meta.principal);
   let latch: Latch;
   let due: AttachedEval[];
   let evidence: TurnEvidence;
+  let evalOwner: string;
   try {
     // Lazy import keeps this module load-safe from latch.ts (composition root).
     const { getLatch } = await import("../latch");
     latch = await getLatch();
     const rec = await latch.agentStore.getRecord(meta.principal, meta.agent);
+    // File the verdicts under the AGENT's owner, not the runner's — a colleague's
+    // run on my agent is graded against MY rubrics, so the result is mine to see.
+    evalOwner = evalOwnerFor(meta.principal, rec, runOwner);
     const evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
     if (evals.length === 0) return;
 
@@ -230,7 +255,6 @@ export async function judgeLiveRun({
     return;
   }
 
-  const ownerTag = ownerTagOf(meta.principal);
   const now = Date.now();
   await judgeScopeGroups({
     runId: meta.runId,
@@ -242,7 +266,7 @@ export async function judgeLiveRun({
       // verdict even if Langfuse is slow/unreachable — then best-effort to
       // Langfuse. Pinning the score timestamp to the run's start keeps a later
       // human correction an upsert (see postScore's `timestamp`).
-      await putLocal(latch, ownerTag, meta.runId, v, "live", now);
+      await putLocal(latch, evalOwner, runOwner, meta.runId, v, "live", now);
       await postScore({
         runId: meta.runId,
         name: v.rubric.name,
@@ -284,6 +308,11 @@ export async function rejudgeRun(args: {
 }): Promise<RubricVerdictResult[]> {
   const { getLatch } = await import("../latch");
   const latch = await getLatch();
+  // Authoritative, principal-scoped: proves the caller owns the run AND tells us
+  // which agent produced it (the eval owner is derived from the agent, never from
+  // a client-supplied name).
+  const run = await latch.runtime.getRun({ principal: args.principal, runId: args.runId });
+  if (!run) throw new Error(`No readable run "${args.runId}".`);
   const history = await latch.runtime.loadHistory({
     chatId: args.chatId,
     principal: args.principal,
@@ -319,7 +348,14 @@ export async function rejudgeRun(args: {
   const due = args.rubrics.filter((r) => r.enabled && rubricIsDue(r.trigger, facts));
 
   const results: RubricVerdictResult[] = [];
-  const ownerTag = ownerTagOf(args.principal);
+  // Same keying as the live path, so a tuning re-judge lands on the row the live
+  // judge wrote instead of forking a second one under the caller's own tag.
+  const runOwner = ownerTagOf(args.principal);
+  const evalOwner = evalOwnerFor(
+    args.principal,
+    await latch.agentStore.getRecord(args.principal, run.agent),
+    runOwner,
+  );
   const now = Date.now();
   await judgeScopeGroups({
     runId: args.runId,
@@ -337,10 +373,16 @@ export async function rejudgeRun(args: {
       // (and the AI original it preserves) is authoritative. Skip persisting AND
       // returning it, so both the local store and /observability's overlay keep
       // showing the correction.
-      const existing = await latch.runScores.getOne(ownerTag, args.runId, v.rubric.name);
+      // Check BOTH keys: a pre-split correction sits under the runner's tag, and
+      // it must still win over a re-judge that now writes under the agent's key.
+      const existing = await latch.runScores.getOne(
+        [evalOwner, runOwner],
+        args.runId,
+        v.rubric.name,
+      );
       if (existing?.source === "human") return;
       results.push(v);
-      await putLocal(latch, ownerTag, args.runId, v, "rejudge", now);
+      await putLocal(latch, evalOwner, runOwner, args.runId, v, "rejudge", now);
     },
   });
   return results;

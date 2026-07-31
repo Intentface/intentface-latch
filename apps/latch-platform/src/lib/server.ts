@@ -8,17 +8,19 @@ import {
 } from "@intentface/latch-channels/slack";
 import {
   isLangfuseConfigured,
-  listOwnerTraces,
+  listAdministeredTraces,
   postScore,
 } from "@intentface/latch-langfuse";
 import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { scopeRefOf } from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
+import type { Principal } from "./session";
 import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
-import { normalizeAgentName } from "./agent-store";
+import { normalizeAgentName, evalOwnerKeysOf } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
+import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
 import { rejudgeRun } from "./observability/judge-run";
 import {
@@ -37,6 +39,24 @@ import { parseScopes, sameScopeSet } from "./oauth-scopes";
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
+
+/**
+ * Every owner key a principal may read eval verdicts under — the one definition
+ * shared by all three score read paths (chat badges, the observability overlay,
+ * and a correction's lookup), so they can't drift apart.
+ *
+ * `evalOwnerKeysOf` is the boundary that matters: the agents this caller may
+ * administer. `ownerTagOf` is appended for rows written before verdicts moved to
+ * the agent's key, and for code-registry agents that have no owner. It is
+ * redundant TODAY — `ownerTagOf(p)` is always one of `evalOwnerKeysOf(p)` for
+ * every principal shape — but the two derivations live in different modules with
+ * nothing enforcing that, so this keeps a future divergence from silently hiding
+ * scores. Duplicate keys in the IN-list are harmless.
+ */
+const scoreReadKeys = (p: Principal): string[] => [
+  ...evalOwnerKeysOf(p),
+  ownerTagOf(p),
+];
 
 /**
  * Server-only reads for SSR route loaders / auth gates. These are thin
@@ -687,6 +707,8 @@ export interface ObservabilityRow {
   cost: number | null;
   scores: { name: string; value: number | string | null; comment?: string; dataType?: string }[];
   deepLink: string | null;
+  /** Who ran the turn — absent when the trace carries no user id. */
+  runner: Runner | null;
 }
 
 const preview = (v: unknown): string => {
@@ -696,26 +718,49 @@ const preview = (v: unknown): string => {
 };
 
 /**
- * The live observability feed: the tenant's recent traces with judge scores
- * and user feedback joined in, plus per-rubric aggregates over the window.
- * Polled by /observability (~5s) — all Langfuse reads stay server-side and
- * owner-filtered (tenants never get Langfuse credentials).
+ * The live observability feed: recent traces of the agents the caller
+ * ADMINISTERS — including runs by other users — plus the caller's own runs, with
+ * judge scores and user feedback joined in and per-rubric aggregates over the
+ * window. Polled by /observability (~5s); all Langfuse reads stay server-side
+ * (tenants never get Langfuse credentials).
+ *
+ * Tenancy: the owner keys passed to `listAdministeredTraces` are derived from the
+ * session principal alone, never from `data`. `agent` only narrows.
  */
 export const listObservabilityFn = createServerFn({ method: "GET" })
-  .validator((data: { agent?: string }) => data)
+  .validator((data: { agent?: string; runner?: string; anonymous?: boolean }) => data)
   .handler(async ({ data }) => {
+    const empty = {
+      configured: false as const,
+      rows: [],
+      aggregates: [],
+      feedback: null,
+      runners: [],
+    };
     const principal = await getPrincipal();
-    if (!principal) return { configured: false as const, rows: [], aggregates: [], feedback: null };
-    if (!isLangfuseConfigured()) {
-      return { configured: false as const, rows: [], aggregates: [], feedback: null };
-    }
+    if (!principal) return empty;
+    if (!isLangfuseConfigured()) return empty;
     const base = (process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com").replace(/\/$/, "");
-    const traces = await listOwnerTraces({
-      ownerTag: ownerTagOf(principal),
+    const selfTag = ownerTagOf(principal);
+    // The agents this caller may administer — and therefore whose eval verdicts
+    // are theirs to read, whoever produced them.
+    const evalOwners = evalOwnerKeysOf(principal);
+    const traces = await listAdministeredTraces({
+      agentOwnerTags: evalOwners,
+      ownerTag: selfTag,
       agent: data.agent || undefined,
       limit: 50,
     });
-    const rows: ObservabilityRow[] = traces.map((t) => ({
+
+    const { runScores, resolveUsers } = await getLatch();
+    const runners = await resolveRunners({
+      tags: traces.map((t) => t.userId ?? "").filter((t) => t.length > 0),
+      selfTag,
+      anonymous: data.anonymous === true,
+      lookup: resolveUsers,
+    });
+
+    let rows: ObservabilityRow[] = traces.map((t) => ({
       runId: t.runId ?? null,
       traceId: t.id,
       agent: t.agent ?? null,
@@ -726,7 +771,20 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
       cost: t.totalCost ?? null,
       scores: t.scores,
       deepLink: t.htmlPath ? `${base}${t.htmlPath}` : null,
+      runner: (t.userId ? runners.get(t.userId) : undefined) ?? null,
     }));
+
+    // The full runner list is built BEFORE filtering, so narrowing to one person
+    // doesn't collapse the dropdown to just them.
+    const runnerOptions = [...new Map([...runners.values()].map((r) => [r.key, r])).values()].sort(
+      (a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.label.localeCompare(b.label)),
+    );
+    // Narrows WITHIN the window rather than fetching that person's own newest 50 —
+    // this feed has always been "the recent N", and both the runner list and the
+    // aggregates are scoped to the same window, so they stay consistent with the
+    // rows on screen. A quiet colleague can therefore drop out of the window
+    // entirely; per-runner history belongs in Langfuse (deep-linked per row).
+    if (data.runner) rows = rows.filter((r) => r.runner?.key === data.runner);
 
     // Overlay local human corrections onto the Langfuse-derived scores. Langfuse
     // is the record of truth but has read-side ingestion lag (~20–45s), and a
@@ -736,8 +794,7 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
     // this both dedups and reflects corrections without waiting on Langfuse.
     const runIds = rows.map((r) => r.runId).filter((id): id is string => !!id);
     if (runIds.length > 0) {
-      const { runScores } = await getLatch();
-      const localByRun = await runScores.getForRuns(ownerTagOf(principal), runIds);
+      const localByRun = await runScores.getForRuns(scoreReadKeys(principal), runIds);
       for (const row of rows) {
         if (!row.runId) continue;
         const corrections = localByRun.get(row.runId)?.filter((s) => s.source === "human");
@@ -776,6 +833,7 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
         count: a.count,
       })).sort((a, b) => a.name.localeCompare(b.name)),
       feedback: fb ? { rate: fb.sum / fb.count, count: fb.count } : null,
+      runners: runnerOptions,
     };
   });
 
@@ -809,14 +867,21 @@ export const saveAgentEvalsFn = createServerFn({ method: "POST" })
     return { ok: true as const, evals: valid.rubrics };
   });
 
-/** Local (fast) eval verdicts for the given run ids — the chat badges poll this. */
+/**
+ * Local (fast) eval verdicts for the given run ids — the chat badges poll this.
+ *
+ * Reads under the caller's eval-owner keys, so verdicts are visible only to
+ * someone who administers the judged agent. A user who merely RUNS another's
+ * agent matches no key and gets nothing back — that's what keeps my rubrics'
+ * verdicts off their screen, without a separate permission check.
+ */
 export const getRunScoresFn = createServerFn({ method: "POST" })
   .validator((runIds: string[]) => runIds)
   .handler(async ({ data: runIds }) => {
     const principal = await getPrincipal();
     if (!principal || runIds.length === 0) return {} as Record<string, AttachedEvalScore[]>;
     const { runScores } = await getLatch();
-    const byRun = await runScores.getForRuns(ownerTagOf(principal), runIds);
+    const byRun = await runScores.getForRuns(scoreReadKeys(principal), runIds);
     const out: Record<string, AttachedEvalScore[]> = {};
     for (const [runId, scores] of byRun) {
       out[runId] = scores.map((s) => ({
@@ -898,8 +963,11 @@ export const correctScoreFn = createServerFn({ method: "POST" })
     const run = await runtime.getRun({ principal, runId: data.runId });
     if (!run) return { ok: false as const, error: "unknown run" };
 
-    const ownerTag = ownerTagOf(principal);
-    const existing = await runScores.getOne(ownerTag, data.runId, data.rubricName);
+    const existing = await runScores.getOne(
+      scoreReadKeys(principal),
+      data.runId,
+      data.rubricName,
+    );
     if (!existing) return { ok: false as const, error: "no score to correct" };
     // Binary → 1/0; graded → clamp to [0,1]. Never persist an out-of-range or
     // NaN value (it would skew /observability aggregates and poison averages).
@@ -911,7 +979,9 @@ export const correctScoreFn = createServerFn({ method: "POST" })
     const aiValue = existing.source === "human" ? existing.aiValue : existing.value;
     const aiComment = existing.source === "human" ? existing.aiComment : existing.comment;
 
-    await runScores.put(ownerTag, {
+    // Upsert the row we actually matched — writing under a different key would
+    // fork a second verdict for the same run+rubric.
+    await runScores.put(existing.owner, {
       runId: data.runId,
       rubricName: data.rubricName,
       value,

@@ -36,7 +36,7 @@ import { createConnectionStore  } from "./connection-store";
 import type {ConnectionStore} from "./connection-store";
 import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
-import { createAgentStore, migrateAgents  } from "./agent-store";
+import { createAgentStore, evalOwnerOfRecord, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
@@ -50,6 +50,7 @@ import { createEvalStore, migrateEvals } from "./evals/store";
 import type {EvalStore} from "./evals/store";
 import { createRunScoresStore, migrateRunScores } from "./observability/run-scores-store";
 import type {RunScoresStore} from "./observability/run-scores-store";
+import type { UserProfile } from "./observability/runners";
 import { createAuthoredTools  } from "./tools";
 import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
@@ -108,6 +109,8 @@ let cached:
       handler: LatchHandler;
       memoryStore: MemoryStore<Principal>;
       memoryJobs: MemoryJobStore;
+      /** Batch user-profile lookup (cached) — runner attribution on /observability. */
+      resolveUsers: (userIds: string[]) => Promise<Map<string, UserProfile>>;
     }
   | undefined;
 
@@ -131,6 +134,7 @@ export async function getLatch(): Promise<{
   handler: LatchHandler;
   memoryStore: MemoryStore<Principal>;
   memoryJobs: MemoryJobStore;
+  resolveUsers: (userIds: string[]) => Promise<Map<string, UserProfile>>;
 }> {
   if (cached) return cached;
 
@@ -198,35 +202,89 @@ export async function getLatch(): Promise<{
   // the process lifetime) — fall back to the last known value instead.
   const USER_TTL_MS = 5 * 60_000;
   const USER_CACHE_MAX = 1_000;
-  const userCache = new Map<string, { at: number; value?: { name?: string; email?: string } }>();
-  async function resolveUser(userId: string) {
-    const hit = userCache.get(userId);
-    if (hit && Date.now() - hit.at < USER_TTL_MS) return hit.value;
+  const userCache = new Map<string, { at: number; value?: UserProfile }>();
+
+  /**
+   * Make room for `incoming` new entries: sweep TTL-expired ones, then evict from
+   * the front until under the cap. Called ONCE per batch rather than per row — it
+   * scans the whole map, so calling it inside the insert loop was quadratic.
+   */
+  function boundUserCache(incoming: number) {
+    if (userCache.size + incoming <= USER_CACHE_MAX) return;
     // Bound the cache: TTL alone never evicts users that stop being queried.
-    // Sweep expired entries at the cap; if every entry is still live, drop the
-    // oldest-inserted (Map preserves insertion order).
-    if (userCache.size >= USER_CACHE_MAX) {
-      const now = Date.now();
-      for (const [k, v] of userCache) if (now - v.at >= USER_TTL_MS) userCache.delete(k);
-      while (userCache.size >= USER_CACHE_MAX) {
-        const oldest = userCache.keys().next().value;
-        if (oldest === undefined) break;
-        userCache.delete(oldest);
+    // Sweep expired entries first; if every entry is still live, drop from the
+    // front (Map preserves insertion order, and `cacheUser` re-inserts on
+    // refresh, so the front is the least-recently-refreshed).
+    const now = Date.now();
+    for (const [k, v] of userCache) if (now - v.at >= USER_TTL_MS) userCache.delete(k);
+    while (userCache.size + incoming > USER_CACHE_MAX) {
+      const oldest = userCache.keys().next().value;
+      if (oldest === undefined) break;
+      userCache.delete(oldest);
+    }
+  }
+
+  /**
+   * Cache one profile, keeping the map's iteration order approximately LRU: a
+   * plain `set` on an existing key leaves it where it was, so a hot user would
+   * stay at the front and be evicted first even right after a refresh.
+   */
+  function cacheUser(id: string, value: UserProfile | undefined) {
+    userCache.delete(id);
+    userCache.set(id, { at: Date.now(), value });
+  }
+
+  /**
+   * Batch profile lookup for the observability feed's runner attribution — one
+   * query for every cache miss. A failed query is never memoized (it would pin
+   * the entry to undefined for the process lifetime); the last known value stands.
+   */
+  async function resolveUsers(userIds: string[]): Promise<Map<string, UserProfile>> {
+    const out = new Map<string, UserProfile>();
+    const now = Date.now();
+    const missing: string[] = [];
+    for (const id of new Set(userIds)) {
+      const hit = userCache.get(id);
+      if (hit && now - hit.at < USER_TTL_MS) {
+        if (hit.value) out.set(id, hit.value);
+      } else missing.push(id);
+    }
+    if (missing.length === 0) return out;
+    try {
+      const placeholders = missing.map(() => "?").join(",");
+      const res = await client.execute({
+        sql: `SELECT id, name, email FROM user WHERE id IN (${placeholders})`,
+        args: missing,
+      });
+      boundUserCache(missing.length);
+      const found = new Set<string>();
+      for (const row of res.rows as unknown as Record<string, unknown>[]) {
+        const id = String(row.id);
+        const value: UserProfile = {
+          name: (row.name as string) || undefined,
+          email: (row.email as string) || undefined,
+        };
+        found.add(id);
+        cacheUser(id, value);
+        out.set(id, value);
+      }
+      // Cache the misses too, so an unknown id doesn't re-query every poll.
+      for (const id of missing) {
+        if (!found.has(id)) cacheUser(id, undefined);
+      }
+    } catch (e) {
+      console.warn("resolveUsers failed:", e instanceof Error ? e.message : e);
+      // Fall back to whatever is still cached (possibly stale) for the misses.
+      for (const id of missing) {
+        const stale = userCache.get(id)?.value;
+        if (stale) out.set(id, stale);
       }
     }
-    let row;
-    try {
-      row = (await client.execute({ sql: "SELECT name, email FROM user WHERE id = ?", args: [userId] })).rows[0];
-    } catch (e) {
-      console.warn("resolveUser failed:", e instanceof Error ? e.message : e);
-      return hit?.value;
-    }
-    const value = row
-      ? { name: (row.name as string) || undefined, email: (row.email as string) || undefined }
-      : undefined;
-    userCache.set(userId, { at: Date.now(), value });
-    return value;
+    return out;
   }
+
+  const resolveUser = async (userId: string): Promise<UserProfile | undefined> =>
+    (await resolveUsers([userId])).get(userId);
 
   const context = defineContext<Principal, Ctx>({
     build: async ({ principal }) => ({
@@ -398,6 +456,13 @@ export async function getLatch(): Promise<{
     telemetry: isLangfuseConfigured()
       ? langfuseTelemetry<Principal>({
           ownerTag: ownerTagOf,
+          // Tag the trace with the AGENT's owner so /observability can show a
+          // colleague's runs on the agents this reader administers. Undefined for
+          // code-registry agents (no row) — the tag is simply omitted.
+          agentOwnerTag: async (run) => {
+            const rec = await agentStore.getRecord(run.principal, run.agent);
+            return rec ? evalOwnerOfRecord(run.principal, rec) : undefined;
+          },
           // VERCEL is "1" on every target (preview/dev too), so gate the trace
           // environment on VERCEL_ENV to keep preview/dev traces out of prod.
           environment: process.env.VERCEL_ENV === "production" ? "production" : "development",
@@ -499,6 +564,7 @@ export async function getLatch(): Promise<{
     handler,
     memoryStore,
     memoryJobs,
+    resolveUsers,
   };
   return cached;
 }

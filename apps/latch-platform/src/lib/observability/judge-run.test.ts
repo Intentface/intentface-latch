@@ -149,17 +149,47 @@ const turnMsg = (runId: string, text: string) => ({
 });
 const userMsg = (text: string) => ({ role: "user", parts: [{ type: "text", text }] });
 
-/** In-memory latch fake: records every local score write, counts judge calls. */
-function fakeLatch(evals: AttachedEval[], history: unknown[]) {
+// Must agree with the mocked ownerTagOf ("org/user") — the eval owner is derived
+// from this principal plus the record's scope.
+const PRINCIPAL = { orgId: "org", userId: "user" } as never;
+
+/**
+ * In-memory latch fake: records every local score write (with the owner key it
+ * was filed under), counts judge calls.
+ */
+function fakeLatch(
+  evals: AttachedEval[],
+  history: unknown[],
+  /**
+   * The record's scope — the judge derives the eval owner from it + the principal.
+   * `null` stands in for "no record at all" (a code-registry agent).
+   */
+  scope: "org" | "user" | null = "user",
+) {
   const { model, prompts } = mockJudge();
-  const puts: { rubricName: string; source: string; value: number }[] = [];
+  const puts: {
+    owner: string;
+    rubricName: string;
+    source: string;
+    value: number;
+    runOwner?: string;
+  }[] = [];
   harness.latch = {
-    agentStore: { getRecord: async () => ({ attachedEvals: evals }) },
-    runtime: { loadHistory: async () => history },
+    agentStore: {
+      getRecord: async () => (scope ? { attachedEvals: evals, scope } : undefined),
+    },
+    runtime: {
+      loadHistory: async () => history,
+      // rejudgeRun derives the agent (and so the eval owner) from the run itself.
+      getRun: async ({ runId }: { runId: string }) => ({ id: runId, agent: "my-agent" }),
+    },
     modelFor: () => model,
     runScores: {
-      put: async (_owner: string, s: { rubricName: string; source: string; value: number }) => {
-        puts.push(s);
+      put: async (
+        owner: string,
+        s: { rubricName: string; source: string; value: number; runOwner?: string },
+      ) => {
+        puts.push({ owner, ...s });
       },
       getOne: async () => undefined,
     },
@@ -173,7 +203,7 @@ const liveArgs = (runId: string, depth: number, messages: unknown[]) => ({
     chatId: "chat1",
     agent: "my-agent",
     modelId: "m",
-    principal: {} as never,
+    principal: PRINCIPAL,
     startedAt: 1_000,
     depth,
   },
@@ -225,6 +255,67 @@ describe("judgeLiveRun — trigger gating at the entry point", () => {
   });
 });
 
+describe("eval ownership — whose observations a verdict lands in", () => {
+  beforeEach(() => vi.mocked(postScore).mockClear());
+
+  it("files the verdict under the AGENT's owner, not the runner's tag", async () => {
+    // The mocked ownerTagOf is "org/user" — a colleague running an org agent.
+    // The verdict must be keyed to the agent's owner ("org") so the agent's
+    // administrators see it, with the runner recorded for attribution.
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts } = fakeLatch([rubric("greets")], history, "org");
+    await judgeLiveRun(liveArgs("r1", 0, [turnMsg("r1", "one")]));
+    expect(puts).toEqual([
+      expect.objectContaining({
+        owner: "org",
+        runOwner: "org/user",
+        rubricName: "greets",
+        source: "live",
+      }),
+    ]);
+  });
+
+  it("the live judge writes nothing for an agent with no record", async () => {
+    // A code-registry agent has no latch_agents row, so it has no attached
+    // rubrics either — the live path returns before it ever needs an eval owner.
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts, prompts } = fakeLatch([rubric("greets")], history, null);
+    await judgeLiveRun(liveArgs("r1", 0, [turnMsg("r1", "one")]));
+    expect(prompts).toHaveLength(0);
+    expect(puts).toHaveLength(0);
+  });
+
+  it("a re-judge of a record-less agent falls back to the runner's tag", async () => {
+    // Here the rubrics come from the caller (draft tuning), so the judge runs
+    // even with no record — and the verdict has to belong to someone.
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts } = fakeLatch([], history, null);
+    await rejudgeRun({
+      principal: PRINCIPAL,
+      chatId: "chat1",
+      runId: "r1",
+      rubrics: [rubric("greets")],
+    });
+    expect(puts).toEqual([
+      expect.objectContaining({ owner: "org/user", runOwner: "org/user" }),
+    ]);
+  });
+
+  it("a re-judge lands on the same owner key as the live verdict", async () => {
+    const history = [userMsg("a"), turnMsg("r1", "one")];
+    const { puts } = fakeLatch([], history, "org");
+    await rejudgeRun({
+      principal: PRINCIPAL,
+      chatId: "chat1",
+      runId: "r1",
+      rubrics: [rubric("greets")],
+    });
+    expect(puts).toEqual([
+      expect.objectContaining({ owner: "org", runOwner: "org/user", source: "rejudge" }),
+    ]);
+  });
+});
+
 describe("rejudgeRun — same gate, local-only sink", () => {
   beforeEach(() => vi.mocked(postScore).mockClear());
 
@@ -233,7 +324,7 @@ describe("rejudgeRun — same gate, local-only sink", () => {
   it("a non-matching trigger is silently absent — no judge call, no write", async () => {
     const { puts, prompts } = fakeLatch([], history);
     const results = await rejudgeRun({
-      principal: {} as never,
+      principal: PRINCIPAL,
       chatId: "chat1",
       runId: "r2", // turn 2; the rubric wants turn 1
       rubrics: [{ ...rubric("greets"), trigger: { kind: "turn", eq: 1 } }],
@@ -246,7 +337,7 @@ describe("rejudgeRun — same gate, local-only sink", () => {
   it("a matching trigger returns the verdict and writes source 'rejudge', never Langfuse", async () => {
     const { puts, prompts } = fakeLatch([], history);
     const results = await rejudgeRun({
-      principal: {} as never,
+      principal: PRINCIPAL,
       chatId: "chat1",
       runId: "r1",
       rubrics: [{ ...rubric("greets"), trigger: { kind: "turn", eq: 1 } }],
