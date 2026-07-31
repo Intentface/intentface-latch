@@ -284,7 +284,7 @@ export const addConnectionFn = createServerFn({ method: "POST" })
     }
     const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
     if (!name) return { ok: false, error: "name required" };
-    const { connectionStore } = await getLatch();
+    const { connectionStore, dynamic } = await getLatch();
     // Add is an upsert by (name, scope) — editing goes through here too. A
     // blank secret field on an existing connection means "keep the current
     // secret" (the edit form never sees stored secrets to send them back).
@@ -321,10 +321,10 @@ export const addConnectionFn = createServerFn({ method: "POST" })
         scopes: scopes && scopes.length > 0 ? scopes : undefined,
       };
     } else if (data.kind === "mcp" && data.authMode === "oauth") {
-      // Keep stored scopes on edit — the form doesn't round-trip them for MCP.
+      const requested = data.scopes?.split(/\s+/).filter(Boolean);
       auth = {
         kind: "oauth",
-        scopes: existing?.auth?.kind === "oauth" ? existing.auth.scopes : undefined,
+        scopes: requested && requested.length > 0 ? requested : undefined,
       };
     } else if (data.authMode === "none") {
       auth = undefined; // an explicit "none" clears auth even if a token was typed
@@ -347,6 +347,28 @@ export const addConnectionFn = createServerFn({ method: "POST" })
     if (data.kind === "mcp") {
       if (!data.url?.trim()) return { ok: false, error: "url required" };
       await connectionStore.add(principal, data.scope, { kind: "mcp", name, mcp: { url: data.url.trim() }, auth });
+      // Requested scopes are baked into the issued token, so an existing token
+      // keeps the OLD grant no matter what this record now says — a connection
+      // could claim "private files only" while still holding an unrestricted
+      // token, and a restriction scope can't be added by refresh (a refresh may
+      // never widen a grant). Changing them therefore has to force a fresh
+      // consent. Dropping the DCR client too, since it was registered under the
+      // old scope.
+      const before = existing?.auth?.kind === "oauth" ? existing.auth.scopes : undefined;
+      const after = auth?.kind === "oauth" ? auth.scopes : undefined;
+      const same =
+        (before ?? []).length === (after ?? []).length &&
+        (before ?? []).every((s, i) => s === (after ?? [])[i]);
+      if (!same) {
+        try {
+          await dynamic.oauth(name).provider(principal).invalidateCredentials?.("all");
+        } catch (e) {
+          // The record is already saved; a failed cleanup must not lose it. Log
+          // loudly — a stale token here means the connection is less restricted
+          // than the UI now claims, so it needs re-authorizing by hand.
+          console.warn(`[connections] "${name}": clearing tokens after scope change failed:`, e);
+        }
+      }
     } else {
       if (!data.spec?.trim()) return { ok: false, error: "spec required" };
       const operations = data.operations

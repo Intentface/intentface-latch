@@ -147,7 +147,8 @@ function AddConnection({
   const [scopes, setScopes] = useState(initial?.scopes ?? "");
   // Interactive OAuth has no static secret; the token row is irrelevant then.
   const oauth2Mode = kind === "openapi" && apiAuth === "oauth2";
-  const oauthMode = (kind === "mcp" && mcpAuth === "oauth") || oauth2Mode;
+  const mcpOauthMode = kind === "mcp" && mcpAuth === "oauth";
+  const oauthMode = mcpOauthMode || oauth2Mode;
   // A blank secret is fine when editing a connection that already has one.
   const secretOk = clientSecret.trim() !== "" || (editing && initial.hasClientSecret);
   const oauth2Missing =
@@ -188,7 +189,7 @@ function AddConnection({
           tokenUrl: oauth2Mode ? tokenEndpoint : undefined,
           clientId: oauth2Mode ? clientId : undefined,
           clientSecret: oauth2Mode ? clientSecret : undefined,
-          scopes: oauth2Mode ? scopes || undefined : undefined,
+          scopes: oauth2Mode || mcpOauthMode ? scopes || undefined : undefined,
         },
       });
       if (!res.ok) {
@@ -348,10 +349,31 @@ function AddConnection({
               />
             </div>
           )}
+          {mcpOauthMode && (
+            <div className="flex flex-col gap-1">
+              <Input
+                value={scopes}
+                onChange={(e) => setScopes(e.target.value)}
+                placeholder="scopes (space-separated; Loredex: private_only)"
+              />
+              <p className="text-muted-foreground text-xs">
+                <span className="font-medium">private_only</span> restricts a Loredex connection to
+                files you own privately — shared workspace files and other members&rsquo; files
+                become unreachable, and new folders the agent creates land in your private area.
+              </p>
+            </div>
+          )}
           {oauthMode && (
             <p className="text-muted-foreground text-xs">
               No token needed — after adding, click <span className="font-medium">Connect</span> to
               authorize. Tokens are stored per-user, envelope-encrypted in the Vault.
+              {mcpOauthMode && (
+                <>
+                  {" "}
+                  Changing scopes clears the stored token, because the old one keeps the old
+                  permissions — you will need to <span className="font-medium">Connect</span> again.
+                </>
+              )}
             </p>
           )}
           {error && <p className="text-destructive text-sm">{error}</p>}

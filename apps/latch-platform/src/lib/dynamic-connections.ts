@@ -132,6 +132,17 @@ export function createDynamicConnections(opts: {
             }
             return conn.mcp.url;
           },
+          // Requested scopes come from the caller's own connection record, and
+          // must be resolved lazily for the same reason as `serverUrl`: this
+          // McpOAuth is cached per connection NAME while the record is
+          // per-caller, so a static value would request one caller's scopes on
+          // another's behalf. Undefined when unset, so connections that ask for
+          // nothing keep their current, scope-less authorize request.
+          scope: async (p) => {
+            const conn = await store.get(p, name);
+            const scopes = conn?.auth?.kind === "oauth" ? conn.auth.scopes : undefined;
+            return scopes?.length ? scopes.join(" ") : undefined;
+          },
           redirectUrl,
           clientMetadata: {
             client_name: `Latch (${name})`,
