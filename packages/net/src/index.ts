@@ -2,8 +2,9 @@
  * @intentface/latch-net
  *
  * Network-safety primitives shared across the Latch stack. This root export
- * is Node built-ins only (safe to reach client bundles); the DNS-pinned
- * egress fetch, which pulls in `undici`, lives behind the server-only
+ * has zero third-party dependencies (Node built-ins only), so any host
+ * package can depend on it without pulling heavier packages in; the
+ * DNS-pinned egress fetch, which pulls in `undici`, lives behind the
  * `@intentface/latch-net/pinned` subpath.
  */
 export {
