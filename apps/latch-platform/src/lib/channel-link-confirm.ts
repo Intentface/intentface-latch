@@ -10,6 +10,8 @@
  * identities, and only an explicit POST (the Confirm button) writes the link.
  */
 
+import { CSRF_FIELD } from "./channel-link-csrf";
+
 const esc = (s: string) =>
   s
     .replace(/&/g, "&amp;")
@@ -28,6 +30,11 @@ export function renderLinkConfirmPage(opts: {
   actionUrl: string;
   /** Where "Not you?" sends the user to switch accounts. */
   switchAccountUrl: string;
+  /**
+   * CSRF token bound to BOTH identities (see `channel-link-csrf.ts`). Without
+   * it the POST would rest solely on the session cookie being `SameSite=Lax`.
+   */
+  csrfToken: string;
 }): Response {
   const account = [opts.account.name, opts.account.email]
     .filter((v): v is string => Boolean(v))
@@ -68,6 +75,7 @@ export function renderLinkConfirmPage(opts: {
   <p class="warn">After linking, messages from this ${esc(opts.channelLabel)} account run agents
   as the Latch account above — with its connections and its data. Only confirm if both are yours.</p>
   <form method="post" action="${esc(opts.actionUrl)}">
+    <input type="hidden" name="${esc(CSRF_FIELD)}" value="${esc(opts.csrfToken)}">
     <button type="submit">Confirm link</button>
   </form>
   <p class="warn">Wrong Latch account? <a href="${esc(opts.switchAccountUrl)}">Sign in as someone else</a>

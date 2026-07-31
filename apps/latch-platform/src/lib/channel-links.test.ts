@@ -3,6 +3,10 @@ import { buildTelegramLinkUrl, verifyTelegramLink } from "./telegram-link";
 import { buildWhatsappLinkUrl, verifyWhatsappLink } from "./whatsapp-link";
 import { buildLinkUrl, verifyLink } from "./slack-link";
 import { renderLinkConfirmPage } from "./channel-link-confirm";
+import {
+  channelLinkCsrfToken,
+  verifyChannelLinkCsrf,
+} from "./channel-link-csrf";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -146,6 +150,7 @@ describe("link confirmation page", () => {
       account: { name: "Aleksi", email: "aleksi@example.com" },
       actionUrl: "/telegram/link?bot=b1&user=5",
       switchAccountUrl: "/login?next=x",
+      csrfToken: "tok-abc",
     });
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
     const html = await res.text();
@@ -154,6 +159,9 @@ describe("link confirmation page", () => {
     expect(html).toContain("aleksi@example.com");
     // The mutation is an explicit POST, never the GET that rendered this.
     expect(html).toMatch(/<form method="post"/);
+    // ...and the POST carries the CSRF token, so it can't be driven from
+    // another origin even if the session cookie were sent.
+    expect(html).toContain('name="csrf" value="tok-abc"');
   });
 
   it("escapes attacker-influenced fields", async () => {
@@ -163,6 +171,7 @@ describe("link confirmation page", () => {
       account: { name: `"><img src=x>` },
       actionUrl: `/telegram/link?un="><script>`,
       switchAccountUrl: "/login",
+      csrfToken: "tok",
     });
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
@@ -180,5 +189,52 @@ describe("whatsapp link tokens", () => {
   it("rejects a wrong signature", () => {
     const p = parts(buildWhatsappLinkUrl("https://x.example", "w1", "35840123"));
     expect(verifyWhatsappLink(p.bot, p.user, p.exp, "0".repeat(p.sig.length))).toBe(false);
+  });
+});
+
+describe("channel-link CSRF tokens", () => {
+  const base = {
+    channel: "telegram",
+    scopeId: "b1",
+    externalId: "5",
+    sessionUserId: "u-aleksi",
+    exp: 1_800_000_000_000,
+  };
+
+  it("round-trips a token for the same identities", () => {
+    expect(verifyChannelLinkCsrf(channelLinkCsrfToken(base), base)).toBe(true);
+  });
+
+  it("rejects a token minted for a DIFFERENT Latch account", () => {
+    // The attack the token exists to stop: an attacker holding their own valid
+    // signed link cannot produce a token for the victim's session, so a
+    // cross-site auto-submitted POST fails even if the cookie were sent.
+    const attackers = channelLinkCsrfToken({ ...base, sessionUserId: "u-klaus" });
+    expect(verifyChannelLinkCsrf(attackers, base)).toBe(false);
+  });
+
+  it("rejects a token bound to a different channel identity, bot, or expiry", () => {
+    const token = channelLinkCsrfToken(base);
+    expect(verifyChannelLinkCsrf(token, { ...base, externalId: "6" })).toBe(false);
+    expect(verifyChannelLinkCsrf(token, { ...base, scopeId: "b2" })).toBe(false);
+    expect(verifyChannelLinkCsrf(token, { ...base, exp: base.exp + 1 })).toBe(false);
+  });
+
+  it("does not let one channel's token be replayed on another", () => {
+    const token = channelLinkCsrfToken(base);
+    expect(verifyChannelLinkCsrf(token, { ...base, channel: "slack" })).toBe(false);
+  });
+
+  it("rejects a missing or empty token", () => {
+    expect(verifyChannelLinkCsrf(undefined, base)).toBe(false);
+    expect(verifyChannelLinkCsrf("", base)).toBe(false);
+  });
+
+  it("cannot be forged by shifting field boundaries with a colon", () => {
+    // Payload fields are length-prefixed, so an id containing the separator
+    // must not be able to impersonate a different (id, user) split.
+    const a = channelLinkCsrfToken({ ...base, externalId: "5", sessionUserId: "x:u" });
+    const b = channelLinkCsrfToken({ ...base, externalId: "5:x", sessionUserId: "u" });
+    expect(a).not.toBe(b);
   });
 });

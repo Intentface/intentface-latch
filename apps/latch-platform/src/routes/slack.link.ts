@@ -5,6 +5,11 @@ import { getSlackChannelForApp } from "@/lib/slack-channel";
 import { getSessionUserFromHeaders } from "@/lib/session";
 import { verifyLink } from "@/lib/slack-link";
 import { renderLinkConfirmPage } from "@/lib/channel-link-confirm";
+import {
+  channelLinkCsrfToken,
+  readCsrfField,
+  verifyChannelLinkCsrf,
+} from "@/lib/channel-link-csrf";
 
 /**
  * Account-link landing for Slack. The bot sends a signed link to a specific
@@ -38,7 +43,23 @@ async function prepare(request: Request) {
     } as const;
   }
 
-  return { ok: true, url, teamId, slackUserId, session } as const;
+  return { ok: true, url, teamId, slackUserId, exp, session } as const;
+}
+
+/** CSRF identities for this request — both sides of the link plus the expiry. */
+function csrfInput(ctx: {
+  teamId: string;
+  slackUserId: string;
+  exp: number;
+  session: { principal: { userId?: string } };
+}) {
+  return {
+    channel: "slack",
+    scopeId: ctx.teamId,
+    externalId: ctx.slackUserId,
+    sessionUserId: ctx.session.principal.userId!,
+    exp: ctx.exp,
+  };
 }
 
 async function handleConfirmPage(request: Request): Promise<Response> {
@@ -57,6 +78,7 @@ async function handleConfirmPage(request: Request): Promise<Response> {
     account: { name: ctx.session.name, email: ctx.session.email },
     actionUrl: ctx.url.pathname + ctx.url.search,
     switchAccountUrl: `/login?next=${encodeURIComponent(ctx.url.pathname + ctx.url.search)}`,
+    csrfToken: channelLinkCsrfToken(csrfInput(ctx)),
   });
 }
 
@@ -64,6 +86,12 @@ async function handleLink(request: Request): Promise<Response> {
   const ctx = await prepare(request);
   if (!ctx.ok) return ctx.response;
   const { teamId, slackUserId, session } = ctx;
+
+  // Proves this POST came from a confirmation page rendered for THIS pair of
+  // identities — see `channel-link-csrf.ts`.
+  if (!verifyChannelLinkCsrf(await readCsrfField(request), csrfInput(ctx))) {
+    return redirect("/agents?slack=link_error");
+  }
 
   const { slackStore } = await getLatch();
   await slackStore.linkIdentity({
