@@ -1,13 +1,13 @@
 import { createClient } from "@libsql/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createRunScoresStore, migrateRunScores } from "./run-scores-store";
-import type { RunScore, RunScoresStore } from "./run-scores-store";
+import type { RunScoresStore, RunScoreWrite } from "./run-scores-store";
 
 const AGENT_OWNER = "org"; // an org-shared agent's owner key
 const RUNNER = "org/colleague"; // the member who ran it
 const MINE = "org/me"; // my personal key
 
-const score = (over: Partial<RunScore> = {}): RunScore => ({
+const score = (over: Partial<RunScoreWrite> = {}): RunScoreWrite => ({
   runId: "r1",
   rubricName: "greets",
   value: 1,

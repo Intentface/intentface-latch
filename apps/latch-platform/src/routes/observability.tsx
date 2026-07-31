@@ -46,6 +46,14 @@ function ObservabilityPage() {
   const [anonymous, setAnonymous] = useState(false);
   const [feed, setFeed] = useState<Feed>(initial.feed);
 
+  // Drop a runner filter once that person leaves the window — narrowing the agent
+  // filter, or their runs simply ageing out, can unmount the dropdown while the
+  // key is still selected. The table would then show "No traces yet" with no
+  // control left to clear it.
+  useEffect(() => {
+    if (runner && !feed.runners.some((r) => r.key === runner)) setRunner("");
+  }, [feed.runners, runner]);
+
   // Live poll (~5s), paused while the tab is hidden — this is the "watch your
   // agent get judged in realtime" loop.
   useEffect(() => {

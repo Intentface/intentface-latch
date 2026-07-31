@@ -36,6 +36,26 @@ describe("evalOwnerKeysOf", () => {
   it("URL-encodes each segment so a '/' in an id can't forge another key", () => {
     expect(evalOwnerKeysOf({ orgId: "a/b", userId: "c" })).toEqual(["a%2Fb/c", "a%2Fb"]);
   });
+
+  it("always contains the principal's own owner tag", () => {
+    // `scoreReadKeys` appends ownerTagOf(p) so pre-split rows stay readable. That
+    // append is redundant precisely because of this invariant — if a change to
+    // either derivation breaks it, the two would diverge and scores written under
+    // one would silently vanish from reads keyed on the other. `ownerTagOf` is
+    // re-derived here rather than imported: importing it pulls in the composition
+    // root (agents, connections, model catalog).
+    const ownerTagOf = (p: Principal) =>
+      (p.userId ? [p.orgId, p.userId] : [p.orgId]).map(encodeURIComponent).join("/");
+    for (const p of [
+      { orgId: "org1", userId: "me" },
+      { orgId: "org1" },
+      { orgId: "org1", userId: "" }, // falsy but non-nullish: the two differ here
+      { orgId: "user:abc", userId: "abc" }, // the org-less session shape
+      { orgId: "a/b", userId: "c" },
+    ] satisfies Principal[]) {
+      expect(evalOwnerKeysOf(p)).toContain(ownerTagOf(p));
+    }
+  });
 });
 
 describe("agent store ownership + scope-pinned lookup (in-memory libsql)", () => {

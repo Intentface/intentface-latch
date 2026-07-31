@@ -15,6 +15,7 @@ import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { scopeRefOf } from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
+import type { Principal } from "./session";
 import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
 import { normalizeAgentName, evalOwnerKeysOf } from "./agent-store";
@@ -37,6 +38,24 @@ import { assertPublicHttpsUrl } from "./oauth2-flow";
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
+
+/**
+ * Every owner key a principal may read eval verdicts under — the one definition
+ * shared by all three score read paths (chat badges, the observability overlay,
+ * and a correction's lookup), so they can't drift apart.
+ *
+ * `evalOwnerKeysOf` is the boundary that matters: the agents this caller may
+ * administer. `ownerTagOf` is appended for rows written before verdicts moved to
+ * the agent's key, and for code-registry agents that have no owner. It is
+ * redundant TODAY — `ownerTagOf(p)` is always one of `evalOwnerKeysOf(p)` for
+ * every principal shape — but the two derivations live in different modules with
+ * nothing enforcing that, so this keeps a future divergence from silently hiding
+ * scores. Duplicate keys in the IN-list are harmless.
+ */
+const scoreReadKeys = (p: Principal): string[] => [
+  ...evalOwnerKeysOf(p),
+  ownerTagOf(p),
+];
 
 /**
  * Server-only reads for SSR route loaders / auth gates. These are thin
@@ -757,9 +776,7 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
     // this both dedups and reflects corrections without waiting on Langfuse.
     const runIds = rows.map((r) => r.runId).filter((id): id is string => !!id);
     if (runIds.length > 0) {
-      // Read under the eval-owner keys AND the caller's own tag: the latter picks
-      // up corrections written before verdicts moved to the agent's key.
-      const localByRun = await runScores.getForRuns([...evalOwners, selfTag], runIds);
+      const localByRun = await runScores.getForRuns(scoreReadKeys(principal), runIds);
       for (const row of rows) {
         if (!row.runId) continue;
         const corrections = localByRun.get(row.runId)?.filter((s) => s.source === "human");
@@ -846,7 +863,7 @@ export const getRunScoresFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal || runIds.length === 0) return {} as Record<string, AttachedEvalScore[]>;
     const { runScores } = await getLatch();
-    const byRun = await runScores.getForRuns(evalOwnerKeysOf(principal), runIds);
+    const byRun = await runScores.getForRuns(scoreReadKeys(principal), runIds);
     const out: Record<string, AttachedEvalScore[]> = {};
     for (const [runId, scores] of byRun) {
       out[runId] = scores.map((s) => ({
@@ -928,12 +945,8 @@ export const correctScoreFn = createServerFn({ method: "POST" })
     const run = await runtime.getRun({ principal, runId: data.runId });
     if (!run) return { ok: false as const, error: "unknown run" };
 
-    // Verdicts live under the judged agent's owner key; `selfTag` additionally
-    // matches rows written before that split (and code agents, which have none).
-    const selfTag = ownerTagOf(principal);
-    const evalOwners = evalOwnerKeysOf(principal);
     const existing = await runScores.getOne(
-      [...evalOwners, selfTag],
+      scoreReadKeys(principal),
       data.runId,
       data.rubricName,
     );
@@ -950,7 +963,7 @@ export const correctScoreFn = createServerFn({ method: "POST" })
 
     // Upsert the row we actually matched — writing under a different key would
     // fork a second verdict for the same run+rubric.
-    await runScores.put(existing.owner ?? selfTag, {
+    await runScores.put(existing.owner, {
       runId: data.runId,
       rubricName: data.rubricName,
       value,

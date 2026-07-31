@@ -33,14 +33,21 @@ export interface RunScore {
    */
   runOwner?: string;
   /**
-   * READ-ONLY: the `owner` column this row was found under, set on reads and
-   * ignored by `put` (which takes the owner explicitly). Lets a caller that read
-   * across several keys upsert the row it actually matched instead of forking a
-   * duplicate under its preferred key.
+   * The `owner` column this row was found under. Reads always set it, so a caller
+   * that searched several keys can upsert the row it actually matched instead of
+   * forking a duplicate under its preferred key. `put` takes the owner as its own
+   * argument and rejects it here (`RunScoreWrite`), so it can't be passed twice.
    */
-  owner?: string;
+  owner: string;
   updatedAt: number;
 }
+
+/**
+ * A verdict as written: everything except `owner`, which `put` takes separately.
+ * Splitting it keeps a read result from being handed back to `put` in the hope
+ * that its `owner` routes the write — that would have been a silent no-op.
+ */
+export type RunScoreWrite = Omit<RunScore, "owner">;
 
 export async function migrateRunScores(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_run_scores (
@@ -87,7 +94,7 @@ export async function migrateRunScores(client: Client): Promise<void> {
 export interface RunScoresStore {
   /** Upsert one verdict for a run+rubric (live or re-judge). `owner` is the eval
    *  owner — the judged agent's owner key (see `agentOwnerKey`). */
-  put: (owner: string, score: RunScore) => Promise<void>;
+  put: (owner: string, score: RunScoreWrite) => Promise<void>;
   /**
    * All scores for the given run ids, grouped by runId. `owner` accepts several
    * keys (see `evalOwnerKeysOf`) so a caller can read its personal AND its org's

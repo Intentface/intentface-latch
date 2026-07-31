@@ -204,19 +204,34 @@ export async function getLatch(): Promise<{
   const USER_CACHE_MAX = 1_000;
   const userCache = new Map<string, { at: number; value?: UserProfile }>();
 
-  /** Evict expired entries at the cap, then the oldest-inserted if still full. */
-  function boundUserCache() {
-    if (userCache.size < USER_CACHE_MAX) return;
+  /**
+   * Make room for `incoming` new entries: sweep TTL-expired ones, then evict from
+   * the front until under the cap. Called ONCE per batch rather than per row — it
+   * scans the whole map, so calling it inside the insert loop was quadratic.
+   */
+  function boundUserCache(incoming: number) {
+    if (userCache.size + incoming <= USER_CACHE_MAX) return;
     // Bound the cache: TTL alone never evicts users that stop being queried.
-    // Sweep expired entries at the cap; if every entry is still live, drop the
-    // oldest-inserted (Map preserves insertion order).
+    // Sweep expired entries first; if every entry is still live, drop from the
+    // front (Map preserves insertion order, and `cacheUser` re-inserts on
+    // refresh, so the front is the least-recently-refreshed).
     const now = Date.now();
     for (const [k, v] of userCache) if (now - v.at >= USER_TTL_MS) userCache.delete(k);
-    while (userCache.size >= USER_CACHE_MAX) {
+    while (userCache.size + incoming > USER_CACHE_MAX) {
       const oldest = userCache.keys().next().value;
       if (oldest === undefined) break;
       userCache.delete(oldest);
     }
+  }
+
+  /**
+   * Cache one profile, keeping the map's iteration order approximately LRU: a
+   * plain `set` on an existing key leaves it where it was, so a hot user would
+   * stay at the front and be evicted first even right after a refresh.
+   */
+  function cacheUser(id: string, value: UserProfile | undefined) {
+    userCache.delete(id);
+    userCache.set(id, { at: Date.now(), value });
   }
 
   /**
@@ -241,6 +256,7 @@ export async function getLatch(): Promise<{
         sql: `SELECT id, name, email FROM user WHERE id IN (${placeholders})`,
         args: missing,
       });
+      boundUserCache(missing.length);
       const found = new Set<string>();
       for (const row of res.rows as unknown as Record<string, unknown>[]) {
         const id = String(row.id);
@@ -249,15 +265,12 @@ export async function getLatch(): Promise<{
           email: (row.email as string) || undefined,
         };
         found.add(id);
-        boundUserCache();
-        userCache.set(id, { at: Date.now(), value });
+        cacheUser(id, value);
         out.set(id, value);
       }
       // Cache the misses too, so an unknown id doesn't re-query every poll.
       for (const id of missing) {
-        if (found.has(id)) continue;
-        boundUserCache();
-        userCache.set(id, { at: Date.now(), value: undefined });
+        if (!found.has(id)) cacheUser(id, undefined);
       }
     } catch (e) {
       console.warn("resolveUsers failed:", e instanceof Error ? e.message : e);
