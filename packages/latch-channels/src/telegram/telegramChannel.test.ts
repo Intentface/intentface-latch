@@ -832,6 +832,53 @@ describe("telegramChannel questionnaires (askUser)", () => {
     expect(h.ask.rows.get("telegram_bot1_5")).toBeUndefined();
   });
 
+  it("a captioned photo is NOT an answer — it runs a turn so the file reaches the agent", async () => {
+    const h = askHarness([goal]);
+    await h.channel.handleRequest(webhookRequest(dm("moi")));
+    await h.flush();
+    h.runtime.handleChat.mockClear();
+    h.runtime.loadHistory.mockResolvedValue([]);
+
+    const photo = [{ file_id: "p1", file_size: 4 }];
+    await h.channel.handleRequest(
+      webhookRequest({ ...dm("", { text: undefined, caption: "here it is", photo }), update_id: 7 }),
+    );
+    await h.flush();
+
+    // Treating the caption as the answer would silently drop the attachment.
+    expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    const sent = h.runtime.handleChat.mock.calls[0]![0] as { message: AppMessage };
+    expect(sent.message.parts.some((p) => p.type === "file")).toBe(true);
+    expect(h.ask.rows.get("telegram_bot1_5")).toBeUndefined(); // questionnaire retired
+  });
+
+  it("keeps the answers when the host forgot to wire applyToolResult", async () => {
+    const ask = fakeAskState();
+    const h = harness({
+      askState: ask.store,
+      runtime: {
+        handleChat: vi.fn(async () => textRun("Answer!")),
+        applyApproval: vi.fn(),
+        loadHistory: vi.fn(async () => askHistory("toolu_ask1", [goal])),
+      } as never,
+    });
+    await h.channel.handleRequest(webhookRequest(dm("moi")));
+    await h.flush();
+    const kb = (
+      h.of("sendMessage").at(-1)!.body as {
+        reply_markup: { inline_keyboard: { callback_data: string }[][] };
+      }
+    ).reply_markup.inline_keyboard;
+
+    await tap(h, kb[0]![0]!.callback_data);
+    await h.flush();
+
+    // Destroying the session here would lose every collected answer with no
+    // way left to submit them.
+    expect(ask.rows.get("telegram_bot1_5")).toBeDefined();
+  });
+
   it("without askState the questions are posted as text and nothing is submitted", async () => {
     const h = harness();
     h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [goal, days]));

@@ -390,7 +390,15 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
       promptChatId: ctx.waId,
     };
     if ((await store.begin(ctx.chatId, session)) === "already") return;
-    await sendQuestion({ ...session, rev: 0 });
+    try {
+      await sendQuestion({ ...session, rev: 0 });
+    } catch (e) {
+      // No prompt reached the user, so nothing is on screen to answer. Retire
+      // the session or their next message gets eaten as an answer to a question
+      // they never saw, with `/cancel` the only way out.
+      await store.clear(ctx.chatId).catch(() => null);
+      throw e;
+    }
   }
 
   /**
@@ -440,15 +448,18 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
       return;
     }
 
+    // Nothing to submit through — bail BEFORE consuming the session, so the
+    // collected answers survive a misconfigured host.
+    const submit = config.runtime.applyToolResult;
+    if (!submit) {
+      console.error("[whatsapp] runtime.applyToolResult not wired — cannot resume askUser");
+      return;
+    }
+
     // Final answer: claim the lease BEFORE consuming the session, so a busy chat
     // leaves the answers recoverable instead of destroying them.
     await withTurnLease(ctx.chatId, ctx.waId, async () => {
       if (!(await store.finish(ctx.chatId, session.toolCallId, session.rev))) return;
-      const submit = config.runtime.applyToolResult;
-      if (!submit) {
-        console.error("[whatsapp] runtime.applyToolResult not wired — cannot resume askUser");
-        return;
-      }
       await api.sendText(ctx.waId, `✓ ${step.answered.answer}`).catch(() => {});
       try {
         const res = await submit({
@@ -636,11 +647,14 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
           return;
         }
         const command = text.startsWith("/");
-        if (!command && text) {
+        // Media is never an answer: treating a captioned image as one would
+        // silently drop the file, since answers are plain text. Let it fall
+        // through to a normal turn so the attachment actually reaches the agent.
+        if (!command && text && media.length === 0) {
           await answerQuestion({ waId, chatId, principal, session, event: { kind: "typed", text } });
           return;
         }
-        // A command, or media with no text — not an answer. Drop the questionnaire.
+        // A command, or a message carrying media — not an answer. Drop the questionnaire.
         await config.askState.clear(chatId).catch(() => {});
         if (command && /^\/(cancel|skip)\b/.test(text)) {
           await api

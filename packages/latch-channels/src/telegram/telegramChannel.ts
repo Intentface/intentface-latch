@@ -361,7 +361,10 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       const session = await config.askState.get(chatId).catch(() => null);
       if (session) {
         const command = text.startsWith("/");
-        if (!command && text) {
+        // Media is never an answer: treating a captioned photo as one would
+        // silently drop the file, since answers are plain text. Let it fall
+        // through to a normal turn so the attachment actually reaches the agent.
+        if (!command && text && media.length === 0) {
           const { rejected } = await answerQuestion({
             chatId,
             telegramChatId,
@@ -375,7 +378,7 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
           }
           return;
         }
-        // A command, or media with no text — not an answer. Drop the
+        // A command, or a message carrying media — not an answer. Drop the
         // questionnaire (the parked call dies with the next turn anyway) and
         // retire its buttons so they don't look live.
         await config.askState.clear(chatId).catch(() => {});
@@ -683,7 +686,16 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     // redelivered webhook, or a resume that produced no new askUser). Prompting
     // again would post a duplicate card whose buttons both mutate one session.
     if ((await store.begin(chatId, session)) === "already") return;
-    const messageId = await sendQuestion({ ...session, rev: 0 });
+    let messageId: number | undefined;
+    try {
+      messageId = await sendQuestion({ ...session, rev: 0 });
+    } catch (e) {
+      // No prompt reached the user, so nothing is on screen to answer. Retire
+      // the session or their next message gets eaten as an answer to a question
+      // they never saw, with `/cancel` the only way out.
+      await store.clear(chatId).catch(() => null);
+      throw e;
+    }
     if (messageId !== undefined) {
       await store
         .update(chatId, pending.toolCallId, 0, { promptRef: String(messageId) })
@@ -715,7 +727,9 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     event: AskEvent;
     /** The tapped card, when the interaction came from a button. */
     cardMessageId?: number;
-  }): Promise<{ rejected?: string }> {
+    /** Ack this callback query before a resume that would outlive its window. */
+    ackCallbackId?: string;
+  }): Promise<{ rejected?: string; acked?: boolean }> {
     const store = config.askState;
     if (!store) return {};
     const { session } = ctx;
@@ -780,17 +794,26 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       return {};
     }
 
-    // Last question answered — this resumes the agent, so take the lease. Claim
-    // it BEFORE consuming the session: releasing the session first would destroy
-    // every collected answer with no way left to submit them.
+    // Last question answered — this resumes the agent. Ack the button first: the
+    // resume runs the whole turn (tens of seconds), which outlives Telegram's
+    // callback-query window, so acking afterwards fails and leaves the user
+    // staring at a spinner. The approval path acks up front for the same reason.
+    const acked = ctx.ackCallbackId !== undefined;
+    if (ctx.ackCallbackId) await api.answerCallbackQuery(ctx.ackCallbackId);
+
+    // Nothing to submit through — bail BEFORE consuming the session, so the
+    // collected answers survive a misconfigured host.
+    const submit = config.runtime.applyToolResult;
+    if (!submit) {
+      console.error("[telegram] runtime.applyToolResult not wired — cannot resume askUser");
+      return { acked };
+    }
+
+    // Take the lease BEFORE consuming the session: releasing the session first
+    // would destroy every collected answer with no way left to submit them.
     await withTurnLease(ctx.chatId, ctx.telegramChatId, async () => {
       if (!(await store.finish(ctx.chatId, session.toolCallId, session.rev))) return;
       await collapseCard();
-      const submit = config.runtime.applyToolResult;
-      if (!submit) {
-        console.error("[telegram] runtime.applyToolResult not wired — cannot resume askUser");
-        return;
-      }
       try {
         const res = await submit({
           chatId: ctx.chatId,
@@ -808,7 +831,7 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
           .catch(() => {});
       }
     });
-    return {};
+    return { acked };
   }
 
   /**
@@ -879,16 +902,19 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
 
     const event: AskEvent =
       decoded.verb === "pick" ? { kind: "pick", option: decoded.optionIndex } : { kind: "done" };
-    const { rejected } = await answerQuestion({
+    const { rejected, acked } = await answerQuestion({
       chatId,
       telegramChatId,
       telegramUserId,
       principal,
       session,
       event,
+      ackCallbackId: cb.id,
       ...(cb.message ? { cardMessageId: cb.message.message_id } : {}),
     });
-    await api.answerCallbackQuery(cb.id, rejected);
+    // The resume path already acked (it outlives the query window); everything
+    // else settles synchronously and gets its ack — with the reason, if rejected.
+    if (!acked) await api.answerCallbackQuery(cb.id, rejected);
   }
 
   // ── Approve/Deny button → resume the run ────────────────────────────────────

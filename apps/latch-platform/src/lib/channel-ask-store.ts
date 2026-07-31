@@ -78,9 +78,14 @@ export function createChannelAskStore(client: Client) {
 
     /**
      * Claim the right to prompt. The guarded upsert replaces a session for a
-     * DIFFERENT tool call but leaves one for the SAME call untouched, reporting
-     * `already` — so re-rendering a still-pending questionnaire never posts a
-     * twin card whose buttons would both drive one session.
+     * DIFFERENT tool call but leaves a LIVE one for the SAME call untouched,
+     * reporting `already` — so re-rendering a still-pending questionnaire never
+     * posts a twin card whose buttons would both drive one session.
+     *
+     * An EXPIRED row counts as absent: callers reach `begin` without going
+     * through `get` (which is what prunes), so treating a stale row as live
+     * would answer `already` and suppress the prompt entirely — the user would
+     * see no question and have no button, with the turn still paused.
      */
     async beginAsk(
       chatId: string,
@@ -100,7 +105,8 @@ export function createChannelAskStore(client: Client) {
                 prompt_chat_id = excluded.prompt_chat_id,
                 prompt_ref = NULL, rev = 0,
                 updated_at = excluded.updated_at
-              WHERE latch_channel_ask.tool_call_id <> excluded.tool_call_id`,
+              WHERE latch_channel_ask.tool_call_id <> excluded.tool_call_id
+                 OR latch_channel_ask.updated_at < ?`,
         args: [
           chatId,
           session.toolCallId,
@@ -108,6 +114,7 @@ export function createChannelAskStore(client: Client) {
           JSON.stringify(session.questions),
           session.promptChatId,
           now,
+          now - ASK_TTL_MS,
         ],
       });
       // Ours iff the stored nonce is the one we just tried to write.

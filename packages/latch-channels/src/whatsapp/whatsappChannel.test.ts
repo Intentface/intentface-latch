@@ -561,6 +561,51 @@ describe("whatsappChannel questionnaires (askUser)", () => {
     expect(h.sends().some((b) => (b as { type?: string }).type === "interactive")).toBe(false);
   });
 
+  it("a captioned image is NOT an answer — it runs a turn so the file reaches the agent", async () => {
+    const h = askHarness([two]);
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+    h.runtime.handleChat.mockClear();
+    h.runtime.loadHistory.mockResolvedValue([]);
+
+    await h.channel.handleRequest(
+      signedPost(
+        inbound({
+          id: "wamid.img",
+          type: "image",
+          text: undefined,
+          image: { id: "media1", mime_type: "image/jpeg", caption: "here it is" },
+        }),
+      ),
+    );
+    await h.flush();
+
+    // Treating the caption as the answer would silently drop the attachment.
+    expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    expect(h.ask.rows.size).toBe(0); // questionnaire retired
+  });
+
+  it("keeps the answers when the host forgot to wire applyToolResult", async () => {
+    const ask = fakeAskState();
+    const h = harness({
+      askState: ask.store,
+      runtime: {
+        handleChat: vi.fn(async () => textRun("Answer!")),
+        applyApproval: vi.fn(),
+        loadHistory: vi.fn(async () => askHistory("toolu_ask1", [two])),
+      } as never,
+    });
+    await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));
+    await h.flush();
+
+    await h.channel.handleRequest(signedPost(inbound({ id: "wamid.a", text: { body: "1" } })));
+    await h.flush();
+
+    // Destroying the session here would lose every collected answer.
+    expect(ask.rows.get("whatsapp_wb1_358401234567")).toBeDefined();
+  });
+
   it("without askState the questions are posted as text and nothing is submitted", async () => {
     const h = harness();
     h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [two]));

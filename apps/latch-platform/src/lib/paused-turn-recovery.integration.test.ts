@@ -77,6 +77,25 @@ const callAskUser = (toolCallId: string, question: string) => [
   { type: "finish", finishReason: "tool-calls", usage },
 ];
 
+/** Two parked client-tool calls in ONE step — only the second submit may resume. */
+const callAskUserTwice = () => [
+  { type: "stream-start", warnings: [] },
+  meta("r_ask2"),
+  {
+    type: "tool-call",
+    toolCallId: "call_a",
+    toolName: "askUser",
+    input: JSON.stringify({ questions: [{ question: "A?", options: [{ label: "Yes", description: "y" }] }] }),
+  },
+  {
+    type: "tool-call",
+    toolCallId: "call_b",
+    toolName: "askUser",
+    input: JSON.stringify({ questions: [{ question: "B?", options: [{ label: "Yes", description: "y" }] }] }),
+  },
+  { type: "finish", finishReason: "tool-calls", usage },
+];
+
 const callGated = (toolCallId: string) => [
   { type: "stream-start", warnings: [] },
   meta("r_gate"),
@@ -198,6 +217,32 @@ describe("recovering a chat parked on a stale pause", () => {
     });
     expect(isStream(unknown)).toBe(false);
     expect((await runtime.loadHistory({ chatId, principal })).length).toBe(after);
+  });
+
+  it("with two parked calls in one step, only the second submit resumes", async () => {
+    // `hasPendingToolResult` is scoped to the messages just touched, so a SIBLING
+    // still awaiting a result must hold the resume — otherwise the re-run throws
+    // MissingToolResultsError on the unanswered tool_use.
+    const chatId = "chat_two_calls";
+    script = [() => callAskUserTwice(), () => sayText("Both answered.")];
+    await drain(await send(runtime, chatId, "hi"));
+
+    const first = await runtime.applyToolResult({
+      chatId,
+      principal,
+      toolCallId: "call_a",
+      output: { "A?": "Yes" },
+    });
+    expect(isStream(first)).toBe(false); // sibling call_b still pending
+
+    const second = await runtime.applyToolResult({
+      chatId,
+      principal,
+      toolCallId: "call_b",
+      output: { "B?": "Yes" },
+    });
+    expect(isStream(second)).toBe(true);
+    await drain(second);
   });
 
   it("a LIVE approval still blocks a new message", async () => {

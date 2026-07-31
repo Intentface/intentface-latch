@@ -230,6 +230,18 @@ describe("telegram store: askUser sessions", () => {
     expect(await store.getAsk(chat)).toBeNull();
   });
 
+  it("re-begins over an EXPIRED row for the same tool call", async () => {
+    // begin() is reached without a preceding get() (which is what prunes), so a
+    // stale row must not answer "already" — that would suppress the prompt and
+    // leave the user with no question AND no button on a still-paused turn.
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000);
+    await store.beginAsk(chat, session);
+    vi.setSystemTime(1_000_000_000 + 25 * 60 * 60 * 1000);
+    expect(await store.beginAsk(chat, { ...session, nonce: "fresh1" })).toBe("started");
+    expect((await store.getAsk(chat))!.nonce).toBe("fresh1");
+  });
+
   it("keeps sessions of different chats apart", async () => {
     await store.beginAsk(chat, session);
     await store.beginAsk("telegram_b1_6", { ...session, toolCallId: "toolu_9", nonce: "n9" });
