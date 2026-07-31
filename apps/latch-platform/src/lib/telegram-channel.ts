@@ -2,7 +2,7 @@ import { waitUntil } from "@vercel/functions";
 import { telegramChannel } from "@intentface/latch-channels/telegram";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
-import { telegramVaultKeys, type TelegramBot } from "./telegram-store";
+import { telegramVaultKeys } from "./telegram-store";
 import { buildTelegramLinkUrl } from "./telegram-link";
 import { baseUrl } from "./base-url";
 import { transcribeAudio } from "./transcribe";
@@ -38,7 +38,19 @@ export async function getTelegramChannelForBot(botId: string) {
     runtime: {
       handleChat: (i) => runtime.handleChat(i),
       applyApproval: (i) => runtime.applyApproval(i),
+      // Resumes a turn parked on `askUser` — what makes questionnaires answerable
+      // from Telegram rather than only in the web composer.
+      applyToolResult: (i) => runtime.applyToolResult(i),
       loadHistory: (i) => runtime.loadHistory(i),
+    },
+    // Holds the answers collected so far while a questionnaire is on screen.
+    askState: {
+      get: (chatId) => telegramStore.getAsk(chatId),
+      begin: (chatId, session) => telegramStore.beginAsk(chatId, session),
+      update: (chatId, toolCallId, rev, patch) =>
+        telegramStore.updateAsk(chatId, toolCallId, rev, patch),
+      finish: (chatId, toolCallId, rev) => telegramStore.finishAsk(chatId, toolCallId, rev),
+      clear: (chatId) => telegramStore.clearAsk(chatId),
     },
     waitUntil: (p) => waitUntil(p),
     // Voice/audio messages reach the agent as transcribed text (ElevenLabs).
@@ -96,5 +108,5 @@ export async function getTelegramChannelForBot(botId: string) {
     },
   });
 
-  return { channel, bot: bot as TelegramBot };
+  return { channel, bot: bot };
 }

@@ -1,7 +1,7 @@
 import { jsonSchema, parseJsonEventStream } from "ai";
 import type { UIMessageChunk } from "ai";
 import type { AppMessage } from "@intentface/latch-core";
-import type { PendingApproval, RenderEvent } from "./types.js";
+import type { PendingApproval, PendingQuestion, Question, RenderEvent } from "./types.js";
 
 /**
  * Fold a Latch run's streaming `Response` (the SSE the chat handler speaks —
@@ -101,48 +101,99 @@ function toolNameOf(part: ToolPartLike): string {
 }
 
 /**
- * Scan history for tool parts parked in `approval-requested` with an undecided
- * approval — the HITL prompts a channel should render as buttons (or, for
- * `connect_*`, an authorize link). Mirrors the web UI's `renderApproval` filter.
+ * Parts of the LAST assistant message — the live pause point.
+ *
+ * A paused turn's gated calls and client-tool calls all sit on the assistant
+ * message it paused on (a resume starts a new one). Undecided parts in older
+ * messages belong to abandoned turns: the runtime's own gate ignores them (see
+ * `hasPendingApproval` in latch-core) and `closeDanglingToolCalls` fabricates a
+ * terminal result for the model view. Scanning all of history instead re-posts
+ * the same stale card on every later turn.
+ */
+function lastAssistantParts(messages: AppMessage[]): ToolPartLike[] {
+  const last = messages[messages.length - 1];
+  // Strictly the FINAL message: a later user message means the turn moved on and
+  // buried whatever the old one was waiting for.
+  if (last?.role !== "assistant") return [];
+  return (last.parts ?? []) as ToolPartLike[];
+}
+
+/**
+ * Scan the live pause point for tool parts parked in `approval-requested` with
+ * an undecided approval — the HITL prompts a channel should render as buttons
+ * (or, for `connect_*`, an authorize link). Mirrors the web UI's filter.
  */
 export function pendingApprovals(messages: AppMessage[]): PendingApproval[] {
   const out: PendingApproval[] = [];
-  for (const msg of messages) {
-    for (const part of (msg.parts ?? []) as ToolPartLike[]) {
-      // A gated tool inside a spawned subagent bubbles up as a
-      // `data-subagent-approval` part (not a tool part). Surface it so the
-      // channel renders Approve/Deny; the decision routes via applyApproval.
-      const sub = part as {
-        type: string;
-        data?: { approvalId?: string; summaries?: string[]; approved?: boolean };
-      };
-      if (sub.type === "data-subagent-approval") {
-        if (sub.data?.approvalId && sub.data.approved === undefined) {
-          out.push({
-            approvalId: sub.data.approvalId,
-            toolName: sub.data.summaries?.join(", ") || "connector action",
-            input: undefined,
-            isConnect: false,
-          });
-        }
-        continue;
+  for (const part of lastAssistantParts(messages)) {
+    // A gated tool inside a spawned subagent bubbles up as a
+    // `data-subagent-approval` part (not a tool part). Surface it so the
+    // channel renders Approve/Deny; the decision routes via applyApproval.
+    const sub = part as {
+      type: string;
+      data?: { approvalId?: string; summaries?: string[]; approved?: boolean };
+    };
+    if (sub.type === "data-subagent-approval") {
+      if (sub.data?.approvalId && sub.data.approved === undefined) {
+        out.push({
+          approvalId: sub.data.approvalId,
+          toolName: sub.data.summaries?.join(", ") || "connector action",
+          input: undefined,
+          isConnect: false,
+        });
       }
-      const isTool = part.type === "dynamic-tool" || part.type.startsWith("tool-");
-      if (!isTool) continue;
-      if (part.state !== "approval-requested") continue;
-      const approvalId = part.approval?.id;
-      if (!approvalId || part.approval?.approved !== undefined) continue;
-
-      const toolName = toolNameOf(part);
-      const isConnect = toolName.startsWith(CONNECT_PREFIX);
-      out.push({
-        approvalId,
-        toolName,
-        input: part.input,
-        isConnect,
-        connectionName: isConnect ? toolName.slice(CONNECT_PREFIX.length) : undefined,
-      });
+      continue;
     }
+    const isTool = part.type === "dynamic-tool" || part.type.startsWith("tool-");
+    if (!isTool) continue;
+    if (part.state !== "approval-requested") continue;
+    const approvalId = part.approval?.id;
+    if (!approvalId || part.approval?.approved !== undefined) continue;
+
+    const toolName = toolNameOf(part);
+    const isConnect = toolName.startsWith(CONNECT_PREFIX);
+    out.push({
+      approvalId,
+      toolName,
+      input: part.input,
+      isConnect,
+      connectionName: isConnect ? toolName.slice(CONNECT_PREFIX.length) : undefined,
+    });
   }
   return out;
+}
+
+/** The client-handled tool that asks the user questions. */
+const ASK_USER_PART = "tool-askUser";
+
+/**
+ * The questionnaire the turn is parked on, or null. Tail-scoped for the same
+ * reason as {@link pendingApprovals}: a parked `askUser` call buried by a later
+ * user turn will never resolve (the runtime closes it in the model projection),
+ * so re-prompting it would nag forever with buttons that can't complete.
+ *
+ * Answers go back via `runtime.applyToolResult` — ONE call closes the whole tool
+ * call, so a channel must collect every question's answer before submitting.
+ */
+export function pendingQuestion(messages: AppMessage[]): PendingQuestion | null {
+  for (const part of lastAssistantParts(messages)) {
+    if (part.type !== ASK_USER_PART || part.state !== "input-available") continue;
+    const toolCallId = (part as { toolCallId?: string }).toolCallId;
+    const questions = (part.input as { questions?: Question[] } | undefined)?.questions;
+    if (!toolCallId || !questions?.length) continue;
+    // Drop malformed questions rather than rendering an empty keyboard.
+    const usable = questions.filter((q) => q?.question && q.options?.length);
+    if (!usable.length) continue;
+    return { toolCallId, questions: usable };
+  }
+  return null;
+}
+
+/**
+ * True for the error `handleChat` throws when a decision is still outstanding
+ * (`PendingApprovalError` in latch-core). Structural check on the stable `code`
+ * so this package stays decoupled from the runtime's classes.
+ */
+export function isPendingApprovalError(e: unknown): boolean {
+  return (e as { code?: string } | null)?.code === "pending_approval";
 }

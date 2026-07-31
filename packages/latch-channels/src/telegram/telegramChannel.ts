@@ -1,9 +1,22 @@
 import type { AppMessage } from "@intentface/latch-core";
-import type { ChannelRunOps, TranscribeAudio } from "../types.js";
-import { consumeRun, pendingApprovals } from "../render.js";
-import { telegramApi, type TelegramApiOptions, type TelegramToken } from "./api.js";
+import type { AskSession, AskStateStore, ChannelRunOps, Question, TranscribeAudio } from "../types.js";
+import { consumeRun, isPendingApprovalError, pendingApprovals, pendingQuestion } from "../render.js";
+import { nextAskStep, type AskEvent } from "../ask.js";
+import {
+  assertCallbackData,
+  telegramApi,
+  type InlineKeyboardButton,
+  type TelegramApiOptions,
+  type TelegramToken,
+} from "./api.js";
 import { verifyTelegramSecretToken } from "./verify.js";
-import { approvalPromptHtml, renderTelegramStream } from "./stream.js";
+import {
+  answeredQuestionHtml,
+  approvalPromptHtml,
+  optionButtonText,
+  questionPromptHtml,
+  renderTelegramStream,
+} from "./stream.js";
 import { escapeHtml } from "./html.js";
 
 /**
@@ -93,6 +106,13 @@ export interface TelegramChannelConfig<P> {
    * audio input). Without it, voice-only messages get a friendly refusal.
    */
   transcribe?: TranscribeAudio;
+  /**
+   * Host storage for in-flight `askUser` questionnaires. Without it a
+   * questionnaire is posted as plain text and the turn stays paused (the user
+   * can still answer in the web app) — buttons need somewhere to keep the
+   * answers collected so far between webhook deliveries.
+   */
+  askState?: AskStateStore;
   /** Keep a serverless function alive after the fast ACK (Vercel: `waitUntil`). */
   waitUntil?: (p: Promise<unknown>) => void;
   /** Test seam: base URL / fetch for the Bot API client. */
@@ -160,10 +180,50 @@ export function decodeApprovalCallback(
   return { approved: m[1] === "1", approvalId: m[2]! };
 }
 
+// ── Questionnaire callback encoding ─────────────────────────────────────────
+// Ordinals only: `ltq:<verb>|<nonce>|<questionIndex>[|<optionIndex>]`. The
+// `toolCallId` is deliberately absent — it's provider-generated and 30-40 chars,
+// which would crowd the 64-byte cap; it's read from the session instead. The
+// nonce pins the payload to the questionnaire that was posted, so a button from
+// a superseded one is rejected rather than answering the wrong question.
+// Worst case: 4 + 2 + 7 + 3 + 3 = 19 bytes.
+
+const QUESTION_PREFIX = "ltq";
+/** Length of the session nonce carried in button payloads. */
+export const ASK_NONCE_LENGTH = 6;
+
+export type QuestionCallback =
+  | { verb: "pick"; nonce: string; questionIndex: number; optionIndex: number }
+  | { verb: "done"; nonce: string; questionIndex: number };
+
+export function encodeQuestionCallback(cb: QuestionCallback): string {
+  const tail = cb.verb === "pick" ? `|${cb.optionIndex}` : "";
+  return assertCallbackData(
+    `${QUESTION_PREFIX}:${cb.verb === "pick" ? "s" : "d"}|${cb.nonce}|${cb.questionIndex}${tail}`,
+  );
+}
+
+export function decodeQuestionCallback(data: string | undefined): QuestionCallback | null {
+  if (!data) return null;
+  const m = /^ltq:([sd])\|([^|]+)\|(\d+)(?:\|(\d+))?$/.exec(data);
+  if (!m) return null;
+  const nonce = m[2]!;
+  const questionIndex = Number(m[3]);
+  if (m[1] === "d") return { verb: "done", nonce, questionIndex };
+  if (m[4] === undefined) return null;
+  return { verb: "pick", nonce, questionIndex, optionIndex: Number(m[4]) };
+}
+
 const ok = () => new Response(null, { status: 200 });
 
 function newId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `m_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+}
+
+/** Short random token pinning button payloads to one posted questionnaire. */
+function newNonce(): string {
+  const uuid = globalThis.crypto?.randomUUID?.() ?? String(Math.random());
+  return uuid.replace(/[^a-z0-9]/gi, "").slice(0, ASK_NONCE_LENGTH);
 }
 
 /** The typed media attachments present on a message, largest photo size only. */
@@ -290,7 +350,52 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     }
 
     const principal = auth.principal;
-    await withTurnLease(chatIdFor(telegramUserId), msg.chat.id, () =>
+    const chatId = chatIdFor(telegramUserId);
+
+    // A questionnaire on screen changes what a plain message MEANS: it answers
+    // the current question rather than starting a turn. Deliberately downstream
+    // of `seen()` — a redelivered update would otherwise be applied as a second
+    // answer and skip a question — and downstream of the auth gate, so an
+    // unlinked user still gets the link prompt and can't mutate ask state.
+    if (config.askState) {
+      const session = await config.askState.get(chatId).catch(() => null);
+      if (session) {
+        const command = text.startsWith("/");
+        // Media is never an answer: treating a captioned photo as one would
+        // silently drop the file, since answers are plain text. Let it fall
+        // through to a normal turn so the attachment actually reaches the agent.
+        if (!command && text && media.length === 0) {
+          const { rejected } = await answerQuestion({
+            chatId,
+            telegramChatId,
+            telegramUserId,
+            principal,
+            session,
+            event: { kind: "typed", text },
+          });
+          if (rejected) {
+            await api.sendMessage({ chat_id: msg.chat.id, text: rejected }).catch(() => {});
+          }
+          return;
+        }
+        // A command, or a message carrying media — not an answer. Drop the
+        // questionnaire (the parked call dies with the next turn anyway) and
+        // retire its buttons so they don't look live.
+        await config.askState.clear(chatId).catch(() => {});
+        if (session.promptRef) await stripKeyboard(telegramChatId, session.promptRef);
+        if (command && /^\/(cancel|skip)\b/.test(text)) {
+          await api
+            .sendMessage({
+              chat_id: msg.chat.id,
+              text: "Dropped those questions. What would you like to do instead?",
+            })
+            .catch(() => {});
+          return;
+        }
+      }
+    }
+
+    await withTurnLease(chatId, msg.chat.id, () =>
       runMessage({ telegramUserId, telegramChatId, text, media, principal }),
     );
   }
@@ -394,13 +499,24 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
         api,
         chatId: ctx.telegramChatId,
       });
-      await renderApprovals(chatId, ctx.telegramChatId, ctx.telegramUserId, ctx.principal);
+      await renderPending(chatId, ctx.telegramChatId, ctx.telegramUserId, ctx.principal);
     } catch (e) {
       console.error("[telegram] runMessage failed:", e);
       const m = e instanceof Error ? e.message : String(e);
       await api
         .sendMessage({ chat_id: ctx.telegramChatId, text: `⚠️ ${m.slice(0, 3000)}` })
         .catch(() => {});
+      // The turn was refused because a decision is still outstanding — re-post
+      // the card so it can be resolved from here. Without this the chat is a
+      // dead end: the same refusal every turn and no buttons to clear it.
+      if (isPendingApprovalError(e)) {
+        await renderPending(
+          chatId,
+          ctx.telegramChatId,
+          ctx.telegramUserId,
+          ctx.principal,
+        ).catch((err) => console.error("[telegram] re-render pending failed:", err));
+      }
     }
   }
 
@@ -420,15 +536,32 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     await withTurnLease(chatIdFor(ctx.telegramUserId), ctx.telegramChatId, () => runMessage(ctx));
   }
 
-  /** Approvals are message state, not stream chunks — scan fresh history. */
-  async function renderApprovals(
+  /**
+   * Everything a paused turn is waiting on — approvals and questionnaires are
+   * message state, not stream chunks, so scan fresh history once and render
+   * whatever it's parked on. Approvals win when both are present: a gated tool
+   * blocks the run outright, so answering questions first would go nowhere.
+   */
+  async function renderPending(
     chatId: string,
     telegramChatId: string,
     telegramUserId: string,
     principal: P,
   ): Promise<void> {
     const history = await config.runtime.loadHistory({ chatId, principal });
-    for (const pa of pendingApprovals(history)) {
+    const approvals = pendingApprovals(history);
+    await renderApprovals(approvals, chatId, telegramChatId, telegramUserId);
+    if (approvals.length) return;
+    await renderQuestions(pendingQuestion(history), chatId, telegramChatId);
+  }
+
+  async function renderApprovals(
+    approvals: ReturnType<typeof pendingApprovals>,
+    chatId: string,
+    telegramChatId: string,
+    telegramUserId: string,
+  ): Promise<void> {
+    for (const pa of approvals) {
       if (pa.isConnect && pa.connectionName && config.authorizeUrl) {
         const url = config.authorizeUrl(pa.connectionName, {
           chatId,
@@ -461,10 +594,334 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     }
   }
 
-  // ── Approve/Deny button → resume the run ────────────────────────────────────
+  // ── Questionnaires (askUser) ───────────────────────────────────────────────
+
+  /** The inline keyboard for one question: one row per option, Done for multi. */
+  function questionKeyboard(
+    q: Question,
+    nonce: string,
+    questionIndex: number,
+    selected: number[],
+  ): InlineKeyboardButton[][] {
+    const rows: InlineKeyboardButton[][] = q.options.map((o, i) => [
+      {
+        text: optionButtonText(o.label, q.multiSelect ? selected.includes(i) : undefined),
+        callback_data: encodeQuestionCallback({
+          verb: "pick",
+          nonce,
+          questionIndex,
+          optionIndex: i,
+        }),
+      },
+    ]);
+    if (q.multiSelect) {
+      rows.push([
+        {
+          text: "✅ Done",
+          callback_data: encodeQuestionCallback({ verb: "done", nonce, questionIndex }),
+        },
+      ]);
+    }
+    return rows;
+  }
+
+  /** Post the question at `cursor`; returns the new message id for `promptRef`. */
+  async function sendQuestion(session: AskSession): Promise<number | undefined> {
+    const q = session.questions[session.cursor];
+    if (!q) return undefined;
+    const { messageId } = await api.sendMessage({
+      chat_id: session.promptChatId,
+      text: questionPromptHtml(q, session.cursor, session.questions.length),
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: questionKeyboard(q, session.nonce, session.cursor, session.selected),
+      },
+    });
+    return messageId;
+  }
+
+  /**
+   * Prompt the questionnaire the turn is parked on (if any), and retire a stale
+   * session when it's gone — e.g. the user answered the same questionnaire in
+   * the web app, so the Telegram buttons must stop looking live.
+   */
+  async function renderQuestions(
+    pending: { toolCallId: string; questions: Question[] } | null,
+    chatId: string,
+    telegramChatId: string,
+  ): Promise<void> {
+    const store = config.askState;
+    if (!pending) {
+      const stale = await store?.clear(chatId).catch(() => null);
+      if (stale?.promptRef) await stripKeyboard(telegramChatId, stale.promptRef);
+      return;
+    }
+    if (!store) {
+      // No host storage: post the questions as text so the user at least sees
+      // them, and leave the turn paused (answerable in the web app). Fabricating
+      // an answer would put words in their mouth.
+      console.warn("[telegram] askUser pending but no askState configured — posting as text");
+      for (const [i, q] of pending.questions.entries()) {
+        await api
+          .sendMessage({
+            chat_id: telegramChatId,
+            text: questionPromptHtml(q, i, pending.questions.length),
+            parse_mode: "HTML",
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    const session: Omit<AskSession, "rev"> = {
+      toolCallId: pending.toolCallId,
+      nonce: newNonce(),
+      questions: pending.questions,
+      cursor: 0,
+      answers: {},
+      selected: [],
+      promptChatId: telegramChatId,
+    };
+    // `already` ⇒ this questionnaire is on screen from an earlier render (a
+    // redelivered webhook, or a resume that produced no new askUser). Prompting
+    // again would post a duplicate card whose buttons both mutate one session.
+    if ((await store.begin(chatId, session)) === "already") return;
+    let messageId: number | undefined;
+    try {
+      messageId = await sendQuestion({ ...session, rev: 0 });
+    } catch (e) {
+      // No prompt reached the user, so nothing is on screen to answer. Retire
+      // the session or their next message gets eaten as an answer to a question
+      // they never saw, with `/cancel` the only way out.
+      await store.clear(chatId).catch(() => null);
+      throw e;
+    }
+    if (messageId !== undefined) {
+      await store
+        .update(chatId, pending.toolCallId, 0, { promptRef: String(messageId) })
+        .catch(() => null);
+    }
+  }
+
+  /** Best-effort removal of a message's buttons (it may be gone or too old). */
+  async function stripKeyboard(telegramChatId: string, messageRef: string): Promise<void> {
+    const messageId = Number(messageRef);
+    if (!Number.isFinite(messageId)) return;
+    await api
+      .editMessageReplyMarkup({ chat_id: telegramChatId, message_id: messageId })
+      .catch(() => {});
+  }
+
+  /**
+   * Apply one questionnaire interaction. Only the final answer runs the agent,
+   * so only that path takes the turn lease — leasing intermediate taps would
+   * serialize a 5-question flow behind the lease TTL and reply "still working"
+   * to taps that touch no run state.
+   */
+  async function answerQuestion(ctx: {
+    chatId: string;
+    telegramChatId: string;
+    telegramUserId: string;
+    principal: P;
+    session: AskSession;
+    event: AskEvent;
+    /** The tapped card, when the interaction came from a button. */
+    cardMessageId?: number;
+    /** Ack this callback query before a resume that would outlive its window. */
+    ackCallbackId?: string;
+  }): Promise<{ rejected?: string; acked?: boolean }> {
+    const store = config.askState;
+    if (!store) return {};
+    const { session } = ctx;
+    const step = nextAskStep(session, ctx.event);
+
+    if (step.kind === "rejected") return { rejected: step.reason };
+
+    if (step.kind === "toggled") {
+      const rev = await store.update(ctx.chatId, session.toolCallId, session.rev, {
+        selected: step.selected,
+      });
+      if (rev === null) return { rejected: "Already answered." };
+      const q = session.questions[session.cursor]!;
+      const messageId = ctx.cardMessageId ?? Number(session.promptRef);
+      if (Number.isFinite(messageId)) {
+        await api
+          .editMessageReplyMarkup({
+            chat_id: ctx.telegramChatId,
+            message_id: messageId,
+            reply_markup: {
+              inline_keyboard: questionKeyboard(q, session.nonce, session.cursor, step.selected),
+            },
+          })
+          .catch(() => {});
+      }
+      return {};
+    }
+
+    const answeredCard = ctx.cardMessageId ?? Number(session.promptRef);
+    const collapseCard = async () => {
+      if (!Number.isFinite(answeredCard)) return;
+      await api
+        .editMessageText({
+          chat_id: ctx.telegramChatId,
+          message_id: answeredCard,
+          text: answeredQuestionHtml(step.answered.question, step.answered.answer),
+          parse_mode: "HTML",
+        })
+        .catch(() => {});
+    };
+
+    if (step.kind === "advanced") {
+      const rev = await store.update(ctx.chatId, session.toolCallId, session.rev, {
+        cursor: step.cursor,
+        answers: step.answers,
+        selected: [],
+      });
+      if (rev === null) return { rejected: "Already answered." };
+      await collapseCard();
+      const messageId = await sendQuestion({
+        ...session,
+        cursor: step.cursor,
+        answers: step.answers,
+        selected: [],
+        rev,
+      });
+      if (messageId !== undefined) {
+        await store
+          .update(ctx.chatId, session.toolCallId, rev, { promptRef: String(messageId) })
+          .catch(() => null);
+      }
+      return {};
+    }
+
+    // Last question answered — this resumes the agent. Ack the button first: the
+    // resume runs the whole turn (tens of seconds), which outlives Telegram's
+    // callback-query window, so acking afterwards fails and leaves the user
+    // staring at a spinner. The approval path acks up front for the same reason.
+    const acked = ctx.ackCallbackId !== undefined;
+    if (ctx.ackCallbackId) await api.answerCallbackQuery(ctx.ackCallbackId);
+
+    // Nothing to submit through — bail BEFORE consuming the session, so the
+    // collected answers survive a misconfigured host.
+    const submit = config.runtime.applyToolResult;
+    if (!submit) {
+      console.error("[telegram] runtime.applyToolResult not wired — cannot resume askUser");
+      return { acked };
+    }
+
+    // Take the lease BEFORE consuming the session: releasing the session first
+    // would destroy every collected answer with no way left to submit them.
+    await withTurnLease(ctx.chatId, ctx.telegramChatId, async () => {
+      if (!(await store.finish(ctx.chatId, session.toolCallId, session.rev))) return;
+      await collapseCard();
+      try {
+        const res = await submit({
+          chatId: ctx.chatId,
+          principal: ctx.principal,
+          toolCallId: session.toolCallId,
+          output: step.output,
+        });
+        await renderTelegramStream(consumeRun(res), { api, chatId: ctx.telegramChatId });
+        await renderPending(ctx.chatId, ctx.telegramChatId, ctx.telegramUserId, ctx.principal);
+      } catch (e) {
+        console.error("[telegram] applyToolResult failed:", e);
+        const m = e instanceof Error ? e.message : String(e);
+        await api
+          .sendMessage({ chat_id: ctx.telegramChatId, text: `⚠️ ${m.slice(0, 3000)}` })
+          .catch(() => {});
+      }
+    });
+    return { acked };
+  }
+
+  /**
+   * Every inline button lands here. Approvals and questionnaires use distinct
+   * prefixes, so try both decoders — an undecodable payload is ignored, which is
+   * why a new button type MUST be registered here or it silently does nothing.
+   */
   async function runCallback(cb: TgCallbackQuery): Promise<void> {
-    const decoded = decodeApprovalCallback(cb.data);
-    if (!decoded) return;
+    const approval = decodeApprovalCallback(cb.data);
+    if (approval) return runApprovalCallback(cb, approval);
+    const question = decodeQuestionCallback(cb.data);
+    if (question) return runQuestionCallback(cb, question);
+  }
+
+  /** Resolve the identity behind a button press (it's authorized on its own). */
+  async function callbackPrincipal(
+    cb: TgCallbackQuery,
+    telegramChatId: string,
+  ): Promise<P | undefined> {
+    try {
+      const auth = await config.authorizeUser({
+        telegramUserId: String(cb.from.id),
+        ...(cb.from.username ? { username: cb.from.username } : {}),
+        telegramChatId,
+      });
+      if (auth.allowed && auth.principal !== undefined) return auth.principal;
+    } catch (e) {
+      console.error("[telegram] callback auth failed:", e);
+      return undefined;
+    }
+    await api
+      .sendMessage({ chat_id: telegramChatId, text: "Link your Latch account first." })
+      .catch(() => {});
+    return undefined;
+  }
+
+  /** An option / Done tap on a questionnaire card. */
+  async function runQuestionCallback(
+    cb: TgCallbackQuery,
+    decoded: QuestionCallback,
+  ): Promise<void> {
+    const telegramUserId = String(cb.from.id);
+    const telegramChatId = String(cb.message?.chat.id ?? cb.from.id);
+    const chatId = chatIdFor(telegramUserId);
+
+    const session = await config.askState?.get(chatId).catch(() => null);
+    // Stale button: the session is gone (answered elsewhere, cancelled, expired)
+    // or belongs to a newer questionnaire, or this card isn't the current
+    // question. Retire the card instead of answering the wrong thing.
+    const stale =
+      !session ||
+      session.nonce !== decoded.nonce ||
+      session.cursor !== decoded.questionIndex;
+    if (stale) {
+      await api.answerCallbackQuery(
+        cb.id,
+        session ? "Already answered." : "This questionnaire is no longer active.",
+      );
+      if (cb.message) await stripKeyboard(telegramChatId, String(cb.message.message_id));
+      return;
+    }
+
+    const principal = await callbackPrincipal(cb, telegramChatId);
+    if (principal === undefined) {
+      await api.answerCallbackQuery(cb.id);
+      return;
+    }
+
+    const event: AskEvent =
+      decoded.verb === "pick" ? { kind: "pick", option: decoded.optionIndex } : { kind: "done" };
+    const { rejected, acked } = await answerQuestion({
+      chatId,
+      telegramChatId,
+      telegramUserId,
+      principal,
+      session,
+      event,
+      ackCallbackId: cb.id,
+      ...(cb.message ? { cardMessageId: cb.message.message_id } : {}),
+    });
+    // The resume path already acked (it outlives the query window); everything
+    // else settles synchronously and gets its ack — with the reason, if rejected.
+    if (!acked) await api.answerCallbackQuery(cb.id, rejected);
+  }
+
+  // ── Approve/Deny button → resume the run ────────────────────────────────────
+  async function runApprovalCallback(
+    cb: TgCallbackQuery,
+    decoded: { approved: boolean; approvalId: string },
+  ): Promise<void> {
     await api.answerCallbackQuery(cb.id);
 
     const telegramUserId = String(cb.from.id);
@@ -524,9 +981,10 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
             })
             .catch(() => {});
         }
-        // Continue rendering whatever the resume produced (incl. chained approvals).
+        // Continue rendering whatever the resume produced (chained approvals, or
+        // a questionnaire the resumed turn went on to ask).
         await renderTelegramStream(consumeRun(res), { api, chatId: telegramChatId });
-        await renderApprovals(chatId, telegramChatId, telegramUserId, principal);
+        await renderPending(chatId, telegramChatId, telegramUserId, principal);
       } catch (e) {
         console.error("[telegram] applyApproval failed:", e);
         const m = e instanceof Error ? e.message : String(e);

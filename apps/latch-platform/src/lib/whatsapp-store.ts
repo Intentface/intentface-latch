@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { createChannelAskStore, migrateChannelAsk } from "./channel-ask-store";
 import type { WaMediaRef } from "@intentface/latch-channels/whatsapp";
 
 /**
@@ -11,6 +12,7 @@ import type { WaMediaRef } from "@intentface/latch-channels/whatsapp";
  *  - `latch_whatsapp_delivery` — handled `wamid` keys with a 10-min TTL.
  *  - `latch_whatsapp_pending`  — a message held while an unlinked user links.
  *  - `latch_channel_turn`      — shared with the Telegram store.
+ *  - `latch_channel_ask`       — in-flight askUser questionnaires, also shared.
  */
 
 const DELIVERY_TTL_MS = 10 * 60 * 1000;
@@ -57,6 +59,7 @@ export async function migrateWhatsapp(client: Client): Promise<void> {
     token TEXT NOT NULL DEFAULT '',
     expires_at INTEGER NOT NULL
   )`);
+  await migrateChannelAsk(client);
   // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
   for (const [table, col] of [
     ["latch_whatsapp_bot", "agent_scope TEXT"],
@@ -320,6 +323,8 @@ export function createWhatsappStore(client: Client) {
         args: [chatId, token],
       });
     },
+
+    ...createChannelAskStore(client),
   };
 }
 

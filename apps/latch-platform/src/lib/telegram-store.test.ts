@@ -156,3 +156,96 @@ describe("telegram store: turn leases", () => {
     expect(await store.claimTurn("telegram_b1_5")).toBeTruthy();
   });
 });
+
+describe("telegram store: askUser sessions", () => {
+  const chat = "telegram_b1_5";
+  const questions = [
+    { question: "Goal?", options: [{ label: "Speed", description: "faster" }] },
+    { question: "Days?", options: [{ label: "3", description: "three" }] },
+  ];
+  const session = {
+    toolCallId: "toolu_1",
+    nonce: "abc123",
+    questions,
+    cursor: 0,
+    answers: {},
+    selected: [],
+    promptChatId: "5",
+  };
+
+  it("begins a session and round-trips it", async () => {
+    expect(await store.beginAsk(chat, session)).toBe("started");
+    expect(await store.getAsk(chat)).toEqual({ ...session, rev: 0 });
+  });
+
+  it("re-begins for the SAME tool call as 'already' — no duplicate prompt", async () => {
+    await store.beginAsk(chat, session);
+    await store.updateAsk(chat, "toolu_1", 0, { cursor: 1 });
+    expect(await store.beginAsk(chat, { ...session, nonce: "zzz999" })).toBe("already");
+    // The live session survives untouched — the second render must not reset it.
+    const live = (await store.getAsk(chat))!;
+    expect(live.nonce).toBe("abc123");
+    expect(live.cursor).toBe(1);
+  });
+
+  it("a DIFFERENT tool call takes over the row and resets progress", async () => {
+    await store.beginAsk(chat, session);
+    await store.updateAsk(chat, "toolu_1", 0, { cursor: 1, answers: { "Goal?": "Speed" } });
+    expect(await store.beginAsk(chat, { ...session, toolCallId: "toolu_2", nonce: "def456" })).toBe(
+      "started",
+    );
+    const live = (await store.getAsk(chat))!;
+    expect(live).toMatchObject({ toolCallId: "toolu_2", cursor: 0, answers: {}, rev: 0 });
+  });
+
+  it("update is fenced on rev — a double tap can't advance twice", async () => {
+    await store.beginAsk(chat, session);
+    expect(await store.updateAsk(chat, "toolu_1", 0, { cursor: 1 })).toBe(1);
+    // The second delivery of the same tap still carries rev 0.
+    expect(await store.updateAsk(chat, "toolu_1", 0, { cursor: 2 })).toBeNull();
+    expect((await store.getAsk(chat))!.cursor).toBe(1);
+  });
+
+  it("finish is fenced too, so only one caller submits", async () => {
+    await store.beginAsk(chat, session);
+    expect(await store.finishAsk(chat, "toolu_1", 9)).toBe(false); // stale rev
+    expect(await store.getAsk(chat)).not.toBeNull();
+    expect(await store.finishAsk(chat, "toolu_1", 0)).toBe(true);
+    expect(await store.getAsk(chat)).toBeNull();
+    expect(await store.finishAsk(chat, "toolu_1", 0)).toBe(false); // already gone
+  });
+
+  it("clear returns what it removed", async () => {
+    await store.beginAsk(chat, session);
+    expect((await store.clearAsk(chat))!.toolCallId).toBe("toolu_1");
+    expect(await store.getAsk(chat)).toBeNull();
+    expect(await store.clearAsk(chat)).toBeNull();
+  });
+
+  it("expires a session after 24h so it can't swallow a later message", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000);
+    await store.beginAsk(chat, session);
+    vi.setSystemTime(1_000_000_000 + 25 * 60 * 60 * 1000);
+    expect(await store.getAsk(chat)).toBeNull();
+  });
+
+  it("re-begins over an EXPIRED row for the same tool call", async () => {
+    // begin() is reached without a preceding get() (which is what prunes), so a
+    // stale row must not answer "already" — that would suppress the prompt and
+    // leave the user with no question AND no button on a still-paused turn.
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000);
+    await store.beginAsk(chat, session);
+    vi.setSystemTime(1_000_000_000 + 25 * 60 * 60 * 1000);
+    expect(await store.beginAsk(chat, { ...session, nonce: "fresh1" })).toBe("started");
+    expect((await store.getAsk(chat))!.nonce).toBe("fresh1");
+  });
+
+  it("keeps sessions of different chats apart", async () => {
+    await store.beginAsk(chat, session);
+    await store.beginAsk("telegram_b1_6", { ...session, toolCallId: "toolu_9", nonce: "n9" });
+    expect((await store.getAsk(chat))!.toolCallId).toBe("toolu_1");
+    expect((await store.getAsk("telegram_b1_6"))!.toolCallId).toBe("toolu_9");
+  });
+});

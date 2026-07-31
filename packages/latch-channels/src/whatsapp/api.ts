@@ -38,6 +38,10 @@ export interface WhatsappReplyButton {
   title: string;
 }
 
+/** Meta's caps on interactive messages — they decide which affordance fits. */
+export const MAX_REPLY_BUTTONS = 3;
+export const MAX_LIST_ROWS = 10;
+
 export function whatsappApi(
   creds: { accessToken: LazyString; phoneNumberId: LazyString },
   opts: WhatsappApiOptions = {},
@@ -106,6 +110,40 @@ export function whatsappApi(
               type: "reply",
               reply: { id: b.id, title: b.title.slice(0, 20) },
             })),
+          },
+        },
+      });
+    },
+
+    /**
+     * Send a body with a tappable list — up to 10 rows, so it covers questions
+     * that have more options than the 3-button limit allows. Row titles cap at
+     * 24 chars; the option's description rides along in `description`.
+     */
+    async sendList(
+      to: string,
+      body: string,
+      buttonLabel: string,
+      rows: { id: string; title: string; description?: string }[],
+    ): Promise<void> {
+      await sendPayload("sendList", {
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: { text: body.slice(0, 1024) },
+          action: {
+            button: buttonLabel.slice(0, 20),
+            sections: [
+              {
+                title: "Options",
+                rows: rows.slice(0, MAX_LIST_ROWS).map((r) => ({
+                  id: r.id,
+                  title: r.title.slice(0, 24),
+                  ...(r.description ? { description: r.description.slice(0, 72) } : {}),
+                })),
+              },
+            ],
           },
         },
       });
