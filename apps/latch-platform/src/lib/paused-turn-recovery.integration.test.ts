@@ -240,7 +240,7 @@ describe("recovering a chat parked on a stale pause", () => {
 
     const after = await runtime.loadHistory({ chatId, principal });
     expect(after.length).toBe(before.length); // no extra assistant turn
-    const dead = (after[1]!.parts as Record<string, unknown>[]).find(
+    const dead = (after[1].parts as Record<string, unknown>[]).find(
       (p) => p.toolCallId === "call_dead",
     )!;
     expect(dead.state).toBe("input-available"); // untouched in stored history
