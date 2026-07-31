@@ -1,0 +1,233 @@
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { jsonSchema, tool } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
+import { z } from "zod";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import type { Runtime } from "@intentface/latch-core";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
+
+/**
+ * Regressions for two ways a chat could get PERMANENTLY wedged — both reported
+ * from Telegram, both caused by scanning all of history for a pause that only
+ * ever lives on the last message.
+ *
+ * 1. An undecided approval buried by a later turn made `handleChat` throw
+ *    `PendingApprovalError` on every subsequent message, AND made `applyApproval`
+ *    return an empty 200 without resuming — so no button press could clear it.
+ * 2. An abandoned `askUser` call left `input-available` in history made every
+ *    later `applyToolResult` in that chat return an empty 200 with no
+ *    continuation: the user answers the questionnaire and the agent never
+ *    resumes.
+ */
+
+type P = { orgId: string; userId: string };
+const principal: P = { orgId: "org", userId: "user" };
+
+const usage = {
+  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+  outputTokens: { total: 1, text: 1, reasoning: 0 },
+};
+
+const streamFrom = (parts: unknown[]) =>
+  new ReadableStream({
+    start(c) {
+      for (const p of parts) c.enqueue(p);
+      c.close();
+    },
+  });
+
+const meta = (id: string) => ({
+  type: "response-metadata",
+  id,
+  modelId: "mock",
+  timestamp: new Date(0),
+});
+
+/** What the model should do on each successive call, queued by the test. */
+let script: (() => unknown[])[] = [];
+const model = new MockLanguageModelV3({
+  doStream: async () => {
+    const next = script.shift() ?? (() => sayText("Nothing left to do."));
+    return { stream: streamFrom(next()) };
+  },
+});
+
+const sayText = (text: string) => [
+  { type: "stream-start", warnings: [] },
+  meta("r_text"),
+  { type: "text-start", id: "t1" },
+  { type: "text-delta", id: "t1", delta: text },
+  { type: "text-end", id: "t1" },
+  { type: "finish", finishReason: "stop", usage },
+];
+
+const callAskUser = (toolCallId: string, question: string) => [
+  { type: "stream-start", warnings: [] },
+  meta("r_ask"),
+  {
+    type: "tool-call",
+    toolCallId,
+    toolName: "askUser",
+    input: JSON.stringify({
+      questions: [{ question, options: [{ label: "Yes", description: "y" }] }],
+    }),
+  },
+  { type: "finish", finishReason: "tool-calls", usage },
+];
+
+const callGated = (toolCallId: string) => [
+  { type: "stream-start", warnings: [] },
+  meta("r_gate"),
+  { type: "tool-call", toolCallId, toolName: "gated", input: JSON.stringify({ n: 1 }) },
+  { type: "finish", finishReason: "tool-calls", usage },
+];
+
+/** `askUser` has no execute — the SDK parks the call and the turn pauses. */
+const agent = defineAgent<P>({
+  model: model as never,
+  instructions: "test agent",
+  tools: {
+    askUser: tool({
+      description: "ask the user",
+      inputSchema: jsonSchema<{ questions: unknown[] }>({
+        type: "object",
+        properties: { questions: { type: "array" } },
+        required: ["questions"],
+      }),
+    }),
+    gated: tool({
+      description: "needs approval",
+      inputSchema: z.object({ n: z.number() }),
+      execute: async ({ n }) => ({ ok: n }),
+    }),
+  },
+  toolApproval: { gated: "user-approval" },
+});
+
+async function drain(res: Response) {
+  if (res.body) for await (const _ of res.body as unknown as AsyncIterable<unknown>) void _;
+}
+
+const isStream = (res: Response) =>
+  (res.headers.get("content-type") ?? "").includes("text/event-stream");
+
+const send = (runtime: Runtime<P>, chatId: string, text: string) =>
+  runtime.handleChat({
+    agent: "t",
+    chatId,
+    principal,
+    message: { id: `u_${text}`, role: "user", parts: [{ type: "text", text }] } as never,
+  });
+
+describe("recovering a chat parked on a stale pause", () => {
+  let runtime: Runtime<P>;
+
+  beforeEach(async () => {
+    script = [];
+    const client = createClient({ url: ":memory:" });
+    await migrate(client);
+    runtime = createRuntime<P, { orgId: string }>({
+      storage: createSqliteAdapter<P>(drizzle(client, { schema }), {
+        owner: (p) => [p.orgId, p.userId],
+      }),
+      context: defineContext<P, { orgId: string }>({
+        build: ({ principal: p }) => ({ orgId: p.orgId }),
+      }),
+      agents: { t: agent },
+    });
+  });
+
+  it("an abandoned askUser call does not stop a LATER questionnaire from resuming", async () => {
+    const chatId = "chat_ask";
+    // Turn 1 parks on askUser…
+    script = [() => callAskUser("call_abandoned", "First?")];
+    await drain(await send(runtime, chatId, "hello"));
+
+    // …the user ignores it and just says something else, burying the parked call.
+    script = [() => callAskUser("call_live", "Second?"), () => sayText("Thanks!")];
+    await drain(await send(runtime, chatId, "never mind, something else"));
+
+    const history = await runtime.loadHistory({ chatId, principal });
+    const parked = (history.at(-1)!.parts as Record<string, unknown>[]).find(
+      (p) => p.type === "tool-askUser" && p.state === "input-available",
+    );
+    expect(parked).toMatchObject({ toolCallId: "call_live" });
+
+    // Answering the live questionnaire must RESUME, not return an empty 200 —
+    // the abandoned call from turn 1 is still input-available in history.
+    const res = await runtime.applyToolResult({
+      chatId,
+      principal,
+      toolCallId: "call_live",
+      output: { "Second?": "Yes" },
+    });
+    expect(isStream(res)).toBe(true);
+    await drain(res);
+  });
+
+  it("answering an unknown or already-answered call is a no-op, not a spurious turn", async () => {
+    const chatId = "chat_ask_idem";
+    script = [() => callAskUser("call_1", "Q?"), () => sayText("Done.")];
+    await drain(await send(runtime, chatId, "hi"));
+
+    await drain(
+      await runtime.applyToolResult({
+        chatId,
+        principal,
+        toolCallId: "call_1",
+        output: { "Q?": "Yes" },
+      }),
+    );
+    const after = (await runtime.loadHistory({ chatId, principal })).length;
+
+    // A redelivered submit (or a double-tapped button) must change nothing.
+    const dup = await runtime.applyToolResult({
+      chatId,
+      principal,
+      toolCallId: "call_1",
+      output: { "Q?": "Yes" },
+    });
+    expect(isStream(dup)).toBe(false);
+    const unknown = await runtime.applyToolResult({
+      chatId,
+      principal,
+      toolCallId: "no_such_call",
+      output: {},
+    });
+    expect(isStream(unknown)).toBe(false);
+    expect((await runtime.loadHistory({ chatId, principal })).length).toBe(after);
+  });
+
+  it("a LIVE approval still blocks a new message", async () => {
+    const chatId = "chat_gate_live";
+    script = [() => callGated("call_gate")];
+    await drain(await send(runtime, chatId, "do the thing"));
+
+    // The pause is the tail of history, so it must still be enforced.
+    await expect(send(runtime, chatId, "and another thing")).rejects.toMatchObject({
+      code: "pending_approval",
+    });
+  });
+
+  it("a live approval resumes normally when decided", async () => {
+    const chatId = "chat_gate_ok";
+    script = [() => callGated("call_gate"), () => sayText("Approved and done.")];
+    await drain(await send(runtime, chatId, "do the thing"));
+
+    const history = await runtime.loadHistory({ chatId, principal });
+    const part = (history.at(-1)!.parts as Record<string, unknown>[]).find(
+      (p) => p.type === "tool-gated",
+    )!;
+    const approvalId = (part.approval as { id: string }).id;
+
+    const res = await runtime.applyApproval({
+      chatId,
+      principal,
+      decisions: [{ approvalId, approved: true }],
+    });
+    expect(isStream(res)).toBe(true);
+    await drain(res);
+  });
+});

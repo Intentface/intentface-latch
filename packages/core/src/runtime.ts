@@ -606,20 +606,30 @@ type SubApprovalPart = {
   };
 };
 
+/**
+ * Is the chat parked on an undecided approval RIGHT NOW?
+ *
+ * Only the last assistant message counts. A paused turn's gated calls all live
+ * on the assistant message it paused on (a resume starts a new one), so that
+ * message is the live pause point. Undecided parts in OLDER messages are
+ * abandoned turns — `closeDanglingToolCalls` already fabricates a terminal
+ * result for them in the model projection, and stored history is never
+ * rewritten. Scanning all of history instead wedged chats permanently in both
+ * directions: `handleChat` refused every new message with PendingApprovalError,
+ * AND `applyApproval` returned an empty 200 without resuming, so no button
+ * press could clear it either.
+ */
 function hasPendingApproval(messages: AppMessage[]): boolean {
-  for (const m of messages) {
-    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
-      if (p.state === "approval-requested" && p.approval?.approved === undefined) {
-        return true;
-      }
-      // A bubbled-up subagent approval still awaiting a decision.
-      if (
-        p.type === "data-subagent-approval" &&
-        p.data &&
-        p.data.approved === undefined
-      ) {
-        return true;
-      }
+  const last = messages[messages.length - 1];
+  // Strictly the FINAL message: a later user message means the turn moved on.
+  if (last?.role !== "assistant") return false;
+  for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
+    if (p.state === "approval-requested" && p.approval?.approved === undefined) {
+      return true;
+    }
+    // A bubbled-up subagent approval still awaiting a decision.
+    if (p.type === "data-subagent-approval" && p.data && p.data.approved === undefined) {
+      return true;
     }
   }
   return false;
@@ -802,7 +812,15 @@ export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage
 /** A tool/dynamic-tool UI part, narrowed to the result fields we touch. */
 type ResultPart = { type?: string; toolCallId?: string; state?: string; output?: unknown };
 
-/** True if any tool call is still awaiting a (client-supplied) result. */
+/**
+ * True if any tool call is still awaiting a (client-supplied) result.
+ *
+ * Callers must pass only the messages of the step being resolved (see
+ * `applyToolResult`) — NOT full history. A client tool call abandoned turns ago
+ * stays `input-available` in stored history forever (`closeDanglingToolCalls`
+ * repairs the model projection, never the store), so an all-history scan would
+ * make every later resume in that chat return "still waiting" and never re-run.
+ */
 function hasPendingToolResult(messages: AppMessage[]): boolean {
   for (const m of messages) {
     for (const p of (m.parts ?? []) as ResultPart[]) {
@@ -2042,11 +2060,18 @@ export function createRuntime<P, RC = unknown>(
 
     const messages = await storage.loadMessages(principal, chatId);
     const changed = recordToolResult(messages, toolCallId, output);
-    if (changed.length > 0) await storage.appendMessages(chatId, changed);
+    // Unknown or already-answered call: nothing to resume. Makes a duplicate
+    // submit (double-tapped button, redelivered webhook) a no-op instead of a
+    // spurious extra turn.
+    if (changed.length === 0) return new Response(null, { status: 200 });
+    await storage.appendMessages(chatId, changed);
 
-    // Another client tool call in the same step may still be awaiting a result;
+    // Another client tool call in the SAME step may still be awaiting a result;
     // re-running now would throw MissingToolResultsError. Wait for the rest.
-    if (hasPendingToolResult(messages)) {
+    // Scope this to the messages we just touched: a call abandoned turns ago is
+    // still `input-available` in stored history, and counting it would park
+    // every future resume in this chat forever.
+    if (hasPendingToolResult(changed)) {
       return new Response(null, { status: 200 });
     }
 

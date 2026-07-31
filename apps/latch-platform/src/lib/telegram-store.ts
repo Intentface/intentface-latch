@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import type { AskSession } from "@intentface/latch-channels";
 import type { TgFileRef } from "@intentface/latch-channels/telegram";
 
 /**
@@ -13,12 +14,19 @@ import type { TgFileRef } from "@intentface/latch-channels/telegram";
  *    replayed after they link.
  *  - `latch_channel_turn`      — one-turn-per-chat leases, shared with the
  *    WhatsApp store (chat ids are channel-prefixed so keys never collide).
+ *  - `latch_channel_ask`       — the in-flight askUser questionnaire per chat
+ *    (also channel-shared), holding answers collected so far.
  *
  * Idempotent create-if-not-exists, same pattern as `migrateSlack`.
  */
 
 const DELIVERY_TTL_MS = 10 * 60 * 1000;
 const TURN_LEASE_MS = 5 * 60 * 1000;
+/**
+ * A questionnaire must survive overnight (people answer in the morning), but a
+ * week-old row would silently swallow an unrelated message as an answer.
+ */
+const ASK_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function migrateTelegram(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_telegram_bot (
@@ -62,6 +70,25 @@ export async function migrateTelegram(client: Client): Promise<void> {
     chat_id TEXT PRIMARY KEY,
     token TEXT NOT NULL DEFAULT '',
     expires_at INTEGER NOT NULL
+  )`);
+  // In-flight askUser questionnaire per chat. Chat surfaces ask one question at
+  // a time but `applyToolResult` closes the whole call at once, so the answers
+  // collected so far have to survive between webhook deliveries. `chat_id` is
+  // already channel-prefixed (`telegram_<bot>_<user>`), so one table serves all
+  // channels. `rev` fences concurrent writes (a double-tapped button must not
+  // advance the cursor twice).
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_channel_ask (
+    chat_id TEXT PRIMARY KEY,
+    tool_call_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    questions TEXT NOT NULL,
+    cursor INTEGER NOT NULL DEFAULT 0,
+    answers TEXT NOT NULL DEFAULT '{}',
+    selected TEXT NOT NULL DEFAULT '[]',
+    prompt_chat_id TEXT NOT NULL DEFAULT '',
+    prompt_ref TEXT,
+    rev INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
   )`);
   // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
   for (const [table, col] of [
@@ -370,6 +397,129 @@ export function createTelegramStore(client: Client) {
         args: [chatId, token],
       });
     },
+
+    // ── In-flight askUser questionnaires (AskStateStore) ────────────────────
+
+    async getAsk(chatId: string): Promise<AskSession | null> {
+      await client.execute({
+        sql: `DELETE FROM latch_channel_ask WHERE updated_at < ?`,
+        args: [Date.now() - ASK_TTL_MS],
+      });
+      const res = await client.execute({
+        sql: `SELECT * FROM latch_channel_ask WHERE chat_id = ?`,
+        args: [chatId],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      return r ? rowToAsk(r) : null;
+    },
+
+    /**
+     * Claim the right to prompt. The guarded upsert replaces a session for a
+     * DIFFERENT tool call but leaves one for the SAME call untouched, so a
+     * re-render of a still-pending questionnaire reports `already` instead of
+     * posting a duplicate card whose buttons would both drive one session.
+     */
+    async beginAsk(chatId: string, session: Omit<AskSession, "rev">): Promise<"started" | "already"> {
+      const now = Date.now();
+      await client.execute({
+        sql: `INSERT INTO latch_channel_ask
+                (chat_id, tool_call_id, nonce, questions, cursor, answers, selected,
+                 prompt_chat_id, prompt_ref, rev, updated_at)
+              VALUES (?, ?, ?, ?, 0, '{}', '[]', ?, NULL, 0, ?)
+              ON CONFLICT(chat_id) DO UPDATE SET
+                tool_call_id = excluded.tool_call_id,
+                nonce = excluded.nonce,
+                questions = excluded.questions,
+                cursor = 0, answers = '{}', selected = '[]',
+                prompt_chat_id = excluded.prompt_chat_id,
+                prompt_ref = NULL, rev = 0,
+                updated_at = excluded.updated_at
+              WHERE latch_channel_ask.tool_call_id <> excluded.tool_call_id`,
+        args: [
+          chatId,
+          session.toolCallId,
+          session.nonce,
+          JSON.stringify(session.questions),
+          session.promptChatId,
+          now,
+        ],
+      });
+      // Ours iff the stored nonce is the one we just tried to write.
+      const res = await client.execute({
+        sql: `SELECT nonce FROM latch_channel_ask WHERE chat_id = ?`,
+        args: [chatId],
+      });
+      const nonce = res.rows[0]?.nonce;
+      return nonce === session.nonce ? "started" : "already";
+    },
+
+    async updateAsk(
+      chatId: string,
+      toolCallId: string,
+      rev: number,
+      patch: Partial<Pick<AskSession, "cursor" | "answers" | "selected" | "promptRef">>,
+    ): Promise<number | null> {
+      const sets: string[] = [];
+      const args: (string | number | null)[] = [];
+      if (patch.cursor !== undefined) (sets.push(`cursor = ?`), args.push(patch.cursor));
+      if (patch.answers !== undefined)
+        (sets.push(`answers = ?`), args.push(JSON.stringify(patch.answers)));
+      if (patch.selected !== undefined)
+        (sets.push(`selected = ?`), args.push(JSON.stringify(patch.selected)));
+      if (patch.promptRef !== undefined) (sets.push(`prompt_ref = ?`), args.push(patch.promptRef));
+      const next = rev + 1;
+      const res = await client.execute({
+        sql: `UPDATE latch_channel_ask SET ${sets.join(", ")}, rev = ?, updated_at = ?
+              WHERE chat_id = ? AND tool_call_id = ? AND rev = ?`,
+        args: [...args, next, Date.now(), chatId, toolCallId, rev],
+      });
+      return res.rowsAffected === 1 ? next : null;
+    },
+
+    async finishAsk(chatId: string, toolCallId: string, rev: number): Promise<boolean> {
+      const res = await client.execute({
+        sql: `DELETE FROM latch_channel_ask WHERE chat_id = ? AND tool_call_id = ? AND rev = ?`,
+        args: [chatId, toolCallId, rev],
+      });
+      return res.rowsAffected === 1;
+    },
+
+    async clearAsk(chatId: string): Promise<AskSession | null> {
+      const res = await client.execute({
+        sql: `SELECT * FROM latch_channel_ask WHERE chat_id = ?`,
+        args: [chatId],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      if (!r) return null;
+      await client.execute({
+        sql: `DELETE FROM latch_channel_ask WHERE chat_id = ?`,
+        args: [chatId],
+      });
+      return rowToAsk(r);
+    },
+  };
+}
+
+function parseJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== "string") return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function rowToAsk(r: Record<string, unknown>): AskSession {
+  return {
+    toolCallId: String(r.tool_call_id),
+    nonce: String(r.nonce),
+    questions: parseJson<AskSession["questions"]>(r.questions, []),
+    cursor: Number(r.cursor ?? 0),
+    answers: parseJson<Record<string, string>>(r.answers, {}),
+    selected: parseJson<number[]>(r.selected, []),
+    promptChatId: String(r.prompt_chat_id ?? ""),
+    ...(r.prompt_ref ? { promptRef: String(r.prompt_ref) } : {}),
+    rev: Number(r.rev ?? 0),
   };
 }
 
