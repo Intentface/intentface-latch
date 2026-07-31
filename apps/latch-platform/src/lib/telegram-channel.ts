@@ -50,7 +50,7 @@ export async function getTelegramChannelForBot(botId: string) {
     releaseTurn: (chatId, token) => telegramStore.releaseTurn(chatId, token),
     // Only linked platform users may drive the agent; refusals get a signed
     // link, and the triggering message is stashed for post-link replay.
-    authorizeUser: async ({ telegramUserId }) => {
+    authorizeUser: async ({ telegramUserId, username }) => {
       const identity = await telegramStore.resolveIdentity(botId, telegramUserId);
       if (identity) {
         // Identity rows outlive org membership — revalidate before minting a
@@ -74,7 +74,7 @@ export async function getTelegramChannelForBot(botId: string) {
       return {
         allowed: false,
         message: "You need a Latch account to use this agent.",
-        linkUrl: buildTelegramLinkUrl(baseUrl(), botId, telegramUserId),
+        linkUrl: buildTelegramLinkUrl(baseUrl(), botId, telegramUserId, username),
       };
     },
     stashPending: (input) =>

@@ -80,7 +80,7 @@ export async function getSlackChannelForApp(appId: string) {
       return {
         allowed: false,
         message: "You need a Latch account to use this agent.",
-        linkUrl: buildLinkUrl(baseUrl(), team, userId),
+        linkUrl: buildLinkUrl(baseUrl(), appId, team, userId),
       };
     },
     // Thread-following: a Latch chat exists for a thread the bot has replied in.
