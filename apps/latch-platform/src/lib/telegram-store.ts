@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import { createChannelAskStore, migrateChannelAsk } from "./channel-ask-store";
+import { createChannelThreadStore, migrateChannelThread } from "./channel-thread-store";
 import type { TgFileRef } from "@intentface/latch-channels/telegram";
 
 /**
@@ -16,6 +17,8 @@ import type { TgFileRef } from "@intentface/latch-channels/telegram";
  *    WhatsApp store (chat ids are channel-prefixed so keys never collide).
  *  - `latch_channel_ask`       — the in-flight askUser questionnaire per chat
  *    (also channel-shared), holding answers collected so far.
+ *  - `latch_channel_thread`    — which conversation a DM is currently writing to
+ *    (also channel-shared); `/new` bumps it.
  *
  * Idempotent create-if-not-exists, same pattern as `migrateSlack`.
  */
@@ -67,6 +70,7 @@ export async function migrateTelegram(client: Client): Promise<void> {
     expires_at INTEGER NOT NULL
   )`);
   await migrateChannelAsk(client);
+  await migrateChannelThread(client);
   // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
   for (const [table, col] of [
     ["latch_telegram_bot", "agent_scope TEXT"],
@@ -376,6 +380,7 @@ export function createTelegramStore(client: Client) {
     },
 
     ...createChannelAskStore(client),
+    ...createChannelThreadStore(client),
   };
 }
 

@@ -41,6 +41,9 @@ export async function getTelegramChannelForBot(botId: string) {
       // Resumes a turn parked on `askUser` — what makes questionnaires answerable
       // from Telegram rather than only in the web composer.
       applyToolResult: (i) => runtime.applyToolResult(i),
+      // Backs `/compact`: summarize the thread and keep going in it, so a DM that
+      // never ends stops growing its prompt without losing what matters.
+      compactChat: (i) => runtime.compactChat(i),
       loadHistory: (i) => runtime.loadHistory(i),
     },
     // Holds the answers collected so far while a questionnaire is on screen.
@@ -51,6 +54,11 @@ export async function getTelegramChannelForBot(botId: string) {
         telegramStore.updateAsk(chatId, toolCallId, rev, patch),
       finish: (chatId, toolCallId, rev) => telegramStore.finishAsk(chatId, toolCallId, rev),
       clear: (chatId) => telegramStore.clearAsk(chatId),
+    },
+    // Which conversation this DM is writing to — what makes `/new` possible.
+    thread: {
+      current: (key) => telegramStore.currentThread(key),
+      rotate: (key) => telegramStore.rotateThread(key),
     },
     waitUntil: (p) => waitUntil(p),
     // Voice/audio messages reach the agent as transcribed text (ElevenLabs).

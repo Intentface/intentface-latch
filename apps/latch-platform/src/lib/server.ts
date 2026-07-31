@@ -11,6 +11,7 @@ import {
   listAdministeredTraces,
   postScore,
 } from "@intentface/latch-langfuse";
+import { telegramCommandMenu } from "@intentface/latch-channels";
 import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import { scopeRefOf } from "@intentface/latch-memory";
@@ -1525,6 +1526,11 @@ export const registerTelegramWebhookFn = createServerFn({ method: "POST" })
         url: `${baseUrl()}/api/telegram/${botId}/events`,
         secretToken: secret,
       });
+      // Publish the "/" menu too — the commands work regardless, but nothing else
+      // makes them discoverable. Cosmetic, so a failure must not fail the hookup.
+      await telegramApi(token)
+        .setMyCommands(telegramCommandMenu())
+        .catch((e) => console.error("[telegram] setMyCommands failed:", e));
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
     }

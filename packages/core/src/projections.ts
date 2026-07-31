@@ -94,18 +94,47 @@ function replaceAudioFileParts(messages: AppMessage[]): AppMessage[] {
   });
 }
 
+/** The part type that marks a compaction boundary (see `sliceAtCompaction`). */
+export const COMPACTION_PART_TYPE = "data-compaction";
+
 /**
- * Model projection: drop `sendToModel === false`, neutralize audio file parts,
- * close any dangling tool calls, then convert to model messages. (`data-*`
- * parts — e.g. a compaction marker — are dropped by the SDK during conversion,
- * so they never reach the model.)
+ * The live context window: everything from the LAST compaction marker onward.
+ *
+ * `compactChat` summarizes a conversation and appends the summary as one message
+ * carrying a `data-compaction` part; from then on the model sees that summary
+ * instead of the turns it replaces, while stored history — and the client
+ * projection — keep everything. No marker → the messages unchanged, so chats
+ * that were never compacted are untouched.
+ *
+ * Slicing at a marker can orphan a `tool_result` from its `tool_use` only if the
+ * two straddled the boundary, which can't happen: the marker is appended at the
+ * tail of a settled conversation, so a call and its result are always on the
+ * same side of it.
+ */
+export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = (messages[i] as { parts?: { type?: unknown }[] }).parts;
+    if (Array.isArray(parts) && parts.some((p) => p.type === COMPACTION_PART_TYPE)) {
+      return messages.slice(i);
+    }
+  }
+  return messages;
+}
+
+/**
+ * Model projection: cut to the live context window, drop `sendToModel === false`,
+ * neutralize audio file parts, close any dangling tool calls, then convert to
+ * model messages. (`data-*` parts — e.g. the compaction marker — are dropped by
+ * the SDK during conversion, so they never reach the model.)
  */
 export async function toModelMessages(
   messages: AppMessage[],
   opts?: { tools?: Record<string, unknown> },
 ): Promise<ModelMessage[]> {
   const forModel = closeDanglingToolCalls(
-    replaceAudioFileParts(messages.filter((m) => m.metadata?.sendToModel !== false)),
+    replaceAudioFileParts(
+      sliceAtCompaction(messages).filter((m) => m.metadata?.sendToModel !== false),
+    ),
   );
   return convertToModelMessages(forModel as never, (opts ?? {}) as never);
 }

@@ -249,3 +249,35 @@ describe("telegram store: askUser sessions", () => {
     expect((await store.getAsk("telegram_b1_6"))!.toolCallId).toBe("toolu_9");
   });
 });
+
+describe("telegram store: thread pointer", () => {
+  const key = "telegram_b1_5";
+
+  it("starts on the first thread (epoch 0)", async () => {
+    expect(await store.currentThread(key)).toBe(0);
+  });
+
+  it("rotate bumps and persists the epoch", async () => {
+    expect(await store.rotateThread(key)).toBe(1);
+    expect(await store.currentThread(key)).toBe(1);
+    expect(await store.rotateThread(key)).toBe(2);
+    expect(await store.currentThread(key)).toBe(2);
+  });
+
+  it("keeps threads of different chats apart", async () => {
+    await store.rotateThread(key);
+    await store.rotateThread(key);
+    expect(await store.currentThread("telegram_b1_6")).toBe(0);
+    expect(await store.currentThread(key)).toBe(2);
+  });
+
+  it("survives losing the identity row", async () => {
+    // The pointer deliberately lives in its own table: hanging it off
+    // `latch_telegram_identity` would make an unlink drop the user back into a
+    // thread they had rotated away from.
+    await store.linkIdentity({ botId: "b1", telegramUserId: "5", userId: "u1", orgId: "org1" });
+    await store.rotateThread(key);
+    await client.execute(`DELETE FROM latch_telegram_identity`);
+    expect(await store.currentThread(key)).toBe(1);
+  });
+});

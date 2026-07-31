@@ -141,6 +141,20 @@ export interface AskStateStore {
 }
 
 /**
+ * Host-backed "which thread am I in" pointer for surfaces that have exactly one
+ * conversation per person (a Telegram DM, a WhatsApp thread) and therefore no
+ * native way to start a new one. `/new` bumps the epoch; the channel derives the
+ * chat id from it, so epoch 0 keeps the original id and existing conversations
+ * never move.
+ */
+export interface ChannelThreadStore {
+  /** Current epoch for a surface conversation; 0 when it has never rotated. */
+  current(baseChatId: string): Promise<number>;
+  /** Start a fresh thread; returns the new (higher) epoch. */
+  rotate(baseChatId: string): Promise<number>;
+}
+
+/**
  * The subset of the Latch runtime a channel drives. Structural so the package
  * stays decoupled from the concrete app (and could even target a remote Latch).
  */
@@ -167,6 +181,16 @@ export interface ChannelRunOps<P> {
     toolCallId: string;
     output: unknown;
   }): Promise<Response>;
+  /**
+   * Summarize the conversation and continue from the summary (`/compact`). Null
+   * when there's too little to compact. Optional so existing hosts keep
+   * type-checking; without it the command reports that it isn't available.
+   */
+  compactChat?(input: {
+    chatId: string;
+    principal: P;
+    focus?: string;
+  }): Promise<{ summary: string; compacted: number } | null>;
   loadHistory(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
 }
 

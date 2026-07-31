@@ -148,6 +148,17 @@ export function telegramApi(token: TelegramToken, opts: TelegramApiOptions = {})
       await call("deleteWebhook", {});
     },
 
+    /**
+     * Publish the bot's command list — what Telegram shows in the "/" menu and
+     * autocompletes. Cosmetic: the commands work either way, but nothing else
+     * makes them discoverable. Call it whenever the webhook is (re-)registered.
+     */
+    async setMyCommands(
+      commands: { command: string; description: string }[],
+    ): Promise<void> {
+      await call("setMyCommands", { commands });
+    },
+
     async getWebhookInfo(): Promise<TelegramWebhookInfo> {
       const r = asObject(await call("getWebhookInfo", {}));
       return {
