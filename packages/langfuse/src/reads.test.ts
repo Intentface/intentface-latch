@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const calls: Record<string, unknown>[] = [];
 let tracePages: Record<string, unknown[]>;
 let scoreRows: unknown[];
-/** When set, the trace-list call matching this filter key rejects. */
+/** When set, the trace-list call matching this filter key rejects ("*" = all). */
 let failFor: string | undefined;
 
 vi.mock("./client.js", () => ({
@@ -19,7 +19,9 @@ vi.mock("./client.js", () => ({
           // Key the canned page by the filter this call used.
           const tags = params.tags as string[] | undefined;
           const key = tags?.[0] ?? `user:${String(params.userId)}`;
-          if (failFor && key === failFor) throw new Error("langfuse unavailable");
+          if (failFor && (failFor === "*" || key === failFor)) {
+            throw new Error("langfuse unavailable");
+          }
           return { data: tracePages[key] ?? [] };
         },
       },
@@ -141,6 +143,14 @@ describe("listAdministeredTraces", () => {
       ownerTag: "org/me",
     });
     expect(rows.map((r) => r.id)).toEqual(["mine"]);
+  });
+
+  it("throws when EVERY source fails, so the caller keeps its last good page", async () => {
+    // An empty array would read as "no traces yet" and wipe the feed.
+    failFor = "*";
+    await expect(
+      listAdministeredTraces({ agentOwnerTags: ["org"], ownerTag: "org/me" }),
+    ).rejects.toThrow("langfuse unavailable");
   });
 
   it("passes the agent filter to every source", async () => {

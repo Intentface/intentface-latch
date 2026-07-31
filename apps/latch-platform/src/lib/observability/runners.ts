@@ -51,7 +51,9 @@ export function userIdFromOwnerTag(tag: string): string | undefined {
  * alongside the identity.
  */
 export function pseudonymFor(tag: string): string {
-  return `User ${createHash("sha256").update(tag).digest("hex").slice(0, 4)}`;
+  // 6 hex digits (~16.7M): wide enough that two colleagues sharing a label — which
+  // would silently merge them in the feed and its filter — stays negligible.
+  return `User ${createHash("sha256").update(tag).digest("hex").slice(0, 6)}`;
 }
 
 /**
@@ -76,8 +78,10 @@ export async function resolveRunners(args: {
   if (args.anonymous) {
     for (const tag of tags) {
       const isSelf = tag === args.selfTag;
+      // Pseudonymous keys throughout, including one's own row: the contract is
+      // that an anonymized response carries no owner tag at all.
       out.set(tag, {
-        key: isSelf ? tag : pseudonymFor(tag),
+        key: pseudonymFor(tag),
         label: isSelf ? "You" : pseudonymFor(tag),
         isSelf,
       });

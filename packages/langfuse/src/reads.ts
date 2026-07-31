@@ -142,11 +142,17 @@ export async function listOwnerTraces(args: {
   return rows.map((t) => toSummary(t, scores.get(t.id) ?? []));
 }
 
-/** Newest-first by trace timestamp; unparseable timestamps sort last. */
+/**
+ * Newest-first by trace timestamp; unparseable timestamps sort last. Never
+ * returns NaN — a NaN comparator leaves Array#sort's ordering unspecified.
+ */
 const byNewest = (a: RawTrace, b: RawTrace): number => {
   const at = Date.parse(a.timestamp);
   const bt = Date.parse(b.timestamp);
-  return (Number.isNaN(bt) ? -Infinity : bt) - (Number.isNaN(at) ? -Infinity : at);
+  if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
+  if (Number.isNaN(at)) return 1;
+  if (Number.isNaN(bt)) return -1;
+  return bt - at;
 };
 
 /**
@@ -201,6 +207,13 @@ export async function listAdministeredTraces(args: {
       continue;
     }
     for (const t of (page.value.data ?? []) as RawTrace[]) merged.set(t.id, t);
+  }
+  // Partial failure degrades the feed; TOTAL failure must throw. An empty array
+  // is indistinguishable from "this tenant has no traces", so swallowing it would
+  // replace the caller's last good page with a confident "No traces yet".
+  const failure = pages.find((p) => p.status === "rejected");
+  if (failure?.status === "rejected" && pages.every((p) => p.status === "rejected")) {
+    throw failure.reason;
   }
   // Each source returned up to `limit` rows; the union can exceed it, so re-sort
   // across sources and take the newest `limit` — otherwise the cap would depend

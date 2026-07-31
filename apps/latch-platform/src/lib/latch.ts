@@ -36,7 +36,7 @@ import { createConnectionStore  } from "./connection-store";
 import type {ConnectionStore} from "./connection-store";
 import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
-import { createAgentStore, migrateAgents  } from "./agent-store";
+import { createAgentStore, evalOwnerOfRecord, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
@@ -446,8 +446,10 @@ export async function getLatch(): Promise<{
           // Tag the trace with the AGENT's owner so /observability can show a
           // colleague's runs on the agents this reader administers. Undefined for
           // code-registry agents (no row) — the tag is simply omitted.
-          agentOwnerTag: async (run) =>
-            (await agentStore.getRecord(run.principal, run.agent))?.owner,
+          agentOwnerTag: async (run) => {
+            const rec = await agentStore.getRecord(run.principal, run.agent);
+            return rec ? evalOwnerOfRecord(run.principal, rec) : undefined;
+          },
           // VERCEL is "1" on every target (preview/dev too), so gate the trace
           // environment on VERCEL_ENV to keep preview/dev traces out of prod.
           environment: process.env.VERCEL_ENV === "production" ? "production" : "development",

@@ -742,6 +742,11 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
     const runnerOptions = [...new Map([...runners.values()].map((r) => [r.key, r])).values()].sort(
       (a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.label.localeCompare(b.label)),
     );
+    // Narrows WITHIN the window rather than fetching that person's own newest 50 —
+    // this feed has always been "the recent N", and both the runner list and the
+    // aggregates are scoped to the same window, so they stay consistent with the
+    // rows on screen. A quiet colleague can therefore drop out of the window
+    // entirely; per-runner history belongs in Langfuse (deep-linked per row).
     if (data.runner) rows = rows.filter((r) => r.runner?.key === data.runner);
 
     // Overlay local human corrections onto the Langfuse-derived scores. Langfuse

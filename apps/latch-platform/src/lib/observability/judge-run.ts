@@ -6,6 +6,8 @@ import { postScore } from "@intentface/latch-langfuse";
 import type { LanguageModel } from "ai";
 import type { Principal } from "../session";
 import type { AttachedEval } from "../agent-store";
+import { evalOwnerOfRecord } from "../agent-store";
+import type { CredentialScope } from "../credentials";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
 import { JUDGE_MODEL_ID, judgeOnce } from "../evals/judge";
@@ -162,13 +164,17 @@ async function putLocal(
 }
 
 /**
- * Who owns the verdicts for a run on `agent`: the owner key of the agent record
- * the name resolves to — the org key for a shared agent, the (org,user) key for a
- * personal one. Falls back to the runner's own tag for a code-registry agent
- * (no row, so nobody "administers" it and its evals stay with whoever ran it).
+ * Who owns the verdicts for a run: the owner key of the agent record the name
+ * resolved to — the org key for a shared agent, the (org,user) key for a personal
+ * one. Falls back to the runner's own tag for a code-registry agent (no row, so
+ * nobody administers it and its evals stay with whoever ran it).
  */
-function evalOwnerOf(record: { owner?: string } | undefined, runOwner: string): string {
-  return record?.owner ?? runOwner;
+function evalOwnerFor(
+  principal: Principal,
+  record: { scope: CredentialScope } | undefined,
+  runOwner: string,
+): string {
+  return record ? evalOwnerOfRecord(principal, record) : runOwner;
 }
 
 /**
@@ -202,7 +208,7 @@ export async function judgeLiveRun({
     const rec = await latch.agentStore.getRecord(meta.principal, meta.agent);
     // File the verdicts under the AGENT's owner, not the runner's — a colleague's
     // run on my agent is graded against MY rubrics, so the result is mine to see.
-    evalOwner = evalOwnerOf(rec, runOwner);
+    evalOwner = evalOwnerFor(meta.principal, rec, runOwner);
     const evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
     if (evals.length === 0) return;
 
@@ -345,7 +351,8 @@ export async function rejudgeRun(args: {
   // Same keying as the live path, so a tuning re-judge lands on the row the live
   // judge wrote instead of forking a second one under the caller's own tag.
   const runOwner = ownerTagOf(args.principal);
-  const evalOwner = evalOwnerOf(
+  const evalOwner = evalOwnerFor(
+    args.principal,
     await latch.agentStore.getRecord(args.principal, run.agent),
     runOwner,
   );

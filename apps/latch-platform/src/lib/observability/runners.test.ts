@@ -59,9 +59,11 @@ describe("resolveRunners", () => {
     const other = runners.get(OTHER);
     expect(other?.label).toBe(pseudonymFor(OTHER));
     expect(other?.key).toBe(pseudonymFor(OTHER));
-    // The real owner tag (which embeds the user id) must not leak in either field.
-    expect(other?.key).not.toContain("colleague");
-    expect(other?.label).not.toContain("colleague");
+    // No owner tag survives anywhere in the response — not even one's own row,
+    // whose label stays "You" but whose filter key is pseudonymous too.
+    expect(JSON.stringify([...runners.values()])).not.toContain("colleague");
+    expect(runners.get(SELF)?.key).toBe(pseudonymFor(SELF));
+    expect(runners.get(SELF)?.label).toBe("You");
   });
 
   it("pseudonyms are stable, so a colleague reads the same across polls", async () => {

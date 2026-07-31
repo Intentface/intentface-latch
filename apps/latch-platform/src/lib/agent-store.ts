@@ -75,14 +75,6 @@ export interface AgentRecord {
    */
   attachedEvals?: AttachedEval[];
   scope: CredentialScope;
-  /**
-   * READ-ONLY: the `owner` column of the row this record came from, set by the
-   * store on reads and ignored by `upsert` (which always derives owner from
-   * `scope`). This is the eval-visibility boundary — whoever holds this key may
-   * administer the agent, and therefore owns its eval verdicts. See
-   * `evalOwnerKeysOf`.
-   */
-  owner?: string;
 }
 
 /** One judge rubric attached to an agent (see AgentRecord.attachedEvals). */
@@ -128,6 +120,22 @@ const ownerKey = (p: Principal, scope: CredentialScope): string =>
     .join("/");
 
 export { ownerKey as agentOwnerKey };
+
+/**
+ * The eval owner of an agent a caller resolved: the `owner` column of that row.
+ *
+ * Derived rather than read back, and safely so — `find` only ever matches rows
+ * whose owner is one of the caller's OWN keys, and `upsert` always writes
+ * `owner = ownerKey(principal, scope)`. So for any record this caller could
+ * resolve, the row's owner and `ownerKey(caller, record.scope)` are the same
+ * string by construction. Deriving keeps the owner key off `AgentRecord`, which
+ * is passed wholesale to the model by `get_agent` and to the browser by
+ * `listAgentRecordsFn`.
+ */
+export const evalOwnerOfRecord = (
+  p: Principal,
+  rec: { scope: CredentialScope },
+): string => ownerKey(p, rec.scope);
 
 /**
  * The owner keys whose agents this principal may administer, i.e. the eval
@@ -220,7 +228,6 @@ export function createAgentStore(
       ? (JSON.parse(String(row.attached_evals)) as AttachedEval[])
       : undefined,
     scope: String(row.scope) as CredentialScope,
-    owner: String(row.owner),
   });
 
   /**

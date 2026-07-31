@@ -1,7 +1,12 @@
 import { createClient } from "@libsql/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { LanguageModel } from "ai";
-import { createAgentStore, evalOwnerKeysOf, migrateAgents } from "./agent-store";
+import {
+  createAgentStore,
+  evalOwnerKeysOf,
+  evalOwnerOfRecord,
+  migrateAgents,
+} from "./agent-store";
 import type { AgentRecord, AgentStore } from "./agent-store";
 import type { Principal } from "./session";
 
@@ -42,26 +47,39 @@ describe("agent store ownership + scope-pinned lookup (in-memory libsql)", () =>
     store = createAgentStore(client, (() => ({})) as unknown as (id: string) => LanguageModel);
   });
 
-  it("reports the row's owner, which is the eval-visibility boundary", async () => {
+  /** The eval owner of the record `ref` resolves to for `p`. */
+  const ownerOf = async (p: Principal, ref: string) => {
+    const rec = await store.getRecord(p, ref);
+    return rec ? evalOwnerOfRecord(p, rec) : undefined;
+  };
+
+  it("derives the eval owner from the caller + the record's scope", async () => {
     await store.upsert(ME, record("shared", "org"));
     await store.upsert(ME, record("mine", "user"));
-    expect((await store.getRecord(ME, "shared"))?.owner).toBe("org1");
-    expect((await store.getRecord(ME, "mine"))?.owner).toBe("org1/me");
+    expect(await ownerOf(ME, "shared")).toBe("org1");
+    expect(await ownerOf(ME, "mine")).toBe("org1/me");
   });
 
-  it("ignores a record's read-only owner on write", async () => {
-    // A caller round-tripping a record (getRecord → upsert) must not be able to
-    // re-home the agent by echoing back the owner field.
-    await store.upsert(ME, { ...record("mine", "user"), owner: "org1" });
-    expect((await store.getRecord(ME, "mine"))?.owner).toBe("org1/me");
-    expect(await store.getRecord(COLLEAGUE, "mine")).toBeUndefined();
+  it("keeps the owner key off the record itself", async () => {
+    // AgentRecord is handed wholesale to the model (get_agent) and to the browser
+    // (listAgentRecordsFn), so the internal owner key must not ride along.
+    await store.upsert(ME, record("mine", "user"));
+    const rec = await store.getRecord(ME, "mine");
+    expect(rec).not.toHaveProperty("owner");
+  });
+
+  it("a colleague deriving the same org agent gets the same key", async () => {
+    // The derivation must be caller-independent for org scope — otherwise two
+    // members would file verdicts under different keys for one shared agent.
+    await store.upsert(ME, record("shared", "org"));
+    expect(await ownerOf(COLLEAGUE, "shared")).toBe(await ownerOf(ME, "shared"));
   });
 
   it("resolves a channel's scope-pinned ref, so the online judge finds its rubrics", async () => {
     // latch_runs.agent keeps the `org:`/`user:` pin a channel binding was created
     // with; getRecord must parse it exactly as resolve() does.
     await store.upsert(ME, record("helper", "org"));
-    expect((await store.getRecord(ME, "org:helper"))?.owner).toBe("org1");
+    expect(await ownerOf(ME, "org:helper")).toBe("org1");
     expect(await store.getRecord(ME, "user:helper")).toBeUndefined();
   });
 
@@ -69,13 +87,13 @@ describe("agent store ownership + scope-pinned lookup (in-memory libsql)", () =>
     await store.upsert(ME, record("helper", "org"));
     await store.upsert(ME, record("helper", "user"));
     // Unpinned: personal wins. Pinned to org: the org record, whatever else exists.
-    expect((await store.getRecord(ME, "helper"))?.owner).toBe("org1/me");
-    expect((await store.getRecord(ME, "org:helper"))?.owner).toBe("org1");
+    expect(await ownerOf(ME, "helper")).toBe("org1/me");
+    expect(await ownerOf(ME, "org:helper")).toBe("org1");
   });
 
   it("a colleague sees the org agent; an outsider sees nothing", async () => {
     await store.upsert(ME, record("shared", "org"));
-    expect((await store.getRecord(COLLEAGUE, "shared"))?.owner).toBe("org1");
+    expect(await ownerOf(COLLEAGUE, "shared")).toBe("org1");
     expect(await store.getRecord(OUTSIDER, "shared")).toBeUndefined();
   });
 });
