@@ -33,6 +33,7 @@ import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
 import type { StoredConnection } from "./connection-store";
 import { assertPublicHttpsUrl } from "./oauth2-flow";
+import { parseScopes, sameScopeSet } from "./oauth-scopes";
 
 /** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
 const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
@@ -311,21 +312,16 @@ export const addConnectionFn = createServerFn({ method: "POST" })
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
-      const scopes = data.scopes?.split(/\s+/).filter(Boolean);
       auth = {
         kind: "oauth2",
         authorizeUrl,
         tokenUrl,
         clientId,
         clientSecret,
-        scopes: scopes && scopes.length > 0 ? scopes : undefined,
+        scopes: parseScopes(data.scopes),
       };
     } else if (data.kind === "mcp" && data.authMode === "oauth") {
-      const requested = data.scopes?.split(/\s+/).filter(Boolean);
-      auth = {
-        kind: "oauth",
-        scopes: requested && requested.length > 0 ? requested : undefined,
-      };
+      auth = { kind: "oauth", scopes: parseScopes(data.scopes) };
     } else if (data.authMode === "none") {
       auth = undefined; // an explicit "none" clears auth even if a token was typed
     } else {
@@ -356,10 +352,10 @@ export const addConnectionFn = createServerFn({ method: "POST" })
       // old scope.
       const before = existing?.auth?.kind === "oauth" ? existing.auth.scopes : undefined;
       const after = auth?.kind === "oauth" ? auth.scopes : undefined;
-      const same =
-        (before ?? []).length === (after ?? []).length &&
-        (before ?? []).every((s, i) => s === (after ?? [])[i]);
-      if (!same) {
+      // Set comparison, not positional: a scope is an unordered set, so
+      // retyping the same permissions in a different order must not log the
+      // user out of the connection.
+      if (!sameScopeSet(before, after)) {
         try {
           await dynamic.oauth(name).provider(principal).invalidateCredentials?.("all");
         } catch (e) {
