@@ -25,12 +25,13 @@ const redirect = (to: string) => new Response(null, { status: 302, headers: { lo
 /** Shared guards for GET and POST: token + session. */
 async function prepare(request: Request) {
   const url = new URL(request.url);
+  const appId = url.searchParams.get("app") ?? "";
   const teamId = url.searchParams.get("team") ?? "";
   const slackUserId = url.searchParams.get("user") ?? "";
   const exp = Number(url.searchParams.get("exp"));
   const sig = url.searchParams.get("sig") ?? "";
 
-  if (!teamId || !slackUserId || !verifyLink(teamId, slackUserId, exp, sig)) {
+  if (!appId || !teamId || !slackUserId || !verifyLink(appId, teamId, slackUserId, exp, sig)) {
     return { ok: false, response: redirect("/agents?slack=link_error") } as const;
   }
 
@@ -43,19 +44,31 @@ async function prepare(request: Request) {
     } as const;
   }
 
-  return { ok: true, url, teamId, slackUserId, exp, session } as const;
+  // The identity row carries an org, and messages from this Slack user then run
+  // under it — so the claiming account must belong to the org that owns the app
+  // binding. `team_id` alone cannot answer that (it is not unique across orgs),
+  // which is why the link is signed with `appId`. Mirrors the Telegram and
+  // WhatsApp routes, which reject on `bot.orgId !== session.principal.orgId`.
+  const { slackStore } = await getLatch();
+  const app = await slackStore.resolve(appId);
+  if (!app) return { ok: false, response: redirect("/agents?slack=link_error") } as const;
+  if (app.orgId !== session.principal.orgId) {
+    return { ok: false, response: redirect("/agents?slack=link_wrong_org") } as const;
+  }
+
+  return { ok: true, url, appId, teamId, slackUserId, exp, session, slackStore, app } as const;
 }
 
 /** CSRF identities for this request — both sides of the link plus the expiry. */
 function csrfInput(ctx: {
-  teamId: string;
+  appId: string;
   slackUserId: string;
   exp: number;
   session: { principal: { userId?: string } };
 }) {
   return {
     channel: "slack",
-    scopeId: ctx.teamId,
+    scopeId: ctx.appId,
     externalId: ctx.slackUserId,
     sessionUserId: ctx.session.principal.userId!,
     exp: ctx.exp,
@@ -66,8 +79,7 @@ async function handleConfirmPage(request: Request): Promise<Response> {
   const ctx = await prepare(request);
   if (!ctx.ok) return ctx.response;
 
-  const { slackStore } = await getLatch();
-  const existing = await slackStore.resolveIdentity(ctx.teamId, ctx.slackUserId);
+  const existing = await ctx.slackStore.resolveIdentity(ctx.teamId, ctx.slackUserId);
   if (existing?.userId === ctx.session.principal.userId) {
     return redirect("/agents?slack=linked");
   }
@@ -85,7 +97,7 @@ async function handleConfirmPage(request: Request): Promise<Response> {
 async function handleLink(request: Request): Promise<Response> {
   const ctx = await prepare(request);
   if (!ctx.ok) return ctx.response;
-  const { teamId, slackUserId, session } = ctx;
+  const { appId, teamId, slackUserId, session, slackStore, app } = ctx;
 
   // Proves this POST came from a confirmation page rendered for THIS pair of
   // identities — see `channel-link-csrf.ts`.
@@ -93,17 +105,21 @@ async function handleLink(request: Request): Promise<Response> {
     return redirect("/agents?slack=link_error");
   }
 
-  const { slackStore } = await getLatch();
   await slackStore.linkIdentity({
     teamId,
     slackUserId,
     userId: session.principal.userId!,
-    orgId: session.principal.orgId,
+    // The app's org, not merely the session's — they are now verified equal,
+    // and taking it from the binding keeps that the single source of truth.
+    orgId: app.orgId,
   });
 
   // Continue the conversation: replay the message that triggered the link.
+  // Only for the app this link was signed for — `takePending` is keyed on
+  // (team, user), so a pending message queued by a DIFFERENT app in the same
+  // workspace must not be executed under this binding's principal.
   const pending = await slackStore.takePending(teamId, slackUserId);
-  if (pending) {
+  if (pending && pending.appId === appId) {
     const resolved = await getSlackChannelForApp(pending.appId);
     if (resolved) {
       waitUntil(

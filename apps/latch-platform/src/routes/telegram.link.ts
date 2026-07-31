@@ -104,6 +104,9 @@ async function handleConfirmPage(request: Request): Promise<Response> {
     actionUrl: ctx.url.pathname + ctx.url.search,
     switchAccountUrl: `/login?next=${encodeURIComponent(ctx.url.pathname + ctx.url.search)}`,
     csrfToken: channelLinkCsrfToken(csrfInput(ctx)),
+    // Already claimed by someone else: `linkIdentity` is fenced and will
+    // return "conflict", so say so now rather than after a doomed click.
+    alreadyLinkedElsewhere: Boolean(existing),
   });
 }
 

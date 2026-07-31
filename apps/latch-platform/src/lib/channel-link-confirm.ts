@@ -35,11 +35,21 @@ export function renderLinkConfirmPage(opts: {
    * it the POST would rest solely on the session cookie being `SameSite=Lax`.
    */
   csrfToken: string;
+  /**
+   * This channel identity is already linked to a DIFFERENT Latch account.
+   *
+   * The write would be refused anyway (Telegram/WhatsApp return `"conflict"`),
+   * so offering a Confirm button would promise something that cannot succeed
+   * and hide the real problem until after the click. Explain it instead, and
+   * leave only the switch-account route out.
+   */
+  alreadyLinkedElsewhere?: boolean;
 }): Response {
   const account = [opts.account.name, opts.account.email]
     .filter((v): v is string => Boolean(v))
     .map(esc)
     .join(" · ");
+  const conflict = opts.alreadyLinkedElsewhere === true;
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -65,19 +75,25 @@ export function renderLinkConfirmPage(opts: {
 </head>
 <body>
 <main>
-  <h1>Link ${esc(opts.channelLabel)} account?</h1>
+  <h1>${conflict ? `${esc(opts.channelLabel)} account already linked` : `Link ${esc(opts.channelLabel)} account?`}</h1>
   <dl>
     <dt>${esc(opts.channelLabel)} account</dt>
     <dd>${esc(opts.externalIdentity)}</dd>
-    <dt>Will be linked to Latch account</dt>
+    <dt>${conflict ? "You are signed in as" : "Will be linked to Latch account"}</dt>
     <dd>${account || "(unnamed account)"}</dd>
   </dl>
-  <p class="warn">After linking, messages from this ${esc(opts.channelLabel)} account run agents
+${
+  conflict
+    ? `  <p class="warn">This ${esc(opts.channelLabel)} account is already linked to a different Latch
+  account, and an existing link is never reassigned automatically. If the other account is yours,
+  sign in as it; otherwise ask an admin to remove the old link first.</p>`
+    : `  <p class="warn">After linking, messages from this ${esc(opts.channelLabel)} account run agents
   as the Latch account above — with its connections and its data. Only confirm if both are yours.</p>
   <form method="post" action="${esc(opts.actionUrl)}">
     <input type="hidden" name="${esc(CSRF_FIELD)}" value="${esc(opts.csrfToken)}">
     <button type="submit">Confirm link</button>
-  </form>
+  </form>`
+}
   <p class="warn">Wrong Latch account? <a href="${esc(opts.switchAccountUrl)}">Sign in as someone else</a>
   and reopen the link from ${esc(opts.channelLabel)}.</p>
 </main>
@@ -85,6 +101,21 @@ export function renderLinkConfirmPage(opts: {
 </html>`;
   return new Response(html, {
     status: 200,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      // This page turns a single button click into an identity-binding write,
+      // which makes it a clickjacking target: framed and overlaid, a victim can
+      // be induced to confirm the ATTACKER's signed link. `SameSite=Lax` also
+      // happens to break a cross-site framed GET today, but relying on that is
+      // the same invisible dependency `channel-link-csrf.ts` exists to remove —
+      // so refuse framing outright. `frame-ancestors` is the modern control;
+      // `X-Frame-Options` covers clients that ignore CSP.
+      "content-security-policy": "frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+      // Keep the signed link (and its token) out of Referer on the outbound
+      // "Sign in as someone else" navigation.
+      "referrer-policy": "no-referrer",
+    },
   });
 }
