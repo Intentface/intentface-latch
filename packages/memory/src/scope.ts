@@ -37,6 +37,20 @@ function seg(raw: string): string {
 export const MEMORY_ROOT_PREFIX = "_memory";
 
 /**
+ * Loredex's per-user private root folder (`is_root=1`, `visibility='private'`,
+ * owner-only ACL). Every workspace member has exactly one; the server creates
+ * it on join (`ensureUserPrivateRoot`), so it always exists and is never
+ * created by us. Folders created under it inherit `private` visibility, which
+ * is what makes per-user memory scopes actually private — unlike the shared
+ * `_memory/**` tree, where per-user separation is only a folder convention.
+ *
+ * The path segment is caller-relative: the same literal resolves to a
+ * DIFFERENT physical folder per authenticated user. Scope roots under it keep
+ * their `u-<id>` leaf anyway — see `scopeRefOf` for why.
+ */
+export const LOREDEX_PRIVATE_ROOT = "__private_root";
+
+/**
  * Boundary-aware containment check for workspace paths: `path` must sit
  * strictly under `root`, segment-by-segment, with no `.`/`..`/empty segments —
  * so `root/../elsewhere` can't escape and `${root}-evil/x` can't prefix-match.
@@ -62,14 +76,21 @@ export function scopeRefOf(args: {
   const { agent, memory, userId } = args;
   const needsUser = memory.scope === "agent-user" || memory.scope === "user";
   if (needsUser && !userId) return undefined;
+  // Per-user scopes are stored under the caller's PRIVATE root so only that
+  // user (and connections acting as them) can read them. The layout mirrors
+  // the shared tree (`<agent>` per agent, the literal `_user` for the
+  // cross-agent scope) so subtrees stay disjoint (hard boundary). The
+  // `u-<id>` leaf is kept even though the private root is already per-user:
+  // it makes the root globally unique (the key stays `${connection}:${root}`)
+  // and, on a workspace-SHARED connection — where every caller resolves the
+  // connection identity's one private root — it keeps users' stores from
+  // merging into a single MEMORY.md.
   const root =
     memory.scope === "agent-user"
-      ? `${MEMORY_ROOT_PREFIX}/${seg(agent)}/u-${seg(userId!)}`
+      ? `${LOREDEX_PRIVATE_ROOT}/${MEMORY_ROOT_PREFIX}/${seg(agent)}/u-${seg(userId!)}`
       : memory.scope === "agent-org"
         ? `${MEMORY_ROOT_PREFIX}/${seg(agent)}/org`
-        : // `user`: shared across the user's agents — the agent segment is the
-          // literal `_user` so every agent resolves the same folder.
-          `${MEMORY_ROOT_PREFIX}/_user/u-${seg(userId!)}`;
+        : `${LOREDEX_PRIVATE_ROOT}/${MEMORY_ROOT_PREFIX}/_user/u-${seg(userId!)}`;
   return { key: `${memory.connection}:${root}`, connection: memory.connection, root };
 }
 
@@ -77,10 +98,10 @@ export function scopeRefOf(args: {
 export function scopeLabelOf(memory: MemoryConfig): string {
   switch (memory.scope) {
     case "agent-user":
-      return "this agent's memory of this user";
+      return "this agent's private memory of this user";
     case "agent-org":
       return "this agent's shared memory for the whole organization";
     case "user":
-      return "this user's memory, shared across their agents";
+      return "this user's private memory, shared across their agents";
   }
 }

@@ -128,6 +128,23 @@ describe("createLoredexStore", () => {
     expect(folderCreates.map((c) => c.input.name)).toEqual(["_memory", "coach", "u-1"]);
   });
 
+  it("never creates the private root itself for a private-root scope", async () => {
+    const { registry, files, calls } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    const scope: ScopeRef = {
+      key: "loredex:__private_root/_memory/_user/u-1",
+      connection: "loredex",
+      root: "__private_root/_memory/_user/u-1",
+    };
+    await store.writeIndex(P, scope, VALID_INDEX);
+    expect(files.get("__private_root/_memory/_user/u-1/MEMORY.md")).toBe(VALID_INDEX);
+    const folderCreates = calls.filter((c) => c.tool === "create" && c.input.type === "folder");
+    // `__private_root` always exists server-side; creating it would mint a
+    // stray shared folder. Only its descendants are ensured.
+    expect(folderCreates.map((c) => c.input.name)).toEqual(["_memory", "_user", "u-1"]);
+    expect(folderCreates[0]?.input.parentId).toBe("__private_root");
+  });
+
   it("writeIndex snapshots BEFORE rewriting an existing index", async () => {
     const { registry, files, calls } = fakeRegistry();
     const store = createLoredexStore({ connections: registry });
