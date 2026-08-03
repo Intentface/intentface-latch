@@ -22,7 +22,9 @@ import {
  * override names via `toolNames` if a workspace exposes variants):
  * - `read_file { fileId }` — path-addressable reads.
  * - `create { type, name, folderId?, parentId?, content?, summary? }` — files
- *   and folders; there is no overwrite.
+ *   and folders; there is no overwrite. Folder creates are NOT idempotent:
+ *   a repeat call with the same name+parent inserts a DUPLICATE sibling rather
+ *   than erroring, so `ensureFolders` probes before it creates.
  * - `edit_file { fileId, replacements: [{ oldContent, newContent }] }` —
  *   search-and-replace only; a full rewrite replaces the whole previous text.
  * - `search { query, folderId?, limit?, mode? }` — BM25, folder-scopable.
@@ -44,6 +46,12 @@ const DEFAULT_TOOL_NAMES: LoredexToolNames = {
   edit: "edit_file",
   search: "search",
 };
+
+/**
+ * Loredex auto-creates this file inside every folder it makes, so reading it is
+ * how `ensureFolders` asks "does this folder exist?" without a folder-stat tool.
+ */
+const FOLDER_INDEX_FILENAME = "index.md";
 
 type ToolCall = (tool: string, input: unknown) => Promise<CallResult>;
 type CallResult =
@@ -74,14 +82,37 @@ function isErrorResult(result: unknown): boolean {
   return !!(result as { isError?: boolean })?.isError;
 }
 
+/**
+ * Does this tool error definitively mean "the file isn't there"?
+ *
+ * Loredex answers an unresolvable read with `File not found: <ref>` on every
+ * path (bad id, unresolvable path, missing row). Everything else — tool
+ * unavailable, transport failure, an out-of-scope folder — leaves existence
+ * UNKNOWN, and `ensureFolders` must not create on an unknown.
+ */
+function isDefinitelyMissing(error: string): boolean {
+  return /not found/i.test(error);
+}
+
 export function createLoredexStore<P>(opts: {
   connections: ConnectionRegistry<P>;
   toolNames?: Partial<LoredexToolNames>;
 }): MemoryStore<P> {
   const names = { ...DEFAULT_TOOL_NAMES, ...opts.toolNames };
-  // Folders successfully ensured this process lifetime (per scope key) — the
-  // create calls are idempotent-by-tolerance but not free.
+  // Folder prefixes confirmed to exist this process lifetime (`<scope key>:<path>`),
+  // so repeat writes skip the existence probe. Correctness never depends on it:
+  // a cold cache (every serverless start) just re-probes.
   const ensuredFolders = new Set<string>();
+  /**
+   * Ensures currently in flight, keyed the same way. Without this, two
+   * concurrent writes for one scope (a turn running `memory_write` and
+   * `memory_index` in parallel) both probe a missing folder, both see it
+   * absent, and both create it — the duplicate this store exists to avoid.
+   *
+   * In-process only. Two instances racing can still duplicate, which is why
+   * the server-side idempotent create matters (Intentface/loredex#149).
+   */
+  const ensuringFolders = new Map<string, Promise<void>>();
 
   /** Open the scope's connection, run `fn` with a tool caller, always close. */
   async function withConnection<T>(
@@ -121,10 +152,25 @@ export function createLoredexStore<P>(opts: {
     }
   }
 
-  /** Create the folder chain for `path` (workspace-relative), tolerating "exists". */
+  /**
+   * Create the folder chain for `path` (workspace-relative), skipping segments
+   * that already exist.
+   *
+   * Loredex's folder `create` does NOT reject a duplicate name: it inserts a
+   * second sibling with the same name, and path resolution then silently
+   * resolves to whichever the traversal reaches first — so a blind re-create
+   * leaves a trail of empty shadow folders (each with just its auto `index.md`)
+   * that nothing can delete, since there is no delete tool. So probe first.
+   *
+   * The probe reads the segment's auto-created `index.md`: folders themselves
+   * aren't addressable by `read_file`, but every Loredex folder has that file.
+   *
+   * Caching is per PREFIX, not per full path — `writeIndex` ensures `root`
+   * while `writeEpisode` ensures `root/episodes`, so a whole-path key made the
+   * second call re-walk (and, before the probe, re-create) every shared
+   * ancestor.
+   */
   async function ensureFolders(call: ToolCall, scopeKey: string, path: string): Promise<void> {
-    const cacheKey = `${scopeKey}:${path}`;
-    if (ensuredFolders.has(cacheKey)) return;
     const parts = path.split("/").filter(Boolean);
     // The caller's private root always exists (Loredex creates it on join)
     // and must never be created here — a `create` for that name would mint a
@@ -132,15 +178,53 @@ export function createLoredexStore<P>(opts: {
     // then inherit `private` visibility from it.
     const first = parts[0] === LOREDEX_PRIVATE_ROOT ? 1 : 0;
     for (let i = first; i < parts.length; i++) {
-      const parentId = parts.slice(0, i).join("/") || undefined;
-      // "Already exists" comes back as an error — that's the common, fine case.
-      await call(names.create, {
-        type: "folder",
-        name: parts[i],
-        ...(parentId ? { parentId } : {}),
-      });
+      const cacheKey = `${scopeKey}:${parts.slice(0, i + 1).join("/")}`;
+      if (ensuredFolders.has(cacheKey)) continue;
+      // Share an in-flight ensure rather than racing it. Deleted on settle so a
+      // failed attempt is retried by the next write instead of being awaited
+      // forever.
+      let pending = ensuringFolders.get(cacheKey);
+      if (!pending) {
+        pending = ensureOneFolder(call, cacheKey, parts, i).finally(() => {
+          ensuringFolders.delete(cacheKey);
+        });
+        ensuringFolders.set(cacheKey, pending);
+      }
+      await pending;
     }
-    ensuredFolders.add(cacheKey);
+  }
+
+  /** One segment of `ensureFolders`: probe `parts[i]`, create it if truly absent. */
+  async function ensureOneFolder(
+    call: ToolCall,
+    cacheKey: string,
+    parts: string[],
+    i: number,
+  ): Promise<void> {
+    const prefix = parts.slice(0, i + 1).join("/");
+    const probe = await call(names.read, {
+      fileId: `${prefix}/${FOLDER_INDEX_FILENAME}`,
+    });
+    if (probe.ok) {
+      ensuredFolders.add(cacheKey);
+      return;
+    }
+    // Only a definitive "not found" licenses a create. Any other failure —
+    // tool unavailable, transport error, an out-of-scope folder — leaves
+    // existence unknown, and creating on a guess is precisely how the shadow
+    // folders appeared. Bail instead: the write that follows surfaces the real
+    // error, and the next run re-probes. Guessing wrong here is unrecoverable
+    // (no delete tool); guessing "exists" costs one retry.
+    if (!isDefinitelyMissing(probe.error)) return;
+    const parentId = parts.slice(0, i).join("/") || undefined;
+    const created = await call(names.create, {
+      type: "folder",
+      name: parts[i],
+      ...(parentId ? { parentId } : {}),
+    });
+    // Only remember what we know exists: a failed create must be retried on
+    // the next write, not cached as done.
+    if (created.ok) ensuredFolders.add(cacheKey);
   }
 
   function indexPath(scope: ScopeRef): string {

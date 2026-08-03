@@ -14,8 +14,17 @@ function fakeRegistry(opts?: {
   failCreate?: boolean;
   /** Override the search tool's `results` array (e.g. the live Loredex shape). */
   searchResults?: Array<Record<string, unknown>>;
+  /**
+   * Fail every read with this message instead of resolving it — a transport or
+   * tool-level failure, as opposed to Loredex's "File not found: …".
+   */
+  readError?: string;
+  /** Called before each read resolves; await inside it to hold a probe open. */
+  onRead?: (fileId: string) => Promise<void>;
 }) {
   const files = new Map<string, string>();
+  /** Every folder path created, in order — duplicates included, as live does. */
+  const folders: string[] = [];
   const calls: Array<{ tool: string; input: Record<string, unknown> }> = [];
   let closes = 0;
 
@@ -28,7 +37,14 @@ function fakeRegistry(opts?: {
         loredex_read_file: {
           execute: async (input: { fileId: string }) => {
             calls.push({ tool: "read_file", input });
+            // Resolved when the call ARRIVES, then optionally delayed in
+            // flight. That ordering is what makes a concurrent probe racy: a
+            // slow response carries the answer from when it was asked, so a
+            // folder created meanwhile is still reported absent. Looking the
+            // file up after the delay would quietly make every race benign.
             const text = files.get(input.fileId);
+            await opts?.onRead?.(input.fileId);
+            if (opts?.readError) return err(opts.readError);
             return text === undefined ? err(`File not found: ${input.fileId}`) : ok(text);
           },
         },
@@ -37,8 +53,13 @@ function fakeRegistry(opts?: {
             calls.push({ tool: "create", input });
             if (input.type === "folder") {
               const path = [input.parentId, input.name].filter(Boolean).join("/");
-              if (files.has(`dir:${path}`)) return err(`Folder already exists: ${path}`);
-              files.set(`dir:${path}`, "");
+              // Live Loredex does NOT reject a duplicate folder name — it
+              // inserts a second sibling and auto-creates its `index.md`, and
+              // path reads keep resolving to the first one. Model exactly that
+              // (`folders` is an array, so duplicates are countable) or the
+              // fake hides the empty-shadow-folder bug.
+              folders.push(path);
+              if (!files.has(`${path}/index.md`)) files.set(`${path}/index.md`, "");
               return ok(`created folder ${path}`);
             }
             if (opts?.failCreate) return err("boom");
@@ -92,7 +113,7 @@ function fakeRegistry(opts?: {
       }),
     }),
   };
-  return { registry, files, calls, closeCount: () => closes };
+  return { registry, files, folders, calls, closeCount: () => closes };
 }
 
 const SCOPE: ScopeRef = {
@@ -143,6 +164,89 @@ describe("createLoredexStore", () => {
     // stray shared folder. Only its descendants are ensured.
     expect(folderCreates.map((c) => c.input.name)).toEqual(["_memory", "_user", "u-1"]);
     expect(folderCreates[0]?.input.parentId).toBe("__private_root");
+    // Existence probes stay rooted at the private root. Probing the bare
+    // `_memory/index.md` would resolve against the SHARED top-level `_memory`
+    // (agent-org scopes create one), so every private segment would look like
+    // it already existed and the scope would never be created at all.
+    const probes = calls
+      .filter((c) => c.tool === "read_file" && String(c.input.fileId).endsWith("/index.md"))
+      .map((c) => c.input.fileId);
+    expect(probes).toEqual([
+      "__private_root/_memory/index.md",
+      "__private_root/_memory/_user/index.md",
+      "__private_root/_memory/_user/u-1/index.md",
+    ]);
+  });
+
+  const EPISODE = {
+    slug: "tempo-run",
+    summary: "Tempo run",
+    body: "Ran 8k tempo.",
+    meta: {
+      agent: "coach",
+      extractedAt: "2026-07-31T09:43:00.000Z",
+      provenance: "user-said" as const,
+    },
+  };
+
+  it("never creates a folder twice across writes that share ancestors", async () => {
+    // The empty-shadow-folder bug: `writeEpisode` ensures `<root>/episodes`
+    // and `writeIndex` ensures `<root>`, so the shared `_memory/coach/u-1`
+    // ancestors were walked — and re-created — a second time.
+    const { registry, folders } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    await store.writeEpisode(P, SCOPE, EPISODE);
+    await store.writeIndex(P, SCOPE, VALID_INDEX);
+    expect(folders).toEqual([
+      "_memory",
+      "_memory/coach",
+      "_memory/coach/u-1",
+      "_memory/coach/u-1/episodes",
+    ]);
+  });
+
+  it("a fresh store (new process) reuses folders instead of duplicating them", async () => {
+    // The in-process `ensuredFolders` cache is empty on every cold start, so
+    // existence has to be probed against the workspace, not just remembered.
+    const { registry, folders } = fakeRegistry();
+    await createLoredexStore({ connections: registry }).writeIndex(P, SCOPE, VALID_INDEX);
+    const before = [...folders];
+    await createLoredexStore({ connections: registry }).writeEpisode(P, SCOPE, EPISODE);
+    expect(folders).toEqual([...before, "_memory/coach/u-1/episodes"]);
+  });
+
+  it("does not create a folder when the probe fails for a reason other than absence", async () => {
+    // A read can fail without proving anything: tool unavailable, transport
+    // error, out-of-scope folder. Treating those as "absent" recreates the
+    // original bug, and a wrong guess is unrecoverable — there is no delete
+    // tool — while guessing "exists" only costs a retry.
+    const { registry, folders } = fakeRegistry({ readError: "Upstream request timed out" });
+    const store = createLoredexStore({ connections: registry });
+    await store.writeIndex(P, SCOPE, VALID_INDEX);
+    expect(folders).toEqual([]);
+  });
+
+  it("shares an in-flight ensure between concurrent writes", async () => {
+    // Two writes in one turn (memory_write + memory_index) both probe the
+    // shared ancestor. Without a pending-ensure map both see it missing and
+    // both create it — the completed-prefix cache is set too late to help.
+    let probes = 0;
+    // Hold the first `_memory` probe open long enough for the second write to
+    // reach the same prefix; a real gate would deadlock, since the fix means
+    // the second probe never happens.
+    const gate = new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const { registry, folders } = fakeRegistry({
+      onRead: async (fileId) => {
+        if (fileId === "_memory/index.md" && ++probes === 1) await gate;
+      },
+    });
+    const store = createLoredexStore({ connections: registry });
+    await Promise.all([
+      store.writeIndex(P, SCOPE, VALID_INDEX),
+      store.writeEpisode(P, SCOPE, EPISODE),
+    ]);
+    expect(folders.filter((f) => f === "_memory")).toHaveLength(1);
+    expect(new Set(folders).size).toBe(folders.length);
   });
 
   it("writeIndex snapshots BEFORE rewriting an existing index", async () => {
