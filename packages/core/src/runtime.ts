@@ -11,7 +11,7 @@ import {
   tool,
   toUIMessageStream,
 } from "ai";
-import type { Experimental_SandboxSession } from "ai";
+import type { Experimental_SandboxSession, LanguageModel } from "ai";
 import type { AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
@@ -24,7 +24,13 @@ import type {
 } from "./agent.js";
 import { currentDateLine } from "./current-date.js";
 import type { MemoryProvider } from "./memory.js";
-import { toClientMessages, toModelMessages } from "./projections.js";
+import {
+  COMPACTION_PART_TYPE,
+  sliceAtCompaction,
+  toClientMessages,
+  toModelMessages,
+} from "./projections.js";
+import { summarizeForCompaction } from "./compaction.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import type {
@@ -339,6 +345,21 @@ export interface Runtime<P> {
     turnContext?: unknown;
   }): Promise<{ threadId: string; answer: string }>;
   /**
+   * Summarize a conversation and append a compaction boundary, so later turns
+   * send the model the summary instead of the turns it replaces. Stored history
+   * is untouched — this shrinks the model projection, not the record. Null when
+   * there's too little to compact (or the chat isn't the caller's); throws
+   * `PendingApprovalError` when the last turn is paused awaiting a human.
+   */
+  compactChat(input: {
+    chatId: string;
+    principal: P;
+    /** Optional steer for the summary ("keep the training plan"). */
+    focus?: string;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<{ summary: string; compacted: number } | null>;
+  /**
    * Client-projected conversation history (`toClientMessages`): the stored
    * messages with `internal`/`redacted` ones filtered out. For rendering past
    * turns on load.
@@ -496,6 +517,12 @@ const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
 const generateSubApprovalId = createIdGenerator({ prefix: "sapv", separator: "_" });
 /** Recursion ceiling for subagent delegation. */
 const MAX_SUBAGENT_DEPTH = 4;
+/**
+ * Below this many messages in the live window, compaction isn't worth a model
+ * call: one exchange (user + assistant) plus the message asking for it summarizes
+ * to roughly what it replaces.
+ */
+const MIN_COMPACTABLE_MESSAGES = 4;
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
 /** Synthetic run id for an ephemeral (unpersisted) `runTurnStream` turn. */
@@ -571,9 +598,11 @@ function lastUserText(messages: AppMessage[]): string | undefined {
 
 /** True if any message has a tool part still awaiting an approval decision. */
 /**
- * Thrown by `handleChat` when a new message arrives while the previous turn is
- * still awaiting an approval decision. Carries a stable `code` so the handler
- * can map it to a 409 and the client can prompt the user to decide first.
+ * Thrown when work is attempted on a chat whose last turn is still paused
+ * awaiting a human: by `handleChat` for a new message, and by `compactChat`
+ * (where the pause can also be a parked client tool call). Carries a stable
+ * `code` so the handler can map it to a 409 and the client can prompt the user to
+ * resolve it first.
  */
 export class PendingApprovalError extends Error {
   readonly code = "pending_approval";
@@ -2100,6 +2129,136 @@ export function createRuntime<P, RC = unknown>(
     });
   }
 
+  /**
+   * Compact a conversation: summarize the live context window and append the
+   * summary as a boundary marker, so later turns send the model the summary
+   * instead of the turns it replaces (see `sliceAtCompaction`). Stored history is
+   * never rewritten — nothing is lost, and a chat can be compacted repeatedly.
+   *
+   * Returns null when there's too little to be worth compacting (or the chat
+   * isn't the caller's). Throws `PendingApprovalError` when the turn is paused:
+   * the parked `tool_use` would fall behind the boundary and vanish from the
+   * model view while stored history still gates every new message.
+   */
+  async function compactChat({
+    chatId,
+    principal,
+    focus,
+    signal,
+    request,
+    turnContext,
+  }: {
+    chatId: string;
+    principal: P;
+    /** Optional steer, e.g. Telegram's `/compact keep the training plan`. */
+    focus?: string;
+    /** Abort a stalled summarization (a request signal, or a caller timeout). */
+    signal?: AbortSignal;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<{ summary: string; compacted: number } | null> {
+    const chat = await storage.getChat(principal, chatId);
+    if (!chat) return null;
+
+    const stored = await storage.loadMessages(principal, chatId);
+    // Only the live window is summarized: everything before the previous
+    // boundary is already represented by that boundary's summary.
+    const live = sliceAtCompaction(stored);
+    if (live.length < MIN_COMPACTABLE_MESSAGES) return null;
+    if (hasPendingApproval(live) || hasPendingToolResult([live[live.length - 1]!])) {
+      throw new PendingApprovalError(
+        "This chat is awaiting a decision — resolve the pending request before compacting.",
+      );
+    }
+
+    const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request, turnContext);
+    // Tool definitions only affect how a recorded tool RESULT is rendered for the
+    // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
+    // than failing. So take every definition available without I/O — the agent's
+    // own plus the harness ones — and deliberately skip opening dynamic sources
+    // (MCP / connections): summarizing must not depend on a remote server being
+    // reachable, and raw JSON is a fine thing to summarize.
+    const harness = config.harnessTools ?? {};
+    const tools = {
+      ...cfg.tools,
+      ...harness.app,
+      ...harness.sandbox,
+    } as Record<string, unknown>;
+    const run = await storage.createRun(principal, { chatId, agent: chat.agent });
+    try {
+      const { text, truncated, usage } = await summarizeForCompaction({
+        model: cfg.model as LanguageModel,
+        messages: await toModelMessages(live, { tools }),
+        ...(focus ? { focus } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      if (!text) throw new Error("The model returned an empty summary.");
+      // A summary cut off at the token cap stops mid-thought, and once persisted
+      // it becomes the permanent head of every later prompt — worse than not
+      // compacting. Fail instead; history is untouched, so a retry is safe.
+      if (truncated) {
+        throw new Error("The summary ran over its limit — nothing was changed. Try again.");
+      }
+
+      const cost = computeCost(config.pricing?.(modelId), usage);
+      // `internal` so the client projection never shows a "user" message the user
+      // didn't write; `sendToModel` stays default-true so the model DOES see it.
+      // Role `user` because after slicing this is the conversation's first
+      // message, and a model prompt may not open with an assistant turn.
+      await storage.appendMessages(chatId, [
+        {
+          id: generateMessageId(),
+          role: "user",
+          parts: [
+            { type: "text", text },
+            {
+              type: COMPACTION_PART_TYPE,
+              data: { compacted: live.length, at: Date.now() },
+            },
+          ],
+          metadata: {
+            visibility: "internal",
+            createdAt: Date.now(),
+            model: modelId,
+            usage: {
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              ...(usage.cacheReadTokens ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+              ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+            },
+            cost,
+          },
+        } as AppMessage,
+      ]);
+      await storage.updateRun(run.id, {
+        status: "completed",
+        usageInputTokens: usage.inputTokens,
+        usageOutputTokens: usage.outputTokens,
+        usageCacheReadTokens: usage.cacheReadTokens || undefined,
+        usageCacheWriteTokens: usage.cacheWriteTokens || undefined,
+        costTotal: cost,
+        endedAt: Date.now(),
+      });
+      await storage.recordUsage(principal, {
+        runId: run.id,
+        model: modelId,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cost,
+      });
+      return { summary: text, compacted: live.length };
+    } catch (e) {
+      await storage
+        .updateRun(run.id, {
+          status: "errored",
+          error: e instanceof Error ? e.message : String(e),
+          endedAt: Date.now(),
+        })
+        .catch(() => {});
+      throw e;
+    }
+  }
+
   async function loadHistory({
     chatId,
     principal,
@@ -2445,6 +2604,7 @@ export function createRuntime<P, RC = unknown>(
     runTurnStream,
     runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext }) =>
       runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated, turnContext }),
+    compactChat,
     loadHistory,
     listChats,
     listRuns,

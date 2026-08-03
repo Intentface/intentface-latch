@@ -17,5 +17,6 @@ export * from "./connections.js";
 export * from "./scheduler.js";
 export * from "./vault.js";
 export * from "./projections.js";
+export * from "./compaction.js";
 export * from "./pricing.js";
 export * from "./telemetry.js";

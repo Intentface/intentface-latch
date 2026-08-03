@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toModelMessages } from "@intentface/latch-core";
+import { COMPACTION_PART_TYPE, toModelMessages } from "@intentface/latch-core";
 import type { AppMessage } from "@intentface/latch-core";
 
 /**
@@ -135,5 +135,82 @@ describe("toModelMessages dangling-call closure", () => {
     const { calls } = assertBalanced(model);
     expect(calls).toContain("toolu_done");
     expect(calls).toContain("toolu_dangling");
+  });
+});
+
+/**
+ * `/compact` appends a summary message carrying a `data-compaction` part; from
+ * then on the model must see that summary INSTEAD of the turns it replaces,
+ * while stored history (and the web UI) keep everything.
+ */
+describe("toModelMessages compaction boundary", () => {
+  const marker = (id: string, summary: string): AppMessage =>
+    ({
+      id,
+      role: "user",
+      parts: [
+        { type: "text", text: summary },
+        { type: COMPACTION_PART_TYPE, data: { compacted: 4, at: 1 } },
+      ],
+      metadata: { visibility: "internal" },
+    }) as never;
+
+  const textsOf = (model: unknown[]) =>
+    JSON.stringify((model as { content?: unknown }[]).map((m) => m.content));
+
+  it("leaves a chat that was never compacted alone", async () => {
+    const history = [user("u1", "first"), asst("a1", [{ type: "text", text: "reply" }])];
+    expect(await toModelMessages(history)).toHaveLength(2);
+  });
+
+  it("drops everything before the marker and keeps the summary", async () => {
+    const model = await toModelMessages([
+      user("u1", "ancient history"),
+      asst("a1", [{ type: "text", text: "long forgotten" }]),
+      marker("c1", "the user is training for a marathon"),
+      user("u2", "what pace should I run?"),
+    ]);
+    const dump = textsOf(model);
+    expect(dump).not.toContain("ancient history");
+    expect(dump).not.toContain("long forgotten");
+    expect(dump).toContain("training for a marathon");
+    expect(dump).toContain("what pace should I run?");
+    // The marker part itself is dropped by the SDK — only its text survives.
+    expect(dump).not.toContain(COMPACTION_PART_TYPE);
+  });
+
+  it("slices at the LAST marker when a chat was compacted twice", async () => {
+    const model = await toModelMessages([
+      user("u1", "ancient history"),
+      marker("c1", "first summary"),
+      user("u2", "middle"),
+      marker("c2", "second summary"),
+      user("u3", "now"),
+    ]);
+    const dump = textsOf(model);
+    expect(dump).not.toContain("first summary");
+    expect(dump).not.toContain("middle");
+    expect(dump).toContain("second summary");
+  });
+
+  it("the model conversation opens on a user turn", async () => {
+    // Anthropic rejects a prompt that starts with an assistant message, and after
+    // slicing the summary IS the first message — hence its `user` role.
+    const model = (await toModelMessages([
+      user("u1", "ancient"),
+      marker("c1", "summary"),
+      asst("a2", [{ type: "text", text: "carrying on" }]),
+    ])) as { role: string }[];
+    expect(model[0].role).toBe("user");
+  });
+
+  it("a tool call left behind the boundary can't orphan a result", async () => {
+    const model = await toModelMessages([
+      asst("a1", [approvedNoOutput]),
+      marker("c1", "summary"),
+      user("u2", "next"),
+    ]);
+    const { calls } = assertBalanced(model);
+    expect(calls.size).toBe(0); // the call went away with its message
   });
 });

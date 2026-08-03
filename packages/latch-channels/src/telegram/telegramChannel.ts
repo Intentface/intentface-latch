@@ -1,7 +1,21 @@
 import type { AppMessage } from "@intentface/latch-core";
-import type { AskSession, AskStateStore, ChannelRunOps, Question, TranscribeAudio } from "../types.js";
+import type {
+  AskSession,
+  AskStateStore,
+  ChannelRunOps,
+  ChannelThreadStore,
+  Question,
+  TranscribeAudio,
+} from "../types.js";
 import { consumeRun, isPendingApprovalError, pendingApprovals, pendingQuestion } from "../render.js";
 import { nextAskStep, type AskEvent } from "../ask.js";
+import {
+  CHANNEL_COMMANDS,
+  helpText,
+  parseCommand,
+  THREAD_CHANGING_COMMANDS,
+  type ParsedCommand,
+} from "../commands.js";
 import {
   assertCallbackData,
   telegramApi,
@@ -37,6 +51,13 @@ const MAX_INLINE_FILE_BYTES = 10 * 1024 * 1024;
 const STILL_WORKING_MESSAGE = "I am still working on the previous message in this chat.";
 const TRANSCRIBE_FAILED_MESSAGE =
   "⚠️ Couldn't transcribe your voice message — please try again or type it instead.";
+const THREAD_UNAVAILABLE_MESSAGE =
+  "⚠️ Couldn't work out which conversation this belongs to — please send that again.";
+/** How much of a compaction summary `/compact` echoes back (Telegram caps at 4096). */
+const MAX_SUMMARY_CHARS = 2000;
+
+const truncate = (text: string, max: number) =>
+  text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
 
 export interface TelegramAuthResult<P> {
   allowed: boolean;
@@ -113,6 +134,12 @@ export interface TelegramChannelConfig<P> {
    * answers collected so far between webhook deliveries.
    */
   askState?: AskStateStore;
+  /**
+   * Host storage for the current thread epoch, which is what makes `/new`
+   * possible: a Telegram DM is otherwise one conversation forever. Without it
+   * `/new` reports that it isn't available and everything else works unchanged.
+   */
+  thread?: ChannelThreadStore;
   /** Keep a serverless function alive after the fast ACK (Vercel: `waitUntil`). */
   waitUntil?: (p: Promise<unknown>) => void;
   /** Test seam: base URL / fetch for the Bot API client. */
@@ -258,8 +285,54 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       : config.webhookSecret;
   }
 
-  /** chatId for a Telegram DM — continuity is per (bot, Telegram user). */
-  const chatIdFor = (telegramUserId: string) => `telegram_${config.botRef}_${telegramUserId}`;
+  /**
+   * The permanent key for a Telegram DM — continuity is per (bot, Telegram user).
+   * Also the `ChannelThreadStore` key, so the epoch survives token rotation.
+   */
+  const baseChatIdFor = (telegramUserId: string) => `telegram_${config.botRef}_${telegramUserId}`;
+
+  /**
+   * The chat this DM is currently writing to. `/new` bumps the epoch; epoch 0
+   * keeps the original, un-suffixed id so no existing conversation moves. `_t<n>`
+   * can't collide with a (numeric) Telegram user id and stays URL-safe — chat ids
+   * show up in `/chat/<chatId>` links.
+   *
+   * The epoch comes back with it so nothing has to parse the suffix again: the
+   * format lives here only. A store failure THROWS rather than falling back to
+   * epoch 0 — that would silently write the message into the conversation the
+   * user just left behind, mixing two threads with no way to tell.
+   */
+  async function currentThread(telegramUserId: string): Promise<{ chatId: string; epoch: number }> {
+    const base = baseChatIdFor(telegramUserId);
+    if (!config.thread) return { chatId: base, epoch: 0 };
+    const epoch = await config.thread.current(base);
+    return { chatId: epoch > 0 ? `${base}_t${epoch}` : base, epoch };
+  }
+
+  /** `currentThread`'s chat id alone, for the paths that don't need the epoch. */
+  const currentChatId = async (telegramUserId: string) =>
+    (await currentThread(telegramUserId)).chatId;
+
+  /**
+   * The current chat id, or null after telling the user we couldn't work it out.
+   * Used by the entry points a host calls directly (`runMessage`,
+   * `replayMessage`): they run detached under `waitUntil`, so a rejected promise
+   * would only reach a log and the person would be left with silence.
+   */
+  async function resolveThreadOrNotify(ctx: {
+    telegramUserId: string;
+    telegramChatId: string;
+  }): Promise<string | null> {
+    try {
+      return await currentChatId(ctx.telegramUserId);
+    } catch (e) {
+      console.error("[telegram] thread lookup failed:", e);
+      await api
+        .sendMessage({ chat_id: ctx.telegramChatId, text: THREAD_UNAVAILABLE_MESSAGE })
+        .catch(() => {});
+      return null;
+    }
+  }
 
   /**
    * Run `fn` under the one-turn-per-chat lease. Every path that mutates a
@@ -324,16 +397,26 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       return;
     }
 
+    // A command changes what the message MEANS everywhere below: it isn't an
+    // answer to a question, isn't worth stashing for replay, and never reaches
+    // the agent. Media rules it out — a captioned photo is a real message, and
+    // running a command would silently drop the file.
+    const command = media.length === 0 ? parseCommand(text) : null;
+
     if (!auth.allowed || auth.principal === undefined) {
-      await config
-        .stashPending?.({
-          telegramUserId,
-          ...(from.username ? { username: from.username } : {}),
-          telegramChatId,
-          text,
-          ...(media.length ? { media } : {}),
-        })
-        .catch((e) => console.error("[telegram] stashPending failed:", e));
+      // Don't stash a command: the post-link replay would send the agent the
+      // literal "/new" as a message.
+      if (!command) {
+        await config
+          .stashPending?.({
+            telegramUserId,
+            ...(from.username ? { username: from.username } : {}),
+            telegramChatId,
+            text,
+            ...(media.length ? { media } : {}),
+          })
+          .catch((e) => console.error("[telegram] stashPending failed:", e));
+      }
       const base = auth.message ?? "You need a Latch account to use this agent.";
       const body = auth.linkUrl
         ? `${escapeHtml(base)}\n\n<a href="${auth.linkUrl}">Link your Latch account</a>`
@@ -350,17 +433,29 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     }
 
     const principal = auth.principal;
-    const chatId = chatIdFor(telegramUserId);
+    // Which conversation this belongs to. If that can't be established, say so
+    // and drop the message: guessing would write it into the wrong thread.
+    let thread: { chatId: string; epoch: number };
+    try {
+      thread = await currentThread(telegramUserId);
+    } catch (e) {
+      console.error("[telegram] thread lookup failed:", e);
+      await api
+        .sendMessage({ chat_id: msg.chat.id, text: THREAD_UNAVAILABLE_MESSAGE })
+        .catch(() => {});
+      return;
+    }
+    const chatId = thread.chatId;
 
     // A questionnaire on screen changes what a plain message MEANS: it answers
     // the current question rather than starting a turn. Deliberately downstream
     // of `seen()` — a redelivered update would otherwise be applied as a second
     // answer and skip a question — and downstream of the auth gate, so an
     // unlinked user still gets the link prompt and can't mutate ask state.
+    let droppedQuestions = false;
     if (config.askState) {
       const session = await config.askState.get(chatId).catch(() => null);
       if (session) {
-        const command = text.startsWith("/");
         // Media is never an answer: treating a captioned photo as one would
         // silently drop the file, since answers are plain text. Let it fall
         // through to a normal turn so the attachment actually reaches the agent.
@@ -378,25 +473,34 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
           }
           return;
         }
-        // A command, or a message carrying media — not an answer. Drop the
-        // questionnaire (the parked call dies with the next turn anyway) and
-        // retire its buttons so they don't look live.
-        await config.askState.clear(chatId).catch(() => {});
-        if (session.promptRef) await stripKeyboard(telegramChatId, session.promptRef);
-        if (command && /^\/(cancel|skip)\b/.test(text)) {
-          await api
-            .sendMessage({
-              chat_id: msg.chat.id,
-              text: "Dropped those questions. What would you like to do instead?",
-            })
-            .catch(() => {});
-          return;
+        // Not an answer. Retire the questionnaire when whatever comes next
+        // abandons the parked call anyway — a fresh turn (media, or unknown `/`
+        // text) or a command that ends/replaces the thread. Read-only commands
+        // (`/status`, `/help`) leave it live: asking about a conversation
+        // shouldn't destroy the questions in it.
+        if (!command || THREAD_CHANGING_COMMANDS.has(command.name)) {
+          await config.askState.clear(chatId).catch(() => {});
+          if (session.promptRef) await stripKeyboard(telegramChatId, session.promptRef);
+          droppedQuestions = true;
         }
       }
     }
 
+    if (command) {
+      await runCommand({
+        command,
+        chatId,
+        epoch: thread.epoch,
+        telegramChatId,
+        telegramUserId,
+        principal,
+        droppedQuestions,
+      });
+      return;
+    }
+
     await withTurnLease(chatId, msg.chat.id, () =>
-      runMessage({ telegramUserId, telegramChatId, text, media, principal }),
+      runMessage({ telegramUserId, telegramChatId, text, media, principal, chatId }),
     );
   }
 
@@ -411,8 +515,11 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     text: string;
     media?: { ref: TgFileRef; mediaType: string; name: string }[];
     principal: P;
+    /** The resolved thread, when the caller already looked it up. */
+    chatId?: string;
   }): Promise<void> {
-    const chatId = chatIdFor(ctx.telegramUserId);
+    const chatId = ctx.chatId ?? (await resolveThreadOrNotify(ctx));
+    if (chatId === null) return;
 
     // Media → inline data-URL file parts (≤10 MB each); oversized listed in a
     // note. Audio is the exception: it's transcribed to text (never a file
@@ -533,7 +640,9 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     media?: { ref: TgFileRef; mediaType: string; name: string }[];
     principal: P;
   }): Promise<void> {
-    await withTurnLease(chatIdFor(ctx.telegramUserId), ctx.telegramChatId, () => runMessage(ctx));
+    const chatId = await resolveThreadOrNotify(ctx);
+    if (chatId === null) return;
+    await withTurnLease(chatId, ctx.telegramChatId, () => runMessage({ ...ctx, chatId }));
   }
 
   /**
@@ -834,6 +943,215 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     return { acked };
   }
 
+  // ── Commands ───────────────────────────────────────────────────────────────
+
+  interface CommandCtx {
+    command: ParsedCommand;
+    /** The thread the command was issued in (before `/new` rotates it). */
+    chatId: string;
+    /** That thread's epoch — 0 for the first conversation. */
+    epoch: number;
+    telegramChatId: string;
+    telegramUserId: string;
+    principal: P;
+    /** True when a live questionnaire was retired to make room for this command. */
+    droppedQuestions: boolean;
+  }
+
+  /** Plain-text reply; commands answer conversationally, never as a turn. */
+  const say = (telegramChatId: string, text: string) =>
+    api.sendMessage({ chat_id: telegramChatId, text }).catch((e) => {
+      console.error("[telegram] command reply failed:", e);
+      return undefined;
+    });
+
+  const COMMAND_HELP = `Commands\n\n${helpText(CHANNEL_COMMANDS)}`;
+
+  async function runCommand(ctx: CommandCtx): Promise<void> {
+    switch (ctx.command.name) {
+      case "help":
+        await say(ctx.telegramChatId, COMMAND_HELP);
+        return;
+      case "start":
+        await say(
+          ctx.telegramChatId,
+          `You're talking to ${config.agent}. Send a message — text, a photo, a file, or a voice note — and it will answer here.\n\n${COMMAND_HELP}`,
+        );
+        return;
+      case "new":
+        await runNewCommand(ctx);
+        return;
+      case "compact":
+        await runCompactCommand(ctx);
+        return;
+      case "cancel":
+        await runCancelCommand(ctx);
+        return;
+      case "status":
+        await runStatusCommand(ctx);
+        return;
+      default:
+        // Unreachable: `parseCommand` only resolves names in the registry.
+        await say(ctx.telegramChatId, COMMAND_HELP);
+    }
+  }
+
+  /** `/new` — rotate to a fresh thread. Cheap: no lease, no agent turn. */
+  async function runNewCommand(ctx: CommandCtx): Promise<void> {
+    if (!config.thread) {
+      console.warn("[telegram] /new used but no thread store configured");
+      await say(ctx.telegramChatId, "Starting a new conversation isn't available on this bot.");
+      return;
+    }
+    try {
+      await config.thread.rotate(baseChatIdFor(ctx.telegramUserId));
+    } catch (e) {
+      console.error("[telegram] /new failed:", e);
+      await say(ctx.telegramChatId, "⚠️ Couldn't start a new conversation — please try again.");
+      return;
+    }
+    await say(
+      ctx.telegramChatId,
+      "Started a new conversation. The previous one is still in the web app.",
+    );
+  }
+
+  /**
+   * `/compact` — summarize the thread and keep going in the same one. Takes the
+   * turn lease: it costs a model call and rewrites what the next turn sends.
+   */
+  async function runCompactCommand(ctx: CommandCtx): Promise<void> {
+    const compact = config.runtime.compactChat;
+    if (!compact) {
+      console.warn("[telegram] /compact used but runtime.compactChat not wired");
+      await say(ctx.telegramChatId, "Compacting isn't available on this bot.");
+      return;
+    }
+    await withTurnLease(ctx.chatId, ctx.telegramChatId, async () => {
+      await api.sendChatAction(ctx.telegramChatId);
+      try {
+        const res = await compact({
+          chatId: ctx.chatId,
+          principal: ctx.principal,
+          ...(ctx.command.args ? { focus: ctx.command.args } : {}),
+        });
+        if (!res) {
+          await say(ctx.telegramChatId, "This conversation is short enough already.");
+          return;
+        }
+        // Plain text on purpose: the summary is model output, so with parse_mode
+        // set it would have to be escaped, and escaping AFTER truncating can push
+        // the message back over Telegram's 4096-char limit (or split an entity)
+        // — which would drop the reply entirely.
+        await say(
+          ctx.telegramChatId,
+          `♻️ Compacted ${res.compacted} messages. Carrying forward:\n\n${truncate(
+            res.summary,
+            MAX_SUMMARY_CHARS,
+          )}`,
+        );
+      } catch (e) {
+        console.error("[telegram] /compact failed:", e);
+        const m = e instanceof Error ? e.message : String(e);
+        await say(ctx.telegramChatId, `⚠️ ${m.slice(0, 3000)}`);
+        // Paused turn: show what it's waiting on, so the refusal is actionable.
+        if (isPendingApprovalError(e)) {
+          await renderPending(
+            ctx.chatId,
+            ctx.telegramChatId,
+            ctx.telegramUserId,
+            ctx.principal,
+          ).catch((err) => console.error("[telegram] re-render pending failed:", err));
+        }
+      }
+    });
+  }
+
+  /**
+   * `/cancel` — get out of whatever the agent is waiting on. A questionnaire is
+   * already dropped by the time we get here; approvals are denied, which lets the
+   * agent wrap up instead of leaving the chat gated forever.
+   */
+  async function runCancelCommand(ctx: CommandCtx): Promise<void> {
+    // The questionnaire is already gone (runTurn dropped it), so report that
+    // BEFORE the lease: a busy chat would otherwise answer only "still working"
+    // and the user would never learn their questions had been retired.
+    if (ctx.droppedQuestions) {
+      await say(ctx.telegramChatId, "Dropped those questions. What would you like to do instead?");
+    }
+
+    // Approvals, in contrast, are read and denied INSIDE the lease: a decision
+    // built from a pre-lease read could name approvals a concurrent turn has
+    // already moved past. If a turn is running the user gets "still working",
+    // which is the honest answer — there'd be nothing to cancel yet anyway.
+    await withTurnLease(ctx.chatId, ctx.telegramChatId, async () => {
+      let approvals: ReturnType<typeof pendingApprovals> = [];
+      try {
+        approvals = pendingApprovals(
+          await config.runtime.loadHistory({ chatId: ctx.chatId, principal: ctx.principal }),
+        );
+      } catch (e) {
+        console.error("[telegram] /cancel history read failed:", e);
+        await say(ctx.telegramChatId, "⚠️ Couldn't read this conversation — try again.");
+        return;
+      }
+      // Nothing left to say when the questions were the thing being cancelled —
+      // "Nothing to cancel." right after "Dropped those questions." contradicts it.
+      if (!approvals.length) {
+        if (!ctx.droppedQuestions) await say(ctx.telegramChatId, "Nothing to cancel.");
+        return;
+      }
+
+      try {
+        const res = await config.runtime.applyApproval({
+          chatId: ctx.chatId,
+          principal: ctx.principal,
+          decisions: approvals.map((a) => ({ approvalId: a.approvalId, approved: false })),
+        });
+        await say(ctx.telegramChatId, `🚫 Denied ${approvals.map((a) => a.toolName).join(", ")}.`);
+        await renderTelegramStream(consumeRun(res), { api, chatId: ctx.telegramChatId });
+        await renderPending(ctx.chatId, ctx.telegramChatId, ctx.telegramUserId, ctx.principal);
+      } catch (e) {
+        console.error("[telegram] /cancel failed:", e);
+        const m = e instanceof Error ? e.message : String(e);
+        await say(ctx.telegramChatId, `⚠️ ${m.slice(0, 3000)}`);
+      }
+    });
+  }
+
+  /** `/status` — what this thread is and what it's waiting on. Read-only. */
+  async function runStatusCommand(ctx: CommandCtx): Promise<void> {
+    let history: AppMessage[] = [];
+    try {
+      history = await config.runtime.loadHistory({
+        chatId: ctx.chatId,
+        principal: ctx.principal,
+      });
+    } catch (e) {
+      console.error("[telegram] /status history read failed:", e);
+      await say(ctx.telegramChatId, "⚠️ Couldn't read this conversation.");
+      return;
+    }
+    const approvals = pendingApprovals(history);
+    const question = pendingQuestion(history);
+    const waiting = approvals.length
+      ? `approval for ${approvals.map((a) => a.toolName).join(", ")}`
+      : question
+        ? `${question.questions.length} question(s)`
+        : "nothing";
+    await say(
+      ctx.telegramChatId,
+      [
+        `Agent: ${config.agent}`,
+        // The epoch comes from `currentThread`, so the `_t<n>` id format stays
+        // known in exactly one place.
+        `Conversation: ${ctx.epoch > 0 ? `#${ctx.epoch + 1}` : "the first one"}`,
+        `Messages: ${history.length}`,
+        `Waiting on: ${waiting}`,
+      ].join("\n"),
+    );
+  }
+
   /**
    * Every inline button lands here. Approvals and questionnaires use distinct
    * prefixes, so try both decoders — an undecodable payload is ignored, which is
@@ -875,7 +1193,16 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
   ): Promise<void> {
     const telegramUserId = String(cb.from.id);
     const telegramChatId = String(cb.message?.chat.id ?? cb.from.id);
-    const chatId = chatIdFor(telegramUserId);
+    // Unknown thread ⇒ we can't tell which session this tap belongs to. Ack with
+    // the reason and leave the card alone so a retry still works.
+    let chatId: string;
+    try {
+      chatId = await currentChatId(telegramUserId);
+    } catch (e) {
+      console.error("[telegram] thread lookup failed:", e);
+      await api.answerCallbackQuery(cb.id, "Something went wrong — try again.");
+      return;
+    }
 
     const session = await config.askState?.get(chatId).catch(() => null);
     // Stale button: the session is gone (answered elsewhere, cancelled, expired)
@@ -945,24 +1272,54 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
       return;
     }
 
-    const chatId = chatIdFor(telegramUserId);
     const principal = auth.principal;
+    let chatId: string;
+    try {
+      chatId = await currentChatId(telegramUserId);
+    } catch (e) {
+      console.error("[telegram] thread lookup failed:", e);
+      await api
+        .sendMessage({ chat_id: telegramChatId, text: THREAD_UNAVAILABLE_MESSAGE })
+        .catch(() => {});
+      return;
+    }
+
+    // Resolve the tapped approval against fresh history BEFORE acting on it. Not
+    // just for naming the card: a card left behind by a previous thread (`/new`)
+    // or already decided in the web app points at an approval this chat no longer
+    // has, and pushing it through would surface a raw "Unknown chat" error.
+    let history: AppMessage[];
+    try {
+      history = await config.runtime.loadHistory({ chatId, principal });
+    } catch (e) {
+      // Couldn't tell live from stale. Say so and leave the card as it is —
+      // retiring it on a transient read failure would strand a real approval
+      // with no buttons left to resolve it.
+      console.error("[telegram] approval history read failed:", e);
+      await api
+        .sendMessage({ chat_id: telegramChatId, text: "⚠️ Couldn't check that request — try again." })
+        .catch(() => {});
+      return;
+    }
+    const live = pendingApprovals(history).find((p) => p.approvalId === decoded.approvalId);
+    if (!live) {
+      if (cb.message) {
+        await api
+          .editMessageText({
+            chat_id: cb.message.chat.id,
+            message_id: cb.message.message_id,
+            text: "This request is no longer active.",
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+    const toolName = live.toolName;
 
     // The resume mutates the same run state as a fresh turn — take the lease
     // too, or an approval press racing a new message runs two turns at once.
     // If the chat is busy the buttons stay in place; the user presses again.
     await withTurnLease(chatId, telegramChatId, async () => {
-      // Name the tool on the settled card (history still holds the pending part).
-      let toolName = "tool";
-      try {
-        const history = await config.runtime.loadHistory({ chatId, principal });
-        toolName =
-          pendingApprovals(history).find((p) => p.approvalId === decoded.approvalId)?.toolName ??
-          toolName;
-      } catch {
-        /* cosmetic only */
-      }
-
       try {
         const res = await config.runtime.applyApproval({
           chatId,

@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import { createChannelAskStore, migrateChannelAsk } from "./channel-ask-store";
+import { createChannelThreadStore, migrateChannelThread } from "./channel-thread-store";
 import type { TgFileRef } from "@intentface/latch-channels/telegram";
 
 /**
@@ -16,6 +17,8 @@ import type { TgFileRef } from "@intentface/latch-channels/telegram";
  *    WhatsApp store (chat ids are channel-prefixed so keys never collide).
  *  - `latch_channel_ask`       — the in-flight askUser questionnaire per chat
  *    (also channel-shared), holding answers collected so far.
+ *  - `latch_channel_thread`    — which conversation a DM is currently writing to
+ *    (also channel-shared); `/new` bumps it.
  *
  * Idempotent create-if-not-exists, same pattern as `migrateSlack`.
  */
@@ -67,6 +70,7 @@ export async function migrateTelegram(client: Client): Promise<void> {
     expires_at INTEGER NOT NULL
   )`);
   await migrateChannelAsk(client);
+  await migrateChannelThread(client);
   // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
   for (const [table, col] of [
     ["latch_telegram_bot", "agent_scope TEXT"],
@@ -216,6 +220,19 @@ export function createTelegramStore(client: Client) {
         sql: `DELETE FROM latch_telegram_pending WHERE bot_id = ?`,
         args: [id],
       });
+      // Per-chat state in the channel-shared tables is keyed by chat id, which
+      // embeds the bot id (`telegram_<botId>_<userId>`) — drop those rows too, or
+      // deleting a binding leaves its thread pointers and half-answered
+      // questionnaires behind forever. Matched with `substr` rather than LIKE:
+      // `_` is a LIKE wildcard and these keys are full of underscores.
+      const prefix = `telegram_${id}_`;
+      for (const table of ["latch_channel_thread", "latch_channel_ask", "latch_channel_turn"]) {
+        const column = table === "latch_channel_thread" ? "chat_key" : "chat_id";
+        await client.execute({
+          sql: `DELETE FROM ${table} WHERE substr(${column}, 1, ?) = ?`,
+          args: [prefix.length, prefix],
+        });
+      }
     },
 
     /**
@@ -376,6 +393,7 @@ export function createTelegramStore(client: Client) {
     },
 
     ...createChannelAskStore(client),
+    ...createChannelThreadStore(client),
   };
 }
 

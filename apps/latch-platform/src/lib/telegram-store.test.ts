@@ -1,6 +1,8 @@
-import { createClient, type Client } from "@libsql/client";
+import { createClient } from "@libsql/client";
+import type { Client } from "@libsql/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTelegramStore, migrateTelegram, type TelegramStore } from "./telegram-store";
+import { createTelegramStore, migrateTelegram } from "./telegram-store";
+import type { TelegramStore } from "./telegram-store";
 
 let client: Client;
 let store: TelegramStore;
@@ -247,5 +249,47 @@ describe("telegram store: askUser sessions", () => {
     await store.beginAsk("telegram_b1_6", { ...session, toolCallId: "toolu_9", nonce: "n9" });
     expect((await store.getAsk(chat))!.toolCallId).toBe("toolu_1");
     expect((await store.getAsk("telegram_b1_6"))!.toolCallId).toBe("toolu_9");
+  });
+});
+
+describe("telegram store: thread pointer", () => {
+  const key = "telegram_b1_5";
+
+  it("starts on the first thread (epoch 0)", async () => {
+    expect(await store.currentThread(key)).toBe(0);
+  });
+
+  it("rotate bumps and persists the epoch", async () => {
+    expect(await store.rotateThread(key)).toBe(1);
+    expect(await store.currentThread(key)).toBe(1);
+    expect(await store.rotateThread(key)).toBe(2);
+    expect(await store.currentThread(key)).toBe(2);
+  });
+
+  it("keeps threads of different chats apart", async () => {
+    await store.rotateThread(key);
+    await store.rotateThread(key);
+    expect(await store.currentThread("telegram_b1_6")).toBe(0);
+    expect(await store.currentThread(key)).toBe(2);
+  });
+
+  it("is dropped with the bot, leaving other bots' pointers alone", async () => {
+    // Chat ids embed the bot id, so a removed binding must not leave its
+    // routing state behind.
+    await store.rotateThread(key);
+    await store.rotateThread("telegram_b2_5");
+    await store.remove("b1");
+    expect(await store.currentThread(key)).toBe(0);
+    expect(await store.currentThread("telegram_b2_5")).toBe(1);
+  });
+
+  it("survives losing the identity row", async () => {
+    // The pointer deliberately lives in its own table: hanging it off
+    // `latch_telegram_identity` would make an unlink drop the user back into a
+    // thread they had rotated away from.
+    await store.linkIdentity({ botId: "b1", telegramUserId: "5", userId: "u1", orgId: "org1" });
+    await store.rotateThread(key);
+    await client.execute(`DELETE FROM latch_telegram_identity`);
+    expect(await store.currentThread(key)).toBe(1);
   });
 });

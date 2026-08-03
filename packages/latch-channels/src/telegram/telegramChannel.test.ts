@@ -58,6 +58,12 @@ function harness(overrides: Partial<TelegramChannelConfig<{ userId: string }>> =
     handleChat: vi.fn(async (_input: unknown) => textRun("Answer!")),
     applyApproval: vi.fn(async (_input: unknown) => textRun("Resumed.")),
     applyToolResult: vi.fn(async (_input: unknown) => textRun("Thanks!")),
+    compactChat: vi.fn(
+      async (_input: unknown): Promise<{ summary: string; compacted: number } | null> => ({
+        summary: "The user is training for a marathon in October.",
+        compacted: 12,
+      }),
+    ),
     loadHistory: vi.fn(async (): Promise<AppMessage[]> => []),
   };
 
@@ -289,6 +295,26 @@ describe("telegramChannel.handleRequest", () => {
     expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-2");
   });
 
+  it("replayMessage tells the user when the thread can't be resolved", async () => {
+    // It runs detached under waitUntil, so a rejected promise would only reach a
+    // log and the person would be left with silence after linking.
+    const thread = {
+      current: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+      rotate: vi.fn(async () => 1),
+    };
+    const h = harness({ thread });
+    await h.channel.replayMessage({
+      telegramUserId: "5",
+      telegramChatId: "5",
+      text: "replayed",
+      principal: { userId: "u1" },
+    });
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(String(h.of("sendMessage")[0]!.body.text)).toMatch(/which conversation/i);
+  });
+
   it("replayMessage backs off with 'still working' when the lease is held", async () => {
     const h = harness({ claimTurn: async () => null });
     await h.channel.replayMessage({
@@ -322,6 +348,7 @@ describe("telegramChannel.handleRequest", () => {
     const claimTurn = vi.fn(async () => "lease-3");
     const releaseTurn = vi.fn(async () => {});
     const h = harness({ claimTurn, releaseTurn });
+    h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
     await h.channel.handleRequest(
       webhookRequest({
         update_id: 3,
@@ -336,6 +363,7 @@ describe("telegramChannel.handleRequest", () => {
 
   it("approval callbacks back off with 'still working' when the turn is claimed", async () => {
     const h = harness({ claimTurn: async () => null });
+    h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
     await h.channel.handleRequest(
       webhookRequest({
         update_id: 3,
@@ -345,6 +373,48 @@ describe("telegramChannel.handleRequest", () => {
     await h.flush();
     expect(h.runtime.applyApproval).not.toHaveBeenCalled();
     expect(String(h.of("sendMessage")[0]!.body.text)).toContain("still working");
+  });
+
+  it("retires a card whose approval is gone from fresh history", async () => {
+    // e.g. decided in the web app, or left over from a previous thread — pushing
+    // it through would surface a raw "Unknown chat" instead.
+    const h = harness();
+    h.runtime.loadHistory.mockResolvedValue([]);
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 4,
+        callback_query: {
+          id: "cb2",
+          from: { id: 5 },
+          message: { message_id: 99, chat: { id: 5, type: "private" } },
+          data: "lta:1|ap1",
+        },
+      }),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect(String(h.of("editMessageText").at(-1)!.body.text)).toMatch(/no longer active/i);
+  });
+
+  it("leaves the card alone when the history read FAILS", async () => {
+    // A transient read failure must not strand a live approval with no buttons.
+    const h = harness();
+    h.runtime.loadHistory.mockRejectedValue(new Error("db down"));
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 5,
+        callback_query: {
+          id: "cb3",
+          from: { id: 5 },
+          message: { message_id: 99, chat: { id: 5, type: "private" } },
+          data: "lta:1|ap1",
+        },
+      }),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect(h.of("editMessageText")).toHaveLength(0); // card untouched
+    expect(String(h.of("sendMessage").at(-1)!.body.text)).toMatch(/couldn't check/i);
   });
 
   it("resolves an approval callback: applyApproval + settled card + continuation", async () => {
@@ -919,5 +989,320 @@ describe("telegramChannel questionnaires (askUser)", () => {
     const texts = h.of("sendMessage").map((c) => String(c.body.text));
     expect(texts.some((t) => t.includes("web_search"))).toBe(true);
     expect(texts.some((t) => t.includes("tavoitteesi"))).toBe(false);
+  });
+});
+
+describe("telegramChannel commands", () => {
+  /** An in-memory ChannelThreadStore with the real "rotate bumps" semantics. */
+  function fakeThreadStore() {
+    const epochs = new Map<string, number>();
+    return {
+      epochs,
+      store: {
+        current: vi.fn(async (key: string) => epochs.get(key) ?? 0),
+        rotate: vi.fn(async (key: string) => {
+          const next = (epochs.get(key) ?? 0) + 1;
+          epochs.set(key, next);
+          return next;
+        }),
+      },
+    };
+  }
+
+  const send = (h: ReturnType<typeof harness>, text: string, update_id = 1) =>
+    h.channel.handleRequest(webhookRequest({ ...dm(text), update_id }));
+
+  const texts = (h: ReturnType<typeof harness>) =>
+    h.of("sendMessage").map((c) => String(c.body.text));
+
+  const question = {
+    question: "Mikä on tavoitteesi?",
+    options: [{ label: "Ajan parantaminen", description: "faster" }],
+  };
+
+  it("/help lists the commands and runs no turn", async () => {
+    const h = harness();
+    await send(h, "/help");
+    await h.flush();
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    const help = texts(h).at(-1)!;
+    for (const name of ["/new", "/compact", "/cancel", "/status", "/help", "/start"]) {
+      expect(help).toContain(name);
+    }
+  });
+
+  it("/start names the agent instead of sending '/start' to it", async () => {
+    const h = harness();
+    await send(h, "/start");
+    await h.flush();
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(texts(h).at(-1)!).toContain("support");
+  });
+
+  it("an unknown command still reaches the agent", async () => {
+    // Pasted paths and unregistered commands must not be swallowed.
+    const h = harness();
+    await send(h, "/deploy the thing");
+    await h.flush();
+    const input = h.runtime.handleChat.mock.calls[0]![0] as { message: AppMessage };
+    expect(JSON.stringify(input.message.parts)).toContain("/deploy the thing");
+  });
+
+  it("a command from an unlinked user is not stashed for replay", async () => {
+    const stashPending = vi.fn(async () => {});
+    const h = harness({
+      stashPending,
+      authorizeUser: vi.fn(async () => ({ allowed: false, linkUrl: "https://latch/link" })),
+    });
+    await send(h, "/new");
+    await h.flush();
+    // Otherwise linking would replay "/new" to the agent as a message.
+    expect(stashPending).not.toHaveBeenCalled();
+    expect(texts(h).at(-1)!).toContain("Link your Latch account");
+  });
+
+  describe("/new", () => {
+    it("rotates the thread so the next message lands in a new chat", async () => {
+      const thread = fakeThreadStore();
+      const claimTurn = vi.fn(async () => "lease-n");
+      const h = harness({ thread: thread.store, claimTurn, releaseTurn: async () => {} });
+
+      await send(h, "/new");
+      await h.flush();
+      expect(h.runtime.handleChat).not.toHaveBeenCalled();
+      expect(thread.store.rotate).toHaveBeenCalledWith("telegram_bot1_5");
+      expect(texts(h).at(-1)!).toMatch(/new conversation/i);
+
+      await send(h, "fresh start", 2);
+      await h.flush();
+      expect(h.runtime.handleChat.mock.calls[0]![0]).toMatchObject({
+        chatId: "telegram_bot1_5_t1",
+      });
+      // The lease and every other per-chat key follow the rotated id.
+      expect(claimTurn).toHaveBeenCalledWith("telegram_bot1_5_t1");
+    });
+
+    it("keeps the original chat id for the first thread", async () => {
+      const thread = fakeThreadStore();
+      const h = harness({ thread: thread.store });
+      await send(h, "hi");
+      await h.flush();
+      expect(h.runtime.handleChat.mock.calls[0]![0]).toMatchObject({
+        chatId: "telegram_bot1_5",
+      });
+    });
+
+    it("says so when the host has no thread store", async () => {
+      const h = harness();
+      await send(h, "/new");
+      await h.flush();
+      expect(texts(h).at(-1)!).toMatch(/isn't available/i);
+      expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    });
+
+    it("drops the message when the thread can't be resolved", async () => {
+      // Falling back to epoch 0 would write into the conversation the user just
+      // left behind, silently mixing two threads.
+      const thread = fakeThreadStore();
+      thread.store.current.mockRejectedValue(new Error("db down"));
+      const h = harness({ thread: thread.store });
+      await send(h, "hello?");
+      await h.flush();
+      expect(h.runtime.handleChat).not.toHaveBeenCalled();
+      expect(texts(h).at(-1)!).toMatch(/which conversation/i);
+    });
+
+    it("retires a live questionnaire", async () => {
+      const ask = fakeAskState();
+      const thread = fakeThreadStore();
+      const h = harness({ askState: ask.store, thread: thread.store });
+      h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [question]));
+      await send(h, "moi");
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeDefined();
+
+      await send(h, "/new", 2);
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeUndefined();
+      expect(h.of("editMessageReplyMarkup").length).toBeGreaterThan(0);
+      expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("/status", () => {
+    it("reports the agent, the thread, the message count and what it waits on", async () => {
+      const thread = fakeThreadStore();
+      thread.epochs.set("telegram_bot1_5", 2);
+      const h = harness({ thread: thread.store });
+      h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
+
+      await send(h, "/status");
+      await h.flush();
+      const status = texts(h).at(-1)!;
+      expect(status).toContain("support");
+      expect(status).toContain("#3"); // epoch 2 ⇒ the third conversation
+      expect(status).toContain("Messages: 1");
+      expect(status).toContain("web_search");
+      expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    });
+
+    it("does NOT retire a live questionnaire", async () => {
+      // Asking about a conversation must not destroy the questions in it.
+      const ask = fakeAskState();
+      const h = harness({ askState: ask.store });
+      h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [question]));
+      await send(h, "moi");
+      await h.flush();
+
+      await send(h, "/status", 2);
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeDefined();
+      expect(texts(h).at(-1)!).toContain("1 question");
+    });
+  });
+
+  describe("/cancel", () => {
+    it("denies every pending approval under the turn lease", async () => {
+      const claimTurn = vi.fn(async () => "lease-c");
+      const releaseTurn = vi.fn(async () => {});
+      const h = harness({ claimTurn, releaseTurn });
+      h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
+
+      await send(h, "/cancel");
+      await h.flush();
+      expect(h.runtime.applyApproval).toHaveBeenCalledWith({
+        chatId: "telegram_bot1_5",
+        principal: { userId: "u1" },
+        decisions: [{ approvalId: "ap1", approved: false }],
+      });
+      expect(claimTurn).toHaveBeenCalledWith("telegram_bot1_5");
+      expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-c");
+      expect(texts(h).some((t) => t.includes("Denied"))).toBe(true);
+      // The wrap-up the denial produced is rendered.
+      expect(texts(h).some((t) => t === "Resumed.")).toBe(true);
+    });
+
+    it("says there's nothing to cancel when nothing is pending", async () => {
+      const h = harness();
+      await send(h, "/cancel");
+      await h.flush();
+      expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+      expect(texts(h).at(-1)!).toMatch(/nothing to cancel/i);
+    });
+
+    it("retires a live questionnaire and says so", async () => {
+      // The only observable proof that `cancel` is thread-changing: drop it from
+      // THREAD_CHANGING_COMMANDS and the session survives this.
+      const ask = fakeAskState();
+      const h = harness({ askState: ask.store });
+      h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [question]));
+      await send(h, "moi");
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeDefined();
+
+      h.runtime.loadHistory.mockResolvedValue([]);
+      await send(h, "/cancel", 2);
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeUndefined();
+      expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+      expect(texts(h).some((t) => /dropped those questions/i.test(t))).toBe(true);
+      // …and not contradicted by a "nothing to cancel" right after it.
+      expect(texts(h).some((t) => /nothing to cancel/i.test(t))).toBe(false);
+    });
+
+    it("reads what's pending under the lease, not before it", async () => {
+      // A pre-lease read could deny approvals a concurrent turn has moved past.
+      const h = harness({ claimTurn: async () => null });
+      h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
+      await send(h, "/cancel");
+      await h.flush();
+      expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+      expect(texts(h).at(-1)!).toContain("still working");
+    });
+
+    it("still reports a dropped questionnaire when the chat is busy", async () => {
+      // The questions are already gone by then, so reporting only "still
+      // working" would leave the user thinking they're still on screen.
+      const ask = fakeAskState();
+      const h = harness({ askState: ask.store });
+      h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [question]));
+      await send(h, "moi");
+      await h.flush();
+
+      const busy = harness({ askState: ask.store, claimTurn: async () => null });
+      await send(busy, "/cancel", 2);
+      await busy.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeUndefined();
+      const said = texts(busy);
+      expect(said.some((t) => /dropped those questions/i.test(t))).toBe(true);
+      expect(said.some((t) => t.includes("still working"))).toBe(true);
+    });
+  });
+
+  describe("/compact", () => {
+    it("compacts under the lease and echoes the summary", async () => {
+      const claimTurn = vi.fn(async () => "lease-k");
+      const releaseTurn = vi.fn(async () => {});
+      const h = harness({ claimTurn, releaseTurn });
+
+      await send(h, "/compact keep the training plan");
+      await h.flush();
+      expect(h.runtime.compactChat).toHaveBeenCalledWith({
+        chatId: "telegram_bot1_5",
+        principal: { userId: "u1" },
+        focus: "keep the training plan",
+      });
+      expect(claimTurn).toHaveBeenCalledWith("telegram_bot1_5");
+      expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-k");
+      const reply = texts(h).at(-1)!;
+      expect(reply).toContain("12");
+      expect(reply).toContain("marathon in October");
+      expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    });
+
+    it("passes no focus when the command had no arguments", async () => {
+      const h = harness();
+      await send(h, "/compact");
+      await h.flush();
+      expect(h.runtime.compactChat.mock.calls[0]![0]).not.toHaveProperty("focus");
+    });
+
+    it("says the conversation is short enough when there's nothing to compact", async () => {
+      const h = harness();
+      h.runtime.compactChat.mockResolvedValue(null);
+      await send(h, "/compact");
+      await h.flush();
+      expect(texts(h).at(-1)!).toMatch(/short enough/i);
+    });
+
+    it("re-posts the pending card when the turn is paused", async () => {
+      const h = harness();
+      h.runtime.compactChat.mockRejectedValue(
+        Object.assign(new Error("This chat is awaiting a decision"), {
+          code: "pending_approval",
+        }),
+      );
+      h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
+
+      await send(h, "/compact");
+      await h.flush();
+      const all = texts(h);
+      expect(all.some((t) => t.includes("awaiting a decision"))).toBe(true);
+      // Actionable: the approval it's stuck on comes back with its buttons.
+      expect(all.some((t) => t.includes("web_search"))).toBe(true);
+    });
+
+    it("says so when the host has not wired compactChat", async () => {
+      const h = harness({
+        runtime: {
+          handleChat: vi.fn(async () => textRun("Answer!")),
+          applyApproval: vi.fn(async () => textRun("Resumed.")),
+          loadHistory: vi.fn(async () => []),
+        },
+      });
+      await send(h, "/compact");
+      await h.flush();
+      expect(texts(h).at(-1)!).toMatch(/isn't available/i);
+    });
   });
 });
