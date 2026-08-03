@@ -22,7 +22,9 @@ import {
  * override names via `toolNames` if a workspace exposes variants):
  * - `read_file { fileId }` — path-addressable reads.
  * - `create { type, name, folderId?, parentId?, content?, summary? }` — files
- *   and folders; there is no overwrite.
+ *   and folders; there is no overwrite. Folder creates are NOT idempotent:
+ *   a repeat call with the same name+parent inserts a DUPLICATE sibling rather
+ *   than erroring, so `ensureFolders` probes before it creates.
  * - `edit_file { fileId, replacements: [{ oldContent, newContent }] }` —
  *   search-and-replace only; a full rewrite replaces the whole previous text.
  * - `search { query, folderId?, limit?, mode? }` — BM25, folder-scopable.
@@ -44,6 +46,12 @@ const DEFAULT_TOOL_NAMES: LoredexToolNames = {
   edit: "edit_file",
   search: "search",
 };
+
+/**
+ * Loredex auto-creates this file inside every folder it makes, so reading it is
+ * how `ensureFolders` asks "does this folder exist?" without a folder-stat tool.
+ */
+const FOLDER_INDEX_FILENAME = "index.md";
 
 type ToolCall = (tool: string, input: unknown) => Promise<CallResult>;
 type CallResult =
@@ -79,8 +87,9 @@ export function createLoredexStore<P>(opts: {
   toolNames?: Partial<LoredexToolNames>;
 }): MemoryStore<P> {
   const names = { ...DEFAULT_TOOL_NAMES, ...opts.toolNames };
-  // Folders successfully ensured this process lifetime (per scope key) — the
-  // create calls are idempotent-by-tolerance but not free.
+  // Folder prefixes confirmed to exist this process lifetime (`<scope key>:<path>`),
+  // so repeat writes skip the existence probe. Correctness never depends on it:
+  // a cold cache (every serverless start) just re-probes.
   const ensuredFolders = new Set<string>();
 
   /** Open the scope's connection, run `fn` with a tool caller, always close. */
@@ -121,10 +130,25 @@ export function createLoredexStore<P>(opts: {
     }
   }
 
-  /** Create the folder chain for `path` (workspace-relative), tolerating "exists". */
+  /**
+   * Create the folder chain for `path` (workspace-relative), skipping segments
+   * that already exist.
+   *
+   * Loredex's folder `create` does NOT reject a duplicate name: it inserts a
+   * second sibling with the same name, and path resolution then silently
+   * resolves to whichever the traversal reaches first — so a blind re-create
+   * leaves a trail of empty shadow folders (each with just its auto `index.md`)
+   * that nothing can delete, since there is no delete tool. So probe first.
+   *
+   * The probe reads the segment's auto-created `index.md`: folders themselves
+   * aren't addressable by `read_file`, but every Loredex folder has that file.
+   *
+   * Caching is per PREFIX, not per full path — `writeIndex` ensures `root`
+   * while `writeEpisode` ensures `root/episodes`, so a whole-path key made the
+   * second call re-walk (and, before the probe, re-create) every shared
+   * ancestor.
+   */
   async function ensureFolders(call: ToolCall, scopeKey: string, path: string): Promise<void> {
-    const cacheKey = `${scopeKey}:${path}`;
-    if (ensuredFolders.has(cacheKey)) return;
     const parts = path.split("/").filter(Boolean);
     // The caller's private root always exists (Loredex creates it on join)
     // and must never be created here — a `create` for that name would mint a
@@ -132,15 +156,26 @@ export function createLoredexStore<P>(opts: {
     // then inherit `private` visibility from it.
     const first = parts[0] === LOREDEX_PRIVATE_ROOT ? 1 : 0;
     for (let i = first; i < parts.length; i++) {
+      const prefix = parts.slice(0, i + 1).join("/");
+      const cacheKey = `${scopeKey}:${prefix}`;
+      if (ensuredFolders.has(cacheKey)) continue;
+      const probe = await call(names.read, {
+        fileId: `${prefix}/${FOLDER_INDEX_FILENAME}`,
+      });
+      if (probe.ok) {
+        ensuredFolders.add(cacheKey);
+        continue;
+      }
       const parentId = parts.slice(0, i).join("/") || undefined;
-      // "Already exists" comes back as an error — that's the common, fine case.
-      await call(names.create, {
+      const created = await call(names.create, {
         type: "folder",
         name: parts[i],
         ...(parentId ? { parentId } : {}),
       });
+      // Only remember what we know exists: a failed create must be retried on
+      // the next write, not cached as done.
+      if (created.ok) ensuredFolders.add(cacheKey);
     }
-    ensuredFolders.add(cacheKey);
   }
 
   function indexPath(scope: ScopeRef): string {

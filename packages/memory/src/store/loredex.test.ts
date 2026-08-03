@@ -16,6 +16,8 @@ function fakeRegistry(opts?: {
   searchResults?: Array<Record<string, unknown>>;
 }) {
   const files = new Map<string, string>();
+  /** Every folder path created, in order — duplicates included, as live does. */
+  const folders: string[] = [];
   const calls: Array<{ tool: string; input: Record<string, unknown> }> = [];
   let closes = 0;
 
@@ -37,8 +39,13 @@ function fakeRegistry(opts?: {
             calls.push({ tool: "create", input });
             if (input.type === "folder") {
               const path = [input.parentId, input.name].filter(Boolean).join("/");
-              if (files.has(`dir:${path}`)) return err(`Folder already exists: ${path}`);
-              files.set(`dir:${path}`, "");
+              // Live Loredex does NOT reject a duplicate folder name — it
+              // inserts a second sibling and auto-creates its `index.md`, and
+              // path reads keep resolving to the first one. Model exactly that
+              // (`folders` is an array, so duplicates are countable) or the
+              // fake hides the empty-shadow-folder bug.
+              folders.push(path);
+              if (!files.has(`${path}/index.md`)) files.set(`${path}/index.md`, "");
               return ok(`created folder ${path}`);
             }
             if (opts?.failCreate) return err("boom");
@@ -92,7 +99,7 @@ function fakeRegistry(opts?: {
       }),
     }),
   };
-  return { registry, files, calls, closeCount: () => closes };
+  return { registry, files, folders, calls, closeCount: () => closes };
 }
 
 const SCOPE: ScopeRef = {
@@ -143,6 +150,55 @@ describe("createLoredexStore", () => {
     // stray shared folder. Only its descendants are ensured.
     expect(folderCreates.map((c) => c.input.name)).toEqual(["_memory", "_user", "u-1"]);
     expect(folderCreates[0]?.input.parentId).toBe("__private_root");
+    // Existence probes stay rooted at the private root. Probing the bare
+    // `_memory/index.md` would resolve against the SHARED top-level `_memory`
+    // (agent-org scopes create one), so every private segment would look like
+    // it already existed and the scope would never be created at all.
+    const probes = calls
+      .filter((c) => c.tool === "read_file" && String(c.input.fileId).endsWith("/index.md"))
+      .map((c) => c.input.fileId);
+    expect(probes).toEqual([
+      "__private_root/_memory/index.md",
+      "__private_root/_memory/_user/index.md",
+      "__private_root/_memory/_user/u-1/index.md",
+    ]);
+  });
+
+  const EPISODE = {
+    slug: "tempo-run",
+    summary: "Tempo run",
+    body: "Ran 8k tempo.",
+    meta: {
+      agent: "coach",
+      extractedAt: "2026-07-31T09:43:00.000Z",
+      provenance: "user-said" as const,
+    },
+  };
+
+  it("never creates a folder twice across writes that share ancestors", async () => {
+    // The empty-shadow-folder bug: `writeEpisode` ensures `<root>/episodes`
+    // and `writeIndex` ensures `<root>`, so the shared `_memory/coach/u-1`
+    // ancestors were walked — and re-created — a second time.
+    const { registry, folders } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    await store.writeEpisode(P, SCOPE, EPISODE);
+    await store.writeIndex(P, SCOPE, VALID_INDEX);
+    expect(folders).toEqual([
+      "_memory",
+      "_memory/coach",
+      "_memory/coach/u-1",
+      "_memory/coach/u-1/episodes",
+    ]);
+  });
+
+  it("a fresh store (new process) reuses folders instead of duplicating them", async () => {
+    // The in-process `ensuredFolders` cache is empty on every cold start, so
+    // existence has to be probed against the workspace, not just remembered.
+    const { registry, folders } = fakeRegistry();
+    await createLoredexStore({ connections: registry }).writeIndex(P, SCOPE, VALID_INDEX);
+    const before = [...folders];
+    await createLoredexStore({ connections: registry }).writeEpisode(P, SCOPE, EPISODE);
+    expect(folders).toEqual([...before, "_memory/coach/u-1/episodes"]);
   });
 
   it("writeIndex snapshots BEFORE rewriting an existing index", async () => {
