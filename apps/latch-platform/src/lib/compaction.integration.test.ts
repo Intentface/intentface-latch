@@ -27,8 +27,15 @@ const usage = {
 /** Every prompt the streaming (turn) path saw, and the summarizer's own. */
 let streamPrompts: unknown[] = [];
 let generatePrompts: unknown[] = [];
-/** Why the summarization call ended — `"length"` means it hit the token cap. */
-let summaryFinishReason = "stop";
+/**
+ * Why each successive summarization call ends. `"length"` means it hit the token
+ * cap; the queue lets a test truncate the first attempt and settle the retry.
+ */
+let summaryFinishReasons: string[] = [];
+/** Provider options each summarization call received (thinking config lives here). */
+let summaryProviderOptions: unknown[] = [];
+/** Every `resolveReasoningOptions` lookup, to prove which effort compaction asks for. */
+let reasoningCalls: { modelId: string; effort: string }[] = [];
 /** What the model should do on each successive streamed turn. */
 let script: (() => unknown[])[] = [];
 
@@ -76,14 +83,15 @@ const model = new MockLanguageModelV3({
     const next = script.shift() ?? (() => sayText("Anything else?"));
     return { stream: streamFrom(next()) };
   },
-  // The compaction pass is a single tool-free generate, not a streamed turn.
-  doGenerate: async ({ prompt }) => {
+  // The compaction pass is a tool-free generate, not a streamed turn.
+  doGenerate: async ({ prompt, providerOptions }) => {
     generatePrompts.push(prompt);
+    summaryProviderOptions.push(providerOptions);
     return {
       content: [{ type: "text", text: SUMMARY }],
       // Provider shape in ai@7: a unified enum, not a bare string — the SDK
       // reads `.unified`, so a plain string surfaces as `undefined`.
-      finishReason: { unified: summaryFinishReason },
+      finishReason: { unified: summaryFinishReasons.shift() ?? "stop" },
       usage,
       warnings: [],
     } as never;
@@ -127,7 +135,9 @@ describe("compactChat", () => {
     script = [];
     streamPrompts = [];
     generatePrompts = [];
-    summaryFinishReason = "stop";
+    summaryFinishReasons = [];
+    summaryProviderOptions = [];
+    reasoningCalls = [];
     const client = createClient({ url: ":memory:" });
     await migrate(client);
     runtime = createRuntime<P, { orgId: string }>({
@@ -138,6 +148,14 @@ describe("compactChat", () => {
         build: ({ principal: p }) => ({ orgId: p.orgId }),
       }),
       agents: { t: agent },
+      // Stands in for the platform's mapping (reasoning.ts): "minimal" is the
+      // effort every provider turns into "thinking off".
+      resolveReasoningOptions: (modelId, effort) => {
+        reasoningCalls.push({ modelId, effort });
+        return effort === "minimal"
+          ? { providerOptions: { anthropic: { thinking: { type: "disabled" } } } }
+          : { maxOutputTokens: 32_000 };
+      },
     });
   });
 
@@ -234,14 +252,50 @@ describe("compactChat", () => {
     ).toBeNull();
   });
 
-  it("refuses to store a summary that hit the token cap", async () => {
+  it("asks the provider not to think while summarizing", async () => {
+    // A thinking-by-default model spends the SAME output budget on its reasoning
+    // block as on the summary, so the call ends truncated with nothing usable —
+    // this is what made /compact fail in production.
+    const chatId = "chat_nothink";
+    await chatTwice(chatId);
+    await runtime.compactChat({ chatId, principal });
+
+    expect(reasoningCalls.at(-1)).toEqual({ modelId: "mock-model-id", effort: "minimal" });
+    expect(summaryProviderOptions.at(-1)).toEqual({
+      anthropic: { thinking: { type: "disabled" } },
+    });
+  });
+
+  it("retries with a shorter target when the first attempt is truncated", async () => {
+    // Failing outright would mean the longest conversations — the ones that most
+    // need compacting — could never be compacted.
+    const chatId = "chat_retry";
+    await chatTwice(chatId);
+    summaryFinishReasons = ["length"]; // first attempt only
+
+    const res = await runtime.compactChat({ chatId, principal });
+    expect(res).toMatchObject({ summary: SUMMARY });
+    expect(generatePrompts).toHaveLength(2);
+    // The retry asks for a decisively shorter summary than the first attempt.
+    const asked = generatePrompts.map((p) => /under (\d+) words/.exec(dump(p))?.[1]);
+    expect(Number(asked[1])).toBeLessThan(Number(asked[0]));
+
+    // Both calls were paid for, so the run's usage covers both.
+    const runs = await runtime.listRuns({ principal });
+    const compaction = runs.find((r) => r.usageOutputTokens === usage.outputTokens.total * 2);
+    expect(compaction?.status).toBe("completed");
+  });
+
+  it("refuses to store a summary still truncated after the retry", async () => {
     // A summary cut off mid-thought would become the permanent head of every
     // later prompt — worse than not compacting at all.
     const chatId = "chat_truncated";
     await chatTwice(chatId);
-    summaryFinishReason = "length";
+    summaryFinishReasons = ["length", "length"];
 
-    await expect(runtime.compactChat({ chatId, principal })).rejects.toThrow(/ran over its limit/i);
+    await expect(runtime.compactChat({ chatId, principal })).rejects.toThrow(
+      /couldn't fit a summary/i,
+    );
 
     // History is untouched, so the next turn is unaffected and a retry is safe.
     script = [() => sayText("Still here.")];
