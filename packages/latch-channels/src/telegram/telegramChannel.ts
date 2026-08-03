@@ -314,6 +314,27 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     (await currentThread(telegramUserId)).chatId;
 
   /**
+   * The current chat id, or null after telling the user we couldn't work it out.
+   * Used by the entry points a host calls directly (`runMessage`,
+   * `replayMessage`): they run detached under `waitUntil`, so a rejected promise
+   * would only reach a log and the person would be left with silence.
+   */
+  async function resolveThreadOrNotify(ctx: {
+    telegramUserId: string;
+    telegramChatId: string;
+  }): Promise<string | null> {
+    try {
+      return await currentChatId(ctx.telegramUserId);
+    } catch (e) {
+      console.error("[telegram] thread lookup failed:", e);
+      await api
+        .sendMessage({ chat_id: ctx.telegramChatId, text: THREAD_UNAVAILABLE_MESSAGE })
+        .catch(() => {});
+      return null;
+    }
+  }
+
+  /**
    * Run `fn` under the one-turn-per-chat lease. Every path that mutates a
    * chat's run state — fresh turns, post-link replays AND approval resumes —
    * goes through here, so two of them can never interleave on one chat. When
@@ -497,7 +518,8 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     /** The resolved thread, when the caller already looked it up. */
     chatId?: string;
   }): Promise<void> {
-    const chatId = ctx.chatId ?? (await currentChatId(ctx.telegramUserId));
+    const chatId = ctx.chatId ?? (await resolveThreadOrNotify(ctx));
+    if (chatId === null) return;
 
     // Media → inline data-URL file parts (≤10 MB each); oversized listed in a
     // note. Audio is the exception: it's transcribed to text (never a file
@@ -618,7 +640,8 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
     media?: { ref: TgFileRef; mediaType: string; name: string }[];
     principal: P;
   }): Promise<void> {
-    const chatId = await currentChatId(ctx.telegramUserId);
+    const chatId = await resolveThreadOrNotify(ctx);
+    if (chatId === null) return;
     await withTurnLease(chatId, ctx.telegramChatId, () => runMessage({ ...ctx, chatId }));
   }
 
@@ -1050,10 +1073,16 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
    * agent wrap up instead of leaving the chat gated forever.
    */
   async function runCancelCommand(ctx: CommandCtx): Promise<void> {
-    // Everything happens under the lease, INCLUDING reading what's pending: a
-    // decision built from a pre-lease read could be denying approvals a
-    // concurrent turn has already moved past, and the reply would name tools
-    // nothing was done to. If a turn is running the user gets "still working",
+    // The questionnaire is already gone (runTurn dropped it), so report that
+    // BEFORE the lease: a busy chat would otherwise answer only "still working"
+    // and the user would never learn their questions had been retired.
+    if (ctx.droppedQuestions) {
+      await say(ctx.telegramChatId, "Dropped those questions. What would you like to do instead?");
+    }
+
+    // Approvals, in contrast, are read and denied INSIDE the lease: a decision
+    // built from a pre-lease read could name approvals a concurrent turn has
+    // already moved past. If a turn is running the user gets "still working",
     // which is the honest answer — there'd be nothing to cancel yet anyway.
     await withTurnLease(ctx.chatId, ctx.telegramChatId, async () => {
       let approvals: ReturnType<typeof pendingApprovals> = [];
@@ -1066,16 +1095,12 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
         await say(ctx.telegramChatId, "⚠️ Couldn't read this conversation — try again.");
         return;
       }
+      // Nothing left to say when the questions were the thing being cancelled —
+      // "Nothing to cancel." right after "Dropped those questions." contradicts it.
       if (!approvals.length) {
-        await say(
-          ctx.telegramChatId,
-          ctx.droppedQuestions
-            ? "Dropped those questions. What would you like to do instead?"
-            : "Nothing to cancel.",
-        );
+        if (!ctx.droppedQuestions) await say(ctx.telegramChatId, "Nothing to cancel.");
         return;
       }
-      if (ctx.droppedQuestions) await say(ctx.telegramChatId, "Dropped those questions.");
 
       try {
         const res = await config.runtime.applyApproval({

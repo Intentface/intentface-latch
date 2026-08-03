@@ -1,6 +1,8 @@
-import { createClient, type Client } from "@libsql/client";
+import { createClient } from "@libsql/client";
+import type { Client } from "@libsql/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTelegramStore, migrateTelegram, type TelegramStore } from "./telegram-store";
+import { createTelegramStore, migrateTelegram } from "./telegram-store";
+import type { TelegramStore } from "./telegram-store";
 
 let client: Client;
 let store: TelegramStore;

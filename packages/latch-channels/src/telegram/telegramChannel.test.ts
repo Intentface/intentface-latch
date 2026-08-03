@@ -295,6 +295,26 @@ describe("telegramChannel.handleRequest", () => {
     expect(releaseTurn).toHaveBeenCalledWith("telegram_bot1_5", "lease-2");
   });
 
+  it("replayMessage tells the user when the thread can't be resolved", async () => {
+    // It runs detached under waitUntil, so a rejected promise would only reach a
+    // log and the person would be left with silence after linking.
+    const thread = {
+      current: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+      rotate: vi.fn(async () => 1),
+    };
+    const h = harness({ thread });
+    await h.channel.replayMessage({
+      telegramUserId: "5",
+      telegramChatId: "5",
+      text: "replayed",
+      principal: { userId: "u1" },
+    });
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(String(h.of("sendMessage")[0]!.body.text)).toMatch(/which conversation/i);
+  });
+
   it("replayMessage backs off with 'still working' when the lease is held", async () => {
     const h = harness({ claimTurn: async () => null });
     await h.channel.replayMessage({
@@ -1185,7 +1205,9 @@ describe("telegramChannel commands", () => {
       await h.flush();
       expect(ask.rows.get("telegram_bot1_5")).toBeUndefined();
       expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
-      expect(texts(h).at(-1)!).toMatch(/dropped those questions/i);
+      expect(texts(h).some((t) => /dropped those questions/i.test(t))).toBe(true);
+      // …and not contradicted by a "nothing to cancel" right after it.
+      expect(texts(h).some((t) => /nothing to cancel/i.test(t))).toBe(false);
     });
 
     it("reads what's pending under the lease, not before it", async () => {
@@ -1196,6 +1218,24 @@ describe("telegramChannel commands", () => {
       await h.flush();
       expect(h.runtime.applyApproval).not.toHaveBeenCalled();
       expect(texts(h).at(-1)!).toContain("still working");
+    });
+
+    it("still reports a dropped questionnaire when the chat is busy", async () => {
+      // The questions are already gone by then, so reporting only "still
+      // working" would leave the user thinking they're still on screen.
+      const ask = fakeAskState();
+      const h = harness({ askState: ask.store });
+      h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [question]));
+      await send(h, "moi");
+      await h.flush();
+
+      const busy = harness({ askState: ask.store, claimTurn: async () => null });
+      await send(busy, "/cancel", 2);
+      await busy.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeUndefined();
+      const said = texts(busy);
+      expect(said.some((t) => /dropped those questions/i.test(t))).toBe(true);
+      expect(said.some((t) => t.includes("still working"))).toBe(true);
     });
   });
 

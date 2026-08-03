@@ -27,6 +27,8 @@ const usage = {
 /** Every prompt the streaming (turn) path saw, and the summarizer's own. */
 let streamPrompts: unknown[] = [];
 let generatePrompts: unknown[] = [];
+/** Why the summarization call ended — `"length"` means it hit the token cap. */
+let summaryFinishReason = "stop";
 /** What the model should do on each successive streamed turn. */
 let script: (() => unknown[])[] = [];
 
@@ -79,7 +81,9 @@ const model = new MockLanguageModelV3({
     generatePrompts.push(prompt);
     return {
       content: [{ type: "text", text: SUMMARY }],
-      finishReason: "stop",
+      // Provider shape in ai@7: a unified enum, not a bare string — the SDK
+      // reads `.unified`, so a plain string surfaces as `undefined`.
+      finishReason: { unified: summaryFinishReason },
       usage,
       warnings: [],
     } as never;
@@ -123,6 +127,7 @@ describe("compactChat", () => {
     script = [];
     streamPrompts = [];
     generatePrompts = [];
+    summaryFinishReason = "stop";
     const client = createClient({ url: ":memory:" });
     await migrate(client);
     runtime = createRuntime<P, { orgId: string }>({
@@ -227,6 +232,21 @@ describe("compactChat", () => {
     expect(
       await runtime.compactChat({ chatId, principal: { orgId: "org", userId: "someone-else" } }),
     ).toBeNull();
+  });
+
+  it("refuses to store a summary that hit the token cap", async () => {
+    // A summary cut off mid-thought would become the permanent head of every
+    // later prompt — worse than not compacting at all.
+    const chatId = "chat_truncated";
+    await chatTwice(chatId);
+    summaryFinishReason = "length";
+
+    await expect(runtime.compactChat({ chatId, principal })).rejects.toThrow(/ran over its limit/i);
+
+    // History is untouched, so the next turn is unaffected and a retry is safe.
+    script = [() => sayText("Still here.")];
+    await drain(await send(runtime, chatId, "you still there?"));
+    expect(dump(streamPrompts.at(-1))).toContain("I run four times a week");
   });
 
   it("refuses while the turn is parked on a questionnaire", async () => {

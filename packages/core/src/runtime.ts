@@ -2186,13 +2186,19 @@ export function createRuntime<P, RC = unknown>(
     } as Record<string, unknown>;
     const run = await storage.createRun(principal, { chatId, agent: chat.agent });
     try {
-      const { text, usage } = await summarizeForCompaction({
+      const { text, truncated, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
         messages: await toModelMessages(live, { tools }),
         ...(focus ? { focus } : {}),
         ...(signal ? { signal } : {}),
       });
       if (!text) throw new Error("The model returned an empty summary.");
+      // A summary cut off at the token cap stops mid-thought, and once persisted
+      // it becomes the permanent head of every later prompt — worse than not
+      // compacting. Fail instead; history is untouched, so a retry is safe.
+      if (truncated) {
+        throw new Error("The summary ran over its limit — nothing was changed. Try again.");
+      }
 
       const cost = computeCost(config.pricing?.(modelId), usage);
       // `internal` so the client projection never shows a "user" message the user

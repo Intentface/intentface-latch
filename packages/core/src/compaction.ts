@@ -51,6 +51,8 @@ export async function summarizeForCompaction(input: {
   signal?: AbortSignal;
 }): Promise<{
   text: string;
+  /** True when the model hit `MAX_SUMMARY_TOKENS` — the text stops mid-thought. */
+  truncated: boolean;
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -83,6 +85,7 @@ export async function summarizeForCompaction(input: {
   } | undefined;
   return {
     text: res.text.trim(),
+    truncated: res.finishReason === "length",
     usage: {
       inputTokens: usage?.inputTokens ?? 0,
       outputTokens: usage?.outputTokens ?? 0,
