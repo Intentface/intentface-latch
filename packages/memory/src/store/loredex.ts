@@ -82,6 +82,18 @@ function isErrorResult(result: unknown): boolean {
   return !!(result as { isError?: boolean })?.isError;
 }
 
+/**
+ * Does this tool error definitively mean "the file isn't there"?
+ *
+ * Loredex answers an unresolvable read with `File not found: <ref>` on every
+ * path (bad id, unresolvable path, missing row). Everything else — tool
+ * unavailable, transport failure, an out-of-scope folder — leaves existence
+ * UNKNOWN, and `ensureFolders` must not create on an unknown.
+ */
+function isDefinitelyMissing(error: string): boolean {
+  return /not found/i.test(error);
+}
+
 export function createLoredexStore<P>(opts: {
   connections: ConnectionRegistry<P>;
   toolNames?: Partial<LoredexToolNames>;
@@ -91,6 +103,16 @@ export function createLoredexStore<P>(opts: {
   // so repeat writes skip the existence probe. Correctness never depends on it:
   // a cold cache (every serverless start) just re-probes.
   const ensuredFolders = new Set<string>();
+  /**
+   * Ensures currently in flight, keyed the same way. Without this, two
+   * concurrent writes for one scope (a turn running `memory_write` and
+   * `memory_index` in parallel) both probe a missing folder, both see it
+   * absent, and both create it — the duplicate this store exists to avoid.
+   *
+   * In-process only. Two instances racing can still duplicate, which is why
+   * the server-side idempotent create matters (Intentface/loredex#149).
+   */
+  const ensuringFolders = new Map<string, Promise<void>>();
 
   /** Open the scope's connection, run `fn` with a tool caller, always close. */
   async function withConnection<T>(
@@ -156,26 +178,53 @@ export function createLoredexStore<P>(opts: {
     // then inherit `private` visibility from it.
     const first = parts[0] === LOREDEX_PRIVATE_ROOT ? 1 : 0;
     for (let i = first; i < parts.length; i++) {
-      const prefix = parts.slice(0, i + 1).join("/");
-      const cacheKey = `${scopeKey}:${prefix}`;
+      const cacheKey = `${scopeKey}:${parts.slice(0, i + 1).join("/")}`;
       if (ensuredFolders.has(cacheKey)) continue;
-      const probe = await call(names.read, {
-        fileId: `${prefix}/${FOLDER_INDEX_FILENAME}`,
-      });
-      if (probe.ok) {
-        ensuredFolders.add(cacheKey);
-        continue;
+      // Share an in-flight ensure rather than racing it. Deleted on settle so a
+      // failed attempt is retried by the next write instead of being awaited
+      // forever.
+      let pending = ensuringFolders.get(cacheKey);
+      if (!pending) {
+        pending = ensureOneFolder(call, cacheKey, parts, i).finally(() => {
+          ensuringFolders.delete(cacheKey);
+        });
+        ensuringFolders.set(cacheKey, pending);
       }
-      const parentId = parts.slice(0, i).join("/") || undefined;
-      const created = await call(names.create, {
-        type: "folder",
-        name: parts[i],
-        ...(parentId ? { parentId } : {}),
-      });
-      // Only remember what we know exists: a failed create must be retried on
-      // the next write, not cached as done.
-      if (created.ok) ensuredFolders.add(cacheKey);
+      await pending;
     }
+  }
+
+  /** One segment of `ensureFolders`: probe `parts[i]`, create it if truly absent. */
+  async function ensureOneFolder(
+    call: ToolCall,
+    cacheKey: string,
+    parts: string[],
+    i: number,
+  ): Promise<void> {
+    const prefix = parts.slice(0, i + 1).join("/");
+    const probe = await call(names.read, {
+      fileId: `${prefix}/${FOLDER_INDEX_FILENAME}`,
+    });
+    if (probe.ok) {
+      ensuredFolders.add(cacheKey);
+      return;
+    }
+    // Only a definitive "not found" licenses a create. Any other failure —
+    // tool unavailable, transport error, an out-of-scope folder — leaves
+    // existence unknown, and creating on a guess is precisely how the shadow
+    // folders appeared. Bail instead: the write that follows surfaces the real
+    // error, and the next run re-probes. Guessing wrong here is unrecoverable
+    // (no delete tool); guessing "exists" costs one retry.
+    if (!isDefinitelyMissing(probe.error)) return;
+    const parentId = parts.slice(0, i).join("/") || undefined;
+    const created = await call(names.create, {
+      type: "folder",
+      name: parts[i],
+      ...(parentId ? { parentId } : {}),
+    });
+    // Only remember what we know exists: a failed create must be retried on
+    // the next write, not cached as done.
+    if (created.ok) ensuredFolders.add(cacheKey);
   }
 
   function indexPath(scope: ScopeRef): string {

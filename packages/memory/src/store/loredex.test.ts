@@ -14,6 +14,13 @@ function fakeRegistry(opts?: {
   failCreate?: boolean;
   /** Override the search tool's `results` array (e.g. the live Loredex shape). */
   searchResults?: Array<Record<string, unknown>>;
+  /**
+   * Fail every read with this message instead of resolving it — a transport or
+   * tool-level failure, as opposed to Loredex's "File not found: …".
+   */
+  readError?: string;
+  /** Called before each read resolves; await inside it to hold a probe open. */
+  onRead?: (fileId: string) => Promise<void>;
 }) {
   const files = new Map<string, string>();
   /** Every folder path created, in order — duplicates included, as live does. */
@@ -30,7 +37,14 @@ function fakeRegistry(opts?: {
         loredex_read_file: {
           execute: async (input: { fileId: string }) => {
             calls.push({ tool: "read_file", input });
+            // Resolved when the call ARRIVES, then optionally delayed in
+            // flight. That ordering is what makes a concurrent probe racy: a
+            // slow response carries the answer from when it was asked, so a
+            // folder created meanwhile is still reported absent. Looking the
+            // file up after the delay would quietly make every race benign.
             const text = files.get(input.fileId);
+            await opts?.onRead?.(input.fileId);
+            if (opts?.readError) return err(opts.readError);
             return text === undefined ? err(`File not found: ${input.fileId}`) : ok(text);
           },
         },
@@ -199,6 +213,40 @@ describe("createLoredexStore", () => {
     const before = [...folders];
     await createLoredexStore({ connections: registry }).writeEpisode(P, SCOPE, EPISODE);
     expect(folders).toEqual([...before, "_memory/coach/u-1/episodes"]);
+  });
+
+  it("does not create a folder when the probe fails for a reason other than absence", async () => {
+    // A read can fail without proving anything: tool unavailable, transport
+    // error, out-of-scope folder. Treating those as "absent" recreates the
+    // original bug, and a wrong guess is unrecoverable — there is no delete
+    // tool — while guessing "exists" only costs a retry.
+    const { registry, folders } = fakeRegistry({ readError: "Upstream request timed out" });
+    const store = createLoredexStore({ connections: registry });
+    await store.writeIndex(P, SCOPE, VALID_INDEX);
+    expect(folders).toEqual([]);
+  });
+
+  it("shares an in-flight ensure between concurrent writes", async () => {
+    // Two writes in one turn (memory_write + memory_index) both probe the
+    // shared ancestor. Without a pending-ensure map both see it missing and
+    // both create it — the completed-prefix cache is set too late to help.
+    let probes = 0;
+    // Hold the first `_memory` probe open long enough for the second write to
+    // reach the same prefix; a real gate would deadlock, since the fix means
+    // the second probe never happens.
+    const gate = new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const { registry, folders } = fakeRegistry({
+      onRead: async (fileId) => {
+        if (fileId === "_memory/index.md" && ++probes === 1) await gate;
+      },
+    });
+    const store = createLoredexStore({ connections: registry });
+    await Promise.all([
+      store.writeIndex(P, SCOPE, VALID_INDEX),
+      store.writeEpisode(P, SCOPE, EPISODE),
+    ]);
+    expect(folders.filter((f) => f === "_memory")).toHaveLength(1);
+    expect(new Set(folders).size).toBe(folders.length);
   });
 
   it("writeIndex snapshots BEFORE rewriting an existing index", async () => {
