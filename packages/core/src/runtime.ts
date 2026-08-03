@@ -2184,20 +2184,30 @@ export function createRuntime<P, RC = unknown>(
       ...harness.app,
       ...harness.sandbox,
     } as Record<string, unknown>;
+    // Summarizing needs no reasoning block, and on a model that thinks by
+    // DEFAULT that block spends the same output budget as the summary — leaving
+    // the call truncated with nothing usable. `"minimal"` is the effort every
+    // provider mapping turns into "thinking off", so reuse the host's hook rather
+    // than hardcoding provider shapes here.
+    const noThinking = config.resolveReasoningOptions?.(modelId, "minimal")?.providerOptions;
     const run = await storage.createRun(principal, { chatId, agent: chat.agent });
     try {
       const { text, truncated, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
         messages: await toModelMessages(live, { tools }),
         ...(focus ? { focus } : {}),
+        ...(noThinking ? { providerOptions: noThinking } : {}),
         ...(signal ? { signal } : {}),
       });
       if (!text) throw new Error("The model returned an empty summary.");
-      // A summary cut off at the token cap stops mid-thought, and once persisted
-      // it becomes the permanent head of every later prompt — worse than not
-      // compacting. Fail instead; history is untouched, so a retry is safe.
+      // Still truncated after the shortened retry (see summarizeForCompaction).
+      // A summary cut off mid-thought must not be stored — it would become the
+      // permanent head of every later prompt. History is untouched, so retrying
+      // is safe.
       if (truncated) {
-        throw new Error("The summary ran over its limit — nothing was changed. Try again.");
+        throw new Error(
+          "Couldn't fit a summary of this conversation — nothing was changed. Try /compact again, or /new to start fresh.",
+        );
       }
 
       const cost = computeCost(config.pricing?.(modelId), usage);
