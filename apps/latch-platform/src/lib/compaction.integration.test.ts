@@ -181,15 +181,17 @@ describe("compactChat", () => {
   it("accounts for the summarization call as its own completed run", async () => {
     const chatId = "chat_usage";
     await chatTwice(chatId);
-    const before = (await runtime.listRuns({ principal })).length;
+    // Identify the compaction run by id, not by timestamp: two runs in the same
+    // millisecond would make a `max(startedAt)` pick arbitrary.
+    const before = new Set((await runtime.listRuns({ principal })).map((r) => r.id));
 
     await runtime.compactChat({ chatId, principal });
 
     const runs = await runtime.listRuns({ principal });
-    expect(runs).toHaveLength(before + 1);
-    const compaction = runs.find((r) => r.startedAt === Math.max(...runs.map((x) => x.startedAt)))!;
-    expect(compaction.status).toBe("completed");
-    expect(compaction.usageOutputTokens).toBe(usage.outputTokens.total);
+    const added = runs.filter((r) => !before.has(r.id));
+    expect(added).toHaveLength(1);
+    expect(added[0].status).toBe("completed");
+    expect(added[0].usageOutputTokens).toBe(usage.outputTokens.total);
   });
 
   it("compacting twice summarizes only the live window", async () => {

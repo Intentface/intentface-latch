@@ -220,6 +220,19 @@ export function createTelegramStore(client: Client) {
         sql: `DELETE FROM latch_telegram_pending WHERE bot_id = ?`,
         args: [id],
       });
+      // Per-chat state in the channel-shared tables is keyed by chat id, which
+      // embeds the bot id (`telegram_<botId>_<userId>`) — drop those rows too, or
+      // deleting a binding leaves its thread pointers and half-answered
+      // questionnaires behind forever. Matched with `substr` rather than LIKE:
+      // `_` is a LIKE wildcard and these keys are full of underscores.
+      const prefix = `telegram_${id}_`;
+      for (const table of ["latch_channel_thread", "latch_channel_ask", "latch_channel_turn"]) {
+        const column = table === "latch_channel_thread" ? "chat_key" : "chat_id";
+        await client.execute({
+          sql: `DELETE FROM ${table} WHERE substr(${column}, 1, ?) = ?`,
+          args: [prefix.length, prefix],
+        });
+      }
     },
 
     /**

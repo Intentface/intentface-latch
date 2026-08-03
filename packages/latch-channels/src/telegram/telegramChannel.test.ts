@@ -355,6 +355,48 @@ describe("telegramChannel.handleRequest", () => {
     expect(String(h.of("sendMessage")[0]!.body.text)).toContain("still working");
   });
 
+  it("retires a card whose approval is gone from fresh history", async () => {
+    // e.g. decided in the web app, or left over from a previous thread — pushing
+    // it through would surface a raw "Unknown chat" instead.
+    const h = harness();
+    h.runtime.loadHistory.mockResolvedValue([]);
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 4,
+        callback_query: {
+          id: "cb2",
+          from: { id: 5 },
+          message: { message_id: 99, chat: { id: 5, type: "private" } },
+          data: "lta:1|ap1",
+        },
+      }),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect(String(h.of("editMessageText").at(-1)!.body.text)).toMatch(/no longer active/i);
+  });
+
+  it("leaves the card alone when the history read FAILS", async () => {
+    // A transient read failure must not strand a live approval with no buttons.
+    const h = harness();
+    h.runtime.loadHistory.mockRejectedValue(new Error("db down"));
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 5,
+        callback_query: {
+          id: "cb3",
+          from: { id: 5 },
+          message: { message_id: 99, chat: { id: 5, type: "private" } },
+          data: "lta:1|ap1",
+        },
+      }),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect(h.of("editMessageText")).toHaveLength(0); // card untouched
+    expect(String(h.of("sendMessage").at(-1)!.body.text)).toMatch(/couldn't check/i);
+  });
+
   it("resolves an approval callback: applyApproval + settled card + continuation", async () => {
     const h = harness();
     h.runtime.loadHistory.mockResolvedValueOnce(approvalHistory("ap1")); // toolName lookup
@@ -1038,6 +1080,18 @@ describe("telegramChannel commands", () => {
       expect(h.runtime.handleChat).not.toHaveBeenCalled();
     });
 
+    it("drops the message when the thread can't be resolved", async () => {
+      // Falling back to epoch 0 would write into the conversation the user just
+      // left behind, silently mixing two threads.
+      const thread = fakeThreadStore();
+      thread.store.current.mockRejectedValue(new Error("db down"));
+      const h = harness({ thread: thread.store });
+      await send(h, "hello?");
+      await h.flush();
+      expect(h.runtime.handleChat).not.toHaveBeenCalled();
+      expect(texts(h).at(-1)!).toMatch(/which conversation/i);
+    });
+
     it("retires a live questionnaire", async () => {
       const ask = fakeAskState();
       const thread = fakeThreadStore();
@@ -1114,6 +1168,34 @@ describe("telegramChannel commands", () => {
       await h.flush();
       expect(h.runtime.applyApproval).not.toHaveBeenCalled();
       expect(texts(h).at(-1)!).toMatch(/nothing to cancel/i);
+    });
+
+    it("retires a live questionnaire and says so", async () => {
+      // The only observable proof that `cancel` is thread-changing: drop it from
+      // THREAD_CHANGING_COMMANDS and the session survives this.
+      const ask = fakeAskState();
+      const h = harness({ askState: ask.store });
+      h.runtime.loadHistory.mockResolvedValue(askHistory("toolu_ask1", [question]));
+      await send(h, "moi");
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeDefined();
+
+      h.runtime.loadHistory.mockResolvedValue([]);
+      await send(h, "/cancel", 2);
+      await h.flush();
+      expect(ask.rows.get("telegram_bot1_5")).toBeUndefined();
+      expect(h.runtime.applyToolResult).not.toHaveBeenCalled();
+      expect(texts(h).at(-1)!).toMatch(/dropped those questions/i);
+    });
+
+    it("reads what's pending under the lease, not before it", async () => {
+      // A pre-lease read could deny approvals a concurrent turn has moved past.
+      const h = harness({ claimTurn: async () => null });
+      h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
+      await send(h, "/cancel");
+      await h.flush();
+      expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+      expect(texts(h).at(-1)!).toContain("still working");
     });
   });
 

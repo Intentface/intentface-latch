@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toModelMessages } from "@intentface/latch-core";
+import { COMPACTION_PART_TYPE, toModelMessages } from "@intentface/latch-core";
 import type { AppMessage } from "@intentface/latch-core";
 
 /**
@@ -150,7 +150,7 @@ describe("toModelMessages compaction boundary", () => {
       role: "user",
       parts: [
         { type: "text", text: summary },
-        { type: "data-compaction", data: { compacted: 4, at: 1 } },
+        { type: COMPACTION_PART_TYPE, data: { compacted: 4, at: 1 } },
       ],
       metadata: { visibility: "internal" },
     }) as never;
@@ -176,7 +176,7 @@ describe("toModelMessages compaction boundary", () => {
     expect(dump).toContain("training for a marathon");
     expect(dump).toContain("what pace should I run?");
     // The marker part itself is dropped by the SDK — only its text survives.
-    expect(dump).not.toContain("data-compaction");
+    expect(dump).not.toContain(COMPACTION_PART_TYPE);
   });
 
   it("slices at the LAST marker when a chat was compacted twice", async () => {

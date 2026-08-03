@@ -52,17 +52,16 @@ const BY_NAME = new Map<string, string>(
  * carry arguments; both are handled here so channels don't each re-derive it.
  */
 export function parseCommand(text: string): ParsedCommand | null {
-  const trimmed = text.trim();
-  // `\S+` deliberately: `/foo/bar` must NOT parse as `/foo` with args, or a
-  // pasted path whose first segment happens to be a command name gets eaten.
-  const m = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  // The command word matches Telegram's own grammar exactly — `[A-Za-z0-9_]`
+  // plus an optional `@botusername` — and nothing else. Anything with another
+  // character in it (`/new/plan.md`, `/Users/me/notes.txt`, `/help@bot/docs`)
+  // fails to match and stays an ordinary message, so a pasted path is never
+  // mistaken for the command its first segment happens to spell.
+  const m = /^\/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!m) return null;
-  const word = m[1]!.toLowerCase();
-  // Strip Telegram's `@botname` suffix, but only from the command word.
-  const bare = word.includes("@") ? word.slice(0, word.indexOf("@")) : word;
-  const name = BY_NAME.get(bare);
+  const name = BY_NAME.get(m[1]!.toLowerCase());
   if (!name) return null;
-  return { name, args: (m[2] ?? "").trim() };
+  return { name, args: (m[3] ?? "").trim() };
 }
 
 /** The `/help` body: one `/command — description` line per command. */

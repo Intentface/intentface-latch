@@ -30,6 +30,13 @@ Rules:
 const COMPACTION_INSTRUCTION = `Summarize the conversation above as described in your system prompt, so it can be continued in a fresh context window. Output only the summary.`;
 
 /**
+ * Hard ceiling on the summary. A summary that runs away is worse than no
+ * compaction at all — it becomes the permanent head of every later prompt, so it
+ * must be decisively smaller than the history it replaces.
+ */
+const MAX_SUMMARY_TOKENS = 2000;
+
+/**
  * Summarize a conversation for compaction with a single tool-free model call.
  *
  * Deliberately NOT a normal agent turn: with the agent's own tools and
@@ -40,6 +47,8 @@ export async function summarizeForCompaction(input: {
   messages: ModelMessage[];
   /** Extra steer from the caller, e.g. `/compact keep the training plan`. */
   focus?: string;
+  /** Abort a stalled provider (a request signal, or a caller-owned timeout). */
+  signal?: AbortSignal;
 }): Promise<{
   text: string;
   usage: {
@@ -53,6 +62,8 @@ export async function summarizeForCompaction(input: {
   const res = await generateText({
     model: input.model,
     system: COMPACTION_SYSTEM,
+    maxOutputTokens: MAX_SUMMARY_TOKENS,
+    ...(input.signal ? { abortSignal: input.signal } : {}),
     messages: [
       ...input.messages,
       {

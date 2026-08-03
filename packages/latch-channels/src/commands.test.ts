@@ -24,6 +24,15 @@ describe("parseCommand", () => {
 
   it("strips Telegram's @botname suffix", () => {
     expect(parseCommand("/status@runner_coach_bot")).toEqual({ name: "status", args: "" });
+    expect(parseCommand("/status@runner_coach_bot now")).toEqual({ name: "status", args: "now" });
+  });
+
+  it("rejects a malformed @suffix instead of reading past it", () => {
+    // Otherwise anything after the `@` would be discarded and `/help@x/docs`
+    // would run `/help`.
+    expect(parseCommand("/help@bot/docs")).toBeNull();
+    expect(parseCommand("/new@")).toBeNull();
+    expect(parseCommand("/new@bot@bot")).toBeNull();
   });
 
   it("keeps the arguments", () => {

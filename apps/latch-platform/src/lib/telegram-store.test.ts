@@ -271,6 +271,16 @@ describe("telegram store: thread pointer", () => {
     expect(await store.currentThread(key)).toBe(2);
   });
 
+  it("is dropped with the bot, leaving other bots' pointers alone", async () => {
+    // Chat ids embed the bot id, so a removed binding must not leave its
+    // routing state behind.
+    await store.rotateThread(key);
+    await store.rotateThread("telegram_b2_5");
+    await store.remove("b1");
+    expect(await store.currentThread(key)).toBe(0);
+    expect(await store.currentThread("telegram_b2_5")).toBe(1);
+  });
+
   it("survives losing the identity row", async () => {
     // The pointer deliberately lives in its own table: hanging it off
     // `latch_telegram_identity` would make an unlink drop the user back into a

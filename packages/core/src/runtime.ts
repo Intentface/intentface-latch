@@ -2144,6 +2144,7 @@ export function createRuntime<P, RC = unknown>(
     chatId,
     principal,
     focus,
+    signal,
     request,
     turnContext,
   }: {
@@ -2151,6 +2152,8 @@ export function createRuntime<P, RC = unknown>(
     principal: P;
     /** Optional steer, e.g. Telegram's `/compact keep the training plan`. */
     focus?: string;
+    /** Abort a stalled summarization (a request signal, or a caller timeout). */
+    signal?: AbortSignal;
     request?: Request;
     turnContext?: unknown;
   }): Promise<{ summary: string; compacted: number } | null> {
@@ -2169,12 +2172,25 @@ export function createRuntime<P, RC = unknown>(
     }
 
     const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request, turnContext);
+    // Tool definitions only affect how a recorded tool RESULT is rendered for the
+    // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
+    // than failing. So take every definition available without I/O — the agent's
+    // own plus the harness ones — and deliberately skip opening dynamic sources
+    // (MCP / connections): summarizing must not depend on a remote server being
+    // reachable, and raw JSON is a fine thing to summarize.
+    const harness = config.harnessTools ?? {};
+    const tools = {
+      ...cfg.tools,
+      ...harness.app,
+      ...harness.sandbox,
+    } as Record<string, unknown>;
     const run = await storage.createRun(principal, { chatId, agent: chat.agent });
     try {
       const { text, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
-        messages: await toModelMessages(live, { tools: cfg.tools as Record<string, unknown> }),
+        messages: await toModelMessages(live, { tools }),
         ...(focus ? { focus } : {}),
+        ...(signal ? { signal } : {}),
       });
       if (!text) throw new Error("The model returned an empty summary.");
 
