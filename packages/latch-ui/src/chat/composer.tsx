@@ -1784,11 +1784,14 @@ const ComposerRoot = ({
       return;
     }
 
-    // A secret form owns Enter only while the message box is EMPTY. If the user
-    // typed a reply instead of filling the form, Enter has to send that reply —
-    // saving the form would silently discard what they wrote, and the composer
-    // stays deliberately usable so replying is a real option.
-    if (secret.request && !composerController.getText().trim()) {
+    // A secret form owns Enter only while there is NOTHING to send. If the user
+    // typed a reply (or attached a file) instead of filling the form, Enter has
+    // to send that — saving the form would silently discard it, and the composer
+    // stays deliberately usable so replying is a real option. Attachments count:
+    // an attachment-only message is a valid submission below.
+    const hasReply =
+      !!composerController.getText().trim() || attachments.items.length > 0;
+    if (secret.request && !hasReply) {
       if (secret.isComplete) secret.save();
       return;
     }
