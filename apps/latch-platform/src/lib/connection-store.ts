@@ -50,6 +50,38 @@ export interface StoredConnection {
       };
 }
 
+/**
+ * The named secret a connection depends on, if any — the back-link that
+ * inlining never had. Drives "Used by …" on the Secrets page and the
+ * dependency list on delete.
+ */
+export function connectionSecretRef(conn: StoredConnection): string | undefined {
+  const auth = conn.auth;
+  if (!auth) return undefined;
+  if (auth.kind === "bearer" || auth.kind === "header") return auth.tokenRef;
+  if (auth.kind === "oauth2") return auth.clientSecretRef;
+  return undefined;
+}
+
+/** Key for {@link secretDependents} — scope is part of a secret's identity. */
+export const secretKey = (scope: CredentialScope, name: string) => `${scope}:${name}`;
+
+/**
+ * Connection names grouped by the secret they depend on. Scope-exact: a
+ * user-level secret and an org-level one sharing a name are different
+ * credentials, and a connection only ever resolves against its own scope.
+ */
+export function secretDependents(conns: ScopedConnection[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const c of conns) {
+    const ref = connectionSecretRef(c);
+    if (!ref) continue;
+    const key = secretKey(c.scope, ref);
+    out.set(key, [...(out.get(key) ?? []), c.name]);
+  }
+  return out;
+}
+
 /** A stored connection plus the scope it lives at (for listing/UI). */
 export interface ScopedConnection extends StoredConnection {
   scope: CredentialScope;

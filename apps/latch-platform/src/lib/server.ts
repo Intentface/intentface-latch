@@ -38,6 +38,7 @@ import type { CredentialScope } from "./credentials";
 import { upsertConnection } from "./connection-upsert";
 import type { ConnectionInput } from "./connection-upsert";
 import { normalizeSecretName } from "./named-secrets";
+import { secretDependents, secretKey } from "./connection-store";
 
 /**
  * Every owner key a principal may read eval verdicts under — the one definition
@@ -303,12 +304,26 @@ export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () =
 // `lib/named-secrets.ts`.
 // ---------------------------------------------------------------------------
 
-/** Names + scopes of the caller's stored secrets. Never values. */
+/**
+ * Names + scopes of the caller's stored secrets, each with the connections that
+ * depend on it. Never values.
+ *
+ * `usedBy` is the whole reason connections store a reference: it says, at rest,
+ * what Replace will rotate and what Delete will break.
+ */
 export const listSecretsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
-  const { namedSecrets } = await getLatch();
-  return namedSecrets.list(principal);
+  const { namedSecrets, connectionStore } = await getLatch();
+  const [secrets, conns] = await Promise.all([
+    namedSecrets.list(principal),
+    connectionStore.list(principal),
+  ]);
+  const dependents = secretDependents(conns);
+  return secrets.map((s) => ({
+    ...s,
+    usedBy: dependents.get(secretKey(s.scope, s.name)) ?? [],
+  }));
 });
 
 /**
@@ -374,7 +389,12 @@ export const saveSecretsFn = createServerFn({ method: "POST" })
     return { ok: true as const, saved };
   });
 
-/** Delete a stored secret at its scope. Connections already built from it keep working. */
+/**
+ * Delete a stored secret at its scope. This REVOKES every connection that
+ * references it — they stop contributing tools rather than calling out
+ * unauthenticated. The UI names those connections before asking to confirm; the
+ * audit line records them.
+ */
 export const deleteSecretFn = createServerFn({ method: "POST" })
   .validator((data: { name: string; scope: CredentialScope }) => data)
   .handler(async ({ data }) => {
@@ -391,12 +411,14 @@ export const deleteSecretFn = createServerFn({ method: "POST" })
     // audit line below claimed otherwise.
     const name = normalizeSecretName(parsed.data.name);
     if (!name) return { ok: false as const, error: "secret name required" };
-    const { namedSecrets } = await getLatch();
+    const { namedSecrets, connectionStore } = await getLatch();
+    const revoked =
+      secretDependents(await connectionStore.list(principal)).get(secretKey(scope, name)) ?? [];
     await namedSecrets.remove(principal, name, scope);
     console.log(
-      `[secrets] deleted ${name} scope=${scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
+      `[secrets] deleted ${name} scope=${scope} by=${principal.userId ?? "-"}@${principal.orgId} revoked=${revoked.join(",") || "-"}`,
     );
-    return { ok: true as const };
+    return { ok: true as const, revoked };
   });
 
 /** The model catalog (id + label) for the agent editor's dropdown (from models.dev). */

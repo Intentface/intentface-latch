@@ -15,6 +15,10 @@ type SecretRef = Awaited<ReturnType<typeof listSecretsFn>>[number];
  * form, plus anything added here. Values are write-only by construction: the
  * server's list returns names and scopes only, so there is nothing to render or
  * leak — you can replace a secret or delete it, never read it back.
+ *
+ * Connections reference these by name and resolve them at call time, so Replace
+ * and Delete are live: one rotates every dependent connection, the other
+ * revokes them. Both say which connections that is before you commit.
  */
 export function SecretsSection({ secrets }: { secrets: SecretRef[] }) {
   if (secrets.length === 0) return null;
@@ -37,6 +41,11 @@ function SecretCard({ secret }: { secret: SecretRef }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Deleting is the one action here that breaks something. Two steps, with the
+  // damage named in between — there is no undo and no way to retype a value you
+  // can't read back.
+  const [confirming, setConfirming] = useState(false);
+  const usedBy = secret.usedBy;
 
   async function replace() {
     if (!value.trim()) return;
@@ -70,6 +79,7 @@ function SecretCard({ secret }: { secret: SecretRef }) {
         setError(res.error);
         return;
       }
+      setConfirming(false);
       await router.invalidate();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not delete the secret.");
@@ -93,7 +103,7 @@ function SecretCard({ secret }: { secret: SecretRef }) {
               </Badge>
             </div>
             <p className="text-ink-tertiary truncate text-xs">
-              Stored. Replacing it here does not update connections already built from it.
+              {usedBy.length > 0 ? `Used by ${usedBy.join(", ")}` : "Stored — no connection uses it yet"}
             </p>
           </div>
           <Button
@@ -101,24 +111,58 @@ function SecretCard({ secret }: { secret: SecretRef }) {
             variant="ghost"
             disabled={busy}
             aria-label={`Delete ${secret.name}`}
-            onClick={remove}
+            onClick={() => setConfirming(true)}
           >
             <Trash2 className="size-4" />
           </Button>
         </div>
-        <div className="flex gap-2">
-          <Input
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="Replace value…"
-          />
-          <Button size="sm" disabled={busy || !value.trim()} onClick={replace}>
-            Save
-          </Button>
-        </div>
+        {confirming ? (
+          <div className="border-primary-border space-y-2 rounded-lg border p-3">
+            <p className="text-xs">
+              {usedBy.length > 0 ? (
+                <>
+                  Deleting <span className="font-mono">{secret.name}</span> revokes{" "}
+                  <span className="font-medium">{usedBy.join(", ")}</span> — those connections stop
+                  working until you add the credential again.
+                </>
+              ) : (
+                <>
+                  Delete <span className="font-mono">{secret.name}</span>? The value can&rsquo;t be
+                  read back, so this can&rsquo;t be undone.
+                </>
+              )}
+            </p>
+            <div className="flex gap-2">
+              <Button size="sm" variant="destructive" disabled={busy} onClick={remove}>
+                Delete
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => setConfirming(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <Input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder={
+                usedBy.length > 0 ? "Rotate value — applies immediately…" : "Replace value…"
+              }
+            />
+            <Button size="sm" disabled={busy || !value.trim()} onClick={replace}>
+              Save
+            </Button>
+          </div>
+        )}
         {error && <p className="text-xs text-red-500">{error}</p>}
       </CardContent>
     </Card>
