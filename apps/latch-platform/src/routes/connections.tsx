@@ -1,13 +1,12 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { Braces, KeyRound, Pencil, Plug, Plus, Trash2 } from "lucide-react";
+import { Braces, Pencil, Plug, Plus, Trash2 } from "lucide-react";
 import { Dialog } from "@intentface/latch-ui";
 import { cn } from "@/lib/utils";
 import {
   currentPrincipalFn,
   connectionsStatusFn,
-  connectionKeysFn,
-  setConnectionKeyFn,
+  listSecretsFn,
   listConnectionsFn,
   getConnectionFn,
   addConnectionFn,
@@ -24,6 +23,7 @@ import { Select } from "@/components/ui/select";
 import { RichSelect } from "@/components/ui/rich-select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { SecretsSection } from "@/components/secrets-section";
 
 export const Route = createFileRoute("/connections")({
   head: () => ({ meta: [{ title: "Connections · Latch" }] }),
@@ -31,20 +31,20 @@ export const Route = createFileRoute("/connections")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [oauth, keys, dynamic] = await Promise.all([
+    const [oauth, secrets, dynamic] = await Promise.all([
       connectionsStatusFn(),
-      connectionKeysFn(),
+      listSecretsFn(),
       listConnectionsFn(),
     ]);
-    return { oauth, keys, dynamic };
+    return { oauth, secrets, dynamic };
   },
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const { oauth, keys, dynamic } = Route.useLoaderData();
+  const { oauth, secrets, dynamic } = Route.useLoaderData();
   const [addOpen, setAddOpen] = useState(false);
-  const empty = dynamic.length === 0 && oauth.length === 0 && keys.length === 0;
+  const empty = dynamic.length === 0 && oauth.length === 0 && secrets.length === 0;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
@@ -82,13 +82,12 @@ function ConnectionsPage() {
         </Section>
       )}
 
-      {(oauth.length > 0 || keys.length > 0) && (
+      <SecretsSection secrets={secrets} />
+
+      {oauth.length > 0 && (
         <Section label="Built-in">
           {oauth.map((c) => (
             <ConnectionCard key={c.name} connection={c} />
-          ))}
-          {keys.map((k) => (
-            <ApiKeyCard key={k.name} conn={k} />
           ))}
         </Section>
       )}
@@ -507,63 +506,6 @@ function DynamicCard({
           </div>
         </Dialog.Content>
       </Dialog>
-    </Card>
-  );
-}
-
-function ApiKeyCard({
-  conn,
-}: {
-  conn: { name: string; label: string; scope: string; set: boolean };
-}) {
-  const router = useRouter();
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function save() {
-    if (!value.trim()) return;
-    setBusy(true);
-    try {
-      await setConnectionKeyFn({ data: { name: conn.name, value: value.trim() } });
-      setValue("");
-      await router.invalidate();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Card size="sm">
-      <CardContent className="space-y-2 py-3">
-        <div className="flex items-center gap-3">
-          <div className="bg-tertiary border-primary-border text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg border">
-            <KeyRound className="size-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-sm font-medium capitalize">{conn.label}</span>
-              <Badge variant={conn.set ? "secondary" : "outline"}>
-                {conn.set ? "key set" : "no key"}
-              </Badge>
-              <Badge variant="outline" className="ml-auto">{conn.scope}-level</Badge>
-            </div>
-            <p className="text-ink-tertiary truncate text-xs">
-              REST API — key stored envelope-encrypted in the Vault, brokered server-side.
-            </p>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <Input
-            type="password"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder={conn.set ? "Replace API key…" : "Paste API key…"}
-          />
-          <Button size="sm" disabled={busy || !value.trim()} onClick={save}>
-            Save
-          </Button>
-        </div>
-      </CardContent>
     </Card>
   );
 }

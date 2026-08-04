@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
 import type { AppMessage } from "@intentface/latch-core";
 import {
   slackManifest,
@@ -34,12 +35,9 @@ import { telegramVaultKeys } from "./telegram-store";
 import { whatsappVaultKeys } from "./whatsapp-store";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
-import type { StoredConnection } from "./connection-store";
-import { assertPublicHttpsUrl } from "./oauth2-flow";
-import { parseScopes, sameScopeSet } from "./oauth-scopes";
-
-/** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
-const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
+import { upsertConnection } from "./connection-upsert";
+import type { ConnectionInput } from "./connection-upsert";
+import { normalizeSecretName } from "./named-secrets";
 
 /**
  * Every owner key a principal may read eval verdicts under — the one definition
@@ -172,34 +170,6 @@ export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
   },
 );
 
-/** API-key connection status (is a key stored for the caller, at its scope). */
-export const connectionKeysFn = createServerFn({ method: "GET" }).handler(async () => {
-  const principal = await getPrincipal();
-  if (!principal) return [];
-  const { credentials } = await getLatch();
-  return Promise.all(
-    API_KEY_CONNECTIONS.map(async (c) => ({
-      name: c.name,
-      label: c.label,
-      scope: c.scope,
-      set: await credentials.has(principal, c.name, c.scope),
-    })),
-  );
-});
-
-/** Store an API key for a connection, at its declared scope (user/org). */
-export const setConnectionKeyFn = createServerFn({ method: "POST" })
-  .validator((data: { name: string; value: string }) => data)
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false };
-    const conn = API_KEY_CONNECTIONS.find((c) => c.name === data.name);
-    if (!conn) return { ok: false };
-    const { credentials } = await getLatch();
-    await credentials.set(principal, conn.name, conn.scope, data.value);
-    return { ok: true };
-  });
-
 /** UI-added connections visible to the caller (org-shared + personal). */
 export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
@@ -269,33 +239,13 @@ export const getConnectionFn = createServerFn({ method: "GET" })
     };
   });
 
-/** Add a UI-defined connection (stored encrypted in the Vault at its scope). */
+/**
+ * Add a UI-defined connection (stored encrypted in the Vault at its scope).
+ * The rules live in `upsertConnection` so this and the Agent Builder's
+ * `create_connection` validate identically.
+ */
 export const addConnectionFn = createServerFn({ method: "POST" })
-  .validator(
-    (data: {
-      name: string;
-      kind: "mcp" | "openapi";
-      scope: "user" | "org";
-      url?: string;
-      spec?: string;
-      baseUrl?: string;
-      operations?: string;
-      /**
-       * "oauth" (MCP only) uses the interactive discovery flow (no token);
-       * "oauth2" (OpenAPI only) is a pre-registered client — requires the
-       * authorizeUrl/tokenUrl/clientId/clientSecret fields; else token/none.
-       */
-      authMode?: "none" | "token" | "oauth" | "oauth2";
-      authHeader?: string;
-      token?: string;
-      authorizeUrl?: string;
-      tokenUrl?: string;
-      clientId?: string;
-      clientSecret?: string;
-      /** oauth2: whitespace-separated scope items (a provider's own delimiter, e.g. Strava's commas, survives inside one item). */
-      scopes?: string;
-    }) => data,
-  )
+  .validator((data: ConnectionInput) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
@@ -304,106 +254,14 @@ export const addConnectionFn = createServerFn({ method: "POST" })
     if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
       return { ok: false, error: "only org admins can manage org-shared connections" };
     }
-    const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
-    if (!name) return { ok: false, error: "name required" };
     const { connectionStore, dynamic } = await getLatch();
-    // Add is an upsert by (name, scope) — editing goes through here too. A
-    // blank secret field on an existing connection means "keep the current
-    // secret" (the edit form never sees stored secrets to send them back).
-    const existing = (await connectionStore.list(principal)).find(
-      (c) => c.name === name && c.scope === data.scope,
-    );
-    let auth: StoredConnection["auth"];
-    if (data.authMode === "oauth2") {
-      if (data.kind !== "openapi") {
-        return { ok: false, error: "oauth2 is supported for OpenAPI connections only" };
-      }
-      const authorizeUrl = data.authorizeUrl?.trim();
-      const tokenUrl = data.tokenUrl?.trim();
-      const clientId = data.clientId?.trim();
-      const clientSecret =
-        data.clientSecret?.trim() ||
-        (existing?.auth?.kind === "oauth2" ? existing.auth.clientSecret : undefined);
-      if (!authorizeUrl || !tokenUrl || !clientId || !clientSecret) {
-        return { ok: false, error: "oauth2 requires authorize URL, token URL, client ID and client secret" };
-      }
-      try {
-        await assertPublicHttpsUrl(authorizeUrl);
-        await assertPublicHttpsUrl(tokenUrl);
-      } catch (e) {
-        return { ok: false, error: e instanceof Error ? e.message : String(e) };
-      }
-      auth = {
-        kind: "oauth2",
-        authorizeUrl,
-        tokenUrl,
-        clientId,
-        clientSecret,
-        scopes: parseScopes(data.scopes),
-      };
-    } else if (data.kind === "mcp" && data.authMode === "oauth") {
-      auth = { kind: "oauth", scopes: parseScopes(data.scopes) };
-    } else if (data.authMode === "none") {
-      auth = undefined; // an explicit "none" clears auth even if a token was typed
-    } else {
-      // Blank token in token mode keeps the stored one (edit).
-      const token =
-        data.token?.trim() ||
-        (data.authMode === "token" &&
-        (existing?.auth?.kind === "bearer" || existing?.auth?.kind === "header")
-          ? existing.auth.token
-          : undefined);
-      auth = token
-        ? {
-            kind: data.authHeader?.trim() ? "header" : "bearer",
-            header: data.authHeader?.trim() || undefined,
-            token,
-          }
-        : undefined;
+    const result = await upsertConnection(principal, data, { connectionStore, dynamic });
+    if (result.ok) {
+      console.log(
+        `[connections] upsert name=${result.name} scope=${data.scope} kind=${data.kind} by=${principal.userId ?? "-"}@${principal.orgId}`,
+      );
     }
-    if (data.kind === "mcp") {
-      if (!data.url?.trim()) return { ok: false, error: "url required" };
-      await connectionStore.add(principal, data.scope, { kind: "mcp", name, mcp: { url: data.url.trim() }, auth });
-      // Requested scopes are baked into the issued token, so an existing token
-      // keeps the OLD grant no matter what this record now says — a connection
-      // could claim "private files only" while still holding an unrestricted
-      // token, and a restriction scope can't be added by refresh (a refresh may
-      // never widen a grant). Changing them therefore has to force a fresh
-      // consent. Dropping the DCR client too, since it was registered under the
-      // old scope.
-      const before = existing?.auth?.kind === "oauth" ? existing.auth.scopes : undefined;
-      const after = auth?.kind === "oauth" ? auth.scopes : undefined;
-      // Set comparison, not positional: a scope is an unordered set, so
-      // retyping the same permissions in a different order must not log the
-      // user out of the connection.
-      if (!sameScopeSet(before, after)) {
-        try {
-          await dynamic.oauth(name).provider(principal).invalidateCredentials?.("all");
-        } catch (e) {
-          // The record is already saved; a failed cleanup must not lose it. Log
-          // loudly — a stale token here means the connection is less restricted
-          // than the UI now claims, so it needs re-authorizing by hand.
-          console.warn(`[connections] "${name}": clearing tokens after scope change failed:`, e);
-        }
-      }
-    } else {
-      if (!data.spec?.trim()) return { ok: false, error: "spec required" };
-      const operations = data.operations
-        ?.split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      await connectionStore.add(principal, data.scope, {
-        kind: "openapi",
-        name,
-        openapi: {
-          spec: data.spec.trim(),
-          baseUrl: data.baseUrl?.trim() || undefined,
-          operations: operations && operations.length > 0 ? operations : undefined,
-        },
-        auth,
-      });
-    }
-    return { ok: true };
+    return result;
   });
 
 /** Remove a UI-defined connection at its scope. */
@@ -430,6 +288,112 @@ export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () =
   // from the user-facing picker (they stay runnable by name for the sweep).
   return (await runtime.listAgents(principal)).filter((a) => !a.name.startsWith("memory-"));
 });
+
+// ---------------------------------------------------------------------------
+// Named secrets
+//
+// The ONLY path a credential's plaintext takes. The Agent Builder asks for a
+// secret by NAME (`request_secret`); the composer collects the value and posts
+// it here; the agent's tool result carries names only. Nothing on this path
+// writes a value into a message part, a tool input, or a tool output — see
+// `lib/named-secrets.ts`.
+// ---------------------------------------------------------------------------
+
+/** Names + scopes of the caller's stored secrets. Never values. */
+export const listSecretsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { namedSecrets } = await getLatch();
+  return namedSecrets.list(principal);
+});
+
+/**
+ * The wire contract for a secret batch. `.validator()` in this file is types
+ * only, and these endpoints are callable directly — so the shape is parsed for
+ * real here. `scope` especially: every reader compares it with `=== "org"`, so
+ * an unrecognised value would quietly mean "user". The 6-entry cap mirrors
+ * `request_secret`'s `fields` cap (one form, one batch) and bounds Vault writes.
+ */
+const SAVE_SECRETS_INPUT = z.object({
+  scope: z.enum(["user", "org"]),
+  secrets: z
+    .array(z.object({ name: z.string(), value: z.string().min(1) }))
+    .min(1)
+    .max(6),
+});
+
+const DELETE_SECRET_INPUT = z.object({
+  name: z.string(),
+  scope: z.enum(["user", "org"]),
+});
+
+const firstIssue = (e: z.ZodError) => e.issues[0]?.message ?? "invalid request";
+
+/**
+ * Store one or more secret values under caller-chosen names. Returns the names
+ * only, which is what the paused `request_secret` tool result is built from.
+ */
+export const saveSecretsFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { scope: CredentialScope; secrets: { name: string; value: string }[] }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const parsed = SAVE_SECRETS_INPUT.safeParse(data);
+    if (!parsed.success) return { ok: false as const, error: firstIssue(parsed.error) };
+    const { scope, secrets } = parsed.data;
+    // Org-shared secrets back connections every member's agents call — same
+    // gate as the connections they feed.
+    if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false as const, error: "only org admins can store org-shared secrets" };
+    }
+    // Normalize the WHOLE batch before the first write: a bad name halfway
+    // through would otherwise leave some secrets stored and some not, with the
+    // caller told only that it failed.
+    const entries: { name: string; value: string }[] = [];
+    for (const s of secrets) {
+      const name = normalizeSecretName(s.name);
+      if (!name) return { ok: false as const, error: "secret name required" };
+      entries.push({ name, value: s.value });
+    }
+    const { namedSecrets } = await getLatch();
+    const saved: string[] = [];
+    for (const e of entries) {
+      await namedSecrets.set(principal, e.name, scope, e.value);
+      saved.push(e.name);
+    }
+    // Audit: names and actor only — never the value.
+    console.log(
+      `[secrets] saved ${saved.join(",")} scope=${parsed.data.scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
+    );
+    return { ok: true as const, saved };
+  });
+
+/** Delete a stored secret at its scope. Connections already built from it keep working. */
+export const deleteSecretFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: CredentialScope }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const parsed = DELETE_SECRET_INPUT.safeParse(data);
+    if (!parsed.success) return { ok: false as const, error: firstIssue(parsed.error) };
+    const { scope } = parsed.data;
+    if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false as const, error: "only org admins can delete org-shared secrets" };
+    }
+    // Normalize exactly as `saveSecretsFn` does: secrets are STORED under the
+    // normalized name, so deleting the raw one would remove nothing while the
+    // audit line below claimed otherwise.
+    const name = normalizeSecretName(parsed.data.name);
+    if (!name) return { ok: false as const, error: "secret name required" };
+    const { namedSecrets } = await getLatch();
+    await namedSecrets.remove(principal, name, scope);
+    console.log(
+      `[secrets] deleted ${name} scope=${scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
+    );
+    return { ok: true as const };
+  });
 
 /** The model catalog (id + label) for the agent editor's dropdown (from models.dev). */
 export const listModelsFn = createServerFn({ method: "GET" }).handler(async () => {

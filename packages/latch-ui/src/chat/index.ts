@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./ask-user.js";
+export * from "./secret-request.js";
 export * from "./message-utils.js";
 export { Markdown } from "./markdown.js";
 export { Reasoning } from "./reasoning.js";
@@ -7,7 +8,12 @@ export { Steps } from "./steps.js";
 export { Message } from "./message.js";
 export { Thread } from "./thread.js";
 export { Composer } from "./composer.js";
-export type { ComposerSubmitData, ComposerAnswerEntry } from "./composer.js";
+export type {
+  ComposerSubmitData,
+  ComposerAnswerEntry,
+  ComposerSecretSubmit,
+} from "./composer.js";
+export { SecretRequest } from "./secret-request-compound.js";
 export { ProgressiveBlur } from "./progressive-blur.js";
 export { StepQueue } from "./step-queue.js";
 export { TextShimmer } from "./text-shimmer.js";

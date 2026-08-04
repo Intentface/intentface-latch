@@ -16,7 +16,12 @@ import {
 
 
 } from "@intentface/latch-ui";
-import type {AppUIMessage, ComposerSubmitData, ToolPart} from "@intentface/latch-ui";
+import type {
+  AppUIMessage,
+  ComposerSubmitData,
+  SecretRequestInput,
+  ToolPart,
+} from "@intentface/latch-ui";
 import type { AppMessage, SubagentProgressData } from "@intentface/latch-core";
 import {
   authorizeUrl,
@@ -25,7 +30,13 @@ import {
   submitApproval,
   submitToolResult,
 } from "@/lib/latch-client";
-import { chatGeneratingFn, getAgentEvalsFn, rejudgeRunFn, submitFeedbackFn } from "@/lib/server";
+import {
+  chatGeneratingFn,
+  getAgentEvalsFn,
+  rejudgeRunFn,
+  saveSecretsFn,
+  submitFeedbackFn,
+} from "@/lib/server";
 import type { AttachedEval } from "@/lib/agent-store";
 import { EvalsDrawer, useEvalsDrawerToggle } from "@/components/evals-drawer";
 import { ScoreBadges, useEvalScores } from "@/components/eval-scores";
@@ -85,7 +96,22 @@ function subagentProgressFor(
   return found;
 }
 
-/** The approval id of a pending `connect_<name>` gate, if one is awaiting a decision. */
+/**
+ * The connection a gated tool part is about — either a per-connection
+ * `connect_<name>` contributed by a tool source, or the Agent Builder's generic
+ * `connect_connection({ name })`. Both render the same Connect card and resume
+ * the same way.
+ */
+function connectTargetOf(p: ApprovalPart): string | undefined {
+  const name = p.type === "dynamic-tool" ? p.toolName : p.type.replace(/^tool-/, "");
+  if (name === "connect_connection") {
+    const target = (p.input as { name?: string } | undefined)?.name;
+    return typeof target === "string" && target ? target : undefined;
+  }
+  return name?.startsWith("connect_") ? name.replace(/^connect_/, "") : undefined;
+}
+
+/** The approval id of a pending connect gate for `name`, if one is awaiting a decision. */
 function pendingConnectApprovalId(
   msgs: AppMessage[] | undefined,
   name: string,
@@ -93,9 +119,7 @@ function pendingConnectApprovalId(
   for (const m of msgs ?? []) {
     for (const part of m.parts ?? []) {
       const p = part as ApprovalPart;
-      const isConnect =
-        p.type === `tool-connect_${name}` ||
-        (p.type === "dynamic-tool" && p.toolName === `connect_${name}`);
+      const isConnect = connectTargetOf(p) === name;
       if (isConnect && p.state === "approval-requested" && p.approval && p.approval.approved === undefined) {
         return p.approval.id;
       }
@@ -115,6 +139,9 @@ export function Chat({
 }) {
   const router = useRouter();
   const [deciding, setDeciding] = useState(false);
+  // A failed secret write (e.g. not an org admin): shown in the composer form,
+  // which stays open over the still-paused turn.
+  const [secretError, setSecretError] = useState<string | null>(null);
   // Poll guard: while an approval/tool-result continuation is streaming into
   // setMessages, the background history poll must not overwrite it (server
   // history lags the stream — it lacks streamed-only parts like eval progress).
@@ -150,6 +177,7 @@ export function Chat({
   const scrollMode = useSettingsStore((s) => s.scrollMode);
   const composerState = useComposerState(messages, status);
   const isAskUser = composerState.type === "ask-user";
+  const isSecretRequest = composerState.type === "secret-request";
 
   // Response feedback → Langfuse `user-feedback` score on the run's trace.
   // The thumb click opens the dialog preselected; submitted verdicts are kept
@@ -266,8 +294,14 @@ export function Chat({
         ? [{ key: "gen", label: "Generating…", kind: "thinking" as const }]
         : [];
 
-  // The composer reports either a message (text + files) or ask-user answers.
+  // The composer reports a message (text + files), ask-user answers, or a
+  // completed secret form.
   async function handleSubmit(data: ComposerSubmitData) {
+    if (data.kind === "secret") {
+      if (composerState.type !== "secret-request") return;
+      await answerSecretRequest(composerState.toolCallId, composerState.request, data);
+      return;
+    }
     if (data.kind === "answers") {
       if (composerState.type !== "ask-user") return;
       // Flatten the composer's answer entries into question → picked text.
@@ -395,6 +429,53 @@ export function Chat({
     }
   }
 
+  /**
+   * Answer a paused `request_secret` tool.
+   *
+   * The ONLY place a credential leaves the browser: secret values go to
+   * `saveSecretsFn`, which writes them to the Vault. What resumes the run is a
+   * result carrying the vault NAMES and the non-secret values — so the agent can
+   * finish configuring the connection without the plaintext ever entering the
+   * message history or the model's context.
+   */
+  async function answerSecretRequest(
+    toolCallId: string,
+    request: SecretRequestInput,
+    data: { values: Record<string, string>; declined: boolean },
+  ) {
+    setDeciding(true);
+    try {
+      let output: Record<string, unknown>;
+      if (data.declined) {
+        output = { saved: [], values: {}, declined: true };
+      } else {
+        const secrets = request.fields
+          .filter((f) => f.secret)
+          .map((f) => ({ name: f.name ?? f.key, value: data.values[f.key] ?? "" }));
+        if (secrets.length > 0) {
+          const res = await saveSecretsFn({ data: { scope: request.scope, secrets } });
+          if (!res.ok) {
+            // Keep the form open with the reason; the turn stays paused so the
+            // user can correct it (e.g. they aren't an org admin).
+            setSecretError(res.error);
+            return;
+          }
+        }
+        // Non-secret fields are the only values that travel onward.
+        const values = Object.fromEntries(
+          request.fields.filter((f) => !f.secret).map((f) => [f.key, data.values[f.key] ?? ""]),
+        );
+        output = { saved: secrets.map((s) => s.name), values, declined: false };
+      }
+      // `addToolResult` flips the part to output-available, which drops the
+      // panel state and clears the form — no separate teardown needed.
+      void addToolResult({ tool: "request_secret", toolCallId, output });
+      await consumeResume(await submitToolResult(chatId, agent, toolCallId, output));
+    } finally {
+      setDeciding(false);
+    }
+  }
+
   // Returning from an OAuth connect (`?connected=<name>`): the run is paused on a
   // `connect_<name>` approval. Approve it now so the continuation streams in.
   const resumedRef = useRef(false);
@@ -419,8 +500,8 @@ export function Chat({
     const approvalId = p.approval?.id;
     if (!approvalId) return null;
 
-    if (name?.startsWith("connect_")) {
-      const conn = name.replace(/^connect_/, "");
+    const conn = connectTargetOf(p);
+    if (conn) {
       return (
         <div className="border-primary-border bg-primary rounded-md border p-2">
           {deciding ? (
@@ -573,8 +654,20 @@ export function Chat({
           onSubmit={handleSubmit}
           isSubmitting={busy}
           questions={isAskUser ? composerState.questions : undefined}
+          secretRequest={isSecretRequest ? composerState.request : null}
+          secretError={secretError}
         >
-          <Composer.Panel value={showActive ? "active" : isAskUser ? "ask-user" : undefined}>
+          <Composer.Panel
+            value={
+              showActive
+                ? "active"
+                : isAskUser
+                  ? "ask-user"
+                  : isSecretRequest
+                    ? "secret-request"
+                    : undefined
+            }
+          >
             <Composer.PanelItem value="active">
               <StepQueue>
                 {activeSteps.map((step, i) => {
@@ -599,6 +692,9 @@ export function Chat({
             <Composer.PanelItem value="ask-user">
               <Composer.AskUser />
             </Composer.PanelItem>
+            <Composer.PanelItem value="secret-request">
+              <Composer.SecretRequest />
+            </Composer.PanelItem>
           </Composer.Panel>
 
           <Composer.Container>
@@ -606,7 +702,13 @@ export function Chat({
             <Composer.Textarea autoFocus>
               <Composer.Placeholder
                 placeholder={
-                  isAskUser ? "Or type your own answer…" : busy ? "Thinking…" : "Message the agent…"
+                  isAskUser
+                    ? "Or type your own answer…"
+                    : isSecretRequest
+                      ? "Or reply instead of filling the form…"
+                      : busy
+                        ? "Thinking…"
+                        : "Message the agent…"
                 }
               />
             </Composer.Textarea>
@@ -615,6 +717,11 @@ export function Chat({
                 <Composer.AskUserHints />
                 <Composer.AskUserDismiss />
                 <Composer.AskUserContinue />
+              </Composer.Actions>
+            ) : isSecretRequest ? (
+              <Composer.Actions className="flex items-center justify-end gap-1">
+                <Composer.SecretSkip />
+                <Composer.SecretSave />
               </Composer.Actions>
             ) : (
               <Composer.Actions className="flex items-center justify-between">
