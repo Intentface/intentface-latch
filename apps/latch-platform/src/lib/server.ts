@@ -254,8 +254,12 @@ export const addConnectionFn = createServerFn({ method: "POST" })
     if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
       return { ok: false, error: "only org admins can manage org-shared connections" };
     }
-    const { connectionStore, dynamic } = await getLatch();
-    const result = await upsertConnection(principal, data, { connectionStore, dynamic });
+    const { connectionStore, dynamic, namedSecrets } = await getLatch();
+    const result = await upsertConnection(principal, data, {
+      connectionStore,
+      dynamic,
+      namedSecrets,
+    });
     if (result.ok) {
       console.log(
         `[connections] upsert name=${result.name} scope=${data.scope} kind=${data.kind} by=${principal.userId ?? "-"}@${principal.orgId}`,

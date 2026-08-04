@@ -21,20 +21,31 @@ export interface StoredConnection {
    * `oauth` (MCP only) holds no secret — the per-user tokens come from the
    * interactive OAuth flow and live under the caller's own Vault scope.
    * `oauth2` (OpenAPI only) is a classic pre-registered authorization-code
-   * client: explicit endpoints + client credentials stored in this encrypted
-   * blob (same trust model as static tokens), while the GRANTS are always
+   * client: explicit endpoints + client credentials, while the GRANTS are always
    * per-user — each caller authorizes with their own account and their tokens
    * live under their own Vault scope, even for org-shared connections.
+   *
+   * SECRETS ARE REFERENCES. `tokenRef` / `clientSecretRef` name a
+   * {@link NamedSecretRef} in the same scope as this connection, resolved at
+   * EGRESS (see `dynamic-connections.ts`) rather than copied in here. That is
+   * what makes the Secrets page's Replace rotate every dependent connection at
+   * once and its Delete actually revoke.
+   *
+   * The inline `token` / `clientSecret` are the pre-reference shape, kept
+   * readable forever: connections written before this existed still work, and
+   * they migrate to a ref the next time their secret is retyped. Exactly one of
+   * the pair is set on any given record — the ref wins if both somehow are.
    */
   auth?:
-    | { kind: "bearer" | "header"; header?: string; token: string }
+    | { kind: "bearer" | "header"; header?: string; token?: string; tokenRef?: string }
     | { kind: "oauth"; scopes?: string[] }
     | {
         kind: "oauth2";
         authorizeUrl: string;
         tokenUrl: string;
         clientId: string;
-        clientSecret: string;
+        clientSecret?: string;
+        clientSecretRef?: string;
         scopes?: string[];
       };
 }

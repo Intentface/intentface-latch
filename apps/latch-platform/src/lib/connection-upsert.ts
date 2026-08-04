@@ -1,16 +1,20 @@
 import type { CredentialScope } from "./credentials";
 import type { ConnectionStore, StoredConnection } from "./connection-store";
 import type { DynamicConnections } from "./dynamic-connections";
+import type { NamedSecrets } from "./named-secrets";
 import type { Principal } from "./session";
+import { assertSecretRef, defaultSecretName, normalizeSecretName } from "./named-secrets";
 import { assertPublicHttpsUrl } from "./oauth2-flow";
 import { parseScopes, sameScopeSet } from "./oauth-scopes";
 
 /**
  * The editable shape of a connection — what the Connections page form posts and
- * what the Agent Builder's `create_connection` assembles. Secrets arrive here
- * ALREADY RESOLVED: the agent path passes vault-name refs and resolves them
- * before calling in, so this module never touches the Vault and stays a pure
- * validation + persistence unit.
+ * what the Agent Builder's `create_connection` assembles.
+ *
+ * The two paths differ in how the credential arrives: the form posts a VALUE the
+ * user typed, the agent passes only a NAME (it must never hold a value). Both
+ * converge on a name — a typed value is minted into a named secret here — so a
+ * connection always ends up storing a reference, never a copy.
  */
 export interface ConnectionInput {
   name: string;
@@ -27,11 +31,17 @@ export interface ConnectionInput {
    */
   authMode?: "none" | "token" | "oauth" | "oauth2";
   authHeader?: string;
+  /** A static token the user TYPED. Minted into a named secret; never stored as-is. */
   token?: string;
+  /** The name of an existing secret to use as the static token (the agent's path). */
+  tokenRef?: string;
   authorizeUrl?: string;
   tokenUrl?: string;
   clientId?: string;
+  /** An oauth2 client secret the user TYPED. Minted into a named secret. */
   clientSecret?: string;
+  /** The name of an existing secret to use as the oauth2 client secret. */
+  clientSecretRef?: string;
   /** oauth2: whitespace-separated scope items (a provider's own delimiter, e.g. Strava's commas, survives inside one item). */
   scopes?: string;
 }
@@ -41,6 +51,66 @@ export type UpsertResult = { ok: true; name: string } | { ok: false; error: stri
 /** Connection names are used as tool-source keys — keep them to a safe alphabet. */
 export const normalizeConnectionName = (raw: string): string =>
   raw.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+
+/** What a connection ends up pointing at for one credential field. */
+type SettledSecret =
+  | { ok: true; ref?: string; inline?: string }
+  | { ok: false; error: string };
+
+/**
+ * Decide which named secret backs one credential field, minting one if the user
+ * typed a value. Precedence, highest first:
+ *
+ * 1. A ref the caller named — validated against the connection's own scope.
+ * 2. A value the user typed — stored under this connection's own secret name,
+ *    which is also how a legacy inline secret finally becomes a reference.
+ * 3. Neither: keep what the record already used (the blank-field convention).
+ *    A legacy inline value survives untouched until someone retypes it.
+ */
+async function settleSecret(opts: {
+  secrets: NamedSecrets;
+  principal: Principal;
+  scope: CredentialScope;
+  connection: string;
+  field: "token" | "client_secret";
+  ref?: string;
+  typed?: string;
+  existingRef?: string;
+  existingInline?: string;
+}): Promise<SettledSecret> {
+  const { secrets, principal, scope, connection, field, existingRef, existingInline } = opts;
+
+  const ref = opts.ref?.trim();
+  if (ref) {
+    const checked = await assertSecretRef(secrets, principal, ref, scope, `${field}Ref`);
+    if (!checked.ok) return checked;
+    return { ok: true, ref: normalizeSecretName(ref) };
+  }
+
+  const typed = opts.typed?.trim();
+  if (typed) {
+    // Retyping rotates the secret already in use, in place — every other
+    // connection pointing at that name gets the new value too, which is the
+    // whole point of references. Only a connection with no ref yet needs a name.
+    let name = existingRef;
+    if (!name) {
+      const derived = defaultSecretName(connection, field);
+      name = derived;
+      // The derived name can already belong to something else (a secret the
+      // agent minted, another connection's). Never silently overwrite it.
+      for (let i = 2; (await secrets.has(principal, name, scope)) && i < 100; i++) {
+        name = `${derived}-${i}`;
+      }
+      if (await secrets.has(principal, name, scope)) {
+        return { ok: false, error: `Could not find a free secret name for "${derived}".` };
+      }
+    }
+    await secrets.set(principal, name, scope, typed);
+    return { ok: true, ref: name };
+  }
+
+  return { ok: true, ref: existingRef, inline: existingRef ? undefined : existingInline };
+}
 
 /**
  * Create or update a connection. Shared by the Connections page
@@ -53,11 +123,28 @@ export const normalizeConnectionName = (raw: string): string =>
 export async function upsertConnection(
   principal: Principal,
   data: ConnectionInput,
-  deps: { connectionStore: ConnectionStore; dynamic: DynamicConnections },
+  deps: {
+    connectionStore: ConnectionStore;
+    dynamic: DynamicConnections;
+    namedSecrets: NamedSecrets;
+  },
 ): Promise<UpsertResult> {
-  const { connectionStore, dynamic } = deps;
+  const { connectionStore, dynamic, namedSecrets } = deps;
   const name = normalizeConnectionName(data.name);
   if (!name) return { ok: false, error: "name required" };
+
+  // The kind's own target, validated before anything is written: settling a
+  // secret can MINT one, so a late "spec required" would leave an orphan
+  // credential behind. Bound here so the write below needs no re-checking.
+  let mcpUrl = "";
+  let openapiSpec = "";
+  if (data.kind === "mcp") {
+    mcpUrl = data.url?.trim() ?? "";
+    if (!mcpUrl) return { ok: false, error: "url required" };
+  } else {
+    openapiSpec = data.spec?.trim() ?? "";
+    if (!openapiSpec) return { ok: false, error: "spec required" };
+  }
 
   // Add is an upsert by (name, scope) — editing goes through here too. A
   // blank secret field on an existing connection means "keep the current
@@ -74,10 +161,7 @@ export async function upsertConnection(
     const authorizeUrl = data.authorizeUrl?.trim();
     const tokenUrl = data.tokenUrl?.trim();
     const clientId = data.clientId?.trim();
-    const clientSecret =
-      data.clientSecret?.trim() ||
-      (existing?.auth?.kind === "oauth2" ? existing.auth.clientSecret : undefined);
-    if (!authorizeUrl || !tokenUrl || !clientId || !clientSecret) {
+    if (!authorizeUrl || !tokenUrl || !clientId) {
       return {
         ok: false,
         error: "oauth2 requires authorize URL, token URL, client ID and client secret",
@@ -89,12 +173,32 @@ export async function upsertConnection(
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+    const prev = existing?.auth?.kind === "oauth2" ? existing.auth : undefined;
+    const secret = await settleSecret({
+      secrets: namedSecrets,
+      principal,
+      scope: data.scope,
+      connection: name,
+      field: "client_secret",
+      ref: data.clientSecretRef,
+      typed: data.clientSecret,
+      existingRef: prev?.clientSecretRef,
+      existingInline: prev?.clientSecret,
+    });
+    if (!secret.ok) return secret;
+    if (!secret.ref && !secret.inline) {
+      return {
+        ok: false,
+        error: "oauth2 requires authorize URL, token URL, client ID and client secret",
+      };
+    }
     auth = {
       kind: "oauth2",
       authorizeUrl,
       tokenUrl,
       clientId,
-      clientSecret,
+      clientSecret: secret.inline,
+      clientSecretRef: secret.ref,
       scopes: parseScopes(data.scopes),
     };
   } else if (data.authMode === "oauth") {
@@ -114,27 +218,39 @@ export async function upsertConnection(
     auth = undefined; // an explicit "none" clears auth even if a token was typed
   } else {
     // Blank token in token mode keeps the stored one (edit).
-    const token =
-      data.token?.trim() ||
-      (data.authMode === "token" &&
+    const prev =
+      data.authMode === "token" &&
       (existing?.auth?.kind === "bearer" || existing?.auth?.kind === "header")
-        ? existing.auth.token
-        : undefined);
-    auth = token
-      ? {
-          kind: data.authHeader?.trim() ? "header" : "bearer",
-          header: data.authHeader?.trim() || undefined,
-          token,
-        }
-      : undefined;
+        ? existing.auth
+        : undefined;
+    const secret = await settleSecret({
+      secrets: namedSecrets,
+      principal,
+      scope: data.scope,
+      connection: name,
+      field: "token",
+      ref: data.tokenRef,
+      typed: data.token,
+      existingRef: prev?.tokenRef,
+      existingInline: prev?.token,
+    });
+    if (!secret.ok) return secret;
+    auth =
+      secret.ref || secret.inline
+        ? {
+            kind: data.authHeader?.trim() ? "header" : "bearer",
+            header: data.authHeader?.trim() || undefined,
+            token: secret.inline,
+            tokenRef: secret.ref,
+          }
+        : undefined;
   }
 
   if (data.kind === "mcp") {
-    if (!data.url?.trim()) return { ok: false, error: "url required" };
     await connectionStore.add(principal, data.scope, {
       kind: "mcp",
       name,
-      mcp: { url: data.url.trim() },
+      mcp: { url: mcpUrl },
       auth,
     });
     // Requested scopes are baked into the issued token, so an existing token
@@ -160,7 +276,6 @@ export async function upsertConnection(
       }
     }
   } else {
-    if (!data.spec?.trim()) return { ok: false, error: "spec required" };
     const operations = data.operations
       ?.split(",")
       .map((s) => s.trim())
@@ -169,7 +284,7 @@ export async function upsertConnection(
       kind: "openapi",
       name,
       openapi: {
-        spec: data.spec.trim(),
+        spec: openapiSpec,
         baseUrl: data.baseUrl?.trim() || undefined,
         operations: operations && operations.length > 0 ? operations : undefined,
       },

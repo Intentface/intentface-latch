@@ -7,7 +7,6 @@ import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
 import { validateRubrics } from "@/lib/observability/rubrics";
 import { isOrgAdmin } from "@/lib/auth";
-import { resolveSecretRef } from "@/lib/named-secrets";
 import { upsertConnection, normalizeConnectionName } from "@/lib/connection-upsert";
 import type { ConnectionInput } from "@/lib/connection-upsert";
 import { sharedReadTools } from "./shared-read-tools";
@@ -235,9 +234,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
   const orgAdminOk = async (scope: "user" | "org") =>
     scope !== "org" || (await isOrgAdmin(principal.userId!, principal.orgId));
 
-  const resolveRef = (ref: string | undefined, scope: "user" | "org", field: string) =>
-    resolveSecretRef(namedSecrets, principal, ref, scope, field);
-
   const capsToExec = (
     c: z.infer<typeof CAPABILITIES>,
     authored?: string[],
@@ -346,11 +342,10 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             };
           }
         }
-        const clientSecret = await resolveRef(input.clientSecretRef, input.scope, "clientSecretRef");
-        if (!clientSecret.ok) return { error: clientSecret.error };
-        const token = await resolveRef(input.tokenRef, input.scope, "tokenRef");
-        if (!token.ok) return { error: token.error };
 
+        // The refs go into the record as NAMES. Nothing on this path reads a
+        // secret's value — `upsertConnection` checks the names exist at this
+        // scope, and the plaintext is fetched only at egress.
         const record: ConnectionInput = {
           name: input.name,
           kind: input.kind,
@@ -361,14 +356,18 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           operations: input.operations,
           authMode: input.authMode,
           authHeader: input.authHeader,
-          token: token.value,
+          tokenRef: input.tokenRef,
           authorizeUrl: input.authorizeUrl,
           tokenUrl: input.tokenUrl,
           clientId: input.clientId,
-          clientSecret: clientSecret.value,
+          clientSecretRef: input.clientSecretRef,
           scopes: input.scopes,
         };
-        const saved = await upsertConnection(principal, record, { connectionStore, dynamic });
+        const saved = await upsertConnection(principal, record, {
+          connectionStore,
+          dynamic,
+          namedSecrets,
+        });
         if (!saved.ok) return { error: saved.error };
         console.log(
           `[connections] upsert name=${saved.name} scope=${input.scope} kind=${input.kind} by=${principal.userId ?? "-"}@${principal.orgId} via=agent-builder`,

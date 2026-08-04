@@ -13,10 +13,11 @@ import {
   bearer as openApiBearer,
   createOpenApiConnections,
   defineOpenApiConnection,
-  headers as openApiHeaders,
 } from "@intentface/latch-openapi";
 import type { Principal } from "./session";
-import type { ConnectionStore, StoredConnection } from "./connection-store";
+import type { ConnectionStore, ScopedConnection } from "./connection-store";
+import type { NamedSecrets } from "./named-secrets";
+import { defaultSecretName, requireSecret } from "./named-secrets";
 import type { OAuth2Flow } from "./oauth2-flow";
 import { createOAuth2Flow } from "./oauth2-flow";
 
@@ -36,27 +37,41 @@ import { createOAuth2Flow } from "./oauth2-flow";
  * the agent can ask the user to authorize mid-chat, exactly like code-declared
  * ones. The registry therefore also surfaces the handler's connection routes
  * (`oauth`/`status`/`testTools`) for those UI connections.
+ *
+ * CREDENTIALS ARE RESOLVED HERE, at egress, from the named secret a connection
+ * points at — never copied into the connection record. Replacing a secret on the
+ * Secrets page therefore rotates every connection built on it, and deleting one
+ * revokes them. The three resolution points are the oauth2 client secret (per
+ * token POST), the OpenAPI static token (per tool call) and the MCP static token
+ * (per turn, since transport headers are fixed when the socket opens).
  */
 const hostOf = (u: string) => new URL(u).hostname;
 
-/** Static token auth → MCP request headers (oauth/oauth2 carry no static token). */
-function mcpAuth(auth: StoredConnection["auth"]): McpAuth | undefined {
+/**
+ * A static token's plaintext, from either the referenced secret or a legacy
+ * inline value. Throws when a referenced secret is gone — the callers turn that
+ * into a connection that contributes no tools, rather than one that sends
+ * unauthenticated requests.
+ */
+async function staticToken(
+  secrets: NamedSecrets,
+  conn: ScopedConnection,
+  principal: Principal,
+): Promise<string | undefined> {
+  const auth = conn.auth;
   if (!auth || auth.kind === "oauth" || auth.kind === "oauth2") return undefined;
-  const headers =
-    auth.kind === "bearer"
-      ? { Authorization: `Bearer ${auth.token}` }
-      : { [auth.header ?? "Authorization"]: auth.token };
-  return { type: "headers", headers };
+  if (auth.tokenRef) {
+    return requireSecret(secrets, principal, auth.tokenRef, conn.scope, conn.name);
+  }
+  return auth.token;
 }
 
-/** Static token auth → OpenAPI header resolver (oauth2 is resolved per call instead). */
-function openApiAuth(auth: StoredConnection["auth"]): OpenApiAuth<Principal> | undefined {
-  if (!auth || auth.kind === "oauth" || auth.kind === "oauth2") return undefined;
-  return openApiHeaders(
-    auth.kind === "bearer"
-      ? { Authorization: `Bearer ${auth.token}` }
-      : { [auth.header ?? "Authorization"]: auth.token },
-  );
+/** Static token → the request headers it belongs in (`Authorization` unless overridden). */
+function tokenHeaders(conn: ScopedConnection, token: string): Record<string, string> {
+  const auth = conn.auth;
+  return auth?.kind === "header"
+    ? { [auth.header ?? "Authorization"]: token }
+    : { Authorization: `Bearer ${token}` };
 }
 
 /** The synthetic, approval-gated tool that asks the user to authorize a connection. */
@@ -87,12 +102,14 @@ export interface DynamicConnections extends ConnectionRegistry<Principal> {
 
 export function createDynamicConnections(opts: {
   store: ConnectionStore;
+  /** Where a connection's `*Ref` credentials are read from, at egress. */
+  secrets: NamedSecrets;
   vault: Vault<Principal>;
   /** Base the OAuth callback lands on, e.g. `https://app/api/latch/connections`. */
   callbackBaseUrl: string;
   onConnectionError?: (name: string, error: unknown) => void;
 }): DynamicConnections {
-  const { store, vault, onConnectionError } = opts;
+  const { store, secrets, vault, onConnectionError } = opts;
   const callbackBase = opts.callbackBaseUrl.replace(/\/$/, "");
 
   // Normalize non-conformant OAuth discovery from proxied MCP servers: force the
@@ -176,12 +193,29 @@ export function createDynamicConnections(opts: {
           if (!conn || conn.kind !== "openapi" || !conn.openapi || conn.auth?.kind !== "oauth2") {
             throw new Error(`Connection "${name}" is not configured for OAuth2`);
           }
+          const { clientSecretRef } = conn.auth;
+          const clientSecret = clientSecretRef
+            ? await requireSecret(secrets, p, clientSecretRef, conn.scope, name)
+            : (conn.auth.clientSecret ?? "");
           return {
             ...conn.auth,
-            // Fold the API target into the grant identity: retargeting the
-            // connection (new spec/baseUrl) must invalidate grants minted for
-            // the old API, not send its bearer tokens to the new host.
-            fingerprint: JSON.stringify([conn.openapi.spec, conn.openapi.baseUrl ?? null]),
+            clientSecret,
+            // Fold the API target and the credential's IDENTITY into the grant
+            // fingerprint. Retargeting the connection (new spec/baseUrl) must
+            // invalidate grants minted for the old API rather than send its
+            // bearer tokens to the new host; repointing at a *different* named
+            // secret is likewise a different client, so it forces re-consent.
+            //
+            // Pointing at this connection's OWN secret is the baseline and
+            // contributes nothing, which is what makes two migrations invisible:
+            // a legacy inline secret becoming a ref on first retype (same
+            // credential, new home), and this very field being introduced
+            // (grants minted before refs existed stay valid).
+            fingerprint: JSON.stringify(
+              clientSecretRef && clientSecretRef !== defaultSecretName(name, "client_secret")
+                ? [conn.openapi.spec, conn.openapi.baseUrl ?? null, clientSecretRef]
+                : [conn.openapi.spec, conn.openapi.baseUrl ?? null],
+            ),
           };
         },
         ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
@@ -191,19 +225,26 @@ export function createDynamicConnections(opts: {
     return o;
   }
 
-  function openapiSource(conn: StoredConnection): ToolSource<Principal> {
+  function openapiSource(conn: ScopedConnection): ToolSource<Principal> {
     const o = conn.openapi!;
     // Auth is part of the key so a re-add that changes credentials doesn't
-    // reuse a registry built with a stale auth closure. In-memory only.
-    const sig = `${conn.name}:${o.spec}:${o.baseUrl ?? ""}:${JSON.stringify(conn.auth ?? null)}`;
+    // reuse a registry built with a stale auth closure — but note the key is
+    // deliberately STABLE across a secret's value changing, because the value is
+    // no longer in here: it's read per call below. Scope is part of the key too,
+    // since it decides which secret a `*Ref` resolves against. In-memory only.
+    const sig = `${conn.scope}:${conn.name}:${o.spec}:${o.baseUrl ?? ""}:${JSON.stringify(conn.auth ?? null)}`;
     let reg = openapiCache.get(sig);
     if (!reg) {
       const hosts = [hostOf(o.spec), ...(o.baseUrl ? [hostOf(o.baseUrl)] : [])];
-      // oauth2 → a live per-user bearer token, resolved on every tool call (the
-      // registry is built once and shared across principals, so the closure
-      // must only capture the connection name). An unauthorized/dead grant
-      // yields no header → the API's own 401 comes back as a tool result.
-      const auth =
+      // Both auth kinds resolve on every tool call — the registry is built once
+      // and shared across principals, so the closures must capture nothing but
+      // the connection record.
+      //
+      // oauth2 → a live per-user bearer token; an unauthorized/dead grant yields
+      // no header and the API's own 401 comes back as a tool result. A static
+      // token instead THROWS when its secret has been deleted: a revoked
+      // credential must fail the call, not quietly make it anonymous.
+      const auth: OpenApiAuth<Principal> | undefined =
         conn.auth?.kind === "oauth2"
           ? openApiBearer<Principal>({
               getToken: (p) =>
@@ -211,7 +252,12 @@ export function createDynamicConnections(opts: {
                   .accessTokenFor(p)
                   .catch(() => undefined),
             })
-          : openApiAuth(conn.auth);
+          : conn.auth && conn.auth.kind !== "oauth"
+            ? async (p) => {
+                const token = await staticToken(secrets, conn, p);
+                return token ? tokenHeaders(conn, token) : {};
+              }
+            : undefined;
       reg = createOpenApiConnections<Principal>({
         allowedHosts: hosts,
         // DNS-pinned: vets addresses at connect time for BOTH the spec
@@ -234,7 +280,7 @@ export function createDynamicConnections(opts: {
   }
 
   /** Open an authorized oauth2 OpenAPI connection's live tools (empty until connected). */
-  function openapiOAuth2Source(conn: StoredConnection): ToolSource<Principal> {
+  function openapiOAuth2Source(conn: ScopedConnection): ToolSource<Principal> {
     return {
       async open(principal): Promise<OpenToolSet> {
         if (!(await oauth2FlowFor(conn.name).isAuthorized(principal))) {
@@ -245,18 +291,33 @@ export function createDynamicConnections(opts: {
     };
   }
 
-  /** Open a static-token (or no-auth) MCP connection's live tools. */
-  function mcpTokenSource(conn: StoredConnection): ToolSource<Principal> {
+  /**
+   * Open a static-token (or no-auth) MCP connection's live tools.
+   *
+   * The token is resolved when the transport connects, so a rotation lands on
+   * the NEXT turn rather than the next call — MCP fixes its request headers at
+   * connect time, unlike OpenAPI's per-call resolver. Deliberate asymmetry: the
+   * alternative is reconnecting mid-turn on every tool call.
+   */
+  function mcpTokenSource(conn: ScopedConnection): ToolSource<Principal> {
     const url = conn.mcp!.url;
-    return createMcpHost<Principal>({
-      allowedHosts: [hostOf(url)],
-      onConnectionError,
-      connections: [{ name: conn.name, url, auth: mcpAuth(conn.auth) }],
-    });
+    return {
+      async open(principal): Promise<OpenToolSet> {
+        const token = await staticToken(secrets, conn, principal);
+        const auth: McpAuth | undefined = token
+          ? { type: "headers", headers: tokenHeaders(conn, token) }
+          : undefined;
+        return createMcpHost<Principal>({
+          allowedHosts: [hostOf(url)],
+          onConnectionError,
+          connections: [{ name: conn.name, url, auth }],
+        }).open(principal);
+      },
+    };
   }
 
   /** Open an authorized OAuth MCP connection's live tools (auto-refreshing). */
-  function mcpOAuthSource(conn: StoredConnection): ToolSource<Principal> {
+  function mcpOAuthSource(conn: ScopedConnection): ToolSource<Principal> {
     const url = conn.mcp!.url;
     return {
       async open(principal): Promise<OpenToolSet> {
@@ -278,7 +339,7 @@ export function createDynamicConnections(opts: {
   async function openNamed(names: string[], principal: Principal): Promise<OpenToolSet> {
     const all = await store.list(principal);
     // Keep requested names; personal precedence (user entries come last).
-    const byName = new Map<string, StoredConnection>();
+    const byName = new Map<string, ScopedConnection>();
     for (const c of all) if (names.includes(c.name)) byName.set(c.name, c);
 
     const tools: Record<string, unknown> = {};
@@ -301,7 +362,20 @@ export function createDynamicConnections(opts: {
               : openapiSource(conn)
             : undefined;
       if (!source) continue;
-      const opened = await source.open(principal);
+      let opened: OpenToolSet;
+      try {
+        // A connection whose referenced secret has been deleted is REVOKED — it
+        // contributes no tools and says why, instead of sending unauthenticated
+        // requests. Resolving here (rather than only at call time) makes the
+        // tool simply absent, which the agent handles far better than a runtime
+        // failure. The same containment covers any other open failure: one bad
+        // connection must not take the rest of the turn's tools down with it.
+        await staticToken(secrets, conn, principal);
+        opened = await source.open(principal);
+      } catch (error) {
+        onConnectionError?.(conn.name, error);
+        continue;
+      }
       Object.assign(tools, opened.tools);
       Object.assign(toolApproval, opened.toolApproval ?? {});
       if (opened.alwaysActive) alwaysActive.push(...opened.alwaysActive);
@@ -355,19 +429,23 @@ export function createDynamicConnections(opts: {
     async status(principal) {
       const conns = await store.list(principal);
       const out: ConnectionStatus[] = [];
+      // An oauth2 grant check reads the connection's client secret, so a deleted
+      // one throws here. This listing backs the whole Connections page — one
+      // revoked connection reports as unauthorized, it doesn't blank the page.
+      const grantOk = (check: Promise<boolean>) => check.catch(() => false);
       for (const c of conns) {
         if (c.kind === "mcp") {
           const isOAuth = c.auth?.kind === "oauth";
           out.push({
             name: c.name,
             oauth: isOAuth,
-            authorized: isOAuth ? await oauthFor(c.name).isAuthorized(principal) : true,
+            authorized: isOAuth ? await grantOk(oauthFor(c.name).isAuthorized(principal)) : true,
           });
         } else if (c.auth?.kind === "oauth2") {
           out.push({
             name: c.name,
             oauth: true,
-            authorized: await oauth2FlowFor(c.name).isAuthorized(principal),
+            authorized: await grantOk(oauth2FlowFor(c.name).isAuthorized(principal)),
           });
         }
         // Other OpenAPI connections stay out of status (always usable);
