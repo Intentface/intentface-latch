@@ -1,13 +1,14 @@
 import { type ReactNode, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "motion/react";
-import { Check, ChevronDown, CircleHelp, Copy, FileText, Mic, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Copy, FileText, KeyRound, Mic, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
 import { Steps } from "./steps.js";
 import {
   getAskUserInfo,
+  getSecretRequestsAnswered,
   getSegmentedParts,
   getSourcesInfo,
   getTextInfo,
@@ -64,6 +65,7 @@ export function Message({
   const { sources, hasSources } = getSourcesInfo(message.parts);
   const { text: copyText } = getTextInfo(segments);
   const { answered } = getAskUserInfo(message.parts);
+  const secretsAnswered = getSecretRequestsAnswered(message.parts);
 
   return (
     <motion.div
@@ -191,6 +193,36 @@ export function Message({
               ))}
             </Collapsible.Panel>
           </Collapsible.Root>
+        ))}
+
+      {!isUser &&
+        secretsAnswered.map((s) => (
+          <div
+            key={s.toolCallId}
+            className="text-ink-secondary flex flex-wrap items-center gap-1.5 text-xs"
+          >
+            <KeyRound className="size-3.5 shrink-0" />
+            {s.declined ? (
+              <span>Skipped {s.title.toLowerCase()}</span>
+            ) : (
+              <>
+                <span>{s.title} saved</span>
+                {s.saved.map((name) => (
+                  <span
+                    key={name}
+                    className="border-primary-border text-ink-tertiary rounded border px-1 font-mono text-[11px]"
+                  >
+                    {name}
+                  </span>
+                ))}
+                {s.values.map((v) => (
+                  <span key={v.label} className="text-ink-tertiary">
+                    · {v.label}: {v.value}
+                  </span>
+                ))}
+              </>
+            )}
+          </div>
         ))}
 
       {!isUser && hasSources && (

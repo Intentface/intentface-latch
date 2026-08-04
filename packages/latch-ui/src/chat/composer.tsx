@@ -60,6 +60,8 @@ import {
 } from "./chip-markdown.js";
 import { cn } from "../lib/utils.js";
 import type { AskUserQuestion } from "./ask-user.js";
+import type { SecretRequestInput } from "./secret-request.js";
+import { SecretRequest } from "./secret-request-compound.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -129,7 +131,21 @@ export type ComposerAnswersSubmit = {
   answers: ComposerAnswerEntry[];
 };
 
-export type ComposerSubmitData = ComposerMessageSubmit | ComposerAnswersSubmit;
+/**
+ * A secret-entry form's result. The host is expected to post `values` to its
+ * OWN server and resume the paused tool with names only — this union member
+ * exists precisely so credentials never travel the message path.
+ */
+export type ComposerSecretSubmit = {
+  kind: "secret";
+  values: Record<string, string>;
+  declined: boolean;
+};
+
+export type ComposerSubmitData =
+  | ComposerMessageSubmit
+  | ComposerAnswersSubmit
+  | ComposerSecretSubmit;
 
 export type ComposerCommandsItems =
   | CommandItemData[]
@@ -1049,6 +1065,19 @@ type ComposerAskUserState = {
   optionsRef: RefObject<AskUserOptionsHandle | null>;
 };
 
+type ComposerSecretRequestState = {
+  /** Null when no secret form is open. */
+  request: SecretRequestInput | null;
+  values: Record<string, string>;
+  busy: boolean;
+  error: string | null;
+  setValue: (key: string, value: string) => void;
+  /** Every non-optional field has a value. */
+  isComplete: boolean;
+  save: () => void;
+  skip: () => void;
+};
+
 // Mirror of the command-list plugin state: whether a trigger prefix is
 // active, which one, and the query typed after it.
 type ComposerCommandsState = {
@@ -1073,6 +1102,7 @@ type ComposerState = {
   commands: ComposerCommandsState;
   attachments: ComposerAttachmentsState;
   askUser: ComposerAskUserState;
+  secretRequest: ComposerSecretRequestState;
 };
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1121,9 @@ type ComposerStore = {
   setPanelValue: (value: string | null) => void;
   setCommands: (next: ComposerCommandsState) => void;
   setQuestions: (questions: AskUserQuestion[] | null) => void;
+  setSecretRequest: (request: SecretRequestInput | null) => void;
+  setSecretBusy: (busy: boolean) => void;
+  setSecretError: (error: string | null) => void;
   setDragging: (active: boolean) => void;
   resetAttachments: () => void;
   activateAskUser: () => () => void;
@@ -1098,6 +1131,9 @@ type ComposerStore = {
   // Co-located refs the mounted Composer wires up at runtime.
   attachmentConfigRef: RefObject<AttachmentStoreConfig>;
   submitAnswersRef: RefObject<((answers: ComposerAnswerEntry[]) => void) | null>;
+  submitSecretRef: RefObject<
+    ((values: Record<string, string>, declined: boolean) => void) | null
+  >;
   commandSelectRef: RefObject<(() => void) | null>;
   commandNavigateRef: RefObject<((direction: number) => void) | null>;
 };
@@ -1122,6 +1158,9 @@ const createComposerStore = (): ComposerStore => {
   const submitAnswersRef: RefObject<((answers: ComposerAnswerEntry[]) => void) | null> = {
     current: null,
   };
+  const submitSecretRef: RefObject<
+    ((values: Record<string, string>, declined: boolean) => void) | null
+  > = { current: null };
   const commandSelectRef: RefObject<(() => void) | null> = { current: null };
   const commandNavigateRef: RefObject<((direction: number) => void) | null> = { current: null };
 
@@ -1244,6 +1283,53 @@ const createComposerStore = (): ComposerStore => {
     notify();
   };
 
+  // Secret-entry: a plain controlled form. No state machine and no keyboard
+  // takeover — unlike ask-user there is nothing to navigate, and the values are
+  // credentials we want to hold for as short a time as possible.
+  const secretComplete = (request: SecretRequestInput | null, values: Record<string, string>) =>
+    !!request && request.fields.every((f) => (values[f.key] ?? "").trim() !== "");
+
+  const patchSecret = (patch: Partial<ComposerSecretRequestState>) => {
+    snapshot = { ...snapshot, secretRequest: { ...snapshot.secretRequest, ...patch } };
+    notify();
+  };
+
+  const setSecretValue = (key: string, value: string) => {
+    const values = { ...snapshot.secretRequest.values, [key]: value };
+    patchSecret({
+      values,
+      isComplete: secretComplete(snapshot.secretRequest.request, values),
+      error: null,
+    });
+  };
+
+  const setSecretRequest = (request: SecretRequestInput | null) => {
+    if (snapshot.secretRequest.request === request) return;
+    // Always start from empty values — a previous request's credentials must
+    // never be carried into the next form.
+    patchSecret({ request, values: {}, isComplete: false, busy: false, error: null });
+  };
+
+  const setSecretBusy = (busy: boolean) => {
+    if (snapshot.secretRequest.busy === busy) return;
+    patchSecret({ busy });
+  };
+
+  const setSecretError = (error: string | null) => {
+    if (snapshot.secretRequest.error === error) return;
+    patchSecret({ error, busy: false });
+  };
+
+  const submitSecret = (declined: boolean) => {
+    const { request, values, busy } = snapshot.secretRequest;
+    if (!request || busy) return;
+    // Hand the values off and drop our copy in the same tick. The host owns
+    // clearing the form (by clearing the request prop) once its write lands.
+    const payload = declined ? {} : values;
+    patchSecret({ values: {}, isComplete: false, busy: true, error: null });
+    submitSecretRef.current?.(payload, declined);
+  };
+
   // Ask-user mode: while questions are active the options own the keyboard.
   // Entering blurs the editor; document-level keys are interpreted (pure) and
   // dispatched here, so custom AskUser renders keep the behavior for free.
@@ -1329,6 +1415,16 @@ const createComposerStore = (): ComposerStore => {
         dispatchAskUser({ type: "step-forward", currentText: composerController.getText() }),
       optionsRef,
     },
+    secretRequest: {
+      request: null,
+      values: {},
+      busy: false,
+      error: null,
+      isComplete: false,
+      setValue: setSecretValue,
+      save: () => submitSecret(false),
+      skip: () => submitSecret(true),
+    },
   };
 
   // Pristine state for reset() — slice actions and refs are reused, so action
@@ -1359,12 +1455,16 @@ const createComposerStore = (): ComposerStore => {
     setPanelValue,
     setCommands,
     setQuestions,
+    setSecretRequest,
+    setSecretBusy,
+    setSecretError,
     setDragging,
     resetAttachments: () => dispatchAttachments({ type: "reset" }),
     activateAskUser,
     reset,
     attachmentConfigRef,
     submitAnswersRef,
+    submitSecretRef,
     commandSelectRef,
     commandNavigateRef,
   };
@@ -1590,6 +1690,10 @@ export type ComposerRootProps = Omit<ComponentProps<"form">, "onSubmit" | "ref">
   isSubmitting?: boolean;
   commands?: ComposerCommandsMap;
   questions?: AskUserQuestion[];
+  /** An open secret-entry form. Clear it once the host's write has landed. */
+  secretRequest?: SecretRequestInput | null;
+  /** A failed secret write, shown in the form; also releases its busy state. */
+  secretError?: string | null;
   defaultValue?: ComposerSnapshot;
   value?: ComposerSnapshot;
   onValueChange?: (snapshot: ComposerSnapshot) => void;
@@ -1602,6 +1706,8 @@ const ComposerRoot = ({
   isSubmitting = false,
   commands = EMPTY_COMMANDS,
   questions,
+  secretRequest,
+  secretError,
   defaultValue,
   value,
   onValueChange,
@@ -1618,8 +1724,11 @@ const ComposerRoot = ({
   useEffect(() => {
     composerStore.submitAnswersRef.current = (answers) =>
       onSubmitRef.current?.({ kind: "answers", answers });
+    composerStore.submitSecretRef.current = (values, declined) =>
+      onSubmitRef.current?.({ kind: "secret", values, declined });
     return () => {
       composerStore.submitAnswersRef.current = null;
+      composerStore.submitSecretRef.current = null;
       composerStore.reset();
     };
   }, []);
@@ -1640,6 +1749,16 @@ const ComposerRoot = ({
     return composerStore.activateAskUser();
   }, [questions]);
 
+  // Sync the secret-request prop into the store. No keyboard arming: the form's
+  // own inputs take focus, and the user can still type a message instead.
+  useEffect(() => {
+    composerStore.setSecretRequest(secretRequest ?? null);
+  }, [secretRequest]);
+
+  useEffect(() => {
+    composerStore.setSecretError(secretError ?? null);
+  }, [secretError]);
+
   const { getRegisteredPrefixes } = useCommandRegistry(commands);
 
   useDragDropFiles({
@@ -1658,10 +1777,17 @@ const ComposerRoot = ({
 
   const handleFormSubmit = async (event: React.SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const { askUser, attachments } = composerStore.getSnapshot();
+    const { askUser, attachments, secretRequest: secret } = composerStore.getSnapshot();
 
     if (askUser.questions?.length) {
       askUser.continueStep(composerController.getText());
+      return;
+    }
+
+    // A secret form owns Enter while it's open — submitting the composer's text
+    // here would send a half-typed message and leave the run paused.
+    if (secret.request) {
+      if (secret.isComplete) secret.save();
       return;
     }
 
@@ -2934,6 +3060,78 @@ const ComposerAskUserContinue = ({ className, ...props }: ComposerAskUserContinu
 };
 
 // ---------------------------------------------------------------------------
+// Composer.SecretRequest (with actions) — default render for the secret-entry
+// flow registered via the `secretRequest` prop on Composer Root.
+// ---------------------------------------------------------------------------
+
+const ComposerSecretRequest = () => {
+  const secret = useComposer((composer) => composer.secretRequest);
+  const request = secret.request;
+  if (!request) return null;
+
+  return (
+    <SecretRequest>
+      <SecretRequest.Header>
+        <SecretRequest.Title>{request.title}</SecretRequest.Title>
+        <SecretRequest.Scope scope={request.scope} />
+      </SecretRequest.Header>
+      <SecretRequest.Fields>
+        {request.fields.map((field, index) => (
+          <SecretRequest.Field
+            key={field.key}
+            field={field}
+            autoFocus={index === 0}
+            disabled={secret.busy}
+            value={secret.values[field.key] ?? ""}
+            onValueChange={(value) => secret.setValue(field.key, value)}
+          />
+        ))}
+      </SecretRequest.Fields>
+      <SecretRequest.Note />
+      {secret.error && <SecretRequest.Error>{secret.error}</SecretRequest.Error>}
+    </SecretRequest>
+  );
+};
+
+type ComposerSecretSkipProps = ComponentProps<typeof Button>;
+
+const ComposerSecretSkip = ({ className, ...props }: ComposerSecretSkipProps) => {
+  const secret = useComposer((composer) => composer.secretRequest);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      data-slot="composer-secret-skip"
+      disabled={secret.busy}
+      onClick={secret.skip}
+      className={className}
+      {...props}
+    >
+      Skip
+    </Button>
+  );
+};
+
+type ComposerSecretSaveProps = ComponentProps<typeof Button>;
+
+const ComposerSecretSave = ({ className, ...props }: ComposerSecretSaveProps) => {
+  const secret = useComposer((composer) => composer.secretRequest);
+  return (
+    <Button
+      type="submit"
+      variant="tertiary"
+      data-slot="composer-secret-save"
+      disabled={secret.busy || !secret.isComplete}
+      className={cn("gap-2", className)}
+      {...props}
+    >
+      {secret.busy ? "Saving…" : "Save"}
+      <Kbd size="sm">↵</Kbd>
+    </Button>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Compound export
 // ---------------------------------------------------------------------------
 
@@ -2952,6 +3150,9 @@ export const Composer = Object.assign(ComposerRoot, {
   AskUserHints: ComposerAskUserHints,
   AskUserDismiss: ComposerAskUserDismiss,
   AskUserContinue: ComposerAskUserContinue,
+  SecretRequest: ComposerSecretRequest,
+  SecretSkip: ComposerSecretSkip,
+  SecretSave: ComposerSecretSave,
   Commands: ComposerCommands,
   CommandList: ComposerCommandList,
   CommandItems: ComposerCommandItems,
