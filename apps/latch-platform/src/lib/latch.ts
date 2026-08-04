@@ -32,6 +32,8 @@ import { getPrincipalFromHeaders  } from "./session";
 import type {Principal} from "./session";
 import { createCredentials  } from "./credentials";
 import type {Credentials} from "./credentials";
+import { createNamedSecrets } from "./named-secrets";
+import type { NamedSecrets } from "./named-secrets";
 import { createConnectionStore  } from "./connection-store";
 import type {ConnectionStore} from "./connection-store";
 import { createDynamicConnections  } from "./dynamic-connections";
@@ -93,6 +95,7 @@ let cached:
       runtime: Runtime<Principal>;
       connections: McpConnections<Principal>;
       credentials: Credentials;
+      namedSecrets: NamedSecrets;
       connectionStore: ConnectionStore;
       dynamic: DynamicConnections;
       allConnections: ConnectionRegistry<Principal>;
@@ -118,6 +121,7 @@ export async function getLatch(): Promise<{
   runtime: Runtime<Principal>;
   connections: McpConnections<Principal>;
   credentials: Credentials;
+  namedSecrets: NamedSecrets;
   connectionStore: ConnectionStore;
   dynamic: DynamicConnections;
   allConnections: ConnectionRegistry<Principal>;
@@ -167,6 +171,7 @@ export async function getLatch(): Promise<{
     masterKey: secretEnv("LATCH_VAULT_KEY", btoa("latch-dev-vault-key-32-bytes!!!!")),
   });
   const credentials = createCredentials(vault);
+  const namedSecrets = createNamedSecrets(vault);
   const connectionStore = createConnectionStore(vault);
   // Model catalog + pricing from models.dev (filtered to Anthropic).
   const catalog = await loadModelCatalog();
@@ -548,6 +553,7 @@ export async function getLatch(): Promise<{
     // Connections page's status list read this, not the raw MCP set.
     connections: builtinConnections,
     credentials,
+    namedSecrets,
     connectionStore,
     dynamic,
     allConnections,
