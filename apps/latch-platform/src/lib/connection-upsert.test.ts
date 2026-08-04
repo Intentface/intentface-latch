@@ -92,6 +92,23 @@ describe("upsertConnection", () => {
     expect(res).toEqual({ ok: false, error: "oauth2 is supported for OpenAPI connections only" });
   });
 
+  it("rejects oauth (discovery) on an OpenAPI connection", async () => {
+    // Without an explicit rejection this fell through to the static-token
+    // branch, found no token, and saved with NO auth — a connection that looks
+    // configured but is silently unauthenticated.
+    const { store, run } = harness();
+    const res = await run({
+      name: "silent",
+      kind: "openapi",
+      scope: "user",
+      spec: "https://specs.example.com/x.json",
+      authMode: "oauth",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("MCP connections only");
+    expect(await store.get(principal, "silent")).toBeUndefined();
+  });
+
   it("requires all four oauth2 fields", async () => {
     const { run } = harness();
     for (const missing of ["authorizeUrl", "tokenUrl", "clientId", "clientSecret"] as const) {

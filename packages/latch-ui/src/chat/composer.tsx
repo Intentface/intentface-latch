@@ -1784,9 +1784,11 @@ const ComposerRoot = ({
       return;
     }
 
-    // A secret form owns Enter while it's open — submitting the composer's text
-    // here would send a half-typed message and leave the run paused.
-    if (secret.request) {
+    // A secret form owns Enter only while the message box is EMPTY. If the user
+    // typed a reply instead of filling the form, Enter has to send that reply —
+    // saving the form would silently discard what they wrote, and the composer
+    // stays deliberately usable so replying is a real option.
+    if (secret.request && !composerController.getText().trim()) {
       if (secret.isComplete) secret.save();
       return;
     }
@@ -3118,10 +3120,11 @@ const ComposerSecretSave = ({ className, ...props }: ComposerSecretSaveProps) =>
   const secret = useComposer((composer) => composer.secretRequest);
   return (
     <Button
-      type="submit"
+      type="button"
       variant="tertiary"
       data-slot="composer-secret-save"
       disabled={secret.busy || !secret.isComplete}
+      onClick={secret.save}
       className={cn("gap-2", className)}
       {...props}
     >

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
 import type { AppMessage } from "@intentface/latch-core";
 import {
   slackManifest,
@@ -307,6 +308,28 @@ export const listSecretsFn = createServerFn({ method: "GET" }).handler(async () 
 });
 
 /**
+ * The wire contract for a secret batch. `.validator()` in this file is types
+ * only, and these endpoints are callable directly — so the shape is parsed for
+ * real here. `scope` especially: every reader compares it with `=== "org"`, so
+ * an unrecognised value would quietly mean "user". The 6-entry cap mirrors
+ * `request_secret`'s `fields` cap (one form, one batch) and bounds Vault writes.
+ */
+const SAVE_SECRETS_INPUT = z.object({
+  scope: z.enum(["user", "org"]),
+  secrets: z
+    .array(z.object({ name: z.string(), value: z.string().min(1) }))
+    .min(1)
+    .max(6),
+});
+
+const DELETE_SECRET_INPUT = z.object({
+  name: z.string(),
+  scope: z.enum(["user", "org"]),
+});
+
+const firstIssue = (e: z.ZodError) => e.issues[0]?.message ?? "invalid request";
+
+/**
  * Store one or more secret values under caller-chosen names. Returns the names
  * only, which is what the paused `request_secret` tool result is built from.
  */
@@ -317,23 +340,32 @@ export const saveSecretsFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
+    const parsed = SAVE_SECRETS_INPUT.safeParse(data);
+    if (!parsed.success) return { ok: false as const, error: firstIssue(parsed.error) };
+    const { scope, secrets } = parsed.data;
     // Org-shared secrets back connections every member's agents call — same
     // gate as the connections they feed.
-    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+    if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
       return { ok: false as const, error: "only org admins can store org-shared secrets" };
+    }
+    // Normalize the WHOLE batch before the first write: a bad name halfway
+    // through would otherwise leave some secrets stored and some not, with the
+    // caller told only that it failed.
+    const entries: { name: string; value: string }[] = [];
+    for (const s of secrets) {
+      const name = normalizeSecretName(s.name);
+      if (!name) return { ok: false as const, error: "secret name required" };
+      entries.push({ name, value: s.value });
     }
     const { namedSecrets } = await getLatch();
     const saved: string[] = [];
-    for (const s of data.secrets) {
-      const name = normalizeSecretName(s.name);
-      if (!name) return { ok: false as const, error: "secret name required" };
-      if (!s.value) return { ok: false as const, error: `no value given for "${name}"` };
-      await namedSecrets.set(principal, name, data.scope, s.value);
-      saved.push(name);
+    for (const e of entries) {
+      await namedSecrets.set(principal, e.name, scope, e.value);
+      saved.push(e.name);
     }
     // Audit: names and actor only — never the value.
     console.log(
-      `[secrets] saved ${saved.join(",")} scope=${data.scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
+      `[secrets] saved ${saved.join(",")} scope=${parsed.data.scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
     );
     return { ok: true as const, saved };
   });
@@ -344,13 +376,21 @@ export const deleteSecretFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+    const parsed = DELETE_SECRET_INPUT.safeParse(data);
+    if (!parsed.success) return { ok: false as const, error: firstIssue(parsed.error) };
+    const { scope } = parsed.data;
+    if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
       return { ok: false as const, error: "only org admins can delete org-shared secrets" };
     }
+    // Normalize exactly as `saveSecretsFn` does: secrets are STORED under the
+    // normalized name, so deleting the raw one would remove nothing while the
+    // audit line below claimed otherwise.
+    const name = normalizeSecretName(parsed.data.name);
+    if (!name) return { ok: false as const, error: "secret name required" };
     const { namedSecrets } = await getLatch();
-    await namedSecrets.remove(principal, data.name, data.scope);
+    await namedSecrets.remove(principal, name, scope);
     console.log(
-      `[secrets] deleted ${data.name} scope=${data.scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
+      `[secrets] deleted ${name} scope=${scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
     );
     return { ok: true as const };
   });

@@ -52,6 +52,10 @@ function SecretCard({ secret }: { secret: SecretRef }) {
       }
       setValue("");
       await router.invalidate();
+    } catch (e) {
+      // A rejected server fn (offline, 500) would otherwise just clear `busy`
+      // and look like a silent success.
+      setError(e instanceof Error ? e.message : "Could not save the secret.");
     } finally {
       setBusy(false);
     }
@@ -67,6 +71,8 @@ function SecretCard({ secret }: { secret: SecretRef }) {
         return;
       }
       await router.invalidate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not delete the secret.");
     } finally {
       setBusy(false);
     }

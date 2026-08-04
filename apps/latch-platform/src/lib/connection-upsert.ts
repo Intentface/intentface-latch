@@ -97,8 +97,19 @@ export async function upsertConnection(
       clientSecret,
       scopes: parseScopes(data.scopes),
     };
-  } else if (data.kind === "mcp" && data.authMode === "oauth") {
-    auth = { kind: "oauth", scopes: parseScopes(data.scopes) };
+  } else if (data.authMode === "oauth") {
+    // The mirror of the oauth2-on-MCP rejection above. Without it an OpenAPI
+    // connection asking for "oauth" falls through to the static-token branch,
+    // finds no token, and saves with NO auth at all — a silently unauthenticated
+    // connection that looks configured. OpenAPI's interactive flow is "oauth2".
+    if (data.kind !== "openapi") {
+      auth = { kind: "oauth", scopes: parseScopes(data.scopes) };
+    } else {
+      return {
+        ok: false,
+        error: "oauth (discovery) is supported for MCP connections only — use oauth2 for OpenAPI",
+      };
+    }
   } else if (data.authMode === "none") {
     auth = undefined; // an explicit "none" clears auth even if a token was typed
   } else {
