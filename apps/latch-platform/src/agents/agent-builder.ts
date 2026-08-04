@@ -6,6 +6,10 @@ import type { Principal } from "@/lib/session";
 import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
 import { validateRubrics } from "@/lib/observability/rubrics";
+import { isOrgAdmin } from "@/lib/auth";
+import { resolveSecretRef } from "@/lib/named-secrets";
+import { upsertConnection, normalizeConnectionName } from "@/lib/connection-upsert";
+import type { ConnectionInput } from "@/lib/connection-upsert";
 import { sharedReadTools } from "./shared-read-tools";
 
 /**
@@ -48,6 +52,87 @@ const CAPABILITIES = z
       ),
   })
   .optional();
+
+/**
+ * One field on the secret form. `secret: true` means the value is written
+ * straight from the browser into the Vault under `name` and NEVER comes back to
+ * the model — the agent gets the name and passes it as a `*Ref`. `secret: false`
+ * is an ordinary value (a client id, an account slug) returned in the result.
+ */
+const SECRET_FIELD = z.object({
+  key: z
+    .string()
+    .min(1)
+    .describe('Identifier for this field in the result, e.g. "clientId".'),
+  label: z.string().min(1).describe('Shown above the input, e.g. "Client Secret".'),
+  secret: z
+    .boolean()
+    .describe(
+      "true = the value is stored in the Vault and you only ever see its name. false = a plain value returned to you.",
+    ),
+  name: z
+    .string()
+    .optional()
+    .describe(
+      'Vault name for a secret field, e.g. "strava_client_secret". REQUIRED when secret is true — this is the handle you pass to create_connection as clientSecretRef/tokenRef.',
+    ),
+  hint: z
+    .string()
+    .optional()
+    .describe("One short line telling the user where to find this value."),
+});
+
+const REQUEST_SECRET_INPUT = z.object({
+  title: z.string().min(1).describe('Heading for the form, e.g. "Strava API credentials".'),
+  scope: SCOPE.describe(
+    "Where the secrets are stored. Must match the scope of the connection they will back. 'org' requires the user to be an org admin.",
+  ),
+  fields: z.array(SECRET_FIELD).min(1).max(6),
+});
+
+/**
+ * `create_connection`'s input — the connection record, with `*Ref` vault names
+ * standing in for the two secret-bearing fields. A raw secret must never appear
+ * here: the input is echoed verbatim on the approval card and into the model's
+ * own context.
+ */
+const CREATE_CONNECTION_INPUT = z.object({
+  name: z.string().min(1).describe("Connection id, kebab/snake case (e.g. \"strava\")."),
+  kind: z.enum(["mcp", "openapi"]),
+  scope: SCOPE.describe("'user' (personal) or 'org' (shared). Never guess — ask."),
+  url: z.string().optional().describe("MCP only: the server URL."),
+  spec: z.string().optional().describe("OpenAPI only: the spec URL (or inline spec)."),
+  baseUrl: z.string().optional().describe("OpenAPI only: override the spec's server URL."),
+  operations: z
+    .string()
+    .optional()
+    .describe("OpenAPI only: comma-separated operationId allow-list. Omit for all."),
+  authMode: z
+    .enum(["none", "token", "oauth", "oauth2"])
+    .optional()
+    .describe(
+      "'none'; 'token' = static bearer/header (needs tokenRef); 'oauth' = MCP discovery flow (no credentials); 'oauth2' = OpenAPI pre-registered client (needs authorizeUrl, tokenUrl, clientId, clientSecretRef).",
+    ),
+  authHeader: z
+    .string()
+    .optional()
+    .describe('Header name for a static token when it is not "Authorization: Bearer".'),
+  tokenRef: z
+    .string()
+    .optional()
+    .describe("Vault name of the static token, from request_secret. Omit on edit to keep the stored one."),
+  authorizeUrl: z.string().optional(),
+  tokenUrl: z.string().optional(),
+  clientId: z.string().optional().describe("Not a secret — pass the value directly."),
+  clientSecretRef: z
+    .string()
+    .optional()
+    .describe("Vault name of the oauth2 client secret, from request_secret. Omit on edit to keep the stored one."),
+  scopes: z
+    .string()
+    .optional()
+    .describe("Whitespace-separated scope items (a provider's own commas survive inside one item)."),
+});
 
 /**
  * The service-free save_agent preflight: name reservations + the memory-config
@@ -143,8 +228,15 @@ const ATTACHED_EVAL_INPUT = z.object({
 async function builderTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy import avoids a static import cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
-  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, authoredTools, evalStore } =
+  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, authoredTools, evalStore, namedSecrets } =
     await getLatch();
+
+  /** Org-scoped connections and secrets are admin-managed — same gate as the UI. */
+  const orgAdminOk = async (scope: "user" | "org") =>
+    scope !== "org" || (await isOrgAdmin(principal.userId!, principal.orgId));
+
+  const resolveRef = (ref: string | undefined, scope: "user" | "org", field: string) =>
+    resolveSecretRef(namedSecrets, principal, ref, scope, field);
 
   const capsToExec = (
     c: z.infer<typeof CAPABILITIES>,
@@ -218,6 +310,119 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           kind: stored.find((c) => c.name === name)?.kind ?? "mcp",
           authorized: status.get(name)?.authorized ?? true,
         }));
+      },
+    }),
+
+    list_secrets: tool({
+      description:
+        "Credentials the user has already stored, by NAME and scope only (values are never readable). Pass a name to create_connection as clientSecretRef/tokenRef.",
+      inputSchema: z.object({}),
+      execute: async () => namedSecrets.list(principal),
+    }),
+
+    // No `execute` — this is client-handled. The turn pauses at
+    // `input-available`, the composer renders the form, the browser posts the
+    // values straight to `saveSecretsFn`, and the run resumes with a result
+    // holding only names + non-secret values. The plaintext never enters a tool
+    // input, a tool output, or the message history.
+    request_secret: tool({
+      description:
+        "Ask the user to type credentials into a secure form. Secret fields go straight to the Vault and come back to you as NAMES only; non-secret fields come back as values. Use this for every API key, client secret and token — never ask for one in chat.",
+      inputSchema: REQUEST_SECRET_INPUT,
+    }),
+
+    create_connection: tool({
+      description:
+        "Create or update an integration the user's agents can call (upsert by name + scope). Secrets are passed as vault names from request_secret, never as values. Pauses for the user's approval.",
+      inputSchema: CREATE_CONNECTION_INPUT,
+      execute: async (input) => {
+        if (!(await orgAdminOk(input.scope))) {
+          return { error: "Only org admins can manage org-shared connections." };
+        }
+        for (const field of ["clientSecret", "token"] as const) {
+          if (field in input) {
+            return {
+              error: `Pass ${field}Ref (a vault name from request_secret), not ${field}. Raw secrets are not accepted here.`,
+            };
+          }
+        }
+        const clientSecret = await resolveRef(input.clientSecretRef, input.scope, "clientSecretRef");
+        if (!clientSecret.ok) return { error: clientSecret.error };
+        const token = await resolveRef(input.tokenRef, input.scope, "tokenRef");
+        if (!token.ok) return { error: token.error };
+
+        const record: ConnectionInput = {
+          name: input.name,
+          kind: input.kind,
+          scope: input.scope,
+          url: input.url,
+          spec: input.spec,
+          baseUrl: input.baseUrl,
+          operations: input.operations,
+          authMode: input.authMode,
+          authHeader: input.authHeader,
+          token: token.value,
+          authorizeUrl: input.authorizeUrl,
+          tokenUrl: input.tokenUrl,
+          clientId: input.clientId,
+          clientSecret: clientSecret.value,
+          scopes: input.scopes,
+        };
+        const saved = await upsertConnection(principal, record, { connectionStore, dynamic });
+        if (!saved.ok) return { error: saved.error };
+        console.log(
+          `[connections] upsert name=${saved.name} scope=${input.scope} kind=${input.kind} by=${principal.userId ?? "-"}@${principal.orgId} via=agent-builder`,
+        );
+
+        // Open it for real so a bad spec URL or an unreachable MCP server is a
+        // fixable error now, not a mystery when the agent runs.
+        const interactive = input.authMode === "oauth" || input.authMode === "oauth2";
+        try {
+          const tools = await dynamic.testTools(saved.name, principal);
+          return {
+            saved: true,
+            name: saved.name,
+            scope: input.scope,
+            tools,
+            note:
+              tools.length === 0 && interactive
+                ? `Not authorized yet — call connect_connection({ name: "${saved.name}" }) so the user can grant access, then re-check with list_connection_tools.`
+                : tools.length === 0
+                  ? "The connection opened but exposed no tools — check the spec URL or the operations allow-list."
+                  : undefined,
+          };
+        } catch (e) {
+          return {
+            saved: true,
+            name: saved.name,
+            scope: input.scope,
+            tools: [],
+            warning: `Saved, but opening it failed: ${e instanceof Error ? e.message : String(e)}`,
+          };
+        }
+      },
+    }),
+
+    connect_connection: tool({
+      description:
+        "Ask the user to authorize an OAuth connection. They'll approve, sign in with the provider, and this conversation resumes automatically. Only for connections whose authMode is 'oauth' or 'oauth2'.",
+      inputSchema: z.object({ name: z.string().min(1) }),
+      execute: async ({ name }) => ({ connected: true, connection: name }),
+    }),
+
+    delete_connection: tool({
+      description: "Delete a connection at its scope. Destructive — pauses for approval.",
+      inputSchema: z.object({ name: z.string().min(1), scope: SCOPE }),
+      execute: async ({ name, scope }) => {
+        if (!(await orgAdminOk(scope))) {
+          return { error: "Only org admins can manage org-shared connections." };
+        }
+        const target = normalizeConnectionName(name);
+        await connectionStore.remove(principal, scope, target);
+        console.log(
+          `[connections] delete name=${target} scope=${scope} by=${principal.userId ?? "-"}@${principal.orgId} via=agent-builder`,
+        );
+        return { deleted: true, name: target, scope };
       },
     }),
 
@@ -432,14 +637,28 @@ WHAT AN AGENT IS — the fields you set with save_agent:
 - modelId: MUST be one returned by list_models — never invent one.
 - effort: reasoning/thinking level ("minimal" | "low" | "medium" | "high"). ONLY set it when list_models shows reasoning=true for the chosen model; lower effort = faster + cheaper (good for simple/throughput agents), higher = deeper reasoning. Omit to use the provider default. For a model with reasoning=false, leave effort unset (it would be a no-op).
 - instructions: the system prompt, the heart of the agent. Spend most of your effort here: role, scope, tone, which tools to use and when, and edge cases. A great agent is mostly a great prompt.
-- connections: integration names from list_connections. Only wire ones that exist; prefer authorized ones. Use list_connection_tools to see what a connection offers.
+- connections: integration names from list_connections. Only wire ones that exist; prefer authorized ones. Use list_connection_tools to see what a connection offers. If the one the agent needs doesn't exist yet, you can create it — see CREATING A CONNECTION.
 - capabilities: codeMode (writes/runs JS over its tools — multi-step orchestration), sandbox (workspace + file/shell tools), providerWebTools (native web search/fetch), defaultTools (web_fetch + askUser).
 - authoredTools: names of custom tools you've authored (see BUILDING TOOLS) for this agent to call.
 - subagents: names of other agents this one may delegate to.
 - scope: "user" (personal) or "org" (shared with the whole org).
 
+CONNECTIONS vs AUTHORED TOOLS — pick by what the integration IS:
+- The API has an MCP server, or an OpenAPI/Swagger spec, or needs OAuth on the user's behalf → CREATE A CONNECTION. You get auth, token refresh and every endpoint for free.
+- No spec, and the value is computation — maths, unit conversion, ranking, merging several calls into one compact answer → AUTHOR A TOOL. A tool can also sit on top of a connection's data.
+- Unsure whether a spec exists? Ask the user, or check the vendor's docs. Prefer a connection when one is possible.
+
+CREATING A CONNECTION (list_connections / request_secret / create_connection / connect_connection / list_connection_tools / delete_connection):
+1. Gather the non-secret config first: kind (mcp = a server URL; openapi = a spec URL), and for oauth2 the authorize URL, token URL and client id. Propose the URLs you believe are right and have the user confirm them — never invent one silently.
+2. ASK THE SCOPE — "user" (just them) or "org" (the whole org). Never guess. Org scope needs them to be an org admin.
+3. For every credential, call request_secret. It opens a secure form in the composer; secret fields go straight to the Vault and you get back only the NAME you chose, non-secret fields (like a client id) come back as values. Put related fields in ONE call — e.g. Client ID (secret:false) and Client Secret (secret:true, name:"strava_client_secret") together. If the user Skips, the result says declined — offer another route, don't re-ask in a loop.
+4. Call create_connection, passing the vault NAMES as clientSecretRef / tokenRef. It pauses for approval, then opens the connection and reports the tools it found (or why it couldn't).
+5. For an oauth/oauth2 connection, call connect_connection — the user authorizes with the provider and this conversation resumes automatically. Then confirm with list_connection_tools.
+6. Wire it into an agent with save_agent's connections field, and test_agent it.
+Editing: call create_connection again with the SAME name and scope. Omit a *Ref to keep the stored secret; pass a new one to rotate it.
+
 BUILDING TOOLS (save_tool / test_tool / list_tools / delete_tool):
-When an agent needs an external API or any real computation, AUTHOR A TOOL instead of asking the model to do it in its head.
+When an agent needs computation over an API or its own data, AUTHOR A TOOL instead of asking the model to do it in its head.
 
 A tool is a JS or TypeScript program (TS types are allowed — they're stripped automatically; no type-checking). It runs in a locked-down sandbox whose ONLY globals are:
 - \`input\` — the call arguments (shaped by the tool's inputSchema).
@@ -464,7 +683,7 @@ test_agent is one ad-hoc trial; ATTACHED EVALS are the continuous version — LL
 
 WORKFLOW:
 1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).
-2. Discover before proposing: call list_models and list_connections (and list_connection_tools for any you'll wire). If the agent needs an external API or real computation, AUTHOR + test_tool the tool(s) it needs now (see BUILDING TOOLS), to attach via authoredTools.
+2. Discover before proposing: call list_models and list_connections (and list_connection_tools for any you'll wire). If the agent needs an integration the user doesn't have yet, CREATE IT now (see CONNECTIONS vs AUTHORED TOOLS, then CREATING A CONNECTION). If it needs real computation, AUTHOR + test_tool the tool(s) it needs (see BUILDING TOOLS), to attach via authoredTools.
 3. ALWAYS ask whether the agent should be personal (user) or org-shared before saving — scope is required and you must not guess it.
 4. Propose: summarize the agent in plain language (name, model, connections, key instruction points) and get a quick confirmation.
 5. Call save_agent. It pauses for the user's approval — they'll see the full spec; that's expected.
@@ -476,10 +695,18 @@ MODIFYING an existing agent: call get_agent first, change only what's needed, th
 
 USING HISTORY: when the user refers to past work ("make an agent like in that chat"), use list_chats + read_chat to read the relevant conversation and ground the prompt/connections in what actually happened.
 
+CREDENTIALS — the hard rules:
+- NEVER ask the user to type an API key, token, client secret or password into the chat. Always call request_secret; its form is the only safe path, and anything typed in chat is permanently in this conversation's history.
+- NEVER write a credential into a tool program. Tool programs are stored in plain text, are visible on the Tools page, and you would have to see the value to write it. If an API needs a key, it needs a CONNECTION with a tokenRef.
+- If the user pastes a secret into the chat anyway, tell them plainly that it's now in the history and should be rotated at the provider, then collect the new one with request_secret.
+- You cannot read a stored secret back — list_secrets gives you names only. That's deliberate; work from the names.
+- Known gap: an API with a credential but NO OpenAPI spec fits neither path today (a connection needs a spec, and a tool can't hold a secret). Say so instead of hardcoding the key — the user can point you at a spec URL, or the integration waits for generic HTTP connection support.
+
 RULES:
 - You can only create/edit the user's own agents (those from list_agents → yourAgents). Built-in agents are read-only references — inspect for inspiration, don't overwrite their names.
-- Never invent a modelId or connection name. Only use values from list_models / list_connections.
-- delete_agent is destructive and pauses for approval; only call it when the user clearly asks.`,
+- Never invent a modelId. Only use values from list_models.
+- Only wire connections that exist (list_connections) — or create the missing one first (see CREATING A CONNECTION).
+- delete_agent and delete_connection are destructive and pause for approval; only call them when the user clearly asks.`,
     // Eval drafting + failure diagnosis delegate to the read-only Eval Author
     // (the runtime injects a `spawn_agent` tool for it). It MUST stay
     // read-only: subagent runs are auto-approved, so any write tool on it
@@ -503,6 +730,14 @@ RULES:
       delete_tool: "user-approval",
       // Evals: attaching persists AND adds a judge call to every live run.
       attach_evals: "user-approval",
+      // Connections: persists credentials and grants agents network reach.
+      // `request_secret` is deliberately NOT gated — the user typing into its
+      // form is the consent, and a gate before it would be a pointless
+      // double-confirm.
+      create_connection: "user-approval",
+      delete_connection: "user-approval",
+      // Sends the user to an identity provider to grant real account access.
+      connect_connection: "user-approval",
     },
     smoothStream: true,
   },
