@@ -47,6 +47,23 @@ vi.mock("../latch", () => ({
 }));
 
 // ---------- fake Loredex connection (in-memory file map, MCP-shaped) ----------
+/**
+ * Live `read_file` returns a JSON envelope with every line of `content`
+ * numbered — never the bare body. The store decodes it; returning the body
+ * here would skip that path and let a broken decode pass the pipeline test.
+ */
+function readEnvelope(fileId: string, body: string): string {
+  return JSON.stringify({
+    file: { id: `file_${fileId}`, name: fileId.split("/").pop(), type: ".md", version: 1 },
+    content: body
+      .split("\n")
+      .map((line, i) => `${i + 1}|${line}`)
+      .join("\n"),
+    totalLines: body.split("\n").length,
+    rangeRequested: false,
+  });
+}
+
 function fakeLoredex() {
   const files = new Map<string, string>();
   const ok = (text: string) => ({ content: [{ type: "text", text }] });
@@ -54,7 +71,9 @@ function fakeLoredex() {
   const tools: Record<string, unknown> = {
     loredex_read_file: {
       execute: async (i: { fileId: string }) =>
-        files.has(i.fileId) ? ok(files.get(i.fileId)!) : err(`not found: ${i.fileId}`),
+        files.has(i.fileId)
+          ? ok(readEnvelope(i.fileId, files.get(i.fileId)!))
+          : err(`not found: ${i.fileId}`),
     },
     loredex_create: {
       execute: async (i: Record<string, unknown>) => {

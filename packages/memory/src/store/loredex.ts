@@ -83,6 +83,42 @@ function isErrorResult(result: unknown): boolean {
 }
 
 /**
+ * `read_file` output → the file's body.
+ *
+ * Loredex does NOT return the body: it returns a JSON envelope
+ * (`{ file, content, totalLines, linksTo, … }`) whose `content` carries every
+ * line prefixed with its number — server-side, literally
+ * `lines.map((line, i) => \`${i + 1}|${line}\`).join("\n")`. Un-numbering is
+ * therefore exact and round-trips to the stored bytes, which `writeIndex`
+ * depends on: it hands the previous body straight back as `edit_file`'s
+ * `oldContent`, and a JSON envelope matches nothing in the file.
+ *
+ * Tolerant on purpose: a non-JSON result, a shape without a string `content`,
+ * or content that isn't line-numbered passes through untouched, so a plain-text
+ * server (or the range form, which we never ask for) still reads sensibly.
+ *
+ * Caveat: for `.md` reads Loredex renders insight blocks and strips ai-block
+ * config comments before numbering, so a body containing those markers decodes
+ * to the RENDERED text, not the stored bytes. Memory files are consolidator-
+ * authored and carry neither.
+ */
+function decodeFileRead(text: string): string {
+  let content: unknown;
+  try {
+    content = (JSON.parse(text) as { content?: unknown }).content;
+  } catch {
+    return text;
+  }
+  if (typeof content !== "string") return text;
+  if (content === "") return "";
+  const lines = content.split("\n");
+  // All lines or none: a partial match means this isn't a numbered body, and
+  // stripping the prefixes that happen to be there would corrupt the rest.
+  if (!lines.every((line) => /^\d+\|/.test(line))) return text;
+  return lines.map((line) => line.replace(/^\d+\|/, "")).join("\n");
+}
+
+/**
  * Does this tool error definitively mean "the file isn't there"?
  *
  * Loredex answers an unresolvable read with `File not found: <ref>` on every
@@ -234,7 +270,7 @@ export function createLoredexStore<P>(opts: {
   async function readIndexWith(call: ToolCall, scope: ScopeRef): Promise<string | undefined> {
     const res = await call(names.read, { fileId: indexPath(scope) });
     if (!res.ok) return undefined;
-    return res.text;
+    return decodeFileRead(res.text);
   }
 
   return {
@@ -357,7 +393,7 @@ export function createLoredexStore<P>(opts: {
         const out: Array<{ path: string; text: string }> = [];
         for (const path of safePaths) {
           const res = await call(names.read, { fileId: path });
-          if (res.ok) out.push({ path, text: res.text });
+          if (res.ok) out.push({ path, text: decodeFileRead(res.text) });
         }
         return out;
       });
