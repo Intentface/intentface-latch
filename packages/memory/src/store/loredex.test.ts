@@ -5,6 +5,27 @@ import type { ScopeRef } from "../types.js";
 import { MemoryStoreUnreachableError } from "../types.js";
 
 /**
+ * Live Loredex answers `read_file` with a JSON envelope, not the file body,
+ * and numbers every line of `content` (server: `lines.map((line, i) =>
+ * \`${i + 1}|${line}\`).join("\n")`). A fake that returns the bare body hides
+ * the whole decode path — including the rewrite, which feeds the previous body
+ * back as `edit_file`'s `oldContent`.
+ */
+function readEnvelope(fileId: string, body: string): string {
+  return JSON.stringify({
+    file: { id: `file_${fileId}`, name: fileId.split("/").pop(), type: ".md", version: 1 },
+    content: body
+      .split("\n")
+      .map((line, i) => `${i + 1}|${line}`)
+      .join("\n"),
+    totalLines: body.split("\n").length,
+    rangeRequested: false,
+    linksTo: [],
+    linkedFrom: [],
+  });
+}
+
+/**
  * Fake Loredex-shaped connection: an in-memory file map behind MCP-ish tools
  * (`{ content: [{type:"text",text}], isError? }` results), recording every
  * call and close so tests can assert behavior AND ordering.
@@ -21,6 +42,8 @@ function fakeRegistry(opts?: {
   readError?: string;
   /** Called before each read resolves; await inside it to hold a probe open. */
   onRead?: (fileId: string) => Promise<void>;
+  /** Answer reads with the bare body instead of Loredex's JSON envelope. */
+  rawReads?: boolean;
 }) {
   const files = new Map<string, string>();
   /** Every folder path created, in order — duplicates included, as live does. */
@@ -45,7 +68,8 @@ function fakeRegistry(opts?: {
             const text = files.get(input.fileId);
             await opts?.onRead?.(input.fileId);
             if (opts?.readError) return err(opts.readError);
-            return text === undefined ? err(`File not found: ${input.fileId}`) : ok(text);
+            if (text === undefined) return err(`File not found: ${input.fileId}`);
+            return ok(opts?.rawReads ? text : readEnvelope(input.fileId, text));
           },
         },
         loredex_create: {
@@ -136,6 +160,24 @@ describe("createLoredexStore", () => {
     const { registry, files } = fakeRegistry();
     const store = createLoredexStore({ connections: registry });
     expect(await store.readIndex(P, SCOPE)).toBeUndefined();
+    files.set("_memory/coach/u-1/MEMORY.md", VALID_INDEX);
+    expect(await store.readIndex(P, SCOPE)).toBe(VALID_INDEX);
+  });
+
+  it("readIndex un-numbers the read envelope, returning the body verbatim", async () => {
+    const { registry, files } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    // Pipe-and-digit shaped body: only the envelope's OWN prefix comes off,
+    // never a `3|…` the file actually contains. Trailing blank lines survive
+    // too — the decode has to be byte-exact or the rewrite can't match.
+    const body = "# Notes\n\n3|not a line number\n\n";
+    files.set("_memory/coach/u-1/MEMORY.md", body);
+    expect(await store.readIndex(P, SCOPE)).toBe(body);
+  });
+
+  it("readIndex passes a non-envelope (plain body) read through untouched", async () => {
+    const { registry, files } = fakeRegistry({ rawReads: true });
+    const store = createLoredexStore({ connections: registry });
     files.set("_memory/coach/u-1/MEMORY.md", VALID_INDEX);
     expect(await store.readIndex(P, SCOPE)).toBe(VALID_INDEX);
   });
@@ -263,6 +305,13 @@ describe("createLoredexStore", () => {
     expect(snapshotIdx).toBeGreaterThan(-1);
     expect(editIdx).toBeGreaterThan(snapshotIdx);
     expect(files.get("_memory/coach/u-1/MEMORY.md")).toBe(next);
+    // The rewrite replaces the STORED body. Handing back what `read_file`
+    // returned (a JSON envelope of numbered lines) matches nothing in the
+    // file, and every consolidation after the first one fails.
+    const replacements = calls[editIdx]?.input.replacements as
+      | Array<{ oldContent: string }>
+      | undefined;
+    expect(replacements?.[0]?.oldContent).toBe(VALID_INDEX);
     const snapPath = Array.from(files.keys()).find((k) =>
       k.includes("archive/index-snapshots/MEMORY-"),
     );
