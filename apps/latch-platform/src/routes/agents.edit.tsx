@@ -934,11 +934,19 @@ function SlackSection({ agent }: { agent: string }) {
           </p>
           <Input
             placeholder="Config token (xoxe.xoxp-…)"
+            type="password"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
             value={cfgToken}
             onChange={(e) => setCfgToken(e.target.value)}
           />
           <Input
             placeholder="Refresh token (xoxe-…)"
+            type="password"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
             value={cfgRefresh}
             onChange={(e) => setCfgRefresh(e.target.value)}
           />
@@ -1012,11 +1020,19 @@ function SlackSection({ agent }: { agent: string }) {
             />
             <Input
               placeholder="Client Secret"
+              type="password"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={clientSecret}
               onChange={(e) => setClientSecret(e.target.value)}
             />
             <Input
               placeholder="Signing Secret"
+              type="password"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={signingSecret}
               onChange={(e) => setSigningSecret(e.target.value)}
             />
@@ -1375,6 +1391,10 @@ function TelegramSection({ agent }: { agent: string }) {
               </p>
               <Input
                 placeholder="1234567890:AAF…"
+                type="password"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
               />
@@ -1583,6 +1603,10 @@ function WhatsappSection({ agent }: { agent: string }) {
               </p>
               <Input
                 placeholder="Access token (EAAG…)"
+                type="password"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
               />
@@ -1593,6 +1617,10 @@ function WhatsappSection({ agent }: { agent: string }) {
               />
               <Input
                 placeholder="App secret"
+                type="password"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={appSecret}
                 onChange={(e) => setAppSecret(e.target.value)}
               />
