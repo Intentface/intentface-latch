@@ -136,6 +136,22 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   cron?: (expr: string, afterMs: number, timezone?: string) => number | null;
   /**
+   * Optional per-fire override for `runDue`, so a host can run a scheduled turn
+   * somewhere the default can't reach — typically a chat channel, where the
+   * report should land in the conversation the person actually replies in.
+   *
+   * Return true when the host ran (and delivered) this fire ITSELF; core then
+   * skips its own fresh-chat run. Anything else — false, absent, or a throw —
+   * falls through to the default, so a host whose delivery target has gone
+   * stale (bot disabled, user unlinked) still gets the work done in a chat
+   * rather than losing the fire.
+   *
+   * Core keeps owning the claim, the lease and the advance either way, and
+   * stays entirely channel-blind: `schedule.delivery` is opaque here and only
+   * ever interpreted by this hook.
+   */
+  runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
+  /**
    * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
    * Returns the AI SDK `Experimental_SandboxSession` passed to the model
    * (`agent.stream({ experimental_sandbox })`) and read by sandbox tools. Keeps
@@ -165,6 +181,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
      * service) and should be opted into explicitly.
      */
     render?: Record<string, unknown>;
+    /**
+     * Default approval policy for harness tools, by tool name (e.g.
+     * `{ create_schedule: "user-approval" }`). Applied only to tools actually
+     * attached to the agent, and merged like a tool source's: the AGENT WINS
+     * for names it lists in its own `toolApproval`, so a host can ship a
+     * side-effecting harness tool gated by default without freezing that
+     * choice.
+     */
+    approval?: Record<string, unknown>;
   };
   /**
    * Resolve the model provider's NATIVE web tools (server-side search/fetch) for
@@ -455,16 +480,28 @@ export interface Runtime<P> {
     /** IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"). */
     timezone?: string;
     prompt: string;
+    /**
+     * Opaque, host-interpreted delivery target for each fire (see
+     * `RuntimeConfig.runSchedule`). Stored verbatim; core never reads it.
+     */
+    delivery?: unknown;
   }): Promise<ScheduleRecord>;
   /** The caller's schedules. */
   listSchedules(input: { principal: P }): Promise<ScheduleRecord[]>;
   /** Delete one of the caller's schedules. */
   unschedule(input: { principal: P; id: string }): Promise<void>;
   /**
+   * Make one of the caller's schedules due immediately. It then fires through
+   * the ordinary `runDue` path — same claim, same delivery, same advance — so
+   * "run now" can never drift from what the cron actually does.
+   */
+  runScheduleNow(input: { principal: P; id: string }): Promise<void>;
+  /**
    * Fire all due schedules across ALL tenants (system op — the cron entry point).
    * Claims each exactly-once, reconstructs its principal, runs the turn in a
-   * fresh chat, and advances the schedule. Point a platform cron (or the
-   * in-process scheduler) at this.
+   * fresh chat (or via `runSchedule`, when the host handles the fire), and
+   * advances the schedule. Point a platform cron (or the in-process scheduler)
+   * at this.
    */
   runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }>;
 }
@@ -1083,25 +1120,29 @@ export function createRuntime<P, RC = unknown>(
     // the harness tools, and `spawn_agent` are capabilities, not connection picks.
     const capabilityTools: string[] = Object.keys(cfg.tools ?? {});
     const harness = config.harnessTools ?? {};
+    // Gate defaults for the harness tools this agent actually gets (a policy
+    // naming an unattached tool would be dead weight in the merge below).
+    const harnessApproval: Record<string, unknown> = {};
+    const attachHarness = (name: string, t: unknown) => {
+      tools[name] = t;
+      capabilityTools.push(name);
+      const gate = harness.approval?.[name];
+      if (gate) harnessApproval[name] = gate;
+    };
     const wantSandbox = !!cfg.sandbox && !!config.sandbox;
     if (wantSandbox && harness.sandbox) {
-      Object.assign(tools, harness.sandbox);
-      capabilityTools.push(...Object.keys(harness.sandbox));
+      for (const [name, t] of Object.entries(harness.sandbox)) attachHarness(name, t);
     }
     if (cfg.defaultTools && harness.app) {
       const only = Array.isArray(cfg.defaultTools) ? new Set(cfg.defaultTools) : null;
       for (const [name, t] of Object.entries(harness.app)) {
-        if (!only || only.has(name)) {
-          tools[name] = t;
-          capabilityTools.push(name);
-        }
+        if (!only || only.has(name)) attachHarness(name, t);
       }
     }
     // Render tools — a separate capability (like sandbox), opted into via
     // `renderTools: true`, never granted by `defaultTools`.
     if (cfg.renderTools && harness.render) {
-      Object.assign(tools, harness.render);
-      capabilityTools.push(...Object.keys(harness.render));
+      for (const [name, t] of Object.entries(harness.render)) attachHarness(name, t);
     }
     // Provider-native web tools (server-side search/fetch), if the agent opts in
     // and the platform supplies a resolver for this model's provider.
@@ -1269,6 +1310,7 @@ export function createRuntime<P, RC = unknown>(
       // real side effects. Gated set = connection defaults + the agent's policy.
       if (blockGated) {
         const gated = new Set<string>();
+        for (const [k, v] of Object.entries(harnessApproval)) if (v) gated.add(k);
         for (const o of opened) {
           for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
         }
@@ -1300,13 +1342,15 @@ export function createRuntime<P, RC = unknown>(
       }
     }
 
-    // Merge the source-contributed approval policy (connection defaults +
-    // synthetic `connect_<name>` gates) with the agent's. The AGENT WINS for
-    // tools it names — so an agent can require approval on a GET or waive it on
-    // a mutating op; tools it doesn't mention keep the connection default. Only
-    // for the object form (a function policy is left as-is).
+    // Merge the default approval policies — harness-tool gates and the
+    // source-contributed ones (connection defaults + synthetic `connect_<name>`
+    // gates) — with the agent's. The AGENT WINS for tools it names, so an agent
+    // can require approval on a GET or waive it on a mutating op; tools it
+    // doesn't mention keep the default. Only for the object form (a function
+    // policy is left as-is).
     const sourceApproval = Object.assign(
       {},
+      harnessApproval,
       ...opened.map((o) => o.toolApproval ?? {}),
     ) as Record<string, unknown>;
     const toolApproval = autoApprove
@@ -1484,7 +1528,10 @@ export function createRuntime<P, RC = unknown>(
               {
                 ...(runtimeCtx as Record<string, unknown>),
                 principal,
-                run: { id: run.id, chatId: resolvedChatId },
+                // `agent` is the ref the turn resolved (scope-pinned as stored
+                // on the run), so a tool that acts on "the agent I'm running
+                // as" names the same record the turn is using.
+                run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
                 writer,
               },
             ]),
@@ -2551,12 +2598,14 @@ export function createRuntime<P, RC = unknown>(
     cron,
     timezone,
     prompt,
+    delivery,
   }: {
     principal: P;
     agent: string;
     cron: string | null;
     timezone?: string;
     prompt: string;
+    delivery?: unknown;
   }): Promise<ScheduleRecord> {
     // Accept code-declared or dynamic (UI-created) agents.
     const known =
@@ -2573,7 +2622,14 @@ export function createRuntime<P, RC = unknown>(
       }
       nextRunAt = next;
     }
-    return storage.createSchedule(principal, { agent, cron, timezone, prompt, nextRunAt });
+    return storage.createSchedule(principal, {
+      agent,
+      cron,
+      timezone,
+      prompt,
+      nextRunAt,
+      delivery,
+    });
   }
 
   async function runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }> {
@@ -2586,11 +2642,26 @@ export function createRuntime<P, RC = unknown>(
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
       try {
         const principal = await reconstructPrincipal(s.identity);
-        const chat = await storage.createChat(principal, {
-          agent: s.agent,
-          title: s.prompt.slice(0, 80),
-        });
-        await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+        // Give the host first refusal (e.g. run it in the user's channel thread
+        // and stream the answer there). A hook that throws is treated as "not
+        // handled": the fire still happens the default way, so a broken
+        // delivery target degrades to a normal chat run instead of losing the
+        // occurrence entirely.
+        let handled = false;
+        if (config.runSchedule) {
+          try {
+            handled = await config.runSchedule({ schedule: s, principal });
+          } catch (e) {
+            console.error(`[schedule] runSchedule hook failed for ${s.id}:`, e);
+          }
+        }
+        if (!handled) {
+          const chat = await storage.createChat(principal, {
+            agent: s.agent,
+            title: s.prompt.slice(0, 80),
+          });
+          await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+        }
         fired++;
       } catch {
         errors++;
@@ -2626,6 +2697,7 @@ export function createRuntime<P, RC = unknown>(
     schedule,
     listSchedules: ({ principal }) => storage.listSchedules(principal),
     unschedule: ({ principal, id }) => storage.deleteSchedule(principal, id),
+    runScheduleNow: ({ principal, id }) => storage.bumpSchedule(principal, id),
     runDue,
   };
 }

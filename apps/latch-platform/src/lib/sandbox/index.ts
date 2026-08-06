@@ -6,7 +6,7 @@ import { createJustBashSession, workspaceDir } from "./just-bash";
 import { createDaytonaSession } from "./daytona";
 import { createMirageSession } from "./mirage";
 import type { GoogleMountCreds } from "../google-workspace";
-import { sandboxTools, appTools, renderTools } from "./tools";
+import { sandboxTools, appTools, renderTools, harnessApproval } from "./tools";
 
 /**
  * The sandbox seam wired for the platform: a per-session `SandboxSession`
@@ -66,4 +66,9 @@ export function createSandboxResolver(deps: SandboxDeps = {}) {
   };
 }
 
-export const harnessTools = { sandbox: sandboxTools, app: appTools, render: renderTools };
+export const harnessTools = {
+  sandbox: sandboxTools,
+  app: appTools,
+  render: renderTools,
+  approval: harnessApproval,
+};

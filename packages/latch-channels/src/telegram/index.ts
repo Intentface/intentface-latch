@@ -28,6 +28,8 @@ export {
 } from "./stream.js";
 export {
   telegramChannel,
+  telegramChatId,
+  parseTelegramChatId,
   encodeApprovalCallback,
   decodeApprovalCallback,
   type TelegramAuthResult,

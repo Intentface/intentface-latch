@@ -10,6 +10,7 @@ import { isOrgAdmin } from "@/lib/auth";
 import { resolveSecretRef } from "@/lib/named-secrets";
 import { upsertConnection, normalizeConnectionName } from "@/lib/connection-upsert";
 import type { ConnectionInput } from "@/lib/connection-upsert";
+import type { ScheduleDelivery } from "@/lib/schedule-delivery";
 import { sharedReadTools } from "./shared-read-tools";
 
 /**
@@ -33,7 +34,7 @@ const CAPABILITIES = z
     codeMode: z.boolean().optional().describe("Agent writes/runs a JS program over its tools (multi-step orchestration)."),
     sandbox: z.boolean().optional().describe("Per-session workspace + file/shell tools (bash, read_file, …)."),
     providerWebTools: z.boolean().optional().describe("Native provider web search/fetch (Anthropic/OpenAI)."),
-    defaultTools: z.boolean().optional().describe("App harness tools: web_fetch + askUser."),
+    defaultTools: z.boolean().optional().describe("App harness tools: web_fetch, askUser, and self-scheduling (create/list/cancel_schedule)."),
     memory: z
       .object({
         scope: z
@@ -534,6 +535,166 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       },
     }),
 
+    // ── Schedules ───────────────────────────────────────────────────────────
+    // The builder can schedule ANY of the user's agents, unlike the harness
+    // `create_schedule` (which only ever schedules the agent it's running as).
+    // That's also why this is the one place a delivery target is named by the
+    // model: this is a web chat, so there's no channel to derive one from.
+    // It's safe because every target is checked against `list_agent_channels`
+    // and then re-checked by `resolveDelivery` — and the whole call pauses for
+    // approval with the spec echoed on the card.
+
+    list_agent_channels: tool({
+      description:
+        "The channels a scheduled run of this agent could be delivered to — the Telegram bots " +
+        "the user has linked and the Slack apps they own, with each app's channels. Call this " +
+        "before create_agent_schedule; deliverTo values not listed here are rejected.",
+      inputSchema: z.object({ agent: z.string().describe("Agent name from list_agents.") }),
+      execute: async ({ agent }) => {
+        const { listAgentChannels } = await import("@/lib/schedule-delivery");
+        const channels = await listAgentChannels(principal, agent);
+        return {
+          channels: channels.flatMap<{
+            kind: string;
+            ref: string;
+            channel?: string;
+            label: string;
+          }>((c) =>
+            c.kind === "telegram"
+              ? [{ kind: c.kind, ref: c.ref, label: c.label }]
+              : (c.channels ?? []).map((ch) => ({
+                  kind: c.kind,
+                  ref: c.ref,
+                  channel: ch.id,
+                  label: `#${ch.name}`,
+                })),
+          ),
+          note:
+            channels.length === 0
+              ? "No channels available — a schedule for this agent will run in the app only."
+              : undefined,
+        };
+      },
+    }),
+
+    create_agent_schedule: tool({
+      description:
+        "Schedule one of the user's agents to run on a cron expression (omit `cron` for a " +
+        "one-off on the next tick), optionally delivering each run into a channel. Pauses for " +
+        "the user's approval.",
+      inputSchema: z.object({
+        agent: z.string().describe("Agent name from list_agents."),
+        cron: z
+          .string()
+          .optional()
+          .describe("5-field cron, e.g. `0 8 * * 1-5`. Omit for a one-off run."),
+        timezone: z
+          .string()
+          .optional()
+          .describe("IANA timezone the cron is read in, e.g. `Europe/Helsinki`. Defaults to UTC."),
+        prompt: z.string().describe("The message the agent receives on each fire."),
+        deliverTo: z
+          .object({
+            kind: z.enum(["telegram", "slack"]),
+            ref: z.string().describe("The `ref` from list_agent_channels (bot id / Slack app id)."),
+            channel: z
+              .string()
+              .optional()
+              .describe("Slack only: the channel id from list_agent_channels."),
+          })
+          .optional()
+          .describe("Omit to run in the app only (no channel push)."),
+      }),
+      execute: async ({ agent, cron, timezone, prompt, deliverTo }) => {
+        const { listAgentChannels, resolveDelivery, DeliveryError } = await import(
+          "@/lib/schedule-delivery"
+        );
+        let delivery: ScheduleDelivery | undefined;
+        if (deliverTo) {
+          // Reject hallucinated references — only targets discovery returned
+          // (same guard as save_agent's authored-tool check).
+          const available = await listAgentChannels(principal, agent);
+          const match = available.find(
+            (c) =>
+              c.kind === deliverTo.kind &&
+              c.ref === deliverTo.ref &&
+              (c.kind !== "slack" || (c.channels ?? []).some((ch) => ch.id === deliverTo.channel)),
+          );
+          if (!match) {
+            return {
+              error: `Unknown channel for agent "${agent}". Use list_agent_channels and pass one of its entries.`,
+            };
+          }
+          delivery =
+            deliverTo.kind === "telegram"
+              ? { kind: "telegram", botId: deliverTo.ref }
+              : { kind: "slack", appId: deliverTo.ref, channel: deliverTo.channel! };
+          try {
+            await resolveDelivery(principal, agent, delivery);
+          } catch (e) {
+            return {
+              error: e instanceof DeliveryError ? e.message : "Delivery target rejected.",
+            };
+          }
+        }
+        try {
+          const created = await runtime.schedule({
+            principal,
+            agent,
+            cron: cron?.trim() || null,
+            timezone,
+            prompt,
+            delivery,
+          });
+          return {
+            id: created.id,
+            agent: created.agent,
+            cron: created.cron ?? "one-off",
+            timezone: created.timezone ?? "UTC",
+            nextRunAt: new Date(created.nextRunAt).toISOString(),
+            deliversTo: delivery ? delivery.kind : "app only",
+          };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : "Failed to create the schedule." };
+        }
+      },
+    }),
+
+    list_agent_schedules: tool({
+      description: "The user's scheduled runs, optionally filtered to one agent.",
+      inputSchema: z.object({ agent: z.string().optional() }),
+      execute: async ({ agent }) => {
+        const all = await runtime.listSchedules({ principal });
+        const { parseAgentRef } = await import("@/lib/agent-store");
+        const wanted = agent ? parseAgentRef(agent).name : undefined;
+        return {
+          schedules: all
+            .filter((s) => !wanted || parseAgentRef(s.agent).name === wanted)
+            .map((s) => ({
+              id: s.id,
+              agent: s.agent,
+              cron: s.cron ?? "one-off",
+              timezone: s.timezone ?? "UTC",
+              prompt: s.prompt,
+              enabled: s.enabled,
+              nextRunAt: new Date(s.nextRunAt).toISOString(),
+            })),
+        };
+      },
+    }),
+
+    delete_agent_schedule: tool({
+      description:
+        "Delete one of the user's scheduled runs by id (from list_agent_schedules). " +
+        "Pauses for the user's approval.",
+      inputSchema: z.object({ id: z.string() }),
+      execute: async ({ id }) => {
+        // Owner-fenced in storage, so a foreign id simply deletes nothing.
+        await runtime.unschedule({ principal, id });
+        return { deleted: id };
+      },
+    }),
+
     test_agent: tool({
       description:
         "Run one of the user's agents once with a test message and get its answer plus which tools it called — so you can verify behavior and refine the prompt. In the default safe mode, APPROVAL-GATED tools are blocked (return a 'blocked' marker). NOTE: tools that are NOT approval-gated still execute for real — including authored tools, which may perform real fetch side effects (e.g. a POST). Set live=true only when the user explicitly wants a full real run.",
@@ -706,7 +867,12 @@ RULES:
 - You can only create/edit the user's own agents (those from list_agents → yourAgents). Built-in agents are read-only references — inspect for inspiration, don't overwrite their names.
 - Never invent a modelId. Only use values from list_models.
 - Only wire connections that exist (list_connections) — or create the missing one first (see CREATING A CONNECTION).
-- delete_agent and delete_connection are destructive and pause for approval; only call them when the user clearly asks.`,
+- delete_agent and delete_connection are destructive and pause for approval; only call them when the user clearly asks.
+
+SCHEDULES:
+- To make an agent run on a cadence, use create_agent_schedule. Always call list_agent_channels FIRST when the user wants the result delivered somewhere ("message me on Telegram", "post it to #general") and pass one of its entries as deliverTo — invented refs are rejected.
+- No channels listed means the user hasn't linked that agent's bot (or doesn't own its Slack app). Say so and offer the app-only schedule; don't guess an id.
+- An agent with defaultTools can also schedule ITSELF from its own conversation, delivering back into that same channel. Prefer that when the user is really asking "have this agent ping me" and the agent is one they already talk to.`,
     // Eval drafting + failure diagnosis delegate to the read-only Eval Author
     // (the runtime injects a `spawn_agent` tool for it). It MUST stay
     // read-only: subagent runs are auto-approved, so any write tool on it
@@ -738,6 +904,10 @@ RULES:
       delete_connection: "user-approval",
       // Sends the user to an identity provider to grant real account access.
       connect_connection: "user-approval",
+      // Schedules persist a recurring run and, with a delivery target, a
+      // recurring push into someone's DM or a team channel.
+      create_agent_schedule: "user-approval",
+      delete_agent_schedule: "user-approval",
     },
     smoothStream: true,
   },

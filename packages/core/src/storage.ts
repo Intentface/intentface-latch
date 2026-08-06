@@ -121,6 +121,13 @@ export interface ScheduleRecord {
   timezone?: string;
   /** The user message to send the agent each fire. */
   prompt: string;
+  /**
+   * Where this schedule's output should go, or undefined for the default
+   * (a fresh chat, no push). OPAQUE to core, exactly like `identity`: only the
+   * host's `runSchedule` hook interprets it, so core never learns what a
+   * "channel" is. Hosts should keep it small and JSON-serializable.
+   */
+  delivery?: unknown;
   /** Epoch ms of the next due fire. */
   nextRunAt: number;
   lastRunAt?: number | null;
@@ -245,12 +252,21 @@ export interface StorageAdapter<P> {
       timezone?: string;
       prompt: string;
       nextRunAt: number;
+      /** Host-defined delivery target, stored verbatim (see `ScheduleRecord.delivery`). */
+      delivery?: unknown;
     },
   ): Promise<ScheduleRecord>;
   /** The caller's schedules, most-recently-created first. */
   listSchedules(principal: P): Promise<ScheduleRecord[]>;
   /** Delete one of the caller's schedules. */
   deleteSchedule(principal: P, id: string): Promise<void>;
+  /**
+   * Make one of the caller's schedules due immediately ("run now"): set
+   * `nextRunAt` to 0 so the next `runDue` claims it through the ordinary path.
+   * Owner-fenced like `deleteSchedule`. No-ops on a disabled schedule — a
+   * finished one-shot shouldn't be resurrectable by re-arming its clock.
+   */
+  bumpSchedule(principal: P, id: string): Promise<void>;
   /**
    * System op (no principal): atomically claim due schedules (`enabled`,
    * `nextRunAt <= now`, lease unset/expired) for `owner`, stamping a lease so a

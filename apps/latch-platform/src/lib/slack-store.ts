@@ -141,6 +141,15 @@ export function createSlackStore(client: Client) {
       return r ? rowToApp(r) : null;
     },
 
+    /** The org's Slack apps bound to one agent (for delivery-target pickers). */
+    async appsForAgent(orgId: string, agent: string): Promise<SlackApp[]> {
+      const res = await client.execute({
+        sql: `${APP_COLUMNS} WHERE org_id = ? AND agent = ?`,
+        args: [orgId, agent],
+      });
+      return res.rows.map((r) => rowToApp(r as Record<string, unknown>));
+    },
+
     /** The Slack apps owned within an org (for the editor's status view). */
     async listForOrg(orgId: string): Promise<SlackApp[]> {
       const res = await client.execute({

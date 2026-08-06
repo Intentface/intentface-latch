@@ -161,6 +161,18 @@ const newId = () => `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 export const normalizeAgentName = (s: string): string =>
   s.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
 
+/**
+ * Split a possibly scope-pinned agent ref into (name, scope). Channel bindings
+ * store `org:name` / `user:name` so a binding always runs the record it was
+ * created for (stored names never contain `:` — normalizeAgentName strips it),
+ * and `latch_runs.agent` keeps that pin verbatim. Every lookup that can be
+ * handed a run's agent name must therefore parse it, not just `resolve`.
+ */
+export function parseAgentRef(ref: string): { name: string; scope?: CredentialScope } {
+  const pin = /^(org|user):(.+)$/.exec(ref);
+  return pin ? { name: pin[2]!, scope: pin[1] as CredentialScope } : { name: ref };
+}
+
 export async function migrateAgents(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_agents (
     id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
@@ -230,17 +242,7 @@ export function createAgentStore(
     scope: String(row.scope) as CredentialScope,
   });
 
-  /**
-   * Split a possibly scope-pinned agent ref into (name, scope). Channel bindings
-   * store `org:name` / `user:name` so a binding always runs the record it was
-   * created for (stored names never contain `:` — normalizeAgentName strips it),
-   * and `latch_runs.agent` keeps that pin verbatim. Every lookup that can be
-   * handed a run's agent name must therefore parse it, not just `resolve`.
-   */
-  function parseRef(ref: string): { name: string; scope?: CredentialScope } {
-    const pin = /^(org|user):(.+)$/.exec(ref);
-    return pin ? { name: pin[2], scope: pin[1] as CredentialScope } : { name: ref };
-  }
+  const parseRef = parseAgentRef;
 
   async function find(
     p: Principal,

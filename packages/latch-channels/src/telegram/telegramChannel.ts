@@ -274,6 +274,34 @@ function mediaRefs(msg: TgMessage): { ref: TgFileRef; mediaType: string; name: s
   return out;
 }
 
+// ── The Telegram chat-id format ─────────────────────────────────────────────
+// `telegram_<botRef>_<telegramUserId>` for the original thread, `…_t<epoch>`
+// after `/new` bumps the epoch. Defined ONCE here and read back by
+// `parseTelegramChatId`, so nothing outside this file has to know the shape —
+// including the hosts that need to go the other way (a scheduled run resolving
+// which DM it belongs to). `_t<n>` can't collide with a numeric Telegram user
+// id and stays URL-safe: chat ids show up in `/chat/<chatId>` links.
+
+/** Build the chat id for a (bot, Telegram user) at a thread epoch. */
+export function telegramChatId(botRef: string, telegramUserId: string, epoch = 0): string {
+  const base = `telegram_${botRef}_${telegramUserId}`;
+  return epoch > 0 ? `${base}_t${epoch}` : base;
+}
+
+/**
+ * The inverse of `telegramChatId`, or null when `id` isn't one of ours. Parsed
+ * right-to-left because only the trailing parts have a fixed shape (numeric
+ * user id, optional `_t<digits>`) — a botRef is host-chosen and may contain
+ * anything but a newline.
+ */
+export function parseTelegramChatId(
+  id: string,
+): { botRef: string; telegramUserId: string; epoch: number } | null {
+  const m = /^telegram_(.+)_(\d+)(?:_t(\d+))?$/.exec(id);
+  if (!m) return null;
+  return { botRef: m[1]!, telegramUserId: m[2]!, epoch: m[3] ? Number(m[3]) : 0 };
+}
+
 export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
   const api = telegramApi(config.botToken, config.apiOptions);
 
@@ -289,24 +317,23 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
    * The permanent key for a Telegram DM — continuity is per (bot, Telegram user).
    * Also the `ChannelThreadStore` key, so the epoch survives token rotation.
    */
-  const baseChatIdFor = (telegramUserId: string) => `telegram_${config.botRef}_${telegramUserId}`;
+  const baseChatIdFor = (telegramUserId: string) =>
+    telegramChatId(config.botRef, telegramUserId);
 
   /**
    * The chat this DM is currently writing to. `/new` bumps the epoch; epoch 0
-   * keeps the original, un-suffixed id so no existing conversation moves. `_t<n>`
-   * can't collide with a (numeric) Telegram user id and stays URL-safe — chat ids
-   * show up in `/chat/<chatId>` links.
+   * keeps the original, un-suffixed id so no existing conversation moves.
    *
-   * The epoch comes back with it so nothing has to parse the suffix again: the
-   * format lives here only. A store failure THROWS rather than falling back to
-   * epoch 0 — that would silently write the message into the conversation the
-   * user just left behind, mixing two threads with no way to tell.
+   * The epoch comes back with it so nothing has to parse the suffix again. A
+   * store failure THROWS rather than falling back to epoch 0 — that would
+   * silently write the message into the conversation the user just left behind,
+   * mixing two threads with no way to tell.
    */
   async function currentThread(telegramUserId: string): Promise<{ chatId: string; epoch: number }> {
     const base = baseChatIdFor(telegramUserId);
     if (!config.thread) return { chatId: base, epoch: 0 };
     const epoch = await config.thread.current(base);
-    return { chatId: epoch > 0 ? `${base}_t${epoch}` : base, epoch };
+    return { chatId: telegramChatId(config.botRef, telegramUserId, epoch), epoch };
   }
 
   /** `currentThread`'s chat id alone, for the paths that don't need the epoch. */

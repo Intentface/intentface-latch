@@ -5,7 +5,7 @@
  * (own-app-per-agent), plus the manifest generator and the building blocks.
  * All hand-rolled Block Kit, no Chat SDK runtime dependency.
  */
-export { slackChannel } from "./slackChannel.js";
+export { slackChannel, slackChatId, parseSlackChatId } from "./slackChannel.js";
 export type {
   SlackChannelConfig,
   SlackRunOps,

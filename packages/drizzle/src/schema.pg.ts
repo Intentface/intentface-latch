@@ -183,6 +183,8 @@ export const schedules = pgTable(
     cron: text("cron"),
     timezone: text("timezone"),
     prompt: text("prompt").notNull(),
+    /** Host-interpreted delivery target (e.g. a channel), opaque to core. */
+    delivery: jsonb("delivery"),
     nextRunAt: bigint("next_run_at", { mode: "number" }).notNull(),
     lastRunAt: bigint("last_run_at", { mode: "number" }),
     enabled: integer("enabled").notNull(),
