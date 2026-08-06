@@ -561,27 +561,11 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         "before create_agent_schedule; deliverTo values not listed here are rejected.",
       inputSchema: z.object({ agent: z.string().describe("Agent name from list_agents.") }),
       execute: async ({ agent }) => {
-        const { listAgentChannels } = await import("@/lib/schedule-delivery");
-        const available = await listAgentChannels(principal, agent);
-        const channels = available.flatMap<{
-          kind: string;
-          ref: string;
-          channel?: string;
-          label: string;
-        }>((c) =>
-          c.kind === "telegram"
-            ? [{ kind: c.kind, ref: c.ref, label: c.label }]
-            : (c.channels ?? []).map((ch) => ({
-                kind: c.kind,
-                ref: c.ref,
-                channel: ch.id,
-                label: `#${ch.name}`,
-              })),
-        );
+        const { listAgentChannels, deliveryOptions } = await import("@/lib/schedule-delivery");
+        const channels = deliveryOptions(await listAgentChannels(principal, agent));
         // Count the ENTRIES, not the apps: a Slack app whose channels couldn't
-        // be listed (missing token or scope) stays in `available` but yields no
-        // entries, and without this the model would get an empty list and no
-        // explanation for it.
+        // be listed (missing token or scope) yields no entries, and without this
+        // the model would get an empty list and no explanation for it.
         return {
           channels,
           note:
@@ -621,9 +605,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           .describe("Omit to run in the app only (no channel push)."),
       }),
       execute: async ({ agent, cron, timezone, prompt, deliverTo }) => {
-        const { listAgentChannels, resolveDelivery, DeliveryError } = await import(
-          "@/lib/schedule-delivery"
-        );
+        const { resolveOfferedDelivery, DeliveryError } = await import("@/lib/schedule-delivery");
         const { checkScheduleLimits } = await import("@/lib/schedule-limits");
         // The same cap and frequency floor the harness `create_schedule`
         // applies. Both are model-driven, so both need them — the builder is
@@ -637,27 +619,20 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         if (rejected) return { error: rejected };
 
         let delivery: ScheduleDelivery | undefined;
+        let deliversTo = "app only";
         if (deliverTo) {
-          // Reject hallucinated references — only targets discovery returned
-          // (same guard as save_agent's authored-tool check).
-          const available = await listAgentChannels(principal, agent);
-          const match = available.find(
-            (c) =>
-              c.kind === deliverTo.kind &&
-              c.ref === deliverTo.ref &&
-              (c.kind !== "slack" || (c.channels ?? []).some((ch) => ch.id === deliverTo.channel)),
-          );
-          if (!match) {
-            return {
-              error: `Unknown channel for agent "${agent}". Use list_agent_channels and pass one of its entries.`,
-            };
-          }
-          delivery =
-            deliverTo.kind === "telegram"
-              ? { kind: "telegram", botId: deliverTo.ref }
-              : { kind: "slack", appId: deliverTo.ref, channel: deliverTo.channel! };
+          // Rejects hallucinated references (only what discovery returned) and
+          // re-checks the entitlement — the same guard the harness
+          // `create_schedule` uses for its own `deliver_to`.
           try {
-            await resolveDelivery(principal, agent, delivery);
+            const offered = await resolveOfferedDelivery(principal, agent, deliverTo);
+            if (!offered) {
+              return {
+                error: `Unknown channel for agent "${agent}". Use list_agent_channels and pass one of its entries.`,
+              };
+            }
+            delivery = offered.delivery;
+            deliversTo = offered.label;
           } catch (e) {
             return {
               error: e instanceof DeliveryError ? e.message : "Delivery target rejected.",
@@ -679,7 +654,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             cron: created.cron ?? "one-off",
             timezone: created.timezone ?? "UTC",
             nextRunAt: new Date(created.nextRunAt).toISOString(),
-            deliversTo: delivery ? delivery.kind : "app only",
+            deliversTo,
           };
         } catch (e) {
           return { error: e instanceof Error ? e.message : "Failed to create the schedule." };
@@ -906,7 +881,7 @@ RULES:
 SCHEDULES:
 - To make an agent run on a cadence, use create_agent_schedule. Always call list_agent_channels FIRST when the user wants the result delivered somewhere ("message me on Telegram", "post it to #general") and pass one of its entries as deliverTo — invented refs are rejected.
 - No channels listed means the user hasn't linked that agent's bot (or doesn't own its Slack app). Say so and offer the app-only schedule; don't guess an id.
-- An agent with defaultTools can also schedule ITSELF from its own conversation, delivering back into that same channel. Prefer that when the user is really asking "have this agent ping me" and the agent is one they already talk to.`,
+- An agent with defaultTools can also schedule ITSELF from its own conversation — into that same channel by default, or into any of its own list_delivery_channels entries (so a web-chat conversation can still set up a Telegram push). Prefer that when the user is really asking "have this agent ping me" and the agent is one they already talk to.`,
     // Eval drafting + failure diagnosis delegate to the read-only Eval Author
     // (the runtime injects a `spawn_agent` tool for it). It MUST stay
     // read-only: subagent runs are auto-approved, so any write tool on it

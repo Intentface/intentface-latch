@@ -45,6 +45,32 @@ export interface AgentChannel {
   channels?: { id: string; name: string }[];
 }
 
+/**
+ * One postable target, as a model or a select sees it: a Slack app fans out into
+ * a row per channel, a Telegram bot is one row (the DM is implied and derived).
+ */
+export interface DeliveryOption {
+  kind: ScheduleDelivery["kind"];
+  ref: string;
+  /** Slack only. */
+  channel?: string;
+  label: string;
+}
+
+/** What a discovery tool hands the model, and what a target is matched against. */
+export function deliveryOptions(available: AgentChannel[]): DeliveryOption[] {
+  return available.flatMap<DeliveryOption>((c) =>
+    c.kind === "telegram"
+      ? [{ kind: c.kind, ref: c.ref, label: c.label }]
+      : (c.channels ?? []).map((ch) => ({
+          kind: c.kind,
+          ref: c.ref,
+          channel: ch.id,
+          label: `#${ch.name}`,
+        })),
+  );
+}
+
 export class DeliveryError extends Error {}
 
 /** Narrow unknown JSON (a DB column, a tool argument) to a delivery target. */
@@ -115,6 +141,42 @@ export async function listAgentChannels(
   }
 
   return out;
+}
+
+/**
+ * Validate a target a MODEL supplied (the builder's `deliverTo`, the harness
+ * `deliver_to`) against what the caller may actually reach.
+ *
+ * Two failure modes, kept distinct because they mean different things to the
+ * model: `null` means the target wasn't offered by discovery — a hallucinated or
+ * stale ref, the caller should list again; a thrown `DeliveryError` means the
+ * target is real but the entitlement doesn't hold, which is the same message the
+ * fire would produce. Offered targets are still put through `resolveDelivery`,
+ * so discovery is a filter and never the authority.
+ *
+ * Returns the stored shape plus the label discovery used, so a tool can echo
+ * "@briefbot" back rather than just "telegram".
+ */
+export async function resolveOfferedDelivery(
+  principal: Principal,
+  agentRef: string,
+  want: { kind: string; ref: string; channel?: string },
+): Promise<{ delivery: ScheduleDelivery; label: string } | null> {
+  const offered = deliveryOptions(await listAgentChannels(principal, agentRef)).find(
+    // A stray `channel` on a Telegram target is ignored rather than fatal: the
+    // DM is derived from the identity row, so there is nothing for it to select.
+    (o) =>
+      o.kind === want.kind &&
+      o.ref === want.ref &&
+      (o.kind !== "slack" || o.channel === want.channel),
+  );
+  if (!offered) return null;
+  const delivery: ScheduleDelivery =
+    offered.kind === "telegram"
+      ? { kind: "telegram", botId: offered.ref }
+      : { kind: "slack", appId: offered.ref, channel: offered.channel! };
+  await resolveDelivery(principal, agentRef, delivery);
+  return { delivery, label: offered.label };
 }
 
 /** A validated Telegram target: the bot plus the DM it resolves to. */

@@ -29,9 +29,14 @@ vi.mock("./latch", () => ({
   }),
 }));
 
-const { DeliveryError, listAgentChannels, parseScheduleDelivery, resolveDelivery } = await import(
-  "./schedule-delivery"
-);
+const {
+  DeliveryError,
+  deliveryOptions,
+  listAgentChannels,
+  parseScheduleDelivery,
+  resolveDelivery,
+  resolveOfferedDelivery,
+} = await import("./schedule-delivery");
 
 const owner: Principal = { orgId: "org1", userId: "u1" };
 const bot = { id: "b1", agent: "todo", orgId: "org1", handle: "todo-bot" };
@@ -226,5 +231,72 @@ describe("listAgentChannels", () => {
 
   it("returns nothing for an agent with no bindings", async () => {
     expect(await listAgentChannels(owner, "todo")).toEqual([]);
+  });
+});
+
+describe("deliveryOptions", () => {
+  it("fans a slack app out per channel and leaves telegram as one row", () => {
+    expect(
+      deliveryOptions([
+        { kind: "telegram", ref: "b1", label: "@todobot" },
+        {
+          kind: "slack",
+          ref: "A1",
+          label: "Todo",
+          channels: [
+            { id: "C1", name: "general" },
+            { id: "C2", name: "briefs" },
+          ],
+        },
+        // An app whose channels couldn't be listed contributes nothing — this is
+        // why callers count entries, not apps, before saying "no channels".
+        { kind: "slack", ref: "A2", label: "Broken", channels: [] },
+      ]),
+    ).toEqual([
+      { kind: "telegram", ref: "b1", label: "@todobot" },
+      { kind: "slack", ref: "A1", channel: "C1", label: "#general" },
+      { kind: "slack", ref: "A1", channel: "C2", label: "#briefs" },
+    ]);
+  });
+});
+
+/**
+ * The model-supplied path (builder `deliverTo`, harness `deliver_to`). The two
+ * failure modes must stay distinguishable: not-offered is the caller's input
+ * being wrong, a throw is the entitlement being gone.
+ */
+describe("resolveOfferedDelivery", () => {
+  it("accepts an offered target and echoes discovery's label", async () => {
+    await linkedBot();
+    await expect(
+      resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b1" }),
+    ).resolves.toEqual({ delivery: { kind: "telegram", botId: "b1" }, label: "todo-bot" });
+  });
+
+  it("returns null for a ref discovery never offered", async () => {
+    await linkedBot();
+    expect(await resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b9" })).toBeNull();
+  });
+
+  it("returns null for a real bot the caller hasn't linked", async () => {
+    await telegramStore.create(bot);
+    expect(await resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b1" })).toBeNull();
+  });
+
+  it("ignores a stray channel on a telegram target", async () => {
+    await linkedBot();
+    await expect(
+      resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b1", channel: "C1" }),
+    ).resolves.toMatchObject({ delivery: { kind: "telegram", botId: "b1" } });
+  });
+
+  it("throws — not null — when the target is offered but the gate refuses it", async () => {
+    await linkedBot();
+    // Discovery doesn't re-check org membership; `resolveDelivery` does. So this
+    // is offered and then refused, which must surface as the gate's message.
+    members.clear();
+    await expect(
+      resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b1" }),
+    ).rejects.toThrow(DeliveryError);
   });
 });
