@@ -111,6 +111,25 @@ function connectTargetOf(p: ApprovalPart): string | undefined {
   return name?.startsWith("connect_") ? name.replace(/^connect_/, "") : undefined;
 }
 
+/**
+ * The undecided approvals on the LAST assistant message — the live pause point,
+ * matching the server's `hasPendingApproval`. Sending a message supersedes them
+ * server-side; we mirror that locally so the card stops rendering as live
+ * instead of lingering until the next history load.
+ */
+function pendingApprovalIdsOnTail(msgs: AppMessage[]): string[] {
+  const last = msgs[msgs.length - 1];
+  if (last?.role !== "assistant") return [];
+  const ids: string[] = [];
+  for (const part of last.parts ?? []) {
+    const p = part as ApprovalPart;
+    if (p.state === "approval-requested" && p.approval && p.approval.approved === undefined) {
+      ids.push(p.approval.id);
+    }
+  }
+  return ids;
+}
+
 /** The approval id of a pending connect gate for `name`, if one is awaiting a decision. */
 function pendingConnectApprovalId(
   msgs: AppMessage[] | undefined,
@@ -142,6 +161,9 @@ export function Chat({
   // A failed secret write (e.g. not an org admin): shown in the composer form,
   // which stays open over the still-paused turn.
   const [secretError, setSecretError] = useState<string | null>(null);
+  // A send that the server rejected — shown above the composer so a dropped
+  // message is never silent.
+  const [sendError, setSendError] = useState<string | null>(null);
   // Poll guard: while an approval/tool-result continuation is streaming into
   // setMessages, the background history poll must not overwrite it (server
   // history lags the stream — it lacks streamed-only parts like eval progress).
@@ -172,6 +194,10 @@ export function Chat({
       },
     }),
     onFinish: () => router.invalidate(),
+    // Without this a rejected send is swallowed whole: `sendMessage` only ever
+    // added the user bubble to client state, so a failed turn looked like it
+    // was accepted until a reload made the message vanish. Surface it instead.
+    onError: (e) => setSendError(e.message || "Something went wrong sending that message."),
   });
   const busy = status === "submitted" || status === "streaming";
   const scrollMode = useSettingsStore((s) => s.scrollMode);
@@ -297,6 +323,7 @@ export function Chat({
   // The composer reports a message (text + files), ask-user answers, or a
   // completed secret form.
   async function handleSubmit(data: ComposerSubmitData) {
+    setSendError(null);
     if (data.kind === "secret") {
       if (composerState.type !== "secret-request") return;
       await answerSecretRequest(composerState.toolCallId, composerState.request, data);
@@ -319,6 +346,12 @@ export function Chat({
       await answerAskUser(composerState.toolCallId, out);
       return;
     }
+    // A message typed over a pending approval IS the decision — the server
+    // declines the gate and runs this message. Mirror it locally so the card
+    // closes now rather than sitting there looking actionable.
+    for (const id of pendingApprovalIdsOnTail(messagesRef.current)) {
+      applyLocalDecision(id, false);
+    }
     sendMessage({ text: data.text, files: data.files });
   }
 
@@ -332,6 +365,9 @@ export function Chat({
   const chatBusyRef = useRef(false);
   chatBusyRef.current = busy || deciding;
   function sendVoiceMessage(text: string, durationMs: number) {
+    for (const id of pendingApprovalIdsOnTail(messagesRef.current)) {
+      applyLocalDecision(id, false);
+    }
     sendMessage({ text, metadata: { visibility: "user", voice: { durationMs } } });
   }
   function handleVoiceTranscribed(text: string, durationMs: number) {
@@ -515,20 +551,33 @@ export function Chat({
                 Connect <span className="font-medium">{conn}</span> to continue.
               </div>
               <p className="text-ink-tertiary my-1 text-xs">
-                You'll authorize access, then this conversation resumes automatically.
+                You'll authorize access, then this conversation resumes automatically. Or dismiss
+                this and tell the agent what to do instead.
               </p>
-              <Button
-                size="sm"
-                onClick={() => {
-                  window.location.href = authorizeUrl(conn, {
-                    chatId,
-                    approvalId,
-                    returnTo: `/chat/${chatId}`,
-                  });
-                }}
-              >
-                Connect {conn}
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    window.location.href = authorizeUrl(conn, {
+                      chatId,
+                      approvalId,
+                      returnTo: `/chat/${chatId}`,
+                    });
+                  }}
+                >
+                  Connect {conn}
+                </Button>
+                {/* The way out when the connection can't be completed at all (bad
+                    credentials, a provider that never redirects back). Denying
+                    resumes the turn, so the agent can offer another route. */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => decide(approvalId, false)}
+                >
+                  Dismiss
+                </Button>
+              </div>
             </>
           )}
         </div>
@@ -650,6 +699,21 @@ export function Chat({
       </Thread.Viewport>
       <Thread.Composer>
         <Thread.ScrollButton />
+        {sendError && (
+          <div
+            role="alert"
+            className="border-destructive/40 bg-destructive/10 text-destructive mb-2 flex items-start gap-2 rounded-md border px-2 py-1.5 text-xs"
+          >
+            <span className="flex-1">{sendError}</span>
+            <button
+              type="button"
+              className="opacity-70 hover:opacity-100"
+              onClick={() => setSendError(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <Composer
           onSubmit={handleSubmit}
           isSubmitting={busy}

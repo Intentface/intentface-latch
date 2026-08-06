@@ -20,6 +20,10 @@ import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle"
  *    later `applyToolResult` in that chat return an empty 200 with no
  *    continuation: the user answers the questionnaire and the agent never
  *    resumes.
+ *
+ * …plus the third way out, for a pause the user can't satisfy at all (a
+ * `connect_<name>` gate for a broken connection): a new message declines the
+ * pending approval and runs, rather than being refused and dropped.
  */
 
 type P = { orgId: string; userId: string };
@@ -272,15 +276,62 @@ describe("recovering a chat parked on a stale pause", () => {
     await drain(second);
   });
 
-  it("a LIVE approval still blocks a new message", async () => {
+  it("a new message supersedes a LIVE approval instead of being dropped", async () => {
+    // Reported for a `connect_<name>` gate whose OAuth could never complete:
+    // refusing the message left the chat with no way out at all — the user
+    // could neither satisfy the gate nor talk past it, and every message they
+    // typed was rejected before it was persisted, so it vanished on reload.
     const chatId = "chat_gate_live";
     script = [() => callGated("call_gate")];
     await drain(await send(runtime, chatId, "do the thing"));
 
-    // The pause is the tail of history, so it must still be enforced.
-    await expect(send(runtime, chatId, "and another thing")).rejects.toMatchObject({
-      code: "pending_approval",
+    script = [() => sayText("Fine, doing it another way.")];
+    const res = await send(runtime, chatId, "forget that, do it another way");
+    expect(isStream(res)).toBe(true);
+    await drain(res);
+
+    const history = await runtime.loadHistory({ chatId, principal });
+    // The gate is closed as declined — not left live, and not silently executed.
+    const gate = history
+      .flatMap((m) => m.parts as Record<string, unknown>[])
+      .find((p) => p.type === "tool-gated")!;
+    expect(gate.state).toBe("approval-responded");
+    expect(gate.approval).toMatchObject({ approved: false });
+    expect(String((gate.approval as { reason?: string }).reason)).toContain("Superseded");
+    // …and the message that superseded it actually made it into history.
+    expect(
+      history.some(
+        (m) =>
+          m.role === "user" &&
+          (m.parts as { text?: string }[]).some((p) => p.text === "forget that, do it another way"),
+      ),
+    ).toBe(true);
+  });
+
+  it("denying a live approval resumes the turn (the Dismiss button's path)", async () => {
+    const chatId = "chat_gate_denied";
+    script = [() => callGated("call_gate"), () => sayText("Okay, skipping that.")];
+    await drain(await send(runtime, chatId, "do the thing"));
+
+    const history = await runtime.loadHistory({ chatId, principal });
+    const part = (history.at(-1)!.parts as Record<string, unknown>[]).find(
+      (p) => p.type === "tool-gated",
+    )!;
+    const approvalId = (part.approval as { id: string }).id;
+
+    const res = await runtime.applyApproval({
+      chatId,
+      principal,
+      decisions: [{ approvalId, approved: false }],
     });
+    expect(isStream(res)).toBe(true);
+    await drain(res);
+
+    // The chat is unblocked: a follow-up message runs as a normal turn.
+    script = [() => sayText("Sure.")];
+    const after = await send(runtime, chatId, "try something else");
+    expect(isStream(after)).toBe(true);
+    await drain(after);
   });
 
   it("a live approval resumes normally when decided", async () => {

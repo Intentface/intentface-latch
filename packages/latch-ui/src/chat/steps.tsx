@@ -1,5 +1,5 @@
 import { Collapsible } from "@base-ui/react/collapsible";
-import { Check, ChevronDown, CircleDashed, Loader2, Wrench } from "lucide-react";
+import { Ban, Check, ChevronDown, CircleDashed, Loader2, Wrench } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { type ToolLabels, type ToolPart, toolLabels as defaultLabels } from "./message-utils.js";
 
@@ -63,9 +63,24 @@ export function Steps({
   );
 }
 
+/**
+ * A gated call the user turned down — via Deny/Dismiss, or by typing a new
+ * message over the request (which the runtime records as a declined approval).
+ * `output-denied` is where the SDK lands it once the turn resumes;
+ * `approval-responded` + `approved: false` is the moment in between. Without
+ * this case both render as "no state yet": a dashed circle under the *active*
+ * label, so a dismissed connect sits there reading "Connecting oura" forever.
+ */
+function isDeclined(part: ToolPart): boolean {
+  if (part.state === "output-denied") return true;
+  const approval = (part as { approval?: { approved?: boolean } }).approval;
+  return part.state === "approval-responded" && approval?.approved === false;
+}
+
 function StepRow({ part, labels }: { part: ToolPart; labels: ToolLabels }) {
   const done = part.state === "output-available";
   const errored = part.state === "output-error";
+  const declined = isDeclined(part);
   const active = part.state === "input-streaming" || part.state === "input-available";
   const label = labelFor(part, labels);
   const summary = summaryOf(part);
@@ -76,23 +91,26 @@ function StepRow({ part, labels }: { part: ToolPart; labels: ToolLabels }) {
   const output = done ? (part.output as unknown) : undefined;
   const hasDetail = hasInput || output !== undefined || !!errorText;
 
+  const statusIcon = errored ? (
+    <Wrench className="text-destructive size-3.5" />
+  ) : declined ? (
+    <Ban className="text-ink-tertiary size-3.5" />
+  ) : done ? (
+    <Check className="size-3.5 text-(--accent)" />
+  ) : active ? (
+    <Loader2 className="size-3.5 animate-spin" />
+  ) : (
+    <CircleDashed className="size-3.5" />
+  );
+
   const Icon = (
-    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
-      {errored ? (
-        <Wrench className="text-destructive size-3.5" />
-      ) : done ? (
-        <Check className="size-3.5 text-(--accent)" />
-      ) : active ? (
-        <Loader2 className="size-3.5 animate-spin" />
-      ) : (
-        <CircleDashed className="size-3.5" />
-      )}
-    </span>
+    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">{statusIcon}</span>
   );
 
   const labelEl = (
     <span className="min-w-0 text-xs">
-      <span className="text-ink-primary">{label}</span>
+      <span className={declined ? "text-ink-tertiary" : "text-ink-primary"}>{label}</span>
+      {declined && <span className="text-ink-tertiary"> · declined</span>}
       {summary && <span className="text-ink-tertiary"> · {summary}</span>}
     </span>
   );
@@ -113,15 +131,7 @@ function StepRow({ part, labels }: { part: ToolPart; labels: ToolLabels }) {
         <span className="relative mt-0.5 flex size-4 shrink-0 items-center justify-center">
           {/* Status icon — hidden on hover/open, replaced by the chevron. */}
           <span className="transition-opacity group-hover/step:opacity-0 group-data-[panel-open]/step:opacity-0">
-            {errored ? (
-              <Wrench className="text-destructive size-3.5" />
-            ) : done ? (
-              <Check className="size-3.5 text-(--accent)" />
-            ) : active ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <CircleDashed className="size-3.5" />
-            )}
+            {statusIcon}
           </span>
           <ChevronDown className="text-ink-secondary absolute size-4 opacity-0 transition-all group-hover/step:opacity-100 group-data-[panel-open]/step:rotate-180 group-data-[panel-open]/step:opacity-100" />
         </span>

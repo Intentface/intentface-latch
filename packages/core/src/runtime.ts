@@ -596,13 +596,15 @@ function lastUserText(messages: AppMessage[]): string | undefined {
   return undefined;
 }
 
-/** True if any message has a tool part still awaiting an approval decision. */
 /**
  * Thrown when work is attempted on a chat whose last turn is still paused
- * awaiting a human: by `handleChat` for a new message, and by `compactChat`
- * (where the pause can also be a parked client tool call). Carries a stable
- * `code` so the handler can map it to a 409 and the client can prompt the user to
- * resolve it first.
+ * awaiting a human — by `compactChat`, where the pause can also be a parked
+ * client tool call and there's no sensible way to summarize around it. Carries
+ * a stable `code` so the handler can map it to a 409 and the client can prompt
+ * the user to resolve it first.
+ *
+ * `handleChat` deliberately does NOT throw this: a new message supersedes the
+ * pause (see `declinePendingApprovals`).
  */
 export class PendingApprovalError extends Error {
   readonly code = "pending_approval";
@@ -662,6 +664,43 @@ function hasPendingApproval(messages: AppMessage[]): boolean {
     }
   }
   return false;
+}
+
+/** Why an approval was closed without the user ever deciding it. */
+const SUPERSEDED_REASON =
+  "Superseded — the user sent a new message instead of responding to this request.";
+
+/**
+ * Decline every undecided approval on the paused turn, because the user moved
+ * on: they typed a new message instead of pressing a button.
+ *
+ * Without this a chat could wedge for good. A gate the user CAN'T satisfy — a
+ * misconfigured `connect_<name>` whose OAuth never completes is the reported
+ * case — left `handleChat` refusing every message with `PendingApprovalError`,
+ * so the only escape was a decision UI that (on the web) had no deny button.
+ * Declining is always the safe direction: no gated tool runs, and the model
+ * sees a denial plus the new instruction, so the user can simply redirect it.
+ *
+ * Bubbled-up subagent approvals are marked `resolved` too, so
+ * `collectDecidedSubagentApprovals` won't later try to resume a sub thread the
+ * user has walked away from. Mutates in place; returns the changed messages.
+ */
+function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
+  const last = messages[messages.length - 1];
+  if (last?.role !== "assistant") return [];
+  let touched = false;
+  for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
+    if (p.state === "approval-requested" && p.approval && p.approval.approved === undefined) {
+      p.state = "approval-responded";
+      p.approval = { ...p.approval, approved: false, reason: SUPERSEDED_REASON };
+      touched = true;
+    }
+    if (p.type === "data-subagent-approval" && p.data && p.data.approved === undefined) {
+      p.data = { ...p.data, approved: false, reason: SUPERSEDED_REASON, resolved: true };
+      touched = true;
+    }
+  }
+  return touched ? [last] : [];
 }
 
 /**
@@ -1816,14 +1855,15 @@ export function createRuntime<P, RC = unknown>(
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
 
-    // Don't start a new turn while the last one is still awaiting an approval
-    // decision: that would abandon the gated tool call (a `tool_use` with no
-    // result), forcing the model view to fabricate one. Make the client resolve
-    // the approval first (or the caller can submit a decision via applyApproval).
+    // A new message while the last turn is parked on an approval is itself the
+    // decision: the user declined to answer and wants to steer elsewhere. Close
+    // the gate as declined (persisted, so the card stops rendering as live) and
+    // carry on — the gated tool never runs, and the model sees the denial
+    // followed by the new instruction. Refusing the message instead is what
+    // wedged chats whose gate could not be satisfied at all.
     if (hasPendingApproval(prior)) {
-      throw new PendingApprovalError(
-        "This chat is awaiting an approval decision — respond to the pending request before sending a new message.",
-      );
+      const declined = declinePendingApprovals(prior);
+      if (declined.length > 0) await storage.appendMessages(resolvedChatId, declined);
     }
 
     // persist the user message up front (crash-safe), then open the run
