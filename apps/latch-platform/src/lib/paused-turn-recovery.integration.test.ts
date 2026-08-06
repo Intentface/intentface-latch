@@ -129,6 +129,74 @@ const agent = defineAgent<P>({
   toolApproval: { gated: "user-approval" },
 });
 
+/**
+ * A parent agent that spawns `helper`, whose gated tool pauses the sub thread —
+ * so the approval bubbles up to the parent as a `data-subagent-approval` part.
+ * Its own runtime: the models are call-counted, not driven by `script`.
+ */
+let subParentCalls = 0;
+let subHelperCalls = 0;
+async function subagentRuntime(): Promise<Runtime<P>> {
+  subParentCalls = 0;
+  const parentModel = new MockLanguageModelV3({
+    doStream: async () => {
+      subParentCalls += 1;
+      return {
+        stream: streamFrom(
+          subParentCalls === 1
+            ? [
+                { type: "stream-start", warnings: [] },
+                meta("r_spawn"),
+                {
+                  type: "tool-call",
+                  toolCallId: "call_spawn",
+                  toolName: "spawn_agent",
+                  input: JSON.stringify({ agent: "helper", prompt: "do a gated side job" }),
+                },
+                { type: "finish", finishReason: "tool-calls", usage },
+              ]
+            : sayText("Sure — directly, then."),
+        ),
+      };
+    },
+  });
+  const helperModel = new MockLanguageModelV3({
+    doStream: async () => {
+      subHelperCalls += 1;
+      return { stream: streamFrom(callGated("call_sub_gate")) };
+    },
+  });
+  const client = createClient({ url: ":memory:" });
+  await migrate(client);
+  return createRuntime<P, { orgId: string }>({
+    storage: createSqliteAdapter<P>(drizzle(client, { schema }), {
+      owner: (p) => [p.orgId, p.userId],
+    }),
+    context: defineContext<P, { orgId: string }>({
+      build: ({ principal: p }) => ({ orgId: p.orgId }),
+    }),
+    agents: {
+      parent: defineAgent<P>({
+        model: parentModel as never,
+        instructions: "test parent",
+        subagents: ["helper"],
+      }),
+      helper: defineAgent<P>({
+        model: helperModel as never,
+        instructions: "test helper",
+        tools: {
+          gated: tool({
+            description: "needs approval",
+            inputSchema: z.object({ n: z.number() }),
+            execute: async ({ n }) => ({ ok: n }),
+          }),
+        },
+        toolApproval: { gated: "user-approval" },
+      }),
+    },
+  });
+}
+
 async function drain(res: Response) {
   if (res.body) for await (const _ of res.body as unknown as AsyncIterable<unknown>) void _;
 }
@@ -332,6 +400,60 @@ describe("recovering a chat parked on a stale pause", () => {
     const after = await send(runtime, chatId, "try something else");
     expect(isStream(after)).toBe(true);
     await drain(after);
+  });
+
+  it("superseding a BUBBLED subagent approval closes the parent spawn_agent call", async () => {
+    // A subagent's gated tool bubbles up as a `data-subagent-approval` part,
+    // and `spawn_agent`'s stored result is the `awaiting_approval` payload —
+    // whose note tells the model to stop and wait. Data parts are dropped from
+    // the model projection, so if superseding left that result in place the
+    // next turn would see nothing BUT "stop here and wait" and stall.
+    const chatId = "chat_sub_gate";
+    subHelperCalls = 0;
+    const sub = await subagentRuntime();
+
+    await drain(
+      await sub.handleChat({
+        agent: "parent",
+        chatId,
+        principal,
+        message: { id: "u1", role: "user", parts: [{ type: "text", text: "go" }] } as never,
+      }),
+    );
+    const parked = await sub.loadHistory({ chatId, principal });
+    const bubbled = parked
+      .flatMap((m) => (m.parts ?? []) as Record<string, unknown>[])
+      .find((p) => p.type === "data-subagent-approval");
+    expect(bubbled, "the subagent approval bubbled to the parent").toBeTruthy();
+
+    await drain(
+      await sub.handleChat({
+        agent: "parent",
+        chatId,
+        principal,
+        message: {
+          id: "u2",
+          role: "user",
+          parts: [{ type: "text", text: "stop that, just tell me directly" }],
+        } as never,
+      }),
+    );
+
+    const after = await sub.loadHistory({ chatId, principal });
+    const parts = after.flatMap((m) => (m.parts ?? []) as Record<string, unknown>[]);
+
+    // The bubbled approval is declined AND resolved, so nothing tries to
+    // resume the sub thread the user walked away from.
+    const decided = parts.find((p) => p.type === "data-subagent-approval")!
+      .data as Record<string, unknown>;
+    expect(decided).toMatchObject({ approved: false, resolved: true });
+
+    // …and the parent's spawn_agent result no longer says "wait".
+    const spawn = parts.find((p) => p.type === "tool-spawn_agent")!;
+    expect(spawn.state).toBe("output-available");
+    expect(spawn.output).toMatchObject({ status: "declined" });
+    expect(JSON.stringify(spawn.output)).not.toContain("do not retry");
+    expect(subHelperCalls, "the abandoned sub thread was not resumed").toBe(1);
   });
 
   it("a live approval resumes normally when decided", async () => {

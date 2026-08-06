@@ -688,19 +688,33 @@ const SUPERSEDED_REASON =
 function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
   const last = messages[messages.length - 1];
   if (last?.role !== "assistant") return [];
-  let touched = false;
+  const changed = new Set<AppMessage>();
   for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
     if (p.state === "approval-requested" && p.approval && p.approval.approved === undefined) {
       p.state = "approval-responded";
       p.approval = { ...p.approval, approved: false, reason: SUPERSEDED_REASON };
-      touched = true;
+      changed.add(last);
     }
     if (p.type === "data-subagent-approval" && p.data && p.data.approved === undefined) {
+      const { spawnToolCallId, subChatId } = p.data;
       p.data = { ...p.data, approved: false, reason: SUPERSEDED_REASON, resolved: true };
-      touched = true;
+      changed.add(last);
+      // Close the parent's `spawn_agent` call too. Its stored result is the
+      // `awaiting_approval` payload, whose note tells the model to stop and
+      // wait for a decision that is never coming — and the model projection
+      // drops data parts, so that note is ALL the next turn would see of this.
+      if (spawnToolCallId) {
+        for (const m of overwriteToolResult(messages, spawnToolCallId, {
+          status: "declined",
+          threadId: subChatId,
+          note: SUPERSEDED_REASON,
+        })) {
+          changed.add(m);
+        }
+      }
     }
   }
-  return touched ? [last] : [];
+  return [...changed];
 }
 
 /**
