@@ -494,8 +494,11 @@ export interface Runtime<P> {
    * Make one of the caller's schedules due immediately. It then fires through
    * the ordinary `runDue` path — same claim, same delivery, same advance — so
    * "run now" can never drift from what the cron actually does.
+   *
+   * False when nothing was armed: unknown id, not the caller's, or already
+   * spent.
    */
-  runScheduleNow(input: { principal: P; id: string }): Promise<void>;
+  runScheduleNow(input: { principal: P; id: string }): Promise<boolean>;
   /**
    * Fire all due schedules across ALL tenants (system op — the cron entry point).
    * Claims each exactly-once, reconstructs its principal, runs the turn in a

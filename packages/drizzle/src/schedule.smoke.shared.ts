@@ -57,14 +57,21 @@ export async function scheduleSmoke<P>({
     "a future schedule isn't claimed",
   );
 
-  // Another owner can't arm it.
-  await store.bumpSchedule(other, created.id);
+  // Another owner can't arm it, and is told so rather than getting a silent no-op.
+  assert(
+    (await store.bumpSchedule(other, created.id)) === false,
+    "bumpSchedule reports false for another owner",
+  );
   assert(
     (await store.claimDueSchedules(Date.now(), 30_000, "node-1")).length === 0,
     "bumpSchedule is owner-fenced",
   );
+  assert(
+    (await store.bumpSchedule(me, "sch_does_not_exist")) === false,
+    "bumpSchedule reports false for an unknown id",
+  );
 
-  await store.bumpSchedule(me, created.id);
+  assert((await store.bumpSchedule(me, created.id)) === true, "bumpSchedule reports the arm");
   const claimed = await store.claimDueSchedules(Date.now(), 30_000, "node-1");
   assert(
     claimed.some((s) => s.id === created.id),
@@ -86,7 +93,10 @@ export async function scheduleSmoke<P>({
     { nextRunAt: Date.now(), lastRunAt: Date.now(), enabled: false },
     "node-1",
   );
-  await store.bumpSchedule(me, created.id);
+  assert(
+    (await store.bumpSchedule(me, created.id)) === false,
+    "bumpSchedule reports false for a spent one-shot",
+  );
   assert(
     !(await store.claimDueSchedules(Date.now(), 30_000, "node-2")).some(
       (s) => s.id === created.id,

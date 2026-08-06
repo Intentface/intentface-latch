@@ -1,12 +1,12 @@
 import { tool, jsonSchema } from "ai";
 import type { Experimental_SandboxSession } from "ai";
-import { Cron } from "croner";
 import { parseTelegramChatId } from "@intentface/latch-channels/telegram";
 import { parseSlackChatId } from "@intentface/latch-channels/slack";
 import { webFetch } from "@/lib/web-fetch";
 import { renderFetch, renderFetchConfigured } from "@/lib/render-fetch";
 import { getLatch } from "@/lib/latch";
 import { resolveDelivery, type ScheduleDelivery } from "@/lib/schedule-delivery";
+import { checkScheduleLimits } from "@/lib/schedule-limits";
 import type { Principal } from "@/lib/session";
 
 /**
@@ -333,38 +333,6 @@ const askUser = tool({
 // `create_schedule` is approval-gated by default (see `harnessTools.approval`),
 // so in Telegram it surfaces as an Approve/Deny card before anything persists.
 
-/** Refuse anything firing more often than this from the tool path. */
-const MIN_SCHEDULE_INTERVAL_MS = 15 * 60 * 1000;
-/** Ceiling on enabled schedules per principal, so a loop can't install hundreds. */
-const MAX_SCHEDULES_PER_PRINCIPAL = 20;
-
-/**
- * Would this cron ever fire twice within `minMs`? Checks the first few
- * occurrences rather than reasoning about the expression: a step of five
- * minutes and `0,1 8 * * *` are both too frequent, and only sampling catches
- * the second. An unparseable expression returns false so the tool rejects it.
- */
-export function intervalAtLeast(
-  expr: string,
-  timezone: string | undefined,
-  minMs: number,
-): boolean {
-  try {
-    const cron = new Cron(expr, { timezone: timezone || "UTC" });
-    let prev = cron.nextRun(new Date());
-    if (!prev) return false; // never fires — nothing to schedule
-    for (let i = 0; i < 5; i++) {
-      const next = cron.nextRun(prev);
-      if (!next) return true; // no further occurrence
-      if (next.getTime() - prev.getTime() < minMs) return false;
-      prev = next;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * The delivery target implied by the chat a turn is running in, or undefined
  * for a web chat. This is the whole reason the model never names a recipient:
@@ -428,21 +396,9 @@ const create_schedule = tool({
     if (!principal || !run) return { error: "No principal for this turn." };
     const { runtime } = await getLatch();
 
-    const existing = await runtime.listSchedules({ principal });
-    if (existing.filter((s) => s.enabled).length >= MAX_SCHEDULES_PER_PRINCIPAL) {
-      return {
-        error: `You already have ${MAX_SCHEDULES_PER_PRINCIPAL} active schedules. Cancel one first (list_schedules / cancel_schedule).`,
-      };
-    }
-
     const cron = args.cron?.trim() || null;
-    if (cron && !intervalAtLeast(cron, args.timezone, MIN_SCHEDULE_INTERVAL_MS)) {
-      return {
-        error:
-          "That fires too often (or isn't a valid cron). The minimum interval is 15 minutes — " +
-          "try something like `0 8 * * 1-5`.",
-      };
-    }
+    const rejected = await checkScheduleLimits(runtime, principal, cron, args.timezone);
+    if (rejected) return { error: rejected };
 
     // Derived, never taken from the model: which channel this chat belongs to.
     // Re-checked through the same gate the fire uses, so a target the caller
@@ -519,10 +475,15 @@ const cancel_schedule = tool({
     const { principal } = ctxOf(options);
     if (!principal) return { error: "No principal for this turn." };
     const { runtime } = await getLatch();
-    // Ownership is enforced in storage (`deleteSchedule` is owner-fenced), so a
-    // guessed id from another tenant simply deletes nothing.
+    // `unschedule` is owner-fenced and returns void, so a stale or foreign id
+    // deletes nothing silently. Confirm it exists first — otherwise the model
+    // tells the user a schedule was cancelled when it wasn't.
+    const mine = await runtime.listSchedules({ principal });
+    if (!mine.some((s) => s.id === args.id)) {
+      return { error: `No schedule ${args.id} — call list_schedules for current ids.` };
+    }
     await runtime.unschedule({ principal, id: args.id });
-    return { ok: true };
+    return { cancelled: args.id };
   },
 });
 

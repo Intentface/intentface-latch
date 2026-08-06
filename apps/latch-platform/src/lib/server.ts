@@ -707,8 +707,12 @@ export const runScheduleNowFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const { runtime } = await getLatch();
-    await runtime.runScheduleNow({ principal, id: data.id });
-    return { ok: true as const };
+    // Owner-fenced and enabled-only, so a stale id from a page loaded before
+    // the schedule fired arms nothing — report that rather than "queued".
+    const armed = await runtime.runScheduleNow({ principal, id: data.id });
+    return armed
+      ? { ok: true as const }
+      : { ok: false as const, error: "That schedule is no longer active." };
   });
 
 // ── Observability (Langfuse): feedback scores + the live trace feed ─────────

@@ -313,16 +313,31 @@ async function runSlackDelivery(
     return false;
   }
 
-  const anchor = await slackApi(token).postMessage({
+  const api = slackApi(token);
+  const anchor = await api.postMessage({
     channel: target.channel,
     text: `:alarm_clock: ${summarize(schedule.prompt)}`,
   });
 
-  await resolved.channel.runMessage({
-    channel: anchor.channel,
-    root: anchor.ts,
-    userId: target.ownerUserId,
-    prompt: schedule.prompt,
-  });
+  try {
+    await resolved.channel.runMessage({
+      channel: anchor.channel,
+      root: anchor.ts,
+      userId: target.ownerUserId,
+      prompt: schedule.prompt,
+    });
+  } catch (e) {
+    // The anchor is already visible in the channel. If the turn couldn't start,
+    // say so on it rather than leaving a bare ⏰ with no reply under it — an
+    // empty thread reads as "still working" forever.
+    await api
+      .update({
+        channel: anchor.channel,
+        ts: anchor.ts,
+        text: `:warning: ${summarize(schedule.prompt)} — scheduled run failed to start.`,
+      })
+      .catch((err) => console.error("[schedule] slack anchor cleanup failed:", err));
+    throw e;
+  }
   return true;
 }

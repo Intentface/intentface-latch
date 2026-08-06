@@ -199,9 +199,15 @@ describe("runScheduleNow", () => {
     });
     expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
 
-    await runtime.runScheduleNow({ principal, id: created.id });
+    expect(await runtime.runScheduleNow({ principal, id: created.id })).toBe(true);
     expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0 });
     expect(fired).toEqual([created.id]);
+  });
+
+  it("reports false rather than success when nothing was armed", async () => {
+    const runtime = build(async () => true);
+    // Unknown id — the caller must be able to tell this from "queued".
+    expect(await runtime.runScheduleNow({ principal, id: "sch_nope" })).toBe(false);
   });
 
   it("is owner-fenced — another principal's id does nothing", async () => {
@@ -212,7 +218,7 @@ describe("runScheduleNow", () => {
       cron: "*/15 * * * *",
       prompt: "later",
     });
-    await runtime.runScheduleNow({ principal: other, id: created.id });
+    expect(await runtime.runScheduleNow({ principal: other, id: created.id })).toBe(false);
     expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
   });
 
@@ -227,7 +233,7 @@ describe("runScheduleNow", () => {
     await runtime.runDue();
     expect((await runtime.listSchedules({ principal }))[0]!.enabled).toBe(false);
 
-    await runtime.runScheduleNow({ principal, id: created.id });
+    expect(await runtime.runScheduleNow({ principal, id: created.id })).toBe(false);
     expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
   });
 });

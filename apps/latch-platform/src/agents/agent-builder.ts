@@ -552,23 +552,28 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       inputSchema: z.object({ agent: z.string().describe("Agent name from list_agents.") }),
       execute: async ({ agent }) => {
         const { listAgentChannels } = await import("@/lib/schedule-delivery");
-        const channels = await listAgentChannels(principal, agent);
+        const available = await listAgentChannels(principal, agent);
+        const channels = available.flatMap<{
+          kind: string;
+          ref: string;
+          channel?: string;
+          label: string;
+        }>((c) =>
+          c.kind === "telegram"
+            ? [{ kind: c.kind, ref: c.ref, label: c.label }]
+            : (c.channels ?? []).map((ch) => ({
+                kind: c.kind,
+                ref: c.ref,
+                channel: ch.id,
+                label: `#${ch.name}`,
+              })),
+        );
+        // Count the ENTRIES, not the apps: a Slack app whose channels couldn't
+        // be listed (missing token or scope) stays in `available` but yields no
+        // entries, and without this the model would get an empty list and no
+        // explanation for it.
         return {
-          channels: channels.flatMap<{
-            kind: string;
-            ref: string;
-            channel?: string;
-            label: string;
-          }>((c) =>
-            c.kind === "telegram"
-              ? [{ kind: c.kind, ref: c.ref, label: c.label }]
-              : (c.channels ?? []).map((ch) => ({
-                  kind: c.kind,
-                  ref: c.ref,
-                  channel: ch.id,
-                  label: `#${ch.name}`,
-                })),
-          ),
+          channels,
           note:
             channels.length === 0
               ? "No channels available — a schedule for this agent will run in the app only."
@@ -609,6 +614,18 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         const { listAgentChannels, resolveDelivery, DeliveryError } = await import(
           "@/lib/schedule-delivery"
         );
+        const { checkScheduleLimits } = await import("@/lib/schedule-limits");
+        // The same cap and frequency floor the harness `create_schedule`
+        // applies. Both are model-driven, so both need them — the builder is
+        // if anything the wider surface, since it can schedule ANY agent.
+        const rejected = await checkScheduleLimits(
+          runtime,
+          principal,
+          cron?.trim() || null,
+          timezone,
+        );
+        if (rejected) return { error: rejected };
+
         let delivery: ScheduleDelivery | undefined;
         if (deliverTo) {
           // Reject hallucinated references — only targets discovery returned
@@ -689,7 +706,13 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
         "Pauses for the user's approval.",
       inputSchema: z.object({ id: z.string() }),
       execute: async ({ id }) => {
-        // Owner-fenced in storage, so a foreign id simply deletes nothing.
+        // `unschedule` is owner-fenced and returns void, so a foreign or stale
+        // id deletes nothing silently. Confirm it's the caller's first —
+        // otherwise this reports a deletion that never happened.
+        const mine = await runtime.listSchedules({ principal });
+        if (!mine.some((s) => s.id === id)) {
+          return { error: `No schedule ${id} — call list_agent_schedules for current ids.` };
+        }
         await runtime.unschedule({ principal, id });
         return { deleted: id };
       },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { intervalAtLeast } from "./tools";
+import { intervalAtLeast } from "./schedule-limits";
 
 /**
  * The frequency floor on agent-created schedules. A model asked for "keep me

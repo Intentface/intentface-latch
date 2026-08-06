@@ -448,7 +448,7 @@ export function createSqliteAdapter<P>(
     },
 
     async bumpSchedule(principal, id) {
-      await db
+      const armed = await db
         .update(schema.schedules)
         .set({ nextRunAt: 0 })
         // Owner-fenced, and `enabled` only: a spent one-shot stays spent rather
@@ -459,7 +459,9 @@ export function createSqliteAdapter<P>(
             eq(schema.schedules.owner, ownerKey(principal)),
             eq(schema.schedules.enabled, 1),
           ),
-        );
+        )
+        .returning({ id: schema.schedules.id });
+      return armed.length > 0;
     },
 
     async claimDueSchedules(now, ttlMs, owner) {

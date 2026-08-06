@@ -304,8 +304,14 @@ export function createTelegramStore(client: Client) {
       userId: string,
     ): Promise<{ telegramUserId: string; orgId: string } | null> {
       const res = await client.execute({
+        // The unique key is (bot_id, telegram_user_id), so one platform user CAN
+        // hold several rows for a bot after linking a second Telegram account.
+        // Order it: an unordered LIMIT 1 would let a scheduled push land in a
+        // different Telegram account from one fire to the next. Oldest link
+        // wins — that's the one the user has been conversing in.
         sql: `SELECT telegram_user_id, org_id FROM latch_telegram_identity
-              WHERE bot_id = ? AND user_id = ? LIMIT 1`,
+              WHERE bot_id = ? AND user_id = ?
+              ORDER BY created_at, telegram_user_id LIMIT 1`,
         args: [botId, userId],
       });
       const r = res.rows[0] as Record<string, unknown> | undefined;

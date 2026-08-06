@@ -131,19 +131,34 @@ function SchedulesPage() {
     }
   }
 
+  // Both of these clear `busy` in a `finally`: without it, one rejected request
+  // leaves every button on the page disabled until a reload.
   async function remove(id: string) {
     setBusy(true);
-    await deleteSchedule(id);
-    await router.invalidate();
-    setBusy(false);
+    setError(null);
+    try {
+      await deleteSchedule(id);
+      await router.invalidate();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete schedule");
+    } finally {
+      setBusy(false);
+    }
   }
 
   /** Arm it for the next tick; the cron fires it for real from there. */
   async function runNow(id: string) {
     setBusy(true);
-    await runScheduleNowFn({ data: { id } });
-    await router.invalidate();
-    setBusy(false);
+    setError(null);
+    try {
+      const res = await runScheduleNowFn({ data: { id } });
+      if (!res.ok) setError(res.error);
+      await router.invalidate();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to queue the run");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (

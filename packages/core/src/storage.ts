@@ -263,10 +263,14 @@ export interface StorageAdapter<P> {
   /**
    * Make one of the caller's schedules due immediately ("run now"): set
    * `nextRunAt` to 0 so the next `runDue` claims it through the ordinary path.
-   * Owner-fenced like `deleteSchedule`. No-ops on a disabled schedule — a
-   * finished one-shot shouldn't be resurrectable by re-arming its clock.
+   * Owner-fenced like `deleteSchedule`, and enabled-only — a finished one-shot
+   * shouldn't be resurrectable by re-arming its clock.
+   *
+   * Returns whether a schedule was actually armed, so a caller can tell "it's
+   * queued" from "unknown, not yours, or already spent" instead of reporting
+   * success for a no-op.
    */
-  bumpSchedule(principal: P, id: string): Promise<void>;
+  bumpSchedule(principal: P, id: string): Promise<boolean>;
   /**
    * System op (no principal): atomically claim due schedules (`enabled`,
    * `nextRunAt <= now`, lease unset/expired) for `owner`, stamping a lease so a
