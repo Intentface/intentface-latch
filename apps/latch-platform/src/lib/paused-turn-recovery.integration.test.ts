@@ -141,23 +141,26 @@ async function subagentRuntime(): Promise<Runtime<P>> {
   const parentModel = new MockLanguageModelV3({
     doStream: async () => {
       subParentCalls += 1;
-      return {
-        stream: streamFrom(
-          subParentCalls === 1
-            ? [
-                { type: "stream-start", warnings: [] },
-                meta("r_spawn"),
-                {
-                  type: "tool-call",
-                  toolCallId: "call_spawn",
-                  toolName: "spawn_agent",
-                  input: JSON.stringify({ agent: "helper", prompt: "do a gated side job" }),
-                },
-                { type: "finish", finishReason: "tool-calls", usage },
-              ]
-            : sayText("Sure — directly, then."),
-        ),
-      };
+      // Call 1 spawns; call 2 is the tool loop continuing on the
+      // `awaiting_approval` result (still turn 1); call 3 is the redirected
+      // turn. Distinct texts so the assertions can tell them apart.
+      const parts =
+        subParentCalls === 1
+          ? [
+              { type: "stream-start", warnings: [] },
+              meta("r_spawn"),
+              {
+                type: "tool-call",
+                toolCallId: "call_spawn",
+                toolName: "spawn_agent",
+                input: JSON.stringify({ agent: "helper", prompt: "do a gated side job" }),
+              },
+              { type: "finish", finishReason: "tool-calls", usage },
+            ]
+          : subParentCalls === 2
+            ? sayText("Waiting on that approval.")
+            : sayText("Sure — directly, then.");
+      return { stream: streamFrom(parts) };
     },
   });
   const helperModel = new MockLanguageModelV3({
@@ -426,6 +429,7 @@ describe("recovering a chat parked on a stale pause", () => {
       .find((p) => p.type === "data-subagent-approval");
     expect(bubbled, "the subagent approval bubbled to the parent").toBeTruthy();
 
+    const callsBeforeRedirect = subParentCalls;
     await drain(
       await sub.handleChat({
         agent: "parent",
@@ -454,6 +458,17 @@ describe("recovering a chat parked on a stale pause", () => {
     expect(spawn.output).toMatchObject({ status: "declined" });
     expect(JSON.stringify(spawn.output)).not.toContain("do not retry");
     expect(subHelperCalls, "the abandoned sub thread was not resumed").toBe(1);
+    // Closing the gate is only half of it — the message that closed it has to
+    // actually run, or superseding just swaps one dead end for another.
+    expect(
+      subParentCalls - callsBeforeRedirect,
+      "the superseding message reached the parent model",
+    ).toBe(1);
+    const last = after.at(-1)!;
+    expect(last.role).toBe("assistant");
+    expect((last.parts as { text?: string }[]).map((p) => p.text)).toContain(
+      "Sure — directly, then.",
+    );
   });
 
   it("a live approval resumes normally when decided", async () => {
