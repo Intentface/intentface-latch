@@ -365,14 +365,52 @@ type ToolCtx = {
 };
 const ctxOf = (o: unknown): ToolCtx => (o as { context?: ToolCtx }).context ?? ({} as ToolCtx);
 
+const list_delivery_channels = tool({
+  description:
+    "Where a scheduled run of yours could be delivered: the Telegram bots the user " +
+    "has linked to you, and the Slack channels they can post you into. Call this " +
+    "when the user wants a schedule to reach them somewhere other than the chat " +
+    "you're in right now (\"message me on Telegram every morning\"), then pass one " +
+    "entry as create_schedule's `deliver_to` — invented refs are rejected.",
+  inputSchema: jsonSchema<Record<string, never>>({
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  }),
+  execute: async (_args, options) => {
+    const { principal, run } = ctxOf(options);
+    if (!principal || !run) return { error: "No principal for this turn." };
+    const { listAgentChannels, deliveryOptions } = await import("@/lib/schedule-delivery");
+    // Count the ENTRIES, not the apps: a Slack app whose channels couldn't be
+    // listed yields none, and without the note the model gets an empty list and
+    // no explanation for it.
+    const channels = deliveryOptions(await listAgentChannels(principal, run.agent));
+    return {
+      channels,
+      note:
+        channels.length === 0
+          ? "No channels available — a schedule will run in the app only. If the user expected " +
+            "Telegram, they haven't linked this agent's bot yet."
+          : undefined,
+    };
+  },
+});
+
 const create_schedule = tool({
   description:
     "Schedule yourself to run again later, on a cron expression (or omit `cron` " +
     "for a one-off on the next tick). Each fire starts a fresh turn with `prompt` " +
-    "as the message. When this conversation is on a chat channel, the result is " +
-    "delivered back into it. Runs no more often than every 15 minutes. The user " +
-    "confirms before anything is created.",
-  inputSchema: jsonSchema<{ cron?: string; timezone?: string; prompt: string }>({
+    "as the message. By default the result is delivered back into THIS " +
+    "conversation's channel — in the web app that means nowhere, so if the user " +
+    "wants to be reached (\"report to me on Telegram\") call " +
+    "list_delivery_channels and pass an entry as `deliver_to`. Runs no more often " +
+    "than every 15 minutes. The user confirms before anything is created.",
+  inputSchema: jsonSchema<{
+    cron?: string;
+    timezone?: string;
+    prompt: string;
+    deliver_to?: { kind: "telegram" | "slack"; ref: string; channel?: string };
+  }>({
     type: "object",
     properties: {
       cron: {
@@ -387,6 +425,22 @@ const create_schedule = tool({
         type: "string",
         description: "The message to send yourself each fire. Write it as an instruction.",
       },
+      deliver_to: {
+        type: "object",
+        description:
+          "Where each fire reports, from list_delivery_channels. Omit to use the " +
+          "channel this conversation is already on.",
+        properties: {
+          kind: { type: "string", enum: ["telegram", "slack"] },
+          ref: { type: "string", description: "The `ref` from list_delivery_channels." },
+          channel: {
+            type: "string",
+            description: "Slack only: the `channel` from list_delivery_channels.",
+          },
+        },
+        required: ["kind", "ref"],
+        additionalProperties: false,
+      },
     },
     required: ["prompt"],
     additionalProperties: false,
@@ -400,18 +454,43 @@ const create_schedule = tool({
     const rejected = await checkScheduleLimits(runtime, principal, cron, args.timezone);
     if (rejected) return { error: rejected };
 
-    // Derived, never taken from the model: which channel this chat belongs to.
-    // Re-checked through the same gate the fire uses, so a target the caller
-    // isn't entitled to is dropped rather than stored (the run still gets
-    // scheduled — the user asked for that part).
-    let delivery = await deliveryForChat(run.chatId, principal, run.agent);
-    if (delivery) {
+    let delivery: ScheduleDelivery | undefined;
+    let deliversTo: string;
+    if (args.deliver_to) {
+      // Model-supplied, so it must be one discovery offered — and an explicit
+      // ask that can't be honoured is an error, never a silent downgrade to
+      // app-only. The user sees this argument on the approval card.
+      const { resolveOfferedDelivery, DeliveryError } = await import("@/lib/schedule-delivery");
       try {
-        await resolveDelivery(principal, run.agent, delivery);
+        const offered = await resolveOfferedDelivery(principal, run.agent, args.deliver_to);
+        if (!offered) {
+          return {
+            error:
+              "That isn't one of your delivery channels. Call list_delivery_channels " +
+              "and pass one of its entries.",
+          };
+        }
+        delivery = offered.delivery;
+        deliversTo = offered.label;
       } catch (e) {
-        console.warn("[create_schedule] derived delivery rejected:", e);
-        delivery = undefined;
+        return { error: e instanceof DeliveryError ? e.message : "Delivery target rejected." };
       }
+    } else {
+      // Derived from the chat: re-checked through the same gate the fire uses, so
+      // a target the caller isn't entitled to is dropped rather than stored (the
+      // run still gets scheduled — the user asked for that part).
+      delivery = await deliveryForChat(run.chatId, principal, run.agent);
+      if (delivery) {
+        try {
+          await resolveDelivery(principal, run.agent, delivery);
+        } catch (e) {
+          console.warn("[create_schedule] derived delivery rejected:", e);
+          delivery = undefined;
+        }
+      }
+      deliversTo = delivery
+        ? delivery.kind
+        : "this app only — call list_delivery_channels if the user wanted to be messaged";
     }
     try {
       const created = await runtime.schedule({
@@ -427,7 +506,7 @@ const create_schedule = tool({
         cron: created.cron ?? "one-off",
         timezone: created.timezone ?? "UTC",
         nextRunAt: new Date(created.nextRunAt).toISOString(),
-        deliversTo: delivery ? delivery.kind : "this app only (no channel to deliver to)",
+        deliversTo,
       };
     } catch (e) {
       return { error: e instanceof Error ? e.message : "Failed to create the schedule." };
@@ -493,6 +572,7 @@ export const sandboxTools = { bash, read_file, write_file, glob, grep } as Recor
 export const appTools = {
   web_fetch,
   askUser,
+  list_delivery_channels,
   create_schedule,
   list_schedules,
   cancel_schedule,
