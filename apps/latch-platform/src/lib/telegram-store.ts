@@ -293,6 +293,45 @@ export function createTelegramStore(client: Client) {
     },
 
     /**
+     * The reverse of `resolveIdentity`: which Telegram user a platform user is
+     * linked to on this bot, or null if they never linked. Needed by anything
+     * that starts a conversation FROM our side (a scheduled run pushing into
+     * the DM) — the inbound path always learns the Telegram user from the
+     * update, but an outbound one only knows the platform principal.
+     */
+    async identityForUser(
+      botId: string,
+      userId: string,
+    ): Promise<{ telegramUserId: string; orgId: string } | null> {
+      const res = await client.execute({
+        // The unique key is (bot_id, telegram_user_id), so one platform user CAN
+        // hold several rows for a bot after linking a second Telegram account.
+        // Order it: an unordered LIMIT 1 would let a scheduled push land in a
+        // different Telegram account from one fire to the next. Oldest link
+        // wins — that's the one the user has been conversing in.
+        sql: `SELECT telegram_user_id, org_id FROM latch_telegram_identity
+              WHERE bot_id = ? AND user_id = ?
+              ORDER BY created_at, telegram_user_id LIMIT 1`,
+        args: [botId, userId],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      return r
+        ? { telegramUserId: String(r.telegram_user_id), orgId: String(r.org_id) }
+        : null;
+    },
+
+    /** The org's active bots bound to one agent (for delivery-target pickers). */
+    async botsForAgent(orgId: string, agent: string): Promise<TelegramBot[]> {
+      const res = await client.execute({
+        sql: `SELECT * FROM latch_telegram_bot
+              WHERE org_id = ? AND agent = ? AND status = 'active'
+              ORDER BY created_at`,
+        args: [orgId, agent],
+      });
+      return res.rows.map((r) => rowToBot(r as Record<string, unknown>));
+    },
+
+    /**
      * Mark a delivery key as handled; returns true if it was ALREADY seen (so
      * the caller should drop it). Prune-then-check with a 10-min TTL.
      */

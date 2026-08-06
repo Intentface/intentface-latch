@@ -293,3 +293,38 @@ describe("telegram store: thread pointer", () => {
     expect(await store.currentThread(key)).toBe(1);
   });
 });
+
+describe("outbound lookups (scheduled pushes)", () => {
+  // The inbound webhook always learns the Telegram user from the update; a
+  // scheduled run only knows the platform principal, so it needs the reverse.
+  it("identityForUser is the inverse of resolveIdentity", async () => {
+    await store.create(bot);
+    await store.linkIdentity({ botId: "b1", telegramUserId: "555", userId: "u1", orgId: "org1" });
+
+    expect(await store.identityForUser("b1", "u1")).toEqual({
+      telegramUserId: "555",
+      orgId: "org1",
+    });
+    expect(await store.resolveIdentity("b1", "555")).toEqual({ userId: "u1", orgId: "org1" });
+  });
+
+  it("identityForUser is scoped to the bot and returns null when unlinked", async () => {
+    await store.create(bot);
+    await store.create({ ...bot, id: "b2", handle: "other-bot" });
+    await store.linkIdentity({ botId: "b1", telegramUserId: "555", userId: "u1", orgId: "org1" });
+
+    expect(await store.identityForUser("b2", "u1")).toBeNull(); // linked elsewhere
+    expect(await store.identityForUser("b1", "u2")).toBeNull(); // never linked
+  });
+
+  it("botsForAgent lists only this org's active bots for that agent", async () => {
+    await store.create(bot); // org1 / support
+    await store.create({ ...bot, id: "b2", agent: "weekly", handle: "weekly-bot" });
+    await store.create({ ...bot, id: "b3", orgId: "org2", handle: "other-org-bot" });
+    await store.create({ ...bot, id: "b4", handle: "disabled-bot" });
+    await store.setStatus("b4", "disabled");
+
+    expect((await store.botsForAgent("org1", "support")).map((b) => b.id)).toEqual(["b1"]);
+    expect(await store.botsForAgent("org1", "nothing")).toEqual([]);
+  });
+});

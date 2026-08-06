@@ -39,6 +39,13 @@ import { upsertConnection } from "./connection-upsert";
 import type { ConnectionInput } from "./connection-upsert";
 import { normalizeSecretName } from "./named-secrets";
 import { secretDependents, secretKey } from "./connection-store";
+import {
+  DeliveryError,
+  listAgentChannels,
+  parseScheduleDelivery,
+  resolveDelivery,
+  type ScheduleDelivery,
+} from "./schedule-delivery";
 
 /**
  * Every owner key a principal may read eval verdicts under — the one definition
@@ -636,16 +643,103 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async (
   if (!principal) return [];
   const { runtime } = await getLatch();
   const schedules = await runtime.listSchedules({ principal });
-  return schedules.map((s) => ({
-    id: s.id,
-    agent: s.agent,
-    cron: s.cron,
-    prompt: s.prompt,
-    nextRunAt: s.nextRunAt,
-    lastRunAt: s.lastRunAt ?? null,
-    enabled: s.enabled,
-  }));
+  return schedules.map((s) => {
+    const delivery = parseScheduleDelivery(s.delivery);
+    return {
+      id: s.id,
+      agent: s.agent,
+      cron: s.cron,
+      prompt: s.prompt,
+      nextRunAt: s.nextRunAt,
+      lastRunAt: s.lastRunAt ?? null,
+      enabled: s.enabled,
+      delivery: delivery ? { kind: delivery.kind } : null,
+    };
+  });
 });
+
+/** The delivery targets the caller may point a schedule for `agent` at. */
+export const listAgentChannelsFn = createServerFn({ method: "GET" })
+  .validator((data: { agent: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    return listAgentChannels(principal, data.agent);
+  });
+
+/**
+ * Create a schedule, validating any delivery target first.
+ *
+ * The Schedules page posts here rather than to the generic `POST /schedules`
+ * REST route: delivery entitlement is a platform concept (bots, identity links,
+ * org membership) that `@intentface/latch-server` deliberately knows nothing
+ * about, so that route stays delivery-free rather than accepting a target it
+ * couldn't check.
+ */
+export const createScheduleFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      agent: string;
+      cron: string | null;
+      timezone?: string;
+      prompt: string;
+      delivery?: unknown;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    let delivery: ScheduleDelivery | undefined;
+    if (data.delivery) {
+      const parsed = parseScheduleDelivery(data.delivery);
+      if (!parsed) return { ok: false as const, error: "Unrecognized delivery target." };
+      try {
+        await resolveDelivery(principal, data.agent, parsed);
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof DeliveryError ? e.message : "Delivery target rejected.",
+        };
+      }
+      delivery = parsed;
+    }
+    const { runtime } = await getLatch();
+    try {
+      await runtime.schedule({
+        principal,
+        agent: data.agent,
+        cron: data.cron,
+        timezone: data.timezone,
+        prompt: data.prompt,
+        delivery,
+      });
+      return { ok: true as const };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : "Failed to create schedule",
+      };
+    }
+  });
+
+/**
+ * Make one of the caller's schedules due immediately. It then fires on the next
+ * cron tick through the ordinary path — same claim, same delivery, same
+ * advance — so "run now" can't drift from what the schedule actually does.
+ */
+export const runScheduleNowFn = createServerFn({ method: "POST" })
+  .validator((data: { id: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime } = await getLatch();
+    // Owner-fenced and enabled-only, so a stale id from a page loaded before
+    // the schedule fired arms nothing — report that rather than "queued".
+    const armed = await runtime.runScheduleNow({ principal, id: data.id });
+    return armed
+      ? { ok: true as const }
+      : { ok: false as const, error: "That schedule is no longer active." };
+  });
 
 // ── Observability (Langfuse): feedback scores + the live trace feed ─────────
 

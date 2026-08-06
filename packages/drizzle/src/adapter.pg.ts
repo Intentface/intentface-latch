@@ -72,6 +72,7 @@ export function createPostgresAdapter<P>(
     cron: r.cron,
     timezone: r.timezone ?? undefined,
     prompt: r.prompt,
+    delivery: r.delivery ?? undefined,
     nextRunAt: r.nextRunAt,
     lastRunAt: r.lastRunAt,
     enabled: r.enabled === 1,
@@ -378,6 +379,7 @@ export function createPostgresAdapter<P>(
         cron: input.cron,
         timezone: input.timezone ?? null,
         prompt: input.prompt,
+        delivery: input.delivery ?? null,
         nextRunAt: input.nextRunAt,
         lastRunAt: null,
         enabled: 1,
@@ -408,6 +410,23 @@ export function createPostgresAdapter<P>(
         .where(
           and(eq(schema.schedules.id, id), eq(schema.schedules.owner, ownerKey(principal))),
         );
+    },
+
+    async bumpSchedule(principal, id) {
+      const armed = await db
+        .update(schema.schedules)
+        .set({ nextRunAt: 0 })
+        // Owner-fenced, and `enabled` only: a spent one-shot stays spent rather
+        // than being resurrectable by re-arming its clock.
+        .where(
+          and(
+            eq(schema.schedules.id, id),
+            eq(schema.schedules.owner, ownerKey(principal)),
+            eq(schema.schedules.enabled, 1),
+          ),
+        )
+        .returning({ id: schema.schedules.id });
+      return armed.length > 0;
     },
 
     async claimDueSchedules(now, ttlMs, owner) {

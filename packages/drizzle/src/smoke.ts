@@ -5,6 +5,7 @@ import { migrate } from "./migrate.js";
 import { createSqliteAdapter } from "./adapter.js";
 import { createMemoryJobStore } from "./memory-job-store.js";
 import { memoryJobStoreSmoke } from "./memory-job-store.smoke.shared.js";
+import { scheduleSmoke } from "./schedule.smoke.shared.js";
 import * as schema from "./schema.js";
 
 /** A real run against an in-memory libsql DB: persistence + owner isolation + run/usage. */
@@ -75,6 +76,9 @@ async function main() {
   });
   const gotRun = await store.getRun(run.id);
   assert(gotRun?.status === "completed", "run updated to completed");
+
+  // Schedules: the opaque delivery blob and the owner-fenced "run now" bump.
+  await scheduleSmoke({ store, me, other: { org: "org_b", user: "user_2" }, assert });
 
   // Memory job store: extraction/consolidation state machine + usage.
   await memoryJobStoreSmoke({

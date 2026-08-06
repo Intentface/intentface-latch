@@ -41,7 +41,8 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS latch_secrets_owner_idx ON latch_secrets (owner)`,
   `CREATE TABLE IF NOT EXISTS latch_schedules (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity TEXT,
-     cron TEXT, timezone TEXT, prompt TEXT NOT NULL, next_run_at INTEGER NOT NULL, last_run_at INTEGER,
+     cron TEXT, timezone TEXT, prompt TEXT NOT NULL, delivery TEXT,
+     next_run_at INTEGER NOT NULL, last_run_at INTEGER,
      enabled INTEGER NOT NULL, lease_owner TEXT, lease_expires_at INTEGER,
      created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_owner_idx ON latch_schedules (owner)`,
@@ -74,6 +75,7 @@ const DDL = [
 /** Idempotent column adds for DBs created before a column existed. */
 const ALTERS = [
   `ALTER TABLE latch_schedules ADD COLUMN timezone TEXT`,
+  `ALTER TABLE latch_schedules ADD COLUMN delivery TEXT`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_read_tokens INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`,

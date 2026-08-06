@@ -432,6 +432,13 @@ export async function getLatch(): Promise<{
     cron: (expr, afterMs, timezone) =>
       new Cron(expr, { timezone: timezone || "UTC" }).nextRun(new Date(afterMs))?.getTime() ??
       null,
+    // A schedule carrying a delivery target runs IN its channel conversation
+    // (the user's Telegram DM, a Slack thread) instead of a fresh chat, so the
+    // report lands where they'll read it. Returns false for a target that's
+    // absent or no longer authorized → core runs the fire the ordinary way.
+    // Imported lazily: this module reaches back into `getLatch()`.
+    runSchedule: async (input) =>
+      (await import("./schedule-delivery")).runScheduledDelivery(input),
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash

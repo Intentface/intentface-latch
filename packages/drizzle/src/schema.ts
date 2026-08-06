@@ -205,6 +205,8 @@ export const schedules = sqliteTable(
     cron: text("cron"),
     timezone: text("timezone"),
     prompt: text("prompt").notNull(),
+    /** Host-interpreted delivery target (e.g. a channel), opaque to core. */
+    delivery: text("delivery", { mode: "json" }),
     nextRunAt: integer("next_run_at").notNull(),
     lastRunAt: integer("last_run_at"),
     enabled: integer("enabled").notNull(),

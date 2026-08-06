@@ -100,6 +100,23 @@ export function slackApi(token: SlackToken) {
       return String((r.channel as { id?: string } | undefined)?.id ?? "");
     },
 
+    /**
+     * The channels this bot can post to, for pickers. PUBLIC channels only:
+     * the manifest asks for `channels:read` but deliberately not `groups:read`
+     * (see SLACK_BOT_SCOPES), so a private channel never appears here and has
+     * to be entered by id. One page — a picker doesn't need to paginate a
+     * workspace, and Slack caps `limit` at 1000 anyway.
+     */
+    async conversationsList(limit = 200): Promise<{ id: string; name: string }[]> {
+      const r = await call(token, "conversations.list", {
+        exclude_archived: "true",
+        types: "public_channel",
+        limit: String(limit),
+      });
+      const channels = (r.channels as Record<string, unknown>[] | undefined) ?? [];
+      return channels.map((c) => ({ id: String(c.id), name: String(c.name ?? c.id) }));
+    },
+
     /** Set the assistant "thinking…/working…" status line on a thread. */
     async setStatus(input: { channel_id: string; thread_ts: string; status: string }): Promise<void> {
       await call(token, "assistant.threads.setStatus", input).catch(() => {
