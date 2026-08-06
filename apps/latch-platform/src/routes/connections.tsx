@@ -329,23 +329,31 @@ function AddConnection({
             </>
           )}
           {!oauthMode && (
-            <div className="flex gap-2">
-              <Input
-                className="max-w-[12rem]"
-                value={authHeader}
-                onChange={(e) => setAuthHeader(e.target.value)}
-                placeholder="auth header (blank = Bearer)"
-              />
-              <Input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder={
-                  editing && initial.hasToken
-                    ? "token / API key (blank = keep current)"
-                    : "token / API key (optional)"
-                }
-              />
+            <div className="flex flex-col gap-1">
+              <div className="flex gap-2">
+                <Input
+                  className="max-w-[12rem]"
+                  value={authHeader}
+                  onChange={(e) => setAuthHeader(e.target.value)}
+                  placeholder="auth header (blank = Bearer)"
+                />
+                <Input
+                  type="password"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  placeholder={
+                    editing && initial.hasToken
+                      ? "token / API key (blank = keep current)"
+                      : "token / API key (optional)"
+                  }
+                />
+              </div>
+              {token.trim() !== "" && (
+                <p className="text-muted-foreground text-xs">
+                  Saved as a named secret under Secrets below. Replace it there later and this
+                  connection picks up the new value straight away.
+                </p>
+              )}
             </div>
           )}
           {mcpOauthMode && (

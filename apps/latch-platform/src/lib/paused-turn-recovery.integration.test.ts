@@ -20,6 +20,10 @@ import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle"
  *    later `applyToolResult` in that chat return an empty 200 with no
  *    continuation: the user answers the questionnaire and the agent never
  *    resumes.
+ *
+ * …plus the third way out, for a pause the user can't satisfy at all (a
+ * `connect_<name>` gate for a broken connection): a new message declines the
+ * pending approval and runs, rather than being refused and dropped.
  */
 
 type P = { orgId: string; userId: string };
@@ -124,6 +128,77 @@ const agent = defineAgent<P>({
   },
   toolApproval: { gated: "user-approval" },
 });
+
+/**
+ * A parent agent that spawns `helper`, whose gated tool pauses the sub thread —
+ * so the approval bubbles up to the parent as a `data-subagent-approval` part.
+ * Its own runtime: the models are call-counted, not driven by `script`.
+ */
+let subParentCalls = 0;
+let subHelperCalls = 0;
+async function subagentRuntime(): Promise<Runtime<P>> {
+  subParentCalls = 0;
+  const parentModel = new MockLanguageModelV3({
+    doStream: async () => {
+      subParentCalls += 1;
+      // Call 1 spawns; call 2 is the tool loop continuing on the
+      // `awaiting_approval` result (still turn 1); call 3 is the redirected
+      // turn. Distinct texts so the assertions can tell them apart.
+      const parts =
+        subParentCalls === 1
+          ? [
+              { type: "stream-start", warnings: [] },
+              meta("r_spawn"),
+              {
+                type: "tool-call",
+                toolCallId: "call_spawn",
+                toolName: "spawn_agent",
+                input: JSON.stringify({ agent: "helper", prompt: "do a gated side job" }),
+              },
+              { type: "finish", finishReason: "tool-calls", usage },
+            ]
+          : subParentCalls === 2
+            ? sayText("Waiting on that approval.")
+            : sayText("Sure — directly, then.");
+      return { stream: streamFrom(parts) };
+    },
+  });
+  const helperModel = new MockLanguageModelV3({
+    doStream: async () => {
+      subHelperCalls += 1;
+      return { stream: streamFrom(callGated("call_sub_gate")) };
+    },
+  });
+  const client = createClient({ url: ":memory:" });
+  await migrate(client);
+  return createRuntime<P, { orgId: string }>({
+    storage: createSqliteAdapter<P>(drizzle(client, { schema }), {
+      owner: (p) => [p.orgId, p.userId],
+    }),
+    context: defineContext<P, { orgId: string }>({
+      build: ({ principal: p }) => ({ orgId: p.orgId }),
+    }),
+    agents: {
+      parent: defineAgent<P>({
+        model: parentModel as never,
+        instructions: "test parent",
+        subagents: ["helper"],
+      }),
+      helper: defineAgent<P>({
+        model: helperModel as never,
+        instructions: "test helper",
+        tools: {
+          gated: tool({
+            description: "needs approval",
+            inputSchema: z.object({ n: z.number() }),
+            execute: async ({ n }) => ({ ok: n }),
+          }),
+        },
+        toolApproval: { gated: "user-approval" },
+      }),
+    },
+  });
+}
 
 async function drain(res: Response) {
   if (res.body) for await (const _ of res.body as unknown as AsyncIterable<unknown>) void _;
@@ -272,15 +347,128 @@ describe("recovering a chat parked on a stale pause", () => {
     await drain(second);
   });
 
-  it("a LIVE approval still blocks a new message", async () => {
+  it("a new message supersedes a LIVE approval instead of being dropped", async () => {
+    // Reported for a `connect_<name>` gate whose OAuth could never complete:
+    // refusing the message left the chat with no way out at all — the user
+    // could neither satisfy the gate nor talk past it, and every message they
+    // typed was rejected before it was persisted, so it vanished on reload.
     const chatId = "chat_gate_live";
     script = [() => callGated("call_gate")];
     await drain(await send(runtime, chatId, "do the thing"));
 
-    // The pause is the tail of history, so it must still be enforced.
-    await expect(send(runtime, chatId, "and another thing")).rejects.toMatchObject({
-      code: "pending_approval",
+    script = [() => sayText("Fine, doing it another way.")];
+    const res = await send(runtime, chatId, "forget that, do it another way");
+    expect(isStream(res)).toBe(true);
+    await drain(res);
+
+    const history = await runtime.loadHistory({ chatId, principal });
+    // The gate is closed as declined — not left live, and not silently executed.
+    const gate = history
+      .flatMap((m) => m.parts as Record<string, unknown>[])
+      .find((p) => p.type === "tool-gated")!;
+    expect(gate.state).toBe("approval-responded");
+    expect(gate.approval).toMatchObject({ approved: false });
+    expect(String((gate.approval as { reason?: string }).reason)).toContain("Superseded");
+    // …and the message that superseded it actually made it into history.
+    expect(
+      history.some(
+        (m) =>
+          m.role === "user" &&
+          (m.parts as { text?: string }[]).some((p) => p.text === "forget that, do it another way"),
+      ),
+    ).toBe(true);
+  });
+
+  it("denying a live approval resumes the turn (the Dismiss button's path)", async () => {
+    const chatId = "chat_gate_denied";
+    script = [() => callGated("call_gate"), () => sayText("Okay, skipping that.")];
+    await drain(await send(runtime, chatId, "do the thing"));
+
+    const history = await runtime.loadHistory({ chatId, principal });
+    const part = (history.at(-1)!.parts as Record<string, unknown>[]).find(
+      (p) => p.type === "tool-gated",
+    )!;
+    const approvalId = (part.approval as { id: string }).id;
+
+    const res = await runtime.applyApproval({
+      chatId,
+      principal,
+      decisions: [{ approvalId, approved: false }],
     });
+    expect(isStream(res)).toBe(true);
+    await drain(res);
+
+    // The chat is unblocked: a follow-up message runs as a normal turn.
+    script = [() => sayText("Sure.")];
+    const after = await send(runtime, chatId, "try something else");
+    expect(isStream(after)).toBe(true);
+    await drain(after);
+  });
+
+  it("superseding a BUBBLED subagent approval closes the parent spawn_agent call", async () => {
+    // A subagent's gated tool bubbles up as a `data-subagent-approval` part,
+    // and `spawn_agent`'s stored result is the `awaiting_approval` payload —
+    // whose note tells the model to stop and wait. Data parts are dropped from
+    // the model projection, so if superseding left that result in place the
+    // next turn would see nothing BUT "stop here and wait" and stall.
+    const chatId = "chat_sub_gate";
+    subHelperCalls = 0;
+    const sub = await subagentRuntime();
+
+    await drain(
+      await sub.handleChat({
+        agent: "parent",
+        chatId,
+        principal,
+        message: { id: "u1", role: "user", parts: [{ type: "text", text: "go" }] } as never,
+      }),
+    );
+    const parked = await sub.loadHistory({ chatId, principal });
+    const bubbled = parked
+      .flatMap((m) => (m.parts ?? []) as Record<string, unknown>[])
+      .find((p) => p.type === "data-subagent-approval");
+    expect(bubbled, "the subagent approval bubbled to the parent").toBeTruthy();
+
+    const callsBeforeRedirect = subParentCalls;
+    await drain(
+      await sub.handleChat({
+        agent: "parent",
+        chatId,
+        principal,
+        message: {
+          id: "u2",
+          role: "user",
+          parts: [{ type: "text", text: "stop that, just tell me directly" }],
+        } as never,
+      }),
+    );
+
+    const after = await sub.loadHistory({ chatId, principal });
+    const parts = after.flatMap((m) => (m.parts ?? []) as Record<string, unknown>[]);
+
+    // The bubbled approval is declined AND resolved, so nothing tries to
+    // resume the sub thread the user walked away from.
+    const decided = parts.find((p) => p.type === "data-subagent-approval")!
+      .data as Record<string, unknown>;
+    expect(decided).toMatchObject({ approved: false, resolved: true });
+
+    // …and the parent's spawn_agent result no longer says "wait".
+    const spawn = parts.find((p) => p.type === "tool-spawn_agent")!;
+    expect(spawn.state).toBe("output-available");
+    expect(spawn.output).toMatchObject({ status: "declined" });
+    expect(JSON.stringify(spawn.output)).not.toContain("do not retry");
+    expect(subHelperCalls, "the abandoned sub thread was not resumed").toBe(1);
+    // Closing the gate is only half of it — the message that closed it has to
+    // actually run, or superseding just swaps one dead end for another.
+    expect(
+      subParentCalls - callsBeforeRedirect,
+      "the superseding message reached the parent model",
+    ).toBe(1);
+    const last = after.at(-1)!;
+    expect(last.role).toBe("assistant");
+    expect((last.parts as { text?: string }[]).map((p) => p.text)).toContain(
+      "Sure — directly, then.",
+    );
   });
 
   it("a live approval resumes normally when decided", async () => {

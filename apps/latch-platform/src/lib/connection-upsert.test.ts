@@ -5,6 +5,7 @@ import { createConnectionStore } from "./connection-store";
 import { upsertConnection, normalizeConnectionName } from "./connection-upsert";
 import type { ConnectionInput } from "./connection-upsert";
 import type { DynamicConnections } from "./dynamic-connections";
+import { createNamedSecrets } from "./named-secrets";
 import type { Principal } from "./session";
 
 // Fake hostnames don't resolve; the DNS backstop fails closed and would reject
@@ -35,7 +36,11 @@ const principal: Principal = { orgId: "org1", userId: "alice" };
 
 /** Records `invalidateCredentials` calls so the scope-change rule is observable. */
 function harness() {
-  const store = createConnectionStore(memoryVault());
+  // One vault for both, as in production — a connection's ref and the secret it
+  // names have to live in the same store for resolution to mean anything.
+  const vault = memoryVault();
+  const store = createConnectionStore(vault);
+  const namedSecrets = createNamedSecrets(vault);
   const invalidated: string[] = [];
   const dynamic = {
     oauth: (name: string) => ({
@@ -47,8 +52,8 @@ function harness() {
     }),
   } as unknown as DynamicConnections;
   const run = (input: ConnectionInput) =>
-    upsertConnection(principal, input, { connectionStore: store, dynamic });
-  return { store, dynamic, invalidated, run };
+    upsertConnection(principal, input, { connectionStore: store, dynamic, namedSecrets });
+  return { store, dynamic, namedSecrets, invalidated, run };
 }
 
 const OAUTH2: ConnectionInput = {
@@ -72,8 +77,8 @@ describe("normalizeConnectionName", () => {
 });
 
 describe("upsertConnection", () => {
-  it("stores an oauth2 OpenAPI connection with its client credentials", async () => {
-    const { store, run } = harness();
+  it("mints a named secret from a typed client secret and stores only the name", async () => {
+    const { store, namedSecrets, run } = harness();
     expect(await run(OAUTH2)).toEqual({ ok: true, name: "strava" });
     const saved = await store.get(principal, "strava");
     expect(saved?.auth).toEqual({
@@ -81,9 +86,96 @@ describe("upsertConnection", () => {
       authorizeUrl: "https://auth.example.com/authorize",
       tokenUrl: "https://auth.example.com/token",
       clientId: "268672",
-      clientSecret: "s3cret",
+      clientSecretRef: "strava_client_secret",
+      clientSecret: undefined,
       scopes: ["read", "activity:read"],
     });
+    // The value is in the Vault, reachable by name — and nowhere in the record.
+    expect(await namedSecrets.get(principal, "strava_client_secret", "user")).toBe("s3cret");
+    expect(JSON.stringify(saved)).not.toContain("s3cret");
+  });
+
+  it("mints a named secret from a typed static token", async () => {
+    const { store, namedSecrets, run } = harness();
+    await run({
+      name: "notes",
+      kind: "mcp",
+      scope: "user",
+      url: "https://mcp.example.com",
+      authMode: "token",
+      token: "tok-1",
+    });
+    expect((await store.get(principal, "notes"))?.auth).toEqual({
+      kind: "bearer",
+      header: undefined,
+      token: undefined,
+      tokenRef: "notes_token",
+    });
+    expect(await namedSecrets.get(principal, "notes_token", "user")).toBe("tok-1");
+  });
+
+  it("rotates the secret in place when a value is retyped", async () => {
+    // The point of references: one write reaches every connection built on the
+    // secret, instead of each one holding its own stale copy.
+    const { store, namedSecrets, run } = harness();
+    await run(OAUTH2);
+    await run({ ...OAUTH2, clientSecret: "rotated" });
+    expect(await namedSecrets.get(principal, "strava_client_secret", "user")).toBe("rotated");
+    // Still one secret, still the same name — no `-2` sprouted.
+    expect(await namedSecrets.list(principal)).toEqual([
+      { name: "strava_client_secret", scope: "user" },
+    ]);
+    expect((await store.get(principal, "strava"))?.auth).toMatchObject({
+      clientSecretRef: "strava_client_secret",
+    });
+  });
+
+  it("never overwrites a secret that belongs to something else", async () => {
+    // The derived name is taken by an unrelated secret, so this connection gets
+    // its own rather than silently rotating someone else's credential.
+    const { store, namedSecrets, run } = harness();
+    await namedSecrets.set(principal, "strava_client_secret", "user", "someone-elses");
+    await run(OAUTH2);
+    expect((await store.get(principal, "strava"))?.auth).toMatchObject({
+      clientSecretRef: "strava_client_secret-2",
+    });
+    expect(await namedSecrets.get(principal, "strava_client_secret", "user")).toBe("someone-elses");
+    expect(await namedSecrets.get(principal, "strava_client_secret-2", "user")).toBe("s3cret");
+  });
+
+  it("accepts a ref the agent supplies and stores no value", async () => {
+    const { store, run, namedSecrets } = harness();
+    await namedSecrets.set(principal, "shared_oauth_secret", "user", "from-the-form");
+    await run({ ...OAUTH2, clientSecret: undefined, clientSecretRef: "shared_oauth_secret" });
+    expect((await store.get(principal, "strava"))?.auth).toMatchObject({
+      clientSecretRef: "shared_oauth_secret",
+    });
+  });
+
+  it("rejects a ref that does not exist, and one stored at the other scope", async () => {
+    const { run, namedSecrets } = harness();
+    const missing = await run({ ...OAUTH2, clientSecret: undefined, clientSecretRef: "nope" });
+    expect(missing.ok).toBe(false);
+    expect(missing.ok === false && missing.error).toContain('No stored secret named "nope"');
+
+    // Strict scope match, both directions: an org secret must not back a
+    // personal connection, nor a personal one an org-shared connection.
+    await namedSecrets.set(principal, "org_secret", "org", "v");
+    const crossScope = await run({
+      ...OAUTH2,
+      clientSecret: undefined,
+      clientSecretRef: "org_secret",
+    });
+    expect(crossScope.ok).toBe(false);
+    expect(crossScope.ok === false && crossScope.error).toContain("stored at org scope");
+  });
+
+  it("does not mint a secret when a later validation fails", async () => {
+    // Settling a credential WRITES to the vault, so the shape checks have to run
+    // first or a rejected save leaves an orphan behind.
+    const { namedSecrets, run } = harness();
+    expect(await run({ ...OAUTH2, spec: undefined })).toEqual({ ok: false, error: "spec required" });
+    expect(await namedSecrets.list(principal)).toEqual([]);
   });
 
   it("rejects oauth2 on an MCP connection", async () => {
@@ -137,7 +229,10 @@ describe("upsertConnection", () => {
       ok: true,
     });
     const saved = await store.get(principal, "strava");
-    expect(saved?.auth).toMatchObject({ clientId: "999", clientSecret: "s3cret" });
+    expect(saved?.auth).toMatchObject({
+      clientId: "999",
+      clientSecretRef: "strava_client_secret",
+    });
   });
 
   it("keeps the stored static token when the field is blank on edit", async () => {
@@ -153,8 +248,45 @@ describe("upsertConnection", () => {
     await run(base);
     await run({ ...base, token: undefined });
     expect(await store.get(principal, "notes")).toMatchObject({
-      auth: { kind: "bearer", token: "tok-1" },
+      auth: { kind: "bearer", tokenRef: "notes_token" },
     });
+  });
+
+  it("leaves a legacy inline secret alone until it is retyped", async () => {
+    // Records written before references existed must keep working untouched —
+    // no migration script, no forced re-entry. Retyping is what migrates them.
+    const { store, namedSecrets, run } = harness();
+    await store.add(principal, "user", {
+      kind: "mcp",
+      name: "legacy",
+      mcp: { url: "https://mcp.example.com" },
+      auth: { kind: "bearer", token: "inline-tok" },
+    });
+    const base: ConnectionInput = {
+      name: "legacy",
+      kind: "mcp",
+      scope: "user",
+      url: "https://mcp.example.com",
+      authMode: "token",
+    };
+
+    // Edit something else: the inline value survives, still un-referenced.
+    await run({ ...base, authHeader: "X-Api-Key" });
+    expect((await store.get(principal, "legacy"))?.auth).toMatchObject({
+      kind: "header",
+      token: "inline-tok",
+    });
+    expect(await namedSecrets.list(principal)).toEqual([]);
+
+    // Retype it: now it becomes a reference, and the inline copy is gone.
+    await run({ ...base, token: "typed-again" });
+    expect((await store.get(principal, "legacy"))?.auth).toEqual({
+      kind: "bearer",
+      header: undefined,
+      token: undefined,
+      tokenRef: "legacy_token",
+    });
+    expect(await namedSecrets.get(principal, "legacy_token", "user")).toBe("typed-again");
   });
 
   it("clears auth when the mode is explicitly none, even with a token present", async () => {
@@ -186,7 +318,8 @@ describe("upsertConnection", () => {
     expect((await store.get(principal, "clockify"))?.auth).toEqual({
       kind: "header",
       header: "X-Api-Key",
-      token: "abc",
+      token: undefined,
+      tokenRef: "clockify_token",
     });
   });
 
