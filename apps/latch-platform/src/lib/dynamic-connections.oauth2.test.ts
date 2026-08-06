@@ -3,6 +3,7 @@ import type * as latchNet from "@intentface/latch-net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createConnectionStore } from "./connection-store";
 import { createDynamicConnections } from "./dynamic-connections";
+import { createNamedSecrets } from "./named-secrets";
 import { oauth2ConfigFingerprint } from "./oauth2-flow";
 import type { Principal } from "./session";
 
@@ -87,9 +88,16 @@ function stubFetch() {
   return calls;
 }
 
-async function setup() {
+/**
+ * `clientSecretRef` picks the credential shape under test: omitted gives the
+ * legacy INLINE record (what every connection written before references looks
+ * like), a name gives the referenced one.
+ */
+async function setup(opts: { clientSecretRef?: string } = {}) {
   const vault = memoryVault();
   const store = createConnectionStore(vault);
+  const secrets = createNamedSecrets(vault);
+  if (opts.clientSecretRef) await secrets.set(principal, opts.clientSecretRef, "user", "sec-1");
   await store.add(principal, "user", {
     kind: "openapi",
     name: "strava",
@@ -99,24 +107,32 @@ async function setup() {
       authorizeUrl: "https://idp.example.com/oauth/authorize",
       tokenUrl: "https://idp.example.com/oauth/token",
       clientId: "cid-1",
-      clientSecret: "sec-1",
+      clientSecret: opts.clientSecretRef ? undefined : "sec-1",
+      clientSecretRef: opts.clientSecretRef,
       scopes: ["read"],
     },
   });
   const dynamic = createDynamicConnections({
     store,
+    secrets,
     vault,
     callbackBaseUrl: "http://localhost:3000/api/latch/connections",
   });
   // Mirror the config the registry's resolver produces (auth + target folded
   // into the fingerprint) so the seeded grant matches the live connection.
+  // Pointing at the connection's OWN secret name contributes nothing, which is
+  // what keeps inline and migrated records on the same grant.
   const cfg = oauth2ConfigFingerprint({
     authorizeUrl: "https://idp.example.com/oauth/authorize",
     tokenUrl: "https://idp.example.com/oauth/token",
     clientId: "cid-1",
     clientSecret: "sec-1",
     scopes: ["read"],
-    fingerprint: JSON.stringify([SPEC_URL, API_BASE]),
+    fingerprint: JSON.stringify(
+      opts.clientSecretRef && opts.clientSecretRef !== "strava_client_secret"
+        ? [SPEC_URL, API_BASE, opts.clientSecretRef]
+        : [SPEC_URL, API_BASE],
+    ),
   });
   const authorize = () =>
     vault.set(
@@ -129,7 +145,7 @@ async function setup() {
         cfg,
       }),
     );
-  return { vault, store, dynamic, authorize };
+  return { vault, store, secrets, dynamic, authorize };
 }
 
 afterEach(() => {
@@ -246,5 +262,189 @@ describe("dynamic oauth2 OpenAPI connections", () => {
     await expect(dynamic.oauth("some_mcp").start(principal)).rejects.toThrow(
       /not configured for OAuth/,
     );
+  });
+});
+
+describe("oauth2 client secrets held by reference", () => {
+  it("sends the referenced secret, and the current value after a rotation", async () => {
+    const calls = stubFetch();
+    const { dynamic, secrets, vault } = await setup({ clientSecretRef: "strava_client_secret" });
+    await vault.set(
+      principal,
+      "oauth2:strava:tokens",
+      JSON.stringify({
+        access_token: "at-live",
+        refresh_token: "rt-live",
+        expires_at: Date.now() - 1, // expired → forces a refresh POST we can read
+        cfg: oauth2ConfigFingerprint({
+          authorizeUrl: "https://idp.example.com/oauth/authorize",
+          tokenUrl: "https://idp.example.com/oauth/token",
+          clientId: "cid-1",
+          clientSecret: "sec-1",
+          scopes: ["read"],
+          fingerprint: JSON.stringify([SPEC_URL, API_BASE]),
+        }),
+      }),
+    );
+
+    const body = () =>
+      String(calls.filter((c) => c.url.endsWith("/oauth/token")).at(-1)!.init!.body);
+
+    const opened = await dynamic.hostFor(["strava"]).open(principal);
+    const tool = opened.tools.strava_getAthlete as {
+      execute: (i: unknown, o: unknown) => Promise<unknown>;
+    };
+    await tool.execute({}, { toolCallId: "t1", messages: [], context: { principal } });
+    expect(body()).toContain("client_secret=sec-1");
+    await opened.close();
+
+    // Rotate on the Secrets page. Nothing else changes — no re-save of the
+    // connection, no cache to bust — and the next token POST uses the new value.
+    await secrets.set(principal, "strava_client_secret", "user", "sec-2");
+    await vault.set(
+      principal,
+      "oauth2:strava:tokens",
+      JSON.stringify({
+        access_token: "at-live",
+        refresh_token: "rt-live",
+        expires_at: Date.now() - 1,
+        cfg: oauth2ConfigFingerprint({
+          authorizeUrl: "https://idp.example.com/oauth/authorize",
+          tokenUrl: "https://idp.example.com/oauth/token",
+          clientId: "cid-1",
+          clientSecret: "sec-2",
+          scopes: ["read"],
+          fingerprint: JSON.stringify([SPEC_URL, API_BASE]),
+        }),
+      }),
+    );
+    const again = await dynamic.hostFor(["strava"]).open(principal);
+    const tool2 = again.tools.strava_getAthlete as {
+      execute: (i: unknown, o: unknown) => Promise<unknown>;
+    };
+    await tool2.execute({}, { toolCallId: "t2", messages: [], context: { principal } });
+    expect(body()).toContain("client_secret=sec-2");
+    await again.close();
+  });
+
+  it("keeps the grant when a legacy inline secret migrates to this connection's own ref", async () => {
+    // Decision: inline and the ref minted from it on first retype are ONE
+    // credential in two places. The user retyping their client secret must not
+    // sign every member of the org out of the connection.
+    stubFetch();
+    const inline = await setup();
+    await inline.authorize();
+    expect(await inline.dynamic.oauth("strava").isAuthorized(principal)).toBe(true);
+
+    // Same seeded grant, now against a record that references its own secret.
+    const migrated = await setup({ clientSecretRef: "strava_client_secret" });
+    await migrated.authorize();
+    expect(await migrated.dynamic.oauth("strava").isAuthorized(principal)).toBe(true);
+  });
+
+  it("drops the grant when the connection is repointed at a different secret", async () => {
+    // A different named credential is a different client as far as consent goes.
+    stubFetch();
+    const { dynamic, store, secrets, authorize } = await setup({
+      clientSecretRef: "strava_client_secret",
+    });
+    await authorize();
+    expect(await dynamic.oauth("strava").isAuthorized(principal)).toBe(true);
+
+    await secrets.set(principal, "someone_elses_app", "user", "sec-9");
+    const conn = (await store.get(principal, "strava"))!;
+    await store.add(principal, "user", {
+      ...conn,
+      auth: { ...conn.auth, kind: "oauth2", clientSecretRef: "someone_elses_app" } as never,
+    });
+    expect(await dynamic.oauth("strava").isAuthorized(principal)).toBe(false);
+  });
+
+  it("reports an oauth2 connection whose secret is gone as unauthorized, not as a page-wide failure", async () => {
+    stubFetch();
+    const { dynamic, secrets, authorize } = await setup({ clientSecretRef: "strava_client_secret" });
+    await authorize();
+    await secrets.remove(principal, "strava_client_secret", "user");
+    expect(await dynamic.status(principal)).toEqual([
+      { name: "strava", oauth: true, authorized: false },
+    ]);
+  });
+
+  it("exposes no oauth2 API tools once the client secret is deleted", async () => {
+    // The grant is still in the vault, but the client it was minted for can no
+    // longer authenticate. Expose nothing rather than let a call go out on a
+    // token we can't refresh.
+    stubFetch();
+    const { dynamic, secrets, authorize } = await setup({ clientSecretRef: "strava_client_secret" });
+    await authorize();
+    expect(Object.keys((await dynamic.hostFor(["strava"]).open(principal)).tools)).toContain(
+      "strava_getAthlete",
+    );
+    await secrets.remove(principal, "strava_client_secret", "user");
+    expect(Object.keys((await dynamic.hostFor(["strava"]).open(principal)).tools)).toEqual([]);
+  });
+
+  it("revokes the connection when its referenced secret is deleted", async () => {
+    // Delete has to mean revoke: no tools, a reported error, and nothing sent.
+    stubFetch();
+    const errors: string[] = [];
+    const vault = memoryVault();
+    const store = createConnectionStore(vault);
+    const secrets = createNamedSecrets(vault);
+    await secrets.set(principal, "petstore_token", "user", "key-1");
+    await store.add(principal, "user", {
+      kind: "openapi",
+      name: "strava",
+      openapi: { spec: SPEC_URL, baseUrl: API_BASE },
+      auth: { kind: "header", header: "api_key", tokenRef: "petstore_token" },
+    });
+    const dynamic = createDynamicConnections({
+      store,
+      secrets,
+      vault,
+      callbackBaseUrl: "http://localhost:3000/api/latch/connections",
+      onConnectionError: (name, err) => errors.push(`${name}: ${String(err)}`),
+    });
+
+    const opened = await dynamic.hostFor(["strava"]).open(principal);
+    expect(Object.keys(opened.tools)).toEqual(["strava_getAthlete"]);
+    await opened.close();
+
+    await secrets.remove(principal, "petstore_token", "user");
+    const after = await dynamic.hostFor(["strava"]).open(principal);
+    expect(Object.keys(after.tools)).toEqual([]);
+    expect(errors.join()).toMatch(/petstore_token/);
+    await after.close();
+  });
+
+  it("contains a revoked connection instead of taking the turn's other tools down", async () => {
+    stubFetch();
+    const errors: string[] = [];
+    const vault = memoryVault();
+    const store = createConnectionStore(vault);
+    const secrets = createNamedSecrets(vault);
+    await store.add(principal, "user", {
+      kind: "openapi",
+      name: "strava",
+      openapi: { spec: SPEC_URL, baseUrl: API_BASE },
+      auth: { kind: "header", header: "api_key", tokenRef: "deleted_secret" },
+    });
+    await store.add(principal, "user", {
+      kind: "openapi",
+      name: "healthy",
+      openapi: { spec: SPEC_URL, baseUrl: API_BASE },
+    });
+    const dynamic = createDynamicConnections({
+      store,
+      secrets,
+      vault,
+      callbackBaseUrl: "http://localhost:3000/api/latch/connections",
+      onConnectionError: (name, err) => errors.push(`${name}: ${String(err)}`),
+    });
+
+    const opened = await dynamic.hostFor(["strava", "healthy"]).open(principal);
+    expect(Object.keys(opened.tools)).toEqual(["healthy_getAthlete"]);
+    expect(errors).toHaveLength(1);
+    await opened.close();
   });
 });

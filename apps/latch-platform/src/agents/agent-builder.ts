@@ -7,7 +7,7 @@ import {  normalizeAgentName } from "@/lib/agent-store";
 import type {AgentRecord} from "@/lib/agent-store";
 import { validateRubrics } from "@/lib/observability/rubrics";
 import { isOrgAdmin } from "@/lib/auth";
-import { resolveSecretRef } from "@/lib/named-secrets";
+import { secretDependents, secretKey } from "@/lib/connection-store";
 import { upsertConnection, normalizeConnectionName } from "@/lib/connection-upsert";
 import type { ConnectionInput } from "@/lib/connection-upsert";
 import { sharedReadTools } from "./shared-read-tools";
@@ -235,9 +235,6 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
   const orgAdminOk = async (scope: "user" | "org") =>
     scope !== "org" || (await isOrgAdmin(principal.userId!, principal.orgId));
 
-  const resolveRef = (ref: string | undefined, scope: "user" | "org", field: string) =>
-    resolveSecretRef(namedSecrets, principal, ref, scope, field);
-
   const capsToExec = (
     c: z.infer<typeof CAPABILITIES>,
     authored?: string[],
@@ -315,9 +312,19 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
 
     list_secrets: tool({
       description:
-        "Credentials the user has already stored, by NAME and scope only (values are never readable). Pass a name to create_connection as clientSecretRef/tokenRef.",
+        "Credentials the user has already stored, by NAME and scope only (values are never readable), with the connections each one currently backs. Pass a name to create_connection as clientSecretRef/tokenRef — reusing one is how two connections share a credential.",
       inputSchema: z.object({}),
-      execute: async () => namedSecrets.list(principal),
+      execute: async () => {
+        const [secrets, conns] = await Promise.all([
+          namedSecrets.list(principal),
+          connectionStore.list(principal),
+        ]);
+        const dependents = secretDependents(conns);
+        return secrets.map((s) => ({
+          ...s,
+          usedBy: dependents.get(secretKey(s.scope, s.name)) ?? [],
+        }));
+      },
     }),
 
     // No `execute` — this is client-handled. The turn pauses at
@@ -346,11 +353,10 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
             };
           }
         }
-        const clientSecret = await resolveRef(input.clientSecretRef, input.scope, "clientSecretRef");
-        if (!clientSecret.ok) return { error: clientSecret.error };
-        const token = await resolveRef(input.tokenRef, input.scope, "tokenRef");
-        if (!token.ok) return { error: token.error };
 
+        // The refs go into the record as NAMES. Nothing on this path reads a
+        // secret's value — `upsertConnection` checks the names exist at this
+        // scope, and the plaintext is fetched only at egress.
         const record: ConnectionInput = {
           name: input.name,
           kind: input.kind,
@@ -361,14 +367,18 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           operations: input.operations,
           authMode: input.authMode,
           authHeader: input.authHeader,
-          token: token.value,
+          tokenRef: input.tokenRef,
           authorizeUrl: input.authorizeUrl,
           tokenUrl: input.tokenUrl,
           clientId: input.clientId,
-          clientSecret: clientSecret.value,
+          clientSecretRef: input.clientSecretRef,
           scopes: input.scopes,
         };
-        const saved = await upsertConnection(principal, record, { connectionStore, dynamic });
+        const saved = await upsertConnection(principal, record, {
+          connectionStore,
+          dynamic,
+          namedSecrets,
+        });
         if (!saved.ok) return { error: saved.error };
         console.log(
           `[connections] upsert name=${saved.name} scope=${input.scope} kind=${input.kind} by=${principal.userId ?? "-"}@${principal.orgId} via=agent-builder`,
@@ -655,7 +665,8 @@ CREATING A CONNECTION (list_connections / request_secret / create_connection / c
 4. Call create_connection, passing the vault NAMES as clientSecretRef / tokenRef. It pauses for approval, then opens the connection and reports the tools it found (or why it couldn't).
 5. For an oauth/oauth2 connection, call connect_connection — the user authorizes with the provider and this conversation resumes automatically. Then confirm with list_connection_tools.
 6. Wire it into an agent with save_agent's connections field, and test_agent it.
-Editing: call create_connection again with the SAME name and scope. Omit a *Ref to keep the stored secret; pass a new one to rotate it.
+Editing: call create_connection again with the SAME name and scope. Omit a *Ref to keep the connection pointing at the secret it already uses; pass a different one to repoint it.
+Secrets are held BY REFERENCE — the connection stores the name and the value is read at call time. So: the user replacing a secret on the Connections page rotates every connection using it, with nothing to re-run here; deleting one revokes them. Two connections can deliberately share a credential by naming the same secret (list_secrets shows what each one currently backs). A credential the provider itself rotated needs a fresh request_secret under the SAME name — then nothing else has to change.
 
 BUILDING TOOLS (save_tool / test_tool / list_tools / delete_tool):
 When an agent needs computation over an API or its own data, AUTHOR A TOOL instead of asking the model to do it in its head.
@@ -699,7 +710,7 @@ CREDENTIALS — the hard rules:
 - NEVER ask the user to type an API key, token, client secret or password into the chat. Always call request_secret; its form is the only safe path, and anything typed in chat is permanently in this conversation's history.
 - NEVER write a credential into a tool program. Tool programs are stored in plain text, are visible on the Tools page, and you would have to see the value to write it. If an API needs a key, it needs a CONNECTION with a tokenRef.
 - If the user pastes a secret into the chat anyway, tell them plainly that it's now in the history and should be rotated at the provider, then collect the new one with request_secret.
-- You cannot read a stored secret back — list_secrets gives you names only. That's deliberate; work from the names.
+- You cannot read a stored secret back — list_secrets gives you names and what they're used by, never values. That's deliberate; work from the names.
 - Known gap: an API with a credential but NO OpenAPI spec fits neither path today (a connection needs a spec, and a tool can't hold a secret). Say so instead of hardcoding the key — the user can point you at a spec URL, or the integration waits for generic HTTP connection support.
 
 RULES:

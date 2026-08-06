@@ -21,22 +21,65 @@ export interface StoredConnection {
    * `oauth` (MCP only) holds no secret — the per-user tokens come from the
    * interactive OAuth flow and live under the caller's own Vault scope.
    * `oauth2` (OpenAPI only) is a classic pre-registered authorization-code
-   * client: explicit endpoints + client credentials stored in this encrypted
-   * blob (same trust model as static tokens), while the GRANTS are always
+   * client: explicit endpoints + client credentials, while the GRANTS are always
    * per-user — each caller authorizes with their own account and their tokens
    * live under their own Vault scope, even for org-shared connections.
+   *
+   * SECRETS ARE REFERENCES. `tokenRef` / `clientSecretRef` name a
+   * {@link NamedSecretRef} in the same scope as this connection, resolved at
+   * EGRESS (see `dynamic-connections.ts`) rather than copied in here. That is
+   * what makes the Secrets page's Replace rotate every dependent connection at
+   * once and its Delete actually revoke.
+   *
+   * The inline `token` / `clientSecret` are the pre-reference shape, kept
+   * readable forever: connections written before this existed still work, and
+   * they migrate to a ref the next time their secret is retyped. Exactly one of
+   * the pair is set on any given record — the ref wins if both somehow are.
    */
   auth?:
-    | { kind: "bearer" | "header"; header?: string; token: string }
+    | { kind: "bearer" | "header"; header?: string; token?: string; tokenRef?: string }
     | { kind: "oauth"; scopes?: string[] }
     | {
         kind: "oauth2";
         authorizeUrl: string;
         tokenUrl: string;
         clientId: string;
-        clientSecret: string;
+        clientSecret?: string;
+        clientSecretRef?: string;
         scopes?: string[];
       };
+}
+
+/**
+ * The named secret a connection depends on, if any — the back-link that
+ * inlining never had. Drives "Used by …" on the Secrets page and the
+ * dependency list on delete.
+ */
+export function connectionSecretRef(conn: StoredConnection): string | undefined {
+  const auth = conn.auth;
+  if (!auth) return undefined;
+  if (auth.kind === "bearer" || auth.kind === "header") return auth.tokenRef;
+  if (auth.kind === "oauth2") return auth.clientSecretRef;
+  return undefined;
+}
+
+/** Key for {@link secretDependents} — scope is part of a secret's identity. */
+export const secretKey = (scope: CredentialScope, name: string) => `${scope}:${name}`;
+
+/**
+ * Connection names grouped by the secret they depend on. Scope-exact: a
+ * user-level secret and an org-level one sharing a name are different
+ * credentials, and a connection only ever resolves against its own scope.
+ */
+export function secretDependents(conns: ScopedConnection[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const c of conns) {
+    const ref = connectionSecretRef(c);
+    if (!ref) continue;
+    const key = secretKey(c.scope, ref);
+    out.set(key, [...(out.get(key) ?? []), c.name]);
+  }
+  return out;
 }
 
 /** A stored connection plus the scope it lives at (for listing/UI). */

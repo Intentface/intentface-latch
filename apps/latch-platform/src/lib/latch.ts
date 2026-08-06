@@ -309,6 +309,7 @@ export async function getLatch(): Promise<{
   // lands on the same handler base as code connections.
   const dynamic = createDynamicConnections({
     store: connectionStore,
+    secrets: namedSecrets,
     vault,
     callbackBaseUrl: `${baseURL}/api/latch/connections`,
     onConnectionError: (name, err) =>
