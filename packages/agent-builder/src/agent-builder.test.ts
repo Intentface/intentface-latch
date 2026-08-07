@@ -338,3 +338,34 @@ describe("scheduling tools", () => {
     expect((cfg.toolApproval as Record<string, unknown>).schedule_agent).toBeUndefined();
   });
 });
+
+describe("delete_agent cascade", () => {
+  it("removes the caller's schedules that fire the deleted agent", async () => {
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute(SAVE);
+    await tools.schedule_agent!.execute({ agent: "my-agent", prompt: "go", cron: "* * * * *" });
+    await tools.schedule_agent!.execute({ agent: "my-agent", prompt: "go again" });
+    // An unrelated schedule survives.
+    await tools.save_agent!.execute({ ...SAVE, name: "other" });
+    await tools.schedule_agent!.execute({ agent: "other", prompt: "keep" });
+
+    const res = (await tools.delete_agent!.execute({ name: "My Agent", scope: "user" })) as Record<
+      string,
+      unknown
+    >;
+    expect(res.deleted).toBe("my-agent");
+    expect(res.removedSchedules).toBe(2);
+    expect(deps.schedules.map((s) => s.agent)).toEqual(["other"]);
+  });
+
+  it("flags the org-scope blind spot instead of pretending", async () => {
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute({ ...SAVE, scope: "org" });
+    const res = (await tools.delete_agent!.execute({ name: "my-agent", scope: "org" })) as {
+      note?: string;
+    };
+    expect(res.note).toMatch(/other members' schedules/);
+  });
+});

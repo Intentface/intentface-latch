@@ -433,11 +433,35 @@ async function builderTools<P>(
     }),
 
     delete_agent: tool({
-      description: "Delete one of the user's agents. Destructive — pauses for the user's approval.",
+      description:
+        "Delete one of the user's agents, along with the user's schedules that fire it (an orphaned schedule would error on every tick). Destructive — pauses for the user's approval.",
       inputSchema: z.object({ name: z.string(), scope: SCOPE }),
       execute: async ({ name, scope }) => {
-        await store.remove(principal, scope, name);
-        return { deleted: name, scope };
+        const target = normalizeAgentName(name);
+        await store.remove(principal, scope, target);
+        // Cascade: the CALLER's schedules for this agent. Schedules are
+        // per-principal, so an org-shared agent may still have other
+        // members' schedules — surface that instead of pretending.
+        let removedSchedules = 0;
+        if (scheduling) {
+          const mine = (await runtime.listSchedules({ principal })).filter(
+            (s) => s.agent === target,
+          );
+          for (const s of mine) {
+            await runtime.unschedule({ principal, id: s.id });
+            removedSchedules++;
+          }
+        }
+        return {
+          deleted: target,
+          scope,
+          removedSchedules,
+          ...(scope === "org"
+            ? {
+                note: "Org-shared agent: other members' schedules for it (if any) are not visible here — they will error on fire until those members unschedule them.",
+              }
+            : {}),
+        };
       },
     }),
 
