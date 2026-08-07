@@ -79,6 +79,8 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
           lastExtractedSeq: sql<number>`coalesce(${cs.lastExtractedSeq}, -1)`,
           lastExtractedKey: cs.lastExtractedKey,
           maxSeq: maxSeqExpr,
+          // Left join: a never-seen chat has no state row, so 0 failures.
+          failures: sql<number>`coalesce(${cs.failures}, 0)`,
         })
         .from(s.chats)
         .leftJoin(cs, eq(cs.chatId, s.chats.id))

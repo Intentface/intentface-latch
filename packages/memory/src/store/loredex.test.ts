@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionRegistry, OpenToolSet } from "@intentface/latch-core";
-import { createLoredexStore } from "./loredex.js";
+import { createLoredexStore, splitFrontmatter } from "./loredex.js";
 import type { ScopeRef } from "../types.js";
 import { MemoryStoreUnreachableError } from "../types.js";
 
@@ -89,7 +89,17 @@ function fakeRegistry(opts?: {
             if (opts?.failCreate) return err("boom");
             const path = [input.folderId, input.name].filter(Boolean).join("/");
             if (files.has(path)) return err(`File already exists: ${path}`);
-            files.set(path, String(input.content ?? ""));
+            // Live Loredex injects the `summary` we pass into the stored file's
+            // YAML frontmatter (server: create → parseFrontmatter → `{…fm,
+            // summary}`), so the bytes on disk are NOT the content we handed
+            // over. A fake that stored `content` verbatim made every file
+            // frontmatter-free and hid the rewrite bug below entirely.
+            const content = String(input.content ?? "");
+            const md = String(input.name).endsWith(".md");
+            files.set(
+              path,
+              md && input.summary ? `---\nsummary: ${input.summary}\n---\n${content}` : content,
+            );
             return ok(`created ${path}`);
           },
         },
@@ -101,12 +111,23 @@ function fakeRegistry(opts?: {
             calls.push({ tool: "edit_file", input });
             const current = files.get(input.fileId);
             if (current === undefined) return err(`File not found: ${input.fileId}`);
-            let next = current;
+            // Frontmatter is split off and the replacements run against the BODY
+            // ALONE (server: applyMarkdownReplacements), then it is reattached.
+            // Matching the whole file instead let an `oldContent` that included
+            // the frontmatter pass here while failing against live Loredex.
+            const { frontmatter, body } = splitFrontmatter(current);
+            let next = body;
             for (const r of input.replacements) {
-              if (!next.includes(r.oldContent)) return err("oldContent not found");
+              if (r.oldContent.length === 0) return err("oldContent must not be empty");
+              if (!next.includes(r.oldContent)) {
+                return err(
+                  "Replacement 1: oldContent not found in file (also tried ignoring trailing " +
+                    "whitespace per line). The file may have changed since you last read it.",
+                );
+              }
               next = next.replace(r.oldContent, r.newContent);
             }
-            files.set(input.fileId, next);
+            files.set(input.fileId, frontmatter ? `${frontmatter}\n${next}` : next);
             return ok("edited");
           },
         },
@@ -155,6 +176,16 @@ const VALID_INDEX = `# Memory — coach · u-1
 ## Archive
 `;
 
+/** Loredex's frontmatter is the store's to leave alone — assert on the body. */
+const bodyOf = (files: Map<string, string>, path: string): string | undefined => {
+  const raw = files.get(path);
+  return raw === undefined ? undefined : splitFrontmatter(raw).body;
+};
+const INDEX_PATH = "_memory/coach/u-1/MEMORY.md";
+/** An index file as it exists after a first write: Loredex frontmatter + body. */
+const stored = (body: string): string =>
+  `---\nsummary: Compiled memory index (managed by the memory consolidator)\n---\n${body}`;
+
 describe("createLoredexStore", () => {
   it("readIndex returns undefined for a missing file, text when present", async () => {
     const { registry, files } = fakeRegistry();
@@ -182,11 +213,21 @@ describe("createLoredexStore", () => {
     expect(await store.readIndex(P, SCOPE)).toBe(VALID_INDEX);
   });
 
+  it("readIndex strips the frontmatter Loredex injected", async () => {
+    const { registry, files } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    files.set(INDEX_PATH, stored(VALID_INDEX));
+    // Frontmatter is Loredex's, not an index entry: leaking it would put a
+    // `summary:` block in the agent's injected instructions and — worse — into
+    // the `oldContent` of the next rewrite, where nothing can match it.
+    expect(await store.readIndex(P, SCOPE)).toBe(VALID_INDEX);
+  });
+
   it("writeIndex creates the file (and folder chain) on first write", async () => {
     const { registry, files, calls } = fakeRegistry();
     const store = createLoredexStore({ connections: registry });
     await store.writeIndex(P, SCOPE, VALID_INDEX);
-    expect(files.get("_memory/coach/u-1/MEMORY.md")).toBe(VALID_INDEX);
+    expect(bodyOf(files, INDEX_PATH)).toBe(VALID_INDEX);
     const folderCreates = calls.filter((c) => c.tool === "create" && c.input.type === "folder");
     expect(folderCreates.map((c) => c.input.name)).toEqual(["_memory", "coach", "u-1"]);
   });
@@ -200,7 +241,7 @@ describe("createLoredexStore", () => {
       root: "__private_root/_memory/_user/u-1",
     };
     await store.writeIndex(P, scope, VALID_INDEX);
-    expect(files.get("__private_root/_memory/_user/u-1/MEMORY.md")).toBe(VALID_INDEX);
+    expect(bodyOf(files, "__private_root/_memory/_user/u-1/MEMORY.md")).toBe(VALID_INDEX);
     const folderCreates = calls.filter((c) => c.tool === "create" && c.input.type === "folder");
     // `__private_root` always exists server-side; creating it would mint a
     // stray shared folder. Only its descendants are ensured.
@@ -294,7 +335,7 @@ describe("createLoredexStore", () => {
   it("writeIndex snapshots BEFORE rewriting an existing index", async () => {
     const { registry, files, calls } = fakeRegistry();
     const store = createLoredexStore({ connections: registry });
-    files.set("_memory/coach/u-1/MEMORY.md", VALID_INDEX);
+    files.set(INDEX_PATH, stored(VALID_INDEX));
     const next = VALID_INDEX.replace("Prefers concise answers.", "Prefers detailed answers.");
     await store.writeIndex(P, SCOPE, next);
 
@@ -304,10 +345,11 @@ describe("createLoredexStore", () => {
     const editIdx = calls.findIndex((c) => c.tool === "edit_file");
     expect(snapshotIdx).toBeGreaterThan(-1);
     expect(editIdx).toBeGreaterThan(snapshotIdx);
-    expect(files.get("_memory/coach/u-1/MEMORY.md")).toBe(next);
-    // The rewrite replaces the STORED body. Handing back what `read_file`
-    // returned (a JSON envelope of numbered lines) matches nothing in the
-    // file, and every consolidation after the first one fails.
+    expect(bodyOf(files, INDEX_PATH)).toBe(next);
+    // The rewrite replaces the stored BODY. Handing back what `read_file`
+    // returned — a JSON envelope of numbered lines, or the body with Loredex's
+    // frontmatter still on it — matches nothing in the file, and every
+    // consolidation after the first one fails.
     const replacements = calls[editIdx]?.input.replacements as
       | Array<{ oldContent: string }>
       | undefined;
@@ -316,16 +358,80 @@ describe("createLoredexStore", () => {
       k.includes("archive/index-snapshots/MEMORY-"),
     );
     expect(snapPath).toBeDefined();
-    expect(files.get(snapPath!)).toBe(VALID_INDEX);
+    expect(bodyOf(files, snapPath!)).toBe(VALID_INDEX);
+  });
+
+  it("writeIndex rewrites an index it wrote itself, run after run", async () => {
+    // The regression that made consolidation permanently impossible: `create`
+    // injects the `summary` as frontmatter, `edit_file` matches the body alone,
+    // so a second write whose `oldContent` was the whole read never matched —
+    // the consolidator retried, gave up, and answered as if it had saved.
+    const { registry, files } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    await store.writeIndex(P, SCOPE, VALID_INDEX);
+    const second = VALID_INDEX.replace(
+      "## Archive",
+      "- [m-11aa] (2026-07-13, user-said) B. ← e.md\n\n## Archive",
+    );
+    await store.writeIndex(P, SCOPE, second);
+    expect(bodyOf(files, INDEX_PATH)).toBe(second);
+    // Third write, now against a body the store itself put there via edit_file.
+    const third = second.replace("Prefers concise answers.", "Prefers detailed answers.");
+    await store.writeIndex(P, SCOPE, third);
+    expect(bodyOf(files, INDEX_PATH)).toBe(third);
+    expect(await store.readIndex(P, SCOPE)).toBe(third);
+  });
+
+  it("writeIndex drops frontmatter the consolidator echoed back", async () => {
+    // A model that read the index sees Loredex's `summary:` block and copies it
+    // into its rewrite. Writing that verbatim would stack a second block on the
+    // file and poison every later `oldContent`.
+    const { registry, files } = fakeRegistry();
+    const store = createLoredexStore({ connections: registry });
+    files.set(INDEX_PATH, stored(VALID_INDEX));
+    const next = VALID_INDEX.replace("concise", "detailed");
+    await store.writeIndex(P, SCOPE, stored(next));
+    // Exactly one frontmatter block, and the body is the rewrite — not the
+    // echoed block glued on top of it.
+    expect(files.get(INDEX_PATH)).toBe(stored(next));
+  });
+
+  it("writeIndex re-reads and retries once when the index changed under it", async () => {
+    // Loredex answers a stale `oldContent` with "re-read and try again". Do that
+    // rather than surfacing a conflict the consolidator would only loop on —
+    // but re-validate, so an entry added meanwhile still can't be dropped.
+    const concurrent = VALID_INDEX.replace(
+      "## Archive",
+      "- [m-22bb] (2026-07-14, user-said) Added by someone else. ← e.md\n\n## Archive",
+    );
+    // The fake captures a read's answer BEFORE onRead runs, so this hands the
+    // first read the pre-edit body while the file has already moved on — exactly
+    // how a stale `oldContent` arises in the wild.
+    const { registry, files, calls } = fakeRegistry({
+      onRead: async (fileId) => {
+        if (fileId === INDEX_PATH) files.set(INDEX_PATH, stored(concurrent));
+      },
+    });
+    const store = createLoredexStore({ connections: registry });
+    files.set(INDEX_PATH, stored(VALID_INDEX));
+    const next = concurrent.replace("Prefers concise answers.", "Prefers detailed answers.");
+    await store.writeIndex(P, SCOPE, next);
+    expect(bodyOf(files, INDEX_PATH)).toBe(next);
+    // Exactly one retry, and only one snapshot — each attempt would otherwise
+    // leave another snapshot file no tool can delete.
+    expect(calls.filter((c) => c.tool === "edit_file")).toHaveLength(2);
+    expect(
+      calls.filter((c) => c.tool === "create" && String(c.input.name).startsWith("MEMORY-")),
+    ).toHaveLength(1);
   });
 
   it("writeIndex rejects a rewrite that silently deletes an active entry", async () => {
     const { registry, files } = fakeRegistry();
     const store = createLoredexStore({ connections: registry });
-    files.set("_memory/coach/u-1/MEMORY.md", VALID_INDEX);
+    files.set(INDEX_PATH, stored(VALID_INDEX));
     const bad = VALID_INDEX.replace(/- \[m-7f3a2c\].*\n/, "");
     await expect(store.writeIndex(P, SCOPE, bad)).rejects.toThrow(/silently deleted/);
-    expect(files.get("_memory/coach/u-1/MEMORY.md")).toBe(VALID_INDEX);
+    expect(bodyOf(files, INDEX_PATH)).toBe(VALID_INDEX);
   });
 
   it("writeEpisode renders frontmatter and a chronologically sortable name", async () => {

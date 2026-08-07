@@ -212,6 +212,13 @@ export function memoryWriteEpisodeTool<P>(
     agent: string;
     chatId?: string;
     onEpisodeWritten?: (args: { path: string; name: string }) => void | Promise<void>;
+    /**
+     * Outcome of each write attempt — the same three-way distinction
+     * `memoryWriteIndexTool` needs: episode written, nothing durable to write
+     * (never called), or the store refused. Only the last may tombstone the
+     * transcript window, and the run's answer can't tell them apart.
+     */
+    onWriteAttempt?: (ok: boolean) => void;
   },
 ): MemoryTool {
   return tool({
@@ -263,6 +270,8 @@ export function memoryWriteEpisodeTool<P>(
       additionalProperties: false,
     }),
     execute: async ({ slug, summary, happened, facts, aliases }) => {
+      // Not a store failure — the model chose to write nothing. Left unreported
+      // so it stays a normal zero-yield run rather than forcing a retry.
       if (facts.length === 0) return { saved: false, error: "no facts provided" };
       const provs = new Set(facts.map((f) => f.provenance));
       const provenance: Provenance = provs.size === 1 ? [...provs][0] : "mixed";
@@ -288,7 +297,11 @@ export function memoryWriteEpisodeTool<P>(
         summary,
         body,
       });
-      if (!written) return { saved: false, error: "memory store unreachable" };
+      if (!written) {
+        opts.onWriteAttempt?.(false);
+        return { saved: false, error: "memory store unreachable" };
+      }
+      opts.onWriteAttempt?.(true);
       if (opts.onEpisodeWritten) {
         void Promise.resolve(opts.onEpisodeWritten(written)).catch(() => {});
       }
@@ -320,7 +333,18 @@ export function memoryReadEpisodesTool<P>(bound: BoundScope<P>): MemoryTool {
 
 export function memoryWriteIndexTool<P>(
   bound: BoundScope<P>,
-  opts?: { invalidate?: () => void },
+  opts?: {
+    invalidate?: () => void;
+    /**
+     * Outcome of each write attempt. The caller needs it to tell three cases
+     * apart that all look identical from the run's answer: the index was
+     * rewritten, nothing needed changing (never called), and every attempt
+     * failed. Only the last one must keep the episodes pending for a retry —
+     * a model that gives up after a failed write still answers with a tidy
+     * summary, so the answer alone cannot be trusted as proof of a write.
+     */
+    onWriteAttempt?: (ok: boolean) => void;
+  },
 ): MemoryTool {
   return tool({
     description:
@@ -340,12 +364,21 @@ export function memoryWriteIndexTool<P>(
       try {
         await bound.store.writeIndex(bound.principal, bound.scope, content);
         opts?.invalidate?.();
+        opts?.onWriteAttempt?.(true);
         return { ok: true };
       } catch (error) {
+        opts?.onWriteAttempt?.(false);
         if (error instanceof IndexValidationError) {
           return { ok: false, problems: error.problems };
         }
-        return { ok: false, error: String(error) };
+        return {
+          ok: false,
+          error: String(error),
+          // The model's own instructions say to re-read and retry once; say it
+          // here too, where it lands next to the failure it applies to.
+          retry:
+            "Call memory_read_index, rebuild the rewrite on what it returns now, and retry once.",
+        };
       }
     },
   });

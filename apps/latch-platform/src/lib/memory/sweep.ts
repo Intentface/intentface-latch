@@ -10,6 +10,7 @@ import {
 import type { ScopeRef } from "@intentface/latch-memory";
 import { memoryEnabledCodeAgents } from "@/agents/memory-enabled";
 import type { Principal } from "../session";
+import { memoryAgentOf } from "./agent-identity";
 import type {
   MemoryConsolidationTurnContext,
   MemoryExtractionTurnContext,
@@ -23,9 +24,9 @@ import {
   MEMORY_EXTRACTION_CONCURRENCY,
   MEMORY_EXTRACTION_LEASE_MS,
   MEMORY_EXTRACTION_MAX_CHARS,
-  MEMORY_FAILURE_BACKOFF_MS,
   MEMORY_IDLE_MS,
   MEMORY_PARK_MS,
+  memoryFailureBackoffMs,
 } from "./constants";
 
 /**
@@ -53,6 +54,33 @@ interface SweepResult {
 }
 
 const leaseId = () => `memsweep_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+
+/**
+ * Tally of a job run's memory writes, fed by the bound tools via `turnContext`.
+ *
+ * `runAgent`'s answer says nothing about whether anything was stored: a model
+ * whose write tool keeps failing gives up and answers with a confident summary
+ * of the version it never saved (observed in the wild — the consolidator fell
+ * back to printing the new index and reported "added 4 new facts"). Consuming
+ * the input on that answer loses those memories permanently, so the sweep asks
+ * the tools instead.
+ */
+function writeTally() {
+  let ok = 0;
+  let failed = 0;
+  return {
+    sink: (success: boolean) => {
+      if (success) ok++;
+      else failed++;
+    },
+    /**
+     * True when every attempt failed. Zero attempts is NOT a failure — a run
+     * with nothing durable to add legitimately writes nothing, and forcing a
+     * retry on that would re-run the model forever over the same episodes.
+     */
+    allFailed: () => ok === 0 && failed > 0,
+  };
+}
 
 /** The memory config for an agent under a specific caller, or undefined. */
 async function memoryConfigFor(
@@ -83,7 +111,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
 
   // ---- discovery: which agents have memory at all ----
   const uiNames = await agentStore.listMemoryEnabledNames().catch(() => [] as string[]);
-  const agents = Array.from(new Set([...Object.keys(memoryEnabledCodeAgents), ...uiNames]));
+  const bareAgents = Array.from(new Set([...Object.keys(memoryEnabledCodeAgents), ...uiNames]));
+  // A channel-bound chat stores the binding's pinned ref verbatim
+  // (`chats.agent = "org:coach"`), and the candidate query matches that column
+  // EXACTLY against this list — so without the pinned forms a Telegram/Slack/
+  // WhatsApp chat is never even a candidate and its transcript is never
+  // extracted at all. `parseAgentRef` recognizes only these two prefixes, so
+  // the variant set is closed; `extractOne` normalizes back to the bare name.
+  const agents = [...bareAgents, ...bareAgents.flatMap((n) => [`org:${n}`, `user:${n}`])];
 
   // ---- phase 1: extraction ----
   if (agents.length > 0) {
@@ -122,8 +157,13 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     lastExtractedSeq: number;
     lastExtractedKey?: string;
     maxSeq: number;
+    failures: number;
   }): Promise<"extractions" | "skipped"> {
     const lease = leaseId();
+    // `cand.agent` comes from the chat/run rows, so a channel-bound chat carries
+    // the binding's `org:`/`user:` pin. Strip it once here: the pin is not a
+    // separate agent, and letting it reach `scopeRefOf` forks the memory store.
+    const agent = memoryAgentOf(cand.agent);
     // Identity + config first (read-only), then claim with the derived scope.
     const identity = await memoryJobs.latestRunIdentity(cand.chatId);
     if (!identity) {
@@ -132,7 +172,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       if (
         await memoryJobs.claimChatExtraction(
           cand.chatId,
-          { owner: cand.owner, agent: cand.agent, scopeKey: "unresolvable" },
+          { owner: cand.owner, agent, scopeKey: "unresolvable" },
           lease,
           MEMORY_EXTRACTION_LEASE_MS,
           now,
@@ -147,9 +187,9 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       return "skipped";
     }
     const principal = identity as Principal;
-    const memory = await memoryConfigFor(cand.agent, principal, agentStore);
+    const memory = await memoryConfigFor(agent, principal, agentStore);
     const scope: ScopeRef | undefined = memory
-      ? scopeRefOf({ agent: cand.agent, memory, userId: principal.userId })
+      ? scopeRefOf({ agent, memory, userId: principal.userId })
       : undefined;
     if (!memory || !scope) {
       // Not actually memory-enabled for THIS owner (LIKE prefilter false
@@ -158,7 +198,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       if (
         await memoryJobs.claimChatExtraction(
           cand.chatId,
-          { owner: cand.owner, agent: cand.agent, scopeKey: "unresolvable" },
+          { owner: cand.owner, agent, scopeKey: "unresolvable" },
           lease,
           MEMORY_EXTRACTION_LEASE_MS,
           now,
@@ -176,7 +216,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     if (
       !(await memoryJobs.claimChatExtraction(
         cand.chatId,
-        { owner: cand.owner, agent: cand.agent, scopeKey: scope.key },
+        { owner: cand.owner, agent, scopeKey: scope.key },
         lease,
         MEMORY_EXTRACTION_LEASE_MS,
         now,
@@ -219,16 +259,18 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         return "skipped";
       }
       const transcript = msgs.map((m) => `${m.role}: ${m.text}`).join("\n\n");
+      const writes = writeTally();
       const turnContext: MemoryExtractionTurnContext = {
         kind: "memory-extraction",
         scope,
         chatId: cand.chatId,
-        targetAgent: cand.agent,
+        targetAgent: agent,
         // `!= null` (not `||`): an explicit cooldownHours of 0 is a real choice.
         cooldownMs:
           memory.consolidation?.cooldownHours != null
             ? memory.consolidation.cooldownHours * 3_600_000
             : MEMORY_COOLDOWN_MS,
+        onWriteAttempt: writes.sink,
       };
       const { answer } = await runtime.runAgent({
         principal,
@@ -236,7 +278,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         blockGated: false,
         turnContext,
         prompt: buildExtractionPrompt({
-          agent: cand.agent,
+          agent,
           scopeLabel: scopeLabelOf(memory),
           chatId: cand.chatId,
           transcript,
@@ -251,9 +293,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // actually processed. Conservative on purpose — an ambiguous run costs
       // one backoff'd retry, a wrong tombstone loses memories forever.
       if (!answer.trim()) throw new Error("extractor run finished without an answer");
+      // Every episode write failed — the transcript was processed but nothing
+      // was stored. Tombstoning the window here would lose it for good, so
+      // fail into the retry path instead (same reasoning as the empty answer).
+      if (writes.allFailed()) throw new Error("extractor could not write its episode");
       // Completed (with or without an episode written): record the window's
       // key. Zero-yield completions tombstone the content; failures above
-      // (throw / empty answer) skip this and stay eligible for retry.
+      // (throw / empty answer / no write landed) skip this and stay eligible
+      // for retry.
       await memoryJobs.completeChatExtraction(
         cand.chatId,
         { lastExtractedSeq: lastSeenSeq, extractionKey, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
@@ -261,10 +308,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       );
       return "extractions";
     } catch (error) {
+      // Escalating backoff, as consolidation does: a write outage now routes
+      // here (see `writes.allFailed()` above), and a flat interval would keep
+      // paying for an extractor run at a fixed rate for as long as it lasts.
+      // This path never tombstones the window — it only retries less often.
       await memoryJobs
         .completeChatExtraction(
           cand.chatId,
-          { ok: false, nextEligibleAt: now + MEMORY_FAILURE_BACKOFF_MS },
+          { ok: false, nextEligibleAt: now + memoryFailureBackoffMs(cand.failures + 1) },
           lease,
         )
         .catch(() => {});
@@ -292,16 +343,20 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     }
     try {
       const principal = row.identity as Principal | undefined;
-      const memory = principal
-        ? await memoryConfigFor(row.agent, principal, agentStore)
-        : undefined;
+      // Bare name, as in extraction — a row stamped with a channel pin resolves
+      // to the agent's one canonical scope.
+      const agent = memoryAgentOf(row.agent);
+      const memory = principal ? await memoryConfigFor(agent, principal, agentStore) : undefined;
       const scope: ScopeRef | undefined =
         memory && principal
-          ? scopeRefOf({ agent: row.agent, memory, userId: principal.userId })
+          ? scopeRefOf({ agent, memory, userId: principal.userId })
           : undefined;
       if (!principal || !memory || !scope || scope.key !== row.scopeKey) {
-        // Identity lost or agent no longer memory-enabled — park the scope
-        // (episodes stay pending; a future touch re-stamps a fresh identity).
+        // Identity lost, agent no longer memory-enabled, or a row whose stored
+        // scopeKey predates a scope-derivation change (a channel-pinned root) —
+        // park the scope. Episodes stay pending; a future touch re-stamps a
+        // fresh identity, and a stale root simply parks daily rather than
+        // erroring, since its content is not reachable from the new key.
         await memoryJobs.completeScopeConsolidation(
           row.scopeKey,
           { ok: false, nextEligibleAt: now + MEMORY_PARK_MS },
@@ -341,9 +396,11 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         : [];
 
       const episodePaths = [...row.pendingEpisodes].sort();
+      const writes = writeTally();
       const turnContext: MemoryConsolidationTurnContext = {
         kind: "memory-consolidation",
         scope,
+        onWriteAttempt: writes.sink,
       };
       const { answer } = await runtime.runAgent({
         principal,
@@ -362,6 +419,10 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // would consume the pending episodes without ever folding them in —
       // throw into the failure path so they survive for the retry.
       if (!answer.trim()) throw new Error("consolidator run finished without an answer");
+      // Every index write failed: the episodes were read but never folded in.
+      // Consuming them on the strength of the answer alone is how a whole
+      // consolidation silently evaporates — keep them pending for the retry.
+      if (writes.allFailed()) throw new Error("consolidator could not write the index");
       const cooldownMs =
         memory.consolidation?.cooldownHours != null
           ? memory.consolidation.cooldownHours * 3_600_000
@@ -380,10 +441,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     } catch (error) {
       result.errors++;
       console.warn(`[memory] consolidation failed for scope ${row.scopeKey}:`, error);
+      // Escalating backoff on `row.failures` (the count BEFORE this attempt).
+      // The episodes stay pending either way — a scope whose rewrite is
+      // deterministically invalid would otherwise buy a model run every two
+      // hours forever, since nothing changes between attempts.
       await memoryJobs
         .completeScopeConsolidation(
           row.scopeKey,
-          { ok: false, nextEligibleAt: now + MEMORY_FAILURE_BACKOFF_MS },
+          { ok: false, nextEligibleAt: now + memoryFailureBackoffMs(row.failures + 1) },
           lease,
         )
         .catch(() => {});

@@ -26,3 +26,17 @@ export const MEMORY_CONSOLIDATION_LEASE_MS = 300_000;
 /** Failure backoff / parking intervals. */
 export const MEMORY_FAILURE_BACKOFF_MS = 2 * 3_600_000;
 export const MEMORY_PARK_MS = 24 * 3_600_000;
+
+/**
+ * Backoff after `failures` consecutive failed attempts: the base interval
+ * doubled per failure, capped at the park interval.
+ *
+ * A flat retry interval is fine for outages, which clear on their own. It is
+ * wrong for a deterministic failure — an index rewrite the consolidator keeps
+ * reproducing invalid, say — where nothing changes between attempts and the
+ * scope buys a model run every base interval forever. Failing work still must
+ * never be dropped (that is how memories vanish), so it keeps its place in the
+ * queue and only gets rarer: 2h, 4h, 8h, 16h, then daily.
+ */
+export const memoryFailureBackoffMs = (failures: number): number =>
+  Math.min(MEMORY_FAILURE_BACKOFF_MS * 2 ** Math.max(0, failures - 1), MEMORY_PARK_MS);

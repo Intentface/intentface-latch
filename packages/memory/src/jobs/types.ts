@@ -26,6 +26,13 @@ export interface ExtractionCandidate {
   lastExtractedKey?: string;
   /** Highest message seq currently in the chat. */
   maxSeq: number;
+  /**
+   * Consecutive failed extraction attempts (0 after any completion). The sweep
+   * escalates its retry backoff on this, so a persistent outage — or a chat the
+   * extractor keeps failing on — stops buying a model run at a fixed rate
+   * forever. Failing chats are never dropped, only retried less often.
+   */
+  failures: number;
 }
 
 export interface ScopeStateRow {

@@ -24,9 +24,13 @@ import {
  * - `create { type, name, folderId?, parentId?, content?, summary? }` — files
  *   and folders; there is no overwrite. Folder creates are NOT idempotent:
  *   a repeat call with the same name+parent inserts a DUPLICATE sibling rather
- *   than erroring, so `ensureFolders` probes before it creates.
+ *   than erroring, so `ensureFolders` probes before it creates. For `.md`,
+ *   `summary` is injected as YAML frontmatter into the stored file — so the
+ *   bytes on disk are never quite the `content` we handed over.
  * - `edit_file { fileId, replacements: [{ oldContent, newContent }] }` —
  *   search-and-replace only; a full rewrite replaces the whole previous text.
+ *   For `.md` it splits frontmatter off and matches the BODY ALONE, so
+ *   `oldContent` must never include the frontmatter (see `splitFrontmatter`).
  * - `search { query, folderId?, limit?, mode? }` — BM25, folder-scopable.
  *
  * There is no delete/move tool, so nothing here ever destroys content: index
@@ -116,6 +120,35 @@ function decodeFileRead(text: string): string {
   // stripping the prefixes that happen to be there would corrupt the rest.
   if (!lines.every((line) => /^\d+\|/.test(line))) return text;
   return lines.map((line) => line.replace(/^\d+\|/, "")).join("\n");
+}
+
+/**
+ * Split a leading `---\n…\n---` frontmatter block off a file's text.
+ *
+ * Loredex OWNS that block on `.md` files, and both halves of the rewrite depend
+ * on it: `create` injects the `summary` we pass into frontmatter, and `edit_file`
+ * splits frontmatter off and runs replacements against the BODY ALONE. So the
+ * index file we read back is `frontmatter + body` while the text `edit_file` can
+ * actually match is `body` — handing the whole read back as `oldContent` matches
+ * nothing, forever, from the second consolidation onward. The store therefore
+ * owns the body and leaves the frontmatter to Loredex.
+ *
+ * Structural, exactly like the server's own `splitFrontmatter`: the block is
+ * located by its `---` delimiters and never YAML-parsed, so a malformed-but-
+ * delimited block is still recognized (and left alone) rather than leaking into
+ * the body, where it would put bytes into `oldContent` that `edit_file` cannot
+ * see.
+ */
+export function splitFrontmatter(text: string): { frontmatter: string; body: string } {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("---")) return { frontmatter: "", body: text };
+  const end = trimmed.indexOf("\n---", 3);
+  if (end === -1) return { frontmatter: "", body: text };
+  const offset = text.length - trimmed.length;
+  return {
+    frontmatter: text.slice(0, offset + end + 4),
+    body: text.slice(offset + end + 4).replace(/^\n/, ""),
+  };
 }
 
 /**
@@ -267,10 +300,16 @@ export function createLoredexStore<P>(opts: {
     return `${scope.root}/${MEMORY_INDEX_FILENAME}`;
   }
 
+  /**
+   * The index's BODY — Loredex's frontmatter stripped. That is the text every
+   * consumer wants (entry lines, not a `summary:` block the provider would
+   * otherwise inject into the agent's instructions), and it is the only text
+   * `edit_file` can match.
+   */
   async function readIndexWith(call: ToolCall, scope: ScopeRef): Promise<string | undefined> {
     const res = await call(names.read, { fileId: indexPath(scope) });
     if (!res.ok) return undefined;
-    return decodeFileRead(res.text);
+    return splitFrontmatter(decodeFileRead(res.text)).body;
   }
 
   return {
@@ -294,9 +333,14 @@ export function createLoredexStore<P>(opts: {
           throw new MemoryStoreUnreachableError(`memory store unreachable (${res.error})`);
         throw new Error(`${what}: ${res.error}`);
       };
+      // What we write is the BODY. A consolidator that read the index saw the
+      // frontmatter Loredex injected and routinely echoes it back at the top of
+      // its rewrite; keeping it would both duplicate the block on disk and put
+      // unmatchable bytes into `oldContent`.
+      const body = splitFrontmatter(text).body;
       const result = await withConnection(principal, scope, async (call) => {
         const prev = await readIndexWith(call, scope);
-        const problems = validateIndexRewrite(prev, text);
+        const problems = validateIndexRewrite(prev, body);
         if (problems.length > 0) throw new IndexValidationError(problems);
         if (prev !== undefined && prev.trim().length > 0) {
           // Snapshot BEFORE the rewrite; a failed snapshot aborts the write —
@@ -304,26 +348,56 @@ export function createLoredexStore<P>(opts: {
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
           const snapDir = `${scope.root}/archive/index-snapshots`;
           await ensureFolders(call, scope.key, snapDir);
-          const snap = await call(names.create, {
-            type: "file",
-            name: `MEMORY-${stamp}.md`,
-            folderId: snapDir,
-            content: prev,
-            summary: "Memory index snapshot (pre-consolidation)",
-          });
+          const snapshot = (name: string) =>
+            call(names.create, {
+              type: "file",
+              name,
+              folderId: snapDir,
+              content: prev,
+              summary: "Memory index snapshot (pre-consolidation)",
+            });
+          let snap = await snapshot(`MEMORY-${stamp}.md`);
+          if (!snap.ok && /exist/i.test(snap.error)) {
+            // Two rewrites inside the same millisecond collide on the name, and
+            // an aborted write here means a consolidation that can never land.
+            // Disambiguate once, as `writeEpisode` does.
+            snap = await snapshot(`MEMORY-${stamp}-${Math.random().toString(36).slice(2, 6)}.md`);
+          }
           if (!snap.ok) fail("memory index snapshot failed", snap);
-          const edit = await call(names.edit, {
+          let edit = await call(names.edit, {
             fileId: indexPath(scope),
-            replacements: [{ oldContent: prev, newContent: text }],
+            replacements: [{ oldContent: prev, newContent: body }],
           });
+          // A match failure means the file changed under us (a concurrent
+          // consolidation, a human editing MEMORY.md in Loredex), which Loredex
+          // answers with "re-read and try again". Do exactly that, once —
+          // re-validating against the CURRENT entries, so an entry added
+          // meanwhile can't be dropped either — and reuse the snapshot already
+          // taken. One retry, not a loop: a second failure is a real conflict,
+          // and each attempt would otherwise leave another undeletable snapshot.
+          if (!edit.ok && !("unavailable" in edit)) {
+            const fresh = await readIndexWith(call, scope);
+            if (fresh !== undefined && fresh !== prev && fresh.trim().length > 0) {
+              const freshProblems = validateIndexRewrite(fresh, body);
+              if (freshProblems.length > 0) throw new IndexValidationError(freshProblems);
+              edit = await call(names.edit, {
+                fileId: indexPath(scope),
+                replacements: [{ oldContent: fresh, newContent: body }],
+              });
+            }
+          }
           if (!edit.ok) fail("memory index rewrite failed", edit);
         } else {
+          // `prev === ""` (the file exists but its body is empty) lands here and
+          // fails the create as "already exists" — deliberately loud: `edit_file`
+          // rejects an empty `oldContent`, so there is nothing to replace and
+          // guessing would mean clobbering a file we can't read.
           await ensureFolders(call, scope.key, scope.root);
           const created = await call(names.create, {
             type: "file",
             name: MEMORY_INDEX_FILENAME,
             folderId: scope.root,
-            content: text,
+            content: body,
             summary: "Compiled memory index (managed by the memory consolidator)",
           });
           if (!created.ok) fail("memory index create failed", created);

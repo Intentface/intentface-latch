@@ -40,6 +40,7 @@ export const memoryExtractor = defineAgent<Principal, { orgId: string }>(
         memory_write_episode: memoryWriteEpisodeTool(bound, {
           agent: tc.targetAgent,
           chatId: tc.chatId,
+          onWriteAttempt: tc.onWriteAttempt,
           // Mark the scope dirty for consolidation, stamping the principal so
           // the consolidation job can run under this scope's own caller.
           onEpisodeWritten: ({ path }) =>
