@@ -111,6 +111,38 @@ export const usage = pgTable(
   (t) => [index("latch_usage_owner_idx").on(t.owner)],
 );
 
+/**
+ * Builder/editor-created agents (see `@intentface/latch-agent-builder`'s
+ * `AgentRecord`). Owner-keyed for org/personal scope; config isn't secret.
+ */
+export const agents = pgTable(
+  "latch_agents",
+  {
+    id: text("id").primaryKey(),
+    /** Opaque ownership key derived from (principal, scope). */
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    title: text("title"),
+    description: text("description"),
+    modelId: text("model_id").notNull(),
+    instructions: text("instructions").notNull(),
+    /** string[] — connection names. */
+    connections: jsonb("connections").notNull(),
+    /** AgentRecord["tools"] — per-tool selection/approval overrides. */
+    tools: jsonb("tools"),
+    /** AgentRecord["exec"] — code-execution capabilities. */
+    exec: jsonb("exec"),
+    /** string[] — delegate agent names. */
+    subagents: jsonb("subagents"),
+    /** NULL=default, 0=unlimited, N=cap (AgentRecord["maxSteps"]). */
+    maxSteps: integer("max_steps"),
+    scope: text("scope").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("latch_agents_owner_name").on(t.owner, t.name)],
+);
+
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
 export const schedules = pgTable(
   "latch_schedules",

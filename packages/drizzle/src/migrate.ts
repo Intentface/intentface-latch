@@ -39,6 +39,14 @@ const DDL = [
      ciphertext TEXT NOT NULL, iv TEXT NOT NULL, wrapped_dek TEXT NOT NULL, dek_iv TEXT NOT NULL,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_secrets_owner_idx ON latch_secrets (owner)`,
+  // Same shape latch-platform's libsql agent store creates (base table +
+  // idempotent ALTERs), so either writer can own an existing DB.
+  `CREATE TABLE IF NOT EXISTS latch_agents (
+     id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
+     title TEXT, description TEXT, model_id TEXT NOT NULL, instructions TEXT NOT NULL,
+     connections TEXT NOT NULL, tools TEXT, exec TEXT, subagents TEXT, max_steps INTEGER,
+     scope TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   `CREATE TABLE IF NOT EXISTS latch_schedules (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity TEXT,
      cron TEXT, timezone TEXT, prompt TEXT NOT NULL, next_run_at INTEGER NOT NULL, last_run_at INTEGER,

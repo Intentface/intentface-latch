@@ -1,7 +1,7 @@
 {
   "name": "@intentface/latch-server",
   "version": "0.0.0",
-  "description": "The mountable Latch HTTP surface — one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath.",
+  "description": "The mountable Latch HTTP surface \u2014 one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,23 +19,30 @@
       "import": "./dist/hono.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:*",
-    "@intentface/latch-mcp": "workspace:*"
+    "@intentface/latch-mcp": "workspace:*",
+    "croner": "^10.0.1"
   },
   "peerDependencies": {
     "ai": ">=7.0.0-beta.178",
     "hono": ">=4"
   },
   "peerDependenciesMeta": {
-    "hono": { "optional": true }
+    "hono": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "ai": "7.0.0-beta.178",

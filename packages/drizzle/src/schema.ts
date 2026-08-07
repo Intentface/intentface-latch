@@ -115,6 +115,39 @@ export const usage = sqliteTable(
   (t) => [index("latch_usage_owner_idx").on(t.owner)],
 );
 
+/**
+ * Builder/editor-created agents (see `@intentface/latch-agent-builder`'s
+ * `AgentRecord`). Owner-keyed for org/personal scope; config isn't secret.
+ * Same table shape latch-platform's libsql store uses, so hosts can share DBs.
+ */
+export const agents = sqliteTable(
+  "latch_agents",
+  {
+    id: text("id").primaryKey(),
+    /** Opaque ownership key derived from (principal, scope). */
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    title: text("title"),
+    description: text("description"),
+    modelId: text("model_id").notNull(),
+    instructions: text("instructions").notNull(),
+    /** string[] — connection names. */
+    connections: text("connections", { mode: "json" }).notNull(),
+    /** AgentRecord["tools"] — per-tool selection/approval overrides. */
+    tools: text("tools", { mode: "json" }),
+    /** AgentRecord["exec"] — code-execution capabilities. */
+    exec: text("exec", { mode: "json" }),
+    /** string[] — delegate agent names. */
+    subagents: text("subagents", { mode: "json" }),
+    /** NULL=default, 0=unlimited, N=cap (AgentRecord["maxSteps"]). */
+    maxSteps: integer("max_steps"),
+    scope: text("scope").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("latch_agents_owner_name").on(t.owner, t.name)],
+);
+
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
 export const schedules = sqliteTable(
   "latch_schedules",

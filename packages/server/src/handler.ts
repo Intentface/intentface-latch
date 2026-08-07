@@ -88,6 +88,13 @@ export interface LatchHandlerConfig<P> {
    * host (cron secret / network). Omit to disable the route entirely.
    */
   cronSecret?: string;
+  /**
+   * The system-wide tick `POST /cron/run` fires. Required when `runtime` is a
+   * resolver (DB-per-tenant): no principal exists on this route, so the host
+   * must supply the tick that sweeps its tenants (each `runtime.runDue()` +
+   * `sweep()`). With a static runtime it defaults to `runtime.runDue()`.
+   */
+  cronRun?: () => Promise<unknown>;
 }
 
 export type LatchHandler = (
@@ -486,11 +493,12 @@ export function createLatchHandler<P>(
       if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
         return json({ error: "forbidden" }, 403);
       }
-      // No principal here → can't resolve a per-tenant runtime. A resolver-based
-      // (DB-per-tenant) setup must sweep tenants app-side instead of this route.
+      // Host-supplied tick first — the only option for a resolver-based
+      // (DB-per-tenant) setup, where no principal exists to resolve a runtime.
+      if (config.cronRun) return json(await config.cronRun());
       if (typeof runtime === "function") {
         return json(
-          { error: "cron/run requires a static runtime; sweep tenants app-side" },
+          { error: "cron/run requires a static runtime or a `cronRun` tick in the handler config" },
           400,
         );
       }

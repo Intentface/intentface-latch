@@ -2,9 +2,11 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
+import { sharedReadTools } from "@intentface/latch-agent-builder";
 import type { Principal } from "@/lib/session";
 import { compactResult } from "@/lib/evals/store";
-import { personalOwner, sharedReadTools } from "./shared-read-tools";
+import { builderDeps } from "./agent-builder";
+import { listEvalSetsTool, personalOwner } from "./extensions/evals";
 
 /**
  * The Eval Author — an internal helper the Agent Builder delegates eval work
@@ -62,10 +64,14 @@ export function transcriptOf(messages: unknown[]): TranscriptMessage[] {
 async function evalAuthorTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy import avoids a static import cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
-  const { runtime, agentStore, allConnections, evalStore } = await getLatch();
+  const { runtime, evalStore } = await getLatch();
+  const { store, connectionTools } = await builderDeps();
 
   return {
-    ...sharedReadTools(principal, { agentStore, allConnections, evalStore }),
+    // Same get_agent / list_connection_tools / list_eval_sets the builder
+    // carries — one implementation so the two agents can't drift.
+    ...sharedReadTools(principal, { store, connectionTools }),
+    list_eval_sets: listEvalSetsTool(principal, evalStore),
 
     get_eval_run: tool({
       description:

@@ -1,4 +1,5 @@
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import { jsonSchema, parseJsonEventStream } from "ai";
 import type { UIMessageChunk } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
@@ -130,7 +131,7 @@ describe("builder → eval-author delegation over spawn_agent", () => {
     const client = createClient({ url: ":memory:" });
     await migrate(client);
     runtime = createRuntime<P, { orgId: string }>({
-      storage: createSqliteAdapter<P>(client, { owner: (p) => [p.orgId, p.userId] }),
+      storage: createSqliteAdapter<P>(drizzle(client), { owner: (p) => [p.orgId, p.userId] }),
       context: defineContext<P, { orgId: string }>({
         build: ({ principal: p }) => ({ orgId: p.orgId }),
       }),

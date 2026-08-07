@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import type { LanguageModel } from "ai";
-import type { AgentConfig, AgentInfo, DynamicAgentStore } from "@intentface/latch-core";
+import type { AgentConfig, AgentInfo } from "@intentface/latch-core";
+import type { AgentBuilderStore, AgentRecord } from "@intentface/latch-agent-builder";
 import type { Principal } from "./session";
 import type { CredentialScope } from "./credentials";
 
@@ -9,53 +10,14 @@ import type { CredentialScope } from "./credentials";
  * Owner-keyed for org/personal scope, same as everything else. `resolve` builds
  * the same `AgentConfig` a code agent would (model from the allow-list,
  * instructions, connection names); the `tools` column is reserved for code-mode.
+ *
+ * The record model + store contract live in `@intentface/latch-agent-builder`
+ * (`AgentRecord` / `AgentBuilderStore`); this file is the platform's libsql
+ * implementation. (`@intentface/latch-drizzle` ships a Drizzle one with the
+ * same table shape.)
  */
-export interface AgentRecord {
-  name: string;
-  title?: string;
-  description?: string;
-  modelId: string;
-  instructions: string;
-  connections: string[];
-  /** Tool-loop ceiling: a number caps steps; "unlimited" runs until done; undefined → default. */
-  maxSteps?: number | "unlimited";
-  /**
-   * Per-tool selection over the connections' tools. `enabled` = the namespaced
-   * tool names the model may call (empty → all). `approval` = per-tool override:
-   * true → require approval, false → waive it (overrides the connection default).
-   */
-  tools?: {
-    enabled: string[];
-    approval: Record<string, boolean>;
-    /** Per-tool description overrides (by namespaced tool name). */
-    descriptions?: Record<string, string>;
-  };
-  /**
-   * Code-execution capabilities (eve-style harness). `sandbox` gives a
-   * per-session workspace + the filesystem/shell tools; `provider` picks the
-   * backend ("just-bash" default | "daytona"); `defaultTools` adds the
-   * app-runtime defaults (web_fetch, …); `disableTools` opts specific defaults
-   * out; `codeMode` runs tools via a written-JS program (Phase 2).
-   */
-  exec?: {
-    sandbox?: boolean;
-    provider?: string;
-    defaultTools?: boolean | string[];
-    disableTools?: string[];
-    codeMode?: { tools?: string[] };
-    /** Use the model provider's native web search/fetch tools. */
-    providerWebTools?: boolean;
-    /** Give the agent the render tool(s) (headless-browser fetch); separate capability. */
-    renderTools?: boolean;
-    /** Names of authored tools (latch_tools) attached to this agent. */
-    authoredTools?: string[];
-    /** Reasoning/thinking effort (gated to reasoning-capable models). */
-    effort?: "minimal" | "low" | "medium" | "high";
-  };
-  /** Agents this one may delegate to via the `spawn_agent` tool. */
-  subagents?: string[];
-  scope: CredentialScope;
-}
+export { normalizeAgentName } from "@intentface/latch-agent-builder";
+export type { AgentRecord } from "@intentface/latch-agent-builder";
 
 /** Column value (INTEGER) ↔ AgentConfig.maxSteps: NULL=default, 0=unlimited, N=cap. */
 const maxStepsToCol = (m: AgentRecord["maxSteps"]): number | null =>
@@ -69,14 +31,6 @@ const ownerKey = (p: Principal, scope: CredentialScope): string =>
     .join("/");
 
 const newId = () => `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
-
-/**
- * Canonical agent-name normalization — used by BOTH writers (the editor's
- * saveAgentFn and the Agent Builder's save_agent) so the same intended name
- * always maps to one record. Lowercased kebab, underscores allowed.
- */
-export const normalizeAgentName = (s: string): string =>
-  s.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
 
 export async function migrateAgents(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_agents (
@@ -97,11 +51,9 @@ export async function migrateAgents(client: Client): Promise<void> {
   }
 }
 
-export interface AgentStore extends DynamicAgentStore<Principal> {
+export interface AgentStore extends AgentBuilderStore<Principal> {
   /** Full records visible to the caller (org + personal), for the editor. */
   listRecords: (p: Principal) => Promise<(AgentRecord & { scope: CredentialScope })[]>;
-  upsert: (p: Principal, rec: AgentRecord) => Promise<void>;
-  remove: (p: Principal, scope: CredentialScope, name: string) => Promise<void>;
 }
 
 export function createAgentStore(

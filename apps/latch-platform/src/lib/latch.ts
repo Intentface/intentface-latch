@@ -17,9 +17,8 @@ import {
 } from "@intentface/latch-drizzle";
 import { createMcpConnections  } from "@intentface/latch-mcp";
 import type {McpConnections} from "@intentface/latch-mcp";
-import { createLatchHandler  } from "@intentface/latch-server";
+import { createLatchHandler, createCronerEvaluator } from "@intentface/latch-server";
 import type {LatchHandler} from "@intentface/latch-server";
-import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
 import { secretEnv } from "./env";
@@ -264,12 +263,10 @@ export async function getLatch(): Promise<{
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },
-    // Cron evaluator for scheduled agents (croner). Interpreted in the
-    // schedule's timezone (IANA) so "9am daily" means the user's 9am; defaults
-    // to UTC when none is set.
-    cron: (expr, afterMs, timezone) =>
-      new Cron(expr, { timezone: timezone || "UTC" }).nextRun(new Date(afterMs))?.getTime() ??
-      null,
+    // Cron evaluator for scheduled agents (croner, via latch-server).
+    // Interpreted in the schedule's timezone (IANA) so "9am daily" means the
+    // user's 9am; defaults to UTC when none is set.
+    cron: createCronerEvaluator(),
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash
