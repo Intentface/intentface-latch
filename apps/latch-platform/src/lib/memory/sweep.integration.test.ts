@@ -14,6 +14,7 @@ import {
   memoryWriteEpisodeTool,
   memoryWriteIndexTool,
   scopeRefOf,
+  splitFrontmatter,
 } from "@intentface/latch-memory";
 import type { MemoryJobStore, MemoryStore } from "@intentface/latch-memory";
 import type { Principal } from "../session";
@@ -64,10 +65,14 @@ function readEnvelope(fileId: string, body: string): string {
   });
 }
 
-function fakeLoredex() {
+function fakeLoredex(opts?: {
+  /** Reject every create/edit whose target path matches — a write-side outage. */
+  failWritesTo?: RegExp;
+}) {
   const files = new Map<string, string>();
   const ok = (text: string) => ({ content: [{ type: "text", text }] });
   const err = (text: string) => ({ content: [{ type: "text", text }], isError: true });
+  const writeBlocked = (path: string) => opts?.failWritesTo?.test(path) ?? false;
   const tools: Record<string, unknown> = {
     loredex_read_file: {
       execute: async (i: { fileId: string }) =>
@@ -82,7 +87,16 @@ function fakeLoredex() {
           .join("/");
         if (i.type === "folder") return ok(`folder ${path}`);
         if (files.has(path)) return err(`already exists: ${path}`);
-        files.set(path, String(i.content ?? ""));
+        if (writeBlocked(path)) return err(`write refused: ${path}`);
+        // Live Loredex injects `summary` into the stored `.md` file's YAML
+        // frontmatter, so the bytes on disk are not the content we passed.
+        const content = String(i.content ?? "");
+        files.set(
+          path,
+          String(i.name).endsWith(".md") && i.summary
+            ? `---\nsummary: ${i.summary}\n---\n${content}`
+            : content,
+        );
         return ok(`created ${path}`);
       },
     },
@@ -93,12 +107,17 @@ function fakeLoredex() {
       }) => {
         const cur = files.get(i.fileId);
         if (cur === undefined) return err("not found");
-        let next = cur;
+        if (writeBlocked(i.fileId)) return err(`write refused: ${i.fileId}`);
+        // Replacements run against the BODY alone — frontmatter is split off
+        // first and reattached after. Matching the whole file here would let a
+        // rewrite pass that live Loredex rejects on every consolidation.
+        const { frontmatter, body } = splitFrontmatter(cur);
+        let next = body;
         for (const r of i.replacements) {
           if (!next.includes(r.oldContent)) return err("oldContent not found");
           next = next.replace(r.oldContent, r.newContent);
         }
-        files.set(i.fileId, next);
+        files.set(i.fileId, frontmatter ? `${frontmatter}\n${next}` : next);
         return ok("edited");
       },
     },
@@ -172,15 +191,18 @@ const MEM = { scope: "agent-user" as const, connection: "loredex" };
  * plus job-agent test doubles) and point the mocked `getLatch()` at it. The
  * job agents use scripted models but the REAL scope-locked tool bindings.
  */
-async function makeHarness(models: {
-  coach?: MockLanguageModelV3;
-  extractor: MockLanguageModelV3;
-  consolidator?: MockLanguageModelV3;
-}) {
+async function makeHarness(
+  models: {
+    coach?: MockLanguageModelV3;
+    extractor: MockLanguageModelV3;
+    consolidator?: MockLanguageModelV3;
+  },
+  loredex?: { failWritesTo?: RegExp },
+) {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
   const db = drizzle(client, { schema });
-  const { registry, files } = fakeLoredex();
+  const { registry, files } = fakeLoredex(loredex);
 
   const memoryJobs = createMemoryJobStore(db);
   const memoryStore = createLoredexStore<Principal>({ connections: registry });
@@ -226,6 +248,9 @@ async function makeHarness(models: {
               memory_write_episode: memoryWriteEpisodeTool(bound, {
                 agent: tc.targetAgent,
                 chatId: tc.chatId,
+                // Mirrors the real agent: the sweep needs write outcomes to
+                // tell "nothing to store" from "the store refused".
+                onWriteAttempt: tc.onWriteAttempt,
                 onEpisodeWritten: ({ path }) =>
                   memoryJobs.touchScope(
                     {
@@ -253,7 +278,9 @@ async function makeHarness(models: {
             tools: {
               memory_read_index: memoryReadIndexTool(bound),
               memory_read_episodes: memoryReadEpisodesTool(bound),
-              memory_write_index: memoryWriteIndexTool(bound),
+              memory_write_index: memoryWriteIndexTool(bound, {
+                onWriteAttempt: tc.onWriteAttempt,
+              }),
             },
           };
         },
@@ -490,5 +517,78 @@ describe("memory pipeline (integration)", () => {
     expect(afterRetry.lastExtractedKey).toMatch(/^x\d+:[0-9a-f]{16}$/);
     expect(afterRetry.lastExtractedSeq).toBe(0);
     expect(afterRetry.failures).toBe(0);
+  });
+
+  it("keeps episodes pending when the consolidator answers without writing", async () => {
+    // The failure this pipeline used to lose memories to: memory_write_index
+    // errors, the model gives up and still answers a tidy summary, and the
+    // sweep — trusting the answer — consumed the pending episodes. Nothing was
+    // ever folded into MEMORY.md and nothing was left to retry.
+    const scope = scopeRefOf({ agent: "coach", memory: MEM, userId: "user" })!;
+    const extractorModel = toolThenText(
+      "memory_write_episode",
+      () => ({
+        slug: "wrist",
+        summary: "Wrist inflammation",
+        facts: [{ text: "Wrist inflamed after cycling", provenance: "user-said" }],
+      }),
+      "stored one episode",
+    );
+    const indexContent = [
+      "# Memory — coach · u-user",
+      "",
+      "## Health",
+      `- [m-3q7f4] (2026-08-06, user-said) Wrist inflamed after cycling. ← ${scope.root}/episodes/x.md`,
+      "",
+      "## Archive",
+      "",
+    ].join("\n");
+    let consolidatorRuns = 0;
+    const consolidatorModel = new MockLanguageModelV3({
+      doStream: async () => {
+        // Every run: attempt the write, then answer as if it had worked.
+        consolidatorRuns++;
+        return consolidatorRuns % 2 === 1
+          ? { stream: toolCallStream("memory_write_index", { content: indexContent }) }
+          : { stream: textStream("folded 2 episodes in") };
+      },
+    });
+
+    const outage: { failWritesTo?: RegExp } = { failWritesTo: /MEMORY\.md$/ };
+    const { files, memoryJobs, storage } = await makeHarness(
+      { extractor: extractorModel, consolidator: consolidatorModel },
+      outage,
+    );
+    const chat = await storage.createChat(principal, { agent: "coach" });
+    await storage.appendMessages(chat.id, [message("m1", "user", "My wrist hurts.")]);
+    await storage.createRun(principal, { chatId: chat.id, agent: "coach" });
+
+    const t1 = Date.now() + 2 * HOUR;
+    const first = await memorySweep({ now: t1 });
+    expect(first.extractions).toBe(1);
+    // The run answered, but the write never landed: counted as a failure.
+    expect(first.consolidations).toBe(0);
+    expect(first.errors).toBe(1);
+    expect(files.get(`${scope.root}/MEMORY.md`)).toBeUndefined();
+
+    const episodePath = Array.from(files.keys()).find((p) =>
+      p.startsWith(`${scope.root}/episodes/`),
+    );
+    expect(episodePath).toBeDefined();
+    // The whole point: the episode is still queued, so it gets another chance.
+    const afterFail = await memoryJobs.scopeState(scope.key);
+    expect(afterFail?.pendingEpisodes).toEqual([episodePath]);
+    expect(afterFail?.hasNew).toBe(true);
+    expect(afterFail?.consolidationWatermark).toBeFalsy();
+
+    // Store recovers; past the backoff the same episode is folded in for real.
+    outage.failWritesTo = undefined;
+    const second = await memorySweep({ now: t1 + 3 * HOUR });
+    expect(second.consolidations).toBe(1);
+    expect(second.errors).toBe(0);
+    expect(files.get(`${scope.root}/MEMORY.md`)).toContain("[m-3q7f4]");
+    const afterRetry = await memoryJobs.scopeState(scope.key);
+    expect(afterRetry?.pendingEpisodes).toEqual([]);
+    expect(afterRetry?.hasNew).toBe(false);
   });
 });

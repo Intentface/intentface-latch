@@ -6,6 +6,21 @@ import type { ScopeRef } from "@intentface/latch-memory";
  * payload, and the agent factories degrade to tool-less (dry-run) configs.
  */
 
+/**
+ * Called with the outcome of every memory write the job agent attempts.
+ *
+ * The sweep decides from this whether the run may consume its input (tombstone
+ * a transcript window, consume pending episodes). A run whose every write
+ * failed still answers with a confident one-line summary — the model treats a
+ * failing tool as a reason to describe what it *would* have saved — so the
+ * answer is no evidence that anything landed. Never called means "nothing
+ * needed writing", which is a legitimate success.
+ *
+ * Ephemeral like the rest of the payload: a resumed turn has no context, and
+ * `turnContext` is passed by reference and never persisted.
+ */
+export type MemoryWriteAttemptSink = (ok: boolean) => void;
+
 export interface MemoryExtractionTurnContext {
   kind: "memory-extraction";
   scope: ScopeRef;
@@ -15,11 +30,13 @@ export interface MemoryExtractionTurnContext {
   targetAgent: string;
   /** Consolidation cooldown for the touched scope. */
   cooldownMs: number;
+  onWriteAttempt?: MemoryWriteAttemptSink;
 }
 
 export interface MemoryConsolidationTurnContext {
   kind: "memory-consolidation";
   scope: ScopeRef;
+  onWriteAttempt?: MemoryWriteAttemptSink;
 }
 
 export function asMemoryExtractionContext(

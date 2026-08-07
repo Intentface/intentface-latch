@@ -54,6 +54,33 @@ interface SweepResult {
 
 const leaseId = () => `memsweep_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
+/**
+ * Tally of a job run's memory writes, fed by the bound tools via `turnContext`.
+ *
+ * `runAgent`'s answer says nothing about whether anything was stored: a model
+ * whose write tool keeps failing gives up and answers with a confident summary
+ * of the version it never saved (observed in the wild — the consolidator fell
+ * back to printing the new index and reported "added 4 new facts"). Consuming
+ * the input on that answer loses those memories permanently, so the sweep asks
+ * the tools instead.
+ */
+function writeTally() {
+  let ok = 0;
+  let failed = 0;
+  return {
+    sink: (success: boolean) => {
+      if (success) ok++;
+      else failed++;
+    },
+    /**
+     * True when every attempt failed. Zero attempts is NOT a failure — a run
+     * with nothing durable to add legitimately writes nothing, and forcing a
+     * retry on that would re-run the model forever over the same episodes.
+     */
+    allFailed: () => ok === 0 && failed > 0,
+  };
+}
+
 /** The memory config for an agent under a specific caller, or undefined. */
 async function memoryConfigFor(
   agent: string,
@@ -219,6 +246,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         return "skipped";
       }
       const transcript = msgs.map((m) => `${m.role}: ${m.text}`).join("\n\n");
+      const writes = writeTally();
       const turnContext: MemoryExtractionTurnContext = {
         kind: "memory-extraction",
         scope,
@@ -229,6 +257,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
           memory.consolidation?.cooldownHours != null
             ? memory.consolidation.cooldownHours * 3_600_000
             : MEMORY_COOLDOWN_MS,
+        onWriteAttempt: writes.sink,
       };
       const { answer } = await runtime.runAgent({
         principal,
@@ -251,9 +280,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // actually processed. Conservative on purpose — an ambiguous run costs
       // one backoff'd retry, a wrong tombstone loses memories forever.
       if (!answer.trim()) throw new Error("extractor run finished without an answer");
+      // Every episode write failed — the transcript was processed but nothing
+      // was stored. Tombstoning the window here would lose it for good, so
+      // fail into the retry path instead (same reasoning as the empty answer).
+      if (writes.allFailed()) throw new Error("extractor could not write its episode");
       // Completed (with or without an episode written): record the window's
       // key. Zero-yield completions tombstone the content; failures above
-      // (throw / empty answer) skip this and stay eligible for retry.
+      // (throw / empty answer / no write landed) skip this and stay eligible
+      // for retry.
       await memoryJobs.completeChatExtraction(
         cand.chatId,
         { lastExtractedSeq: lastSeenSeq, extractionKey, ok: true, nextEligibleAt: now + MEMORY_IDLE_MS },
@@ -341,9 +375,11 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         : [];
 
       const episodePaths = [...row.pendingEpisodes].sort();
+      const writes = writeTally();
       const turnContext: MemoryConsolidationTurnContext = {
         kind: "memory-consolidation",
         scope,
+        onWriteAttempt: writes.sink,
       };
       const { answer } = await runtime.runAgent({
         principal,
@@ -362,6 +398,10 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // would consume the pending episodes without ever folding them in —
       // throw into the failure path so they survive for the retry.
       if (!answer.trim()) throw new Error("consolidator run finished without an answer");
+      // Every index write failed: the episodes were read but never folded in.
+      // Consuming them on the strength of the answer alone is how a whole
+      // consolidation silently evaporates — keep them pending for the retry.
+      if (writes.allFailed()) throw new Error("consolidator could not write the index");
       const cooldownMs =
         memory.consolidation?.cooldownHours != null
           ? memory.consolidation.cooldownHours * 3_600_000

@@ -34,7 +34,9 @@ export const memoryConsolidator = defineAgent<Principal, { orgId: string }>(
       tools: {
         memory_read_index: memoryReadIndexTool(bound),
         memory_read_episodes: memoryReadEpisodesTool(bound),
-        memory_write_index: memoryWriteIndexTool(bound),
+        memory_write_index: memoryWriteIndexTool(bound, {
+          onWriteAttempt: tc.onWriteAttempt,
+        }),
       },
     };
   },

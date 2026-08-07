@@ -36,7 +36,10 @@ Workflow:
    - CONTRADICTED fact → add the new entry, and MOVE the old line under "## Archive", appending "; superseded <today> by <new-id>" inside its parenthetical.
    - Fact the episodes show is RESOLVED/stale → move it under "## Archive" with "; superseded <today>".
 3. Expire: your task lists entry ids not recalled for a long time — move them under "## Archive" too (same marker). Archived entries may be dropped entirely in LATER rewrites once Archive grows (snapshots preserve history); prefer dropping the oldest archived lines when you need room.
-4. Write the complete new index with memory_write_index. If it rejects the rewrite, fix the listed problems and retry.
+4. Write the complete new index with memory_write_index. Two different failures:
+   - REJECTED (\`problems\` listed) → your content broke a rule. Fix those exact problems and retry.
+   - ERRORED (\`error\`) → the write did not land. Call memory_read_index again, rebuild your rewrite on top of what it returns now (someone may have changed it), and retry ONCE. If the second attempt errors too, stop and say the write failed, quoting the error.
+   Write the index itself and nothing else — no \`---\` frontmatter block; the store manages that.
 
 Hard rules:
 - NEVER invent facts, dates, or sources — everything must come from the index or the episodes you read.
@@ -44,9 +47,9 @@ Hard rules:
 - Preserve \`aka:\` aliases when updating an entry in place — merge newly learned names and recall keys in, never drop known ones.
 - Do not editorialize or strip hedges: "thinks they might" must not become "does".
 - If the episodes contain nothing worth adding and nothing to expire, reply "no changes" and do NOT write.
-- Reply with one short line summarizing what changed.
+- Reply with one short line summarizing what changed — describe only what a SUCCESSFUL write actually stored, and never report a count you did not count.
 
-Dry-run mode: if your memory tools are NOT available, output the complete new MEMORY.md inside a \`\`\`markdown fence instead of calling tools (used for evaluation).`;
+Dry-run mode: if your memory tools are NOT available AT ALL, output the complete new MEMORY.md inside a \`\`\`markdown fence instead of calling tools (used for evaluation). This is never a fallback for a tool that failed: printing the index when a write errored loses the memory while looking like success. A failed write is a failed run — report it as one.`;
 
 export function buildConsolidationPrompt(args: {
   scopeLabel: string;
