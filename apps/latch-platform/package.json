@@ -51,6 +51,7 @@
     "better-auth": "^1.6.19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "croner": "^10.0.1",
     "drizzle-orm": "^0.45.0",
     "just-bash": "^3.0.2",
     "kysely": "^0.29.2",

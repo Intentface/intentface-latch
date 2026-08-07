@@ -99,6 +99,9 @@ importers:
       '@fontsource-variable/inter':
         specifier: ^5.2.8
         version: 5.2.8
+      '@intentface/latch-agent-builder':
+        specifier: workspace:*
+        version: link:../../packages/agent-builder
       '@intentface/latch-channels':
         specifier: workspace:*
         version: link:../../packages/latch-channels
@@ -290,6 +293,28 @@ importers:
         specifier: ^4
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@22.19.21)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@8.0.16(@types/node@22.19.21)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
+  packages/agent-builder:
+    dependencies:
+      '@intentface/latch-core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.21
+      ai:
+        specifier: ^7.0.2
+        version: 7.0.2(zod@4.4.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@22.19.21)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@8.0.16(@types/node@22.19.21)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+
   packages/core:
     dependencies:
       zod:
@@ -308,6 +333,9 @@ importers:
 
   packages/drizzle:
     dependencies:
+      '@intentface/latch-agent-builder':
+        specifier: workspace:*
+        version: link:../agent-builder
       '@intentface/latch-core':
         specifier: workspace:*
         version: link:../core
@@ -578,6 +606,9 @@ importers:
       '@intentface/latch-mcp':
         specifier: workspace:*
         version: link:../mcp
+      croner:
+        specifier: ^10.0.1
+        version: 10.0.1
     devDependencies:
       ai:
         specifier: 7.0.0-beta.178
