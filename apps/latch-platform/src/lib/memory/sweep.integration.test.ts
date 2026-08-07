@@ -528,43 +528,56 @@ describe("memory pipeline (integration)", () => {
     expect(afterRetry.failures).toBe(0);
   });
 
-  it("extracts a channel-pinned chat into the agent's one canonical scope", async () => {
-    // A channel binding stores its pin verbatim, so `chats.agent` is
-    // `org:coach`. Two bugs met here: the candidate query matches that column
-    // exactly against bare names, so the chat was never even a candidate; and
-    // `seg()` turned the surviving `:` into a second scope root, so anything
-    // that DID get written (an in-turn memory_save) landed in a store the web
-    // chat could not see.
-    const extractorModel = toolThenText(
-      "memory_write_episode",
-      () => ({
-        slug: "telegram-note",
-        summary: "From Telegram",
-        facts: [{ text: "Races on trails", provenance: "user-said" }],
-      }),
-      "stored one episode",
-    );
-    const { files, memoryJobs, storage } = await makeHarness({ extractor: extractorModel });
-    const scope = scopeRefOf({ agent: "coach", memory: MEM, userId: "user" })!;
+  // Both pin forms, since the candidate query has to carry both variants and a
+  // half-done normalization would otherwise pass on the one that was covered.
+  it.each(["org:coach", "user:coach"])(
+    "extracts a %s chat into the agent's one canonical scope",
+    async (pinnedRef) => {
+      // A channel binding stores its pin verbatim, so `chats.agent` is pinned.
+      // Two bugs met here: the candidate query matches that column exactly
+      // against bare names, so the chat was never even a candidate; and `seg()`
+      // turned the surviving `:` into a second scope root, so anything that DID
+      // get written (an in-turn memory_save) landed in a store the web chat
+      // could not see.
+      const extractorModel = toolThenText(
+        "memory_write_episode",
+        () => ({
+          slug: "channel-note",
+          summary: "From a channel",
+          facts: [{ text: "Races on trails", provenance: "user-said" }],
+        }),
+        "stored one episode",
+      );
+      const { files, memoryJobs, storage } = await makeHarness({ extractor: extractorModel });
+      const scope = scopeRefOf({ agent: "coach", memory: MEM, userId: "user" })!;
 
-    const chat = await storage.createChat(principal, { agent: "org:coach" });
-    await storage.appendMessages(chat.id, [message("m1", "user", "I race on trails.")]);
-    await storage.createRun(principal, { chatId: chat.id, agent: "org:coach" });
+      const chat = await storage.createChat(principal, { agent: pinnedRef });
+      await storage.appendMessages(chat.id, [message("m1", "user", "I race on trails.")]);
+      await storage.createRun(principal, { chatId: chat.id, agent: pinnedRef });
 
-    const swept = await memorySweep({ now: Date.now() + 2 * HOUR });
-    expect(swept.extractions).toBe(1);
-    expect(swept.errors).toBe(0);
+      const swept = await memorySweep({ now: Date.now() + 2 * HOUR });
+      expect(swept.extractions).toBe(1);
+      expect(swept.errors).toBe(0);
 
-    // The episode lands under the BARE agent segment, not `org-coach-<hash>`.
-    const episodePaths = Array.from(files.keys()).filter((p) => p.includes("/episodes/"));
-    expect(episodePaths).toHaveLength(1);
-    expect(episodePaths[0]!.startsWith(`${scope.root}/episodes/`)).toBe(true);
-    expect(episodePaths[0]).not.toContain("org-coach");
-    // …and the scope row the consolidation job keys off is the canonical one.
-    expect(await memoryJobs.scopeState(scope.key)).toBeDefined();
-    // The episode's own frontmatter names the agent without the pin.
-    expect(files.get(episodePaths[0]!)).toContain("agent: coach");
-  });
+      // The episode lands under the BARE agent segment, not `org-coach-<hash>`.
+      const episodePaths = Array.from(files.keys()).filter((p) => p.includes("/episodes/"));
+      expect(episodePaths).toHaveLength(1);
+      expect(episodePaths[0]!.startsWith(`${scope.root}/episodes/`)).toBe(true);
+      expect(episodePaths[0]).not.toContain("-coach-");
+      // The scope row the consolidation job keys off is the canonical one, and
+      // it is FUNCTIONAL, not merely present: this sweep queued the episode
+      // against it and consolidated it through (the harness's default
+      // consolidator answers "no changes", which legitimately consumes the
+      // episode — hence the watermark rather than a pendingEpisodes check).
+      const state = await memoryJobs.scopeState(scope.key);
+      expect(state?.agent).toBe("coach");
+      expect(swept.consolidations).toBe(1);
+      expect(state?.consolidationWatermark).toBe(episodePaths[0]!.split("/").pop());
+      expect(state?.pendingEpisodes).toEqual([]);
+      // The episode's own frontmatter names the agent without the pin.
+      expect(files.get(episodePaths[0]!)).toContain("agent: coach");
+    },
+  );
 
   it("keeps episodes pending when the consolidator answers without writing", async () => {
     // The failure this pipeline used to lose memories to: memory_write_index
@@ -624,6 +637,16 @@ describe("memory pipeline (integration)", () => {
     expect(afterFail?.pendingEpisodes).toEqual([episodePath]);
     expect(afterFail?.hasNew).toBe(true);
     expect(afterFail?.consolidationWatermark).toBeFalsy();
+    // …on the escalating schedule, persisted: first failure = the base 2h.
+    expect(afterFail?.failures).toBe(1);
+    expect(afterFail?.nextEligibleAt).toBe(t1 + 2 * HOUR);
+
+    // And the schedule is HONORED, not just recorded: a sweep inside the
+    // backoff window must not re-run the consolidator on the same input.
+    const tooSoon = await memorySweep({ now: t1 + 1 * HOUR });
+    expect(tooSoon.consolidations).toBe(0);
+    expect(tooSoon.errors).toBe(0);
+    expect((await memoryJobs.scopeState(scope.key))?.failures).toBe(1);
 
     // Store recovers; past the backoff the same episode is folded in for real.
     outage.failWritesTo = undefined;
