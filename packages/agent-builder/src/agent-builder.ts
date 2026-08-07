@@ -72,7 +72,10 @@ export interface ConnectionChoice {
 
 /** The live host services the builder's tools run against, per principal. */
 export interface AgentBuilderDeps<P> {
-  runtime: Pick<Runtime<P>, "listAgents" | "listChats" | "loadHistory" | "runAgent">;
+  runtime: Pick<
+    Runtime<P>,
+    "listAgents" | "listChats" | "loadHistory" | "runAgent" | "schedule" | "listSchedules" | "unschedule"
+  >;
   store: AgentBuilderStore<P>;
   /** The host's model catalog (assignable model ids). */
   models: ModelChoice[];
@@ -80,6 +83,21 @@ export interface AgentBuilderDeps<P> {
   listConnections: (principal: P) => Promise<ConnectionChoice[]>;
   /** Enumerate the tools a set of connections exposes, for this caller. */
   connectionTools: (principal: P, names: string[]) => Promise<{ name: string; description: string }[]>;
+}
+
+/**
+ * What THIS host actually wires for each optional agent capability — so the
+ * builder's prompt only offers what exists, and save_agent rejects the rest
+ * instead of persisting silent no-op flags. Every capability defaults to
+ * supported (backwards compatible for hosts that wire everything).
+ * `defaultTools` may carry a host-specific description of what the flag
+ * grants (rendered in the prompt verbatim).
+ */
+export interface CapabilitySupport {
+  sandbox?: boolean;
+  codeMode?: boolean;
+  providerWebTools?: boolean;
+  defaultTools?: boolean | { description: string };
 }
 
 export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
@@ -94,13 +112,49 @@ export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
   deps: (principal: P) => Promise<AgentBuilderDeps<P>>;
   /** Code-declared agent names save_agent must refuse to overwrite (host statics). */
   reservedNames?: string[];
+  /** Which optional agent capabilities this host wires (default: all). */
+  capabilities?: CapabilitySupport;
+  /**
+   * Offer schedule tools (schedule_agent / list_schedules / unschedule_agent)
+   * so the builder can put agents on a cron cadence. Default true — the
+   * runtime always has the schedule API; disable only if the host runs no
+   * cron driver (nothing would ever fire).
+   */
+  scheduling?: boolean;
   /** Optional feature sets: evals, tool authoring, … */
   extensions?: AgentBuilderExtension<P>[];
   /** Picker metadata override. */
   meta?: AgentMeta;
 }
 
-const BASE_INSTRUCTIONS = `You are the Agent Builder. You design, CREATE, and update agents on behalf of the user you're talking to. Everything you make belongs to that user, at their personal or org scope.
+/** The capabilities bullet, built from what the host actually supports. */
+function capabilitiesBullet(support: CapabilitySupport): string {
+  const offered: string[] = [];
+  if (support.codeMode !== false)
+    offered.push("codeMode (writes/runs JS over its tools — multi-step orchestration)");
+  if (support.sandbox !== false)
+    offered.push("sandbox (workspace + file/shell tools)");
+  if (support.providerWebTools !== false)
+    offered.push("providerWebTools (native web search/fetch)");
+  const dt = support.defaultTools;
+  if (dt !== false) {
+    offered.push(
+      typeof dt === "object" ? `defaultTools (${dt.description})` : "defaultTools (web_fetch + askUser)",
+    );
+  }
+  return offered.length
+    ? `- capabilities: ${offered.join(", ")}. These are the ONLY capabilities that exist here — never promise behavior outside them (agents run as request-scoped turns; there are no persistent/background processes).`
+    : "- capabilities: none available in this host — always leave unset.";
+}
+
+const SCHEDULING_PROMPT = `SCHEDULING (schedule_agent / list_schedules / unschedule_agent):
+An agent runs as one TURN per trigger — it cannot loop in the background. For "do X every …" or "do X at …", save the agent to do X ONCE per run, then put it on a schedule.
+- schedule_agent takes the agent name, a prompt (the message each fire sends it), and a cron expression — croner syntax, 5 fields (minute-level) or 6 with leading seconds — interpreted in the given IANA timezone (default UTC). Omit cron for a ONE-SHOT that fires on the next tick. It pauses for the user's approval (a schedule spends money unattended).
+- Design scheduled agents to complete in one self-contained turn from the schedule's prompt alone. NOTE: a scheduled run has no user watching — if it hits an approval-gated (write) tool it PAUSES until the user reviews that chat, so warn the user when scheduling a write-capable agent.
+- list_schedules shows the user's schedules; unschedule_agent (approval-gated) removes one by id.`;
+
+function buildBaseInstructions(support: CapabilitySupport, scheduling: boolean): string {
+  return `You are the Agent Builder. You design, CREATE, and update agents on behalf of the user you're talking to. Everything you make belongs to that user, at their personal or org scope.
 
 WHAT AN AGENT IS — the fields you set with save_agent:
 - name: unique kebab-case id (e.g. "support-triage"). Reusing a name UPDATES that agent.
@@ -109,10 +163,10 @@ WHAT AN AGENT IS — the fields you set with save_agent:
 - effort: reasoning/thinking level ("minimal" | "low" | "medium" | "high"). ONLY set it when list_models shows reasoning=true for the chosen model; lower effort = faster + cheaper (good for simple/throughput agents), higher = deeper reasoning. Omit to use the provider default. For a model with reasoning=false, leave effort unset (it would be a no-op).
 - instructions: the system prompt, the heart of the agent. Spend most of your effort here: role, scope, tone, which tools to use and when, and edge cases. A great agent is mostly a great prompt.
 - connections: integration names from list_connections. Only wire ones that exist; prefer authorized ones. Use list_connection_tools to see what a connection offers.
-- capabilities: codeMode (writes/runs JS over its tools — multi-step orchestration), sandbox (workspace + file/shell tools), providerWebTools (native web search/fetch), defaultTools (web_fetch + askUser).
+${capabilitiesBullet(support)}
 - subagents: names of other agents this one may delegate to.
 - scope: "user" (personal) or "org" (shared with the whole org).
-
+${scheduling ? `\n${SCHEDULING_PROMPT}\n` : ""}
 WORKFLOW:
 1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).
 2. Discover before proposing: call list_models and list_connections (and list_connection_tools for any you'll wire).
@@ -129,7 +183,9 @@ USING HISTORY: when the user refers to past work ("make an agent like in that ch
 RULES:
 - You can only create/edit the user's own agents (those from list_agents → yourAgents). Built-in agents are read-only references — inspect for inspiration, don't overwrite their names.
 - Never invent a modelId or connection name. Only use values from list_models / list_connections.
+- NEVER promise behavior the fields above can't express. No background loops, no timers inside an agent${scheduling ? " — recurring behavior is a SCHEDULE (see SCHEDULING)" : ""}.
 - delete_agent is destructive and pauses for approval; only call it when the user clearly asks.`;
+}
 
 /** Chain a result through every extension's decorator of the given kind. */
 async function decorate<P>(
@@ -155,11 +211,24 @@ async function builderTools<P>(
   const deps = await config.deps(principal);
   const { runtime, store, models, listConnections, connectionTools } = deps;
   const extensions = config.extensions ?? [];
+  const support = config.capabilities ?? {};
+  const scheduling = config.scheduling !== false;
   const reserved = new Set([
     ...(config.reservedNames ?? []),
     ...extensions.flatMap((e) => e.reservedNames ?? []),
   ]);
   const authoredToolsSupported = extensions.some((e) => e.handlesAuthoredTools);
+
+  /** Reject capability flags this host never wired (silent no-ops otherwise). */
+  const unsupportedCapabilities = (c: z.infer<typeof CAPABILITIES>): string[] => {
+    const asked: [string, boolean | undefined, boolean][] = [
+      ["codeMode", c?.codeMode, support.codeMode !== false],
+      ["sandbox", c?.sandbox, support.sandbox !== false],
+      ["providerWebTools", c?.providerWebTools, support.providerWebTools !== false],
+      ["defaultTools", c?.defaultTools, support.defaultTools !== false],
+    ];
+    return asked.filter(([, on, ok]) => on && !ok).map(([name]) => name);
+  };
 
   const capsToExec = (
     c: z.infer<typeof CAPABILITIES>,
@@ -286,6 +355,14 @@ async function builderTools<P>(
         if (input.authoredTools?.length && !authoredToolsSupported) {
           return { error: "Tool authoring is not available here — omit authoredTools." };
         }
+        // Same for capability flags the host never wired: rejecting beats
+        // persisting a silent no-op the user believes in.
+        const unsupported = unsupportedCapabilities(input.capabilities);
+        if (unsupported.length) {
+          return {
+            error: `Not available in this host: ${unsupported.join(", ")}. Omit ${unsupported.length > 1 ? "them" : "it"} — and don't promise the user that behavior.`,
+          };
+        }
         const rec: AgentRecord = {
           name,
           title: input.title,
@@ -329,6 +406,72 @@ async function builderTools<P>(
         return { deleted: name, scope };
       },
     }),
+
+    ...(scheduling
+      ? {
+          schedule_agent: tool({
+            description:
+              "Put an agent on a schedule: each fire sends it the prompt as a fresh, self-contained turn. Recurring via a cron expression, or one-shot (omit cron) on the next tick. Pauses for the user's approval — a schedule runs unattended and spends money.",
+            inputSchema: z.object({
+              agent: z.string().describe("Agent name (from list_agents)."),
+              prompt: z.string().describe("The message each fire sends the agent. Self-contained — no conversation context exists at fire time."),
+              cron: z
+                .string()
+                .optional()
+                .describe('Croner expression, 5 fields or 6 with leading seconds (e.g. "0 9 * * *" = daily 9am, "*/30 * * * * *" = every 30s). Omit for a one-shot.'),
+              timezone: z.string().optional().describe('IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"). Default UTC.'),
+            }),
+            execute: async ({ agent, prompt, cron, timezone }) => {
+              try {
+                const rec = await runtime.schedule({
+                  principal,
+                  agent: normalizeAgentName(agent),
+                  prompt,
+                  cron: cron ?? null,
+                  timezone,
+                });
+                return {
+                  scheduled: true,
+                  id: rec.id,
+                  agent: rec.agent,
+                  cron: rec.cron ?? "one-shot",
+                  nextRunAt: new Date(rec.nextRunAt).toISOString(),
+                  note: "Manage it with list_schedules / unschedule_agent.",
+                };
+              } catch (e) {
+                return { error: `Could not schedule: ${e instanceof Error ? e.message : String(e)}` };
+              }
+            },
+          }),
+
+          list_schedules: tool({
+            description: "The user's scheduled agent runs (id, agent, cadence, next fire).",
+            inputSchema: z.object({}),
+            execute: async () => {
+              const schedules = await runtime.listSchedules({ principal });
+              return schedules.map((s) => ({
+                id: s.id,
+                agent: s.agent,
+                cron: s.cron ?? "one-shot",
+                timezone: s.timezone ?? "UTC",
+                prompt: s.prompt,
+                enabled: s.enabled,
+                nextRunAt: s.enabled ? new Date(s.nextRunAt).toISOString() : null,
+                lastRunAt: s.lastRunAt ? new Date(s.lastRunAt).toISOString() : null,
+              }));
+            },
+          }),
+
+          unschedule_agent: tool({
+            description: "Remove one of the user's schedules by id (from list_schedules). Pauses for the user's approval.",
+            inputSchema: z.object({ id: z.string() }),
+            execute: async ({ id }) => {
+              await runtime.unschedule({ principal, id });
+              return { unscheduled: id };
+            },
+          }),
+        }
+      : {}),
 
     test_agent: tool({
       description:
@@ -386,8 +529,9 @@ export function createAgentBuilder<P, RuntimeContext = unknown>(
   config: AgentBuilderConfig<P, RuntimeContext>,
 ): AgentFactory<P, RuntimeContext> {
   const extensions = config.extensions ?? [];
+  const scheduling = config.scheduling !== false;
   const instructions = [
-    BASE_INSTRUCTIONS,
+    buildBaseInstructions(config.capabilities ?? {}, scheduling),
     ...extensions.flatMap((e) => e.promptSections ?? []),
   ].join("\n\n");
   const subagents = [...new Set(extensions.flatMap((e) => e.subagents ?? []))];
@@ -395,6 +539,10 @@ export function createAgentBuilder<P, RuntimeContext = unknown>(
     // Approve every persisting mutation: the user sees and confirms the exact spec.
     save_agent: "user-approval",
     delete_agent: "user-approval",
+    // A schedule runs unattended and spends money; removal is destructive.
+    ...(scheduling
+      ? { schedule_agent: "user-approval", unschedule_agent: "user-approval" }
+      : {}),
   };
   for (const ext of extensions) Object.assign(toolApproval, ext.toolApproval ?? {});
 

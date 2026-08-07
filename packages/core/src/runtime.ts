@@ -141,7 +141,19 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   harnessTools?: {
     sandbox?: Record<string, unknown>;
-    app?: Record<string, unknown>;
+    /**
+     * App-process tools. A static record for principal-independent tools
+     * (web_fetch, …), or a per-turn factory when the tools must bind to the
+     * caller (e.g. workspace file/db tools scoped to the user's permissions
+     * and the current chat).
+     */
+    app?:
+      | Record<string, unknown>
+      | ((args: {
+          principal: unknown;
+          chatId: string;
+          agent: string;
+        }) => Record<string, unknown> | Promise<Record<string, unknown>>);
     /**
      * Platform render tool(s) — attached only when an agent sets
      * `renderTools: true`, never by `defaultTools`. Kept a separate capability
@@ -968,8 +980,12 @@ export function createRuntime<P, RC = unknown>(
       capabilityTools.push(...Object.keys(harness.sandbox));
     }
     if (cfg.defaultTools && harness.app) {
+      const appTools =
+        typeof harness.app === "function"
+          ? await harness.app({ principal, chatId: resolvedChatId, agent: run.agent })
+          : harness.app;
       const only = Array.isArray(cfg.defaultTools) ? new Set(cfg.defaultTools) : null;
-      for (const [name, t] of Object.entries(harness.app)) {
+      for (const [name, t] of Object.entries(appTools)) {
         if (!only || only.has(name)) {
           tools[name] = t;
           capabilityTools.push(name);
