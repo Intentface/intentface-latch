@@ -210,7 +210,12 @@ RULES:
 - delete_agent is destructive and pauses for approval; only call it when the user clearly asks.`;
 }
 
-/** Chain a result through every extension's decorator of the given kind. */
+/**
+ * Chain a result through every extension's decorator of the given kind.
+ * A throwing hook is isolated: decoration runs AFTER the mutation persisted,
+ * so a decorator failure must not turn a successful save/test into a reported
+ * error — keep the last good result and log the hook failure.
+ */
 async function decorate<P>(
   extensions: AgentBuilderExtension<P>[],
   kind: "decorateSaveResult" | "decorateTestResult",
@@ -221,7 +226,12 @@ async function decorate<P>(
   let out = result;
   for (const ext of extensions) {
     const hook = ext[kind];
-    if (hook) out = await hook(principal, agentName, out);
+    if (!hook) continue;
+    try {
+      out = await hook(principal, agentName, out);
+    } catch (error) {
+      console.warn(`agent-builder: extension "${ext.name}" ${kind} failed; keeping undecorated result:`, error);
+    }
   }
   return out;
 }
@@ -366,6 +376,13 @@ async function builderTools<P>(
         if (!models.some((m) => m.id === input.modelId)) {
           return { error: `Unknown modelId "${input.modelId}". Call list_models and use one of those.` };
         }
+        // `effort` is a no-op on non-reasoning models — reject like the
+        // capability flags instead of persisting a setting that does nothing.
+        if (input.effort && !models.find((m) => m.id === input.modelId)?.reasoning) {
+          return {
+            error: `Model "${input.modelId}" is not reasoning-capable (list_models shows reasoning=false) — omit effort or pick a reasoning model.`,
+          };
+        }
         // Reject hallucinated references — only names the discovery tools return.
         const knownConnections = new Set((await listConnections(principal)).map((c) => c.name));
         const badConn = (input.connections ?? []).filter((n) => !knownConnections.has(n));
@@ -441,21 +458,36 @@ async function builderTools<P>(
         await store.remove(principal, scope, target);
         // Cascade: the CALLER's schedules for this agent. Schedules are
         // per-principal, so an org-shared agent may still have other
-        // members' schedules — surface that instead of pretending.
+        // members' schedules — surface that instead of pretending. The agent
+        // is already deleted at this point, so a failing unschedule must not
+        // reject the tool (the model would report a failed delete) — collect
+        // and report partial failures instead.
         let removedSchedules = 0;
+        const scheduleCleanupFailures: string[] = [];
         if (scheduling) {
           const mine = (await runtime.listSchedules({ principal })).filter(
             (s) => s.agent === target,
           );
           for (const s of mine) {
-            await runtime.unschedule({ principal, id: s.id });
-            removedSchedules++;
+            try {
+              await runtime.unschedule({ principal, id: s.id });
+              removedSchedules++;
+            } catch (error) {
+              scheduleCleanupFailures.push(s.id);
+              console.warn(`agent-builder: delete_agent cascade failed to unschedule ${s.id}:`, error);
+            }
           }
         }
         return {
           deleted: target,
           scope,
           removedSchedules,
+          ...(scheduleCleanupFailures.length
+            ? {
+                scheduleCleanupFailures,
+                warning: `The agent is deleted, but ${scheduleCleanupFailures.length} schedule(s) could not be removed and will error on fire — retry with unschedule_agent: ${scheduleCleanupFailures.join(", ")}.`,
+              }
+            : {}),
           ...(scope === "org"
             ? {
                 note: "Org-shared agent: other members' schedules for it (if any) are not visible here — they will error on fire until those members unschedule them.",
@@ -524,6 +556,14 @@ async function builderTools<P>(
             description: "Remove one of the user's schedules by id (from list_schedules). Pauses for the user's approval.",
             inputSchema: z.object({ id: z.string() }),
             execute: async ({ id }) => {
+              // `unschedule` returns void and silently ignores unknown ids —
+              // pre-check so the result is truthful. (Lookup + delete isn't
+              // atomic; the worst case of the race is a stale success for an
+              // id that was concurrently deleted anyway.)
+              const exists = (await runtime.listSchedules({ principal })).some((s) => s.id === id);
+              if (!exists) {
+                return { error: `No schedule "${id}" — check list_schedules.` };
+              }
               await runtime.unschedule({ principal, id });
               return { unscheduled: id };
             },
@@ -543,9 +583,11 @@ async function builderTools<P>(
           .describe("true → real run (mutating tools execute). Default false → safe (mutations blocked)."),
       }),
       execute: async ({ name, message, live }) => {
+        // Normalize like every other tool — stored names are normalized.
+        const target = normalizeAgentName(name);
         const { threadId, answer } = await runtime.runAgent({
           principal,
-          agent: name,
+          agent: target,
           prompt: message,
           blockGated: !live,
         });
@@ -567,7 +609,7 @@ async function builderTools<P>(
             }
           }
         }
-        return decorate(extensions, "decorateTestResult", principal, normalizeAgentName(name), {
+        return decorate(extensions, "decorateTestResult", principal, target, {
           answer,
           toolCalls,
           mode: live ? "live" : "safe (mutating tools blocked)",

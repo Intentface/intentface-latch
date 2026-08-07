@@ -37,7 +37,8 @@ export interface LatchHandlerConfig<P> {
    * isolation (a separate runtime/DB per tenant, e.g. one SQLite file per
    * workspace) — it's called after `resolveContext` yields the principal. A
    * single `Runtime` value fits column-scoped (`owner`) tenancy. Note: `POST
-   * cron/run` (no principal) requires a static runtime.
+   * cron/run` (no principal) requires a static runtime OR a `cronRun` tick in
+   * this config (the resolver-based setup's system-wide sweep).
    */
   runtime: Runtime<P> | ((principal: P) => Runtime<P> | Promise<Runtime<P>>);
   /**

@@ -68,7 +68,10 @@ function makeDeps(): AgentBuilderDeps<P> & {
         if (i >= 0) records.splice(i, 1);
       },
     },
-    models: [{ id: "m-1", label: "Model One", provider: "anthropic", reasoning: true }],
+    models: [
+      { id: "m-1", label: "Model One", provider: "anthropic", reasoning: true },
+      { id: "m-flat", label: "No Reasoning", provider: "openai", reasoning: false },
+    ],
     listConnections: async () => [{ name: "github", kind: "mcp", authorized: true }],
     connectionTools: async () => [{ name: "github_search", description: "search" }],
   };
@@ -367,5 +370,71 @@ describe("delete_agent cascade", () => {
       note?: string;
     };
     expect(res.note).toMatch(/other members' schedules/);
+  });
+});
+
+describe("review-hardening regressions", () => {
+  it("rejects effort on a non-reasoning model", async () => {
+    const { tools } = await openTools(makeDeps());
+    const res = (await tools.save_agent!.execute({
+      ...SAVE,
+      modelId: "m-flat",
+      effort: "high",
+    })) as { error?: string };
+    expect(res.error).toMatch(/not reasoning-capable/);
+    const ok = (await tools.save_agent!.execute({ ...SAVE, effort: "high" })) as {
+      saved?: boolean;
+    };
+    expect(ok.saved).toBe(true);
+  });
+
+  it("a throwing decorator never turns a persisted save into an error", async () => {
+    const bad: AgentBuilderExtension<P> = {
+      name: "bad",
+      decorateSaveResult: async () => {
+        throw new Error("boom");
+      },
+    };
+    const deps = makeDeps();
+    const { tools } = await openTools(deps, [bad]);
+    const res = (await tools.save_agent!.execute(SAVE)) as Record<string, unknown>;
+    expect(res.saved).toBe(true);
+    expect(deps.records).toHaveLength(1);
+  });
+
+  it("delete_agent reports (not rejects) a partial schedule cascade", async () => {
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute(SAVE);
+    await tools.schedule_agent!.execute({ agent: "my-agent", prompt: "a" });
+    await tools.schedule_agent!.execute({ agent: "my-agent", prompt: "b" });
+    ;(deps.runtime.unschedule as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("lease held"),
+    );
+    const res = (await tools.delete_agent!.execute({ name: "my-agent", scope: "user" })) as Record<
+      string,
+      unknown
+    >;
+    expect(res.deleted).toBe("my-agent");
+    expect(res.removedSchedules).toBe(1);
+    expect((res.scheduleCleanupFailures as string[]).length).toBe(1);
+    expect(String(res.warning)).toMatch(/could not be removed/);
+  });
+
+  it("unschedule_agent is truthful about unknown ids", async () => {
+    const { tools } = await openTools(makeDeps());
+    const res = (await tools.unschedule_agent!.execute({ id: "sch_ghost" })) as {
+      error?: string;
+    };
+    expect(res.error).toMatch(/No schedule/);
+  });
+
+  it("test_agent normalizes the agent name before running", async () => {
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.test_agent!.execute({ name: "My Agent", message: "hi" });
+    expect(deps.runtime.runAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agent: "my-agent" }),
+    );
   });
 });
