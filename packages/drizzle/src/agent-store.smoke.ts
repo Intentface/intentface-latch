@@ -73,6 +73,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
-  process.exit(1);
+  console.error("❌ agent-store smoke failed:", e);
+  throw e; // unhandled rejection → non-zero exit (no @types/node dep here)
 });
