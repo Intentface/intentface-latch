@@ -9,5 +9,8 @@ export type ChipData = {
   variant?: "primary" | "accent" | "warning";
 };
 
-/** The app's UIMessage: `stopped` metadata + a `chip` data part. */
-export type AppUIMessage = UIMessage<{ stopped?: boolean }, { chip: ChipData[] }>;
+/** The app's UIMessage: `stopped`/`voice` metadata + a `chip` data part. */
+export type AppUIMessage = UIMessage<
+  { stopped?: boolean; voice?: { durationMs: number } },
+  { chip: ChipData[] }
+>;

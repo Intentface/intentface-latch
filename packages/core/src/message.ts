@@ -39,6 +39,8 @@ export interface AppMetadata {
   finishReason?: string;
   /** Server-side creation timestamp (unix ms). */
   createdAt?: number;
+  /** Set when the message text is a transcription of a recorded voice message. */
+  voice?: { durationMs: number };
 }
 
 /** The stored conversation unit — a `UIMessage` typed with our metadata. */

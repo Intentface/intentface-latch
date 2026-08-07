@@ -36,7 +36,10 @@ export interface OpenApiConnectionDef<P> {
   /**
    * Skip the private/internal-address SSRF backstop for this connection.
    * Mirrors the MCP host's `allowPrivateHost`: set it only for a trusted
-   * local/internal API — the allowlist check still applies.
+   * local/internal API — the allowlist check still applies. This skips the
+   * PRE-CHECK only: if the registry's `fetch` is a DNS-pinned fetch
+   * (recommended — `@intentface/latch-net/pinned`), a private backend also
+   * needs `createPinnedFetch({ allowPrivate: true })` injected.
    */
   allowPrivateHost?: boolean;
 }

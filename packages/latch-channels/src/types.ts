@@ -57,6 +57,103 @@ export interface PendingApproval {
   connectionName?: string;
 }
 
+/** One choice on an `askUser` question. `label` goes on the button. */
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+/** One question from an `askUser` call (mirrors `AskUserQuestion` in latch-ui). */
+export interface Question {
+  question: string;
+  header?: string;
+  options: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+/**
+ * A questionnaire a paused turn is waiting on — an `askUser` tool call parked in
+ * `input-available`. Unlike an approval it resolves through
+ * `runtime.applyToolResult`, and ALL questions resolve in one call, so a channel
+ * must collect every answer before submitting.
+ */
+export interface PendingQuestion {
+  /** The tool call to resolve via `runtime.applyToolResult`. */
+  toolCallId: string;
+  questions: Question[];
+}
+
+/**
+ * A questionnaire in progress on a chat surface — at most one per chat.
+ *
+ * Chat surfaces answer one question at a time, but `applyToolResult` closes the
+ * whole tool call in one shot, so the answers collected so far have to live
+ * somewhere between taps. Serverless channels have no memory between webhook
+ * deliveries, hence a host-backed store.
+ */
+export interface AskSession {
+  /** The parked `askUser` call these answers will resolve. */
+  toolCallId: string;
+  /** Freshness token carried in button payloads so stale buttons are rejected. */
+  nonce: string;
+  /** The questions as posted — avoids a history read on every tap. */
+  questions: Question[];
+  /** Index of the question currently on screen. */
+  cursor: number;
+  /** question text → committed answer, for questions already answered. */
+  answers: Record<string, string>;
+  /** Option indices ticked so far on the current `multiSelect` question. */
+  selected: number[];
+  /** Platform chat to post questions into (the Telegram/WhatsApp chat id). */
+  promptChatId: string;
+  /** Platform id of the visible prompt message (cosmetic — used to edit it). */
+  promptRef?: string;
+  /** Fence for optimistic concurrency; every successful write bumps it. */
+  rev: number;
+}
+
+/**
+ * Host-backed storage for in-flight questionnaires, injected like `seen` and
+ * `claimTurn`. Grouped into one object because these are a single transactional
+ * aggregate over one row — partial wiring is a bug, not a degradation, so a
+ * channel checks for the whole store or renders questions as plain text.
+ */
+export interface AskStateStore {
+  /** The live session for this chat, or null (expired rows count as absent). */
+  get(chatId: string): Promise<AskSession | null>;
+  /**
+   * Claim the right to prompt. Replaces a session for a DIFFERENT tool call,
+   * but leaves one for the SAME tool call untouched and answers `"already"` —
+   * so re-rendering a still-pending questionnaire never double-prompts.
+   */
+  begin(chatId: string, session: Omit<AskSession, "rev">): Promise<"started" | "already">;
+  /** Fenced patch. Returns the new rev, or null when `rev` was stale. */
+  update(
+    chatId: string,
+    toolCallId: string,
+    rev: number,
+    patch: Partial<Pick<AskSession, "cursor" | "answers" | "selected" | "promptRef">>,
+  ): Promise<number | null>;
+  /** Fenced delete — true only if THIS caller removed it. Gates the submit. */
+  finish(chatId: string, toolCallId: string, rev: number): Promise<boolean>;
+  /** Unconditional drop, returning whatever was removed. */
+  clear(chatId: string): Promise<AskSession | null>;
+}
+
+/**
+ * Host-backed "which thread am I in" pointer for surfaces that have exactly one
+ * conversation per person (a Telegram DM, a WhatsApp thread) and therefore no
+ * native way to start a new one. `/new` bumps the epoch; the channel derives the
+ * chat id from it, so epoch 0 keeps the original id and existing conversations
+ * never move.
+ */
+export interface ChannelThreadStore {
+  /** Current epoch for a surface conversation; 0 when it has never rotated. */
+  current(baseChatId: string): Promise<number>;
+  /** Start a fresh thread; returns the new (higher) epoch. */
+  rotate(baseChatId: string): Promise<number>;
+}
+
 /**
  * The subset of the Latch runtime a channel drives. Structural so the package
  * stays decoupled from the concrete app (and could even target a remote Latch).
@@ -73,8 +170,41 @@ export interface ChannelRunOps<P> {
     principal: P;
     decisions: { approvalId: string; approved: boolean }[];
   }): Promise<Response>;
+  /**
+   * Resume a turn paused on a client-handled tool (`askUser`). `output` is the
+   * answer map — one call closes the whole tool call. Optional so existing hosts
+   * keep type-checking; a channel without it can't render questionnaires.
+   */
+  applyToolResult?(input: {
+    chatId: string;
+    principal: P;
+    toolCallId: string;
+    output: unknown;
+  }): Promise<Response>;
+  /**
+   * Summarize the conversation and continue from the summary (`/compact`). Null
+   * when there's too little to compact. Optional so existing hosts keep
+   * type-checking; without it the command reports that it isn't available.
+   */
+  compactChat?(input: {
+    chatId: string;
+    principal: P;
+    focus?: string;
+  }): Promise<{ summary: string; compacted: number } | null>;
   loadHistory(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
 }
+
+/**
+ * Host-provided speech-to-text for inbound voice/audio messages. Channels call
+ * it with the downloaded audio and put the returned transcript in the user
+ * message as text (the audio itself is never sent to the model — chat models
+ * generally don't accept audio input). Throws on failure.
+ */
+export type TranscribeAudio = (audio: {
+  bytes: Uint8Array;
+  mediaType: string;
+  filename: string;
+}) => Promise<string>;
 
 /** A tool-name → approval policy view, for rendering an agent's capabilities. */
 export interface ToolCapability {

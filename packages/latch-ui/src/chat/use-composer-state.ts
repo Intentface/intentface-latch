@@ -2,6 +2,7 @@ import type { ChatStatus, UIMessage } from "ai";
 import { useRef } from "react";
 import type { ToolLabels, ToolPart } from "./message-utils.js";
 import type { AskUserInput, AskUserQuestion } from "./ask-user.js";
+import type { SecretRequestInput } from "./secret-request.js";
 
 /** A single in-flight step shown in the composer's loading queue. */
 export type ComposerStepItem = {
@@ -12,13 +13,15 @@ export type ComposerStepItem = {
 
 /**
  * What the composer should show: the normal input (`idle`), an animated step
- * queue while the agent works (`active`), or a clarification questionnaire
- * (`ask-user`, when an `askUser` tool call is awaiting input).
+ * queue while the agent works (`active`), a clarification questionnaire
+ * (`ask-user`, when an `askUser` tool call is awaiting input), or a credential
+ * form (`secret-request`, when a `request_secret` tool call is awaiting input).
  */
 export type ComposerPanelState =
   | { type: "idle" }
   | { type: "active"; steps: ComposerStepItem[] }
-  | { type: "ask-user"; toolCallId: string; questions: AskUserQuestion[] };
+  | { type: "ask-user"; toolCallId: string; questions: AskUserQuestion[] }
+  | { type: "secret-request"; toolCallId: string; request: SecretRequestInput };
 
 const THINKING: ComposerStepItem = { key: "thinking", label: "Thinking…", kind: "thinking" };
 
@@ -26,6 +29,8 @@ const stateEqual = (a: ComposerPanelState, b: ComposerPanelState): boolean => {
   if (a.type !== b.type) return false;
   if (a.type === "idle") return true;
   if (a.type === "ask-user" && b.type === "ask-user") return a.toolCallId === b.toolCallId;
+  if (a.type === "secret-request" && b.type === "secret-request")
+    return a.toolCallId === b.toolCallId;
   if (a.type === "active" && b.type === "active") {
     if (a.steps.length !== b.steps.length) return false;
     return a.steps.every((s, i) => s.key === b.steps[i].key && s.label === b.steps[i].label);
@@ -57,6 +62,18 @@ const deriveState = (
       const input = ask.input as AskUserInput | undefined;
       return { type: "ask-user", toolCallId: ask.toolCallId, questions: input?.questions ?? [] };
     }
+
+    // Same deal for a paused credential form.
+    const secret = lastAssistant.parts.find(
+      (p): p is ToolPart =>
+        p.type === "tool-request_secret" && "state" in p && p.state === "input-available",
+    );
+    if (secret) {
+      const input = secret.input as SecretRequestInput | undefined;
+      if (input?.fields?.length) {
+        return { type: "secret-request", toolCallId: secret.toolCallId, request: input };
+      }
+    }
   }
 
   if (status === "ready" || status === "error") return { type: "idle" };
@@ -68,6 +85,7 @@ const deriveState = (
   const toolParts = parts.filter(
     (p): p is ToolPart =>
       p.type !== "tool-askUser" &&
+      p.type !== "tool-request_secret" &&
       p.type.startsWith("tool-") &&
       "state" in p &&
       (p.state === "input-streaming" ||

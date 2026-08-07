@@ -2,7 +2,8 @@ import { transform } from "sucrase";
 import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 import type { QuickJSAsyncWASMModule } from "quickjs-emscripten-core";
 import variant from "@jitl/quickjs-singlefile-mjs-release-asyncify";
-import { isBlockedHost } from "../web-fetch";
+import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
+import { pinnedFetch } from "@intentface/latch-net/pinned";
 
 /**
  * The tool-authoring runtime: runs a (human- or agent-) authored JS program in a
@@ -84,7 +85,17 @@ function compile(code: string): string {
 
 function stringifyErr(v: unknown): string {
   if (typeof v === "string") return v;
-  if (v && typeof v === "object" && "message" in v) return String((v).message);
+  if (v && typeof v === "object" && "message" in v) {
+    // undici wraps connect-time failures (incl. the pinned fetch's SSRF
+    // block) as `TypeError: fetch failed` with the reason in `cause` —
+    // surface it or the block looks like a network blip.
+    const cause = (v as { cause?: unknown }).cause;
+    const causeMsg =
+      cause && typeof cause === "object" && "message" in cause && cause.message
+        ? `: ${String(cause.message)}`
+        : "";
+    return String(v.message) + causeMsg;
+  }
   try {
     return JSON.stringify(v);
   } catch {
@@ -136,9 +147,16 @@ async function hostFetch(argJson: string, allowedHosts: string[], caps: ToolCaps
   // Validate a target against protocol + SSRF block + the tool's allowlist.
   // Applied to the INITIAL url AND every redirect hop (see below) — otherwise an
   // allowlisted host could 302 to an internal/loopback address (SSRF).
-  const validate = (t: URL): string | null => {
+  //
+  // `allowedHosts` is NOT a security boundary here: it is supplied by whoever
+  // saves or tests the tool (and is an input of the LLM-callable `test_tool`),
+  // so a caller can allowlist a host they control that resolves to a private
+  // address. The DNS backstop, not the allowlist, is what closes that.
+  const validate = async (t: URL): Promise<string | null> => {
     if (t.protocol !== "http:" && t.protocol !== "https:") return "only http(s) URLs are allowed";
-    if (isBlockedHost(t.hostname)) return `host "${t.hostname}" is not allowed (private/loopback)`;
+    if (isBlockedHost(t.hostname) || (await isBlockedResolved(t.hostname))) {
+      return `host "${t.hostname}" is not allowed (private/loopback)`;
+    }
     if (allowedHosts.length === 0 || !hostAllowed(t.hostname, allowedHosts)) {
       return `host "${t.hostname}" is not in this tool's allowedHosts [${allowedHosts.join(", ")}]`;
     }
@@ -151,9 +169,11 @@ async function hostFetch(argJson: string, allowedHosts: string[], caps: ToolCaps
   try {
     let current = u;
     for (let hop = 0; ; hop++) {
-      const bad = validate(current);
+      const bad = await validate(current);
       if (bad) return JSON.stringify({ error: bad });
-      res = await fetch(current, {
+      // Pinned fetch: vets addresses inside the connection's own DNS lookup,
+      // closing the rebinding gap `validate` alone leaves open.
+      res = await pinnedFetch(current, {
         method: opts.method ?? "GET",
         headers: opts.headers ?? {},
         body: opts.body,

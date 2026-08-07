@@ -146,6 +146,29 @@ interface Bound<P> {
   api: SlackClient;
 }
 
+// ── The Slack chat-id format ────────────────────────────────────────────────
+// `slack_<channel>_<threadRoot>`: a Latch conversation is anchored to a Slack
+// thread, so continuing one means knowing its root `ts`. Defined once here and
+// read back by `parseSlackChatId` — hosts that need to go the other way (a
+// scheduled run posting an anchor and threading under it) use these rather
+// than re-deriving the shape.
+
+/** Build the chat id for a Slack thread. */
+export function slackChatId(channel: string, root: string): string {
+  return `slack_${channel}_${root}`;
+}
+
+/**
+ * The inverse of `slackChatId`, or null when `id` isn't one of ours. A thread
+ * root is a Slack `ts` (`1712345678.000100`), which pins the split — channel
+ * ids never contain a dot.
+ */
+export function parseSlackChatId(id: string): { channel: string; root: string } | null {
+  const m = /^slack_(.+)_(\d+\.\d+)$/.exec(id);
+  if (!m) return null;
+  return { channel: m[1]!, root: m[2]! };
+}
+
 /**
  * One agent's Slack app. The host wires `handleRequest` to a single webhook
  * route (events + interactivity + slash all post here). We verify the
@@ -190,7 +213,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
   const identity = { username: config.botName, icon_emoji: config.iconEmoji };
 
   /** chatId for a Slack thread — anchors a Latch conversation to the thread. */
-  const chatIdFor = (channel: string, root: string) => `slack_${channel}_${root}`;
+  const chatIdFor = slackChatId;
 
   // ── Drive one turn and render it ──────────────────────────────────────────
   async function runTurn(b: Bound<P>, ev: SlackEvent, teamId: string): Promise<void> {

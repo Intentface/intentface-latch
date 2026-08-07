@@ -3,6 +3,9 @@ import { drizzle } from "drizzle-orm/libsql";
 import type { AppMessage } from "@intentface/latch-core";
 import { migrate } from "./migrate.js";
 import { createSqliteAdapter } from "./adapter.js";
+import { createMemoryJobStore } from "./memory-job-store.js";
+import { memoryJobStoreSmoke } from "./memory-job-store.smoke.shared.js";
+import { scheduleSmoke } from "./schedule.smoke.shared.js";
 import * as schema from "./schema.js";
 
 /** A real run against an in-memory libsql DB: persistence + owner isolation + run/usage. */
@@ -11,7 +14,8 @@ type P = { org: string; user?: string };
 async function main() {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  const store = createSqliteAdapter<P>(drizzle(client, { schema }), {
+  const db = drizzle(client, { schema });
+  const store = createSqliteAdapter<P>(db, {
     owner: (p) => (p.user ? [p.org, p.user] : [p.org]),
   });
 
@@ -73,8 +77,19 @@ async function main() {
   const gotRun = await store.getRun(run.id);
   assert(gotRun?.status === "completed", "run updated to completed");
 
+  // Schedules: the opaque delivery blob and the owner-fenced "run now" bump.
+  await scheduleSmoke({ store, me, other: { org: "org_b", user: "user_2" }, assert });
+
+  // Memory job store: extraction/consolidation state machine + usage.
+  await memoryJobStoreSmoke({
+    jobs: createMemoryJobStore(db),
+    store,
+    principal: me,
+    assert,
+  });
+
   console.log(
-    "✅ smoke passed — persistence + owner isolation + run/identity/usage all work",
+    "✅ smoke passed — persistence + owner isolation + run/identity/usage + memory jobs all work",
   );
 }
 

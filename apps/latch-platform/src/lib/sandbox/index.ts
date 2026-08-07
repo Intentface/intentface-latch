@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type { Experimental_SandboxSession } from "ai";
 import type { Principal } from "../session";
@@ -5,7 +6,7 @@ import { createJustBashSession, workspaceDir } from "./just-bash";
 import { createDaytonaSession } from "./daytona";
 import { createMirageSession } from "./mirage";
 import type { GoogleMountCreds } from "../google-workspace";
-import { sandboxTools, appTools, renderTools } from "./tools";
+import { sandboxTools, appTools, renderTools, harnessApproval } from "./tools";
 
 /**
  * The sandbox seam wired for the platform: a per-session `SandboxSession`
@@ -18,8 +19,15 @@ import { sandboxTools, appTools, renderTools } from "./tools";
  * switched between them keeps its files); Daytona persists in an org volume
  * under the same path. chatIds are client-chosen so the key is owner-prefixed.
  */
+// On serverless (Vercel/Lambda) the deploy dir is read-only — only the OS
+// tmpdir is writable, so sandboxes are per-instance-ephemeral there. Use the
+// Daytona provider when files must outlive a warm instance.
+const SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const SANDBOX_BASE =
-  process.env.LATCH_SANDBOX_DIR ?? path.join(process.cwd(), ".latch-sandbox");
+  process.env.LATCH_SANDBOX_DIR ??
+  (SERVERLESS
+    ? path.join(os.tmpdir(), "latch-sandbox")
+    : path.join(process.cwd(), ".latch-sandbox"));
 
 export interface SandboxDeps {
   /** Bot token of the agent's dedicated Slack app (org Vault), or null. */
@@ -58,4 +66,9 @@ export function createSandboxResolver(deps: SandboxDeps = {}) {
   };
 }
 
-export const harnessTools = { sandbox: sandboxTools, app: appTools, render: renderTools };
+export const harnessTools = {
+  sandbox: sandboxTools,
+  app: appTools,
+  render: renderTools,
+  approval: harnessApproval,
+};

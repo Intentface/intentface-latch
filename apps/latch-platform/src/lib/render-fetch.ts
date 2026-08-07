@@ -1,4 +1,4 @@
-import { isBlockedHost } from "./web-fetch";
+import { isBlockedHost, isBlockedResolved } from "@intentface/latch-net";
 
 /**
  * `renderFetch()` — client for the in-repo render service (packages/renderer):
@@ -114,7 +114,9 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
     return { ok: false, error: `Malformed url: ${JSON.stringify(args.url)}` };
   }
   if (target.protocol !== "https:") return { ok: false, error: "Only https URLs can be rendered." };
-  if (isBlockedHost(target.hostname)) {
+  // String blocklist plus the DNS backstop — a public name that resolves to a
+  // private address passes the former. The render service re-checks too.
+  if (isBlockedHost(target.hostname) || (await isBlockedResolved(target.hostname))) {
     return { ok: false, error: "URL blocked (private/loopback hosts are not allowed)." };
   }
 
@@ -134,6 +136,10 @@ export async function renderFetch(args: RenderFetchArgs): Promise<RenderFetchRes
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   try {
+    // Deliberately NOT the DNS-pinned fetch: this request goes to the
+    // operator-configured render service (RENDER_FETCH_URL — localhost in
+    // dev), not to the attacker-controllable target URL. The renderer
+    // enforces its own SSRF guard on the target it navigates to.
     const res = await fetch(endpoint, {
       headers: {
         accept: "application/json",

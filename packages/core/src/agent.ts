@@ -1,4 +1,5 @@
 import type { LanguageModel } from "ai";
+import type { MemoryConfig } from "./memory.js";
 
 /**
  * Agent definitions.
@@ -151,6 +152,15 @@ export interface AgentConfig<P> {
    * models. Omitted → the provider default.
    */
   effort?: "minimal" | "low" | "medium" | "high";
+  /**
+   * Persistent cross-session memory for this agent. Requires the runtime to be
+   * composed with a `MemoryProvider` (`RuntimeConfig.memory`) — without one the
+   * declaration is ignored. When both are set, each turn gets the provider's
+   * compiled memory index appended to `instructions` and its memory tools
+   * (`memory_search`/`memory_save`) merged as capability tools; the provider's
+   * background jobs handle extraction and consolidation out of band.
+   */
+  memory?: MemoryConfig;
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */

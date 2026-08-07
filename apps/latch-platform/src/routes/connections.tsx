@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { Braces, KeyRound, Plug, Plus, Trash2 } from "lucide-react";
+import { Braces, Pencil, Plug, Plus, Trash2 } from "lucide-react";
 import { Dialog } from "@intentface/latch-ui";
 import { cn } from "@/lib/utils";
 import {
   currentPrincipalFn,
   connectionsStatusFn,
-  connectionKeysFn,
-  setConnectionKeyFn,
+  listSecretsFn,
   listConnectionsFn,
+  getConnectionFn,
   addConnectionFn,
   removeConnectionFn,
 } from "@/lib/server";
@@ -23,6 +23,7 @@ import { Select } from "@/components/ui/select";
 import { RichSelect } from "@/components/ui/rich-select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { SecretsSection } from "@/components/secrets-section";
 
 export const Route = createFileRoute("/connections")({
   head: () => ({ meta: [{ title: "Connections · Latch" }] }),
@@ -30,20 +31,20 @@ export const Route = createFileRoute("/connections")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [oauth, keys, dynamic] = await Promise.all([
+    const [oauth, secrets, dynamic] = await Promise.all([
       connectionsStatusFn(),
-      connectionKeysFn(),
+      listSecretsFn(),
       listConnectionsFn(),
     ]);
-    return { oauth, keys, dynamic };
+    return { oauth, secrets, dynamic };
   },
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const { oauth, keys, dynamic } = Route.useLoaderData();
+  const { oauth, secrets, dynamic } = Route.useLoaderData();
   const [addOpen, setAddOpen] = useState(false);
-  const empty = dynamic.length === 0 && oauth.length === 0 && keys.length === 0;
+  const empty = dynamic.length === 0 && oauth.length === 0 && secrets.length === 0;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
@@ -81,13 +82,12 @@ function ConnectionsPage() {
         </Section>
       )}
 
-      {(oauth.length > 0 || keys.length > 0) && (
+      <SecretsSection secrets={secrets} />
+
+      {oauth.length > 0 && (
         <Section label="Built-in">
           {oauth.map((c) => (
             <ConnectionCard key={c.name} connection={c} />
-          ))}
-          {keys.map((k) => (
-            <ApiKeyCard key={k.name} conn={k} />
           ))}
         </Section>
       )}
@@ -111,19 +111,48 @@ function Section({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-function AddConnection({ onDone }: { onDone?: () => void }) {
+/** The prefill payload for edit mode — what `getConnectionFn` returns. */
+type EditableConnection = NonNullable<Awaited<ReturnType<typeof getConnectionFn>>>;
+
+function AddConnection({
+  onDone,
+  initial,
+}: {
+  onDone?: () => void;
+  /** When set, the form edits this connection: name/kind/scope are fixed and blank secrets keep the stored ones. */
+  initial?: EditableConnection;
+}) {
   const router = useRouter();
-  const [kind, setKind] = useState<"mcp" | "openapi">("openapi");
-  const [scope, setScope] = useState<"user" | "org">("user");
-  const [name, setName] = useState("");
-  const [target, setTarget] = useState(""); // url (mcp) or spec url (openapi)
-  const [baseUrl, setBaseUrl] = useState("");
-  const [operations, setOperations] = useState("");
-  const [mcpAuth, setMcpAuth] = useState<"none" | "token" | "oauth">("token");
-  const [authHeader, setAuthHeader] = useState("");
-  const [token, setToken] = useState("");
-  // OAuth has no static secret; the token row is irrelevant then.
-  const oauthMode = kind === "mcp" && mcpAuth === "oauth";
+  const editing = initial != null;
+  const [kind, setKind] = useState<"mcp" | "openapi">(initial?.kind ?? "openapi");
+  const [scope, setScope] = useState<"user" | "org">(initial?.scope ?? "user");
+  const [name, setName] = useState(initial?.name ?? "");
+  // url (mcp) or spec url (openapi)
+  const [target, setTarget] = useState(initial?.url ?? initial?.spec ?? "");
+  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? "");
+  const [operations, setOperations] = useState(initial?.operations ?? "");
+  const [mcpAuth, setMcpAuth] = useState<"none" | "token" | "oauth">(
+    initial?.kind === "mcp" && initial.authMode !== "oauth2" ? initial.authMode : "token",
+  );
+  const [apiAuth, setApiAuth] = useState<"none" | "token" | "oauth2">(
+    initial?.kind === "openapi" && initial.authMode !== "oauth" ? initial.authMode : "token",
+  );
+  const [authHeader, setAuthHeader] = useState(initial?.authHeader ?? "");
+  const [token, setToken] = useState(""); // never prefilled — secrets stay server-side
+  const [authorizeEndpoint, setAuthorizeUrl] = useState(initial?.authorizeUrl ?? "");
+  const [tokenEndpoint, setTokenUrl] = useState(initial?.tokenUrl ?? "");
+  const [clientId, setClientId] = useState(initial?.clientId ?? "");
+  const [clientSecret, setClientSecret] = useState(""); // never prefilled
+  const [scopes, setScopes] = useState(initial?.scopes ?? "");
+  // Interactive OAuth has no static secret; the token row is irrelevant then.
+  const oauth2Mode = kind === "openapi" && apiAuth === "oauth2";
+  const mcpOauthMode = kind === "mcp" && mcpAuth === "oauth";
+  const oauthMode = mcpOauthMode || oauth2Mode;
+  // A blank secret is fine when editing a connection that already has one.
+  const secretOk = clientSecret.trim() !== "" || (editing && initial.hasClientSecret);
+  const oauth2Missing =
+    oauth2Mode &&
+    !(authorizeEndpoint.trim() && tokenEndpoint.trim() && clientId.trim() && secretOk);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -139,7 +168,7 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !target.trim() || busy) return;
+    if (!name.trim() || !target.trim() || oauth2Missing || busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -152,16 +181,26 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
           spec: kind === "openapi" ? target : undefined,
           baseUrl: baseUrl || undefined,
           operations: operations || undefined,
-          authMode: kind === "mcp" ? mcpAuth : undefined,
+          authMode: kind === "mcp" ? mcpAuth : apiAuth,
           authHeader: oauthMode ? undefined : authHeader || undefined,
           token: oauthMode ? undefined : token || undefined,
+          authorizeUrl: oauth2Mode ? authorizeEndpoint : undefined,
+          tokenUrl: oauth2Mode ? tokenEndpoint : undefined,
+          clientId: oauth2Mode ? clientId : undefined,
+          clientSecret: oauth2Mode ? clientSecret : undefined,
+          scopes: oauth2Mode || mcpOauthMode ? scopes || undefined : undefined,
         },
       });
       if (!res.ok) {
         setError(res.error ?? "Failed to add");
         return;
       }
-      setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
+      if (!editing) {
+        // Fresh-add form is reused for the next add; the edit dialog unmounts
+        // on close, and clearing it would flash blank fields mid-transition.
+        setName(""); setTarget(""); setBaseUrl(""); setOperations(""); setAuthHeader(""); setToken("");
+        setAuthorizeUrl(""); setTokenUrl(""); setClientId(""); setClientSecret(""); setScopes("");
+      }
       await router.invalidate();
       onDone?.();
     } finally {
@@ -171,31 +210,44 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
 
   return (
     <form className="space-y-2" onSubmit={submit}>
-      <div className="flex gap-2">
-            <Select value={kind} onChange={(e) => setKind(e.target.value as never)}>
-              <option value="openapi">OpenAPI</option>
-              <option value="mcp">MCP</option>
-            </Select>
-            <RichSelect
-              value={scope}
-              onValueChange={(v) => setScope(v as "user" | "org")}
-              className="min-w-[8rem]"
-              options={[
-                {
-                  value: "user",
-                  label: "Personal",
-                  description: "Only you can see and use this connection, with your own token.",
-                },
-                {
-                  value: "org",
-                  label: "Org",
-                  description: "Everyone in your org can use it — one shared token, or per-user with OAuth.",
-                },
-              ]}
-            />
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
-          </div>
-          <p className="text-ink-tertiary text-xs">{scopeHelp}</p>
+      {editing ? (
+            // Identity is fixed while editing — the store upserts by (name, scope),
+            // so changing either would create a second connection instead.
+            <p className="text-ink-secondary text-sm">
+              <span className="font-medium">{name}</span>
+              <span className="text-ink-tertiary">
+                {" "}· {kind.toUpperCase()} · {scope === "org" ? "org" : "personal"}
+              </span>
+            </p>
+          ) : (
+            <>
+              <div className="flex gap-2">
+                <Select value={kind} onChange={(e) => setKind(e.target.value as never)}>
+                  <option value="openapi">OpenAPI</option>
+                  <option value="mcp">MCP</option>
+                </Select>
+                <RichSelect
+                  value={scope}
+                  onValueChange={(v) => setScope(v as "user" | "org")}
+                  className="min-w-[8rem]"
+                  options={[
+                    {
+                      value: "user",
+                      label: "Personal",
+                      description: "Only you can see and use this connection, with your own token.",
+                    },
+                    {
+                      value: "org",
+                      label: "Org",
+                      description: "Everyone in your org can use it — one shared token, or per-user with OAuth.",
+                    },
+                  ]}
+                />
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. github)" />
+              </div>
+              <p className="text-ink-tertiary text-xs">{scopeHelp}</p>
+            </>
+          )}
           <Input
             value={target}
             onChange={(e) => setTarget(e.target.value)}
@@ -222,31 +274,122 @@ function AddConnection({ onDone }: { onDone?: () => void }) {
               />
             </label>
           )}
+          {kind === "openapi" && (
+            <label className="text-muted-foreground flex items-center gap-2 text-xs">
+              Authentication
+              <RichSelect
+                value={apiAuth}
+                onValueChange={(v) => setApiAuth(v as "none" | "token" | "oauth2")}
+                className="min-w-[11rem]"
+                options={[
+                  { value: "token", label: "Token / API key", description: "Static token (org = one shared key)" },
+                  { value: "oauth2", label: "OAuth2 app", description: "Pre-registered client — authorize in browser (per-user tokens)" },
+                  { value: "none", label: "None", description: "No authentication" },
+                ]}
+              />
+            </label>
+          )}
+          {oauth2Mode && (
+            <>
+              <div className="flex gap-2">
+                <Input
+                  value={authorizeEndpoint}
+                  onChange={(e) => setAuthorizeUrl(e.target.value)}
+                  placeholder="authorize URL (e.g. https://www.strava.com/oauth/authorize)"
+                />
+                <Input
+                  value={tokenEndpoint}
+                  onChange={(e) => setTokenUrl(e.target.value)}
+                  placeholder="token URL (e.g. https://www.strava.com/oauth/token)"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  className="max-w-[12rem]"
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  placeholder="client ID"
+                />
+                <Input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  placeholder={
+                    editing && initial.hasClientSecret
+                      ? "client secret (blank = keep current)"
+                      : "client secret"
+                  }
+                />
+                <Input
+                  value={scopes}
+                  onChange={(e) => setScopes(e.target.value)}
+                  placeholder="scopes (space-separated; Strava: read,activity:read_all)"
+                />
+              </div>
+            </>
+          )}
           {!oauthMode && (
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-1">
+              <div className="flex gap-2">
+                <Input
+                  className="max-w-[12rem]"
+                  value={authHeader}
+                  onChange={(e) => setAuthHeader(e.target.value)}
+                  placeholder="auth header (blank = Bearer)"
+                />
+                <Input
+                  type="password"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  placeholder={
+                    editing && initial.hasToken
+                      ? "token / API key (blank = keep current)"
+                      : "token / API key (optional)"
+                  }
+                />
+              </div>
+              {token.trim() !== "" && (
+                <p className="text-muted-foreground text-xs">
+                  Saved as a named secret under Secrets below. Replace it there later and this
+                  connection picks up the new value straight away.
+                </p>
+              )}
+            </div>
+          )}
+          {mcpOauthMode && (
+            <div className="flex flex-col gap-1">
               <Input
-                className="max-w-[12rem]"
-                value={authHeader}
-                onChange={(e) => setAuthHeader(e.target.value)}
-                placeholder="auth header (blank = Bearer)"
+                value={scopes}
+                onChange={(e) => setScopes(e.target.value)}
+                placeholder="scopes (space-separated; Loredex: private_only)"
               />
-              <Input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="token / API key (optional)"
-              />
+              <p className="text-muted-foreground text-xs">
+                <span className="font-medium">private_only</span> restricts a Loredex connection to
+                files you own privately — shared workspace files and other members&rsquo; files
+                become unreachable, and new folders the agent creates land in your private area.
+              </p>
             </div>
           )}
           {oauthMode && (
             <p className="text-muted-foreground text-xs">
               No token needed — after adding, click <span className="font-medium">Connect</span> to
               authorize. Tokens are stored per-user, envelope-encrypted in the Vault.
+              {mcpOauthMode && (
+                <>
+                  {" "}
+                  Changing scopes clears the stored token, because the old one keeps the old
+                  permissions — you will need to <span className="font-medium">Connect</span> again.
+                </>
+              )}
             </p>
           )}
           {error && <p className="text-destructive text-sm">{error}</p>}
-      <Button type="submit" className="w-full" disabled={busy || !name.trim() || !target.trim()}>
-        Add connection
+      <Button
+        type="submit"
+        className="w-full"
+        disabled={busy || !name.trim() || !target.trim() || oauth2Missing}
+      >
+        {editing ? "Save changes" : "Add connection"}
       </Button>
     </form>
   );
@@ -267,6 +410,28 @@ function DynamicCard({
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editInitial, setEditInitial] = useState<EditableConnection | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  async function openEdit() {
+    setBusy(true);
+    setEditError(null);
+    try {
+      const c = await getConnectionFn({
+        data: { name: conn.name, scope: conn.scope as "user" | "org" },
+      });
+      if (!c) {
+        setEditError("Connection not found — it may have been removed.");
+        return;
+      }
+      setEditInitial(c);
+      setEditOpen(true);
+    } catch {
+      setEditError("Couldn't load the connection — try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
   async function remove() {
     setBusy(true);
     await removeConnectionFn({ data: { name: conn.name, scope: conn.scope as "user" | "org" } });
@@ -304,6 +469,7 @@ function DynamicCard({
           <p className="text-ink-tertiary truncate text-xs">
             {conn.kind.toUpperCase()} · {conn.target}
           </p>
+          {editError && <p className="text-destructive text-xs">{editError}</p>}
         </div>
         <div className="flex shrink-0 gap-1">
           {conn.oauth &&
@@ -322,68 +488,32 @@ function DynamicCard({
                 Connect
               </Button>
             ))}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={openEdit} aria-label="Edit">
+            <Pencil className="size-4" />
+          </Button>
           <Button size="sm" variant="ghost" disabled={busy} onClick={remove} aria-label="Delete">
             <Trash2 className="size-4" />
           </Button>
         </div>
       </CardContent>
-    </Card>
-  );
-}
-
-function ApiKeyCard({
-  conn,
-}: {
-  conn: { name: string; label: string; scope: string; set: boolean };
-}) {
-  const router = useRouter();
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function save() {
-    if (!value.trim()) return;
-    setBusy(true);
-    try {
-      await setConnectionKeyFn({ data: { name: conn.name, value: value.trim() } });
-      setValue("");
-      await router.invalidate();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Card size="sm">
-      <CardContent className="space-y-2 py-3">
-        <div className="flex items-center gap-3">
-          <div className="bg-tertiary border-primary-border text-ink-secondary grid size-9 shrink-0 place-items-center rounded-lg border">
-            <KeyRound className="size-4" />
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <Dialog.Content className="max-w-md">
+          <Dialog.Title>Edit connection</Dialog.Title>
+          <Dialog.Description>
+            Name, kind and scope are fixed. Secret fields left blank keep the stored value.
+          </Dialog.Description>
+          <div className="mt-4">
+            {editInitial && (
+              // Remount per open so stale form state never leaks between edits.
+              <AddConnection
+                key={`${editInitial.scope}:${editInitial.name}:${editOpen}`}
+                initial={editInitial}
+                onDone={() => setEditOpen(false)}
+              />
+            )}
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-sm font-medium capitalize">{conn.label}</span>
-              <Badge variant={conn.set ? "secondary" : "outline"}>
-                {conn.set ? "key set" : "no key"}
-              </Badge>
-              <Badge variant="outline" className="ml-auto">{conn.scope}-level</Badge>
-            </div>
-            <p className="text-ink-tertiary truncate text-xs">
-              REST API — key stored envelope-encrypted in the Vault, brokered server-side.
-            </p>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <Input
-            type="password"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder={conn.set ? "Replace API key…" : "Paste API key…"}
-          />
-          <Button size="sm" disabled={busy || !value.trim()} onClick={save}>
-            Save
-          </Button>
-        </div>
-      </CardContent>
+        </Dialog.Content>
+      </Dialog>
     </Card>
   );
 }

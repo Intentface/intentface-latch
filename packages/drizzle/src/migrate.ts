@@ -49,19 +49,47 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   `CREATE TABLE IF NOT EXISTS latch_schedules (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity TEXT,
-     cron TEXT, timezone TEXT, prompt TEXT NOT NULL, next_run_at INTEGER NOT NULL, last_run_at INTEGER,
+     cron TEXT, timezone TEXT, prompt TEXT NOT NULL, delivery TEXT,
+     next_run_at INTEGER NOT NULL, last_run_at INTEGER,
      enabled INTEGER NOT NULL, lease_owner TEXT, lease_expires_at INTEGER,
      created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_owner_idx ON latch_schedules (owner)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_due_idx ON latch_schedules (enabled, next_run_at)`,
+  // Memory sweep state (see @intentface/latch-memory). Lease columns mirror
+  // latch_schedules; next_eligible_at always advances so nothing hot-loops.
+  // (The sweep index on latch_chats lives in ALTERS: it references the `kind`
+  // column, which pre-existing DBs only gain from the ALTER below.)
+  `CREATE TABLE IF NOT EXISTS latch_memory_chat_state (
+     chat_id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, scope_key TEXT NOT NULL,
+     last_extracted_seq INTEGER NOT NULL DEFAULT -1, last_extracted_key TEXT,
+     next_eligible_at INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+     lease_owner TEXT, lease_expires_at INTEGER,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_memory_chat_state_scope_idx ON latch_memory_chat_state (scope_key)`,
+  `CREATE TABLE IF NOT EXISTS latch_memory_scope_state (
+     scope_key TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, connection TEXT NOT NULL,
+     identity TEXT, has_new INTEGER NOT NULL DEFAULT 0, pending_episodes TEXT,
+     consolidation_watermark TEXT, last_consolidated_at INTEGER,
+     next_eligible_at INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+     lease_owner TEXT, lease_expires_at INTEGER,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_memory_scope_due_idx ON latch_memory_scope_state (has_new, next_eligible_at)`,
+  `CREATE TABLE IF NOT EXISTS latch_memory_usage (
+     scope_key TEXT NOT NULL, memory_id TEXT NOT NULL,
+     usage_count INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER, created_at INTEGER NOT NULL,
+     PRIMARY KEY (scope_key, memory_id))`,
 ];
 
 /** Idempotent column adds for DBs created before a column existed. */
 const ALTERS = [
   `ALTER TABLE latch_schedules ADD COLUMN timezone TEXT`,
+  `ALTER TABLE latch_schedules ADD COLUMN delivery TEXT`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_read_tokens INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`,
+  `ALTER TABLE latch_memory_chat_state ADD COLUMN last_extracted_key TEXT`,
+  // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
+  `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];
 
 /**

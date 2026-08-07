@@ -54,6 +54,22 @@ export interface SendMessageInput {
   link_preview_options?: { is_disabled: boolean };
 }
 
+/** Telegram's hard cap on `callback_data`. Over it, sendMessage 400s. */
+export const MAX_CALLBACK_DATA_BYTES = 64;
+
+/**
+ * Guard a `callback_data` payload against Telegram's 64-byte cap. Encoders call
+ * this so an over-long payload fails loudly at the call site instead of as an
+ * opaque 400 from an unrelated `sendMessage`.
+ */
+export function assertCallbackData(data: string): string {
+  const bytes = new TextEncoder().encode(data).length;
+  if (bytes > MAX_CALLBACK_DATA_BYTES) {
+    throw new Error(`callback_data too long (${bytes} > ${MAX_CALLBACK_DATA_BYTES}): ${data}`);
+  }
+  return data;
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -132,6 +148,17 @@ export function telegramApi(token: TelegramToken, opts: TelegramApiOptions = {})
       await call("deleteWebhook", {});
     },
 
+    /**
+     * Publish the bot's command list — what Telegram shows in the "/" menu and
+     * autocompletes. Cosmetic: the commands work either way, but nothing else
+     * makes them discoverable. Call it whenever the webhook is (re-)registered.
+     */
+    async setMyCommands(
+      commands: { command: string; description: string }[],
+    ): Promise<void> {
+      await call("setMyCommands", { commands });
+    },
+
     async getWebhookInfo(): Promise<TelegramWebhookInfo> {
       const r = asObject(await call("getWebhookInfo", {}));
       return {
@@ -154,6 +181,19 @@ export function telegramApi(token: TelegramToken, opts: TelegramApiOptions = {})
     /** Edit a previously sent message in place (the streaming primitive). */
     async editMessageText(input: SendMessageInput & { message_id: number }): Promise<void> {
       await call("editMessageText", { ...input });
+    },
+
+    /**
+     * Swap (or remove) just a message's inline keyboard. Used to re-tick
+     * multi-select options and to retire stale buttons — cheaper than
+     * `editMessageText` and it can't trip the "message is not modified" 400.
+     */
+    async editMessageReplyMarkup(input: {
+      chat_id: number | string;
+      message_id: number;
+      reply_markup?: { inline_keyboard: InlineKeyboardButton[][] };
+    }): Promise<void> {
+      await call("editMessageReplyMarkup", { ...input });
     },
 
     /** Show "typing…" in the chat (auto-expires after ~5s or the next message). */

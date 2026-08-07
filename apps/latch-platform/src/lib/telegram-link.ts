@@ -14,9 +14,17 @@ function secret(): string {
   return secretEnv("BETTER_AUTH_SECRET", "dev-only-secret-change-me");
 }
 
-function sign(botId: string, telegramUserId: string, exp: number): string {
+function sign(
+  botId: string,
+  telegramUserId: string,
+  exp: number,
+  username: string,
+): string {
+  // The username rides along ONLY for the confirmation page's display — but
+  // it must be inside the HMAC, or a phisher could relabel their own link
+  // with the victim's handle.
   return createHmac("sha256", secret())
-    .update(`telegram:${botId}:${telegramUserId}:${exp}`)
+    .update(`telegram:${botId}:${telegramUserId}:${exp}:${username}`)
     .digest("hex");
 }
 
@@ -25,13 +33,15 @@ export function buildTelegramLinkUrl(
   baseUrl: string,
   botId: string,
   telegramUserId: string,
+  username?: string,
 ): string {
   const exp = Date.now() + TTL_MS;
   const q = new URLSearchParams({
     bot: botId,
     user: telegramUserId,
+    ...(username ? { un: username } : {}),
     exp: String(exp),
-    sig: sign(botId, telegramUserId, exp),
+    sig: sign(botId, telegramUserId, exp, username ?? ""),
   });
   return `${baseUrl}/telegram/link?${q}`;
 }
@@ -42,11 +52,12 @@ export function verifyTelegramLink(
   telegramUserId: string,
   exp: number,
   sig: string,
+  username = "",
 ): boolean {
   if (!Number.isFinite(exp) || Date.now() > exp) return false;
   let expected: string;
   try {
-    expected = sign(botId, telegramUserId, exp);
+    expected = sign(botId, telegramUserId, exp, username);
   } catch (e) {
     // No signing secret (misconfigured production): no inbound link can be
     // valid — refuse instead of 500ing. BUILDING links still throws loudly.

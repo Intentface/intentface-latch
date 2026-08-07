@@ -2,9 +2,10 @@ import { waitUntil } from "@vercel/functions";
 import { telegramChannel } from "@intentface/latch-channels/telegram";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
-import { telegramVaultKeys, type TelegramBot } from "./telegram-store";
+import { telegramVaultKeys } from "./telegram-store";
 import { buildTelegramLinkUrl } from "./telegram-link";
 import { baseUrl } from "./base-url";
+import { transcribeAudio } from "./transcribe";
 import type { Principal } from "./session";
 
 /**
@@ -37,15 +38,39 @@ export async function getTelegramChannelForBot(botId: string) {
     runtime: {
       handleChat: (i) => runtime.handleChat(i),
       applyApproval: (i) => runtime.applyApproval(i),
+      // Resumes a turn parked on `askUser` — what makes questionnaires answerable
+      // from Telegram rather than only in the web composer.
+      applyToolResult: (i) => runtime.applyToolResult(i),
+      // Backs `/compact`: summarize the thread and keep going in it, so a DM that
+      // never ends stops growing its prompt without losing what matters.
+      compactChat: (i) => runtime.compactChat(i),
       loadHistory: (i) => runtime.loadHistory(i),
     },
+    // Holds the answers collected so far while a questionnaire is on screen.
+    askState: {
+      get: (chatId) => telegramStore.getAsk(chatId),
+      begin: (chatId, session) => telegramStore.beginAsk(chatId, session),
+      update: (chatId, toolCallId, rev, patch) =>
+        telegramStore.updateAsk(chatId, toolCallId, rev, patch),
+      finish: (chatId, toolCallId, rev) => telegramStore.finishAsk(chatId, toolCallId, rev),
+      clear: (chatId) => telegramStore.clearAsk(chatId),
+    },
+    // Which conversation this DM is writing to — what makes `/new` possible.
+    thread: {
+      current: (key) => telegramStore.currentThread(key),
+      rotate: (key) => telegramStore.rotateThread(key),
+    },
     waitUntil: (p) => waitUntil(p),
+    // Voice/audio messages reach the agent as transcribed text (ElevenLabs).
+    transcribe: ({ bytes, mediaType, filename }) =>
+      // fresh copy pins the buffer type to ArrayBuffer (BlobPart rejects ArrayBufferLike)
+      transcribeAudio({ audio: new Blob([new Uint8Array(bytes)], { type: mediaType }), filename }),
     seen: (key) => telegramStore.seenDelivery(key),
     claimTurn: (chatId) => telegramStore.claimTurn(chatId),
     releaseTurn: (chatId, token) => telegramStore.releaseTurn(chatId, token),
     // Only linked platform users may drive the agent; refusals get a signed
     // link, and the triggering message is stashed for post-link replay.
-    authorizeUser: async ({ telegramUserId }) => {
+    authorizeUser: async ({ telegramUserId, username }) => {
       const identity = await telegramStore.resolveIdentity(botId, telegramUserId);
       if (identity) {
         // Identity rows outlive org membership — revalidate before minting a
@@ -69,7 +94,7 @@ export async function getTelegramChannelForBot(botId: string) {
       return {
         allowed: false,
         message: "You need a Latch account to use this agent.",
-        linkUrl: buildTelegramLinkUrl(baseUrl(), botId, telegramUserId),
+        linkUrl: buildTelegramLinkUrl(baseUrl(), botId, telegramUserId, username),
       };
     },
     stashPending: (input) =>
@@ -91,5 +116,5 @@ export async function getTelegramChannelForBot(botId: string) {
     },
   });
 
-  return { channel, bot: bot as TelegramBot };
+  return { channel, bot: bot };
 }

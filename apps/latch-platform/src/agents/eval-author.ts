@@ -2,11 +2,8 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
-import { sharedReadTools } from "@intentface/latch-agent-builder";
 import type { Principal } from "@/lib/session";
-import { compactResult } from "@/lib/evals/store";
-import { builderDeps } from "./agent-builder";
-import { listEvalSetsTool, personalOwner } from "./extensions/evals";
+import { sharedReadTools } from "./shared-read-tools";
 
 /**
  * The Eval Author — an internal helper the Agent Builder delegates eval work
@@ -64,32 +61,10 @@ export function transcriptOf(messages: unknown[]): TranscriptMessage[] {
 async function evalAuthorTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy import avoids a static import cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
-  const { runtime, evalStore } = await getLatch();
-  const { store, connectionTools } = await builderDeps();
+  const { runtime, agentStore, allConnections, evalStore } = await getLatch();
 
   return {
-    // Same get_agent / list_connection_tools / list_eval_sets the builder
-    // carries — one implementation so the two agents can't drift.
-    ...sharedReadTools(principal, { store, connectionTools }),
-    list_eval_sets: listEvalSetsTool(principal, evalStore),
-
-    get_eval_run: tool({
-      description:
-        "Full results of one eval run by runId: per-case pass/fail, reasons, answer preview, tool calls, and the threadId of each case's transcript (read it with read_transcript).",
-      inputSchema: z.object({ runId: z.string() }),
-      execute: async ({ runId }) => {
-        const run = await evalStore.getRun(personalOwner(principal), runId);
-        if (!run) return { error: `No eval run "${runId}".` };
-        return {
-          runId: run.id,
-          agentName: run.agentName,
-          setName: run.setName,
-          passed: run.passCount,
-          failed: run.failCount,
-          results: run.results.map(compactResult),
-        };
-      },
-    }),
+    ...sharedReadTools(principal, { agentStore, allConnections, evalStore }),
 
     read_transcript: tool({
       description:
@@ -113,35 +88,36 @@ export const evalAuthor = defineAgent<Principal, { orgId: string }>(
 
 OUTPUT CONTRACT (hard rule): your FINAL answer must be exactly one fenced \`\`\`json code block and NOTHING else — no preamble, no prose before or after. If you can't complete the task, the block contains {"error": "<one-line reason>"}. If a follow-up message points out your JSON was malformed, reply with ONLY the corrected block.
 
+You author ONLINE EVALS: judge rubrics attached to an agent that run automatically on live runs — a pinned LLM judge grades each qualifying turn and the verdict lands as a score (named after the rubric) the user watches on the Observability page. By default the judge sees the user message, the agent's final answer, and the tool calls it made — each tool NAME with a compact view of its key ARGUMENTS (long values truncated). So criteria about which subagent was delegated to (spawn_agent's agent arg), which tool ran, or what was written are all fair game.
+
+Each rubric may carry two optional CONDITION fields:
+- "trigger" — WHEN the judge runs (omit → every turn). A structural predicate tree over facts of the finished turn, never message content. Leaves: {"kind":"turn","eq"|"gte"|"lte"|"everyNth":N} (1-based turn # within the chat; everyNth matches turns N, 2N, …), {"kind":"toolCalled","name"?:string} (name omitted → any tool), {"kind":"depth","eq"|"gte"|"lte":N} (0 = top-level), {"kind":"chatKind","is":"user"|"internal"}. Combinators: {"kind":"all"|"any","of":[…]}, {"kind":"not","of":node}. Rubrics skip subagent (depth>0) turns unless the trigger mentions depth. Examples: greets on first message → {"kind":"turn","eq":1}; spot-check every 5th turn → {"kind":"turn","everyNth":5}.
+- "context" — WHAT the judge sees: "turn" (default, described above), "chat" (adds the conversation's user/assistant text so far — for criteria about consistency or not repeating itself), "loop" (this turn full-fidelity: all assistant text plus every tool call WITH its output, subagents as one-line summaries — the only scope where criteria may reference tool OUTPUTS).
+Content conditionality ("IF the user asks about pricing…") stays ENGLISH inside the prompt — triggers are structural only. Prefer no trigger and "turn" context unless the criterion genuinely needs otherwise.
+
 You operate in one of two modes, decided by the incoming message:
 
 MODE 1 — AUTHOR (the message is a brief: agent name, purpose, expected behaviors, edge cases, refusal rules).
-Ground yourself first: get_agent for the target's instructions/connections/capabilities (built-in agents aren't editable and won't resolve — then work from the brief alone); list_eval_sets to see existing cases (when EDITING a set, keep existing case ids STABLE — run history is only comparable when ids persist); list_connection_tools for the REAL tool names when writing toolCalls / forbiddenTools checks — never guess a tool name.
-Then answer with a JSON ARRAY of cases, each:
-  {"id"?: string, "name": string, "input": string, "expected": {"assertions"?: {"contains"?: string[], "notContains"?: string[], "regex"?: string[]}, "toolCalls"?: [{"tool": string, "args"?: object, "maxCalls"?: number}], "forbiddenTools"?: string[], "toolOrder"?: string[], "maxTotalToolCalls"?: number, "rubric"?: string[]}, "repeats"?: number}
+Ground yourself first: get_agent for the target's instructions/connections/capabilities AND its current attachedEvals (built-in agents aren't editable and won't resolve — then work from the brief alone); list_connection_tools when a rubric depends on which tools exist — never guess a tool name. When the agent already has attached evals, this is an EDIT: keep the names of rubrics you're not changing STABLE (score history in Langfuse is only comparable when names persist) and return the FULL replacement list.
+Then answer with a JSON ARRAY of rubrics, each:
+  {"name": string, "prompt": string, "judgeModelId"?: string, "scale": "binary" | "score", "enabled": true, "trigger"?: <trigger tree>, "context"?: "turn" | "chat" | "loop"}
 Craft rules:
-- 5–15 cases covering happy paths, edge cases, ambiguous inputs, and things the agent should refuse or escalate (unless the brief asks otherwise).
-- Every case needs at least one POPULATED check — an empty expected would always pass and is rejected at save time.
-- Prefer toolCalls checks for tool-using agents (most reliable); args is a SUBSET match, so pin only the arguments that matter. For dynamic values (dates, ids) use a matcher: {"date": {"$regex": "^2026-"}} — same regex limits as assertion regexes.
-- toolOrder (≥2 names) checks RELATIVE order ("orient before generating a plan"); other calls may interleave. maxCalls / maxTotalToolCalls bound repeated calls — use when the agent is prone to loops, not by default.
-- repeats (2–5): run the case N times, pass on majority, record the pass rate. ONLY for behavior you've seen flake (e.g. a diagnosis showed the agent sometimes picks the wrong tool) — each repeat costs a full agent run.
-- rubric (max 5): plain-language criteria graded by a pinned LLM judge — for qualities deterministic checks can't express ("explains the WHY behind the plan", "stays encouraging when declining"). A failed criterion FAILS the case, so write criteria a reasonable judge can verify from the answer alone; each names ONE observable quality. The judge sees the user message, the full answer, and tool NAMES (no args) — never write a criterion about argument values (use a toolCalls args check). Prefer deterministic checks when a substring or tool check works; rubric is the tier for judgment, not a shortcut.
-- contains strings: short and distinctive, case-insensitive — models rephrase, so never assert long exact sentences.
-- regex: max 200 chars, no nested quantifiers like (a+)+; prefer contains when a plain substring works.
-- input is the user message verbatim (max 4000 chars); name is a short human label like "refund question escalates".
+- 3–7 rubrics covering the qualities that make this agent good: correctness of scope ("answers the question that was asked"), tone, tool discipline ("uses a search tool before claiming facts"), refusal/escalation rules, formatting promises. Every enabled rubric costs one judge call per live run — quality over quantity.
+- name: kebab-case, short, stable — it becomes the Langfuse score name ("stays-on-topic", "escalates-refunds").
+- prompt: ONE observable quality per rubric, judgeable from the user message + final answer + the tool calls (names + key args). Criteria may reference tool names AND salient argument values (e.g. "delegates to the running-coach-memory-writer subagent via spawn_agent", "writes the run to the runs table"), but not tool OUTPUTS or anything the judge can't see. Write it so a reasonable judge can verify it on ANY real run — unlike test cases there is no fixed input, so avoid criteria that only apply to one scenario ("mentions Paris"); prefer conditionals ("IF the user asks about pricing, quotes exact catalog prices").
+- scale: prefer "binary" (clear pass/fail). Use "score" only for genuinely graded qualities ("depth of explanation") — and say in the prompt what 0 and 1 look like.
+- When genuinely ambiguous whether a quality is judgeable, leave it out and note it in a rubric prompt you DO include only if observable.
 
-MODE 2 — DIAGNOSE (the message names a runId and which cases failed).
-Call get_eval_run for the full results, then read_transcript on each failing case's threadId to see what the agent actually said and which tools it called with what args. Decide for each failure whether the AGENT misbehaved or the CASE's check is brittle (behavior right, phrasing/assertion wrong).
-Then answer with a JSON ARRAY of verdicts, one per failing case:
-  {"caseId": string, "cause": string, "fixTarget": "agent" | "case" | "rubric", "suggestion": string}
-- cause: one or two sentences on what actually happened in the transcript.
+MODE 2 — RUBRIC REVIEW (the message names an agent and pastes rubric names with example verdicts/comments from the Observability page).
+Ground yourself with get_agent (instructions + current attachedEvals); use read_transcript on any threadIds the briefing includes to see what the agent actually did. Decide for each problem rubric whether the AGENT misbehaved or the RUBRIC is unjudgeable, too strict, or about the wrong thing (the judge's comments show its read).
+Then answer with a JSON ARRAY of verdicts, one per problem rubric:
+  {"name": string, "cause": string, "fixTarget": "agent" | "rubric", "suggestion": string}
+- cause: one or two sentences on what's actually happening.
 - fixTarget "agent": the behavior is wrong → suggestion is the concrete instruction change (quote the sentence(s) to add or rewrite).
-- fixTarget "case": the behavior is right but the check failed on phrasing → suggestion is the replacement check (e.g. swap a long contains for a distinctive short one, or a toolCalls check).
-- fixTarget "rubric": the behavior is right but a rubric criterion is unjudgeable, too strict, or about the wrong thing (the failing verdict's reason shows the judge's read) → suggestion is the replacement criterion wording.
-- A rubric failure whose verdict has "error" set is a judge INFRA failure, not a case failure — ignore it in your verdicts.
-- Never suggest weakening a check just to make a genuinely wrong behavior pass.
+- fixTarget "rubric": the behavior is right but the rubric misjudges it → suggestion is the full replacement rubric prompt (same name unless renaming is the fix).
+- Never suggest weakening a rubric just to make a genuinely wrong behavior pass.
 
-If a human chats with you directly: briefly explain you're the Agent Builder's eval helper and ask for an authoring brief or a runId to diagnose — then still answer in the JSON contract.`,
+If a human chats with you directly: briefly explain you're the Agent Builder's eval helper and ask for an authoring brief or rubric-review examples — then still answer in the JSON contract.`,
     toolSources: [
       {
         async open(principal) {

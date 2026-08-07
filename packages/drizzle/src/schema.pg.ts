@@ -25,7 +25,11 @@ export const chats = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("latch_chats_owner_idx").on(t.owner)],
+  (t) => [
+    index("latch_chats_owner_idx").on(t.owner),
+    // The memory sweep enumerates idle chats system-wide (no owner filter).
+    index("latch_chats_sweep_idx").on(t.kind, t.updatedAt),
+  ],
 );
 
 export const messages = pgTable(
@@ -143,6 +147,63 @@ export const agents = pgTable(
   (t) => [uniqueIndex("latch_agents_owner_name").on(t.owner, t.name)],
 );
 
+/** Memory-sweep state per chat — see the SQLite schema for semantics. */
+export const memoryChatState = pgTable(
+  "latch_memory_chat_state",
+  {
+    chatId: text("chat_id").primaryKey(),
+    owner: text("owner").notNull(),
+    agent: text("agent").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    lastExtractedSeq: integer("last_extracted_seq").notNull().default(-1),
+    /** Idempotency key of the last COMPLETED run (content hash + prompt version). */
+    lastExtractedKey: text("last_extracted_key"),
+    nextEligibleAt: bigint("next_eligible_at", { mode: "number" }).notNull().default(0),
+    failures: integer("failures").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("latch_memory_chat_state_scope_idx").on(t.scopeKey)],
+);
+
+/** Memory-sweep state per scope — see the SQLite schema for semantics. */
+export const memoryScopeState = pgTable(
+  "latch_memory_scope_state",
+  {
+    scopeKey: text("scope_key").primaryKey(),
+    owner: text("owner").notNull(),
+    agent: text("agent").notNull(),
+    connection: text("connection").notNull(),
+    identity: jsonb("identity"),
+    hasNew: integer("has_new").notNull().default(0),
+    pendingEpisodes: jsonb("pending_episodes"),
+    consolidationWatermark: text("consolidation_watermark"),
+    lastConsolidatedAt: bigint("last_consolidated_at", { mode: "number" }),
+    nextEligibleAt: bigint("next_eligible_at", { mode: "number" }).notNull().default(0),
+    failures: integer("failures").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("latch_memory_scope_due_idx").on(t.hasNew, t.nextEligibleAt)],
+);
+
+/** Recall tracking — see the SQLite schema for semantics. */
+export const memoryUsage = pgTable(
+  "latch_memory_usage",
+  {
+    scopeKey: text("scope_key").notNull(),
+    memoryId: text("memory_id").notNull(),
+    usageCount: integer("usage_count").notNull().default(0),
+    lastUsedAt: bigint("last_used_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.scopeKey, t.memoryId] })],
+);
+
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
 export const schedules = pgTable(
   "latch_schedules",
@@ -154,6 +215,8 @@ export const schedules = pgTable(
     cron: text("cron"),
     timezone: text("timezone"),
     prompt: text("prompt").notNull(),
+    /** Host-interpreted delivery target (e.g. a channel), opaque to core. */
+    delivery: jsonb("delivery"),
     nextRunAt: bigint("next_run_at", { mode: "number" }).notNull(),
     lastRunAt: bigint("last_run_at", { mode: "number" }),
     enabled: integer("enabled").notNull(),

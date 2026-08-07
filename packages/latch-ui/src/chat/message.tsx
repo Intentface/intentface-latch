@@ -1,13 +1,14 @@
 import { type ReactNode, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "motion/react";
-import { Check, ChevronDown, CircleHelp, Copy, FileText, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Copy, FileText, KeyRound, Mic, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { cn } from "../lib/utils.js";
 import { Markdown } from "./markdown.js";
 import { Reasoning } from "./reasoning.js";
 import { Steps } from "./steps.js";
 import {
   getAskUserInfo,
+  getSecretRequestsAnswered,
   getSegmentedParts,
   getSourcesInfo,
   getTextInfo,
@@ -34,6 +35,8 @@ export function Message({
   renderSubagent,
   renderTool,
   onRegenerate,
+  onFeedback,
+  feedbackValue,
   className,
 }: {
   message: AppUIMessage;
@@ -50,13 +53,19 @@ export function Message({
   renderTool?: (part: ToolPart) => ReactNode | undefined;
   /** Called when the user clicks the regenerate action (assistant messages). */
   onRegenerate?: () => void;
+  /** Called when the user clicks 👍 (1) / 👎 (0) — e.g. to open a feedback dialog. */
+  onFeedback?: (value: 0 | 1) => void;
+  /** Feedback already recorded for this message (highlights that thumb). */
+  feedbackValue?: 0 | 1;
   className?: string;
 }) {
   const isUser = message.role === "user";
+  const voice = message.metadata?.voice;
   const segments = getSegmentedParts(message.parts);
   const { sources, hasSources } = getSourcesInfo(message.parts);
   const { text: copyText } = getTextInfo(segments);
   const { answered } = getAskUserInfo(message.parts);
+  const secretsAnswered = getSecretRequestsAnswered(message.parts);
 
   return (
     <motion.div
@@ -158,6 +167,13 @@ export function Message({
         })}
       </div>
 
+      {isUser && voice && (
+        <span className="text-ink-tertiary flex items-center gap-1 text-xs">
+          <Mic className="size-3 shrink-0" />
+          Voice message · {formatDuration(voice.durationMs)}
+        </span>
+      )}
+
       {!isUser &&
         answered.map((a) => (
           <Collapsible.Root key={a.toolCallId} className="group/ask w-full">
@@ -177,6 +193,36 @@ export function Message({
               ))}
             </Collapsible.Panel>
           </Collapsible.Root>
+        ))}
+
+      {!isUser &&
+        secretsAnswered.map((s) => (
+          <div
+            key={s.toolCallId}
+            className="text-ink-secondary flex flex-wrap items-center gap-1.5 text-xs"
+          >
+            <KeyRound className="size-3.5 shrink-0" />
+            {s.declined ? (
+              <span>Skipped {s.title.toLowerCase()}</span>
+            ) : (
+              <>
+                <span>{s.title} saved</span>
+                {s.saved.map((name) => (
+                  <span
+                    key={name}
+                    className="border-primary-border text-ink-tertiary rounded border px-1 font-mono text-[11px]"
+                  >
+                    {name}
+                  </span>
+                ))}
+                {s.values.map((v) => (
+                  <span key={v.label} className="text-ink-tertiary">
+                    · {v.label}: {v.value}
+                  </span>
+                ))}
+              </>
+            )}
+          </div>
         ))}
 
       {!isUser && hasSources && (
@@ -202,8 +248,17 @@ export function Message({
         </div>
       )}
 
-      {!isUser && !isStreaming && (copyText || onRegenerate) && (
-        <div className="pointer-events-none flex items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+      {!isUser && !isStreaming && (copyText || onRegenerate || onFeedback) && (
+        <div
+          className={cn(
+            "flex items-center gap-1 transition-opacity",
+            // Keep the bar visible once feedback is recorded so the chosen-thumb
+            // highlight is actually seen; otherwise reveal it on hover only.
+            feedbackValue !== undefined
+              ? "opacity-100"
+              : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",
+          )}
+        >
           {copyText && <CopyButton text={copyText} />}
           {onRegenerate && (
             <button
@@ -215,10 +270,46 @@ export function Message({
               <RotateCcw className="size-3.5" />
             </button>
           )}
+          {onFeedback && (
+            <>
+              <button
+                type="button"
+                aria-label="Good response"
+                aria-pressed={feedbackValue === 1}
+                onClick={() => onFeedback(1)}
+                className={cn(
+                  "text-ink-tertiary hover:text-ink-primary hover:bg-primary-hover grid size-7 place-items-center rounded-md transition-colors",
+                  feedbackValue === 1 && "text-accent",
+                )}
+              >
+                <ThumbsUp className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-label="Bad response"
+                aria-pressed={feedbackValue === 0}
+                onClick={() => onFeedback(0)}
+                className={cn(
+                  "text-ink-tertiary hover:text-ink-primary hover:bg-primary-hover grid size-7 place-items-center rounded-md transition-colors",
+                  feedbackValue === 0 && "text-accent",
+                )}
+              >
+                <ThumbsDown className="size-3.5" />
+              </button>
+            </>
+          )}
         </div>
       )}
     </motion.div>
   );
+}
+
+/** Format a duration in ms as m:ss (e.g. 42000 → "0:42"). */
+function formatDuration(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /** Ghost icon button that copies `text` and briefly shows a check. */

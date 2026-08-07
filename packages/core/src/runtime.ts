@@ -11,7 +11,7 @@ import {
   tool,
   toUIMessageStream,
 } from "ai";
-import type { Experimental_SandboxSession } from "ai";
+import type { Experimental_SandboxSession, LanguageModel } from "ai";
 import type { AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition, SecretResolver } from "./context.js";
@@ -22,8 +22,17 @@ import type {
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
-import { toClientMessages, toModelMessages } from "./projections.js";
+import { currentDateLine } from "./current-date.js";
+import type { MemoryProvider } from "./memory.js";
+import {
+  COMPACTION_PART_TYPE,
+  sliceAtCompaction,
+  toClientMessages,
+  toModelMessages,
+} from "./projections.js";
+import { summarizeForCompaction } from "./compaction.js";
 import { computeCost, type Pricing } from "./pricing.js";
+import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import type {
   ChatRecord,
   RunLease,
@@ -106,6 +115,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   dynamicAgents?: DynamicAgentStore<P>;
   /**
+   * Memory seam: gives agents that declare `memory` persistent cross-session
+   * memory (compiled index injected into instructions + scope-bound
+   * `memory_search`/`memory_save` tools). Optional — without it, an agent's
+   * `memory` declaration is ignored. See `MemoryProvider`.
+   */
+  memory?: MemoryProvider<P>;
+  /**
    * Rebuild a `Principal` from the opaque identity blob a run stored, for
    * resume/cron (no request). Default: passthrough (`identity as P`). Override to
    * re-hydrate (e.g. re-fetch fresh identity) or validate on resume.
@@ -119,6 +135,22 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * create recurring schedules.
    */
   cron?: (expr: string, afterMs: number, timezone?: string) => number | null;
+  /**
+   * Optional per-fire override for `runDue`, so a host can run a scheduled turn
+   * somewhere the default can't reach — typically a chat channel, where the
+   * report should land in the conversation the person actually replies in.
+   *
+   * Return true when the host ran (and delivered) this fire ITSELF; core then
+   * skips its own fresh-chat run. Anything else — false, absent, or a throw —
+   * falls through to the default, so a host whose delivery target has gone
+   * stale (bot disabled, user unlinked) still gets the work done in a chat
+   * rather than losing the fire.
+   *
+   * Core keeps owning the claim, the lease and the advance either way, and
+   * stays entirely channel-blind: `schedule.delivery` is opaque here and only
+   * ever interpreted by this hook.
+   */
+  runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
   /**
    * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
    * Returns the AI SDK `Experimental_SandboxSession` passed to the model
@@ -161,6 +193,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
      * service) and should be opted into explicitly.
      */
     render?: Record<string, unknown>;
+    /**
+     * Default approval policy for harness tools, by tool name (e.g.
+     * `{ create_schedule: "user-approval" }`). Applied only to tools actually
+     * attached to the agent, and merged like a tool source's: the AGENT WINS
+     * for names it lists in its own `toolApproval`, so a host can ship a
+     * side-effecting harness tool gated by default without freezing that
+     * choice.
+     */
+    approval?: Record<string, unknown>;
   };
   /**
    * Resolve the model provider's NATIVE web tools (server-side search/fetch) for
@@ -190,6 +231,14 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     tools: Record<string, unknown>,
     opts?: { agent: string },
   ) => unknown;
+  /**
+   * Tracing seam (kept out of core — no OTEL/vendor dep). Supplies per-run AI
+   * SDK telemetry options, an optional trace wrapper around the model call, and
+   * a post-turn hook (e.g. `@intentface/latch-langfuse`). This is the OTEL/span
+   * plumbing — the `observability` seam below is for plain event callbacks.
+   * Optional — without it, nothing is traced and behavior is unchanged.
+   */
+  telemetry?: LatchTelemetry<P>;
   /**
    * Optional observability seam — consumer telemetry (usage rollups, per-tool
    * analytics, tracing) attached WITHOUT wrapping `handleChat`. Complements the
@@ -325,7 +374,28 @@ export interface Runtime<P> {
     prompt: string;
     threadId?: string;
     blockGated?: boolean;
+    /**
+     * Per-turn request payload, passed to `context.build` and the agent
+     * factory (see `HandleChatInput.turnContext`). Ephemeral — never persisted,
+     * absent on resume.
+     */
+    turnContext?: unknown;
   }): Promise<{ threadId: string; answer: string }>;
+  /**
+   * Summarize a conversation and append a compaction boundary, so later turns
+   * send the model the summary instead of the turns it replaces. Stored history
+   * is untouched — this shrinks the model projection, not the record. Null when
+   * there's too little to compact (or the chat isn't the caller's); throws
+   * `PendingApprovalError` when the last turn is paused awaiting a human.
+   */
+  compactChat(input: {
+    chatId: string;
+    principal: P;
+    /** Optional steer for the summary ("keep the training plan"). */
+    focus?: string;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<{ summary: string; compacted: number } | null>;
   /**
    * Client-projected conversation history (`toClientMessages`): the stored
    * messages with `internal`/`redacted` ones filtered out. For rendering past
@@ -350,6 +420,12 @@ export interface Runtime<P> {
     principal: P;
     limit?: number;
   }): Promise<RunRecord[]>;
+  /**
+   * One run by id, scoped to the caller: returns it only when the run's chat is
+   * owned by `principal` (else null). A direct lookup — no capped scan — so it's
+   * safe for ownership checks on arbitrarily old runs.
+   */
+  getRun(input: { principal: P; runId: string }): Promise<RunRecord | null>;
   /**
    * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
    * Returns the reaped runs. No-op-safe to call on every node.
@@ -416,16 +492,31 @@ export interface Runtime<P> {
     /** IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"). */
     timezone?: string;
     prompt: string;
+    /**
+     * Opaque, host-interpreted delivery target for each fire (see
+     * `RuntimeConfig.runSchedule`). Stored verbatim; core never reads it.
+     */
+    delivery?: unknown;
   }): Promise<ScheduleRecord>;
   /** The caller's schedules. */
   listSchedules(input: { principal: P }): Promise<ScheduleRecord[]>;
   /** Delete one of the caller's schedules. */
   unschedule(input: { principal: P; id: string }): Promise<void>;
   /**
+   * Make one of the caller's schedules due immediately. It then fires through
+   * the ordinary `runDue` path — same claim, same delivery, same advance — so
+   * "run now" can never drift from what the cron actually does.
+   *
+   * False when nothing was armed: unknown id, not the caller's, or already
+   * spent.
+   */
+  runScheduleNow(input: { principal: P; id: string }): Promise<boolean>;
+  /**
    * Fire all due schedules across ALL tenants (system op — the cron entry point).
    * Claims each exactly-once, reconstructs its principal, runs the turn in a
-   * fresh chat, and advances the schedule. Point a platform cron (or the
-   * in-process scheduler) at this.
+   * fresh chat (or via `runSchedule`, when the host handles the fire), and
+   * advances the schedule. Point a platform cron (or the in-process scheduler)
+   * at this.
    */
   runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }>;
 }
@@ -478,6 +569,12 @@ const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
 const generateSubApprovalId = createIdGenerator({ prefix: "sapv", separator: "_" });
 /** Recursion ceiling for subagent delegation. */
 const MAX_SUBAGENT_DEPTH = 4;
+/**
+ * Below this many messages in the live window, compaction isn't worth a model
+ * call: one exchange (user + assistant) plus the message asking for it summarizes
+ * to roughly what it replaces.
+ */
+const MIN_COMPACTABLE_MESSAGES = 4;
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
 /** Synthetic run id for an ephemeral (unpersisted) `runTurnStream` turn. */
@@ -542,11 +639,24 @@ function firstText(message: AppMessage): string | undefined {
   return text.length > 0 ? text : undefined;
 }
 
-/** True if any message has a tool part still awaiting an approval decision. */
+/** The text of the turn's incoming user message (for telemetry). */
+function lastUserText(messages: AppMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "user") return firstText(m);
+  }
+  return undefined;
+}
+
 /**
- * Thrown by `handleChat` when a new message arrives while the previous turn is
- * still awaiting an approval decision. Carries a stable `code` so the handler
- * can map it to a 409 and the client can prompt the user to decide first.
+ * Thrown when work is attempted on a chat whose last turn is still paused
+ * awaiting a human — by `compactChat`, where the pause can also be a parked
+ * client tool call and there's no sensible way to summarize around it. Carries
+ * a stable `code` so the handler can map it to a 409 and the client can prompt
+ * the user to resolve it first.
+ *
+ * `handleChat` deliberately does NOT throw this: a new message supersedes the
+ * pause (see `declinePendingApprovals`).
  */
 export class PendingApprovalError extends Error {
   readonly code = "pending_approval";
@@ -568,26 +678,95 @@ type SubApprovalPart = {
     approved?: boolean;
     reason?: string;
     resolved?: boolean;
+    /**
+     * Telemetry linkage of the paused subagent turn, persisted here so the
+     * resumed turn (post-approval) keeps nesting under the same trace/session
+     * instead of defaulting `rootChatId` to its own `sub_…` chat and dropping
+     * `parentRunId`. Set at bubble time; forwarded into the resumed `buildTurn`.
+     */
+    parentRunId?: string;
+    rootChatId?: string;
   };
 };
 
+/**
+ * Is the chat parked on an undecided approval RIGHT NOW?
+ *
+ * Only the last assistant message counts. A paused turn's gated calls all live
+ * on the assistant message it paused on (a resume starts a new one), so that
+ * message is the live pause point. Undecided parts in OLDER messages are
+ * abandoned turns — `closeDanglingToolCalls` already fabricates a terminal
+ * result for them in the model projection, and stored history is never
+ * rewritten. Scanning all of history instead wedged chats permanently in both
+ * directions: `handleChat` refused every new message with PendingApprovalError,
+ * AND `applyApproval` returned an empty 200 without resuming, so no button
+ * press could clear it either.
+ */
 function hasPendingApproval(messages: AppMessage[]): boolean {
-  for (const m of messages) {
-    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
-      if (p.state === "approval-requested" && p.approval?.approved === undefined) {
-        return true;
-      }
-      // A bubbled-up subagent approval still awaiting a decision.
-      if (
-        p.type === "data-subagent-approval" &&
-        p.data &&
-        p.data.approved === undefined
-      ) {
-        return true;
-      }
+  const last = messages[messages.length - 1];
+  // Strictly the FINAL message: a later user message means the turn moved on.
+  if (last?.role !== "assistant") return false;
+  for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
+    if (p.state === "approval-requested" && p.approval?.approved === undefined) {
+      return true;
+    }
+    // A bubbled-up subagent approval still awaiting a decision.
+    if (p.type === "data-subagent-approval" && p.data && p.data.approved === undefined) {
+      return true;
     }
   }
   return false;
+}
+
+/** Why an approval was closed without the user ever deciding it. */
+const SUPERSEDED_REASON =
+  "Superseded — the user sent a new message instead of responding to this request.";
+
+/**
+ * Decline every undecided approval on the paused turn, because the user moved
+ * on: they typed a new message instead of pressing a button.
+ *
+ * Without this a chat could wedge for good. A gate the user CAN'T satisfy — a
+ * misconfigured `connect_<name>` whose OAuth never completes is the reported
+ * case — left `handleChat` refusing every message with `PendingApprovalError`,
+ * so the only escape was a decision UI that (on the web) had no deny button.
+ * Declining is always the safe direction: no gated tool runs, and the model
+ * sees a denial plus the new instruction, so the user can simply redirect it.
+ *
+ * Bubbled-up subagent approvals are marked `resolved` too, so
+ * `collectDecidedSubagentApprovals` won't later try to resume a sub thread the
+ * user has walked away from. Mutates in place; returns the changed messages.
+ */
+function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
+  const last = messages[messages.length - 1];
+  if (last?.role !== "assistant") return [];
+  const changed = new Set<AppMessage>();
+  for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
+    if (p.state === "approval-requested" && p.approval && p.approval.approved === undefined) {
+      p.state = "approval-responded";
+      p.approval = { ...p.approval, approved: false, reason: SUPERSEDED_REASON };
+      changed.add(last);
+    }
+    if (p.type === "data-subagent-approval" && p.data && p.data.approved === undefined) {
+      const { spawnToolCallId, subChatId } = p.data;
+      p.data = { ...p.data, approved: false, reason: SUPERSEDED_REASON, resolved: true };
+      changed.add(last);
+      // Close the parent's `spawn_agent` call too. Its stored result is the
+      // `awaiting_approval` payload, whose note tells the model to stop and
+      // wait for a decision that is never coming — and the model projection
+      // drops data parts, so that note is ALL the next turn would see of this.
+      if (spawnToolCallId) {
+        for (const m of overwriteToolResult(messages, spawnToolCallId, {
+          status: "declined",
+          threadId: subChatId,
+          note: SUPERSEDED_REASON,
+        })) {
+          changed.add(m);
+        }
+      }
+    }
+  }
+  return [...changed];
 }
 
 /**
@@ -767,7 +946,15 @@ export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage
 /** A tool/dynamic-tool UI part, narrowed to the result fields we touch. */
 type ResultPart = { type?: string; toolCallId?: string; state?: string; output?: unknown };
 
-/** True if any tool call is still awaiting a (client-supplied) result. */
+/**
+ * True if any tool call is still awaiting a (client-supplied) result.
+ *
+ * Callers must pass only the messages of the step being resolved (see
+ * `applyToolResult`) — NOT full history. A client tool call abandoned turns ago
+ * stays `input-available` in stored history forever (`closeDanglingToolCalls`
+ * repairs the model projection, never the store), so an all-history scan would
+ * make every later resume in that chat return "still waiting" and never re-run.
+ */
 function hasPendingToolResult(messages: AppMessage[]): boolean {
   for (const m of messages) {
     for (const p of (m.parts ?? []) as ResultPart[]) {
@@ -786,19 +973,23 @@ function recordToolResult(
   toolCallId: string,
   output: unknown,
 ): AppMessage[] {
-  const changed: AppMessage[] = [];
-  for (const m of messages) {
-    let touched = false;
-    for (const p of (m.parts ?? []) as ResultPart[]) {
-      if (p.toolCallId === toolCallId && p.state === "input-available") {
-        p.state = "output-available";
-        p.output = output;
-        touched = true;
-      }
+  // Only the live pause point may be answered. A parked client tool call always
+  // sits on the assistant message the turn paused on (a resume starts a new
+  // one), so anything older was abandoned and buried by a later user turn.
+  // Recording onto it would mutate dead history AND resume an obsolete turn —
+  // a stale button, or a redelivered submit for a long-dead question, would
+  // trigger a spurious agent run instead of doing nothing.
+  const last = messages[messages.length - 1];
+  if (last?.role !== "assistant") return [];
+  let touched = false;
+  for (const p of (last.parts ?? []) as ResultPart[]) {
+    if (p.toolCallId === toolCallId && p.state === "input-available") {
+      p.state = "output-available";
+      p.output = output;
+      touched = true;
     }
-    if (touched) changed.push(m);
   }
-  return changed;
+  return touched ? [last] : [];
 }
 
 /** Invoke an observability hook fire-and-forget — a thrown/rejected hook is
@@ -813,6 +1004,20 @@ function fireObs<E>(
   } catch {
     // synchronous throw from the hook — ignore
   }
+}
+
+/**
+ * The one place an error becomes a client-visible string. Latch deliberately
+ * forwards `Error` messages — they are the debugging surface for sandbox and
+ * tool failures, and the audience is the org's own authenticated users — but
+ * every stream/tool error path must route through here so the exposure policy
+ * can be tightened in a single place. Non-`Error` throws and unbounded
+ * payloads never pass through verbatim.
+ */
+function clientErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (!message) return "An error occurred.";
+  return message.length > 500 ? `${message.slice(0, 499)}…` : message;
 }
 
 export function createRuntime<P, RC = unknown>(
@@ -875,6 +1080,11 @@ export function createRuntime<P, RC = unknown>(
     blockGated?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
+    /** Telemetry linkage: the run that spawned this subagent turn (if any). */
+    parentRunId?: string;
+    /** Telemetry linkage: the top-level conversation id (threaded through
+     *  subagent turns so a delegation tree shares one trace session). */
+    rootChatId?: string;
     /**
      * Ephemeral turn (`runTurnStream`): stream a full tool-loop turn WITHOUT
      * persisting anything — no run/lease, no message/run/usage writes. The
@@ -913,6 +1123,10 @@ export function createRuntime<P, RC = unknown>(
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
     const ephemeral = args.ephemeral ?? false;
+    // The top-level conversation id — this turn's own chat unless a spawn
+    // threaded a root down. Subagent turns spawned below inherit it, so a whole
+    // delegation tree shares one telemetry session (see telemetryMeta).
+    const rootChatId = args.rootChatId ?? resolvedChatId;
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -974,10 +1188,18 @@ export function createRuntime<P, RC = unknown>(
     // the harness tools, and `spawn_agent` are capabilities, not connection picks.
     const capabilityTools: string[] = Object.keys(cfg.tools ?? {});
     const harness = config.harnessTools ?? {};
+    // Gate defaults for the harness tools this agent actually gets (a policy
+    // naming an unattached tool would be dead weight in the merge below).
+    const harnessApproval: Record<string, unknown> = {};
+    const attachHarness = (name: string, t: unknown) => {
+      tools[name] = t;
+      capabilityTools.push(name);
+      const gate = harness.approval?.[name];
+      if (gate) harnessApproval[name] = gate;
+    };
     const wantSandbox = !!cfg.sandbox && !!config.sandbox;
     if (wantSandbox && harness.sandbox) {
-      Object.assign(tools, harness.sandbox);
-      capabilityTools.push(...Object.keys(harness.sandbox));
+      for (const [name, t] of Object.entries(harness.sandbox)) attachHarness(name, t);
     }
     if (cfg.defaultTools && harness.app) {
       const appTools =
@@ -986,17 +1208,13 @@ export function createRuntime<P, RC = unknown>(
           : harness.app;
       const only = Array.isArray(cfg.defaultTools) ? new Set(cfg.defaultTools) : null;
       for (const [name, t] of Object.entries(appTools)) {
-        if (!only || only.has(name)) {
-          tools[name] = t;
-          capabilityTools.push(name);
-        }
+        if (!only || only.has(name)) attachHarness(name, t);
       }
     }
     // Render tools — a separate capability (like sandbox), opted into via
     // `renderTools: true`, never granted by `defaultTools`.
     if (cfg.renderTools && harness.render) {
-      Object.assign(tools, harness.render);
-      capabilityTools.push(...Object.keys(harness.render));
+      for (const [name, t] of Object.entries(harness.render)) attachHarness(name, t);
     }
     // Provider-native web tools (server-side search/fetch), if the agent opts in
     // and the platform supplies a resolver for this model's provider.
@@ -1004,6 +1222,28 @@ export function createRuntime<P, RC = unknown>(
       for (const [name, t] of Object.entries(config.resolveProviderTools(modelId))) {
         tools[name] = t;
         capabilityTools.push(name);
+      }
+    }
+    // Memory seam: when the agent declares `memory` and the runtime has a
+    // provider, merge the scope-bound memory tools (capabilities, not
+    // connection picks — they must survive an `enabledTools` restriction) and
+    // append the provider's compiled-index block to the instructions. A
+    // provider failure degrades to a turn without memory, never a dead turn.
+    let instructions = cfg.instructions;
+    if (cfg.memory && config.memory) {
+      const memArgs = { principal, agent: run.agent, memory: cfg.memory };
+      try {
+        // Resolve both hooks BEFORE mutating the toolset, so a failure in
+        // either leaves the turn exactly as it was without memory.
+        const memoryTools = Object.entries(config.memory.toolsFor(memArgs));
+        const block = await config.memory.instructionsFor(memArgs);
+        for (const [name, t] of memoryTools) {
+          tools[name] = t;
+          capabilityTools.push(name);
+        }
+        if (block) instructions = [instructions, block].filter(Boolean).join("\n\n");
+      } catch {
+        // Memory is optional and degradable — continue without it.
       }
     }
     for (const name of cfg.disableTools ?? []) delete tools[name];
@@ -1054,7 +1294,9 @@ export function createRuntime<P, RC = unknown>(
           // data part, reconciled in place by id). Pre-generate the sub-thread
           // id so the very first write already carries it.
           const writer = options.context?.writer;
-          const subChatId = threadId ?? generateSubchatId();
+          // `||` (not `??`): strict-schema models fill optional params with "" — an
+          // empty threadId must mean "new thread", never become a real chat id.
+          const subChatId = threadId?.trim() || generateSubchatId();
           let onProgress: ((messages: AppMessage[]) => void) | undefined;
           if (writer) {
             const write = (messages: AppMessage[]) => {
@@ -1092,6 +1334,10 @@ export function createRuntime<P, RC = unknown>(
             depth: depth + 1,
             autoApprove,
             onProgress,
+            // Telemetry linkage: this turn is the parent; carry the root chat
+            // down so the subagent's trace nests under this conversation.
+            parentRunId: run.id,
+            rootChatId,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -1109,6 +1355,10 @@ export function createRuntime<P, RC = unknown>(
                 subApprovalIds: result.pending.map((p) => p.approvalId),
                 spawnToolCallId: options.toolCallId,
                 summaries: result.pending.map((p) => p.summary),
+                // Persist the sub-turn's telemetry linkage so its resumed turn
+                // (after approval) stays nested under this conversation/run.
+                parentRunId: run.id,
+                rootChatId,
               },
             });
             return {
@@ -1132,6 +1382,7 @@ export function createRuntime<P, RC = unknown>(
       // real side effects. Gated set = connection defaults + the agent's policy.
       if (blockGated) {
         const gated = new Set<string>();
+        for (const [k, v] of Object.entries(harnessApproval)) if (v) gated.add(k);
         for (const o of opened) {
           for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
         }
@@ -1163,13 +1414,15 @@ export function createRuntime<P, RC = unknown>(
       }
     }
 
-    // Merge the source-contributed approval policy (connection defaults +
-    // synthetic `connect_<name>` gates) with the agent's. The AGENT WINS for
-    // tools it names — so an agent can require approval on a GET or waive it on
-    // a mutating op; tools it doesn't mention keep the connection default. Only
-    // for the object form (a function policy is left as-is).
+    // Merge the default approval policies — harness-tool gates and the
+    // source-contributed ones (connection defaults + synthetic `connect_<name>`
+    // gates) — with the agent's. The AGENT WINS for tools it names, so an agent
+    // can require approval on a GET or waive it on a mutating op; tools it
+    // doesn't mention keep the default. Only for the object form (a function
+    // policy is left as-is).
     const sourceApproval = Object.assign(
       {},
+      harnessApproval,
       ...opened.map((o) => o.toolApproval ?? {}),
     ) as Record<string, unknown>;
     const toolApproval = autoApprove
@@ -1213,21 +1466,91 @@ export function createRuntime<P, RC = unknown>(
       ? config.resolveReasoningOptions(modelId, cfg.effort ?? "")
       : undefined;
 
+    // Telemetry seam: per-run AI SDK telemetry options + trace correlation
+    // identity, resolved once per turn (undefined → nothing traced).
+    const telemetryMeta: TelemetryRunMeta<P> = {
+      runId: run.id,
+      chatId: resolvedChatId,
+      agent: run.agent,
+      modelId,
+      principal,
+      startedAt: run.startedAt,
+      depth,
+      parentRunId: args.parentRunId,
+      // Top-level turns are their own root; subagent turns inherit the root the
+      // spawn threaded down, so a whole delegation tree shares one session id.
+      rootChatId,
+    };
+    const telemetryOptions = config.telemetry?.telemetryFor?.(telemetryMeta);
+    // A telemetry impl that defines `telemetryFor` but returns undefined is
+    // opting THIS run out — so the span wrapper and finish/flush hooks must go
+    // silent too, not just the AI SDK settings. If `telemetryFor` is absent
+    // entirely, the impl simply isn't customizing settings, so tracing stays on.
+    const telemetryOn =
+      !!config.telemetry &&
+      !(config.telemetry.telemetryFor && telemetryOptions === undefined);
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
-      instructions: cfg.instructions,
+      // Every agent gets a trailing "today's date" line — after the memory
+      // block, so it stays the tail. Day-granularity by design — see
+      // `currentDateLine` for the prompt-cache reasoning.
+      instructions: [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
       tools,
       toolApproval,
       stopWhen,
       activeTools,
       ...(reasoning?.providerOptions ? { providerOptions: reasoning.providerOptions } : {}),
       ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
+      ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
 
     let inputTokens = 0;
     let outputTokens = 0;
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
+
+    // Post-turn telemetry: fired after persistence on every terminal path
+    // (completed / awaiting_input / errored). Must never fail the turn.
+    const reportRunFinished = async (
+      status: "completed" | "awaiting_input" | "errored",
+      messages: AppMessage[],
+      error?: string,
+    ) => {
+      const t = config.telemetry;
+      if (!t || !telemetryOn) return;
+      try {
+        await t.onRunFinished?.(telemetryMeta, {
+          status,
+          ...(error !== undefined ? { error } : {}),
+          inputText: lastUserText(uiMessages),
+          messages,
+          usage: {
+            inputTokens,
+            outputTokens,
+            ...(cacheReadTokens ? { cacheReadTokens } : {}),
+            ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+          },
+          cost: computeCost(config.pricing?.(modelId), {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+          }),
+          endedAt: Date.now(),
+        });
+      } catch (e) {
+        console.warn("latch telemetry onRunFinished failed:", e);
+      } finally {
+        // Always flush, even when the finish hook threw — otherwise a failed
+        // judge/score pass would drop the turn's spans in serverless.
+        try {
+          await t.flush?.();
+        } catch (e) {
+          console.warn("latch telemetry flush failed:", e);
+        }
+      }
+    };
 
     // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
     // UI-stream `onStepEnd` (per-step persistence) and the `writer`. The model
@@ -1254,7 +1577,10 @@ export function createRuntime<P, RC = unknown>(
               provider: cfg.sandboxProvider,
             })
           : undefined;
-        const result = await agent.stream({
+        // Start the model call inside the telemetry run span (when provided)
+        // so the impl can root every AI SDK span in one seeded trace.
+        const startStream = () =>
+          agent.stream({
           prompt: modelMessages,
           experimental_sandbox: sandbox,
           abortSignal: dur.enabled ? abort.signal : undefined,
@@ -1274,7 +1600,10 @@ export function createRuntime<P, RC = unknown>(
               {
                 ...(runtimeCtx as Record<string, unknown>),
                 principal,
-                run: { id: run.id, chatId: resolvedChatId },
+                // `agent` is the ref the turn resolved (scope-pinned as stored
+                // on the run), so a tool that acts on "the agent I'm running
+                // as" names the same record the turn is using.
+                run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
                 writer,
               },
             ]),
@@ -1318,13 +1647,29 @@ export function createRuntime<P, RC = unknown>(
             });
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
+        const result =
+          telemetryOn && config.telemetry?.withRunSpan
+            ? await config.telemetry.withRunSpan(telemetryMeta, startStream)
+            : await startStream();
         // Fold the model's own output into the stream.
         writer.merge(
           toUIMessageStream({
             stream: result.stream,
+            // Without this the AI SDK collapses every tool `execute` throw to
+            // the literal "An error occurred." — surface the real message so
+            // failures (sandbox init, credential lookups, …) are debuggable
+            // from the chat itself.
+            onError: clientErrorMessage,
             messageMetadata: ({ part }: { part: { type: string } }) =>
               part.type === "start"
-                ? { visibility: "user", model: modelId, createdAt: Date.now() }
+                ? {
+                    visibility: "user",
+                    model: modelId,
+                    createdAt: Date.now(),
+                    // Correlates the assistant message to its run (and trace)
+                    // — e.g. per-message feedback posts against this id.
+                    runId: run.id,
+                  }
                 : undefined,
           } as Parameters<typeof toUIMessageStream>[0]) as ReadableStream<unknown>,
         );
@@ -1392,17 +1737,22 @@ export function createRuntime<P, RC = unknown>(
             cost,
             messages,
           });
+          await reportRunFinished("errored", messages, "aborted");
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
+        // Ephemeral turns aren't fenced (no lease/run row) — they always finish
+        // here. For persisted turns, `applied` reflects whether our lease still
+        // owns the run (see below).
+        let applied = true;
         if (!ephemeral) {
           // Fenced finish: settle the run FIRST. If the guarded update doesn't
           // apply (our lease was reaped + the run re-claimed elsewhere), we're
           // a stale writer — skip the final message/usage persistence so we
           // don't overwrite the new owner's state.
-          const applied = await storage.updateRun(
+          applied = await storage.updateRun(
             run.id,
             {
               status: paused ? "awaiting_input" : "completed",
@@ -1445,10 +1795,17 @@ export function createRuntime<P, RC = unknown>(
             console.error("[runtime] onComplete hook failed:", e);
           }
         }
+        // Only the winning writer reports terminal telemetry. If our lease was
+        // reaped and the run re-claimed elsewhere (`!applied`), that node will
+        // finish it — a stale writer must not re-run the judge or emit a
+        // duplicate "completed"/"awaiting_input" trace.
+        if (applied)
+          await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
       },
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
+        const message = clientErrorMessage(error);
         fireObs(config.observability?.onError, {
           principal,
           chatId: resolvedChatId,
@@ -1458,7 +1815,12 @@ export function createRuntime<P, RC = unknown>(
           depth,
           error,
         });
-        return error instanceof Error ? error.message : "An error occurred.";
+        // The AI SDK's onError must return the client string synchronously, so
+        // the terminal telemetry can't be awaited here. A serverless-safe impl
+        // keeps its own flush alive (e.g. via waitUntil) so the errored trace
+        // still lands; failures are swallowed inside reportRunFinished.
+        void reportRunFinished("errored", [], message);
+        return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);
 
@@ -1573,14 +1935,15 @@ export function createRuntime<P, RC = unknown>(
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
 
-    // Don't start a new turn while the last one is still awaiting an approval
-    // decision: that would abandon the gated tool call (a `tool_use` with no
-    // result), forcing the model view to fabricate one. Make the client resolve
-    // the approval first (or the caller can submit a decision via applyApproval).
+    // A new message while the last turn is parked on an approval is itself the
+    // decision: the user declined to answer and wants to steer elsewhere. Close
+    // the gate as declined (persisted, so the card stops rendering as live) and
+    // carry on — the gated tool never runs, and the model sees the denial
+    // followed by the new instruction. Refusing the message instead is what
+    // wedged chats whose gate could not be satisfied at all.
     if (hasPendingApproval(prior)) {
-      throw new PendingApprovalError(
-        "This chat is awaiting an approval decision — respond to the pending request before sending a new message.",
-      );
+      const declined = declinePendingApprovals(prior);
+      if (declined.length > 0) await storage.appendMessages(resolvedChatId, declined);
     }
 
     // persist the user message up front (crash-safe), then open the run
@@ -1752,6 +2115,7 @@ export function createRuntime<P, RC = unknown>(
             approved: sa.approved as boolean,
             reason: sa.reason,
           })),
+          { parentRunId: sa.parentRunId, rootChatId: sa.rootChatId },
         );
         if (resumed.pending?.length) {
           // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
@@ -1766,6 +2130,9 @@ export function createRuntime<P, RC = unknown>(
             subApprovalIds: resumed.pending.map((p) => p.approvalId),
             spawnToolCallId: sa.spawnToolCallId,
             summaries: resumed.pending.map((p) => p.summary),
+            // Carry the linkage forward so each further resume stays nested.
+            parentRunId: sa.parentRunId,
+            rootChatId: sa.rootChatId,
           });
           if (sa.spawnToolCallId) {
             overwriteToolResult(messages, sa.spawnToolCallId, {
@@ -1846,11 +2213,18 @@ export function createRuntime<P, RC = unknown>(
 
     const messages = await storage.loadMessages(principal, chatId);
     const changed = recordToolResult(messages, toolCallId, output);
-    if (changed.length > 0) await storage.appendMessages(chatId, changed);
+    // Unknown or already-answered call: nothing to resume. Makes a duplicate
+    // submit (double-tapped button, redelivered webhook) a no-op instead of a
+    // spurious extra turn.
+    if (changed.length === 0) return new Response(null, { status: 200 });
+    await storage.appendMessages(chatId, changed);
 
-    // Another client tool call in the same step may still be awaiting a result;
+    // Another client tool call in the SAME step may still be awaiting a result;
     // re-running now would throw MissingToolResultsError. Wait for the rest.
-    if (hasPendingToolResult(messages)) {
+    // Scope this to the messages we just touched: a call abandoned turns ago is
+    // still `input-available` in stored history, and counting it would park
+    // every future resume in this chat forever.
+    if (hasPendingToolResult(changed)) {
       return new Response(null, { status: 200 });
     }
 
@@ -1873,6 +2247,146 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
     });
+  }
+
+  /**
+   * Compact a conversation: summarize the live context window and append the
+   * summary as a boundary marker, so later turns send the model the summary
+   * instead of the turns it replaces (see `sliceAtCompaction`). Stored history is
+   * never rewritten — nothing is lost, and a chat can be compacted repeatedly.
+   *
+   * Returns null when there's too little to be worth compacting (or the chat
+   * isn't the caller's). Throws `PendingApprovalError` when the turn is paused:
+   * the parked `tool_use` would fall behind the boundary and vanish from the
+   * model view while stored history still gates every new message.
+   */
+  async function compactChat({
+    chatId,
+    principal,
+    focus,
+    signal,
+    request,
+    turnContext,
+  }: {
+    chatId: string;
+    principal: P;
+    /** Optional steer, e.g. Telegram's `/compact keep the training plan`. */
+    focus?: string;
+    /** Abort a stalled summarization (a request signal, or a caller timeout). */
+    signal?: AbortSignal;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<{ summary: string; compacted: number } | null> {
+    const chat = await storage.getChat(principal, chatId);
+    if (!chat) return null;
+
+    const stored = await storage.loadMessages(principal, chatId);
+    // Only the live window is summarized: everything before the previous
+    // boundary is already represented by that boundary's summary.
+    const live = sliceAtCompaction(stored);
+    if (live.length < MIN_COMPACTABLE_MESSAGES) return null;
+    if (hasPendingApproval(live) || hasPendingToolResult([live[live.length - 1]!])) {
+      throw new PendingApprovalError(
+        "This chat is awaiting a decision — resolve the pending request before compacting.",
+      );
+    }
+
+    const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request, turnContext);
+    // Tool definitions only affect how a recorded tool RESULT is rendered for the
+    // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
+    // than failing. So take every definition available without I/O — the agent's
+    // own plus the harness ones — and deliberately skip opening dynamic sources
+    // (MCP / connections): summarizing must not depend on a remote server being
+    // reachable, and raw JSON is a fine thing to summarize.
+    const harness = config.harnessTools ?? {};
+    const tools = {
+      ...cfg.tools,
+      ...harness.app,
+      ...harness.sandbox,
+    } as Record<string, unknown>;
+    // Summarizing needs no reasoning block, and on a model that thinks by
+    // DEFAULT that block spends the same output budget as the summary — leaving
+    // the call truncated with nothing usable. `"minimal"` is the effort every
+    // provider mapping turns into "thinking off", so reuse the host's hook rather
+    // than hardcoding provider shapes here.
+    const noThinking = config.resolveReasoningOptions?.(modelId, "minimal")?.providerOptions;
+    const run = await storage.createRun(principal, { chatId, agent: chat.agent });
+    try {
+      const { text, truncated, usage } = await summarizeForCompaction({
+        model: cfg.model as LanguageModel,
+        messages: await toModelMessages(live, { tools }),
+        ...(focus ? { focus } : {}),
+        ...(noThinking ? { providerOptions: noThinking } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      if (!text) throw new Error("The model returned an empty summary.");
+      // Still truncated after the shortened retry (see summarizeForCompaction).
+      // A summary cut off mid-thought must not be stored — it would become the
+      // permanent head of every later prompt. History is untouched, so retrying
+      // is safe.
+      if (truncated) {
+        throw new Error(
+          "Couldn't fit a summary of this conversation — nothing was changed. Try /compact again, or /new to start fresh.",
+        );
+      }
+
+      const cost = computeCost(config.pricing?.(modelId), usage);
+      // `internal` so the client projection never shows a "user" message the user
+      // didn't write; `sendToModel` stays default-true so the model DOES see it.
+      // Role `user` because after slicing this is the conversation's first
+      // message, and a model prompt may not open with an assistant turn.
+      await storage.appendMessages(chatId, [
+        {
+          id: generateMessageId(),
+          role: "user",
+          parts: [
+            { type: "text", text },
+            {
+              type: COMPACTION_PART_TYPE,
+              data: { compacted: live.length, at: Date.now() },
+            },
+          ],
+          metadata: {
+            visibility: "internal",
+            createdAt: Date.now(),
+            model: modelId,
+            usage: {
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              ...(usage.cacheReadTokens ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+              ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+            },
+            cost,
+          },
+        } as AppMessage,
+      ]);
+      await storage.updateRun(run.id, {
+        status: "completed",
+        usageInputTokens: usage.inputTokens,
+        usageOutputTokens: usage.outputTokens,
+        usageCacheReadTokens: usage.cacheReadTokens || undefined,
+        usageCacheWriteTokens: usage.cacheWriteTokens || undefined,
+        costTotal: cost,
+        endedAt: Date.now(),
+      });
+      await storage.recordUsage(principal, {
+        runId: run.id,
+        model: modelId,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cost,
+      });
+      return { summary: text, compacted: live.length };
+    } catch (e) {
+      await storage
+        .updateRun(run.id, {
+          status: "errored",
+          error: e instanceof Error ? e.message : String(e),
+          endedAt: Date.now(),
+        })
+        .catch(() => {});
+      throw e;
+    }
   }
 
   async function loadHistory({
@@ -1908,6 +2422,21 @@ export function createRuntime<P, RC = unknown>(
     limit?: number;
   }): Promise<RunRecord[]> {
     return storage.listRuns(principal, { limit });
+  }
+
+  async function getRun({
+    principal,
+    runId,
+  }: {
+    principal: P;
+    runId: string;
+  }): Promise<RunRecord | null> {
+    const run = await storage.getRun(runId);
+    if (!run) return null;
+    // Ownership: the run is the caller's only if its chat is (getChat is
+    // principal-scoped). Guards cross-tenant reads/writes keyed by runId.
+    const chat = await storage.getChat(principal, run.chatId);
+    return chat ? run : null;
   }
 
   /** A fresh user message from plain text (for cron-fired turns). */
@@ -1983,6 +2512,9 @@ export function createRuntime<P, RC = unknown>(
     blockGated,
     autoApprove = true,
     onProgress,
+    parentRunId,
+    rootChatId,
+    turnContext,
   }: {
     principal: P;
     agent: string;
@@ -1990,6 +2522,17 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
+    /**
+     * Per-turn request payload for THIS run, passed to `context.build` and the
+     * agent factory (see `HandleChatInput.turnContext`). Ephemeral — applies to
+     * this initial turn only, never to resumes. Lets programmatic callers (e.g.
+     * background jobs) hand a factory-form agent its work payload.
+     */
+    turnContext?: unknown;
+    /** Telemetry: the run that spawned this subagent (nests its trace). */
+    parentRunId?: string;
+    /** Telemetry: the top-level conversation id (shared session across the tree). */
+    rootChatId?: string;
     /**
      * Waive HITL approvals inside the subagent. Default true (autonomous runs —
      * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
@@ -2000,7 +2543,9 @@ export function createRuntime<P, RC = unknown>(
     /** Progressive snapshots of the sub-turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
   }): Promise<{ threadId: string; answer: string; pending?: SubagentPending[] }> {
-    const subChatId = threadId ?? generateSubchatId();
+    // `||` (not `??`): an empty-string threadId must mint a fresh id, or the
+    // subagent chat is created with id "" and the UI can never open it.
+    const subChatId = threadId?.trim() || generateSubchatId();
     let chat = await storage.getChat(principal, subChatId);
     if (!chat) {
       chat = await storage.createChat(principal, {
@@ -2016,7 +2561,12 @@ export function createRuntime<P, RC = unknown>(
     const message = userMessageOf(prompt);
     await storage.appendMessages(subChatId, [message]);
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agent, principal);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      agent,
+      principal,
+      undefined,
+      turnContext,
+    );
     const { run, lease } = await openRun(principal, subChatId, agent);
     const res = await buildTurn({
       resolvedChatId: subChatId,
@@ -2030,6 +2580,8 @@ export function createRuntime<P, RC = unknown>(
       autoApprove,
       blockGated,
       depth,
+      parentRunId,
+      rootChatId,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
       // streams them into the parent turn). Observation must never break the
       // run — the primary stream is drained independently below.
@@ -2078,6 +2630,8 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     subChatId: string,
     decisions: ApprovalDecision[],
+    /** Telemetry linkage of the original sub-turn, so the trace stays nested. */
+    linkage?: { parentRunId?: string; rootChatId?: string },
   ): Promise<{ answer: string; pending?: SubagentPending[] }> {
     const subChat = await storage.getChat(principal, subChatId);
     if (!subChat) return { answer: "" };
@@ -2103,6 +2657,9 @@ export function createRuntime<P, RC = unknown>(
       runtimeCtx,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
+      // Keep the resumed turn nested under the original trace/session.
+      parentRunId: linkage?.parentRunId,
+      rootChatId: linkage?.rootChatId,
     });
     await res.text();
     const after = await storage.loadMessages(principal, subChatId);
@@ -2118,12 +2675,14 @@ export function createRuntime<P, RC = unknown>(
     cron,
     timezone,
     prompt,
+    delivery,
   }: {
     principal: P;
     agent: string;
     cron: string | null;
     timezone?: string;
     prompt: string;
+    delivery?: unknown;
   }): Promise<ScheduleRecord> {
     // Accept code-declared or dynamic (UI-created) agents.
     const known =
@@ -2140,7 +2699,14 @@ export function createRuntime<P, RC = unknown>(
       }
       nextRunAt = next;
     }
-    return storage.createSchedule(principal, { agent, cron, timezone, prompt, nextRunAt });
+    return storage.createSchedule(principal, {
+      agent,
+      cron,
+      timezone,
+      prompt,
+      nextRunAt,
+      delivery,
+    });
   }
 
   async function runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }> {
@@ -2153,11 +2719,26 @@ export function createRuntime<P, RC = unknown>(
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
       try {
         const principal = await reconstructPrincipal(s.identity);
-        const chat = await storage.createChat(principal, {
-          agent: s.agent,
-          title: s.prompt.slice(0, 80),
-        });
-        await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+        // Give the host first refusal (e.g. run it in the user's channel thread
+        // and stream the answer there). A hook that throws is treated as "not
+        // handled": the fire still happens the default way, so a broken
+        // delivery target degrades to a normal chat run instead of losing the
+        // occurrence entirely.
+        let handled = false;
+        if (config.runSchedule) {
+          try {
+            handled = await config.runSchedule({ schedule: s, principal });
+          } catch (e) {
+            console.error(`[schedule] runSchedule hook failed for ${s.id}:`, e);
+          }
+        }
+        if (!handled) {
+          const chat = await storage.createChat(principal, {
+            agent: s.agent,
+            title: s.prompt.slice(0, 80),
+          });
+          await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+        }
         fired++;
       } catch {
         errors++;
@@ -2179,11 +2760,13 @@ export function createRuntime<P, RC = unknown>(
     tick: reapTick,
     handleChat,
     runTurnStream,
-    runAgent: ({ principal, agent, prompt, threadId, blockGated = true }) =>
-      runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated }),
+    runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext }) =>
+      runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated, turnContext }),
+    compactChat,
     loadHistory,
     listChats,
     listRuns,
+    getRun,
     resume: resumeRun,
     sweep,
     applyApproval,
@@ -2191,6 +2774,7 @@ export function createRuntime<P, RC = unknown>(
     schedule,
     listSchedules: ({ principal }) => storage.listSchedules(principal),
     unschedule: ({ principal, id }) => storage.deleteSchedule(principal, id),
+    runScheduleNow: ({ principal, id }) => storage.bumpSchedule(principal, id),
     runDue,
   };
 }

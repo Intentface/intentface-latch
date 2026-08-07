@@ -7,7 +7,7 @@ import { z } from "zod";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
 import type { Runtime, TurnWriter } from "@intentface/latch-core";
-import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 
 /**
  * End-to-end over the REAL runtime: a gated tool (like run_evals) that streams
@@ -106,8 +106,9 @@ describe("approval continuation streams eval progress", () => {
   beforeAll(async () => {
     const client = createClient({ url: ":memory:" });
     await migrate(client);
+    const db = drizzle(client, { schema }); // adapter now takes a drizzle db
     runtime = createRuntime<P, { orgId: string }>({
-      storage: createSqliteAdapter<P>(drizzle(client), { owner: (p) => [p.orgId, p.userId] }),
+      storage: createSqliteAdapter<P>(db, { owner: (p) => [p.orgId, p.userId] }),
       context: defineContext<P, { orgId: string }>({
         build: ({ principal: p }) => ({ orgId: p.orgId }),
       }),

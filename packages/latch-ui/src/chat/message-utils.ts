@@ -49,6 +49,7 @@ export const partSegmentType = (part: UIMessage["parts"][number]): SegmentType |
   if (part.type === "text") return "text";
   if (part.type === "file") return "file";
   if (part.type === "tool-askUser") return null; // rendered separately (questionnaire / answered summary)
+  if (part.type === "tool-request_secret") return null; // rendered separately (secret form / saved summary)
   if (part.type === "dynamic-tool") return "tool";
   if (isStaticToolUIPart(part)) return "tool";
   return null;
@@ -240,6 +241,57 @@ export const getAskUserInfo = (allParts: UIMessage["parts"]): AskUserInfo => {
   };
 };
 
+/** A settled `request_secret` call, for the collapsed summary in the transcript. */
+export type SecretRequestAnswered = {
+  toolCallId: string;
+  title: string;
+  /** Vault names written. Never a value — there is none in the part to read. */
+  saved: string[];
+  /** Non-secret fields the user filled in, label → value. */
+  values: { label: string; value: string }[];
+  declined: boolean;
+};
+
+/**
+ * Extracts settled `request_secret` parts. The tool's OUTPUT is the only place
+ * a result lives, and by construction it carries names and non-secret values
+ * only — so there is nothing here that could leak a credential.
+ */
+export const getSecretRequestsAnswered = (
+  allParts: UIMessage["parts"],
+): SecretRequestAnswered[] =>
+  allParts
+    .filter(
+      (p): p is ToolPart =>
+        p.type === "tool-request_secret" && "state" in p && p.state === "output-available",
+    )
+    .map((p) => {
+      const input = p.input as { title?: string; fields?: { key: string; label: string }[] } | undefined;
+      let out: { saved?: string[]; values?: Record<string, string>; declined?: boolean } = {};
+      const raw = p.output as unknown;
+      if (raw && typeof raw === "object") {
+        out = raw as typeof out;
+      } else if (typeof raw === "string") {
+        try {
+          out = JSON.parse(raw) as typeof out;
+        } catch {
+          // leave empty
+        }
+      }
+      const labelOf = (key: string) =>
+        input?.fields?.find((f) => f.key === key)?.label ?? key;
+      return {
+        toolCallId: p.toolCallId,
+        title: input?.title ?? "Credentials",
+        saved: out.saved ?? [],
+        values: Object.entries(out.values ?? {}).map(([key, value]) => ({
+          label: labelOf(key),
+          value,
+        })),
+        declined: !!out.declined,
+      };
+    });
+
 // ---------------------------------------------------------------------------
 // Source URL helpers
 // ---------------------------------------------------------------------------
@@ -322,6 +374,22 @@ export const splitReasoningByHeaders = (texts: string[]): ReasoningSection[] => 
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_TOOL_LABELS: ToolLabels = {
+  create_connection: {
+    active: (i) => `Creating the ${i.name ?? "connection"} connection`,
+    complete: (i) => `Created the ${i.name ?? "connection"} connection`,
+  },
+  delete_connection: {
+    active: (i) => `Deleting the ${i.name ?? "connection"} connection`,
+    complete: (i) => `Deleted the ${i.name ?? "connection"} connection`,
+  },
+  connect_connection: {
+    active: (i) => `Connecting ${i.name ?? "the integration"}`,
+    complete: (i) => `Connected ${i.name ?? "the integration"}`,
+  },
+  list_secrets: {
+    active: () => "Checking stored credentials",
+    complete: () => "Checked stored credentials",
+  },
   webSearch: {
     active: (i) => `Searching for '${i.query ?? ""}'`,
     complete: (i) => `Searched for '${i.query ?? ""}'`,

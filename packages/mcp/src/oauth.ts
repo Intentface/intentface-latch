@@ -45,8 +45,17 @@ export interface McpOAuthConfig<P = unknown> {
     | ((principal: P) => OAuthClientInformation | undefined | Promise<OAuthClientInformation | undefined>);
   /** Allowed OAuth authorization-server origins. Empty/undefined = allow any. */
   allowedAuthorizationServers?: string[];
-  /** Requested scope string, if the server expects one. */
-  scope?: string;
+  /**
+   * Requested scope string, if the server expects one.
+   *
+   * A function defers the lookup to flow time, per caller — necessary, not
+   * merely symmetric with `serverUrl`: a single `McpOAuth` instance is shared
+   * across callers (UI connections are cached by connection NAME while the
+   * connection record itself is per-caller), so a static string would request
+   * one caller's scope on another caller's behalf. Resolve per principal and
+   * that cannot happen.
+   */
+  scope?: string | ((principal: P) => string | undefined | Promise<string | undefined>);
   /**
    * Optionally validate/normalize the RFC 8707 resource URL discovered from the
    * server's metadata. Default (when omitted) requires an exact origin match;
@@ -263,6 +272,8 @@ export function createMcpOAuth<P>(opts: {
   const { vault, config } = opts;
   const resolveServerUrl = (principal: P): string | Promise<string> =>
     typeof config.serverUrl === "function" ? config.serverUrl(principal) : config.serverUrl;
+  const resolveScope = (principal: P): string | undefined | Promise<string | undefined> =>
+    typeof config.scope === "function" ? config.scope(principal) : config.scope;
   return {
     async isAuthorized(principal) {
       return vault.has(principal, vaultKey(config.name, "tokens"));
@@ -277,7 +288,7 @@ export function createMcpOAuth<P>(opts: {
       });
       const result = await auth(provider, {
         serverUrl: await resolveServerUrl(principal),
-        scope: config.scope,
+        scope: await resolveScope(principal),
         fetchFn: config.fetch,
       });
       if (result === "AUTHORIZED") return { status: "authorized" };

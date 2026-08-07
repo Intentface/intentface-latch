@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
-import { judgeRubric } from "./judge";
+import { judgeOnce, judgeRubric } from "./judge";
 
 /** Mock judge: returns each text in sequence (repeating the last), capturing prompts. */
 function mockJudge(texts: string[]) {
@@ -82,5 +82,26 @@ describe("judgeRubric", () => {
     expect(calls()).toBe(2);
     expect(v.error).toContain("judge call failed");
     expect(v.pass).toBe(false);
+  });
+});
+
+describe("judgeOnce — conversation block (the 'chat' context scope)", () => {
+  it("includes the conversation when provided", async () => {
+    const { model, prompts } = mockJudge(['{"pass": true, "reason": "ok"}']);
+    await judgeOnce(model, {
+      input: "and tomorrow?",
+      answer: "Rest day.",
+      tools: "none",
+      criterion: "stays consistent with earlier advice",
+      conversation: "USER: plan my week\n\nASSISTANT: Hard intervals Tuesday.",
+    });
+    expect(prompts[0]).toContain("CONVERSATION SO FAR");
+    expect(prompts[0]).toContain("Hard intervals Tuesday.");
+  });
+
+  it("omits the block without a conversation", async () => {
+    const { model, prompts } = mockJudge(['{"pass": true, "reason": "ok"}']);
+    await judgeOnce(model, { input: "q", answer: "a", tools: "none", criterion: "c" });
+    expect(prompts[0]).not.toContain("CONVERSATION SO FAR");
   });
 });

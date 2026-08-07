@@ -1,16 +1,30 @@
 import { randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
 import type { AppMessage } from "@intentface/latch-core";
 import {
   slackManifest,
   createFromManifestUrl,
   SLACK_BOT_SCOPES,
 } from "@intentface/latch-channels/slack";
+import {
+  isLangfuseConfigured,
+  listAdministeredTraces,
+  postScore,
+} from "@intentface/latch-langfuse";
+import { telegramCommandMenu } from "@intentface/latch-channels";
 import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
+import { scopeRefOf } from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
-import { getLatch } from "./latch";
-import { normalizeAgentName } from "./agent-store";
+import type { Principal } from "./session";
+import { isOrgAdmin } from "./auth";
+import { getLatch, ownerTagOf } from "./latch";
+import { normalizeAgentName, evalOwnerKeysOf } from "./agent-store";
+import type { AttachedEval } from "./agent-store";
+import { resolveRunners, type Runner } from "./observability/runners";
+import { validateRubrics } from "./observability/rubrics";
+import { rejudgeRun } from "./observability/judge-run";
 import {
   slackVaultKeys,
   SLACK_CONFIG_TOKEN_KEY,
@@ -21,9 +35,35 @@ import { telegramVaultKeys } from "./telegram-store";
 import { whatsappVaultKeys } from "./whatsapp-store";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
+import { upsertConnection } from "./connection-upsert";
+import type { ConnectionInput } from "./connection-upsert";
+import { normalizeSecretName } from "./named-secrets";
+import { secretDependents, secretKey } from "./connection-store";
+import {
+  DeliveryError,
+  listAgentChannels,
+  parseScheduleDelivery,
+  resolveDelivery,
+  type ScheduleDelivery,
+} from "./schedule-delivery";
 
-/** API-key connections (REST/OpenAPI) and their credential scope, for the key UI. */
-const API_KEY_CONNECTIONS: { name: string; label: string; scope: CredentialScope }[] = [];
+/**
+ * Every owner key a principal may read eval verdicts under — the one definition
+ * shared by all three score read paths (chat badges, the observability overlay,
+ * and a correction's lookup), so they can't drift apart.
+ *
+ * `evalOwnerKeysOf` is the boundary that matters: the agents this caller may
+ * administer. `ownerTagOf` is appended for rows written before verdicts moved to
+ * the agent's key, and for code-registry agents that have no owner. It is
+ * redundant TODAY — `ownerTagOf(p)` is always one of `evalOwnerKeysOf(p)` for
+ * every principal shape — but the two derivations live in different modules with
+ * nothing enforcing that, so this keeps a future divergence from silently hiding
+ * scores. Duplicate keys in the IN-list are harmless.
+ */
+const scoreReadKeys = (p: Principal): string[] => [
+  ...evalOwnerKeysOf(p),
+  ownerTagOf(p),
+];
 
 /**
  * Server-only reads for SSR route loaders / auth gates. These are thin
@@ -138,34 +178,6 @@ export const connectionsStatusFn = createServerFn({ method: "GET" }).handler(
   },
 );
 
-/** API-key connection status (is a key stored for the caller, at its scope). */
-export const connectionKeysFn = createServerFn({ method: "GET" }).handler(async () => {
-  const principal = await getPrincipal();
-  if (!principal) return [];
-  const { credentials } = await getLatch();
-  return Promise.all(
-    API_KEY_CONNECTIONS.map(async (c) => ({
-      name: c.name,
-      label: c.label,
-      scope: c.scope,
-      set: await credentials.has(principal, c.name, c.scope),
-    })),
-  );
-});
-
-/** Store an API key for a connection, at its declared scope (user/org). */
-export const setConnectionKeyFn = createServerFn({ method: "POST" })
-  .validator((data: { name: string; value: string }) => data)
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false };
-    const conn = API_KEY_CONNECTIONS.find((c) => c.name === data.name);
-    if (!conn) return { ok: false };
-    const { credentials } = await getLatch();
-    await credentials.set(principal, conn.name, conn.scope, data.value);
-    return { ok: true };
-  });
-
 /** UI-added connections visible to the caller (org-shared + personal). */
 export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
@@ -174,72 +186,94 @@ export const listConnectionsFn = createServerFn({ method: "GET" }).handler(async
   const conns = await connectionStore.list(principal);
   // OAuth status for MCP connections (whether the caller has authorized).
   const status = new Map((await dynamic.status(principal)).map((s) => [s.name, s]));
-  // Never return the token to the client — just shape + whether auth is set.
+  // Never return tokens or client secrets to the client — just shape + whether
+  // auth is set. This explicit projection is the ONLY egress for stored
+  // connections; keep it field-by-field (no spreading of the raw blob).
   return conns.map((c) => ({
     name: c.name,
     kind: c.kind,
     scope: c.scope,
     target: c.mcp?.url ?? c.openapi?.spec ?? "",
     hasAuth: c.auth?.kind === "bearer" || c.auth?.kind === "header",
-    oauth: c.auth?.kind === "oauth",
+    oauth: c.auth?.kind === "oauth" || c.auth?.kind === "oauth2",
     authorized: status.get(c.name)?.authorized ?? true,
   }));
 });
 
-/** Add a UI-defined connection (stored encrypted in the Vault at its scope). */
+/**
+ * One connection's editable config, for prefilling the edit form. Secrets
+ * (static token, oauth2 client secret) stay server-side — the form signals
+ * their presence via the `has*` flags and keeps them unless a replacement is
+ * typed (see the carry-over in `addConnectionFn`).
+ */
+export const getConnectionFn = createServerFn({ method: "GET" })
+  .validator((data: { name: string; scope: "user" | "org" }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { connectionStore } = await getLatch();
+    // Scope-exact lookup — `get()`'s personal-wins precedence would return the
+    // wrong record when a personal connection shadows an org one.
+    const conns = await connectionStore.list(principal);
+    const c = conns.find((x) => x.name === data.name && x.scope === data.scope);
+    if (!c) return null;
+    const auth = c.auth;
+    return {
+      name: c.name,
+      kind: c.kind,
+      scope: c.scope,
+      url: c.mcp?.url,
+      spec: c.openapi?.spec,
+      baseUrl: c.openapi?.baseUrl,
+      operations: c.openapi?.operations?.join(", "),
+      authMode:
+        auth?.kind === "oauth"
+          ? ("oauth" as const)
+          : auth?.kind === "oauth2"
+            ? ("oauth2" as const)
+            : auth
+              ? ("token" as const)
+              : ("none" as const),
+      authHeader: auth?.kind === "header" ? auth.header : undefined,
+      hasToken: auth?.kind === "bearer" || auth?.kind === "header",
+      authorizeUrl: auth?.kind === "oauth2" ? auth.authorizeUrl : undefined,
+      tokenUrl: auth?.kind === "oauth2" ? auth.tokenUrl : undefined,
+      clientId: auth?.kind === "oauth2" ? auth.clientId : undefined,
+      hasClientSecret: auth?.kind === "oauth2",
+      scopes:
+        auth?.kind === "oauth2" || auth?.kind === "oauth"
+          ? auth.scopes?.join(" ")
+          : undefined,
+    };
+  });
+
+/**
+ * Add a UI-defined connection (stored encrypted in the Vault at its scope).
+ * The rules live in `upsertConnection` so this and the Agent Builder's
+ * `create_connection` validate identically.
+ */
 export const addConnectionFn = createServerFn({ method: "POST" })
-  .validator(
-    (data: {
-      name: string;
-      kind: "mcp" | "openapi";
-      scope: "user" | "org";
-      url?: string;
-      spec?: string;
-      baseUrl?: string;
-      operations?: string;
-      /** MCP only: "oauth" uses the interactive flow (no token); else token/none. */
-      authMode?: "none" | "token" | "oauth";
-      authHeader?: string;
-      token?: string;
-    }) => data,
-  )
+  .validator((data: ConnectionInput) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
-    const name = data.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_");
-    if (!name) return { ok: false, error: "name required" };
-    const auth =
-      data.kind === "mcp" && data.authMode === "oauth"
-        ? ({ kind: "oauth" } as const)
-        : data.token?.trim()
-          ? {
-              kind: (data.authHeader?.trim() ? "header" : "bearer") as "header" | "bearer",
-              header: data.authHeader?.trim() || undefined,
-              token: data.token.trim(),
-            }
-          : undefined;
-    const { connectionStore } = await getLatch();
-    if (data.kind === "mcp") {
-      if (!data.url?.trim()) return { ok: false, error: "url required" };
-      await connectionStore.add(principal, data.scope, { kind: "mcp", name, mcp: { url: data.url.trim() }, auth });
-    } else {
-      if (!data.spec?.trim()) return { ok: false, error: "spec required" };
-      const operations = data.operations
-        ?.split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      await connectionStore.add(principal, data.scope, {
-        kind: "openapi",
-        name,
-        openapi: {
-          spec: data.spec.trim(),
-          baseUrl: data.baseUrl?.trim() || undefined,
-          operations: operations && operations.length > 0 ? operations : undefined,
-        },
-        auth,
-      });
+    // Org-shared connections are called by every member's agents — only
+    // owners/admins may create, overwrite or repoint them.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false, error: "only org admins can manage org-shared connections" };
     }
-    return { ok: true };
+    const { connectionStore, dynamic, namedSecrets } = await getLatch();
+    const result = await upsertConnection(principal, data, {
+      connectionStore,
+      dynamic,
+      namedSecrets,
+    });
+    if (result.ok) {
+      console.log(
+        `[connections] upsert name=${result.name} scope=${data.scope} kind=${data.kind} by=${principal.userId ?? "-"}@${principal.orgId}`,
+      );
+    }
+    return result;
   });
 
 /** Remove a UI-defined connection at its scope. */
@@ -248,6 +282,10 @@ export const removeConnectionFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
+    // Same gate as addConnectionFn: org-shared connections are admin-managed.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false };
+    }
     const { connectionStore } = await getLatch();
     await connectionStore.remove(principal, data.scope, data.name);
     return { ok: true };
@@ -258,8 +296,137 @@ export const listAgentsFn = createServerFn({ method: "GET" }).handler(async () =
   const principal = await getPrincipal();
   if (!principal) return [];
   const { runtime } = await getLatch();
-  return runtime.listAgents(principal);
+  // `memory-*` are system agents spawned only by the memory sweep — hide them
+  // from the user-facing picker (they stay runnable by name for the sweep).
+  return (await runtime.listAgents(principal)).filter((a) => !a.name.startsWith("memory-"));
 });
+
+// ---------------------------------------------------------------------------
+// Named secrets
+//
+// The ONLY path a credential's plaintext takes. The Agent Builder asks for a
+// secret by NAME (`request_secret`); the composer collects the value and posts
+// it here; the agent's tool result carries names only. Nothing on this path
+// writes a value into a message part, a tool input, or a tool output — see
+// `lib/named-secrets.ts`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Names + scopes of the caller's stored secrets, each with the connections that
+ * depend on it. Never values.
+ *
+ * `usedBy` is the whole reason connections store a reference: it says, at rest,
+ * what Replace will rotate and what Delete will break.
+ */
+export const listSecretsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { namedSecrets, connectionStore } = await getLatch();
+  const [secrets, conns] = await Promise.all([
+    namedSecrets.list(principal),
+    connectionStore.list(principal),
+  ]);
+  const dependents = secretDependents(conns);
+  return secrets.map((s) => ({
+    ...s,
+    usedBy: dependents.get(secretKey(s.scope, s.name)) ?? [],
+  }));
+});
+
+/**
+ * The wire contract for a secret batch. `.validator()` in this file is types
+ * only, and these endpoints are callable directly — so the shape is parsed for
+ * real here. `scope` especially: every reader compares it with `=== "org"`, so
+ * an unrecognised value would quietly mean "user". The 6-entry cap mirrors
+ * `request_secret`'s `fields` cap (one form, one batch) and bounds Vault writes.
+ */
+const SAVE_SECRETS_INPUT = z.object({
+  scope: z.enum(["user", "org"]),
+  secrets: z
+    .array(z.object({ name: z.string(), value: z.string().min(1) }))
+    .min(1)
+    .max(6),
+});
+
+const DELETE_SECRET_INPUT = z.object({
+  name: z.string(),
+  scope: z.enum(["user", "org"]),
+});
+
+const firstIssue = (e: z.ZodError) => e.issues[0]?.message ?? "invalid request";
+
+/**
+ * Store one or more secret values under caller-chosen names. Returns the names
+ * only, which is what the paused `request_secret` tool result is built from.
+ */
+export const saveSecretsFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { scope: CredentialScope; secrets: { name: string; value: string }[] }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const parsed = SAVE_SECRETS_INPUT.safeParse(data);
+    if (!parsed.success) return { ok: false as const, error: firstIssue(parsed.error) };
+    const { scope, secrets } = parsed.data;
+    // Org-shared secrets back connections every member's agents call — same
+    // gate as the connections they feed.
+    if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false as const, error: "only org admins can store org-shared secrets" };
+    }
+    // Normalize the WHOLE batch before the first write: a bad name halfway
+    // through would otherwise leave some secrets stored and some not, with the
+    // caller told only that it failed.
+    const entries: { name: string; value: string }[] = [];
+    for (const s of secrets) {
+      const name = normalizeSecretName(s.name);
+      if (!name) return { ok: false as const, error: "secret name required" };
+      entries.push({ name, value: s.value });
+    }
+    const { namedSecrets } = await getLatch();
+    const saved: string[] = [];
+    for (const e of entries) {
+      await namedSecrets.set(principal, e.name, scope, e.value);
+      saved.push(e.name);
+    }
+    // Audit: names and actor only — never the value.
+    console.log(
+      `[secrets] saved ${saved.join(",")} scope=${parsed.data.scope} by=${principal.userId ?? "-"}@${principal.orgId}`,
+    );
+    return { ok: true as const, saved };
+  });
+
+/**
+ * Delete a stored secret at its scope. This REVOKES every connection that
+ * references it — they stop contributing tools rather than calling out
+ * unauthenticated. The UI names those connections before asking to confirm; the
+ * audit line records them.
+ */
+export const deleteSecretFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: CredentialScope }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const parsed = DELETE_SECRET_INPUT.safeParse(data);
+    if (!parsed.success) return { ok: false as const, error: firstIssue(parsed.error) };
+    const { scope } = parsed.data;
+    if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false as const, error: "only org admins can delete org-shared secrets" };
+    }
+    // Normalize exactly as `saveSecretsFn` does: secrets are STORED under the
+    // normalized name, so deleting the raw one would remove nothing while the
+    // audit line below claimed otherwise.
+    const name = normalizeSecretName(parsed.data.name);
+    if (!name) return { ok: false as const, error: "secret name required" };
+    const { namedSecrets, connectionStore } = await getLatch();
+    const revoked =
+      secretDependents(await connectionStore.list(principal)).get(secretKey(scope, name)) ?? [];
+    await namedSecrets.remove(principal, name, scope);
+    console.log(
+      `[secrets] deleted ${name} scope=${scope} by=${principal.userId ?? "-"}@${principal.orgId} revoked=${revoked.join(",") || "-"}`,
+    );
+    return { ok: true as const, revoked };
+  });
 
 /** The model catalog (id + label) for the agent editor's dropdown (from models.dev). */
 export const listModelsFn = createServerFn({ method: "GET" }).handler(async () => {
@@ -340,6 +507,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         providerWebTools?: boolean;
         authoredTools?: string[];
         effort?: "minimal" | "low" | "medium" | "high";
+        memory?: { scope: "agent-user" | "agent-org" | "user"; connection: string };
       };
       subagents?: string[];
       scope: "user" | "org";
@@ -350,6 +518,12 @@ export const saveAgentFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false, error: "unauthorized" };
     const name = normalizeAgentName(data.name);
     if (!name) return { ok: false, error: "name required" };
+    // `memory-*` is reserved for the platform's memory system agents —
+    // listAgentsFn hides the whole prefix, so a user agent named this way
+    // would save fine and then vanish from every picker.
+    if (name.startsWith("memory-")) {
+      return { ok: false, error: `"${name}" is reserved (memory-* are platform system agents).` };
+    }
     if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
     const { agentStore, authoredTools } = await getLatch();
     // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
@@ -367,6 +541,33 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         };
       }
     }
+    // Memory must point at a connection the agent itself declares — the memory
+    // files live in that workspace, and a dangling name would silently disable
+    // recall while looking configured.
+    const mem = data.exec?.memory;
+    if (mem) {
+      if (!["agent-user", "agent-org", "user"].includes(mem.scope)) {
+        return { ok: false, error: `Unknown memory scope: ${mem.scope}` };
+      }
+      if (!data.connections.includes(mem.connection)) {
+        return {
+          ok: false,
+          error: `Memory connection "${mem.connection}" must be one of the agent's connections.`,
+        };
+      }
+      // `agent-org` memory is keyed by agent name alone (`_memory/<agent>/org`)
+      // — on a personal agent, two users' same-named agents on a shared
+      // connection would silently share one memory folder.
+      if (mem.scope === "agent-org" && data.scope !== "org") {
+        return {
+          ok: false,
+          error: "Org-shared memory requires an org-visible agent (set the agent's scope to org).",
+        };
+      }
+    }
+    // The editor doesn't manage attached evals — carry them over so a save
+    // never silently wipes the agent's online-eval rubrics.
+    const existing = await agentStore.getRecord(principal, name);
     await agentStore.upsert(principal, {
       name,
       title: data.title?.trim() || undefined,
@@ -378,9 +579,51 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       tools: data.tools,
       exec: data.exec,
       subagents: data.subagents,
+      attachedEvals: existing?.attachedEvals,
       scope: data.scope,
     });
     return { ok: true };
+  });
+
+/**
+ * Memory status for one agent under the CALLER's scope resolution (the agent
+ * editor's Memory panel). Per-user scopes show the caller's own store — other
+ * users' stores are theirs.
+ */
+export const getMemoryStatusFn = createServerFn({ method: "GET" })
+  .validator((data: { name: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { agentStore, memoryJobs } = await getLatch();
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(data.name));
+    const memory = rec?.exec?.memory;
+    if (!rec || !memory) return { enabled: false as const };
+    const scope = scopeRefOf({ agent: rec.name, memory, userId: principal.userId });
+    if (!scope) {
+      return {
+        enabled: true as const,
+        resolvable: false as const,
+        scope: memory.scope,
+        connection: memory.connection,
+      };
+    }
+    const state = await memoryJobs.scopeState(scope.key);
+    const usage = await memoryJobs.usageFor(scope.key);
+    return {
+      enabled: true as const,
+      resolvable: true as const,
+      scope: memory.scope,
+      connection: memory.connection,
+      root: scope.root,
+      pendingEpisodes: state?.pendingEpisodes.length ?? 0,
+      lastConsolidatedAt: state?.lastConsolidatedAt ?? null,
+      failures: state?.failures ?? 0,
+      trackedMemories: usage.length,
+      // The Loredex web app isn't derivable from the MCP URL — deep-link only
+      // when the deployment configures it.
+      loredexUrl: process.env.LOREDEX_APP_URL || null,
+    };
   });
 
 /** Delete a UI agent at its scope. */
@@ -400,16 +643,514 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async (
   if (!principal) return [];
   const { runtime } = await getLatch();
   const schedules = await runtime.listSchedules({ principal });
-  return schedules.map((s) => ({
-    id: s.id,
-    agent: s.agent,
-    cron: s.cron,
-    prompt: s.prompt,
-    nextRunAt: s.nextRunAt,
-    lastRunAt: s.lastRunAt ?? null,
-    enabled: s.enabled,
-  }));
+  return schedules.map((s) => {
+    const delivery = parseScheduleDelivery(s.delivery);
+    return {
+      id: s.id,
+      agent: s.agent,
+      cron: s.cron,
+      prompt: s.prompt,
+      nextRunAt: s.nextRunAt,
+      lastRunAt: s.lastRunAt ?? null,
+      enabled: s.enabled,
+      delivery: delivery ? { kind: delivery.kind } : null,
+    };
+  });
 });
+
+/** The delivery targets the caller may point a schedule for `agent` at. */
+export const listAgentChannelsFn = createServerFn({ method: "GET" })
+  .validator((data: { agent: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    return listAgentChannels(principal, data.agent);
+  });
+
+/**
+ * Create a schedule, validating any delivery target first.
+ *
+ * The Schedules page posts here rather than to the generic `POST /schedules`
+ * REST route: delivery entitlement is a platform concept (bots, identity links,
+ * org membership) that `@intentface/latch-server` deliberately knows nothing
+ * about, so that route stays delivery-free rather than accepting a target it
+ * couldn't check.
+ */
+export const createScheduleFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      agent: string;
+      cron: string | null;
+      timezone?: string;
+      prompt: string;
+      delivery?: unknown;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    let delivery: ScheduleDelivery | undefined;
+    if (data.delivery) {
+      const parsed = parseScheduleDelivery(data.delivery);
+      if (!parsed) return { ok: false as const, error: "Unrecognized delivery target." };
+      try {
+        await resolveDelivery(principal, data.agent, parsed);
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof DeliveryError ? e.message : "Delivery target rejected.",
+        };
+      }
+      delivery = parsed;
+    }
+    const { runtime } = await getLatch();
+    try {
+      await runtime.schedule({
+        principal,
+        agent: data.agent,
+        cron: data.cron,
+        timezone: data.timezone,
+        prompt: data.prompt,
+        delivery,
+      });
+      return { ok: true as const };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : "Failed to create schedule",
+      };
+    }
+  });
+
+/**
+ * Make one of the caller's schedules due immediately. It then fires on the next
+ * cron tick through the ordinary path — same claim, same delivery, same
+ * advance — so "run now" can't drift from what the schedule actually does.
+ */
+export const runScheduleNowFn = createServerFn({ method: "POST" })
+  .validator((data: { id: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime } = await getLatch();
+    // Owner-fenced and enabled-only, so a stale id from a page loaded before
+    // the schedule fired arms nothing — report that rather than "queued".
+    const armed = await runtime.runScheduleNow({ principal, id: data.id });
+    return armed
+      ? { ok: true as const }
+      : { ok: false as const, error: "That schedule is no longer active." };
+  });
+
+// ── Observability (Langfuse): feedback scores + the live trace feed ─────────
+
+/**
+ * Record 👍/👎 (+ optional comment) on a run's trace as the Langfuse
+ * `user-feedback` score. Ownership-checked: the run must belong to the
+ * caller's tenant — a forged runId from another org is rejected.
+ */
+export const submitFeedbackFn = createServerFn({ method: "POST" })
+  .validator((data: { runId: string; value: 0 | 1; comment?: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!isLangfuseConfigured()) return { ok: false as const, error: "langfuse not configured" };
+    if (data.value !== 0 && data.value !== 1) return { ok: false as const, error: "bad value" };
+    const { runtime } = await getLatch();
+    // Direct, principal-scoped lookup (no capped scan) — an unowned or unknown
+    // runId returns null, so this both authorizes and validates in one O(1) hop.
+    const run = await runtime.getRun({ principal, runId: data.runId });
+    if (!run) return { ok: false as const, error: "unknown run" };
+    // Best-effort: a thumbs signal is non-critical, so a slow/down Langfuse
+    // shouldn't fail the click. postScore is already bounded + retry-free.
+    try {
+      await postScore({
+        runId: data.runId,
+        name: "user-feedback",
+        value: data.value,
+        comment: data.comment?.slice(0, 2000),
+        // NUMERIC (1/0) so Langfuse can average it into a satisfaction rate.
+        dataType: "NUMERIC",
+        // Pin to the run's start so flipping 👍↔👎 later upserts one score.
+        timestamp: run.startedAt,
+      });
+    } catch (e) {
+      console.warn(`feedback postScore failed (run ${data.runId}):`, e);
+      return { ok: false as const, error: "feedback could not be saved" };
+    }
+    return { ok: true as const };
+  });
+
+/** One row of the observability feed (a run's trace + its scores). */
+export interface ObservabilityRow {
+  runId: string | null;
+  traceId: string;
+  agent: string | null;
+  timestamp: string;
+  inputPreview: string;
+  outputPreview: string;
+  latencySeconds: number | null;
+  cost: number | null;
+  scores: { name: string; value: number | string | null; comment?: string; dataType?: string }[];
+  deepLink: string | null;
+  /** Who ran the turn — absent when the trace carries no user id. */
+  runner: Runner | null;
+}
+
+const preview = (v: unknown): string => {
+  if (v == null) return "";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+};
+
+/**
+ * The live observability feed: recent traces of the agents the caller
+ * ADMINISTERS — including runs by other users — plus the caller's own runs, with
+ * judge scores and user feedback joined in and per-rubric aggregates over the
+ * window. Polled by /observability (~5s); all Langfuse reads stay server-side
+ * (tenants never get Langfuse credentials).
+ *
+ * Tenancy: the owner keys passed to `listAdministeredTraces` are derived from the
+ * session principal alone, never from `data`. `agent` only narrows.
+ */
+export const listObservabilityFn = createServerFn({ method: "GET" })
+  .validator((data: { agent?: string; runner?: string; anonymous?: boolean }) => data)
+  .handler(async ({ data }) => {
+    const empty = {
+      configured: false as const,
+      rows: [],
+      aggregates: [],
+      feedback: null,
+      runners: [],
+    };
+    const principal = await getPrincipal();
+    if (!principal) return empty;
+    if (!isLangfuseConfigured()) return empty;
+    const base = (process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com").replace(/\/$/, "");
+    const selfTag = ownerTagOf(principal);
+    // The agents this caller may administer — and therefore whose eval verdicts
+    // are theirs to read, whoever produced them.
+    const evalOwners = evalOwnerKeysOf(principal);
+    const traces = await listAdministeredTraces({
+      agentOwnerTags: evalOwners,
+      ownerTag: selfTag,
+      agent: data.agent || undefined,
+      limit: 50,
+    });
+
+    const { runScores, resolveUsers } = await getLatch();
+    const runners = await resolveRunners({
+      tags: traces.map((t) => t.userId ?? "").filter((t) => t.length > 0),
+      selfTag,
+      anonymous: data.anonymous === true,
+      lookup: resolveUsers,
+    });
+
+    let rows: ObservabilityRow[] = traces.map((t) => ({
+      runId: t.runId ?? null,
+      traceId: t.id,
+      agent: t.agent ?? null,
+      timestamp: t.timestamp,
+      inputPreview: preview(t.input),
+      outputPreview: preview(t.output),
+      latencySeconds: t.latency ?? null,
+      cost: t.totalCost ?? null,
+      scores: t.scores,
+      deepLink: t.htmlPath ? `${base}${t.htmlPath}` : null,
+      runner: (t.userId ? runners.get(t.userId) : undefined) ?? null,
+    }));
+
+    // The full runner list is built BEFORE filtering, so narrowing to one person
+    // doesn't collapse the dropdown to just them.
+    const runnerOptions = [...new Map([...runners.values()].map((r) => [r.key, r])).values()].sort(
+      (a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.label.localeCompare(b.label)),
+    );
+    // Narrows WITHIN the window rather than fetching that person's own newest 50 —
+    // this feed has always been "the recent N", and both the runner list and the
+    // aggregates are scoped to the same window, so they stay consistent with the
+    // rows on screen. A quiet colleague can therefore drop out of the window
+    // entirely; per-runner history belongs in Langfuse (deep-linked per row).
+    if (data.runner) rows = rows.filter((r) => r.runner?.key === data.runner);
+
+    // Overlay local human corrections onto the Langfuse-derived scores. Langfuse
+    // is the record of truth but has read-side ingestion lag (~20–45s), and a
+    // correction of a rubric that the live judge already scored can briefly show
+    // as two same-named scores until ingestion settles. The local store holds the
+    // authoritative human verdict immediately, so we replace by (runId, name):
+    // this both dedups and reflects corrections without waiting on Langfuse.
+    const runIds = rows.map((r) => r.runId).filter((id): id is string => !!id);
+    if (runIds.length > 0) {
+      const localByRun = await runScores.getForRuns(scoreReadKeys(principal), runIds);
+      for (const row of rows) {
+        if (!row.runId) continue;
+        const corrections = localByRun.get(row.runId)?.filter((s) => s.source === "human");
+        if (!corrections?.length) continue;
+        const byName = new Map(row.scores.map((s) => [s.name, s]));
+        for (const c of corrections) {
+          byName.set(c.rubricName, {
+            name: c.rubricName,
+            value: c.value,
+            comment: c.comment,
+            dataType: c.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          });
+        }
+        row.scores = Array.from(byName.values());
+      }
+    }
+    // Per-rubric aggregates over the window; user-feedback becomes a 👍 rate.
+    const byName = new Map<string, { sum: number; count: number }>();
+    for (const row of rows) {
+      for (const s of row.scores) {
+        if (typeof s.value !== "number") continue;
+        const agg = byName.get(s.name) ?? { sum: 0, count: 0 };
+        agg.sum += s.value;
+        agg.count += 1;
+        byName.set(s.name, agg);
+      }
+    }
+    const fb = byName.get("user-feedback");
+    byName.delete("user-feedback");
+    return {
+      configured: true as const,
+      rows,
+      aggregates: Array.from(byName, ([name, a]) => ({
+        name,
+        average: a.sum / a.count,
+        count: a.count,
+      })).sort((a, b) => a.name.localeCompare(b.name)),
+      feedback: fb ? { rate: fb.sum / fb.count, count: fb.count } : null,
+      runners: runnerOptions,
+    };
+  });
+
+// ── Chat evals panel: rubric CRUD, live scores, on-demand re-judge ──────────
+
+/** The chatted agent's rubrics + whether the caller can edit them (owns it). */
+export const getAgentEvalsFn = createServerFn({ method: "GET" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { editable: false as const, evals: [] as AttachedEval[] };
+    const { agentStore } = await getLatch();
+    // Only the user's own (editable) agents resolve here; built-ins/others → null.
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(agent));
+    return { editable: !!rec, evals: rec?.attachedEvals ?? [] };
+  });
+
+/** Persist the drawer's rubric set to the agent (the explicit "Save to agent"). */
+export const saveAgentEvalsFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; evals: AttachedEval[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore, models } = await getLatch();
+    const name = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, name);
+    if (!rec) return { ok: false as const, error: `No editable agent "${name}".` };
+    const valid = validateRubrics(data.evals, (id) => models.some((m) => m.id === id));
+    if (!valid.ok) return { ok: false as const, error: valid.error };
+    await agentStore.upsert(principal, { ...rec, attachedEvals: valid.rubrics });
+    return { ok: true as const, evals: valid.rubrics };
+  });
+
+/**
+ * Local (fast) eval verdicts for the given run ids — the chat badges poll this.
+ *
+ * Reads under the caller's eval-owner keys, so verdicts are visible only to
+ * someone who administers the judged agent. A user who merely RUNS another's
+ * agent matches no key and gets nothing back — that's what keeps my rubrics'
+ * verdicts off their screen, without a separate permission check.
+ */
+export const getRunScoresFn = createServerFn({ method: "POST" })
+  .validator((runIds: string[]) => runIds)
+  .handler(async ({ data: runIds }) => {
+    const principal = await getPrincipal();
+    if (!principal || runIds.length === 0) return {} as Record<string, AttachedEvalScore[]>;
+    const { runScores } = await getLatch();
+    const byRun = await runScores.getForRuns(scoreReadKeys(principal), runIds);
+    const out: Record<string, AttachedEvalScore[]> = {};
+    for (const [runId, scores] of byRun) {
+      out[runId] = scores.map((s) => ({
+        name: s.rubricName,
+        value: s.value,
+        comment: s.comment,
+        scale: s.scale,
+        source: s.source,
+        aiValue: s.aiValue,
+        aiComment: s.aiComment,
+      }));
+    }
+    return out;
+  });
+
+export interface AttachedEvalScore {
+  name: string;
+  value: number;
+  comment?: string;
+  scale: "binary" | "score";
+  source: "live" | "rejudge" | "human";
+  /** Present when source="human": the judge's original value/reason. */
+  aiValue?: number;
+  aiComment?: string;
+}
+
+/** Re-judge one already-sent message against the (draft) rubric set — no re-chat. */
+export const rejudgeRunFn = createServerFn({ method: "POST" })
+  .validator((data: { chatId: string; runId: string; evals: AttachedEval[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    // Client-supplied rubrics: enforce the same limits as the save path
+    // (≤7, kebab names, prompt length, known judge model) before judging so a
+    // caller can't fan out hundreds of judge calls or pin an arbitrary model.
+    const { models } = await getLatch();
+    const valid = validateRubrics(data.evals, (id) => models.some((m) => m.id === id));
+    if (!valid.ok) return { ok: false as const, error: valid.error };
+    try {
+      const verdicts = await rejudgeRun({
+        principal,
+        chatId: data.chatId,
+        runId: data.runId,
+        rubrics: valid.rubrics,
+      });
+      return {
+        ok: true as const,
+        scores: verdicts.map((v) => ({
+          name: v.rubric.name,
+          value: v.value,
+          comment: v.comment,
+          scale: v.rubric.scale,
+          source: "rejudge" as const,
+        })),
+      };
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : "re-judge failed" };
+    }
+  });
+
+/**
+ * Human correction of a judge verdict: the human sets the authoritative value
+ * (+ required note). Updates the local store (source "human", preserving the
+ * judge's original value/reason) so the badge flips immediately, AND overwrites
+ * the score in Langfuse (human value + note, AI original in metadata) so
+ * /observability and Langfuse aggregates reflect the corrected truth.
+ */
+export const correctScoreFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { runId: string; rubricName: string; value: number; comment: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!data.comment.trim()) return { ok: false as const, error: "a note is required" };
+    if (!Number.isFinite(data.value)) return { ok: false as const, error: "value must be a finite number" };
+    const { runtime, runScores } = await getLatch();
+    // Ownership: the run must be the caller's (direct, principal-scoped).
+    const run = await runtime.getRun({ principal, runId: data.runId });
+    if (!run) return { ok: false as const, error: "unknown run" };
+
+    const existing = await runScores.getOne(
+      scoreReadKeys(principal),
+      data.runId,
+      data.rubricName,
+    );
+    if (!existing) return { ok: false as const, error: "no score to correct" };
+    // Binary → 1/0; graded → clamp to [0,1]. Never persist an out-of-range or
+    // NaN value (it would skew /observability aggregates and poison averages).
+    const value =
+      existing.scale === "binary"
+        ? (data.value >= 0.5 ? 1 : 0)
+        : Math.max(0, Math.min(1, data.value));
+    // Preserve the judge's original verdict (unless already a human correction).
+    const aiValue = existing.source === "human" ? existing.aiValue : existing.value;
+    const aiComment = existing.source === "human" ? existing.aiComment : existing.comment;
+
+    // Upsert the row we actually matched — writing under a different key would
+    // fork a second verdict for the same run+rubric.
+    await runScores.put(existing.owner, {
+      runId: data.runId,
+      rubricName: data.rubricName,
+      value,
+      comment: data.comment.trim(),
+      scale: existing.scale,
+      source: "human",
+      aiValue,
+      aiComment,
+      updatedAt: Date.now(),
+    });
+    if (isLangfuseConfigured()) {
+      // The correction is already persisted locally (above) and /observability
+      // overlays local human corrections, so it's applied regardless — a
+      // slow/down Langfuse must not fail the user's save. Best-effort mirror.
+      try {
+        await postScore({
+          runId: data.runId,
+          name: data.rubricName,
+          value,
+          comment: data.comment.trim(),
+          dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          // Same timestamp as the original live verdict (the run's start) so this
+          // correction overwrites it in Langfuse instead of adding a second score.
+          timestamp: run.startedAt,
+          metadata: {
+            corrected: true,
+            correctedBy: principal.userId ?? principal.orgId,
+            ...(aiValue != null ? { aiValue } : {}),
+            ...(aiComment ? { aiComment } : {}),
+          },
+        });
+      } catch (e) {
+        console.warn(`correction postScore failed (run ${data.runId}):`, e);
+      }
+    }
+    return {
+      ok: true as const,
+      score: {
+        name: data.rubricName,
+        value,
+        comment: data.comment.trim(),
+        scale: existing.scale,
+        source: "human" as const,
+        aiValue,
+        aiComment,
+      },
+    };
+  });
+
+/** Extract the single fenced ```json block the eval-author is contracted to emit. */
+function parseFencedJson<T>(answer: string): T | null {
+  const fence = answer.match(/```json\s*([\s\S]*?)```/i);
+  const body = (fence ? fence[1] : answer).trim();
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Draft a rubric for a described quality via the eval-author subagent. */
+export const draftRubricFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; quality: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const quality = data.quality.trim();
+    if (!quality) return { ok: false as const, error: "describe the quality to measure" };
+    const { runtime } = await getLatch();
+    const brief =
+      `Agent: ${normalizeAgentName(data.agent)}. Author ONE online-eval rubric that measures this quality: ` +
+      `"${quality}". Return the JSON array (a single rubric) per your output contract.`;
+    const { answer } = await runtime.runAgent({
+      principal,
+      agent: "eval-author",
+      prompt: brief,
+    });
+    const parsed = parseFencedJson<AttachedEval[] | { error: string }>(answer);
+    if (!parsed) return { ok: false as const, error: "eval-author returned no valid JSON" };
+    if (!Array.isArray(parsed)) {
+      return { ok: false as const, error: parsed.error ?? "eval-author could not draft a rubric" };
+    }
+    return { ok: true as const, rubrics: parsed };
+  });
 
 // ── Slack channel: per-agent app onboarding ─────────────────────────────────
 
@@ -459,22 +1200,42 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, slackStore, credentials } = await getLatch();
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
+
+    // An `api_app_id` is visible to every member of the hosting Slack workspace
+    // and echoed in every event payload. RECONFIGURING an existing binding needs
+    // the same creator gate as unbinding, not just a same-org check: the three
+    // credentials below are stored at "org" scope, so any other member of the
+    // owning org could otherwise overwrite the binding's Slack secrets and break
+    // (or repoint) it. Checked BEFORE any write; `bind` is guarded too. A binding
+    // with no recorded creator is unmanageable — `canManageBot` fails closed.
+    const existing = await slackStore.resolve(data.appId);
+    if (existing && !canManageBot(existing, principal)) {
+      return { ok: false as const, error: "app already bound" };
+    }
 
     const keys = slackVaultKeys(data.appId);
     await credentials.set(principal, keys.clientId, "org", data.clientId);
     await credentials.set(principal, keys.clientSecret, "org", data.clientSecret);
     await credentials.set(principal, keys.signingSecret, "org", data.signingSecret);
 
+    // One lookup for both the pinned scope and the display title (see
+    // `boundAgentRecord`); fall back to the directory for code-registry agents,
+    // which have no stored record.
+    const record = await boundAgentRecord(agentStore, principal, data.agent);
     const botName =
-      (await runtime.listAgents(principal)).find((a) => a.name === data.agent)?.title ?? data.agent;
-    await slackStore.bind({
+      record.title ??
+      (await runtime.listAgents(principal)).find((a) => a.name === data.agent)?.title ??
+      data.agent;
+    const bound = await slackStore.bind({
       appId: data.appId,
       agent: data.agent,
+      agentScope: record.scope,
       orgId: principal.orgId,
       userId: principal.userId,
       botName,
     });
+    if (!bound) return { ok: false as const, error: "app already bound" };
 
     const authorizeUrl =
       `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(data.clientId)}` +
@@ -499,7 +1260,11 @@ export const unbindSlackAppFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
     const { slackStore } = await getLatch();
-    await slackStore.unbind(appId);
+    // Ownership check, same gate as every other channel binding — without it any
+    // authenticated user could delete any org's binding by app id.
+    const app = await slackStore.resolve(appId);
+    if (!app || !canManageBot(app, principal)) return { ok: false };
+    await slackStore.unbind(appId, principal.orgId);
     return { ok: true };
   });
 
@@ -536,7 +1301,7 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
   .handler(async ({ data: agent }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, slackStore, credentials } = await getLatch();
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
 
     const configToken = await credentials.get(principal, SLACK_CONFIG_TOKEN_KEY, "org");
     if (!configToken) return { ok: false as const, error: "no_config_token" };
@@ -545,7 +1310,10 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
 
     const info = (await runtime.listAgents(principal)).find((a) => a.name === agent);
     if (!info) return { ok: false as const, error: "unknown_agent" };
-    const displayName = info.title ?? agent;
+    // The pinned record decides the title too, so the app we create is named
+    // after the agent the binding will actually run (see `boundAgentRecord`).
+    const record = await boundAgentRecord(agentStore, principal, agent);
+    const displayName = record.title ?? info.title ?? agent;
 
     const manifest = slackManifest({
       displayName,
@@ -573,13 +1341,17 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
     await credentials.set(principal, keys.signingSecret, "org", created.signingSecret);
     await credentials.set(principal, keys.clientId, "org", created.clientId);
     await credentials.set(principal, keys.clientSecret, "org", created.clientSecret);
-    await slackStore.bind({
+    // Slack minted this app id, so a cross-org conflict shouldn't happen —
+    // report it rather than silently reporting success if it ever does.
+    const bound = await slackStore.bind({
       appId: created.appId,
       agent,
+      agentScope: record.scope,
       orgId: principal.orgId,
       userId: principal.userId,
       botName: displayName,
     });
+    if (!bound) return { ok: false as const, error: "app already bound" };
 
     // Send the installer to Slack; we carry the app id back via `state`.
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
@@ -713,21 +1485,34 @@ const canManageBot = (
 ): boolean => bot.orgId === principal.orgId && !!bot.userId && bot.userId === principal.userId;
 
 /**
- * The scope of the agent record a new channel binding will serve — personal
- * wins on a name clash, mirroring turn-time resolution (agent-store `find`).
- * Persisted on the bot row so webhook turns pin resolution to this exact
+ * The agent record a new channel binding will serve — personal wins on a name
+ * clash, mirroring turn-time resolution (agent-store `find`). Its scope is
+ * persisted on the bot row so webhook turns pin resolution to this exact
  * record. Undefined = not in the store (a code-registry agent).
+ *
+ * Callers that also need a display title must take it from THIS record, not from
+ * a separate `runtime.listAgents` lookup: that directory lists code-declared
+ * agents first and stored ones unordered-by-scope, so on a name clash the two
+ * can disagree — pinning one record while displaying another's title.
  */
-const boundAgentScope = async (
-  agentStore: { listRecords: (p: { orgId: string; userId?: string }) => Promise<{ name: string; scope: string }[]> },
+const boundAgentRecord = async (
+  agentStore: {
+    listRecords: (p: {
+      orgId: string;
+      userId?: string;
+    }) => Promise<{ name: string; scope: string; title?: string }[]>;
+  },
   principal: { orgId: string; userId?: string },
   agent: string,
-): Promise<"org" | "user" | undefined> => {
+): Promise<{ scope?: "org" | "user"; title?: string }> => {
   const records = await agentStore.listRecords(principal);
   const match =
     records.find((r) => r.name === agent && r.scope === "user") ??
     records.find((r) => r.name === agent);
-  return match?.scope === "org" || match?.scope === "user" ? match.scope : undefined;
+  return {
+    scope: match?.scope === "org" || match?.scope === "user" ? match.scope : undefined,
+    title: match?.title,
+  };
 };
 
 /** The caller's Telegram bots (for the editor's status view). */
@@ -753,7 +1538,7 @@ export const createTelegramBotFn = createServerFn({ method: "POST" })
       await telegramStore.create({
         id,
         agent: data.agent,
-        agentScope: await boundAgentScope(agentStore, principal, data.agent),
+        agentScope: (await boundAgentRecord(agentStore, principal, data.agent)).scope,
         orgId: principal.orgId,
         userId: principal.userId,
         handle: data.handle.trim(),
@@ -825,6 +1610,11 @@ export const registerTelegramWebhookFn = createServerFn({ method: "POST" })
         url: `${baseUrl()}/api/telegram/${botId}/events`,
         secretToken: secret,
       });
+      // Publish the "/" menu too — the commands work regardless, but nothing else
+      // makes them discoverable. Cosmetic, so a failure must not fail the hookup.
+      await telegramApi(token)
+        .setMyCommands(telegramCommandMenu())
+        .catch((e) => console.error("[telegram] setMyCommands failed:", e));
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
     }
@@ -894,7 +1684,7 @@ export const createWhatsappBotFn = createServerFn({ method: "POST" })
       await whatsappStore.create({
         id,
         agent: data.agent,
-        agentScope: await boundAgentScope(agentStore, principal, data.agent),
+        agentScope: (await boundAgentRecord(agentStore, principal, data.agent)).scope,
         orgId: principal.orgId,
         userId: principal.userId,
         handle: data.handle.trim(),
