@@ -1,0 +1,42 @@
+{
+  "name": "@intentface/latch-agent-builder",
+  "version": "0.0.0",
+  "description": "Latch agent builder — the meta-agent that designs, creates, and updates agents from a conversation. Host-agnostic core with an extension seam (evals, tool authoring) so hosts plug in what they support.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@intentface/latch-core": "workspace:*",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "ai": ">=7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "ai": "^7.0.2",
+    "typescript": "^5.7.0",
+    "vitest": "^4"
+  }
+}

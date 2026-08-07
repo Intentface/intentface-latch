@@ -12,3 +12,4 @@
  */
 export { createLatchHandler } from "./handler.js";
 export type { LatchHandlerConfig, LatchHandler } from "./handler.js";
+export { createCronerEvaluator } from "./cron.js";

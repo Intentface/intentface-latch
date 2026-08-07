@@ -37,7 +37,8 @@ export interface LatchHandlerConfig<P> {
    * isolation (a separate runtime/DB per tenant, e.g. one SQLite file per
    * workspace) — it's called after `resolveContext` yields the principal. A
    * single `Runtime` value fits column-scoped (`owner`) tenancy. Note: `POST
-   * cron/run` (no principal) requires a static runtime.
+   * cron/run` (no principal) requires a static runtime OR a `cronRun` tick in
+   * this config (the resolver-based setup's system-wide sweep).
    */
   runtime: Runtime<P> | ((principal: P) => Runtime<P> | Promise<Runtime<P>>);
   /**
@@ -88,6 +89,13 @@ export interface LatchHandlerConfig<P> {
    * host (cron secret / network). Omit to disable the route entirely.
    */
   cronSecret?: string;
+  /**
+   * The system-wide tick `POST /cron/run` fires. Required when `runtime` is a
+   * resolver (DB-per-tenant): no principal exists on this route, so the host
+   * must supply the tick that sweeps its tenants (each `runtime.runDue()` +
+   * `sweep()`). With a static runtime it defaults to `runtime.runDue()`.
+   */
+  cronRun?: () => Promise<unknown>;
 }
 
 export type LatchHandler = (
@@ -319,8 +327,11 @@ export function createLatchHandler<P>(
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       // GET agents — the agents available to the caller (for a picker).
+      // Hidden (internal) agents stay resolvable by name but are dropped here;
+      // callers that need the full set use `runtime.listAgents()` directly.
       if (!seg[1] && method === "GET") {
-        return json({ agents: await rt.listAgents(principal) });
+        const all = await rt.listAgents(principal);
+        return json({ agents: all.filter((a) => !a.hidden) });
       }
       const agent = seg[1];
       // Client-chosen chat id, used as-is. Tenant isolation is enforced by the
@@ -486,11 +497,12 @@ export function createLatchHandler<P>(
       if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
         return json({ error: "forbidden" }, 403);
       }
-      // No principal here → can't resolve a per-tenant runtime. A resolver-based
-      // (DB-per-tenant) setup must sweep tenants app-side instead of this route.
+      // Host-supplied tick first — the only option for a resolver-based
+      // (DB-per-tenant) setup, where no principal exists to resolve a runtime.
+      if (config.cronRun) return json(await config.cronRun());
       if (typeof runtime === "function") {
         return json(
-          { error: "cron/run requires a static runtime; sweep tenants app-side" },
+          { error: "cron/run requires a static runtime or a `cronRun` tick in the handler config" },
           400,
         );
       }

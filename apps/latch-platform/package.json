@@ -23,6 +23,7 @@
     "@codemirror/lang-javascript": "^6.2.5",
     "@daytonaio/sdk": "^0.189.0",
     "@fontsource-variable/inter": "^5.2.8",
+    "@intentface/latch-agent-builder": "workspace:*",
     "@intentface/latch-channels": "workspace:*",
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",

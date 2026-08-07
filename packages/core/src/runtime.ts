@@ -173,7 +173,19 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   harnessTools?: {
     sandbox?: Record<string, unknown>;
-    app?: Record<string, unknown>;
+    /**
+     * App-process tools. A static record for principal-independent tools
+     * (web_fetch, …), or a per-turn factory when the tools must bind to the
+     * caller (e.g. workspace file/db tools scoped to the user's permissions
+     * and the current chat).
+     */
+    app?:
+      | Record<string, unknown>
+      | ((args: {
+          principal: unknown;
+          chatId: string;
+          agent: string;
+        }) => Record<string, unknown> | Promise<Record<string, unknown>>);
     /**
      * Platform render tool(s) — attached only when an agent sets
      * `renderTools: true`, never by `defaultTools`. Kept a separate capability
@@ -1190,8 +1202,23 @@ export function createRuntime<P, RC = unknown>(
       for (const [name, t] of Object.entries(harness.sandbox)) attachHarness(name, t);
     }
     if (cfg.defaultTools && harness.app) {
+      let appTools: Record<string, unknown>;
+      if (typeof harness.app === "function") {
+        try {
+          appTools = await harness.app({ principal, chatId: resolvedChatId, agent: run.agent });
+        } catch (error) {
+          // Same teardown as a failing tool-source open above: the sources are
+          // already open and the lease heartbeat is running — release both
+          // before surfacing the factory error.
+          await closeSources();
+          stopHeartbeat();
+          throw error;
+        }
+      } else {
+        appTools = harness.app;
+      }
       const only = Array.isArray(cfg.defaultTools) ? new Set(cfg.defaultTools) : null;
-      for (const [name, t] of Object.entries(harness.app)) {
+      for (const [name, t] of Object.entries(appTools)) {
         if (!only || only.has(name)) attachHarness(name, t);
       }
     }
@@ -2462,9 +2489,13 @@ export function createRuntime<P, RC = unknown>(
       name,
       title: factory.meta?.title,
       description: factory.meta?.description,
+      hidden: factory.meta?.hidden,
     }));
     const dyn = (await config.dynamicAgents?.list(principal)) ?? [];
-    return [...stat, ...dyn];
+    // Dedup by name, static first — mirrors resolve-time precedence (a
+    // code-declared agent shadows a same-named dynamic one).
+    const seen = new Set(stat.map((a) => a.name));
+    return [...stat, ...dyn.filter((a) => !seen.has(a.name) && seen.add(a.name))];
   }
 
   /** Concatenated text of the last assistant message in a chat (subagent answer). */

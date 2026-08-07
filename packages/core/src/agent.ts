@@ -169,6 +169,14 @@ export interface AgentMeta {
   title?: string;
   /** Short description of what the agent does. */
   description?: string;
+  /**
+   * Internal agent: still resolvable/runnable by name, but flagged so
+   * user-facing pickers can drop it. `runtime.listAgents()` returns hidden
+   * agents WITH the flag (internal callers — e.g. a builder validating
+   * subagent names — need the full set); the HTTP `GET agents` route filters
+   * them out.
+   */
+  hidden?: boolean;
 }
 
 /** An agent's identity for selection UIs: its registry key + display metadata. */

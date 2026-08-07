@@ -9,6 +9,8 @@ export { createSqliteAdapter, isUniqueViolation } from "./adapter.js";
 export type { SqliteAdapterOptions, MessageStore } from "./adapter.js";
 export { createSqliteSecretStore } from "./secret-store.js";
 export type { SqliteSecretStoreOptions } from "./secret-store.js";
+export { createSqliteAgentBuilderStore, createPostgresAgentBuilderStore } from "./agent-store.js";
+export type { AgentStoreOptions } from "./agent-store.js";
 export { migrate, migrateWith } from "./migrate.js";
 export * as schema from "./schema.js";
 export { createMemoryJobStore } from "./memory-job-store.js";
