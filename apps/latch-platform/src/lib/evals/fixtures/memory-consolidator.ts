@@ -34,13 +34,29 @@ const episode = (name: string, facts: string[]) =>
     ...facts.map((f) => `- (user-said) ${f}`),
   ].join("\n");
 
-const task = (args: { episodes?: string[]; expire?: string[] }) =>
+// Mirrors buildConsolidationPrompt's block order (policy → schema → episodes →
+// expiry) so the dry-run task looks like a real sweep task.
+const task = (args: {
+  episodes?: string[];
+  expire?: string[];
+  index?: string;
+  schema?: string;
+  policy?: string;
+}) =>
   [
     "You are consolidating this agent's memory of this user. Today is 2026-07-27.",
     "",
+    ...(args.policy ? [`POLICY (non-negotiable floor): ${args.policy}`, ""] : []),
+    ...(args.schema
+      ? [
+          'INDEX SCHEMA — the required top-level sections ("## Archive" is always allowed last):',
+          args.schema,
+          "",
+        ]
+      : []),
     "Current MEMORY.md:",
     "```markdown",
-    INDEX,
+    args.index ?? INDEX,
     "```",
     "",
     "New episodes to fold in:",
@@ -117,6 +133,37 @@ export const MEMORY_CONSOLIDATOR_EVAL_CASES: EvalCase[] = [
     }),
     expected: {
       assertions: { contains: ["no changes"] },
+    },
+  },
+  {
+    id: "schema-driven-sections",
+    name: "a schema'd task files entries under the schema's sections, inventing none",
+    input: task({
+      index: "# Memory — interviewer · u-demo\nupdated: 2026-07-01 · entries: 0\n\n## Archive\n",
+      schema: [
+        "## What was gone through",
+        "- Topics covered with this person",
+        "## Where fatigued",
+        "- Where their attention dropped",
+      ].join("\n"),
+      policy:
+        "Private per-user memory: personal detail relevant to this agent is allowed. " +
+        "NEVER store credentials, secrets, tokens, one-time codes, or full account/ID numbers.",
+      episodes: [
+        episode("episodes/2026-07-27-15-00-interview.md", [
+          "Covered system design and incident response",
+          "Attention dropped noticeably during the systems-design deep dive",
+        ]),
+      ],
+    }),
+    expected: {
+      assertions: {
+        contains: ["## What was gone through", "## Where fatigued", "system design"],
+      },
+      rubric: [
+        "Every non-Archive '##' section heading in the produced MEMORY.md comes from the task's INDEX SCHEMA ('What was gone through', 'Where fatigued') — no invented top-level sections.",
+        "The fatigue observation is filed under '## Where fatigued', and the covered topics under '## What was gone through'.",
+      ],
     },
   },
   {

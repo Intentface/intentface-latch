@@ -46,6 +46,21 @@ const CAPABILITIES = z
           .string()
           .min(1)
           .describe("Which of the agent's connections holds the memory files (must be in `connections`; typically 'loredex')."),
+        extractTo: z
+          .array(z.enum(["agent-user", "agent-org", "user"]))
+          .optional()
+          .describe(
+            "EXTRA memory levels the background archivist also files facts into from the same conversations (the primary scope is always included). 'agent-org' here also requires the agent to have scope 'org'. Same connection for all levels.",
+          ),
+        schemas: z
+          .object({
+            "agent-user": z.string().optional(),
+            "agent-org": z.string().optional(),
+          })
+          .optional()
+          .describe(
+            "Markdown index-schema outlines per agent-held level ('## Section' headings + description bullets): what that level collects and how its MEMORY.md is organized. Draft them with generate_memory_schemas. The shared 'user' level's schema is a workspace file — save it with save_user_memory_schema instead.",
+          ),
       })
       .optional()
       .describe(
@@ -146,7 +161,14 @@ export function saveAgentPreflight(input: {
   name: string;
   scope: "user" | "org";
   connections?: string[];
-  capabilities?: { memory?: { scope: string; connection: string } };
+  capabilities?: {
+    memory?: {
+      scope: string;
+      connection: string;
+      extractTo?: string[];
+      schemas?: Record<string, string | undefined>;
+    };
+  };
 }): string | undefined {
   const name = normalizeAgentName(input.name);
   if (!name) return "invalid name";
@@ -160,14 +182,31 @@ export function saveAgentPreflight(input: {
   }
   // Memory files live in one of the agent's OWN connections. `!== undefined`
   // (not truthy): an empty string must fail the membership check, not skip it.
-  const memConn = input.capabilities?.memory?.connection;
+  const mem = input.capabilities?.memory;
+  const memConn = mem?.connection;
   if (memConn !== undefined && !(input.connections ?? []).includes(memConn)) {
     return `Memory connection "${memConn}" must also be listed in the agent's connections.`;
   }
   // agent-org memory is keyed by agent name alone — restrict it to
   // org-visible agents so same-named personal agents can't share a store.
-  if (input.capabilities?.memory?.scope === "agent-org" && input.scope !== "org") {
+  // Applies to the primary scope AND every extraction level.
+  const levels = [mem?.scope, ...(mem?.extractTo ?? [])].filter((l): l is string => l != null);
+  if (levels.includes("agent-org") && input.scope !== "org") {
     return `Org-shared memory ('agent-org') requires scope: "org" on the agent itself.`;
+  }
+  // Index schemas: agent-held levels only, and each must be a real outline —
+  // at least one "## Section" heading (that outline IS the schema).
+  for (const [level, schema] of Object.entries(mem?.schemas ?? {})) {
+    if (schema == null || !schema.trim()) continue;
+    if (level !== "agent-user" && level !== "agent-org") {
+      return `Memory schemas are per agent-held level (agent-user, agent-org) — the shared 'user' schema is saved with save_user_memory_schema.`;
+    }
+    if (schema.length > 4000) {
+      return `Memory schema for ${level} is too long (max 4000 chars).`;
+    }
+    if (!/^\s*##(?!#)\s*\S/m.test(schema)) {
+      return `Memory schema for ${level} needs at least one "## Section" heading.`;
+    }
   }
   return undefined;
 }
@@ -229,7 +268,7 @@ const ATTACHED_EVAL_INPUT = z.object({
 async function builderTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy import avoids a static import cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
-  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, authoredTools, evalStore, namedSecrets } =
+  const { runtime, agentStore, allConnections, connections, connectionStore, dynamic, models, authoredTools, evalStore, namedSecrets, memoryStore } =
     await getLatch();
 
   /** Org-scoped connections and secrets are admin-managed — same gate as the UI. */
@@ -545,6 +584,79 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
       },
     }),
 
+    // ── Memory schemas ──────────────────────────────────────────────────────
+
+    generate_memory_schemas: tool({
+      description:
+        "Draft memory index schemas (markdown '## Section' outlines) for an agent from its " +
+        "instructions — one per requested level. Pure generation, nothing persists: attach the " +
+        "agent-held levels via save_agent's capabilities.memory.schemas after the user approves " +
+        "them; a 'user'-level draft is saved with save_user_memory_schema instead.",
+      inputSchema: z.object({
+        name: z.string().describe("The agent's name (context for the drafts)."),
+        instructions: z.string().min(1).describe("The agent's system prompt to derive the schemas from."),
+        levels: z
+          .array(z.enum(["agent-user", "agent-org", "user"]))
+          .min(1)
+          .describe("Which memory levels to draft schemas for."),
+      }),
+      execute: async ({ name, instructions, levels }) => {
+        const { buildSchemaGenerationPrompt } = await import("@/lib/memory/schema-generation");
+        const { generateText } = await import("ai");
+        const schemas: Record<string, string> = {};
+        for (const level of Array.from(new Set(levels))) {
+          const { text } = await generateText({
+            model: anthropic("claude-sonnet-4-6"),
+            ...buildSchemaGenerationPrompt({ agent: name, instructions, level }),
+          });
+          const fenced = /```(?:markdown|md)?\n([\s\S]*?)```/.exec(text);
+          schemas[level] = (fenced?.[1] ?? text).trim();
+        }
+        return {
+          schemas,
+          note:
+            "Show these to the user and apply their edits. Attach agent-user/agent-org via " +
+            "save_agent capabilities.memory.schemas; save a 'user' draft with save_user_memory_schema.",
+        };
+      },
+    }),
+
+    save_user_memory_schema: tool({
+      description:
+        "Save the ORG-WIDE user-level memory schema — one shared workspace file " +
+        "(_memory/_user/SCHEMA.md) governing what EVERY agent's background archivist files into " +
+        "users' cross-agent profiles. Affects all memory-enabled agents on the connection — " +
+        "pauses for the user's approval.",
+      inputSchema: z.object({
+        connection: z
+          .string()
+          .default("loredex")
+          .describe("The memory connection whose workspace holds the file (default 'loredex')."),
+        schema: z
+          .string()
+          .min(1)
+          .describe("The complete schema markdown ('## Section' headings + description bullets)."),
+      }),
+      execute: async ({ connection, schema }) => {
+        if (schema.length > 4000) return { error: "schema too long (max 4000 chars)" };
+        if (!/^\s*##(?!#)\s*\S/m.test(schema)) {
+          return { error: 'the schema needs at least one "## Section" heading' };
+        }
+        const { USER_SCHEMA_PATH } = await import("@intentface/latch-memory");
+        try {
+          await memoryStore.writeFile(principal, {
+            connection,
+            path: USER_SCHEMA_PATH,
+            content: schema.endsWith("\n") ? schema : `${schema}\n`,
+            summary: "Shared user-memory index schema (all agents, user level)",
+          });
+          return { saved: true, path: USER_SCHEMA_PATH, connection };
+        } catch (error) {
+          return { error: `could not write the schema file: ${String(error)}` };
+        }
+      },
+    }),
+
     // ── Schedules ───────────────────────────────────────────────────────────
     // The builder can schedule ANY of the user's agents, unlike the harness
     // `create_schedule` (which only ever schedules the agent it's running as).
@@ -807,10 +919,22 @@ WHAT AN AGENT IS — the fields you set with save_agent:
 - effort: reasoning/thinking level ("minimal" | "low" | "medium" | "high"). ONLY set it when list_models shows reasoning=true for the chosen model; lower effort = faster + cheaper (good for simple/throughput agents), higher = deeper reasoning. Omit to use the provider default. For a model with reasoning=false, leave effort unset (it would be a no-op).
 - instructions: the system prompt, the heart of the agent. Spend most of your effort here: role, scope, tone, which tools to use and when, and edge cases. A great agent is mostly a great prompt.
 - connections: integration names from list_connections. Only wire ones that exist; prefer authorized ones. Use list_connection_tools to see what a connection offers. If the one the agent needs doesn't exist yet, you can create it — see CREATING A CONNECTION.
-- capabilities: codeMode (writes/runs JS over its tools — multi-step orchestration), sandbox (workspace + file/shell tools), providerWebTools (native web search/fetch), defaultTools (web_fetch + askUser).
+- capabilities: codeMode (writes/runs JS over its tools — multi-step orchestration), sandbox (workspace + file/shell tools), providerWebTools (native web search/fetch), defaultTools (web_fetch + askUser), memory (see MEMORY & SCHEMAS).
 - authoredTools: names of custom tools you've authored (see BUILDING TOOLS) for this agent to call.
 - subagents: names of other agents this one may delegate to.
 - scope: "user" (personal) or "org" (shared with the whole org).
+
+MEMORY & SCHEMAS (capabilities.memory + generate_memory_schemas / save_user_memory_schema):
+An agent with capabilities.memory remembers across sessions: the platform archives durable facts from idle chats in the background, injects a compiled index (MEMORY.md) each turn, and adds memory_search/memory_save. Memory has LEVELS, each a separate store with its own audience:
+- "agent-user" — this agent's private memory of each user (the default primary scope).
+- "agent-org" — one store shared by the whole org (requires the agent's scope to be "org"). Policy floor: NO PII, no named individuals — aggregate patterns only.
+- "user" — the user's cross-agent profile, shared by ALL their agents. Profile-level facts only.
+Besides its primary scope, an agent can extract into more levels via extractTo (e.g. an interview agent files per-person notes at agent-user AND team-level patterns at agent-org).
+Each level can carry an INDEX SCHEMA — a markdown outline of "## Section" headings (+ one description bullet each) steering WHAT gets archived at that level and HOW its index is organized. A domain-specific schema is what makes memory genuinely useful — offer one whenever you enable memory:
+1. Call generate_memory_schemas with the agent's instructions and the levels; show the drafts to the user and apply their edits.
+2. Attach the agent-held levels via save_agent capabilities.memory.schemas ("agent-user"/"agent-org" only).
+3. A "user"-level schema is NOT agent config — it is one org-wide workspace file shared by all agents; save it with save_user_memory_schema (approval-gated) and only when the user explicitly wants to shape the cross-agent profile.
+Each level also has a fixed policy floor baked into the platform (the org level's no-PII rule above) — schemas add domain guidance on top and can never relax it.
 
 CONNECTIONS vs AUTHORED TOOLS — pick by what the integration IS:
 - The API has an MCP server, or an OpenAPI/Swagger spec, or needs OAuth on the user's behalf → CREATE A CONNECTION. You get auth, token refresh and every endpoint for free.
@@ -917,6 +1041,10 @@ SCHEDULES:
       // recurring push into someone's DM or a team channel.
       create_agent_schedule: "user-approval",
       delete_agent_schedule: "user-approval",
+      // Rewrites the ORG-WIDE user-level memory schema — one file steering
+      // every memory-enabled agent's background extraction.
+      // (generate_memory_schemas is deliberately un-gated: pure generation.)
+      save_user_memory_schema: "user-approval",
     },
     smoothStream: true,
   },

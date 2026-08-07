@@ -72,4 +72,85 @@ describe("saveAgentPreflight (the save_agent runtime guards)", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("gates agent-org as an EXTRACTION level too, not just the primary scope", () => {
+    const memory = {
+      scope: "agent-user",
+      connection: "loredex",
+      extractTo: ["agent-org"],
+    };
+    expect(
+      saveAgentPreflight({
+        ...BASE,
+        scope: "user",
+        connections: ["loredex"],
+        capabilities: { memory },
+      }),
+    ).toMatch(/requires scope: "org"/);
+    expect(
+      saveAgentPreflight({
+        ...BASE,
+        scope: "org",
+        connections: ["loredex"],
+        capabilities: { memory },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("validates memory schemas: agent-held levels only, outline required, size-capped", () => {
+    const base = {
+      ...BASE,
+      scope: "org" as const,
+      connections: ["loredex"],
+    };
+    const mem = (schemas: Record<string, string>) => ({
+      capabilities: {
+        memory: { scope: "agent-user", connection: "loredex", extractTo: ["agent-org"], schemas },
+      },
+    });
+    expect(
+      saveAgentPreflight({ ...base, ...mem({ user: "## Profile" }) }),
+    ).toMatch(/save_user_memory_schema/);
+    expect(
+      saveAgentPreflight({ ...base, ...mem({ "agent-user": "no headings here" }) }),
+    ).toMatch(/## Section/);
+    expect(
+      saveAgentPreflight({ ...base, ...mem({ "agent-user": `## A\n${"x".repeat(4001)}` }) }),
+    ).toMatch(/too long/);
+    expect(
+      saveAgentPreflight({
+        ...base,
+        ...mem({ "agent-user": "## What was gone through\n- topics", "agent-org": "## Org knowledge" }),
+      }),
+    ).toBeUndefined();
+    // Blank schema entries are tolerated (treated as unset).
+    expect(saveAgentPreflight({ ...base, ...mem({ "agent-user": "  " }) })).toBeUndefined();
+  });
+});
+
+describe("save_agent input schema (memory levels)", () => {
+  it("accepts extractTo + schemas and rejects unknown levels", () => {
+    expect(
+      SAVE_INPUT.safeParse({
+        ...BASE,
+        connections: ["loredex"],
+        capabilities: {
+          memory: {
+            scope: "agent-user",
+            connection: "loredex",
+            extractTo: ["agent-org", "user"],
+            schemas: { "agent-user": "## A", "agent-org": "## B" },
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      SAVE_INPUT.safeParse({
+        ...BASE,
+        capabilities: {
+          memory: { scope: "agent-user", connection: "loredex", extractTo: ["everything"] },
+        },
+      }).success,
+    ).toBe(false);
+  });
 });
