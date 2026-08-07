@@ -1933,9 +1933,13 @@ export function createRuntime<P, RC = unknown>(
       name,
       title: factory.meta?.title,
       description: factory.meta?.description,
+      hidden: factory.meta?.hidden,
     }));
     const dyn = (await config.dynamicAgents?.list(principal)) ?? [];
-    return [...stat, ...dyn];
+    // Dedup by name, static first — mirrors resolve-time precedence (a
+    // code-declared agent shadows a same-named dynamic one).
+    const seen = new Set(stat.map((a) => a.name));
+    return [...stat, ...dyn.filter((a) => !seen.has(a.name) && seen.add(a.name))];
   }
 
   /** Concatenated text of the last assistant message in a chat (subagent answer). */

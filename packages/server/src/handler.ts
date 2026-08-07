@@ -326,8 +326,11 @@ export function createLatchHandler<P>(
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       // GET agents — the agents available to the caller (for a picker).
+      // Hidden (internal) agents stay resolvable by name but are dropped here;
+      // callers that need the full set use `runtime.listAgents()` directly.
       if (!seg[1] && method === "GET") {
-        return json({ agents: await rt.listAgents(principal) });
+        const all = await rt.listAgents(principal);
+        return json({ agents: all.filter((a) => !a.hidden) });
       }
       const agent = seg[1];
       // Client-chosen chat id, used as-is. Tenant isolation is enforced by the
