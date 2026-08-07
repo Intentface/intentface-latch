@@ -614,7 +614,12 @@ async function builderTools<P>(
             },
           });
         };
-        const heartbeat = setInterval(writeHeartbeat, config.testHeartbeatMs ?? 10_000);
+        // Guard the configured cadence: 0/negative/NaN would spin the writer.
+        const cadence =
+          Number.isFinite(config.testHeartbeatMs) && (config.testHeartbeatMs as number) >= 10
+            ? (config.testHeartbeatMs as number)
+            : 10_000;
+        const heartbeat = setInterval(writeHeartbeat, cadence);
         let threadId: string;
         let answer: string;
         try {

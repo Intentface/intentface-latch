@@ -493,3 +493,28 @@ describe("test_agent heartbeat + truthful errors", () => {
     expect(res.answer).toBe("hi");
   });
 });
+
+describe("testHeartbeatMs guard", () => {
+  it("falls back to the default cadence on zero/negative/NaN", async () => {
+    const deps = makeDeps();
+    ;(deps.runtime.runAgent as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve({ threadId: "sub_1", answer: "hi" }), 60)),
+    );
+    const factory = createAgentBuilder<P>({
+      model,
+      deps: async () => deps,
+      testHeartbeatMs: 0, // would spin the writer without the guard
+    });
+    const cfg = await factory({ runtime: undefined, principal });
+    const opened = await cfg.toolSources![0]!.open(principal);
+    const tools = opened.tools as Record<string, { execute: (i: unknown, o?: unknown) => Promise<unknown> }>;
+    const written: unknown[] = [];
+    await tools.test_agent!.execute(
+      { name: "greeting", message: "hi" },
+      { toolCallId: "c", context: { writer: { write: (p: never) => written.push(p) } } },
+    );
+    // Only the immediate heartbeat — the interval fell back to 10s, far
+    // beyond this 60ms run. Without the guard this would be dozens.
+    expect(written.length).toBe(1);
+  });
+});
