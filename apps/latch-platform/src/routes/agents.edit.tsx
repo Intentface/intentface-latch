@@ -23,6 +23,7 @@ import {
 import {
   connectionToolsFn,
   createSlackAppFn,
+  generateMemorySchemaFn,
   getMemoryStatusFn,
   createTelegramBotFn,
   createWhatsappBotFn,
@@ -51,6 +52,7 @@ import { Select } from "@/components/ui/select";
 import { RichSelect } from "@/components/ui/rich-select";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import { CodeEditor } from "@/components/code-editor";
 import type { AgentRec, ToolInfo } from "./agents";
 
 export const Route = createFileRoute("/agents/edit")({
@@ -128,6 +130,17 @@ function AgentEditor() {
   const [memoryConnection, setMemoryConnection] = useState(
     initial?.exec?.memory?.connection ?? "",
   );
+  // Extra levels the background sweep also extracts into (the primary scope is
+  // always implicit), and the per-level index-schema outlines.
+  const [memoryExtractTo, setMemoryExtractTo] = useState<MemoryLevel[]>(
+    (initial?.exec?.memory?.extractTo ?? []).filter((l) => l !== initial?.exec?.memory?.scope),
+  );
+  const [memorySchemas, setMemorySchemas] = useState<{
+    "agent-user"?: string;
+    "agent-org"?: string;
+  }>(initial?.exec?.memory?.schemas ?? {});
+  const toggleMemoryLevel = (level: MemoryLevel) =>
+    setMemoryExtractTo((p) => (p.includes(level) ? p.filter((l) => l !== level) : [...p, level]));
   // Keep the memory picks coherent with the rest of the form: re-pick the
   // connection if its checkbox is later un-ticked (otherwise the save path
   // would silently drop memory), and fall back from org-shared scope when the
@@ -141,7 +154,17 @@ function AgentEditor() {
     if (memoryOn && memoryScope === "agent-org" && scope !== "org") {
       setMemoryScope("agent-user");
     }
-  }, [scope, memoryOn, memoryScope]);
+    // The org level is only valid on org-visible agents — as extraction level too.
+    if (memoryOn && scope !== "org" && memoryExtractTo.includes("agent-org")) {
+      setMemoryExtractTo((p) => p.filter((l) => l !== "agent-org"));
+    }
+  }, [scope, memoryOn, memoryScope, memoryExtractTo]);
+  // The primary scope never appears in the extras list.
+  useEffect(() => {
+    if (memoryExtractTo.includes(memoryScope)) {
+      setMemoryExtractTo((p) => p.filter((l) => l !== memoryScope));
+    }
+  }, [memoryScope, memoryExtractTo]);
   // Org agents may only attach org-scoped tools (a personal tool wouldn't resolve
   // for other members); personal agents see all (dedup by name, personal wins).
   const visibleAuthored =
@@ -276,10 +299,22 @@ function AgentEditor() {
       const toolNames = [...(webTools ? ["web_fetch"] : []), ...preserved];
       const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
       // Memory only saves with a valid connection pick (the picker defaults to
-      // loredex when the agent declares it).
+      // loredex when the agent declares it). Schemas save only for levels the
+      // agent actually participates in, and only when non-blank.
+      const activeLevels = [memoryScope, ...memoryExtractTo];
+      const schemas: { "agent-user"?: string; "agent-org"?: string } = {};
+      for (const level of ["agent-user", "agent-org"] as const) {
+        const text = memorySchemas[level];
+        if (activeLevels.includes(level) && text?.trim()) schemas[level] = text;
+      }
       const memory =
         memoryOn && memoryConnection && picked.includes(memoryConnection)
-          ? { scope: memoryScope, connection: memoryConnection }
+          ? {
+              scope: memoryScope,
+              connection: memoryConnection,
+              extractTo: memoryExtractTo.length ? activeLevels : undefined,
+              schemas: Object.keys(schemas).length ? schemas : undefined,
+            }
           : undefined;
       const exec =
         sandbox || defaultTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort || memory
@@ -672,6 +707,47 @@ function AgentEditor() {
                   anyone with workspace access can read the files.
                 </p>
               )}
+              <div className="space-y-1">
+                <p className="text-ink-secondary text-xs">
+                  Also extract to — the background archivist files level-appropriate facts from
+                  the same conversations into these stores too:
+                </p>
+                {MEMORY_LEVELS.filter((l) => l !== memoryScope).map((level) => (
+                  <label key={level} className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={memoryExtractTo.includes(level)}
+                      disabled={level === "agent-org" && scope !== "org"}
+                      onChange={() => toggleMemoryLevel(level)}
+                    />
+                    <span className={level === "agent-org" && scope !== "org" ? "text-ink-tertiary" : ""}>
+                      {MEMORY_LEVEL_LABELS[level]}
+                      {level === "agent-org" && scope !== "org" && " (org-visible agents only)"}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {(["agent-user", "agent-org"] as const)
+                .filter((l) => l === memoryScope || memoryExtractTo.includes(l))
+                .map((level) => (
+                  <MemorySchemaEditor
+                    key={level}
+                    level={level}
+                    agentName={name}
+                    instructions={instructions}
+                    value={memorySchemas[level] ?? ""}
+                    onChange={(v) => setMemorySchemas((p) => ({ ...p, [level]: v }))}
+                  />
+                ))}
+              {(memoryScope === "user" || memoryExtractTo.includes("user")) && (
+                <p className="text-ink-tertiary text-xs">
+                  The user-wide level’s schema is shared by ALL agents — edit it on the{" "}
+                  <Link to="/connections" className="text-ink-secondary underline">
+                    connections page
+                  </Link>
+                  .
+                </p>
+              )}
               {editing && <MemoryStatus agent={name} />}
             </div>
           )}
@@ -695,10 +771,121 @@ function AgentEditor() {
   );
 }
 
+type MemoryLevel = "agent-user" | "agent-org" | "user";
+
+const MEMORY_LEVELS: MemoryLevel[] = ["agent-user", "agent-org", "user"];
+
+const MEMORY_LEVEL_LABELS: Record<MemoryLevel, string> = {
+  "agent-user": "Per user — this agent’s memory of each user",
+  "agent-org": "Org-shared — patterns for the whole org",
+  user: "User-wide — the user’s cross-agent profile",
+};
+
+/**
+ * Display copy for the per-level policy floor. The AUTHORITATIVE text is
+ * MEMORY_POLICY_FLOOR in @intentface/latch-memory (hardcoded into every
+ * extraction/consolidation prompt); this paraphrase just tells the editor the
+ * floor exists and can't be configured away.
+ */
+const MEMORY_LEVEL_POLICY_NOTES: Record<"agent-user" | "agent-org", string> = {
+  "agent-user": "Always enforced: never credentials, secrets, or account numbers.",
+  "agent-org": "Always enforced: no PII, no named individuals — aggregate patterns only.",
+};
+
+/**
+ * The markdown index-schema editor for one agent-held memory level: what the
+ * background archivist looks for and how that level's MEMORY.md is organized.
+ * Blank = the platform default outline.
+ */
+function MemorySchemaEditor({
+  level,
+  agentName,
+  instructions,
+  value,
+  onChange,
+}: {
+  level: "agent-user" | "agent-org";
+  agentName: string;
+  instructions: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(!!value);
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
+
+  async function generate() {
+    if (generating) return;
+    setGenerating(true);
+    setGenError(null);
+    try {
+      const res = await generateMemorySchemaFn({
+        data: { name: agentName || "agent", instructions, level },
+      });
+      if (res.ok) onChange(res.schema);
+      else setGenError(res.error);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  return (
+    <div className="border-primary-border space-y-1.5 rounded-lg border p-2">
+      <button
+        type="button"
+        className="text-ink-secondary flex w-full items-center gap-1 text-left text-xs"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
+        <span>
+          Index schema — {level === "agent-user" ? "per-user" : "org-shared"} level
+          {!value.trim() && <span className="text-ink-tertiary"> (platform default)</span>}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-1.5">
+          <p className="text-ink-tertiary text-xs">
+            Markdown outline of “## Section” headings (+ description bullets): what this level
+            collects and how its index is organized. {MEMORY_LEVEL_POLICY_NOTES[level]}
+          </p>
+          <CodeEditor
+            value={value}
+            onChange={onChange}
+            height="140px"
+            placeholder={
+              level === "agent-user"
+                ? "## What was gone through\n- Topics covered with this user\n## Where fatigued\n- Where their attention dropped"
+                : "## Org knowledge\n- Aggregate facts about the organization\n## Engineering team knowledge\n- How the team likes to work"
+            }
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={generating || !instructions.trim()}
+              onClick={() => void generate()}
+            >
+              {generating ? "Generating…" : "Generate from instructions"}
+            </Button>
+            {value.trim() && (
+              <Button type="button" variant="ghost" size="sm" onClick={() => onChange("")}>
+                Reset to default
+              </Button>
+            )}
+            {genError && <span className="text-destructive text-xs">{genError}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Live memory status for the SAVED agent config (the caller's own scope):
- * pending episodes, last consolidation, failures — plus a Loredex link when
- * the deployment configures one. Unsaved editor changes aren't reflected.
+ * per level, pending episodes, last consolidation, failures — plus a Loredex
+ * link when the deployment configures one. Unsaved editor changes aren't
+ * reflected.
  */
 function MemoryStatus({ agent }: { agent: string }) {
   const [status, setStatus] = useState<Awaited<ReturnType<typeof getMemoryStatusFn>> | null>(
@@ -714,44 +901,44 @@ function MemoryStatus({ agent }: { agent: string }) {
     };
   }, [agent]);
   if (!status || !("enabled" in status) || !status.enabled) return null;
-  if (!status.resolvable) {
-    return (
-      <p className="text-ink-tertiary text-xs">
-        Memory is configured but the scope can’t be resolved for your session (per-user scope
-        without a user).
-      </p>
-    );
-  }
   return (
     <div className="text-ink-tertiary space-y-0.5 text-xs">
-      <p>
-        Your store: <span className="font-mono">{status.root}</span>
-        {status.loredexUrl && (
-          <>
+      {status.loredexUrl && (
+        <p>
+          <a
+            href={status.loredexUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-ink-secondary underline"
+          >
+            open Loredex
+          </a>
+        </p>
+      )}
+      {status.levels.map((lvl) =>
+        lvl.resolvable ? (
+          <p key={lvl.level}>
+            <span className="text-ink-secondary">{lvl.level}</span>
             {" · "}
-            <a
-              href={status.loredexUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-ink-secondary underline"
-            >
-              open Loredex
-            </a>
-          </>
-        )}
-      </p>
-      <p>
-        {status.pendingEpisodes} episode{status.pendingEpisodes === 1 ? "" : "s"} awaiting
-        consolidation · last consolidated{" "}
-        {status.lastConsolidatedAt
-          ? new Date(status.lastConsolidatedAt).toLocaleString()
-          : "never"}
-        {" · "}
-        {status.trackedMemories} recalled entr{status.trackedMemories === 1 ? "y" : "ies"} tracked
-        {status.failures > 0 && (
-          <span className="text-destructive"> · {status.failures} recent failures</span>
-        )}
-      </p>
+            <span className="font-mono">{lvl.root}</span>
+            {" · "}
+            {lvl.pendingEpisodes} pending · consolidated{" "}
+            {lvl.lastConsolidatedAt
+              ? new Date(lvl.lastConsolidatedAt).toLocaleString()
+              : "never"}
+            {" · "}
+            {lvl.trackedMemories} tracked
+            {lvl.failures > 0 && (
+              <span className="text-destructive"> · {lvl.failures} recent failures</span>
+            )}
+          </p>
+        ) : (
+          <p key={lvl.level}>
+            <span className="text-ink-secondary">{lvl.level}</span> — can’t resolve for your
+            session (per-user level without a user).
+          </p>
+        ),
+      )}
     </div>
   );
 }

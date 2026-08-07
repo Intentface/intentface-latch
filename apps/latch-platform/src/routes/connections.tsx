@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Braces, Pencil, Plug, Plus, Trash2 } from "lucide-react";
 import { Dialog } from "@intentface/latch-ui";
@@ -11,6 +11,8 @@ import {
   getConnectionFn,
   addConnectionFn,
   removeConnectionFn,
+  getUserMemorySchemaFn,
+  saveUserMemorySchemaFn,
 } from "@/lib/server";
 import {
   authorizeUrl,
@@ -23,6 +25,7 @@ import { Select } from "@/components/ui/select";
 import { RichSelect } from "@/components/ui/rich-select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { CodeEditor } from "@/components/code-editor";
 import { SecretsSection } from "@/components/secrets-section";
 
 export const Route = createFileRoute("/connections")({
@@ -92,6 +95,12 @@ function ConnectionsPage() {
         </Section>
       )}
 
+      {[...dynamic.map((c) => c.name), ...oauth.map((c) => c.name)].includes("loredex") && (
+        <Section label="User memory schema">
+          <UserMemorySchemaCard connection="loredex" />
+        </Section>
+      )}
+
       {empty && (
         <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <Plug className="size-6 opacity-60" />
@@ -107,6 +116,86 @@ function Section({ label, children }: { label: string; children: React.ReactNode
     <div className="space-y-2">
       <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">{label}</h2>
       {children}
+    </div>
+  );
+}
+
+/**
+ * Editor for the shared user-level memory schema — ONE workspace file
+ * (`_memory/_user/SCHEMA.md`) governing what EVERY memory-enabled agent's
+ * background archivist files into the user's cross-agent profile. Lives here
+ * (not on any agent) because no single agent owns it.
+ */
+function UserMemorySchemaCard({ connection }: { connection: string }) {
+  const [loaded, setLoaded] = useState<Awaited<
+    ReturnType<typeof getUserMemorySchemaFn>
+  > | null>(null);
+  const [text, setText] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getUserMemorySchemaFn({ data: { connection } })
+      .then((res) => {
+        if (!alive || !res) return;
+        setLoaded(res);
+        setText(res.schema ?? res.defaultSchema);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [connection]);
+
+  async function save() {
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await saveUserMemorySchemaFn({ data: { connection, schema: text } });
+      if (res.ok) {
+        setDirty(false);
+        setNote("Saved.");
+      } else {
+        setNote(res.error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!loaded) return null;
+  return (
+    <div className="border-primary-border space-y-2 rounded-xl border p-3">
+      <p className="text-ink-secondary text-xs">
+        The cross-agent user profile: what all agents’ background archivists save about a user at
+        the shared <span className="font-mono">user</span> level — general profile, expertise,
+        stable preferences. Stored as{" "}
+        <span className="font-mono">{loaded.path}</span> in the {connection} workspace.
+      </p>
+      <p className="text-ink-tertiary text-xs">Always enforced: {loaded.policy}</p>
+      <CodeEditor
+        value={text}
+        onChange={(v) => {
+          setText(v);
+          setDirty(true);
+        }}
+        height="140px"
+      />
+      <div className="flex items-center gap-2">
+        <Button type="button" size="sm" disabled={busy || !dirty} onClick={() => void save()}>
+          {busy ? "Saving…" : "Save schema"}
+        </Button>
+        {note && (
+          <span
+            className={note === "Saved." ? "text-ink-tertiary text-xs" : "text-destructive text-xs"}
+          >
+            {note}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
