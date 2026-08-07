@@ -51,6 +51,13 @@ export interface AgentRecord {
     renderTools?: boolean;
     /** Names of authored tools attached to this agent (host tool-authoring feature). */
     authoredTools?: string[];
+    /**
+     * Waive the host's per-call approval pause on this agent's WRITE tools —
+     * the save_agent approval (where this flag is visible) is the consent.
+     * For agents that must run unattended (schedules). Only meaningful on
+     * hosts that gate writes; requires the write capability (`defaultTools`).
+     */
+    preApprovedWrites?: boolean;
     /** Reasoning/thinking effort (gated to reasoning-capable models). */
     effort?: "minimal" | "low" | "medium" | "high";
   };

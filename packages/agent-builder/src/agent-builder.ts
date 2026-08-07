@@ -31,6 +31,12 @@ const CAPABILITIES = z
     sandbox: z.boolean().optional().describe("Per-session workspace + file/shell tools (bash, read_file, …)."),
     providerWebTools: z.boolean().optional().describe("Native provider web search/fetch (Anthropic/OpenAI)."),
     defaultTools: z.boolean().optional().describe("App harness tools: web_fetch + askUser."),
+    preApprovedWrites: z
+      .boolean()
+      .optional()
+      .describe(
+        "Waive the per-call approval pause on this agent's WRITE tools — the save approval is the consent. ONLY for agents that must run unattended (schedules); requires defaultTools. Spell the tradeoff out to the user before saving.",
+      ),
   })
   .optional();
 
@@ -98,6 +104,13 @@ export interface CapabilitySupport {
   codeMode?: boolean;
   providerWebTools?: boolean;
   defaultTools?: boolean | { description: string };
+  /**
+   * Whether the host honors the save-time write-approval waiver
+   * (`preApprovedWrites`). Only meaningful on hosts that gate writes; a host
+   * with ungated writes should declare it unsupported so the flag can't be
+   * saved as a no-op.
+   */
+  preApprovedWrites?: boolean | { description: string };
 }
 
 export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
@@ -140,6 +153,16 @@ function capabilitiesBullet(support: CapabilitySupport): string {
   if (dt !== false) {
     offered.push(
       typeof dt === "object" ? `defaultTools (${dt.description})` : "defaultTools (web_fetch + askUser)",
+    );
+  }
+  // Opt-IN (unlike the rest): only hosts that gate writes and honor the
+  // waiver should offer it — a host with ungated writes would save a no-op.
+  const paw = support.preApprovedWrites;
+  if (paw) {
+    offered.push(
+      typeof paw === "object"
+        ? `preApprovedWrites (${paw.description})`
+        : "preApprovedWrites (writes skip the per-call approval pause — the save approval is the consent; only for unattended/scheduled agents, requires defaultTools)",
     );
   }
   return offered.length
@@ -226,6 +249,8 @@ async function builderTools<P>(
       ["sandbox", c?.sandbox, support.sandbox !== false],
       ["providerWebTools", c?.providerWebTools, support.providerWebTools !== false],
       ["defaultTools", c?.defaultTools, support.defaultTools !== false],
+      // Opt-in (see capabilitiesBullet): unsupported unless declared.
+      ["preApprovedWrites", c?.preApprovedWrites, !!support.preApprovedWrites],
     ];
     return asked.filter(([, on, ok]) => on && !ok).map(([name]) => name);
   };
@@ -239,6 +264,7 @@ async function builderTools<P>(
       sandbox: c?.sandbox || undefined,
       defaultTools: c?.defaultTools || undefined,
       providerWebTools: c?.providerWebTools || undefined,
+      preApprovedWrites: c?.preApprovedWrites || undefined,
       codeMode: c?.codeMode ? {} : undefined,
       authoredTools: authored?.length ? authored : undefined,
       effort,
@@ -247,6 +273,7 @@ async function builderTools<P>(
       !!c?.sandbox ||
       !!c?.defaultTools ||
       !!c?.providerWebTools ||
+      !!c?.preApprovedWrites ||
       !!c?.codeMode ||
       !!authored?.length ||
       effort !== undefined;
@@ -361,6 +388,13 @@ async function builderTools<P>(
         if (unsupported.length) {
           return {
             error: `Not available in this host: ${unsupported.join(", ")}. Omit ${unsupported.length > 1 ? "them" : "it"} — and don't promise the user that behavior.`,
+          };
+        }
+        // The write waiver without write tools is meaningless — likely a
+        // misunderstanding worth surfacing rather than persisting.
+        if (input.capabilities?.preApprovedWrites && !input.capabilities?.defaultTools) {
+          return {
+            error: "preApprovedWrites requires defaultTools (the write capability) — there are no writes to waive without it.",
           };
         }
         const rec: AgentRecord = {

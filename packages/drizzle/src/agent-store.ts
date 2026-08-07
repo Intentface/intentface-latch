@@ -37,6 +37,17 @@ export interface AgentStoreOptions<P> {
     names: string[],
     agentScope: AgentScope,
   ) => Promise<Record<string, unknown>>;
+  /**
+   * Decorate the resolved `AgentConfig` with host policy, with the matched
+   * RECORD in hand (resolve alone hides it) — e.g. default a baseline
+   * toolset, or gate/waive tool approvals off `exec` flags. Runs last;
+   * return the (mutated or replaced) config.
+   */
+  decorateResolve?: (
+    cfg: AgentConfig<P>,
+    record: AgentRecord,
+    principal: P,
+  ) => AgentConfig<P>;
 }
 
 /** A stored row, dialect-agnostic (JSON columns arrive parsed from both dialects). */
@@ -118,6 +129,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
         ? await find(principal, pin[2]!, pin[1] as AgentScope)
         : await find(principal, name);
       if (!rec) return undefined;
+      const decorate = opts.decorateResolve ?? ((cfg: AgentConfig<P>) => cfg);
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
       // Authored tools attached to this agent, resolved per caller into a tool
@@ -144,36 +156,40 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
               },
             ]
           : undefined;
-      return {
-        model: opts.modelFor(rec.modelId),
-        instructions: rec.instructions,
-        connections: rec.connections,
-        toolSources,
-        maxSteps: rec.maxSteps,
-        // Restrict callable tools (empty/undefined → all).
-        enabledTools: sel?.enabled?.length ? sel.enabled : undefined,
-        // Per-tool description overrides → applied to the resolved tools.
-        toolDescriptions:
-          sel?.descriptions && Object.keys(sel.descriptions).length ? sel.descriptions : undefined,
-        // Agents this one may delegate to (→ the runtime's spawn_agent tool).
-        subagents: rec.subagents?.length ? rec.subagents : undefined,
-        // Per-tool approval override (agent wins): on → require, off → waive.
-        toolApproval: approvalEntries.length
-          ? Object.fromEntries(
-              approvalEntries.map(([n, req]) => [n, req ? "user-approval" : "not-applicable"]),
-            )
-          : undefined,
-        // Code-execution capabilities (sandbox + default harness tools).
-        sandbox: rec.exec?.sandbox || undefined,
-        sandboxProvider: rec.exec?.provider,
-        defaultTools: rec.exec?.defaultTools,
-        disableTools: rec.exec?.disableTools,
-        codeMode: rec.exec?.codeMode,
-        providerWebTools: rec.exec?.providerWebTools || undefined,
-        renderTools: rec.exec?.renderTools || undefined,
-        effort: rec.exec?.effort,
-        smoothStream: true,
-      };
+      return decorate(
+        {
+          model: opts.modelFor(rec.modelId),
+          instructions: rec.instructions,
+          connections: rec.connections,
+          toolSources,
+          maxSteps: rec.maxSteps,
+          // Restrict callable tools (empty/undefined → all).
+          enabledTools: sel?.enabled?.length ? sel.enabled : undefined,
+          // Per-tool description overrides → applied to the resolved tools.
+          toolDescriptions:
+            sel?.descriptions && Object.keys(sel.descriptions).length ? sel.descriptions : undefined,
+          // Agents this one may delegate to (→ the runtime's spawn_agent tool).
+          subagents: rec.subagents?.length ? rec.subagents : undefined,
+          // Per-tool approval override (agent wins): on → require, off → waive.
+          toolApproval: approvalEntries.length
+            ? Object.fromEntries(
+                approvalEntries.map(([n, req]) => [n, req ? "user-approval" : "not-applicable"]),
+              )
+            : undefined,
+          // Code-execution capabilities (sandbox + default harness tools).
+          sandbox: rec.exec?.sandbox || undefined,
+          sandboxProvider: rec.exec?.provider,
+          defaultTools: rec.exec?.defaultTools,
+          disableTools: rec.exec?.disableTools,
+          codeMode: rec.exec?.codeMode,
+          providerWebTools: rec.exec?.providerWebTools || undefined,
+          renderTools: rec.exec?.renderTools || undefined,
+          effort: rec.exec?.effort,
+          smoothStream: true,
+        },
+        rec,
+        principal,
+      );
     },
 
     async list(principal): Promise<AgentInfo[]> {

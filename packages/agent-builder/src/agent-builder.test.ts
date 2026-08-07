@@ -245,6 +245,40 @@ describe("capability support (truthful prompt + save rejection)", () => {
     expect(cfg.instructions).toContain("No background loops");
   });
 
+  it("preApprovedWrites is opt-in: rejected unless the host declares it", async () => {
+    // Undeclared support → rejected.
+    const { tools } = await openTools(makeDeps());
+    const res = (await tools.save_agent!.execute({
+      ...SAVE,
+      capabilities: { defaultTools: true, preApprovedWrites: true },
+    })) as { error?: string };
+    expect(res.error).toMatch(/Not available in this host: preApprovedWrites/);
+
+    // Declared support → saved, and the flag lands on exec.
+    const deps = makeDeps();
+    const { tools: tools2, cfg } = await openTools(deps, undefined, undefined, {
+      capabilities: { preApprovedWrites: { description: "writes run unattended after the save approval" } },
+    });
+    expect(cfg.instructions).toContain("writes run unattended after the save approval");
+    const ok = (await tools2.save_agent!.execute({
+      ...SAVE,
+      capabilities: { defaultTools: true, preApprovedWrites: true },
+    })) as { saved?: boolean };
+    expect(ok.saved).toBe(true);
+    expect(deps.records[0]!.exec?.preApprovedWrites).toBe(true);
+  });
+
+  it("preApprovedWrites without the write capability is rejected", async () => {
+    const { tools } = await openTools(makeDeps(), undefined, undefined, {
+      capabilities: { preApprovedWrites: true },
+    });
+    const res = (await tools.save_agent!.execute({
+      ...SAVE,
+      capabilities: { preApprovedWrites: true },
+    })) as { error?: string };
+    expect(res.error).toMatch(/requires defaultTools/);
+  });
+
   it("default (undeclared) support keeps everything offered and saveable", async () => {
     const { cfg, tools } = await openTools(makeDeps());
     expect(cfg.instructions).toMatch(/sandbox \(workspace \+ file\/shell tools\)/);
