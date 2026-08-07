@@ -40,6 +40,7 @@ import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
 import { createAgentStore, evalOwnerOfRecord, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
+import { memoryAgentOf } from "./memory/agent-identity";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
 import { createTelegramStore, migrateTelegram } from "./telegram-store";
@@ -391,8 +392,10 @@ export async function getLatch(): Promise<{
   const MEMORY_TOUCH_COOLDOWN_MS = 6 * 3_600_000; // refined per agent by the sweep
   const memoryProvider = createMemoryProvider<Principal>({
     store: memoryStore,
+    // `memoryAgentOf`: a channel binding's `org:`/`user:` pin must not fork the
+    // scope — a Telegram turn and a web turn are the same agent's memory.
     scopeOf: ({ principal, agent, memory }) =>
-      scopeRefOf({ agent, memory, userId: principal.userId }),
+      scopeRefOf({ agent: memoryAgentOf(agent), memory, userId: principal.userId }),
     // Retention signal: recalled ids bump usage (expiry works off this).
     recordUsage: (scopeKey, ids) => memoryJobs.recordUsage(scopeKey, ids, Date.now()),
     // A memory_save episode marks the scope dirty for the next consolidation,
@@ -402,7 +405,9 @@ export async function getLatch(): Promise<{
         {
           scopeKey,
           owner: ownerTagOf(principal),
-          agent,
+          // Bare, like the scope it belongs to: the sweep looks this agent's
+          // memory config up when it consolidates the row.
+          agent: memoryAgentOf(agent),
           connection,
           identity: principal,
           episodePath: path,

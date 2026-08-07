@@ -10,6 +10,7 @@ import {
 import type { ScopeRef } from "@intentface/latch-memory";
 import { memoryEnabledCodeAgents } from "@/agents/memory-enabled";
 import type { Principal } from "../session";
+import { memoryAgentOf } from "./agent-identity";
 import type {
   MemoryConsolidationTurnContext,
   MemoryExtractionTurnContext,
@@ -152,6 +153,10 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     maxSeq: number;
   }): Promise<"extractions" | "skipped"> {
     const lease = leaseId();
+    // `cand.agent` comes from the chat/run rows, so a channel-bound chat carries
+    // the binding's `org:`/`user:` pin. Strip it once here: the pin is not a
+    // separate agent, and letting it reach `scopeRefOf` forks the memory store.
+    const agent = memoryAgentOf(cand.agent);
     // Identity + config first (read-only), then claim with the derived scope.
     const identity = await memoryJobs.latestRunIdentity(cand.chatId);
     if (!identity) {
@@ -160,7 +165,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       if (
         await memoryJobs.claimChatExtraction(
           cand.chatId,
-          { owner: cand.owner, agent: cand.agent, scopeKey: "unresolvable" },
+          { owner: cand.owner, agent, scopeKey: "unresolvable" },
           lease,
           MEMORY_EXTRACTION_LEASE_MS,
           now,
@@ -175,9 +180,9 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       return "skipped";
     }
     const principal = identity as Principal;
-    const memory = await memoryConfigFor(cand.agent, principal, agentStore);
+    const memory = await memoryConfigFor(agent, principal, agentStore);
     const scope: ScopeRef | undefined = memory
-      ? scopeRefOf({ agent: cand.agent, memory, userId: principal.userId })
+      ? scopeRefOf({ agent, memory, userId: principal.userId })
       : undefined;
     if (!memory || !scope) {
       // Not actually memory-enabled for THIS owner (LIKE prefilter false
@@ -186,7 +191,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       if (
         await memoryJobs.claimChatExtraction(
           cand.chatId,
-          { owner: cand.owner, agent: cand.agent, scopeKey: "unresolvable" },
+          { owner: cand.owner, agent, scopeKey: "unresolvable" },
           lease,
           MEMORY_EXTRACTION_LEASE_MS,
           now,
@@ -204,7 +209,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     if (
       !(await memoryJobs.claimChatExtraction(
         cand.chatId,
-        { owner: cand.owner, agent: cand.agent, scopeKey: scope.key },
+        { owner: cand.owner, agent, scopeKey: scope.key },
         lease,
         MEMORY_EXTRACTION_LEASE_MS,
         now,
@@ -252,7 +257,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         kind: "memory-extraction",
         scope,
         chatId: cand.chatId,
-        targetAgent: cand.agent,
+        targetAgent: agent,
         // `!= null` (not `||`): an explicit cooldownHours of 0 is a real choice.
         cooldownMs:
           memory.consolidation?.cooldownHours != null
@@ -266,7 +271,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         blockGated: false,
         turnContext,
         prompt: buildExtractionPrompt({
-          agent: cand.agent,
+          agent,
           scopeLabel: scopeLabelOf(memory),
           chatId: cand.chatId,
           transcript,
@@ -327,16 +332,20 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     }
     try {
       const principal = row.identity as Principal | undefined;
-      const memory = principal
-        ? await memoryConfigFor(row.agent, principal, agentStore)
-        : undefined;
+      // Bare name, as in extraction — a row stamped with a channel pin resolves
+      // to the agent's one canonical scope.
+      const agent = memoryAgentOf(row.agent);
+      const memory = principal ? await memoryConfigFor(agent, principal, agentStore) : undefined;
       const scope: ScopeRef | undefined =
         memory && principal
-          ? scopeRefOf({ agent: row.agent, memory, userId: principal.userId })
+          ? scopeRefOf({ agent, memory, userId: principal.userId })
           : undefined;
       if (!principal || !memory || !scope || scope.key !== row.scopeKey) {
-        // Identity lost or agent no longer memory-enabled — park the scope
-        // (episodes stay pending; a future touch re-stamps a fresh identity).
+        // Identity lost, agent no longer memory-enabled, or a row whose stored
+        // scopeKey predates a scope-derivation change (a channel-pinned root) —
+        // park the scope. Episodes stay pending; a future touch re-stamps a
+        // fresh identity, and a stale root simply parks daily rather than
+        // erroring, since its content is not reachable from the new key.
         await memoryJobs.completeScopeConsolidation(
           row.scopeKey,
           { ok: false, nextEligibleAt: now + MEMORY_PARK_MS },
