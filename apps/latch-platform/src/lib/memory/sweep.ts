@@ -26,6 +26,7 @@ import {
   MEMORY_FAILURE_BACKOFF_MS,
   MEMORY_IDLE_MS,
   MEMORY_PARK_MS,
+  memoryFailureBackoffMs,
 } from "./constants";
 
 /**
@@ -420,10 +421,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     } catch (error) {
       result.errors++;
       console.warn(`[memory] consolidation failed for scope ${row.scopeKey}:`, error);
+      // Escalating backoff on `row.failures` (the count BEFORE this attempt).
+      // The episodes stay pending either way — a scope whose rewrite is
+      // deterministically invalid would otherwise buy a model run every two
+      // hours forever, since nothing changes between attempts.
       await memoryJobs
         .completeScopeConsolidation(
           row.scopeKey,
-          { ok: false, nextEligibleAt: now + MEMORY_FAILURE_BACKOFF_MS },
+          { ok: false, nextEligibleAt: now + memoryFailureBackoffMs(row.failures + 1) },
           lease,
         )
         .catch(() => {});

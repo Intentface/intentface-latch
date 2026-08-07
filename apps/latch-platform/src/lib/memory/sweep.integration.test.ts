@@ -170,15 +170,24 @@ const toolCallStream = (toolName: string, input: unknown) =>
     { type: "finish", finishReason: "tool-calls", usage },
   ]);
 
-/** First call emits one tool call, second call finishes with text. */
+/**
+ * Scripted model: call `toolName` once, then finish with text as soon as that
+ * result is back — decided from the CONVERSATION, not a call counter.
+ *
+ * A counter couples every run to how many steps the previous ones took: reuse
+ * the model across two sweep runs and any extra step (a retried write, which
+ * the consolidator's instructions now ask for) shifts the parity so the next
+ * run opens on the text branch and never calls the tool at all.
+ */
 function toolThenText(toolName: string, inputOf: () => unknown, done: string) {
-  let calls = 0;
   return new MockLanguageModelV3({
-    doStream: async () => {
-      calls += 1;
-      return calls === 1
-        ? { stream: toolCallStream(toolName, inputOf()) }
-        : { stream: textStream(done) };
+    doStream: async (options) => {
+      // A tool result in the prompt means this run already made its call.
+      // Matched on the serialized prompt so it survives message-shape changes.
+      const alreadyCalled = JSON.stringify(options.prompt ?? null).includes("tool-result");
+      return alreadyCalled
+        ? { stream: textStream(done) }
+        : { stream: toolCallStream(toolName, inputOf()) };
     },
   });
 }
@@ -543,16 +552,13 @@ describe("memory pipeline (integration)", () => {
       "## Archive",
       "",
     ].join("\n");
-    let consolidatorRuns = 0;
-    const consolidatorModel = new MockLanguageModelV3({
-      doStream: async () => {
-        // Every run: attempt the write, then answer as if it had worked.
-        consolidatorRuns++;
-        return consolidatorRuns % 2 === 1
-          ? { stream: toolCallStream("memory_write_index", { content: indexContent }) }
-          : { stream: textStream("folded 2 episodes in") };
-      },
-    });
+    // Every run: attempt the write, then answer as if it had worked — the
+    // give-up behaviour that used to be read as success.
+    const consolidatorModel = toolThenText(
+      "memory_write_index",
+      () => ({ content: indexContent }),
+      "folded 2 episodes in",
+    );
 
     const outage: { failWritesTo?: RegExp } = { failWritesTo: /MEMORY\.md$/ };
     const { files, memoryJobs, storage } = await makeHarness(
