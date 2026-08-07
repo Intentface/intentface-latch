@@ -1,4 +1,4 @@
-import type { MemoryConfig } from "@intentface/latch-core";
+import type { MemoryConfig, MemoryScope } from "@intentface/latch-core";
 import type { ScopeRef } from "./types.js";
 
 /**
@@ -92,6 +92,29 @@ export function scopeRefOf(args: {
         ? `${MEMORY_ROOT_PREFIX}/${seg(agent)}/org`
         : `${LOREDEX_PRIVATE_ROOT}/${MEMORY_ROOT_PREFIX}/_user/u-${seg(userId!)}`;
   return { key: `${memory.connection}:${root}`, connection: memory.connection, root };
+}
+
+/**
+ * The levels this agent's memory participates in: `extractTo` normalized —
+ * deduplicated, primary scope first, and always containing the primary scope
+ * whether or not the stored config lists it. Every multi-level reader
+ * (provider injection/search, sweep extraction) derives its level set here so
+ * a denormalized stored config can't split behavior.
+ */
+export function extractionLevelsOf(memory: MemoryConfig): MemoryScope[] {
+  const out: MemoryScope[] = [memory.scope];
+  for (const level of memory.extractTo ?? []) {
+    if (!out.includes(level)) out.push(level);
+  }
+  return out;
+}
+
+/**
+ * The per-level view of a memory config: same connection and tuning, `scope`
+ * swapped to `level` — so `scopeRefOf`/`scopeLabelOf` work per level for free.
+ */
+export function levelConfigOf(memory: MemoryConfig, level: MemoryScope): MemoryConfig {
+  return level === memory.scope ? memory : { ...memory, scope: level };
 }
 
 /** Human-readable scope label for prompts and UI. */

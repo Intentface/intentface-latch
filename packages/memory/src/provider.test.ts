@@ -19,6 +19,8 @@ function fakeStore(overrides?: Partial<MemoryStore<P>>): MemoryStore<P> & {
     writeEpisode: async () => ({ path: "_memory/a/u-1/episodes/x.md", name: "x.md" }),
     readEpisodes: async () => [],
     search: async () => [],
+    readFile: async () => undefined,
+    writeFile: async () => {},
     ...overrides,
   };
   return Object.assign(store, { readCount: () => reads });
@@ -141,6 +143,63 @@ describe("createMemoryProvider", () => {
 
     await provider.instructionsFor(args);
     expect(store.readCount()).toBe(2);
+  });
+
+  it("multi-level: injects one labeled envelope per level and skips unresolvable ones", async () => {
+    const store = fakeStore();
+    const provider = createMemoryProvider<P>({ store, scopeOf });
+    const memory = {
+      scope: "agent-user" as const,
+      connection: "loredex",
+      extractTo: ["agent-org" as const, "user" as const],
+    };
+    const block = (await provider.instructionsFor({
+      principal: { userId: "u1" },
+      agent: "coach",
+      memory,
+    }))!;
+    expect(block).toContain('<memory level="agent-user">');
+    expect(block).toContain('<memory level="agent-org">');
+    expect(block).toContain('<memory level="user">');
+    expect(block).toContain("memory_save — it writes to your primary level");
+    // userId-less caller: per-user levels drop out; only agent-org remains,
+    // and a single surviving level renders the classic unlabeled envelope.
+    const orgOnly = (await provider.instructionsFor({
+      principal: {},
+      agent: "coach",
+      memory: { ...memory, scope: "agent-org", extractTo: ["agent-user", "user"] },
+    }))!;
+    expect(orgOnly).toContain("<memory>");
+    expect(orgOnly).not.toContain('<memory level="agent-user">');
+  });
+
+  it("multi-level: memory_search fans out and memory_save stays primary-bound", async () => {
+    const recordUsage = vi.fn();
+    const searchedRoots: string[] = [];
+    const store = fakeStore({
+      search: async (_p, scope) => {
+        searchedRoots.push(scope.root);
+        return [];
+      },
+    });
+    const provider = createMemoryProvider<P>({ store, scopeOf, recordUsage });
+    const tools = provider.toolsFor({
+      principal: { userId: "u1" },
+      agent: "coach",
+      memory: {
+        scope: "agent-user",
+        connection: "loredex",
+        extractTo: ["agent-org", "user"],
+      },
+    }) as Record<string, { execute: (input: unknown, o: unknown) => Promise<unknown> }>;
+    await tools.memory_search.execute({ query: "x" }, {});
+    expect(searchedRoots.sort()).toEqual([
+      "__private_root/_memory/_user/u-u1",
+      "__private_root/_memory/coach/u-u1",
+      "_memory/coach/org",
+    ]);
+    const saved = (await tools.memory_save.execute({ note: "n" }, {})) as { saved: boolean };
+    expect(saved.saved).toBe(true);
   });
 
   it("memory_search records usage fire-and-forget", async () => {

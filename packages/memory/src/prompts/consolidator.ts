@@ -5,7 +5,7 @@ import { INDEX_LINE_CAP } from "../index-file.js";
 export const CONSOLIDATOR_INSTRUCTIONS = `You maintain MEMORY.md — the compiled long-term memory index another agent sees at the start of every session. New episode notes have accumulated; fold them in.
 
 The index format:
-- A title line, then topical sections ("## Identity & preferences", "## Projects & context", "## Working agreements", … adapt sections to the domain), then "## Archive" last.
+- A title line, then topical sections, then "## Archive" last. The sections come from the INDEX SCHEMA in your task — use exactly its top-level "##" headings (omit ones with no entries; when the task carries no schema, choose domain-appropriate sections yourself). Do not invent top-level sections outside the schema — memory_write_index will flag them; entries that fit nowhere go under the schema's closest section.
 - One entry per line: \`- [m-<id>] (<YYYY-MM-DD>, <provenance>) <one-line fact> ← <episode path>\`
   where <id> is 4-8 lowercase letters/digits (e.g. \`7f3a2c\`); keep existing entries' ids unchanged.
   Example: \`- [m-7f3a2c] (2026-07-12, user-said) Prefers concise answers. ← episodes/2026-07-12-09-30-onboarding.md\`
@@ -42,6 +42,7 @@ Workflow:
    Write the index itself and nothing else — no \`---\` frontmatter block; the store manages that.
 
 Hard rules:
+- Your task states this level's POLICY floor. An entry that violates it must not be written: drop the fact (do not fold it in), and mention the drop in your final line. Existing entries that violate it move under "## Archive" with "; superseded <today>".
 - NEVER invent facts, dates, or sources — everything must come from the index or the episodes you read.
 - Preserve provenance tags; when merging facts of mixed origin, keep the weaker "tool-derived" tag visible.
 - Preserve \`aka:\` aliases when updating an entry in place — merge newly learned names and recall keys in, never drop known ones.
@@ -58,6 +59,10 @@ export function buildConsolidationPrompt(args: {
   /** Entries unrecalled long enough to expire. */
   expireCandidates: Array<{ memoryId: string; lastUsedAt?: string }>;
   today: string;
+  /** This level's index-schema outline (top-level `##` sections). */
+  schema?: string;
+  /** This level's non-negotiable policy floor. */
+  policy?: string;
 }): string {
   const expire =
     args.expireCandidates.length > 0
@@ -68,6 +73,14 @@ export function buildConsolidationPrompt(args: {
   return [
     `You are consolidating ${args.scopeLabel}. Today is ${args.today}.`,
     "",
+    ...(args.policy ? [`POLICY (non-negotiable floor): ${args.policy}`, ""] : []),
+    ...(args.schema
+      ? [
+          'INDEX SCHEMA — the required top-level sections ("## Archive" is always allowed last):',
+          args.schema.trim(),
+          "",
+        ]
+      : []),
     "New episodes to fold in:",
     ...(args.episodePaths.length > 0 ? args.episodePaths.map((p) => `- ${p}`) : ["(none)"]),
     "",

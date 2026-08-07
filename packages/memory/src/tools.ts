@@ -1,8 +1,10 @@
 import { tool, jsonSchema } from "ai";
+import type { MemoryScope } from "@intentface/latch-core";
 import type { EpisodeMeta, MemoryStore, Provenance, ScopeRef } from "./types.js";
 import { IndexValidationError, MEMORY_INDEX_FILENAME, parseIndex } from "./index-file.js";
 import type { IndexEntry } from "./index-file.js";
 import { isUnderScopeRoot } from "./scope.js";
+import { schemaSectionWarnings } from "./schema.js";
 import { createSafetyOf, entryEvidence, EVIDENCE_RANK } from "./search-evidence.js";
 import type { MatchEvidence } from "./search-evidence.js";
 import { sanitizeMemoryText } from "./sanitize.js";
@@ -27,6 +29,17 @@ export interface BoundScope<P> {
 }
 
 /**
+ * One participating memory level and its bound scope. Multi-level tools
+ * (`memory_search` fan-out, level-routed `memory_write_episode`,
+ * `memory_read_index` across levels) take an array of these; a single-element
+ * array behaves exactly like the classic single-scope binding.
+ */
+export interface LevelBoundScope<P> {
+  level: MemoryScope;
+  bound: BoundScope<P>;
+}
+
+/**
  * Explicit (portable) shape for the authored tools — declaration emit cannot
  * name the AI SDK's inferred `Tool<…>` type across package boundaries
  * (TS2742), and agent configs only need `Record<string, unknown>` anyway.
@@ -37,15 +50,86 @@ export interface MemoryTool {
   execute?: (input: never, options: never) => unknown;
 }
 
-export function memorySearchTool<P>(
+/** One scope's search pass: backend hits + index-evidence merge + synthetic hits. */
+async function searchOneScope<P>(
   bound: BoundScope<P>,
+  query: string,
+  limit: number,
+): Promise<{
+  results: Array<{ path: string; snippet: string; matchedOn: MatchEvidence; unverified?: true }>;
+  recalledIds: string[];
+}> {
+  const hits = await bound.store.search(bound.principal, bound.scope, query, limit);
+  // Evidence pass over the compiled index: the backend ranks free text,
+  // but create_safety needs EXACT signals (normalized alias equality) the
+  // backend can't provide — so match active entries ourselves and merge,
+  // strongest signal winning per result. Index unavailability degrades to
+  // body-only evidence, never a failed search.
+  let entries: IndexEntry[] = [];
+  try {
+    const index = await bound.store.readIndex(bound.principal, bound.scope);
+    if (index) entries = parseIndex(index).entries.filter((e) => !e.archived);
+  } catch {
+    // body-only evidence
+  }
+  const evidenceById = new Map<string, MatchEvidence>();
+  for (const e of entries) {
+    const evidence = entryEvidence(query, e);
+    if (evidence) evidenceById.set(e.id, evidence);
+  }
+  const unverifiedIds = new Set(entries.filter((e) => e.unverified).map((e) => e.id));
+
+  const results = hits.map((h) => {
+    let matchedOn: MatchEvidence = "body";
+    // Trust mark: label (never hide) hits on unverified entries/episodes.
+    let unverified = /^status:\s*unverified\b/m.test(h.snippet);
+    for (const id of h.memoryIds) {
+      const evidence = evidenceById.get(id);
+      if (evidence && EVIDENCE_RANK[evidence] > EVIDENCE_RANK[matchedOn]) {
+        matchedOn = evidence;
+      }
+      if (unverifiedIds.has(id)) unverified = true;
+    }
+    return {
+      path: h.path,
+      snippet: sanitizeMemoryText(h.snippet),
+      matchedOn,
+      ...(unverified ? ({ unverified: true } as const) : {}),
+    };
+  });
+  // Index entries with evidence the backend didn't surface (e.g. an alias
+  // spelled differently than the stored text ranks): synthesize a hit from
+  // the entry line itself so the exact match is never lost.
+  const surfacedIds = new Set(hits.flatMap((h) => h.memoryIds));
+  const syntheticIds: string[] = [];
+  for (const e of entries) {
+    const evidence = evidenceById.get(e.id);
+    if (!evidence || surfacedIds.has(e.id)) continue;
+    syntheticIds.push(e.id);
+    results.push({
+      path: `${bound.scope.root}/${MEMORY_INDEX_FILENAME}`,
+      snippet: sanitizeMemoryText(e.raw),
+      matchedOn: evidence,
+      ...(e.unverified ? ({ unverified: true } as const) : {}),
+    });
+  }
+  const recalledIds = Array.from(new Set([...hits.flatMap((h) => h.memoryIds), ...syntheticIds]));
+  return { results, recalledIds };
+}
+
+export function memorySearchTool<P>(
+  targets: LevelBoundScope<P>[],
   opts?: { recordUsage?: (scopeKey: string, memoryIds: string[]) => void | Promise<void> },
 ): MemoryTool {
+  const multi = targets.length > 1;
   return tool({
     description:
       "Search your long-term episodic memory (notes from past sessions plus archived facts). " +
       "Use it when the conversation touches something you may already know — a preference, " +
       "an earlier decision, an ongoing issue — before asking the user to repeat themselves. " +
+      (multi
+        ? "It searches every one of your memory levels at once; each hit is tagged with its level. "
+        : "") +
       "Search is keyword-based: prefer the vocabulary of your memory index (in your " +
       "instructions) — its exact terms and aliases match best — and when no index line " +
       "obviously matches, keep the user's key words in the query too. " +
@@ -55,77 +139,39 @@ export function memorySearchTool<P>(
       type: "object",
       properties: {
         query: { type: "string", description: "What to look for (topic, name, event)." },
-        limit: { type: "number", description: "Max results (default 6)." },
+        limit: { type: "number", description: multi ? "Max results per level (default 6)." : "Max results (default 6)." },
       },
       required: ["query"],
       additionalProperties: false,
     }),
     execute: async ({ query, limit }) => {
-      const hits = await bound.store.search(bound.principal, bound.scope, query, limit ?? 6);
-      // Evidence pass over the compiled index: the backend ranks free text,
-      // but create_safety needs EXACT signals (normalized alias equality) the
-      // backend can't provide — so match active entries ourselves and merge,
-      // strongest signal winning per result. Index unavailability degrades to
-      // body-only evidence, never a failed search.
-      let entries: IndexEntry[] = [];
-      try {
-        const index = await bound.store.readIndex(bound.principal, bound.scope);
-        if (index) entries = parseIndex(index).entries.filter((e) => !e.archived);
-      } catch {
-        // body-only evidence
-      }
-      const evidenceById = new Map<string, MatchEvidence>();
-      for (const e of entries) {
-        const evidence = entryEvidence(query, e);
-        if (evidence) evidenceById.set(e.id, evidence);
-      }
-      const unverifiedIds = new Set(entries.filter((e) => e.unverified).map((e) => e.id));
-
-      const results = hits.map((h) => {
-        let matchedOn: MatchEvidence = "body";
-        // Trust mark: label (never hide) hits on unverified entries/episodes.
-        let unverified = /^status:\s*unverified\b/m.test(h.snippet);
-        for (const id of h.memoryIds) {
-          const evidence = evidenceById.get(id);
-          if (evidence && EVIDENCE_RANK[evidence] > EVIDENCE_RANK[matchedOn]) {
-            matchedOn = evidence;
+      // Fan out across levels; a single-target search returns exactly the
+      // classic shape (no level tags). Per-level failures degrade to empty
+      // results rather than failing the whole search.
+      const perScope = await Promise.all(
+        targets.map(async (t) => {
+          try {
+            return { t, ...(await searchOneScope(t.bound, query, limit ?? 6)) };
+          } catch {
+            return { t, results: [], recalledIds: [] };
           }
-          if (unverifiedIds.has(id)) unverified = true;
-        }
-        return {
-          path: h.path,
-          snippet: sanitizeMemoryText(h.snippet),
-          matchedOn,
-          ...(unverified ? { unverified: true } : {}),
-        };
-      });
-      // Index entries with evidence the backend didn't surface (e.g. an alias
-      // spelled differently than the stored text ranks): synthesize a hit from
-      // the entry line itself so the exact match is never lost.
-      const surfacedIds = new Set(hits.flatMap((h) => h.memoryIds));
-      const syntheticIds: string[] = [];
-      for (const e of entries) {
-        const evidence = evidenceById.get(e.id);
-        if (!evidence || surfacedIds.has(e.id)) continue;
-        syntheticIds.push(e.id);
-        results.push({
-          path: `${bound.scope.root}/${MEMORY_INDEX_FILENAME}`,
-          snippet: sanitizeMemoryText(e.raw),
-          matchedOn: evidence,
-          ...(e.unverified ? { unverified: true } : {}),
-        });
-      }
-      const create_safety = createSafetyOf(results.map((r) => r.matchedOn));
-
-      const recalledIds = Array.from(
-        new Set([...hits.flatMap((h) => h.memoryIds), ...syntheticIds]),
+        }),
       );
-      if (recalledIds.length > 0 && opts?.recordUsage) {
-        // Fire-and-forget: retention bookkeeping must never fail or slow recall.
-        void Promise.resolve(opts.recordUsage(bound.scope.key, recalledIds)).catch(() => {});
+      const merged = perScope.flatMap(({ t, results }) =>
+        results.map((r) => (multi ? { level: t.level, ...r } : r)),
+      );
+      // create_safety spans ALL levels: an exact match anywhere means the
+      // memory exists — the safe signal for memory_save dedup.
+      const create_safety = createSafetyOf(merged.map((r) => r.matchedOn));
+      if (opts?.recordUsage) {
+        for (const { t, recalledIds } of perScope) {
+          if (recalledIds.length === 0) continue;
+          // Fire-and-forget: retention bookkeeping must never fail or slow recall.
+          void Promise.resolve(opts.recordUsage(t.bound.scope.key, recalledIds)).catch(() => {});
+        }
       }
-      return results.length > 0
-        ? { hits: results, create_safety }
+      return merged.length > 0
+        ? { hits: merged, create_safety }
         : { hits: [], create_safety, note: "no matching memories" };
     },
   });
@@ -206,12 +252,44 @@ export function memoryReadIndexTool<P>(bound: BoundScope<P>): MemoryTool {
   });
 }
 
+/**
+ * The extractor's cross-level index read: every participating level's compiled
+ * index in one call, so "what is already known" covers each level it may
+ * write to.
+ */
+export function memoryReadIndexesTool<P>(targets: LevelBoundScope<P>[]): MemoryTool {
+  return tool({
+    description:
+      "Read the current compiled memory index (MEMORY.md) of every memory level in your task. " +
+      "Returns null for levels with no index yet.",
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async () => {
+      const indexes = await Promise.all(
+        targets.map(async (t) => {
+          const index = await t.bound.store.readIndex(t.bound.principal, t.bound.scope);
+          return { level: t.level, index: index ?? null };
+        }),
+      );
+      return { indexes };
+    },
+  });
+}
+
 export function memoryWriteEpisodeTool<P>(
-  bound: BoundScope<P>,
+  targets: LevelBoundScope<P>[],
   opts: {
     agent: string;
     chatId?: string;
-    onEpisodeWritten?: (args: { path: string; name: string }) => void | Promise<void>;
+    onEpisodeWritten?: (args: {
+      level: MemoryScope;
+      scope: ScopeRef;
+      path: string;
+      name: string;
+    }) => void | Promise<void>;
     /**
      * Outcome of each write attempt — the same three-way distinction
      * `memoryWriteIndexTool` needs: episode written, nothing durable to write
@@ -221,11 +299,16 @@ export function memoryWriteEpisodeTool<P>(
     onWriteAttempt?: (ok: boolean) => void;
   },
 ): MemoryTool {
+  const multi = targets.length > 1;
+  const levels = targets.map((t) => t.level);
   return tool({
     description:
-      "Write ONE immutable episode file capturing the durable memories from this transcript. " +
-      "Call at most once per run, and only when there is something durable to store.",
+      "Write ONE immutable episode file capturing the durable memories from this transcript" +
+      (multi
+        ? " for ONE memory level. Call at most once per level, and only for levels with something durable to store."
+        : ". Call at most once per run, and only when there is something durable to store."),
     inputSchema: jsonSchema<{
+      level?: MemoryScope;
       slug: string;
       summary: string;
       happened?: string;
@@ -234,6 +317,15 @@ export function memoryWriteEpisodeTool<P>(
     }>({
       type: "object",
       properties: {
+        ...(multi
+          ? {
+              level: {
+                type: "string",
+                enum: levels,
+                description: "The memory level this episode belongs to (see your task).",
+              },
+            }
+          : {}),
         slug: {
           type: "string",
           description: "Short kebab-case topic for the filename (e.g. 'calf-strain-week2').",
@@ -266,12 +358,23 @@ export function memoryWriteEpisodeTool<P>(
             "later keyword recall matches any form.",
         },
       },
-      required: ["slug", "summary", "facts"],
+      required: [...(multi ? ["level"] : []), "slug", "summary", "facts"],
       additionalProperties: false,
     }),
-    execute: async ({ slug, summary, happened, facts, aliases }) => {
-      // Not a store failure — the model chose to write nothing. Left unreported
-      // so it stays a normal zero-yield run rather than forcing a retry.
+    execute: async ({ level, slug, summary, happened, facts, aliases }) => {
+      // Route to the requested level; a single-target binding ignores the
+      // param (there is nowhere else to go).
+      const target = multi ? targets.find((t) => t.level === level) : targets[0];
+      if (!target) {
+        return {
+          saved: false,
+          error: `unknown level ${JSON.stringify(level)} — this run's levels are: ${levels.join(", ")}`,
+        };
+      }
+      const bound = target.bound;
+      // An empty facts list is not a store failure — the model chose to write
+      // nothing. Left unreported so it stays a normal zero-yield run rather
+      // than forcing a retry.
       if (facts.length === 0) return { saved: false, error: "no facts provided" };
       const provs = new Set(facts.map((f) => f.provenance));
       const provenance: Provenance = provs.size === 1 ? [...provs][0] : "mixed";
@@ -303,9 +406,11 @@ export function memoryWriteEpisodeTool<P>(
       }
       opts.onWriteAttempt?.(true);
       if (opts.onEpisodeWritten) {
-        void Promise.resolve(opts.onEpisodeWritten(written)).catch(() => {});
+        void Promise.resolve(
+          opts.onEpisodeWritten({ level: target.level, scope: bound.scope, ...written }),
+        ).catch(() => {});
       }
-      return { saved: true, path: written.path };
+      return { saved: true, ...(multi ? { level: target.level } : {}), path: written.path };
     },
   });
 }
@@ -335,6 +440,8 @@ export function memoryWriteIndexTool<P>(
   bound: BoundScope<P>,
   opts?: {
     invalidate?: () => void;
+    /** This level's index-schema outline — advisory, see below. */
+    schema?: string;
     /**
      * Outcome of each write attempt. The caller needs it to tell three cases
      * apart that all look identical from the run's answer: the index was
@@ -346,6 +453,11 @@ export function memoryWriteIndexTool<P>(
     onWriteAttempt?: (ok: boolean) => void;
   },
 ): MemoryTool {
+  // Schema adherence is ADVISORY: the first off-schema rewrite gets bounced
+  // once through the problems loop so the model can self-correct; after that
+  // the write always proceeds (with warnings) — a sweep must never wedge on
+  // schema drift, unlike the hard rules validateIndexRewrite enforces.
+  let schemaNudged = false;
   return tool({
     description:
       "Replace the compiled memory index (MEMORY.md) with a new version. The previous " +
@@ -361,11 +473,19 @@ export function memoryWriteIndexTool<P>(
       additionalProperties: false,
     }),
     execute: async ({ content }) => {
+      const warnings = opts?.schema ? schemaSectionWarnings(opts.schema, content) : [];
+      if (warnings.length > 0 && !schemaNudged) {
+        schemaNudged = true;
+        return {
+          ok: false,
+          problems: warnings.map((w) => `${w} (schema advisory — fix, or resubmit as-is to override)`),
+        };
+      }
       try {
         await bound.store.writeIndex(bound.principal, bound.scope, content);
         opts?.invalidate?.();
         opts?.onWriteAttempt?.(true);
-        return { ok: true };
+        return warnings.length > 0 ? { ok: true, warnings } : { ok: true };
       } catch (error) {
         opts?.onWriteAttempt?.(false);
         if (error instanceof IndexValidationError) {

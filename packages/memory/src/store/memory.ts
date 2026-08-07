@@ -95,6 +95,14 @@ export function createInMemoryStore(opts?: {
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       return keywordSearch(docs, query, limit);
     },
+
+    async readFile(_principal, { path }) {
+      return files.get(path);
+    },
+
+    async writeFile(_principal, { path, content }) {
+      files.set(path, content);
+    },
   };
 }
 

@@ -487,7 +487,71 @@ export function createLoredexStore<P>(opts: {
       });
       return result ?? [];
     },
+
+    async readFile(principal, { connection, path }) {
+      // Path-addressed read of a code-owned auxiliary file (e.g. the shared
+      // user-level SCHEMA.md). Synthetic scope: withConnection only uses
+      // `.connection`; key/root are for the folder-ensure cache, unused here.
+      // Same body/frontmatter split as the index: the store owns the BODY,
+      // Loredex owns the frontmatter it injects from `summary`.
+      const scope: ScopeRef = { key: `${connection}:${dirnameOf(path)}`, connection, root: dirnameOf(path) };
+      return withConnection(principal, scope, async (call) => {
+        const res = await call(names.read, { fileId: path });
+        if (!res.ok) return undefined;
+        return splitFrontmatter(decodeFileRead(res.text)).body;
+      });
+    },
+
+    async writeFile(principal, { connection, path, content, summary }) {
+      const dir = dirnameOf(path);
+      const name = path.slice(dir.length + 1) || path;
+      const scope: ScopeRef = { key: `${connection}:${dir}`, connection, root: dir };
+      // The store owns the BODY only (see writeIndex): `create` injects
+      // `summary` as frontmatter, `edit_file` matches the body alone — so
+      // strip any frontmatter a caller echoed back, read prev as body, and
+      // hand edit_file body-for-body.
+      const body = splitFrontmatter(content).body;
+      const result = await withConnection(principal, scope, async (call) => {
+        const prevRes = await call(names.read, { fileId: path });
+        const prev = prevRes.ok ? splitFrontmatter(decodeFileRead(prevRes.text)).body : undefined;
+        if (prev !== undefined) {
+          if (prev === body) return true;
+          const edit = await call(names.edit, {
+            fileId: path,
+            replacements: [{ oldContent: prev, newContent: body }],
+          });
+          if (!edit.ok) {
+            if ("unavailable" in edit && edit.unavailable)
+              throw new MemoryStoreUnreachableError(`memory store unreachable (${edit.error})`);
+            throw new Error(`memory file rewrite failed: ${edit.error}`);
+          }
+          return true;
+        }
+        await ensureFolders(call, scope.key, dir);
+        const created = await call(names.create, {
+          type: "file",
+          name,
+          folderId: dir,
+          content: body,
+          ...(summary ? { summary } : {}),
+        });
+        if (!created.ok) {
+          if ("unavailable" in created && created.unavailable)
+            throw new MemoryStoreUnreachableError(`memory store unreachable (${created.error})`);
+          throw new Error(`memory file create failed: ${created.error}`);
+        }
+        return true;
+      });
+      if (result === undefined)
+        throw new MemoryStoreUnreachableError("memory store unreachable (connection failed)");
+    },
   };
+}
+
+/** Workspace-relative dirname ("a/b/c.md" → "a/b"; bare filename → ""). */
+function dirnameOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
 }
 
 /**

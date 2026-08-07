@@ -90,7 +90,9 @@ async function main(): Promise<void> {
   const qrels = JSON.parse(readFileSync(QRELS_PATH, "utf8")) as Qrel[];
 
   // The real agent-facing search tool, bound exactly as the provider binds it.
-  const tool = memorySearchTool({ store, principal: {}, scope: SCOPE }) as unknown as {
+  const tool = memorySearchTool([
+    { level: "agent-user", bound: { store, principal: {}, scope: SCOPE } },
+  ]) as unknown as {
     execute: (
       input: { query: string; limit?: number },
       options: unknown,

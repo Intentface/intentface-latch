@@ -32,10 +32,17 @@ function fnv1a64(input: string): string {
  * exactly the duplicate-run case the key exists to suppress. Bumping
  * `EXTRACTION_PROMPT_VERSION` changes every key, so already-tombstoned
  * windows become extractable again under the new prompt.
+ *
+ * `opts.schemaFingerprint` (see `schemasFingerprint`) covers the run's level
+ * set and per-level schemas the same way: a schema edit — or a level added or
+ * removed — changes the key, so the same content becomes re-extractable under
+ * the new configuration.
  */
 export function extractionRunKey(
   messages: ReadonlyArray<{ role: string; text: string }>,
+  opts?: { schemaFingerprint?: string },
 ): string {
   const payload = messages.map((m) => `${m.role}\u0000${m.text}`).join("\u0001");
-  return `x${EXTRACTION_PROMPT_VERSION}:${fnv1a64(payload)}`;
+  const suffix = opts?.schemaFingerprint ? `:${opts.schemaFingerprint}` : "";
+  return `x${EXTRACTION_PROMPT_VERSION}:${fnv1a64(payload)}${suffix}`;
 }
