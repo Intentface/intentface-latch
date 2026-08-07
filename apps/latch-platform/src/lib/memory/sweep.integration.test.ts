@@ -528,6 +528,44 @@ describe("memory pipeline (integration)", () => {
     expect(afterRetry.failures).toBe(0);
   });
 
+  it("extracts a channel-pinned chat into the agent's one canonical scope", async () => {
+    // A channel binding stores its pin verbatim, so `chats.agent` is
+    // `org:coach`. Two bugs met here: the candidate query matches that column
+    // exactly against bare names, so the chat was never even a candidate; and
+    // `seg()` turned the surviving `:` into a second scope root, so anything
+    // that DID get written (an in-turn memory_save) landed in a store the web
+    // chat could not see.
+    const extractorModel = toolThenText(
+      "memory_write_episode",
+      () => ({
+        slug: "telegram-note",
+        summary: "From Telegram",
+        facts: [{ text: "Races on trails", provenance: "user-said" }],
+      }),
+      "stored one episode",
+    );
+    const { files, memoryJobs, storage } = await makeHarness({ extractor: extractorModel });
+    const scope = scopeRefOf({ agent: "coach", memory: MEM, userId: "user" })!;
+
+    const chat = await storage.createChat(principal, { agent: "org:coach" });
+    await storage.appendMessages(chat.id, [message("m1", "user", "I race on trails.")]);
+    await storage.createRun(principal, { chatId: chat.id, agent: "org:coach" });
+
+    const swept = await memorySweep({ now: Date.now() + 2 * HOUR });
+    expect(swept.extractions).toBe(1);
+    expect(swept.errors).toBe(0);
+
+    // The episode lands under the BARE agent segment, not `org-coach-<hash>`.
+    const episodePaths = Array.from(files.keys()).filter((p) => p.includes("/episodes/"));
+    expect(episodePaths).toHaveLength(1);
+    expect(episodePaths[0]!.startsWith(`${scope.root}/episodes/`)).toBe(true);
+    expect(episodePaths[0]).not.toContain("org-coach");
+    // …and the scope row the consolidation job keys off is the canonical one.
+    expect(await memoryJobs.scopeState(scope.key)).toBeDefined();
+    // The episode's own frontmatter names the agent without the pin.
+    expect(files.get(episodePaths[0]!)).toContain("agent: coach");
+  });
+
   it("keeps episodes pending when the consolidator answers without writing", async () => {
     // The failure this pipeline used to lose memories to: memory_write_index
     // errors, the model gives up and still answers a tidy summary, and the

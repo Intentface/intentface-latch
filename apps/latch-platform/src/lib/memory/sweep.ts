@@ -24,7 +24,6 @@ import {
   MEMORY_EXTRACTION_CONCURRENCY,
   MEMORY_EXTRACTION_LEASE_MS,
   MEMORY_EXTRACTION_MAX_CHARS,
-  MEMORY_FAILURE_BACKOFF_MS,
   MEMORY_IDLE_MS,
   MEMORY_PARK_MS,
   memoryFailureBackoffMs,
@@ -112,7 +111,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
 
   // ---- discovery: which agents have memory at all ----
   const uiNames = await agentStore.listMemoryEnabledNames().catch(() => [] as string[]);
-  const agents = Array.from(new Set([...Object.keys(memoryEnabledCodeAgents), ...uiNames]));
+  const bareAgents = Array.from(new Set([...Object.keys(memoryEnabledCodeAgents), ...uiNames]));
+  // A channel-bound chat stores the binding's pinned ref verbatim
+  // (`chats.agent = "org:coach"`), and the candidate query matches that column
+  // EXACTLY against this list — so without the pinned forms a Telegram/Slack/
+  // WhatsApp chat is never even a candidate and its transcript is never
+  // extracted at all. `parseAgentRef` recognizes only these two prefixes, so
+  // the variant set is closed; `extractOne` normalizes back to the bare name.
+  const agents = [...bareAgents, ...bareAgents.flatMap((n) => [`org:${n}`, `user:${n}`])];
 
   // ---- phase 1: extraction ----
   if (agents.length > 0) {
@@ -151,6 +157,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
     lastExtractedSeq: number;
     lastExtractedKey?: string;
     maxSeq: number;
+    failures: number;
   }): Promise<"extractions" | "skipped"> {
     const lease = leaseId();
     // `cand.agent` comes from the chat/run rows, so a channel-bound chat carries
@@ -301,10 +308,14 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       );
       return "extractions";
     } catch (error) {
+      // Escalating backoff, as consolidation does: a write outage now routes
+      // here (see `writes.allFailed()` above), and a flat interval would keep
+      // paying for an extractor run at a fixed rate for as long as it lasts.
+      // This path never tombstones the window — it only retries less often.
       await memoryJobs
         .completeChatExtraction(
           cand.chatId,
-          { ok: false, nextEligibleAt: now + MEMORY_FAILURE_BACKOFF_MS },
+          { ok: false, nextEligibleAt: now + memoryFailureBackoffMs(cand.failures + 1) },
           lease,
         )
         .catch(() => {});
