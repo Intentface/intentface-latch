@@ -438,3 +438,58 @@ describe("review-hardening regressions", () => {
     );
   });
 });
+
+describe("test_agent heartbeat + truthful errors", () => {
+  it("emits progress heartbeats through the turn writer while the run executes", async () => {
+    const deps = makeDeps();
+    ;(deps.runtime.runAgent as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve({ threadId: "sub_1", answer: "hi" }), 80)),
+    );
+    const factory = createAgentBuilder<P>({
+      model,
+      deps: async () => deps,
+      testHeartbeatMs: 20,
+    });
+    const cfg = await factory({ runtime: undefined, principal });
+    const opened = await cfg.toolSources![0]!.open(principal);
+    const tools = opened.tools as Record<string, { execute: (i: unknown, o?: unknown) => Promise<unknown> }>;
+
+    const written: Array<{ type: string; id: string; data: Record<string, unknown> }> = [];
+    const options = {
+      toolCallId: "call_hb",
+      context: { writer: { write: (p: never) => written.push(p as never) } },
+    };
+    const res = (await tools.test_agent!.execute({ name: "greeting", message: "hi" }, options)) as Record<
+      string,
+      unknown
+    >;
+    expect(res.answer).toBe("hi");
+    // Immediate heartbeat + at least one interval tick, all reconciled to one id.
+    expect(written.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(written.map((w) => w.id))).toEqual(new Set(["testprog_call_hb"]));
+    expect(written[0]!.type).toBe("data-test-agent-progress");
+    expect(written.at(-1)!.data.agent).toBe("greeting");
+  });
+
+  it("returns the real error (no thrown generic) and stops the heartbeat", async () => {
+    const deps = makeDeps();
+    ;(deps.runtime.runAgent as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("provider quota exceeded"),
+    );
+    const { tools } = await openTools(deps);
+    const res = (await tools.test_agent!.execute(
+      { name: "greeting", message: "hi" },
+      { toolCallId: "call_e", context: { writer: { write: () => {} } } },
+    )) as { error?: string };
+    expect(res.error).toMatch(/test run of "greeting" failed: provider quota exceeded/);
+  });
+
+  it("works without a writer in options (non-streaming callers)", async () => {
+    const { tools } = await openTools(makeDeps());
+    const res = (await tools.test_agent!.execute({ name: "greeting", message: "hi" })) as Record<
+      string,
+      unknown
+    >;
+    expect(res.answer).toBe("hi");
+  });
+});

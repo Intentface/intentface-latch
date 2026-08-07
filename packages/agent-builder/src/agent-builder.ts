@@ -1,7 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
-import type { AgentFactory, AgentMeta, Runtime } from "@intentface/latch-core";
+import type { AgentFactory, AgentMeta, Runtime, TurnWriter } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
 import type { AgentBuilderExtension, SaveAgentInput } from "./extension";
 import { normalizeAgentName } from "./store";
@@ -136,6 +136,13 @@ export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
   scheduling?: boolean;
   /** Optional feature sets: evals, tool authoring, … */
   extensions?: AgentBuilderExtension<P>[];
+  /**
+   * Interval (ms) for test_agent's progress heartbeat data part
+   * (`data-test-agent-progress`) while the nested test run executes. The
+   * heartbeat keeps idle-timeout proxies from killing the chat stream during
+   * a minutes-long test and doubles as live progress. Default 10s.
+   */
+  testHeartbeatMs?: number;
   /** Picker metadata override. */
   meta?: AgentMeta;
 }
@@ -573,7 +580,7 @@ async function builderTools<P>(
 
     test_agent: tool({
       description:
-        "Run one of the user's agents once with a test message and get its answer plus which tools it called — so you can verify behavior and refine the prompt. In the default safe mode, APPROVAL-GATED tools are blocked (return a 'blocked' marker). NOTE: tools that are NOT approval-gated still execute for real — they may perform real fetch side effects (e.g. a POST). Set live=true only when the user explicitly wants a full real run.",
+        "Run one of the user's agents once with a test message and get its answer plus which tools it called — so you can verify behavior and refine the prompt. In the default safe mode, APPROVAL-GATED tools are blocked (return a 'blocked' marker). NOTE: tools that are NOT approval-gated still execute for real — they may perform real fetch side effects (e.g. a POST). Set live=true only when the user explicitly wants a full real run. A web-heavy agent's test can take MINUTES (each fetch is a full page read) — warn the user before testing one.",
       inputSchema: z.object({
         name: z.string().describe("Agent name to test."),
         message: z.string().describe("The test user message to send it."),
@@ -582,15 +589,51 @@ async function builderTools<P>(
           .optional()
           .describe("true → real run (mutating tools execute). Default false → safe (mutations blocked)."),
       }),
-      execute: async ({ name, message, live }) => {
+      execute: async ({ name, message, live }, options) => {
         // Normalize like every other tool — stored names are normalized.
         const target = normalizeAgentName(name);
-        const { threadId, answer } = await runtime.runAgent({
-          principal,
-          agent: target,
-          prompt: message,
-          blockGated: !live,
-        });
+        // The nested run is one long, otherwise-SILENT await inside this
+        // turn — minutes for a web-heavy agent. Emit a small heartbeat data
+        // part on an interval: it keeps idle-timeout proxies from killing
+        // the chat stream, and gives the user live progress instead of dead
+        // air. Reconciled in place by id (one part, updated), like
+        // latch-platform's eval progress card.
+        const env = (options ?? {}) as {
+          toolCallId?: string;
+          context?: { writer?: TurnWriter };
+        };
+        const startedAt = Date.now();
+        const writeHeartbeat = () => {
+          env.context?.writer?.write({
+            type: "data-test-agent-progress",
+            id: `testprog_${env.toolCallId ?? "run"}`,
+            data: {
+              toolCallId: env.toolCallId,
+              agent: target,
+              elapsedSec: Math.round((Date.now() - startedAt) / 1000),
+            },
+          });
+        };
+        const heartbeat = setInterval(writeHeartbeat, config.testHeartbeatMs ?? 10_000);
+        let threadId: string;
+        let answer: string;
+        try {
+          writeHeartbeat();
+          ({ threadId, answer } = await runtime.runAgent({
+            principal,
+            agent: target,
+            prompt: message,
+            blockGated: !live,
+          }));
+        } catch (error) {
+          // Surface the REAL failure — a generic tool error invites the
+          // model to confabulate reassuring explanations.
+          return {
+            error: `test run of "${target}" failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        } finally {
+          clearInterval(heartbeat);
+        }
         const history = await runtime.loadHistory({ chatId: threadId, principal });
         const toolCalls: { tool: string; blocked?: boolean }[] = [];
         for (const m of history) {
