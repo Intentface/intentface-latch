@@ -1,13 +1,19 @@
-import type { MemoryConfig } from "@intentface/latch-core";
+import type { MemoryConfig, MemoryScope } from "@intentface/latch-core";
 import {
+  DEFAULT_MEMORY_SCHEMAS,
+  MEMORY_POLICY_FLOOR,
+  USER_SCHEMA_PATH,
   buildConsolidationPrompt,
   buildExtractionPrompt,
+  extractionLevelsOf,
   extractionRunKey,
+  levelConfigOf,
   parseIndex,
+  schemasFingerprint,
   scopeLabelOf,
   scopeRefOf,
 } from "@intentface/latch-memory";
-import type { ScopeRef } from "@intentface/latch-memory";
+import type { MemoryStore, ScopeRef } from "@intentface/latch-memory";
 import { memoryEnabledCodeAgents } from "@/agents/memory-enabled";
 import type { Principal } from "../session";
 import { memoryAgentOf } from "./agent-identity";
@@ -26,6 +32,7 @@ import {
   MEMORY_EXTRACTION_MAX_CHARS,
   MEMORY_IDLE_MS,
   MEMORY_PARK_MS,
+  MEMORY_USER_SCHEMA_TTL_MS,
   memoryFailureBackoffMs,
 } from "./constants";
 
@@ -80,6 +87,86 @@ function writeTally() {
      */
     allFailed: () => ok === 0 && failed > 0,
   };
+}
+
+/** One participating memory level, resolved for a specific caller. */
+interface LevelTarget {
+  level: MemoryScope;
+  scope: ScopeRef;
+  schema: string;
+  /**
+   * Whether `schema` was explicitly configured (agent record / workspace
+   * SCHEMA.md) rather than the platform default. Both shape the prompts, but
+   * only a CONFIGURED schema arms memory_write_index's advisory section nudge
+   * — the defaults exist to guide an unconfigured agent, whose consolidator
+   * has always been free to invent domain sections.
+   */
+  configured: boolean;
+}
+
+/**
+ * The shared user-level schema, TTL-cached per (org, connection). The file
+ * lives at a fixed SHARED workspace path (outside the caller-relative private
+ * root), so one entry serves every caller of that org's connection — but a
+ * connection NAME is not globally unique, so the org id must be in the key or
+ * one org's schema would serve another's. Absent/unreachable → undefined →
+ * caller falls back to the default schema; a schema read can never block the
+ * sweep.
+ */
+const userSchemaCache = new Map<string, { at: number; text: string | undefined }>();
+async function readUserSchemaCached(
+  store: MemoryStore<Principal>,
+  principal: Principal,
+  connection: string,
+  now: number,
+): Promise<string | undefined> {
+  const cacheKey = `${principal.orgId}:${connection}`;
+  const hit = userSchemaCache.get(cacheKey);
+  if (hit && now - hit.at < MEMORY_USER_SCHEMA_TTL_MS) return hit.text;
+  let text: string | undefined;
+  try {
+    text = await store.readFile(principal, { connection, path: USER_SCHEMA_PATH });
+  } catch {
+    text = undefined;
+  }
+  const normalized = text?.trim() ? text : undefined;
+  userSchemaCache.set(cacheKey, { at: now, text: normalized });
+  return normalized;
+}
+
+/**
+ * Resolve every level this agent's memory participates in for this caller:
+ * per-user levels drop out when the principal carries no userId; each level
+ * carries its schema — agent-held levels from the config, the shared `user`
+ * level from the workspace SCHEMA.md — falling back to the level's default.
+ */
+async function extractionTargetsOf(
+  agent: string,
+  memory: MemoryConfig,
+  principal: Principal,
+  store: MemoryStore<Principal>,
+  now: number,
+): Promise<LevelTarget[]> {
+  const out: LevelTarget[] = [];
+  for (const level of extractionLevelsOf(memory)) {
+    const scope = scopeRefOf({
+      agent,
+      memory: levelConfigOf(memory, level),
+      userId: principal.userId,
+    });
+    if (!scope) continue;
+    const explicit =
+      level === "user"
+        ? await readUserSchemaCached(store, principal, memory.connection, now)
+        : memory.schemas?.[level];
+    out.push({
+      level,
+      scope,
+      schema: explicit ?? DEFAULT_MEMORY_SCHEMAS[level],
+      configured: explicit != null,
+    });
+  }
+  return out;
 }
 
 /** The memory config for an agent under a specific caller, or undefined. */
@@ -243,13 +330,20 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // The excerpt may be char-capped short of maxSeq — advance the watermark
       // only to what the extractor actually saw; the tail is next tick's work.
       const lastSeenSeq = msgs[msgs.length - 1]!.seq;
-      // Idempotency gate: identical content + prompt version to the last
-      // COMPLETED run (seq-watermark reset, replayed/re-sequenced rows) must
-      // never re-trigger a paid extraction — including windows the last run
-      // extracted NOTHING from (the recorded key is that run's tombstone).
-      // Advance the watermark for free instead. Failed runs never recorded a
-      // key, so they fall through to a retry as intended.
-      const extractionKey = extractionRunKey(msgs);
+      // Every participating level for this caller (primary always included;
+      // per-user levels drop for userId-less principals). Resolved before the
+      // idempotency key so a schema/level change re-opens tombstoned windows.
+      const targets = await extractionTargetsOf(agent, memory, principal, memoryStore, now);
+      // Idempotency gate: identical content + prompt version + level/schema
+      // configuration to the last COMPLETED run (seq-watermark reset,
+      // replayed/re-sequenced rows) must never re-trigger a paid extraction —
+      // including windows the last run extracted NOTHING from (the recorded
+      // key is that run's tombstone). Advance the watermark for free instead.
+      // Failed runs never recorded a key, so they fall through to a retry as
+      // intended.
+      const extractionKey = extractionRunKey(msgs, {
+        schemaFingerprint: schemasFingerprint(targets),
+      });
       if (extractionKey === cand.lastExtractedKey) {
         await memoryJobs.completeChatExtraction(
           cand.chatId,
@@ -263,6 +357,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       const turnContext: MemoryExtractionTurnContext = {
         kind: "memory-extraction",
         scope,
+        targets,
         chatId: cand.chatId,
         targetAgent: agent,
         // `!= null` (not `||`): an explicit cooldownHours of 0 is a real choice.
@@ -279,10 +374,15 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         turnContext,
         prompt: buildExtractionPrompt({
           agent,
-          scopeLabel: scopeLabelOf(memory),
           chatId: cand.chatId,
           transcript,
           seqRange: { from: msgs[0]!.seq, to: lastSeenSeq },
+          targets: targets.map((t) => ({
+            level: t.level,
+            scopeLabel: scopeLabelOf(levelConfigOf(memory, t.level)),
+            schema: t.schema,
+            policy: MEMORY_POLICY_FLOOR[t.level],
+          })),
         }),
       });
       // `runAgent` swallows in-run failures (an LLM error mid-stream resolves
@@ -347,16 +447,27 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       // to the agent's one canonical scope.
       const agent = memoryAgentOf(row.agent);
       const memory = principal ? await memoryConfigFor(agent, principal, agentStore) : undefined;
-      const scope: ScopeRef | undefined =
+      // The row's scope may be ANY of the agent's participating levels (the
+      // extractor touches every level it wrote), so match against all of them
+      // — matching only the primary would false-park non-primary levels.
+      //
+      // Shared-scope attribution caveat (`user`/`agent-org` rows are shared
+      // across agents; `row.agent` is whoever last touched them): cooldown and
+      // connection come from that agent's config, but the SCHEMA does not
+      // depend on it — the user level's schema is store-read and agent-org is
+      // only shared per agent — so consolidation shape stays agent-independent.
+      const targets =
         memory && principal
-          ? scopeRefOf({ agent, memory, userId: principal.userId })
-          : undefined;
-      if (!principal || !memory || !scope || scope.key !== row.scopeKey) {
-        // Identity lost, agent no longer memory-enabled, or a row whose stored
-        // scopeKey predates a scope-derivation change (a channel-pinned root) —
-        // park the scope. Episodes stay pending; a future touch re-stamps a
-        // fresh identity, and a stale root simply parks daily rather than
-        // erroring, since its content is not reachable from the new key.
+          ? await extractionTargetsOf(agent, memory, principal, memoryStore, now)
+          : [];
+      const match = targets.find((t) => t.scope.key === row.scopeKey);
+      if (!principal || !memory || !match) {
+        // Identity lost, agent no longer memory-enabled for this level, or a
+        // row whose stored scopeKey predates a scope-derivation change (a
+        // channel-pinned root) — park the scope. Episodes stay pending; a
+        // future touch re-stamps a fresh identity, and a stale root simply
+        // parks daily rather than erroring, since its content is not reachable
+        // from the new key.
         await memoryJobs.completeScopeConsolidation(
           row.scopeKey,
           { ok: false, nextEligibleAt: now + MEMORY_PARK_MS },
@@ -365,6 +476,7 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         result.skipped++;
         continue;
       }
+      const scope = match.scope;
 
       // Expiry candidates: ACTIVE index entries not recalled (and not updated)
       // within the expiry window. Usage rows only exist for recalled ids, so
@@ -400,6 +512,10 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
       const turnContext: MemoryConsolidationTurnContext = {
         kind: "memory-consolidation",
         scope,
+        level: match.level,
+        // Arms the write tool's advisory section nudge — configured schemas
+        // only; the prompt below carries the schema (or default) regardless.
+        schema: match.configured ? match.schema : undefined,
         onWriteAttempt: writes.sink,
       };
       const { answer } = await runtime.runAgent({
@@ -408,10 +524,12 @@ export async function memorySweep(opts?: { now?: number; force?: boolean }): Pro
         blockGated: false,
         turnContext,
         prompt: buildConsolidationPrompt({
-          scopeLabel: scopeLabelOf(memory),
+          scopeLabel: scopeLabelOf(levelConfigOf(memory, match.level)),
           episodePaths,
           expireCandidates,
           today: new Date(now).toISOString().slice(0, 10),
+          schema: match.schema,
+          policy: MEMORY_POLICY_FLOOR[match.level],
         }),
       });
       // Same in-run-failure blindspot as extraction: `runAgent` resolves with

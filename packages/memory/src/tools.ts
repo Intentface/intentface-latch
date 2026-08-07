@@ -476,6 +476,10 @@ export function memoryWriteIndexTool<P>(
       const warnings = opts?.schema ? schemaSectionWarnings(opts.schema, content) : [];
       if (warnings.length > 0 && !schemaNudged) {
         schemaNudged = true;
+        // Counts as a FAILED attempt: nothing was stored, so a model that
+        // gives up right after the nudge must not read as "nothing needed
+        // writing" — that would consume pending episodes with no index write.
+        opts?.onWriteAttempt?.(false);
         return {
           ok: false,
           problems: warnings.map((w) => `${w} (schema advisory — fix, or resubmit as-is to override)`),

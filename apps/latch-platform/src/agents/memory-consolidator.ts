@@ -34,7 +34,10 @@ export const memoryConsolidator = defineAgent<Principal, { orgId: string }>(
       tools: {
         memory_read_index: memoryReadIndexTool(bound),
         memory_read_episodes: memoryReadEpisodesTool(bound),
+        // Schema adherence is advisory: one nudge round, then the write goes
+        // through — see memoryWriteIndexTool.
         memory_write_index: memoryWriteIndexTool(bound, {
+          schema: tc.schema,
           onWriteAttempt: tc.onWriteAttempt,
         }),
       },
