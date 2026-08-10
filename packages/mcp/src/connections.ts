@@ -55,6 +55,23 @@ export interface OAuthAuthOptions {
    * case; `hosts` bounds the rewrite to those hostnames.
    */
   normalize?: { forceScheme?: "https" | "http"; hosts?: string[] };
+  /**
+   * Omit the RFC 8707 `resource` parameter from the authorization request and
+   * token exchange even when the server's protected-resource metadata
+   * advertises one. Google's MCP servers (calendarmcp.googleapis.com, …) do
+   * advertise a resource, but the audience-bound token Google then mints is
+   * rejected by the MCP server itself (401 `invalid_token`); a plain
+   * scope-bearing token is accepted. Set `true` for those servers.
+   */
+  omitResource?: boolean;
+  /**
+   * Extra query params appended to the authorization redirect URL — provider
+   * extensions the SDK doesn't model, e.g. Google's
+   * `{ access_type: "offline", prompt: "consent" }` to be issued a refresh
+   * token (without it the connection silently dies when the 1h access token
+   * expires, since Google returns no refresh token by default).
+   */
+  authorizationParams?: Record<string, string>;
   /** Extra client-metadata passthrough (merged into the generated metadata). */
   clientMetadata?: Partial<OAuthClientMetadata>;
 }
@@ -254,6 +271,11 @@ export function createMcpConnections<P>(
             : undefined,
           scope: opts.scopes?.join(" "),
           fetch: normFetch,
+          // `undefined` keeps the SDK default (exact origin match on the
+          // advertised resource); a defined hook returning undefined omits the
+          // resource parameter from the authorize + exchange requests.
+          validateResourceURL: opts.omitResource ? () => undefined : undefined,
+          authorizationParams: opts.authorizationParams,
         },
       }),
     );

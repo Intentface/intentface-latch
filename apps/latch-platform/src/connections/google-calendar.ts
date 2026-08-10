@@ -27,5 +27,15 @@ export default defineMcpConnection({
       "https://www.googleapis.com/auth/calendar.events.freebusy",
       "https://www.googleapis.com/auth/calendar.events.readonly",
     ],
+    // Google advertises an RFC 8707 resource in the MCP server's
+    // protected-resource metadata, but the audience-bound token it then mints
+    // is rejected by the MCP server itself (401 invalid_token on every tool
+    // call, while a plain scope-bearing token gets through). Leave the
+    // resource parameter out of the flow entirely.
+    omitResource: true,
+    // Google only issues a refresh token with offline access + forced consent;
+    // without one the connection silently dies when the 1h access token
+    // expires (no refresh possible → every tool call 401s until reconnect).
+    authorizationParams: { access_type: "offline", prompt: "consent" },
   }),
 });

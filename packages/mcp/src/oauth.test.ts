@@ -121,6 +121,43 @@ describe("createMcpOAuth scope resolution", () => {
   });
 });
 
+describe("authorizationParams", () => {
+  // Providers like Google need extra authorize params the SDK doesn't model
+  // (`access_type=offline&prompt=consent` for a refresh token). They are
+  // appended to the SDK-built redirect URL in start().
+  it("appends the configured params to the authorization URL", async () => {
+    const vault = fakeVault();
+    const oauth = createMcpOAuth<P>({
+      vault: vault as never,
+      config: {
+        name: "gcal",
+        serverUrl: "https://calendarmcp.example/mcp/v1",
+        redirectUrl: "https://latch.example/cb",
+        clientMetadata: {
+          client_name: "Latch (gcal)",
+          redirect_uris: ["https://latch.example/cb"],
+        } as never,
+        authorizationParams: { access_type: "offline", prompt: "consent" },
+      },
+    });
+    // Simulate the SDK asking for a browser redirect.
+    authMock.mockImplementationOnce(async (provider: {
+      redirectToAuthorization: (url: URL) => void;
+    }) => {
+      provider.redirectToAuthorization(
+        new URL("https://idp.example/authorize?client_id=abc"),
+      );
+      return "REDIRECT";
+    });
+    const res = await oauth.start({ userId: "u1" });
+    if (res.status !== "redirect") throw new Error("expected redirect");
+    const url = new URL(res.authorizationUrl);
+    expect(url.searchParams.get("client_id")).toBe("abc"); // SDK params kept
+    expect(url.searchParams.get("access_type")).toBe("offline");
+    expect(url.searchParams.get("prompt")).toBe("consent");
+  });
+});
+
 describe("invalidateCredentials", () => {
   it("clears the DCR client as well as the tokens", async () => {
     // A scope change re-runs registration: the stored client was registered

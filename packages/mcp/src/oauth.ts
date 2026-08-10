@@ -73,6 +73,14 @@ export interface McpOAuthConfig<P = unknown> {
    * transport's on-401 re-auth uses it too.
    */
   fetch?: FetchFunction;
+  /**
+   * Extra query params appended to the authorization redirect URL — provider
+   * extensions the SDK doesn't model, e.g. Google's
+   * `{ access_type: "offline", prompt: "consent" }` to be issued a refresh
+   * token. Applied on top of the SDK-built URL, so they can also override a
+   * standard param if a provider needs that.
+   */
+  authorizationParams?: Record<string, string>;
 }
 
 const vaultKey = (name: string, part: string) => `mcp_oauth:${name}:${part}`;
@@ -297,6 +305,9 @@ export function createMcpOAuth<P>(opts: {
         throw new Error(
           `MCP OAuth "${config.name}": authorization required but no redirect URL was produced`,
         );
+      }
+      for (const [key, value] of Object.entries(config.authorizationParams ?? {})) {
+        url.searchParams.set(key, value);
       }
       return { status: "redirect", authorizationUrl: url.toString() };
     },
