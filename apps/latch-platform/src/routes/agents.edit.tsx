@@ -44,6 +44,7 @@ import {
   whatsappWebhookInfoFn,
 } from "@/lib/server";
 import { authorizeUrl } from "@/lib/latch-client";
+import { buildDefaultTools, hasDefaultTool, SCHEDULE_TOOLS } from "@/lib/default-tools";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -104,11 +105,18 @@ function AgentEditor() {
   const [unlimited, setUnlimited] = useState(initial?.maxSteps === "unlimited");
   const [sandbox, setSandbox] = useState(initial?.exec?.sandbox ?? false);
   const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
-  const [webTools, setWebTools] = useState(
-    initial?.exec?.defaultTools === true ||
-      (Array.isArray(initial?.exec?.defaultTools) &&
-        initial.exec.defaultTools.includes("web_fetch")),
+  // Default (app-runtime) tools, toggled per capability. `defaultTools: true`
+  // grants the whole set, an array grants the named ones.
+  const prevDefaultTools = initial?.exec?.defaultTools;
+  const [webTools, setWebTools] = useState(hasDefaultTool(prevDefaultTools, "web_fetch"));
+  const [askUserTool, setAskUserTool] = useState(hasDefaultTool(prevDefaultTools, "askUser"));
+  // The schedule tools travel as one capability; "on" if the agent has any of
+  // them. A stored PARTIAL subset is preserved on save unless the user touches
+  // the toggle (see buildDefaultTools), so an unchanged save never expands it.
+  const [scheduleTools, setScheduleTools] = useState(
+    SCHEDULE_TOOLS.some((n) => hasDefaultTool(prevDefaultTools, n)),
   );
+  const [scheduleTouched, setScheduleTouched] = useState(false);
   // render_fetch is its own capability flag (like sandbox), not a defaultTools
   // member — so `defaultTools: true` never implies it.
   const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
@@ -262,19 +270,17 @@ function AgentEditor() {
             }
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
-      // Save an explicit defaultTools name list (never bare `true`): the Web
-      // tools toggle sets web_fetch, and any OTHER default-tool names the agent
-      // already had (e.g. askUser) are preserved. render_fetch is NOT here — it
-      // is its own capability (`renderTools` below), like sandbox. Keeps the
-      // grant least-privilege and avoids dropping/force-adding askUser.
-      const prevDefault = initial?.exec?.defaultTools;
-      const preserved = Array.isArray(prevDefault)
-        ? prevDefault.filter((n) => n !== "web_fetch" && n !== "render_fetch")
-        : prevDefault === true
-          ? ["askUser"]
-          : [];
-      const toolNames = [...(webTools ? ["web_fetch"] : []), ...preserved];
-      const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
+      // Explicit defaultTools name list (never bare `true`), least-privilege:
+      // unknown names are preserved, a partial schedule subset survives an
+      // untouched save, and render_fetch stays a separate capability
+      // (`renderTools` below). Rules live in buildDefaultTools + its tests.
+      const defaultTools = buildDefaultTools({
+        webTools,
+        askUser: askUserTool,
+        schedules: scheduleTools,
+        schedulesTouched: scheduleTouched,
+        prev: prevDefaultTools,
+      });
       // Memory only saves with a valid connection pick (the picker defaults to
       // loredex when the agent declares it).
       const memory =
@@ -525,7 +531,7 @@ function AgentEditor() {
         </div>
 
         <div className="border-primary-border space-y-3 rounded-lg border p-3">
-          <FieldLabel>Code execution</FieldLabel>
+          <FieldLabel>Capabilities</FieldLabel>
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={sandbox} onCheckedChange={() => setSandbox((v) => !v)} />
             <span>
@@ -546,7 +552,33 @@ function AgentEditor() {
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
             <span>
-              Web tools — <span className="font-mono">web_fetch</span> (built-in, any model)
+              Web tools — <span className="font-mono">web_fetch</span>: fetches public pages as
+              clean markdown (built-in, any model)
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={askUserTool} onCheckedChange={() => setAskUserTool((v) => !v)} />
+            <span>
+              Ask user — <span className="font-mono">askUser</span>: pauses the run to ask the
+              user multiple-choice questions instead of guessing
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch
+              checked={scheduleTools}
+              onCheckedChange={() => {
+                setScheduleTouched(true);
+                setScheduleTools((v) => !v);
+              }}
+            />
+            <span>
+              Schedules —{" "}
+              <span className="font-mono">
+                create_schedule / list_schedules / cancel_schedule / list_delivery_channels
+              </span>
+              : the agent can set up its own recurring runs (“brief me every weekday at 8”) and
+              deliver them to a linked Telegram/Slack channel. Creating one asks the user for
+              approval first; runs fire at most every 15 minutes.
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">
