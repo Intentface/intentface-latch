@@ -44,6 +44,7 @@ import {
   whatsappWebhookInfoFn,
 } from "@/lib/server";
 import { authorizeUrl } from "@/lib/latch-client";
+import { buildDefaultTools, hasDefaultTool, SCHEDULE_TOOLS } from "@/lib/default-tools";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -65,20 +66,6 @@ export const Route = createFileRoute("/agents/edit")({
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return <label className="text-ink-secondary text-xs font-medium">{children}</label>;
 }
-
-// The schedule capability = the four schedule tools together: `create_schedule`
-// depends on `list_delivery_channels` for targets, and `list_schedules` /
-// `cancel_schedule` let the user manage what create made. Granting them
-// piecemeal would leave the model with half a workflow.
-const SCHEDULE_TOOLS = [
-  "list_delivery_channels",
-  "create_schedule",
-  "list_schedules",
-  "cancel_schedule",
-];
-// Every defaultTools name this editor owns a toggle for. Anything an agent has
-// beyond these (a future default tool added server-side) is preserved on save.
-const KNOWN_DEFAULT_TOOLS = ["web_fetch", "askUser", ...SCHEDULE_TOOLS];
 
 // Default model for a NEW agent: first preferred id present in the catalog, else
 // the first non-image/embedding model, else the first. (models.dev includes
@@ -120,13 +107,16 @@ function AgentEditor() {
   const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
   // Default (app-runtime) tools, toggled per capability. `defaultTools: true`
   // grants the whole set, an array grants the named ones.
-  const hasDefaultTool = (n: string) =>
-    initial?.exec?.defaultTools === true ||
-    (Array.isArray(initial?.exec?.defaultTools) && initial.exec.defaultTools.includes(n));
-  const [webTools, setWebTools] = useState(hasDefaultTool("web_fetch"));
-  const [askUserTool, setAskUserTool] = useState(hasDefaultTool("askUser"));
-  // The schedule tools travel as one capability; "on" if the agent has any of them.
-  const [scheduleTools, setScheduleTools] = useState(SCHEDULE_TOOLS.some(hasDefaultTool));
+  const prevDefaultTools = initial?.exec?.defaultTools;
+  const [webTools, setWebTools] = useState(hasDefaultTool(prevDefaultTools, "web_fetch"));
+  const [askUserTool, setAskUserTool] = useState(hasDefaultTool(prevDefaultTools, "askUser"));
+  // The schedule tools travel as one capability; "on" if the agent has any of
+  // them. A stored PARTIAL subset is preserved on save unless the user touches
+  // the toggle (see buildDefaultTools), so an unchanged save never expands it.
+  const [scheduleTools, setScheduleTools] = useState(
+    SCHEDULE_TOOLS.some((n) => hasDefaultTool(prevDefaultTools, n)),
+  );
+  const [scheduleTouched, setScheduleTouched] = useState(false);
   // render_fetch is its own capability flag (like sandbox), not a defaultTools
   // member — so `defaultTools: true` never implies it.
   const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
@@ -280,24 +270,17 @@ function AgentEditor() {
             }
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
-      // Save an explicit defaultTools name list (never bare `true`): each
-      // toggle contributes its names, and any default-tool names beyond the
-      // ones this editor knows (a future server-side addition) are preserved.
-      // (`defaultTools: true` needs no preserving — every toggle initialized
-      // to on, so the toggles carry the full grant.) render_fetch is NOT here —
-      // it is its own capability (`renderTools` below), like sandbox. Keeps
-      // the grant least-privilege.
-      const prevDefault = initial?.exec?.defaultTools;
-      const preserved = Array.isArray(prevDefault)
-        ? prevDefault.filter((n) => !KNOWN_DEFAULT_TOOLS.includes(n) && n !== "render_fetch")
-        : [];
-      const toolNames = [
-        ...(webTools ? ["web_fetch"] : []),
-        ...(askUserTool ? ["askUser"] : []),
-        ...(scheduleTools ? SCHEDULE_TOOLS : []),
-        ...preserved,
-      ];
-      const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
+      // Explicit defaultTools name list (never bare `true`), least-privilege:
+      // unknown names are preserved, a partial schedule subset survives an
+      // untouched save, and render_fetch stays a separate capability
+      // (`renderTools` below). Rules live in buildDefaultTools + its tests.
+      const defaultTools = buildDefaultTools({
+        webTools,
+        askUser: askUserTool,
+        schedules: scheduleTools,
+        schedulesTouched: scheduleTouched,
+        prev: prevDefaultTools,
+      });
       // Memory only saves with a valid connection pick (the picker defaults to
       // loredex when the agent declares it).
       const memory =
@@ -581,7 +564,13 @@ function AgentEditor() {
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">
-            <Switch checked={scheduleTools} onCheckedChange={() => setScheduleTools((v) => !v)} />
+            <Switch
+              checked={scheduleTools}
+              onCheckedChange={() => {
+                setScheduleTouched(true);
+                setScheduleTools((v) => !v);
+              }}
+            />
             <span>
               Schedules —{" "}
               <span className="font-mono">
