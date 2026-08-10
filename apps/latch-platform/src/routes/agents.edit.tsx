@@ -66,6 +66,20 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   return <label className="text-ink-secondary text-xs font-medium">{children}</label>;
 }
 
+// The schedule capability = the four schedule tools together: `create_schedule`
+// depends on `list_delivery_channels` for targets, and `list_schedules` /
+// `cancel_schedule` let the user manage what create made. Granting them
+// piecemeal would leave the model with half a workflow.
+const SCHEDULE_TOOLS = [
+  "list_delivery_channels",
+  "create_schedule",
+  "list_schedules",
+  "cancel_schedule",
+];
+// Every defaultTools name this editor owns a toggle for. Anything an agent has
+// beyond these (a future default tool added server-side) is preserved on save.
+const KNOWN_DEFAULT_TOOLS = ["web_fetch", "askUser", ...SCHEDULE_TOOLS];
+
 // Default model for a NEW agent: first preferred id present in the catalog, else
 // the first non-image/embedding model, else the first. (models.dev includes
 // image/embedding models and the list is label-sorted, so models[0] is a poor
@@ -104,11 +118,15 @@ function AgentEditor() {
   const [unlimited, setUnlimited] = useState(initial?.maxSteps === "unlimited");
   const [sandbox, setSandbox] = useState(initial?.exec?.sandbox ?? false);
   const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
-  const [webTools, setWebTools] = useState(
+  // Default (app-runtime) tools, toggled per capability. `defaultTools: true`
+  // grants the whole set, an array grants the named ones.
+  const hasDefaultTool = (n: string) =>
     initial?.exec?.defaultTools === true ||
-      (Array.isArray(initial?.exec?.defaultTools) &&
-        initial.exec.defaultTools.includes("web_fetch")),
-  );
+    (Array.isArray(initial?.exec?.defaultTools) && initial.exec.defaultTools.includes(n));
+  const [webTools, setWebTools] = useState(hasDefaultTool("web_fetch"));
+  const [askUserTool, setAskUserTool] = useState(hasDefaultTool("askUser"));
+  // The schedule tools travel as one capability; "on" if the agent has any of them.
+  const [scheduleTools, setScheduleTools] = useState(SCHEDULE_TOOLS.some(hasDefaultTool));
   // render_fetch is its own capability flag (like sandbox), not a defaultTools
   // member — so `defaultTools: true` never implies it.
   const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
@@ -262,18 +280,23 @@ function AgentEditor() {
             }
           : undefined;
       const useEffort = effort && modelSupportsReasoning ? effort : undefined;
-      // Save an explicit defaultTools name list (never bare `true`): the Web
-      // tools toggle sets web_fetch, and any OTHER default-tool names the agent
-      // already had (e.g. askUser) are preserved. render_fetch is NOT here — it
-      // is its own capability (`renderTools` below), like sandbox. Keeps the
-      // grant least-privilege and avoids dropping/force-adding askUser.
+      // Save an explicit defaultTools name list (never bare `true`): each
+      // toggle contributes its names, and any default-tool names beyond the
+      // ones this editor knows (a future server-side addition) are preserved.
+      // (`defaultTools: true` needs no preserving — every toggle initialized
+      // to on, so the toggles carry the full grant.) render_fetch is NOT here —
+      // it is its own capability (`renderTools` below), like sandbox. Keeps
+      // the grant least-privilege.
       const prevDefault = initial?.exec?.defaultTools;
       const preserved = Array.isArray(prevDefault)
-        ? prevDefault.filter((n) => n !== "web_fetch" && n !== "render_fetch")
-        : prevDefault === true
-          ? ["askUser"]
-          : [];
-      const toolNames = [...(webTools ? ["web_fetch"] : []), ...preserved];
+        ? prevDefault.filter((n) => !KNOWN_DEFAULT_TOOLS.includes(n) && n !== "render_fetch")
+        : [];
+      const toolNames = [
+        ...(webTools ? ["web_fetch"] : []),
+        ...(askUserTool ? ["askUser"] : []),
+        ...(scheduleTools ? SCHEDULE_TOOLS : []),
+        ...preserved,
+      ];
       const defaultTools = toolNames.length ? [...new Set(toolNames)] : undefined;
       // Memory only saves with a valid connection pick (the picker defaults to
       // loredex when the agent declares it).
@@ -525,7 +548,7 @@ function AgentEditor() {
         </div>
 
         <div className="border-primary-border space-y-3 rounded-lg border p-3">
-          <FieldLabel>Code execution</FieldLabel>
+          <FieldLabel>Capabilities</FieldLabel>
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={sandbox} onCheckedChange={() => setSandbox((v) => !v)} />
             <span>
@@ -546,7 +569,27 @@ function AgentEditor() {
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
             <span>
-              Web tools — <span className="font-mono">web_fetch</span> (built-in, any model)
+              Web tools — <span className="font-mono">web_fetch</span>: fetches public pages as
+              clean markdown (built-in, any model)
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={askUserTool} onCheckedChange={() => setAskUserTool((v) => !v)} />
+            <span>
+              Ask user — <span className="font-mono">askUser</span>: pauses the run to ask the
+              user multiple-choice questions instead of guessing
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={scheduleTools} onCheckedChange={() => setScheduleTools((v) => !v)} />
+            <span>
+              Schedules —{" "}
+              <span className="font-mono">
+                create_schedule / list_schedules / cancel_schedule / list_delivery_channels
+              </span>
+              : the agent can set up its own recurring runs (“brief me every weekday at 8”) and
+              deliver them to a linked Telegram/Slack channel. Creating one asks the user for
+              approval first; runs fire at most every 15 minutes.
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">
