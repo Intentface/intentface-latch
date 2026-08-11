@@ -5,7 +5,9 @@
 
 const int = (env: string | undefined, fallback: number): number => {
   const n = env ? Number.parseInt(env, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  // 0 is a valid override (e.g. MEMORY_COOLDOWN_HOURS=0 disables the cooldown
+  // for manual e2e testing); only negatives and garbage fall back.
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
 /** Chat idle time before its transcript is eligible for extraction. */
