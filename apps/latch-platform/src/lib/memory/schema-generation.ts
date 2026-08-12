@@ -8,10 +8,59 @@ import {
 
 /**
  * The one prompt for drafting a memory index schema from an agent's purpose —
- * shared by the editor's "Generate from instructions" server fn and the
+ * shared by the editor's "Generate from System Prompt" server fn and the
  * builder agent's `generate_memory_schemas` tool, so the two paths can't
  * drift.
  */
+/**
+ * Prompt for drafting the SHARED user-level schema of one memory connection —
+ * generated from every agent that stores memories there, since the profile
+ * must serve all of them. UI agents contribute their full system prompts;
+ * code agents (whose instructions are factory-built) contribute name +
+ * description as a weaker signal.
+ */
+export function buildSharedUserSchemaPrompt(args: {
+  connection: string;
+  agents: Array<{ name: string; instructions?: string; description?: string }>;
+}): { system: string; prompt: string } {
+  return {
+    system: [
+      "You design memory index schemas for AI agents. A schema is a short markdown outline:",
+      'top-level "## Section" headings, each followed by one "- description" bullet saying what',
+      "belongs there.",
+      "",
+      "This schema is special: it is the SHARED, CROSS-AGENT user profile for a whole workspace.",
+      "Every memory-enabled agent on this connection files into it, and every one of them reads",
+      "it back. It must therefore hold only what is useful to ALL of them about the person —",
+      "general profile, expertise, stable preferences, life/work context — never any single",
+      "agent's domain depth (that belongs in that agent's own memory levels).",
+      "",
+      "Rules:",
+      "- 3-6 sections. Specific enough to guide extraction, general enough to serve every agent listed.",
+      `- The level's non-negotiable policy floor (do not restate it as a section): ${MEMORY_POLICY_FLOOR.user}`,
+      "- Sections must be things future sessions of ANY of these agents genuinely need to recall.",
+      "- Reply with ONLY the outline markdown — no preamble, no fences.",
+      "",
+      "A generic default for this level, as a shape reference (yours should fit these agents):",
+      DEFAULT_MEMORY_SCHEMAS.user,
+    ].join("\n"),
+    prompt: [
+      `Memory connection: ${args.connection}. Agents storing memories here:`,
+      "",
+      ...args.agents.map((a) =>
+        [
+          `### ${a.name}`,
+          a.instructions
+            ? `System prompt:\n${a.instructions.slice(0, 6000)}`
+            : `Description: ${a.description ?? "(none)"}`,
+        ].join("\n"),
+      ),
+      "",
+      "Draft the shared user-level memory schema serving all of these agents.",
+    ].join("\n\n"),
+  };
+}
+
 export function buildSchemaGenerationPrompt(args: {
   agent: string;
   instructions: string;

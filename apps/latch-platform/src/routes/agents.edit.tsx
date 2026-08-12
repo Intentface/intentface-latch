@@ -866,7 +866,7 @@ function MemorySchemaEditor({
               disabled={generating || !instructions.trim()}
               onClick={() => void generate()}
             >
-              {generating ? "Generating…" : "Generate from instructions"}
+              {generating ? "Generating…" : "Generate from System Prompt"}
             </Button>
             {value.trim() && (
               <Button type="button" variant="ghost" size="sm" onClick={() => onChange("")}>

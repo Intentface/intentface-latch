@@ -13,6 +13,8 @@ import {
   removeConnectionFn,
   getUserMemorySchemaFn,
   saveUserMemorySchemaFn,
+  generateUserMemorySchemaFn,
+  listMemoryConnectionsFn,
 } from "@/lib/server";
 import {
   authorizeUrl,
@@ -34,18 +36,19 @@ export const Route = createFileRoute("/connections")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [oauth, secrets, dynamic] = await Promise.all([
+    const [oauth, secrets, dynamic, memoryConnections] = await Promise.all([
       connectionsStatusFn(),
       listSecretsFn(),
       listConnectionsFn(),
+      listMemoryConnectionsFn(),
     ]);
-    return { oauth, secrets, dynamic };
+    return { oauth, secrets, dynamic, memoryConnections };
   },
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const { oauth, secrets, dynamic } = Route.useLoaderData();
+  const { oauth, secrets, dynamic, memoryConnections } = Route.useLoaderData();
   const [addOpen, setAddOpen] = useState(false);
   const empty = dynamic.length === 0 && oauth.length === 0 && secrets.length === 0;
 
@@ -95,11 +98,21 @@ function ConnectionsPage() {
         </Section>
       )}
 
-      {[...dynamic.map((c) => c.name), ...oauth.map((c) => c.name)].includes("loredex") && (
-        <Section label="User memory schema">
-          <UserMemorySchemaCard connection="loredex" />
-        </Section>
-      )}
+      {(() => {
+        // One shared-profile schema editor per connection that some
+        // memory-enabled agent stores memories in — but only connections that
+        // actually resolve for this tenant (a code agent may reference one
+        // that was never added here).
+        const visible = new Set([...dynamic.map((c) => c.name), ...oauth.map((c) => c.name)]);
+        const conns = memoryConnections.filter((name) => visible.has(name));
+        return conns.length > 0 ? (
+          <Section label="User memory schema">
+            {conns.map((name) => (
+              <UserMemorySchemaCard key={name} connection={name} />
+            ))}
+          </Section>
+        ) : null;
+      })()}
 
       {empty && (
         <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">
@@ -166,9 +179,30 @@ function UserMemorySchemaCard({ connection }: { connection: string }) {
     }
   }
 
+  // Drafts the shared schema from the system prompts of every agent that
+  // stores memories in this connection — the profile must serve all of them.
+  async function generate() {
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await generateUserMemorySchemaFn({ data: { connection } });
+      if (res.ok) {
+        setText(res.schema);
+        setDirty(true);
+        setNote(`Drafted from: ${res.agents.join(", ")} — review and save.`);
+      } else {
+        setNote(res.error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!loaded) return null;
   return (
     <div className="border-primary-border space-y-2 rounded-xl border p-3">
+      <p className="text-ink-primary font-mono text-xs font-medium">{connection}</p>
       <p className="text-ink-secondary text-xs">
         The cross-agent user profile: what all agents’ background archivists save about a user at
         the shared <span className="font-mono">user</span> level — general profile, expertise,
@@ -186,11 +220,24 @@ function UserMemorySchemaCard({ connection }: { connection: string }) {
       />
       <div className="flex items-center gap-2">
         <Button type="button" size="sm" disabled={busy || !dirty} onClick={() => void save()}>
-          {busy ? "Saving…" : "Save schema"}
+          {busy ? "Working…" : "Save schema"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void generate()}
+        >
+          Generate from agents’ System Prompts
         </Button>
         {note && (
           <span
-            className={note === "Saved." ? "text-ink-tertiary text-xs" : "text-destructive text-xs"}
+            className={
+              note === "Saved." || note.startsWith("Drafted from:")
+                ? "text-ink-tertiary text-xs"
+                : "text-destructive text-xs"
+            }
           >
             {note}
           </span>

@@ -685,6 +685,76 @@ export const getMemoryStatusFn = createServerFn({ method: "GET" })
   });
 
 /**
+ * Connections the caller's memory-enabled agents actually store memories in —
+ * UI agents' `exec.memory.connection` plus the code-agent registry. Drives
+ * which connections get a "User memory schema" editor on the Connections page
+ * (the shared `_memory/_user/SCHEMA.md` lives once per workspace, so it's
+ * edited per memory connection, not per agent).
+ */
+export const listMemoryConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [] as string[];
+  const { agentStore } = await getLatch();
+  const { memoryEnabledCodeAgents } = await import("@/agents/memory-enabled");
+  const records = await agentStore.listRecords(principal);
+  const names = new Set<string>();
+  for (const rec of records) {
+    const conn = rec.exec?.memory?.connection;
+    if (conn) names.add(conn);
+  }
+  for (const cfg of Object.values(memoryEnabledCodeAgents)) names.add(cfg.connection);
+  return [...names].sort();
+});
+
+/**
+ * Draft the SHARED user-level schema for one memory connection from the
+ * system prompts of every agent that stores memories there (code agents
+ * contribute name + description — their instructions are factory-built).
+ */
+export const generateUserMemorySchemaFn = createServerFn({ method: "POST" })
+  .validator((data: { connection: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    try {
+      const { agentStore } = await getLatch();
+      const { memoryEnabledCodeAgents } = await import("@/agents/memory-enabled");
+      const { agents: codeAgents } = await import("@/agents");
+      const contributors: Array<{ name: string; instructions?: string; description?: string }> =
+        [];
+      for (const rec of await agentStore.listRecords(principal)) {
+        if (rec.exec?.memory?.connection === data.connection) {
+          contributors.push({ name: rec.name, instructions: rec.instructions });
+        }
+      }
+      for (const [name, cfg] of Object.entries(memoryEnabledCodeAgents)) {
+        if (cfg.connection === data.connection) {
+          const meta = (codeAgents as Record<string, { meta?: { description?: string } }>)[name]
+            ?.meta;
+          contributors.push({ name, description: meta?.description });
+        }
+      }
+      if (contributors.length === 0) {
+        return { ok: false as const, error: "no memory-enabled agents use this connection" };
+      }
+      const { buildSharedUserSchemaPrompt } = await import("./memory/schema-generation");
+      const { generateText } = await import("ai");
+      const { anthropic } = await import("@ai-sdk/anthropic");
+      const { text } = await generateText({
+        model: anthropic("claude-sonnet-4-6"),
+        ...buildSharedUserSchemaPrompt({ connection: data.connection, agents: contributors }),
+      });
+      const schema = extractSchemaMarkdown(text);
+      if (!schema || schemaSections(schema).length === 0) {
+        return { ok: false as const, error: "the model returned no usable outline — try again" };
+      }
+      return { ok: true as const, schema, agents: contributors.map((c) => c.name) };
+    } catch (error) {
+      return { ok: false as const, error: String(error) };
+    }
+  });
+
+/**
  * Draft a memory index schema for one level from the agent's purpose — one
  * model call, shared by the editor's "Generate" button (the builder agent has
  * its own tool wrapping the same prompt).
