@@ -45,7 +45,12 @@ async function main() {
     for (const row of msgs.rows as unknown as Array<{ parts: string }>) {
       let parts: Array<{ type: string; text?: string }>;
       try {
-        parts = JSON.parse(String(row.parts)) as Array<{ type: string; text?: string }>;
+        const parsed: unknown = JSON.parse(String(row.parts));
+        if (!Array.isArray(parsed) || !parsed.every((p) => p !== null && typeof p === "object")) {
+          console.error(`  skipping invalid message parts in ${c.chatId}`);
+          continue;
+        }
+        parts = parsed as Array<{ type: string; text?: string }>;
       } catch {
         console.error(`  skipping unparsable message parts in ${c.chatId}`);
         continue;
