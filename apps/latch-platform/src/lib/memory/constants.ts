@@ -5,7 +5,9 @@
 
 const int = (env: string | undefined, fallback: number): number => {
   const n = env ? Number.parseInt(env, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  // 0 is a valid override (e.g. MEMORY_COOLDOWN_HOURS=0 disables the cooldown
+  // for manual e2e testing); only negatives and garbage fall back.
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
 /** Chat idle time before its transcript is eligible for extraction. */
@@ -40,3 +42,6 @@ export const MEMORY_PARK_MS = 24 * 3_600_000;
  */
 export const memoryFailureBackoffMs = (failures: number): number =>
   Math.min(MEMORY_FAILURE_BACKOFF_MS * 2 ** Math.max(0, failures - 1), MEMORY_PARK_MS);
+
+/** TTL for the sweep's cached read of the shared user-level SCHEMA.md. */
+export const MEMORY_USER_SCHEMA_TTL_MS = 5 * 60_000;

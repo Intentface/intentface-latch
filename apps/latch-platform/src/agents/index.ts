@@ -3,6 +3,7 @@ import { weekly } from "./weekly";
 import { agentBuilder } from "./agent-builder";
 import { evalAuthor } from "./eval-author";
 import { anchorInterview } from "./anchor-interview";
+import { anchorInterviewMem } from "./anchor-interview-mem";
 import { anchorOrient } from "./anchor-orient";
 import { anchorSession } from "./anchor-session";
 import { anchorMaintainer } from "./anchor-maintainer";
@@ -25,6 +26,7 @@ export const agents = {
   "agent-builder": agentBuilder,
   "eval-author": evalAuthor,
   "anchor-interview": anchorInterview,
+  "anchor-interview-mem": anchorInterviewMem,
   "anchor-orient": anchorOrient,
   "client-work-interview": clientWorkInterview,
   "anchor-session": anchorSession,

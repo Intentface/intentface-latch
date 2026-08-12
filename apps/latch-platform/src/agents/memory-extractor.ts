@@ -2,9 +2,10 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { defineAgent } from "@intentface/latch-core";
 import {
   EXTRACTOR_INSTRUCTIONS,
-  memoryReadIndexTool,
+  memoryReadIndexesTool,
   memoryWriteEpisodeTool,
 } from "@intentface/latch-memory";
+import type { LevelBoundScope } from "@intentface/latch-memory";
 import type { Principal } from "@/lib/session";
 import { asMemoryExtractionContext } from "@/lib/memory/turn-context";
 import { MEMORY_COOLDOWN_MS } from "@/lib/memory/constants";
@@ -32,24 +33,30 @@ export const memoryExtractor = defineAgent<Principal, { orgId: string }>(
     if (!tc) return base; // tool-less: eval dry-runs / stray invocations
     const { memoryStore, memoryJobs } = await import("@/lib/latch").then((m) => m.getLatch());
     const { ownerTagOf } = await import("@/lib/latch");
-    const bound = { store: memoryStore, principal, scope: tc.scope };
+    // One binding per participating level — the model routes each episode by
+    // its `level` param; it still never chooses paths.
+    const levelBounds: LevelBoundScope<Principal>[] = tc.targets.map((t) => ({
+      level: t.level,
+      bound: { store: memoryStore, principal, scope: t.scope },
+    }));
     return {
       ...base,
       tools: {
-        memory_read_index: memoryReadIndexTool(bound),
-        memory_write_episode: memoryWriteEpisodeTool(bound, {
+        memory_read_index: memoryReadIndexesTool(levelBounds),
+        memory_write_episode: memoryWriteEpisodeTool(levelBounds, {
           agent: tc.targetAgent,
           chatId: tc.chatId,
           onWriteAttempt: tc.onWriteAttempt,
-          // Mark the scope dirty for consolidation, stamping the principal so
-          // the consolidation job can run under this scope's own caller.
-          onEpisodeWritten: ({ path }) =>
+          // Mark the WRITTEN level's scope dirty for consolidation, stamping
+          // the principal so the consolidation job can run under this scope's
+          // own caller. Fires per level that received an episode.
+          onEpisodeWritten: ({ scope, path }) =>
             memoryJobs.touchScope(
               {
-                scopeKey: tc.scope.key,
+                scopeKey: scope.key,
                 owner: ownerTagOf(principal),
                 agent: tc.targetAgent,
-                connection: tc.scope.connection,
+                connection: scope.connection,
                 identity: principal,
                 episodePath: path,
               },

@@ -1,5 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { scopeRefOf, scopeLabelOf } from "./scope.js";
+import { extractionLevelsOf, levelConfigOf, scopeRefOf, scopeLabelOf } from "./scope.js";
+
+describe("extractionLevelsOf", () => {
+  it("defaults to just the primary scope", () => {
+    expect(extractionLevelsOf({ scope: "agent-user", connection: "loredex" })).toEqual([
+      "agent-user",
+    ]);
+  });
+
+  it("keeps the primary first, dedups, and always includes the primary", () => {
+    expect(
+      extractionLevelsOf({
+        scope: "agent-user",
+        connection: "loredex",
+        extractTo: ["agent-org", "agent-user", "user", "agent-org"],
+      }),
+    ).toEqual(["agent-user", "agent-org", "user"]);
+    // A denormalized config that omits the primary still gets it.
+    expect(
+      extractionLevelsOf({ scope: "agent-user", connection: "loredex", extractTo: ["user"] }),
+    ).toEqual(["agent-user", "user"]);
+  });
+});
+
+describe("levelConfigOf", () => {
+  it("swaps only the scope, preserving connection and tuning", () => {
+    const memory = {
+      scope: "agent-user" as const,
+      connection: "loredex",
+      extractTo: ["user" as const],
+      extraction: { idleMinutes: 5 },
+    };
+    const view = levelConfigOf(memory, "user");
+    expect(view.scope).toBe("user");
+    expect(view.connection).toBe("loredex");
+    expect(view.extraction).toEqual({ idleMinutes: 5 });
+    // Identity for the primary level (no needless copy).
+    expect(levelConfigOf(memory, "agent-user")).toBe(memory);
+  });
+
+  it("composes with scopeRefOf/scopeLabelOf per level", () => {
+    const memory = { scope: "agent-user" as const, connection: "loredex" };
+    const org = scopeRefOf({ agent: "coach", memory: levelConfigOf(memory, "agent-org") });
+    expect(org?.root).toBe("_memory/coach/org");
+    expect(scopeLabelOf(levelConfigOf(memory, "user"))).toContain("shared across their agents");
+  });
+});
 
 describe("scopeRefOf", () => {
   it("derives agent-user scope under the Loredex private root", () => {

@@ -81,7 +81,9 @@ async function main(): Promise<void> {
 
   const qrels = JSON.parse(readFileSync(QRELS_PATH, "utf8")) as Qrel[];
 
-  const tool = memorySearchTool({ store, principal: {}, scope: LIVE_SCOPE }) as unknown as {
+  const tool = memorySearchTool([
+    { level: "agent-user", bound: { store, principal: {}, scope: LIVE_SCOPE } },
+  ]) as unknown as {
     execute: (
       input: { query: string; limit?: number },
       options: unknown,

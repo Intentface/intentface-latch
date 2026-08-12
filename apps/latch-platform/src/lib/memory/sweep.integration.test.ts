@@ -11,12 +11,14 @@ import {
   createMemoryProvider,
   memoryReadEpisodesTool,
   memoryReadIndexTool,
+  memoryReadIndexesTool,
   memoryWriteEpisodeTool,
   memoryWriteIndexTool,
   scopeRefOf,
   splitFrontmatter,
 } from "@intentface/latch-memory";
 import type { MemoryJobStore, MemoryStore } from "@intentface/latch-memory";
+import type { MemoryConfig } from "@intentface/latch-core";
 import type { Principal } from "../session";
 import { asMemoryConsolidationContext, asMemoryExtractionContext } from "./turn-context";
 import { memorySweep } from "./sweep";
@@ -205,9 +207,14 @@ async function makeHarness(
     coach?: MockLanguageModelV3;
     extractor: MockLanguageModelV3;
     consolidator?: MockLanguageModelV3;
+    /** The coach's memory config (default: single-level MEM). */
+    memory?: MemoryConfig;
   },
   loredex?: { failWritesTo?: RegExp },
 ) {
+  // Mutable so tests can simulate a config edit (e.g. a schema change)
+  // between sweeps — the sweep re-reads the record every run.
+  const memRef = { current: models.memory ?? MEM };
   const client = createClient({ url: ":memory:" });
   await migrate(client);
   const db = drizzle(client, { schema });
@@ -242,31 +249,34 @@ async function makeHarness(
       coach: defineAgent<Principal>({
         model: coachModel as never,
         instructions: "You are a running coach.",
-        memory: MEM,
+        memory: memRef.current,
       }),
       // Test doubles for the job agents: scripted models, REAL tool bindings.
       "memory-extractor": defineAgent<Principal, { orgId: string }>(
         ({ principal: p, turnContext }) => {
           const tc = asMemoryExtractionContext(turnContext)!;
-          const bound = { store: memoryStore, principal: p, scope: tc.scope };
+          const levelBounds = tc.targets.map((t) => ({
+            level: t.level,
+            bound: { store: memoryStore, principal: p, scope: t.scope },
+          }));
           return {
             model: models.extractor as never,
             instructions: "extract",
             tools: {
-              memory_read_index: memoryReadIndexTool(bound),
-              memory_write_episode: memoryWriteEpisodeTool(bound, {
+              memory_read_index: memoryReadIndexesTool(levelBounds),
+              memory_write_episode: memoryWriteEpisodeTool(levelBounds, {
                 agent: tc.targetAgent,
                 chatId: tc.chatId,
                 // Mirrors the real agent: the sweep needs write outcomes to
                 // tell "nothing to store" from "the store refused".
                 onWriteAttempt: tc.onWriteAttempt,
-                onEpisodeWritten: ({ path }) =>
+                onEpisodeWritten: ({ scope, path }) =>
                   memoryJobs.touchScope(
                     {
-                      scopeKey: tc.scope.key,
+                      scopeKey: scope.key,
                       owner: "org/user",
                       agent: tc.targetAgent,
-                      connection: tc.scope.connection,
+                      connection: scope.connection,
                       identity: p,
                       episodePath: path,
                     },
@@ -288,6 +298,7 @@ async function makeHarness(
               memory_read_index: memoryReadIndexTool(bound),
               memory_read_episodes: memoryReadEpisodesTool(bound),
               memory_write_index: memoryWriteIndexTool(bound, {
+                schema: tc.schema,
                 onWriteAttempt: tc.onWriteAttempt,
               }),
             },
@@ -305,10 +316,20 @@ async function makeHarness(
     agentStore: {
       listMemoryEnabledNames: async () => ["coach"],
       getRecord: async (_p: Principal, name: string) =>
-        name === "coach" ? { exec: { memory: MEM } } : undefined,
+        name === "coach" ? { exec: { memory: memRef.current } } : undefined,
     },
   };
-  return { db, files, memoryJobs, memoryStore, storage, runtime };
+  return {
+    db,
+    files,
+    memoryJobs,
+    memoryStore,
+    storage,
+    runtime,
+    setMemory: (m: MemoryConfig) => {
+      memRef.current = m;
+    },
+  };
 }
 
 describe("memory pipeline (integration)", () => {
@@ -466,7 +487,7 @@ describe("memory pipeline (integration)", () => {
     // Zero memories extracted, but the run COMPLETED: key recorded (tombstone)
     // and the watermark advanced — this window is done.
     const afterFirst = await chatStateOf(db, chat.id);
-    expect(afterFirst.lastExtractedKey).toMatch(/^x\d+:[0-9a-f]{16}$/);
+    expect(afterFirst.lastExtractedKey).toMatch(/^x\d+:[0-9a-f]{16}:[0-9a-f]{16}$/);
     expect(afterFirst.lastExtractedSeq).toBe(0);
 
     // Simulate watermark loss (state reset/backfill): the chat becomes a
@@ -523,7 +544,7 @@ describe("memory pipeline (integration)", () => {
     expect(second.errors).toBe(0);
     expect(extractorCalls).toBe(2);
     const afterRetry = await chatStateOf(db, chat.id);
-    expect(afterRetry.lastExtractedKey).toMatch(/^x\d+:[0-9a-f]{16}$/);
+    expect(afterRetry.lastExtractedKey).toMatch(/^x\d+:[0-9a-f]{16}:[0-9a-f]{16}$/);
     expect(afterRetry.lastExtractedSeq).toBe(0);
     expect(afterRetry.failures).toBe(0);
   });
@@ -657,5 +678,232 @@ describe("memory pipeline (integration)", () => {
     const afterRetry = await memoryJobs.scopeState(scope.key);
     expect(afterRetry?.pendingEpisodes).toEqual([]);
     expect(afterRetry?.hasNew).toBe(false);
+  });
+
+  // ---- multi-level extraction + per-level schemas ----
+
+  it("extracts one chat into three levels, consolidates each under its schema, and injects all indexes", async () => {
+    const MEM3: MemoryConfig = {
+      scope: "agent-user",
+      connection: "loredex",
+      extractTo: ["agent-org", "user"],
+      schemas: {
+        "agent-user": "## What was gone through\n## Where fatigued",
+        "agent-org": "## Org knowledge\n## Engineering team knowledge",
+      },
+    };
+    const userRoot = "__private_root/_memory/coach/u-user";
+    const orgRoot = "_memory/coach/org";
+    const sharedRoot = "__private_root/_memory/_user/u-user";
+
+    // The extractor writes one level-tagged episode per level, then finishes.
+    const extractorPrompts: string[] = [];
+    let extractorWrites = 0;
+    const episodeInputs = [
+      {
+        level: "agent-user",
+        slug: "interview-flow",
+        summary: "How the interview went",
+        facts: [{ text: "Fatigued during the system-design part", provenance: "user-said" as const }],
+      },
+      {
+        level: "agent-org",
+        slug: "team-pattern",
+        summary: "Org-level pattern",
+        facts: [{ text: "Engineering candidates prefer pairing-style interviews", provenance: "user-said" as const }],
+      },
+      {
+        level: "user",
+        slug: "profile",
+        summary: "Profile note",
+        facts: [{ text: "Senior engineer, prefers direct feedback", provenance: "user-said" as const }],
+      },
+    ];
+    const extractorModel = new MockLanguageModelV3({
+      doStream: async (options) => {
+        extractorPrompts.push(JSON.stringify(options.prompt));
+        if (extractorWrites < episodeInputs.length) {
+          const input = episodeInputs[extractorWrites]!;
+          extractorWrites += 1;
+          return { stream: toolCallStream("memory_write_episode", input) };
+        }
+        return { stream: textStream("stored three episodes") };
+      },
+    });
+
+    // The consolidator writes each scope's index under that scope's schema —
+    // it recognizes the scope by the episode path in its task prompt.
+    const consolidatorPrompts: string[] = [];
+    const indexByRoot: Record<string, string> = {
+      [userRoot]: [
+        "# Memory — coach · u-user",
+        "",
+        "## What was gone through",
+        `- [m-aaaa01] (2026-07-27, user-said; unverified) Fatigued during the system-design part. ← ${userRoot}/episodes/x.md`,
+        "",
+        "## Archive",
+        "",
+      ].join("\n"),
+      [orgRoot]: [
+        "# Memory — coach · org",
+        "",
+        "## Engineering team knowledge",
+        `- [m-bbbb01] (2026-07-27, user-said; unverified) Candidates prefer pairing-style interviews. ← ${orgRoot}/episodes/x.md`,
+        "",
+        "## Archive",
+        "",
+      ].join("\n"),
+      [sharedRoot]: [
+        "# Memory — user",
+        "",
+        "## Profile",
+        `- [m-cccc01] (2026-07-27, user-said; unverified) Senior engineer, prefers direct feedback. ← ${sharedRoot}/episodes/x.md`,
+        "",
+        "## Archive",
+        "",
+      ].join("\n"),
+    };
+    const consolidatorModel = new MockLanguageModelV3({
+      doStream: async (options) => {
+        const prompt = JSON.stringify(options.prompt);
+        // Second round of a run (the tool result is in the prompt) → finish.
+        if (prompt.includes('\\"ok\\":true') || prompt.includes('"ok":true')) {
+          return { stream: textStream("folded in") };
+        }
+        consolidatorPrompts.push(prompt);
+        const root = Object.keys(indexByRoot).find((r) => prompt.includes(`${r}/episodes/`))!;
+        return { stream: toolCallStream("memory_write_index", { content: indexByRoot[root] }) };
+      },
+    });
+
+    const coachSeen: unknown[] = [];
+    const coachModel = new MockLanguageModelV3({
+      doStream: async (options) => {
+        coachSeen.push(options);
+        return { stream: textStream("ok!") };
+      },
+    });
+    const { files, memoryJobs, runtime } = await makeHarness({
+      coach: coachModel,
+      extractor: extractorModel,
+      consolidator: consolidatorModel,
+      memory: MEM3,
+    });
+    // Pre-seed the shared user-level schema file (org-wide, outside the
+    // private root) — the sweep must pick it up for the `user` level.
+    files.set("_memory/_user/SCHEMA.md", "## Profile\n## Preferences");
+
+    // One chat turn, then idle.
+    const res = await runtime.handleChat({
+      agent: "coach",
+      chatId: "chat_multi",
+      principal,
+      message: {
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "The interview felt long near the end." }],
+      } as never,
+    });
+    if (res.body) for await (const _ of res.body as unknown as AsyncIterable<unknown>) void _;
+
+    // Sweep 1: one extraction (3 episodes), consolidations capped per tick (2).
+    const t1 = Date.now() + 2 * HOUR;
+    const first = await memorySweep({ now: t1 });
+    expect(first.errors).toBe(0);
+    expect(first.extractions).toBe(1);
+
+    // The extraction prompt carried every level's block, schema, and policy.
+    const extractionPrompt = extractorPrompts[0]!;
+    expect(extractionPrompt).toContain('<memory-level name=\\"agent-user\\">');
+    expect(extractionPrompt).toContain('<memory-level name=\\"agent-org\\">');
+    expect(extractionPrompt).toContain('<memory-level name=\\"user\\">');
+    expect(extractionPrompt).toContain("Where fatigued");
+    expect(extractionPrompt).toContain("Engineering team knowledge");
+    // The seeded workspace SCHEMA.md (not the default) reached the user level.
+    expect(extractionPrompt).toContain("## Preferences");
+    expect(extractionPrompt).toContain("NO personally identifying information");
+
+    // Episodes landed under all three scope roots.
+    for (const root of [userRoot, orgRoot, sharedRoot]) {
+      const episode = Array.from(files.keys()).find((p) => p.startsWith(`${root}/episodes/`));
+      expect(episode, `episode under ${root}`).toBeDefined();
+    }
+
+    // Sweep again for the remaining consolidation(s) (per-tick cap is 2).
+    const second = await memorySweep({ now: t1 + HOUR });
+    expect(first.consolidations + second.consolidations).toBe(3);
+    expect(second.errors).toBe(0);
+
+    // Each MEMORY.md follows its level's schema sections.
+    expect(files.get(`${userRoot}/MEMORY.md`)).toContain("## What was gone through");
+    expect(files.get(`${orgRoot}/MEMORY.md`)).toContain("## Engineering team knowledge");
+    expect(files.get(`${sharedRoot}/MEMORY.md`)).toContain("## Profile");
+
+    // Each consolidation prompt carried its own level's schema + policy.
+    const orgPrompt = consolidatorPrompts.find((p) => p.includes(`${orgRoot}/episodes/`))!;
+    expect(orgPrompt).toContain("Org knowledge");
+    expect(orgPrompt).toContain("NO personally identifying information");
+    const sharedPrompt = consolidatorPrompts.find((p) => p.includes(`${sharedRoot}/episodes/`))!;
+    expect(sharedPrompt).toContain("## Preferences");
+
+    // All three scope states are clean.
+    for (const root of [userRoot, orgRoot, sharedRoot]) {
+      const stateRow = await memoryJobs.scopeState(`loredex:${root}`);
+      expect(stateRow?.pendingEpisodes).toEqual([]);
+    }
+
+    // ---- next coach turn: all three indexes injected, level-labeled ----
+    const res2 = await runtime.handleChat({
+      agent: "coach",
+      chatId: "chat_multi",
+      principal,
+      message: { id: "u2", role: "user", parts: [{ type: "text", text: "next steps?" }] } as never,
+    });
+    if (res2.body) for await (const _ of res2.body as unknown as AsyncIterable<unknown>) void _;
+    const secondTurn = JSON.stringify(coachSeen.at(-1));
+    expect(secondTurn).toContain('<memory level=\\"agent-user\\">');
+    expect(secondTurn).toContain('<memory level=\\"agent-org\\">');
+    expect(secondTurn).toContain('<memory level=\\"user\\">');
+    expect(secondTurn).toContain("Fatigued during the system-design part");
+    expect(secondTurn).toContain("pairing-style interviews");
+    expect(secondTurn).toContain("prefers direct feedback");
+  });
+
+  it("a schema edit re-opens a tombstoned window (fingerprint in the extraction key)", async () => {
+    let extractorCalls = 0;
+    const extractorModel = new MockLanguageModelV3({
+      doStream: async () => {
+        extractorCalls++;
+        return { stream: textStream("nothing to store") };
+      },
+    });
+    const { db, storage, setMemory } = await makeHarness({ extractor: extractorModel });
+    const chat = await seedChat(storage);
+
+    const t1 = Date.now() + 2 * HOUR;
+    await memorySweep({ now: t1 });
+    expect(extractorCalls).toBe(1);
+    const afterFirst = await chatStateOf(db, chat.id);
+
+    // Unchanged content + unchanged config: tombstoned (no second run) even
+    // after a watermark reset.
+    await db
+      .update(schema.memoryChatState)
+      .set({ lastExtractedSeq: -1, nextEligibleAt: 0 })
+      .where(eq(schema.memoryChatState.chatId, chat.id));
+    await memorySweep({ now: t1 + 3 * HOUR });
+    expect(extractorCalls).toBe(1);
+
+    // A schema edit changes the fingerprint → the same content re-extracts.
+    setMemory({ ...MEM, schemas: { "agent-user": "## Tea preferences" } });
+    await db
+      .update(schema.memoryChatState)
+      .set({ lastExtractedSeq: -1, nextEligibleAt: 0 })
+      .where(eq(schema.memoryChatState.chatId, chat.id));
+    const third = await memorySweep({ now: t1 + 6 * HOUR });
+    expect(third.extractions).toBe(1);
+    expect(extractorCalls).toBe(2);
+    const afterThird = await chatStateOf(db, chat.id);
+    expect(afterThird.lastExtractedKey).not.toBe(afterFirst.lastExtractedKey);
   });
 });

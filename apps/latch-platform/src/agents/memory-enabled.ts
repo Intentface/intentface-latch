@@ -1,4 +1,5 @@
 import type { MemoryConfig } from "@intentface/latch-core";
+import { anchorInterviewMemMemory } from "./anchor-interview-mem";
 
 /**
  * Code agents with memory enabled — the sweep's discovery registry for
@@ -15,4 +16,5 @@ import type { MemoryConfig } from "@intentface/latch-core";
  */
 export const memoryEnabledCodeAgents: Record<string, MemoryConfig> = {
   // e.g. "running-coach": runningCoachMemory,
+  "anchor-interview-mem": anchorInterviewMemMemory,
 };

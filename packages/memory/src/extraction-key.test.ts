@@ -48,4 +48,12 @@ describe("extractionRunKey", () => {
       ]),
     ).not.toBe(extractionRunKey([{ role: "user", text: "auser b" }]));
   });
+
+  it("a schema fingerprint changes the key; the same fingerprint keys the same", () => {
+    const bare = extractionRunKey(WINDOW);
+    const withFp = extractionRunKey(WINDOW, { schemaFingerprint: "abc123" });
+    expect(withFp).not.toBe(bare);
+    expect(withFp).toBe(extractionRunKey([...WINDOW], { schemaFingerprint: "abc123" }));
+    expect(extractionRunKey(WINDOW, { schemaFingerprint: "def456" })).not.toBe(withFp);
+  });
 });

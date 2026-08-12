@@ -1,3 +1,4 @@
+import type { MemoryScope } from "@intentface/latch-core";
 import type { ScopeRef } from "@intentface/latch-memory";
 
 /**
@@ -23,12 +24,15 @@ export type MemoryWriteAttemptSink = (ok: boolean) => void;
 
 export interface MemoryExtractionTurnContext {
   kind: "memory-extraction";
+  /** The primary scope (guards, back-compat); always also present in `targets`. */
   scope: ScopeRef;
+  /** Every participating level (primary first), each with its resolved scope and schema. */
+  targets: Array<{ level: MemoryScope; scope: ScopeRef; schema: string }>;
   /** The chat being archived. */
   chatId: string;
   /** The memory-enabled agent whose scope this is (NOT `memory-extractor`). */
   targetAgent: string;
-  /** Consolidation cooldown for the touched scope. */
+  /** Consolidation cooldown for the touched scopes. */
   cooldownMs: number;
   onWriteAttempt?: MemoryWriteAttemptSink;
 }
@@ -36,14 +40,21 @@ export interface MemoryExtractionTurnContext {
 export interface MemoryConsolidationTurnContext {
   kind: "memory-consolidation";
   scope: ScopeRef;
+  /** This scope's level and index schema, when resolved by the sweep. */
+  level?: MemoryScope;
+  schema?: string;
   onWriteAttempt?: MemoryWriteAttemptSink;
 }
 
 export function asMemoryExtractionContext(
   tc: unknown,
 ): MemoryExtractionTurnContext | undefined {
-  const t = tc as { kind?: unknown; scope?: { key?: unknown } } | undefined;
-  return t?.kind === "memory-extraction" && typeof t.scope?.key === "string"
+  const t = tc as
+    | { kind?: unknown; scope?: { key?: unknown }; targets?: unknown }
+    | undefined;
+  return t?.kind === "memory-extraction" &&
+    typeof t.scope?.key === "string" &&
+    Array.isArray(t.targets)
     ? (tc as MemoryExtractionTurnContext)
     : undefined;
 }

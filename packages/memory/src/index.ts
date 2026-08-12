@@ -7,6 +7,7 @@
  */
 export * from "./types.js";
 export * from "./scope.js";
+export * from "./schema.js";
 export * from "./index-file.js";
 export * from "./extraction-key.js";
 export * from "./search-evidence.js";

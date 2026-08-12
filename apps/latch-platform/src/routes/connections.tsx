@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Braces, Pencil, Plug, Plus, Trash2 } from "lucide-react";
 import { Dialog } from "@intentface/latch-ui";
@@ -11,6 +11,10 @@ import {
   getConnectionFn,
   addConnectionFn,
   removeConnectionFn,
+  getUserMemorySchemaFn,
+  saveUserMemorySchemaFn,
+  generateUserMemorySchemaFn,
+  listMemoryConnectionsFn,
 } from "@/lib/server";
 import {
   authorizeUrl,
@@ -23,6 +27,7 @@ import { Select } from "@/components/ui/select";
 import { RichSelect } from "@/components/ui/rich-select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { CodeEditor } from "@/components/code-editor";
 import { SecretsSection } from "@/components/secrets-section";
 
 export const Route = createFileRoute("/connections")({
@@ -31,18 +36,19 @@ export const Route = createFileRoute("/connections")({
     if (!(await currentPrincipalFn())) throw redirect({ to: "/login" });
   },
   loader: async () => {
-    const [oauth, secrets, dynamic] = await Promise.all([
+    const [oauth, secrets, dynamic, memoryConnections] = await Promise.all([
       connectionsStatusFn(),
       listSecretsFn(),
       listConnectionsFn(),
+      listMemoryConnectionsFn(),
     ]);
-    return { oauth, secrets, dynamic };
+    return { oauth, secrets, dynamic, memoryConnections };
   },
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const { oauth, secrets, dynamic } = Route.useLoaderData();
+  const { oauth, secrets, dynamic, memoryConnections } = Route.useLoaderData();
   const [addOpen, setAddOpen] = useState(false);
   const empty = dynamic.length === 0 && oauth.length === 0 && secrets.length === 0;
 
@@ -92,6 +98,22 @@ function ConnectionsPage() {
         </Section>
       )}
 
+      {(() => {
+        // One shared-profile schema editor per connection that some
+        // memory-enabled agent stores memories in — but only connections that
+        // actually resolve for this tenant (a code agent may reference one
+        // that was never added here).
+        const visible = new Set([...dynamic.map((c) => c.name), ...oauth.map((c) => c.name)]);
+        const conns = memoryConnections.filter((name) => visible.has(name));
+        return conns.length > 0 ? (
+          <Section label="User memory schema">
+            {conns.map((name) => (
+              <UserMemorySchemaCard key={name} connection={name} />
+            ))}
+          </Section>
+        ) : null;
+      })()}
+
       {empty && (
         <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <Plug className="size-6 opacity-60" />
@@ -107,6 +129,134 @@ function Section({ label, children }: { label: string; children: React.ReactNode
     <div className="space-y-2">
       <h2 className="text-ink-tertiary text-xs font-medium tracking-wide uppercase">{label}</h2>
       {children}
+    </div>
+  );
+}
+
+/**
+ * Editor for the shared user-level memory schema — ONE workspace file
+ * (`_memory/_user/SCHEMA.md`) governing what EVERY memory-enabled agent's
+ * background archivist files into the user's cross-agent profile. Lives here
+ * (not on any agent) because no single agent owns it.
+ */
+function UserMemorySchemaCard({ connection }: { connection: string }) {
+  const [loaded, setLoaded] = useState<Awaited<
+    ReturnType<typeof getUserMemorySchemaFn>
+  > | null>(null);
+  const [text, setText] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    getUserMemorySchemaFn({ data: { connection } })
+      .then((res) => {
+        if (!alive) return;
+        if (!res) return setLoadError(true);
+        setLoaded(res);
+        setText(res.schema ?? res.defaultSchema);
+      })
+      .catch(() => {
+        if (alive) setLoadError(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [connection]);
+
+  async function save() {
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await saveUserMemorySchemaFn({ data: { connection, schema: text } });
+      if (res.ok) {
+        setDirty(false);
+        setNote("Saved.");
+      } else {
+        setNote(res.error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Drafts the shared schema from the system prompts of every agent that
+  // stores memories in this connection — the profile must serve all of them.
+  async function generate() {
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await generateUserMemorySchemaFn({ data: { connection } });
+      if (res.ok) {
+        setText(res.schema);
+        setDirty(true);
+        setNote(`Drafted from: ${res.agents.join(", ")} — review and save.`);
+      } else {
+        setNote(res.error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="border-primary-border space-y-1 rounded-xl border p-3">
+        <p className="text-ink-primary font-mono text-xs font-medium">{connection}</p>
+        <p className="text-destructive text-xs">
+          Couldn’t load the shared user schema for this connection — is it authorized for you?
+        </p>
+      </div>
+    );
+  }
+  if (!loaded) return null;
+  return (
+    <div className="border-primary-border space-y-2 rounded-xl border p-3">
+      <p className="text-ink-primary font-mono text-xs font-medium">{connection}</p>
+      <p className="text-ink-secondary text-xs">
+        The cross-agent user profile: what all agents’ background archivists save about a user at
+        the shared <span className="font-mono">user</span> level — general profile, expertise,
+        stable preferences. Stored as{" "}
+        <span className="font-mono">{loaded.path}</span> in the {connection} workspace.
+      </p>
+      <p className="text-ink-tertiary text-xs">Always enforced: {loaded.policy}</p>
+      <CodeEditor
+        value={text}
+        onChange={(v) => {
+          setText(v);
+          setDirty(true);
+        }}
+        height="140px"
+      />
+      <div className="flex items-center gap-2">
+        <Button type="button" size="sm" disabled={busy || !dirty} onClick={() => void save()}>
+          {busy ? "Working…" : "Save schema"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void generate()}
+        >
+          Generate from agents’ System Prompts
+        </Button>
+        {note && (
+          <span
+            className={
+              note === "Saved." || note.startsWith("Drafted from:")
+                ? "text-ink-tertiary text-xs"
+                : "text-destructive text-xs"
+            }
+          >
+            {note}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

@@ -114,6 +114,22 @@ export interface MemoryStore<P> {
     query: string,
     limit?: number,
   ): Promise<MemorySearchHit[]>;
+  /**
+   * Read one well-known auxiliary file by workspace-relative path (e.g. the
+   * shared user-level SCHEMA.md). Not scope-bound — callers pass fixed,
+   * code-owned paths only, never model-chosen ones. `undefined` when absent
+   * or unreachable (read-side never throws).
+   */
+  readFile(principal: P, args: { connection: string; path: string }): Promise<string | undefined>;
+  /**
+   * Create-or-replace one auxiliary file by workspace-relative path (schema
+   * editors). Ensures parent folders. Throws `MemoryStoreUnreachableError`
+   * when the backing can't be reached.
+   */
+  writeFile(
+    principal: P,
+    args: { connection: string; path: string; content: string; summary?: string },
+  ): Promise<void>;
 }
 
 /** Re-exported for convenience so platform code can import from one place. */

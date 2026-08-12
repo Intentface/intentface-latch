@@ -15,7 +15,15 @@ import {
 import { telegramCommandMenu } from "@intentface/latch-channels";
 import { telegramApi } from "@intentface/latch-channels/telegram";
 import { whatsappApi } from "@intentface/latch-channels/whatsapp";
-import { scopeRefOf } from "@intentface/latch-memory";
+import {
+  DEFAULT_MEMORY_SCHEMAS,
+  MEMORY_POLICY_FLOOR,
+  USER_SCHEMA_PATH,
+  extractionLevelsOf,
+  levelConfigOf,
+  schemaSections,
+  scopeRefOf,
+} from "@intentface/latch-memory";
 import { getPrincipal } from "./session";
 import type { Principal } from "./session";
 import { isOrgAdmin } from "./auth";
@@ -507,7 +515,12 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         providerWebTools?: boolean;
         authoredTools?: string[];
         effort?: "minimal" | "low" | "medium" | "high";
-        memory?: { scope: "agent-user" | "agent-org" | "user"; connection: string };
+        memory?: {
+          scope: "agent-user" | "agent-org" | "user";
+          connection: string;
+          extractTo?: Array<"agent-user" | "agent-org" | "user">;
+          schemas?: { "agent-user"?: string; "agent-org"?: string };
+        };
       };
       subagents?: string[];
       scope: "user" | "org";
@@ -557,12 +570,49 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       }
       // `agent-org` memory is keyed by agent name alone (`_memory/<agent>/org`)
       // — on a personal agent, two users' same-named agents on a shared
-      // connection would silently share one memory folder.
-      if (mem.scope === "agent-org" && data.scope !== "org") {
+      // connection would silently share one memory folder. Applies to the
+      // primary scope AND any extraction level.
+      const levels = Array.from(new Set([mem.scope, ...(mem.extractTo ?? [])]));
+      for (const level of levels) {
+        if (!["agent-user", "agent-org", "user"].includes(level)) {
+          return { ok: false, error: `Unknown memory level: ${level}` };
+        }
+      }
+      if (levels.includes("agent-org") && data.scope !== "org") {
         return {
           ok: false,
           error: "Org-shared memory requires an org-visible agent (set the agent's scope to org).",
         };
+      }
+      // Normalize extractTo before persisting: dedup'd, primary first —
+      // readers (extractionLevelsOf) tolerate denormalized configs, but the
+      // stored record should be canonical.
+      mem.extractTo = levels.length > 1 ? (levels as Array<"agent-user" | "agent-org" | "user">) : undefined;
+      // Index schemas: markdown outlines for the agent-held levels only (the
+      // shared `user` level's schema is a workspace file, not agent config).
+      if (mem.schemas) {
+        for (const [level, schema] of Object.entries(mem.schemas)) {
+          if (!["agent-user", "agent-org"].includes(level)) {
+            return {
+              ok: false,
+              error: `Memory schemas are configured per agent-held level (agent-user, agent-org) — not "${level}".`,
+            };
+          }
+          if (schema == null || !schema.trim()) {
+            delete mem.schemas[level as "agent-user" | "agent-org"];
+            continue;
+          }
+          if (schema.length > 4000) {
+            return { ok: false, error: `Memory schema for ${level} is too long (max 4000 chars).` };
+          }
+          if (schemaSections(schema).length === 0) {
+            return {
+              ok: false,
+              error: `Memory schema for ${level} needs at least one "## Section" heading — it is the index outline.`,
+            };
+          }
+        }
+        if (Object.keys(mem.schemas).length === 0) mem.schemas = undefined;
       }
     }
     // The editor doesn't manage attached evals — carry them over so a save
@@ -599,31 +649,209 @@ export const getMemoryStatusFn = createServerFn({ method: "GET" })
     const rec = await agentStore.getRecord(principal, normalizeAgentName(data.name));
     const memory = rec?.exec?.memory;
     if (!rec || !memory) return { enabled: false as const };
-    const scope = scopeRefOf({ agent: rec.name, memory, userId: principal.userId });
-    if (!scope) {
-      return {
-        enabled: true as const,
-        resolvable: false as const,
-        scope: memory.scope,
-        connection: memory.connection,
-      };
-    }
-    const state = await memoryJobs.scopeState(scope.key);
-    const usage = await memoryJobs.usageFor(scope.key);
+    // One status row per participating level (primary first) — a level whose
+    // scope can't resolve for THIS caller (e.g. no userId) reports that
+    // instead of vanishing.
+    const levels = await Promise.all(
+      extractionLevelsOf(memory).map(async (level) => {
+        const scope = scopeRefOf({
+          agent: rec.name,
+          memory: levelConfigOf(memory, level),
+          userId: principal.userId,
+        });
+        if (!scope) return { level, resolvable: false as const };
+        const state = await memoryJobs.scopeState(scope.key);
+        const usage = await memoryJobs.usageFor(scope.key);
+        return {
+          level,
+          resolvable: true as const,
+          root: scope.root,
+          pendingEpisodes: state?.pendingEpisodes.length ?? 0,
+          lastConsolidatedAt: state?.lastConsolidatedAt ?? null,
+          failures: state?.failures ?? 0,
+          trackedMemories: usage.length,
+        };
+      }),
+    );
     return {
       enabled: true as const,
-      resolvable: true as const,
       scope: memory.scope,
       connection: memory.connection,
-      root: scope.root,
-      pendingEpisodes: state?.pendingEpisodes.length ?? 0,
-      lastConsolidatedAt: state?.lastConsolidatedAt ?? null,
-      failures: state?.failures ?? 0,
-      trackedMemories: usage.length,
+      levels,
       // The Loredex web app isn't derivable from the MCP URL — deep-link only
       // when the deployment configures it.
       loredexUrl: process.env.LOREDEX_APP_URL || null,
     };
+  });
+
+/**
+ * Connections the caller's memory-enabled agents actually store memories in —
+ * UI agents' `exec.memory.connection` plus the code-agent registry. Drives
+ * which connections get a "User memory schema" editor on the Connections page
+ * (the shared `_memory/_user/SCHEMA.md` lives once per workspace, so it's
+ * edited per memory connection, not per agent).
+ */
+export const listMemoryConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [] as string[];
+  const { agentStore } = await getLatch();
+  const { memoryEnabledCodeAgents } = await import("@/agents/memory-enabled");
+  const records = await agentStore.listRecords(principal);
+  const names = new Set<string>();
+  for (const rec of records) {
+    const conn = rec.exec?.memory?.connection;
+    if (conn) names.add(conn);
+  }
+  for (const cfg of Object.values(memoryEnabledCodeAgents)) names.add(cfg.connection);
+  return [...names].sort();
+});
+
+/**
+ * Draft the SHARED user-level schema for one memory connection from the
+ * system prompts of every agent that stores memories there (code agents
+ * contribute name + description — their instructions are factory-built).
+ */
+export const generateUserMemorySchemaFn = createServerFn({ method: "POST" })
+  .validator((data: { connection: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    try {
+      const { agentStore } = await getLatch();
+      const { memoryEnabledCodeAgents } = await import("@/agents/memory-enabled");
+      const { agents: codeAgents } = await import("@/agents");
+      const contributors: Array<{ name: string; instructions?: string; description?: string }> =
+        [];
+      for (const rec of await agentStore.listRecords(principal)) {
+        if (rec.exec?.memory?.connection === data.connection) {
+          contributors.push({ name: rec.name, instructions: rec.instructions });
+        }
+      }
+      for (const [name, cfg] of Object.entries(memoryEnabledCodeAgents)) {
+        if (cfg.connection === data.connection) {
+          const meta = (codeAgents as Record<string, { meta?: { description?: string } }>)[name]
+            ?.meta;
+          contributors.push({ name, description: meta?.description });
+        }
+      }
+      if (contributors.length === 0) {
+        return { ok: false as const, error: "no memory-enabled agents use this connection" };
+      }
+      const { buildSharedUserSchemaPrompt } = await import("./memory/schema-generation");
+      const { generateText } = await import("ai");
+      const { anthropic } = await import("@ai-sdk/anthropic");
+      const { text } = await generateText({
+        model: anthropic("claude-sonnet-4-6"),
+        ...buildSharedUserSchemaPrompt({ connection: data.connection, agents: contributors }),
+      });
+      const schema = extractSchemaMarkdown(text);
+      if (!schema || schemaSections(schema).length === 0) {
+        return { ok: false as const, error: "the model returned no usable outline — try again" };
+      }
+      return { ok: true as const, schema, agents: contributors.map((c) => c.name) };
+    } catch (error) {
+      return { ok: false as const, error: String(error) };
+    }
+  });
+
+/**
+ * Draft a memory index schema for one level from the agent's purpose — one
+ * model call, shared by the editor's "Generate" button (the builder agent has
+ * its own tool wrapping the same prompt).
+ */
+export const generateMemorySchemaFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { name: string; instructions: string; level: "agent-user" | "agent-org" | "user" }) =>
+      data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!data.instructions.trim()) {
+      return { ok: false as const, error: "agent instructions required" };
+    }
+    try {
+      const { buildSchemaGenerationPrompt } = await import("./memory/schema-generation");
+      const { generateText } = await import("ai");
+      const { anthropic } = await import("@ai-sdk/anthropic");
+      const { text } = await generateText({
+        model: anthropic("claude-sonnet-4-6"),
+        ...buildSchemaGenerationPrompt({
+          agent: data.name,
+          instructions: data.instructions,
+          level: data.level,
+        }),
+      });
+      const schema = extractSchemaMarkdown(text);
+      if (!schema || schemaSections(schema).length === 0) {
+        return { ok: false as const, error: "the model returned no usable outline — try again" };
+      }
+      return { ok: true as const, schema };
+    } catch (error) {
+      return { ok: false as const, error: String(error) };
+    }
+  });
+
+/** The generated outline, whether fenced or bare. */
+function extractSchemaMarkdown(text: string): string {
+  const fenced = /```(?:markdown|md)?\n([\s\S]*?)```/.exec(text);
+  return (fenced?.[1] ?? text).trim();
+}
+
+/**
+ * The org-wide `user`-level schema file (shared workspace path — see
+ * USER_SCHEMA_PATH). Read/written under the caller's principal; the policy
+ * floor rides along for the editor to display read-only.
+ */
+export const getUserMemorySchemaFn = createServerFn({ method: "GET" })
+  .validator((data: { connection: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { memoryStore } = await getLatch();
+    const schema = await memoryStore.readFile(principal, {
+      connection: data.connection,
+      path: USER_SCHEMA_PATH,
+    });
+    return {
+      schema: schema ?? null,
+      defaultSchema: DEFAULT_MEMORY_SCHEMAS.user,
+      policy: MEMORY_POLICY_FLOOR.user,
+      path: USER_SCHEMA_PATH,
+    };
+  });
+
+export const saveUserMemorySchemaFn = createServerFn({ method: "POST" })
+  .validator((data: { connection: string; schema: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    // One workspace file steers every member's cross-agent profile extraction
+    // — org-wide policy, so admin-gated like org connections/secrets.
+    if (!(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false as const, error: "only an org admin can edit the shared user schema" };
+    }
+    if (data.schema.length > 4000) {
+      return { ok: false as const, error: "schema too long (max 4000 chars)" };
+    }
+    if (schemaSections(data.schema).length === 0) {
+      return {
+        ok: false as const,
+        error: 'the schema needs at least one "## Section" heading — it is the index outline',
+      };
+    }
+    const { memoryStore } = await getLatch();
+    try {
+      await memoryStore.writeFile(principal, {
+        connection: data.connection,
+        path: USER_SCHEMA_PATH,
+        content: data.schema.endsWith("\n") ? data.schema : `${data.schema}\n`,
+        summary: "Shared user-memory index schema (all agents, user level)",
+      });
+      return { ok: true as const };
+    } catch (error) {
+      return { ok: false as const, error: String(error) };
+    }
   });
 
 /** Delete a UI agent at its scope. */

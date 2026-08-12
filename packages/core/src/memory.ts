@@ -34,6 +34,24 @@ export interface MemoryConfig {
    * `connections` (though agents typically do).
    */
   connection: string;
+  /**
+   * Additional memory levels the background sweep extracts each idle chat
+   * into, beyond (and always implicitly including) `scope`. All levels share
+   * `connection`. The in-chat `memory_save` tool still writes only to `scope`;
+   * extra levels are populated by background extraction and injected/searched
+   * read-side. Readers must treat this as a set that contains `scope` (see the
+   * provider's normalization) — surfaces normalize on save.
+   */
+  extractTo?: MemoryScope[];
+  /**
+   * Markdown index-schema outlines per agent-held level: top-level `##`
+   * section headings (with optional description bullets) that steer what the
+   * background extractor captures and how the consolidator organizes that
+   * level's MEMORY.md. Advisory — the index format itself is unchanged.
+   * The cross-agent `user` level's schema is NOT configured here: it lives as
+   * a shared workspace file (see `USER_SCHEMA_PATH` in the memory package).
+   */
+  schemas?: Partial<Record<"agent-user" | "agent-org", string>>;
   /** Background extraction tuning (used by the provider's job sweep, not core). */
   extraction?: {
     /** Chat idle time before a transcript is eligible for extraction (default 60). */

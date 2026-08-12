@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { USER_SCHEMA_PATH } from "../../src/schema.js";
 import { MEMORY_FILES_DIR } from "../paths.js";
+import { LIVE_CONNECTION } from "./eval-oauth.js";
 import { createLiveStore, LIVE_SCOPE } from "./live-store.js";
 
 /**
@@ -20,7 +22,7 @@ async function main(): Promise<void> {
     .sort();
   if (fixtures.length === 0) throw new Error(`no fixtures in ${MEMORY_FILES_DIR}`);
 
-  const { open } = await createLiveStore();
+  const { store, open } = await createLiveStore();
   const conn = await open();
   try {
     // Folder chain: _memory → running-coach → u-eval → memories.
@@ -69,6 +71,33 @@ async function main(): Promise<void> {
       console.log(`  created ${dir}/${file}`);
     }
     console.log(`\nseeded ${created} file(s), ${skipped} already present, of ${fixtures.length}.`);
+
+    // Shared user-level schema: write + read back through the REAL store file
+    // ops (`writeFile`/`readFile`) — this is the live confirmation that the
+    // shared (non-private-root) path works through Loredex's actual ACLs and
+    // that the numbered-envelope decode round-trips.
+    const schema = [
+      "## Profile",
+      "- Who the user is: role, background, expertise level",
+      "## Preferences",
+      "- Stable cross-agent preferences (tone, language, formats)",
+    ].join("\n");
+    await store.writeFile(
+      {},
+      {
+        connection: LIVE_CONNECTION,
+        path: USER_SCHEMA_PATH,
+        content: `${schema}\n`,
+        summary: "Shared user-memory index schema (live eval seed)",
+      },
+    );
+    const roundTrip = await store.readFile({}, { connection: LIVE_CONNECTION, path: USER_SCHEMA_PATH });
+    if (roundTrip?.trim() !== schema) {
+      throw new Error(
+        `user SCHEMA.md round-trip mismatch:\n--- wrote ---\n${schema}\n--- read ---\n${roundTrip ?? "(unreadable)"}`,
+      );
+    }
+    console.log(`  schema  ${USER_SCHEMA_PATH} written + round-trip ok`);
   } finally {
     await conn.close();
   }
