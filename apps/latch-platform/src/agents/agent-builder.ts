@@ -638,6 +638,11 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
           .describe("The complete schema markdown ('## Section' headings + description bullets)."),
       }),
       execute: async ({ connection, schema }) => {
+        // Org-wide memory policy — admin-gated like create/delete_connection
+        // (the approval pause alone still lets any member approve their own ask).
+        if (!(await isOrgAdmin(principal.userId!, principal.orgId))) {
+          return { error: "only an org admin can edit the shared user schema" };
+        }
         if (schema.length > 4000) return { error: "schema too long (max 4000 chars)" };
         if (!/^\s*##(?!#)\s*\S/m.test(schema)) {
           return { error: 'the schema needs at least one "## Section" heading' };

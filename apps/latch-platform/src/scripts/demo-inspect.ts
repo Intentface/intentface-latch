@@ -38,7 +38,9 @@ async function main() {
     sql: `SELECT id FROM user WHERE email = ?`,
     args: ["aleksi.raatala@intentface.com"],
   });
-  const adminId = String((admin.rows[0] as unknown as { id: unknown }).id);
+  const adminRow = admin.rows[0] as unknown as { id: unknown } | undefined;
+  if (!adminRow) throw new Error("admin user not found — run demo-setup.ts first");
+  const adminId = String(adminRow.id);
   const orgId = `user:${adminId}`;
 
   // Code-defined agent: the memory config is the exported constant.
@@ -48,10 +50,12 @@ async function main() {
   const personas: Array<{ email: string; name: string; principal: Principal }> = [];
   for (const p of PERSONAS) {
     const row = await db.execute({ sql: `SELECT id FROM user WHERE email = ?`, args: [p.email] });
+    const u = row.rows[0] as unknown as { id: unknown } | undefined;
+    if (!u) throw new Error(`persona missing (run demo-setup first): ${p.email}`);
     personas.push({
       email: p.email,
       name: p.name,
-      principal: { orgId, userId: String((row.rows[0] as unknown as { id: unknown }).id) },
+      principal: { orgId, userId: String(u.id) },
     });
   }
 
@@ -74,11 +78,19 @@ async function main() {
 
   // --- isolation probe: persona 1 tries to see persona 2's agent-user folder.
   // __private_root is caller-relative, so the honest check is "does u-<other>
-  // exist under MY resolved private root?" — it must not.
+  // exist under MY resolved private root?" — it must not. The path comes from
+  // scopeRefOf (not a hand-spelled literal) so a layout change can't make the
+  // probe silently pass by reading a path that never existed.
   const [a, b] = personas;
+  const bScope = scopeRefOf({
+    agent: AGENT,
+    memory: levelConfigOf(memory, "agent-user"),
+    userId: b.principal.userId,
+  });
+  if (!bScope) throw new Error("could not resolve persona 2's agent-user scope");
   const foreign = await memoryStore.readFile(a.principal, {
     connection: memory.connection,
-    path: `__private_root/_memory/${AGENT}/u-${b.principal.userId}/MEMORY.md`,
+    path: `${bScope.root}/MEMORY.md`,
   });
   report.isolation = {
     probe: `${a.email} reading u-${b.principal.userId} under own private root`,

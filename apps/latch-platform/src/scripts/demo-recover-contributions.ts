@@ -26,12 +26,16 @@ async function main() {
     sql: `SELECT id FROM user WHERE email = ?`,
     args: ["aleksi.raatala@intentface.com"],
   });
-  const orgId = `user:${String((admin.rows[0] as unknown as { id: unknown }).id)}`;
+  const adminRow = admin.rows[0] as unknown as { id: unknown } | undefined;
+  if (!adminRow) throw new Error("admin user not found — run demo-setup.ts first");
+  const orgId = `user:${String(adminRow.id)}`;
   const { memoryStore } = await getLatch();
 
   for (const c of CHATS) {
     const u = await db.execute({ sql: `SELECT id FROM user WHERE email = ?`, args: [c.email] });
-    const principal = { orgId, userId: String((u.rows[0] as unknown as { id: unknown }).id) };
+    const uRow = u.rows[0] as unknown as { id: unknown } | undefined;
+    if (!uRow) throw new Error(`persona missing (run demo-setup first): ${c.email}`);
+    const principal = { orgId, userId: String(uRow.id) };
 
     const msgs = await db.execute({
       sql: `SELECT parts FROM latch_messages WHERE chat_id = ? AND role = 'assistant' ORDER BY seq`,
@@ -39,7 +43,13 @@ async function main() {
     });
     let contribution: string | undefined;
     for (const row of msgs.rows as unknown as Array<{ parts: string }>) {
-      const parts = JSON.parse(String(row.parts)) as Array<{ type: string; text?: string }>;
+      let parts: Array<{ type: string; text?: string }>;
+      try {
+        parts = JSON.parse(String(row.parts)) as Array<{ type: string; text?: string }>;
+      } catch {
+        console.error(`  skipping unparsable message parts in ${c.chatId}`);
+        continue;
+      }
       const text = parts
         .filter((p) => p.type === "text" && p.text)
         .map((p) => p.text)
@@ -59,6 +69,7 @@ async function main() {
       summary: `Anchor interview contribution (recovered from chat after save failure) — ${c.chatId}`,
     });
     const back = await memoryStore.readFile(principal, { connection: "anchor-build", path: c.path });
+    if (!back) process.exitCode = 1;
     console.log(`${back ? "✓ recovered" : "✗ write failed"}  ${c.path}  (${contribution.length} chars)`);
   }
 }

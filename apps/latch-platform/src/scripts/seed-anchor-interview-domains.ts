@@ -107,9 +107,12 @@ async function main() {
     sql: `SELECT activeOrganizationId FROM session WHERE userId = ? ORDER BY createdAt DESC LIMIT 1`,
     args: [userId],
   });
-  const orgId =
-    (s.rows[0] as unknown as { activeOrganizationId?: string } | undefined)
-      ?.activeOrganizationId ?? `user:${userId}`;
+  const activeOrgId = (s.rows[0] as unknown as { activeOrganizationId?: string } | undefined)
+    ?.activeOrganizationId;
+  if (!activeOrgId) {
+    console.warn(`no active org on the latest session — falling back to user:${userId}`);
+  }
+  const orgId = activeOrgId ?? `user:${userId}`;
   const principal: Principal = { orgId, userId };
   console.log(`caller: ${email} (org ${orgId})`);
 

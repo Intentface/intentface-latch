@@ -104,11 +104,13 @@ prompt rule.
 `anchor-interview-mem` replaces the `orient-profiles` plane with the platform's
 multi-level memory: per-expert interviewing meta at `agent-user` (style, fatigue,
 coverage log — area names only), org-wide interviewing craft at `agent-org`
-(aggregates, never individuals), and the shared profile at `user`. The schemas
-*are* the contamination guard, and a `## Memory` prompt section adds the read-side
-rule: memory shapes *how* it interviews, never *what* it treats as known — any
-memory entry that looks like practice content is ignored. Validated live 2026-08-11
-(see the demo report artifact; findings there).
+(aggregates, never individuals), and the shared profile at `user` (schema at
+`_memory/_user/SCHEMA.md` in the memory connection's workspace — the
+`USER_SCHEMA_PATH` constant). The schemas *are* the contamination guard, and a
+`## Memory` prompt section adds the read-side rule: memory shapes *how* it
+interviews, never *what* it treats as known — any memory entry that looks like
+practice content is ignored. Validated live 2026-08-11 — the run's results,
+evidence, and open findings are in PR #56's description.
 
 ## Known gaps (as of 2026-08-12)
 

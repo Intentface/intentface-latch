@@ -4,15 +4,21 @@ import { createClient } from "@libsql/client";
 import { getLatch } from "../lib/latch";
 import { PERSONAS } from "./demo-setup";
 
+function idOf(rows: unknown[], who: string): string {
+  const row = rows[0] as { id: unknown } | undefined;
+  if (!row) throw new Error(`${who} not found — run demo-setup.ts first`);
+  return String(row.id);
+}
+
 async function main() {
   const db = createClient({ url: process.env.DATABASE_URL ?? "file:./latch.db" });
   const admin = await db.execute({
     sql: `SELECT id FROM user WHERE email = ?`,
     args: ["aleksi.raatala@intentface.com"],
   });
-  const orgId = `user:${String((admin.rows[0] as unknown as { id: unknown }).id)}`;
+  const orgId = `user:${idOf(admin.rows, "admin user")}`;
   const p1 = await db.execute({ sql: `SELECT id FROM user WHERE email = ?`, args: [PERSONAS[0].email] });
-  const principal = { orgId, userId: String((p1.rows[0] as unknown as { id: unknown }).id) };
+  const principal = { orgId, userId: idOf(p1.rows, PERSONAS[0].email) };
 
   const { memoryStore } = await getLatch();
   await memoryStore.writeFile(principal, {
@@ -26,7 +32,12 @@ async function main() {
     connection: "anchor-build",
     path: "anchor/interviews/README.md",
   });
-  console.log("folder materialized:", back != null);
+  if (back == null) {
+    console.error("folder NOT materialized: read-back returned nothing");
+    process.exitCode = 1;
+    return;
+  }
+  console.log("folder materialized: true");
 }
 
 main().catch((e) => {

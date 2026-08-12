@@ -317,15 +317,15 @@ export function memoryWriteEpisodeTool<P>(
     }>({
       type: "object",
       properties: {
-        ...(multi
-          ? {
-              level: {
-                type: "string",
-                enum: levels,
-                description: "The memory level this episode belongs to (see your task).",
-              },
-            }
-          : {}),
+        // Always accepted — the extractor prompt says "call with that level's
+        // `level` value" regardless of level count, and a single-target
+        // binding routes everything to its one scope anyway. Only REQUIRED
+        // when there is a real choice to make.
+        level: {
+          type: "string",
+          enum: levels,
+          description: "The memory level this episode belongs to (see your task).",
+        },
         slug: {
           type: "string",
           description: "Short kebab-case topic for the filename (e.g. 'calf-strain-week2').",

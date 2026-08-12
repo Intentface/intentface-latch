@@ -109,9 +109,14 @@ interface LevelTarget {
  * lives at a fixed SHARED workspace path (outside the caller-relative private
  * root), so one entry serves every caller of that org's connection — but a
  * connection NAME is not globally unique, so the org id must be in the key or
- * one org's schema would serve another's. Absent/unreachable → undefined →
- * caller falls back to the default schema; a schema read can never block the
- * sweep.
+ * one org's schema would serve another's. ABSENT (no file) → undefined →
+ * caller falls back to the default schema. UNREACHABLE (read threw) is a
+ * different animal and must PROPAGATE: mapping it to undefined would swap a
+ * configured schema for the default mid-outage, changing the schema
+ * fingerprint — re-opening tombstoned windows (a paid re-extraction) and
+ * organizing that run's user level under the wrong sections. Both call sites
+ * sit in per-candidate try/catch that fails the candidate with backoff and no
+ * tombstone, which is exactly the safe outcome. Failures are never cached.
  */
 const userSchemaCache = new Map<string, { at: number; text: string | undefined }>();
 async function readUserSchemaCached(
@@ -123,12 +128,7 @@ async function readUserSchemaCached(
   const cacheKey = `${principal.orgId}:${connection}`;
   const hit = userSchemaCache.get(cacheKey);
   if (hit && now - hit.at < MEMORY_USER_SCHEMA_TTL_MS) return hit.text;
-  let text: string | undefined;
-  try {
-    text = await store.readFile(principal, { connection, path: USER_SCHEMA_PATH });
-  } catch {
-    text = undefined;
-  }
+  const text = await store.readFile(principal, { connection, path: USER_SCHEMA_PATH });
   const normalized = text?.trim() ? text : undefined;
   userSchemaCache.set(cacheKey, { at: now, text: normalized });
   return normalized;

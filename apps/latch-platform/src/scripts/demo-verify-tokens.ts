@@ -54,7 +54,9 @@ async function main() {
     sql: `SELECT id FROM user WHERE email = ?`,
     args: ["aleksi.raatala@intentface.com"],
   });
-  const adminId = String((admin.rows[0] as unknown as { id: unknown }).id);
+  const adminRow = admin.rows[0] as unknown as { id: unknown } | undefined;
+  if (!adminRow) throw new Error("admin user not found — run demo-setup.ts first");
+  const adminId = String(adminRow.id);
   const orgId = `user:${adminId}`;
 
   const personas: Array<{ email: string; principal: Principal }> = [];

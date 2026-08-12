@@ -1,15 +1,16 @@
 /**
  * Multilevel-memory live demo — one-shot environment builder (idempotent).
- * Creates: admin + 3 persona users, a shared demo org, an org-scoped `loredex`
- * MCP connection (per-user OAuth), and the 3-level `interviewer` agent.
- *   node --env-file=.env --import tsx src/scripts/demo-setup.ts <loredex-mcp-url>
+ * Creates: admin + 3 persona users, a shared demo org, and the org-scoped
+ * `anchor-frame` / `anchor-build` MCP connections (per-user OAuth). The
+ * 3-level `anchor-interview-mem` agent is code-defined, not created here.
+ *   node --env-file=.env --import tsx src/scripts/demo-setup.ts [loredex-mcp-url]
  */
 import { createClient } from "@libsql/client";
 import { getLatch } from "../lib/latch";
 import { auth, ensurePersonalOrg } from "../lib/auth";
 import type { Principal } from "../lib/session";
 
-export const DEMO_PASSWORD = "Demo-Latch-2026!";
+export const DEMO_PASSWORD = process.env.DEMO_PASSWORD ?? "Demo-Latch-2026!";
 
 export const PERSONAS = [
   { email: "aleksi.raatala+demo-marta@intentface.com", name: "Marta Koskinen", role: "Senior Backend Engineer" },

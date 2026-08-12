@@ -30,7 +30,8 @@ async function signIn(email: string): Promise<string> {
 }
 
 async function cookieFor(email: string): Promise<string> {
-  mkdirSync(STATE_DIR, { recursive: true });
+  // Live session tokens — keep them out of other local users' reach.
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   const file = join(STATE_DIR, `cookie-${email.replace(/[^a-z0-9@.-]/gi, "_")}.txt`);
   if (existsSync(file)) {
     const cached = readFileSync(file, "utf8").trim();
@@ -39,7 +40,7 @@ async function cookieFor(email: string): Promise<string> {
     if (probe.ok) return cached;
   }
   const fresh = await signIn(email);
-  writeFileSync(file, fresh);
+  writeFileSync(file, fresh, { mode: 0o600 });
   return fresh;
 }
 

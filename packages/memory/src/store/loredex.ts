@@ -504,7 +504,8 @@ export function createLoredexStore<P>(opts: {
 
     async writeFile(principal, { connection, path, content, summary }) {
       const dir = dirnameOf(path);
-      const name = path.slice(dir.length + 1) || path;
+      // dir === "" for a bare filename — slice(1) would eat the first char.
+      const name = dir ? path.slice(dir.length + 1) : path;
       const scope: ScopeRef = { key: `${connection}:${dir}`, connection, root: dir };
       // The store owns the BODY only (see writeIndex): `create` injects
       // `summary` as frontmatter, `edit_file` matches the body alone — so

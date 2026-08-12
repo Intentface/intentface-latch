@@ -826,6 +826,11 @@ export const saveUserMemorySchemaFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
+    // One workspace file steers every member's cross-agent profile extraction
+    // — org-wide policy, so admin-gated like org connections/secrets.
+    if (!(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false as const, error: "only an org admin can edit the shared user schema" };
+    }
     if (data.schema.length > 4000) {
       return { ok: false as const, error: "schema too long (max 4000 chars)" };
     }

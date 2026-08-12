@@ -147,16 +147,20 @@ function UserMemorySchemaCard({ connection }: { connection: string }) {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     let alive = true;
     getUserMemorySchemaFn({ data: { connection } })
       .then((res) => {
-        if (!alive || !res) return;
+        if (!alive) return;
+        if (!res) return setLoadError(true);
         setLoaded(res);
         setText(res.schema ?? res.defaultSchema);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (alive) setLoadError(true);
+      });
     return () => {
       alive = false;
     };
@@ -199,6 +203,16 @@ function UserMemorySchemaCard({ connection }: { connection: string }) {
     }
   }
 
+  if (loadError) {
+    return (
+      <div className="border-primary-border space-y-1 rounded-xl border p-3">
+        <p className="text-ink-primary font-mono text-xs font-medium">{connection}</p>
+        <p className="text-destructive text-xs">
+          Couldn’t load the shared user schema for this connection — is it authorized for you?
+        </p>
+      </div>
+    );
+  }
   if (!loaded) return null;
   return (
     <div className="border-primary-border space-y-2 rounded-xl border p-3">
