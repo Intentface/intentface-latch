@@ -4,7 +4,7 @@
  * connections (an unauthorized persona would silently run memory-less and
  * couldn't save contributions), then seeds the demo workspace through the real
  * store as persona 1: the interview domain map `anchor/domain.md` and the
- * shared user-level schema `_memory/_user/SCHEMA.md` — and round-trips both.
+ * shared user-level schema `USER_SCHEMA_PATH` (shared-root anchored) — and round-trips both.
  *   node --env-file=.env --import tsx src/scripts/demo-verify-tokens.ts
  */
 import { createClient } from "@libsql/client";

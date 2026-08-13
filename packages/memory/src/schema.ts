@@ -1,5 +1,5 @@
 import type { MemoryScope } from "@intentface/latch-core";
-import { MEMORY_ROOT_PREFIX } from "./scope.js";
+import { LOREDEX_SHARED_ROOT, MEMORY_ROOT_PREFIX } from "./scope.js";
 
 /**
  * Memory index schemas: markdown outlines (top-level `##` headings, optional
@@ -21,8 +21,12 @@ import { MEMORY_ROOT_PREFIX } from "./scope.js";
 
 export const MEMORY_SCHEMA_FILENAME = "SCHEMA.md";
 
-/** Workspace path of the shared, org-wide `user`-level schema file. */
-export const USER_SCHEMA_PATH = `${MEMORY_ROOT_PREFIX}/_user/${MEMORY_SCHEMA_FILENAME}`;
+/**
+ * Workspace path of the shared, org-wide `user`-level schema file — anchored
+ * at the shared root so it resolves to ONE physical file for every caller
+ * (see LOREDEX_SHARED_ROOT for the caller-relative resolution hazard).
+ */
+export const USER_SCHEMA_PATH = `${LOREDEX_SHARED_ROOT}/${MEMORY_ROOT_PREFIX}/_user/${MEMORY_SCHEMA_FILENAME}`;
 
 /**
  * The non-negotiable per-level policy floor. Always present in extraction and

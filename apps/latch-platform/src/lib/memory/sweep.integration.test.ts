@@ -670,7 +670,7 @@ describe("memory pipeline (integration)", () => {
       },
     };
     const userRoot = "__private_root/_memory/coach/u-user";
-    const orgRoot = "_memory/coach/org";
+    const orgRoot = "__shared_root/_memory/coach/org";
     const sharedRoot = "__private_root/_memory/_user/u-user";
 
     // The extractor writes one level-tagged episode per level, then finishes.
@@ -768,7 +768,7 @@ describe("memory pipeline (integration)", () => {
     });
     // Pre-seed the shared user-level schema file (org-wide, outside the
     // private root) — the sweep must pick it up for the `user` level.
-    files.set("_memory/_user/SCHEMA.md", "## Profile\n## Preferences");
+    files.set("__shared_root/_memory/_user/SCHEMA.md", "## Profile\n## Preferences");
 
     // One chat turn, then idle.
     const res = await runtime.handleChat({

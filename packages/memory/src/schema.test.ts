@@ -92,7 +92,7 @@ describe("schemaSectionWarnings", () => {
 
 describe("constants", () => {
   it("USER_SCHEMA_PATH is the shared (non-private-root) workspace file", () => {
-    expect(USER_SCHEMA_PATH).toBe("_memory/_user/SCHEMA.md");
+    expect(USER_SCHEMA_PATH).toBe("__shared_root/_memory/_user/SCHEMA.md");
     expect(USER_SCHEMA_PATH.startsWith("__private_root")).toBe(false);
   });
 

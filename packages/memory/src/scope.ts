@@ -51,6 +51,21 @@ export const MEMORY_ROOT_PREFIX = "_memory";
 export const LOREDEX_PRIVATE_ROOT = "__private_root";
 
 /**
+ * Loredex's workspace-shared root folder (`is_root=1`, `visibility='shared'`,
+ * unowned). Exactly one per workspace, provisioned by the server, rendered as
+ * "Shared" in the UI — never created by us.
+ *
+ * Shared memory paths MUST anchor here. Loredex resolves bare path heads
+ * caller-relatively (any accessible folder of that name, oldest first), so an
+ * unanchored `_memory/...` can silently resolve to the CALLER'S OWN
+ * `__private_root/_memory` — fragmenting "org" memory into per-user private
+ * copies with no visible error (each user reads their own copy back
+ * consistently). Found live 2026-08-13; anchoring the head is the fix on our
+ * side of the seam.
+ */
+export const LOREDEX_SHARED_ROOT = "__shared_root";
+
+/**
  * Boundary-aware containment check for workspace paths: `path` must sit
  * strictly under `root`, segment-by-segment, with no `.`/`..`/empty segments —
  * so `root/../elsewhere` can't escape and `${root}-evil/x` can't prefix-match.
@@ -89,7 +104,10 @@ export function scopeRefOf(args: {
     memory.scope === "agent-user"
       ? `${LOREDEX_PRIVATE_ROOT}/${MEMORY_ROOT_PREFIX}/${seg(agent)}/u-${seg(userId!)}`
       : memory.scope === "agent-org"
-        ? `${MEMORY_ROOT_PREFIX}/${seg(agent)}/org`
+        ? // Anchored at the shared root — an unanchored `_memory/...` head
+          // resolves caller-relatively and can land in the caller's private
+          // tree (see LOREDEX_SHARED_ROOT).
+          `${LOREDEX_SHARED_ROOT}/${MEMORY_ROOT_PREFIX}/${seg(agent)}/org`
         : `${LOREDEX_PRIVATE_ROOT}/${MEMORY_ROOT_PREFIX}/_user/u-${seg(userId!)}`;
   return { key: `${memory.connection}:${root}`, connection: memory.connection, root };
 }

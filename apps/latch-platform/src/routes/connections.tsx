@@ -135,7 +135,7 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 
 /**
  * Editor for the shared user-level memory schema — ONE workspace file
- * (`_memory/_user/SCHEMA.md`) governing what EVERY memory-enabled agent's
+ * (`__shared_root/_memory/_user/SCHEMA.md`) governing what EVERY memory-enabled agent's
  * background archivist files into the user's cross-agent profile. Lives here
  * (not on any agent) because no single agent owns it.
  */

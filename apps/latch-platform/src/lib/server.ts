@@ -568,7 +568,7 @@ export const saveAgentFn = createServerFn({ method: "POST" })
           error: `Memory connection "${mem.connection}" must be one of the agent's connections.`,
         };
       }
-      // `agent-org` memory is keyed by agent name alone (`_memory/<agent>/org`)
+      // `agent-org` memory is keyed by agent name alone (`__shared_root/_memory/<agent>/org`)
       // — on a personal agent, two users' same-named agents on a shared
       // connection would silently share one memory folder. Applies to the
       // primary scope AND any extraction level.
@@ -688,7 +688,7 @@ export const getMemoryStatusFn = createServerFn({ method: "GET" })
  * Connections the caller's memory-enabled agents actually store memories in —
  * UI agents' `exec.memory.connection` plus the code-agent registry. Drives
  * which connections get a "User memory schema" editor on the Connections page
- * (the shared `_memory/_user/SCHEMA.md` lives once per workspace, so it's
+ * (the shared `USER_SCHEMA_PATH` file lives once per workspace, so it's
  * edited per memory connection, not per agent).
  */
 export const listMemoryConnectionsFn = createServerFn({ method: "GET" }).handler(async () => {

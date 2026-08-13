@@ -6,7 +6,7 @@
  *   node --env-file=.env --import tsx src/scripts/demo-inspect.ts
  */
 import { createClient } from "@libsql/client";
-import { scopeRefOf, levelConfigOf, schemaSections } from "@intentface/latch-memory";
+import { scopeRefOf, levelConfigOf, schemaSections, USER_SCHEMA_PATH } from "@intentface/latch-memory";
 import type { MemoryScope } from "@intentface/latch-core";
 import { getLatch } from "../lib/latch";
 import type { Principal } from "../lib/session";
@@ -115,7 +115,7 @@ async function main() {
   // --- shared user schema file
   report.userSchemaFile = await memoryStore.readFile(a.principal, {
     connection: memory.connection,
-    path: "_memory/_user/SCHEMA.md",
+    path: USER_SCHEMA_PATH,
   });
 
   // --- sweep bookkeeping (scope rows: pending episodes / consolidation state)

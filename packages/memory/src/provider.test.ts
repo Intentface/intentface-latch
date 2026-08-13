@@ -196,7 +196,7 @@ describe("createMemoryProvider", () => {
     expect(searchedRoots.sort()).toEqual([
       "__private_root/_memory/_user/u-u1",
       "__private_root/_memory/coach/u-u1",
-      "_memory/coach/org",
+      "__shared_root/_memory/coach/org",
     ]);
     const saved = (await tools.memory_save.execute({ note: "n" }, {})) as { saved: boolean };
     expect(saved.saved).toBe(true);
