@@ -1,6 +1,11 @@
 /** Live verification of the shared-root anchoring fix: write + round-trip the
- * user schema at the NEW anchored path in the anchor-interviews workspace.
- * Proves `__shared_root/...` resolves for create and read through the store. */
+ * user schema at the NEW anchored path. Proves `__shared_root/...` resolves
+ * for create and read through the store.
+ *   node --env-file=.env --import tsx src/scripts/probe-shared-root.ts <connection> [--force]
+ * The target file is the connection's LIVE shared user schema, so the write is
+ * create-or-confirm only: an existing schema with different content is never
+ * overwritten unless --force is passed.
+ */
 import { createClient } from "@libsql/client";
 import { USER_SCHEMA_PATH } from "@intentface/latch-memory";
 import { getLatch } from "../lib/latch";
@@ -27,18 +32,37 @@ async function main() {
       ?.activeOrganizationId ?? `user:${userId}`;
   const principal = { orgId, userId };
 
-  console.log("anchored path:", USER_SCHEMA_PATH);
+  const args = process.argv.slice(2).filter((a) => a !== "--force");
+  const force = process.argv.includes("--force");
+  const connection = args[0];
+  if (!connection) {
+    throw new Error("usage: probe-shared-root.ts <connection> [--force] — the target file is that connection's LIVE shared user schema");
+  }
+
+  console.log(`anchored path: ${USER_SCHEMA_PATH} (connection ${connection})`);
   const { memoryStore } = await getLatch();
+
+  // The target is live org-wide config — never clobber a customized schema.
+  const existing = await memoryStore.readFile(principal, { connection, path: USER_SCHEMA_PATH });
+  if (existing != null && existing.trim() !== USER_SCHEMA.trim() && !force) {
+    console.error(
+      "refusing to overwrite an existing, different shared schema — re-run with --force if that is intended",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (existing?.trim() === USER_SCHEMA.trim()) {
+    console.log("✓ anchored path already resolves and holds the fixture — nothing to write");
+    return;
+  }
+
   await memoryStore.writeFile(principal, {
-    connection: "anchor-interviews",
+    connection,
     path: USER_SCHEMA_PATH,
     content: USER_SCHEMA,
     summary: "Shared user-level memory schema (all agents, profile-level facts only)",
   });
-  const back = await memoryStore.readFile(principal, {
-    connection: "anchor-interviews",
-    path: USER_SCHEMA_PATH,
-  });
+  const back = await memoryStore.readFile(principal, { connection, path: USER_SCHEMA_PATH });
   if (back?.trim() !== USER_SCHEMA.trim()) {
     throw new Error(`round-trip mismatch:\n---got---\n${back}`);
   }
