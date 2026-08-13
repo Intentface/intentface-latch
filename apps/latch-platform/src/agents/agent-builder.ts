@@ -624,7 +624,7 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
     save_user_memory_schema: tool({
       description:
         "Save the ORG-WIDE user-level memory schema — one shared workspace file " +
-        "(_memory/_user/SCHEMA.md) governing what EVERY agent's background archivist files into " +
+        "(__shared_root/_memory/_user/SCHEMA.md) governing what EVERY agent's background archivist files into " +
         "users' cross-agent profiles. Affects all memory-enabled agents on the connection — " +
         "pauses for the user's approval.",
       inputSchema: z.object({

@@ -42,7 +42,7 @@ describe("levelConfigOf", () => {
   it("composes with scopeRefOf/scopeLabelOf per level", () => {
     const memory = { scope: "agent-user" as const, connection: "loredex" };
     const org = scopeRefOf({ agent: "coach", memory: levelConfigOf(memory, "agent-org") });
-    expect(org?.root).toBe("_memory/coach/org");
+    expect(org?.root).toBe("__shared_root/_memory/coach/org");
     expect(scopeLabelOf(levelConfigOf(memory, "user"))).toContain("shared across their agents");
   });
 });
@@ -66,7 +66,7 @@ describe("scopeRefOf", () => {
       agent: "weekly",
       memory: { scope: "agent-org", connection: "loredex" },
     });
-    expect(s?.root).toBe("_memory/weekly/org");
+    expect(s?.root).toBe("__shared_root/_memory/weekly/org");
   });
 
   it("derives user-wide scope under the Loredex private root", () => {

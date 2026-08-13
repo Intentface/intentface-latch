@@ -105,7 +105,7 @@ prompt rule.
 multi-level memory: per-expert interviewing meta at `agent-user` (style, fatigue,
 coverage log — area names only), org-wide interviewing craft at `agent-org`
 (aggregates, never individuals), and the shared profile at `user` (schema at
-`_memory/_user/SCHEMA.md` in the memory connection's workspace — the
+`__shared_root/_memory/_user/SCHEMA.md` in the memory connection's workspace — the
 `USER_SCHEMA_PATH` constant). The schemas *are* the contamination guard, and a
 `## Memory` prompt section adds the read-side rule: memory shapes *how* it
 interviews, never *what* it treats as known — any memory entry that looks like

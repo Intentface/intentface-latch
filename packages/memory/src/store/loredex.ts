@@ -1,7 +1,7 @@
 import type { ConnectionRegistry } from "@intentface/latch-core";
 import type { EpisodeMeta, MemorySearchHit, MemoryStore, ScopeRef } from "../types.js";
 import { MemoryStoreUnreachableError } from "../types.js";
-import { isUnderScopeRoot, LOREDEX_PRIVATE_ROOT } from "../scope.js";
+import { isUnderScopeRoot, LOREDEX_PRIVATE_ROOT, LOREDEX_SHARED_ROOT } from "../scope.js";
 import {
   IndexValidationError,
   MEMORY_INDEX_FILENAME,
@@ -241,11 +241,13 @@ export function createLoredexStore<P>(opts: {
    */
   async function ensureFolders(call: ToolCall, scopeKey: string, path: string): Promise<void> {
     const parts = path.split("/").filter(Boolean);
-    // The caller's private root always exists (Loredex creates it on join)
-    // and must never be created here — a `create` for that name would mint a
-    // stray SHARED top-level folder shadowing it. Start below it; descendants
-    // then inherit `private` visibility from it.
-    const first = parts[0] === LOREDEX_PRIVATE_ROOT ? 1 : 0;
+    // The workspace root folders always exist (Loredex provisions them) and
+    // must never be created here — a `create` for either name would mint a
+    // stray top-level folder shadowing it. Start below them; descendants then
+    // inherit the root's visibility (`private` under the caller's private
+    // root, `shared` under the workspace-shared root).
+    const first =
+      parts[0] === LOREDEX_PRIVATE_ROOT || parts[0] === LOREDEX_SHARED_ROOT ? 1 : 0;
     for (let i = first; i < parts.length; i++) {
       const cacheKey = `${scopeKey}:${parts.slice(0, i + 1).join("/")}`;
       if (ensuredFolders.has(cacheKey)) continue;
