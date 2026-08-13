@@ -56,6 +56,20 @@ async function main() {
     return;
   }
 
+  // `existing == null` can also mean a transient read failure (the store maps
+  // read errors to "missing"), so re-read just before writing: a schema that
+  // was actually there — or appeared concurrently — must not be clobbered.
+  if (existing == null && !force) {
+    const recheck = await memoryStore.readFile(principal, { connection, path: USER_SCHEMA_PATH });
+    if (recheck != null && recheck.trim() !== USER_SCHEMA.trim()) {
+      console.error(
+        "schema appeared between check and write (or the first read failed) — refusing; re-run with --force if intended",
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   await memoryStore.writeFile(principal, {
     connection,
     path: USER_SCHEMA_PATH,
