@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, Mic, RotateCcw, X } from "lucide-react";
-import { cn, IconButton } from "@intentface/latch-ui";
+import { IconButton } from "@/components/ui/icon-button";
+import { cn } from "@/lib/utils";
 
 /**
  * Voice-message capture for the composer: tap the mic to record, tap ✓ to

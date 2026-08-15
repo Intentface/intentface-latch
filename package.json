@@ -14,6 +14,9 @@
   "pnpm": {
     "overrides": {
       "@napi-rs/lzma": "1.4.5"
+    },
+    "patchedDependencies": {
+      "@intentface/chat@0.1.1": "patches/@intentface__chat@0.1.1.patch"
     }
   }
 }

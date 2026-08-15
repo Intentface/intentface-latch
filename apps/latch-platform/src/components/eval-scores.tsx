@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
-import { cn, Dialog } from "@intentface/latch-ui";
+import { Dialog } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 import { correctScoreFn, getRunScoresFn } from "@/lib/server";
 import type { AttachedEvalScore } from "@/lib/server";
 import { Button } from "@/components/ui/button";

@@ -1,0 +1,81 @@
+diff --git a/dist/internal/render/getReactElementRef.js b/dist/internal/render/getReactElementRef.js
+index 029b3f0c82fec8977dfc9bf0fc2e84afbc6d5e63..1c5fea85e0bdb09ced6cbd3e1de9ab3753abee1a 100644
+--- a/dist/internal/render/getReactElementRef.js
++++ b/dist/internal/render/getReactElementRef.js
+@@ -1,7 +1,7 @@
+ // Vendored from @base-ui/utils v1.6.0 (MIT) — packages/utils/src/getReactElementRef.ts
+ // https://github.com/mui/base-ui — exact copy.
+ import * as React from 'react';
+-import { isReactVersionAtLeast } from './reactVersion';
++import { isReactVersionAtLeast } from './reactVersion.js';
+ /**
+  * Extracts the `ref` from a React element, handling different React versions.
+  */
+diff --git a/dist/internal/render/mergeProps.js b/dist/internal/render/mergeProps.js
+index cd2e8ee303cfdb5802d4aa0c056809c3efe6b0f1..d382faa1c79612789f496bb2187435d5ed30417e 100644
+--- a/dist/internal/render/mergeProps.js
++++ b/dist/internal/render/mergeProps.js
+@@ -1,7 +1,7 @@
+ // Vendored from @base-ui/react v1.6.0 (MIT) — packages/react/src/merge-props/mergeProps.ts
+ // https://github.com/mui/base-ui — exact copy; only import specifiers rewired.
+ import * as React from 'react';
+-import { mergeObjects } from './mergeObjects';
++import { mergeObjects } from './mergeObjects.js';
+ const EMPTY_PROPS = {};
+ export function mergeProps(a, b, c, d, e) {
+     if (!c && !d && !e && !a) {
+diff --git a/dist/internal/render/useMergedRefs.js b/dist/internal/render/useMergedRefs.js
+index 898730330108864a8074d2efc94e758570c48dc0..6c2e2f9078f8b0377662409d5d4ac8016463038a 100644
+--- a/dist/internal/render/useMergedRefs.js
++++ b/dist/internal/render/useMergedRefs.js
+@@ -1,7 +1,7 @@
+ // Vendored from @base-ui/utils v1.6.0 (MIT) — packages/utils/src/useMergedRefs.ts
+ // https://github.com/mui/base-ui — exact copy.
+ import * as React from 'react';
+-import { useRefWithInit } from './useRefWithInit';
++import { useRefWithInit } from './useRefWithInit.js';
+ export function useMergedRefs(a, b, c, d) {
+     const forkRef = useRefWithInit((createForkRef)).current;
+     if (didChange(forkRef, a, b, c, d)) {
+diff --git a/dist/internal/render/useRender.js b/dist/internal/render/useRender.js
+index 189561e92e48ef948029f0e53e05a62a0a22b9bf..6df1d9025f31f792ad64b2beec66d47850f23a66 100644
+--- a/dist/internal/render/useRender.js
++++ b/dist/internal/render/useRender.js
+@@ -1,7 +1,7 @@
+ // Vendored from @base-ui/react v1.6.0 (MIT) — packages/react/src/use-render/useRender.ts
+ // https://github.com/mui/base-ui — exact copy; only import specifiers rewired.
+ import * as React from 'react';
+-import { useRenderElement } from './useRenderElement';
++import { useRenderElement } from './useRenderElement.js';
+ /**
+  * Renders a Base UI element.
+  *
+diff --git a/dist/internal/render/useRenderElement.js b/dist/internal/render/useRenderElement.js
+index 1ae49bf9a120dbcd8b77161a76b6ea654dc253f3..5c76a2d72fd8a899d8e65ea7f961a1b2992430fc 100644
+--- a/dist/internal/render/useRenderElement.js
++++ b/dist/internal/render/useRenderElement.js
+@@ -3,15 +3,15 @@ import { createElement as _createElement } from "react";
+ // https://github.com/mui/base-ui — import specifiers rewired; one local departure:
+ // the `props` config accepts bespoke data-* part attributes (WithDataAttributes).
+ import * as React from 'react';
+-import { useMergedRefs, useMergedRefsN } from './useMergedRefs';
+-import { getReactElementRef } from './getReactElementRef';
+-import { mergeObjects } from './mergeObjects';
+-import { warn } from './warn';
+-import { EMPTY_OBJECT } from './empty';
+-import { getStateAttributesProps } from './getStateAttributesProps';
+-import { resolveClassName } from './resolveClassName';
+-import { resolveStyle } from './resolveStyle';
+-import { mergeProps, mergePropsN, mergeClassNames } from './mergeProps';
++import { useMergedRefs, useMergedRefsN } from './useMergedRefs.js';
++import { getReactElementRef } from './getReactElementRef.js';
++import { mergeObjects } from './mergeObjects.js';
++import { warn } from './warn.js';
++import { EMPTY_OBJECT } from './empty.js';
++import { getStateAttributesProps } from './getStateAttributesProps.js';
++import { resolveClassName } from './resolveClassName.js';
++import { resolveStyle } from './resolveStyle.js';
++import { mergeProps, mergePropsN, mergeClassNames } from './mergeProps.js';
+ /**
+  * Renders a Base UI element.
+  *

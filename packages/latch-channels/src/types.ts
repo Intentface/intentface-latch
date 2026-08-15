@@ -63,7 +63,7 @@ export interface QuestionOption {
   description: string;
 }
 
-/** One question from an `askUser` call (mirrors `AskUserQuestion` in latch-ui). */
+/** One question from an `askUser` call (mirrors `AskUserQuestion` in the platform UI). */
 export interface Question {
   question: string;
   header?: string;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Braces, Pencil, Plug, Plus, Trash2 } from "lucide-react";
-import { Dialog } from "@intentface/latch-ui";
+import { Dialog } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import {
   currentPrincipalFn,
