@@ -1,5 +1,5 @@
 import { tool, jsonSchema } from "ai";
-import type { Experimental_SandboxSession } from "ai";
+import type { Experimental_SandboxSession, Tool } from "ai";
 import { parseTelegramChatId } from "@intentface/latch-channels/telegram";
 import { parseSlackChatId } from "@intentface/latch-channels/slack";
 import { webFetch } from "@/lib/web-fetch";
@@ -8,6 +8,9 @@ import { getLatch } from "@/lib/latch";
 import { resolveDelivery, type ScheduleDelivery } from "@/lib/schedule-delivery";
 import { checkScheduleLimits } from "@/lib/schedule-limits";
 import type { Principal } from "@/lib/session";
+
+/** The model-facing tool-result shape (`ai` doesn't re-export it directly). */
+type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool["toModelOutput"]>>>;
 
 /**
  * The default harness tools, mirroring eve's set but implemented as thin
@@ -160,12 +163,55 @@ const grep = tool({
   },
 });
 
+/** web_fetch's stored output — text page, fetched media, or an error. */
+export type WebFetchToolOutput =
+  | { ok: true; kind?: "text"; status: number; contentType: string; body: string; truncated: boolean }
+  | {
+      ok: true;
+      kind: "media";
+      status: number;
+      contentType: string;
+      mediaType: string;
+      /** Base64 bytes — surfaced to the model as an image/document block. */
+      data: string;
+      bytes: number;
+      url: string;
+    }
+  | { ok: false; error: string };
+
+/**
+ * What the model sees of a web_fetch result. Media becomes a real file block —
+ * an image the model can look at, a PDF Anthropic renders as a document — with
+ * a text line alongside so providers that can't take media in tool results
+ * (Google drops non-image files, with a warning) still leave the model
+ * oriented instead of staring at a silently-emptied result. Text results keep
+ * the default JSON view.
+ */
+export function webFetchToModelOutput({ output }: { output: unknown }): ToolResultOutput {
+  const r = output as WebFetchToolOutput;
+  if (r && typeof r === "object" && r.ok && r.kind === "media") {
+    return {
+      type: "content",
+      value: [
+        {
+          type: "text",
+          text: `Fetched ${r.mediaType} (${Math.round(r.bytes / 1024)} KB) from ${r.url}:`,
+        },
+        { type: "file", mediaType: r.mediaType, data: { type: "data", data: r.data } },
+      ],
+    };
+  }
+  return { type: "json", value: output as never };
+}
+
 /** Block obvious SSRF targets (loopback/private/link-local literals). Best-effort. */
 const web_fetch = tool({
   description:
     "Fetch a public http(s) URL and return its content. HTML is converted to " +
     "clean markdown (default) or text — not raw markup — so it's compact and " +
-    "readable. Runs in the app, not the sandbox; private/loopback hosts blocked.",
+    "readable. Images (png/jpeg/gif/webp) and PDFs are returned as viewable " +
+    "attachments — you SEE them, not their bytes. Runs in the app, not the " +
+    "sandbox; private/loopback hosts blocked.",
   inputSchema: jsonSchema<{ url: string; format?: "markdown" | "text" | "html"; timeout?: number }>({
     type: "object",
     properties: {
@@ -180,17 +226,30 @@ const web_fetch = tool({
     required: ["url"],
     additionalProperties: false,
   }),
-  execute: async ({ url, format, timeout }) => {
+  execute: async ({ url, format, timeout }): Promise<WebFetchToolOutput> => {
     const r = await webFetch({ url, format, timeout });
-    if (!r.ok) return { ok: false as const, error: r.error };
+    if (!r.ok) return { ok: false, error: r.error };
+    if (r.kind === "media") {
+      return {
+        ok: true,
+        kind: "media",
+        status: r.status,
+        contentType: r.contentType,
+        mediaType: r.mediaType,
+        data: r.data,
+        bytes: r.bytes,
+        url,
+      };
+    }
     return {
-      ok: true as const,
+      ok: true,
       status: r.status,
       contentType: r.contentType,
       body: r.content,
       truncated: r.truncated,
     };
   },
+  toModelOutput: webFetchToModelOutput,
 });
 
 /**
