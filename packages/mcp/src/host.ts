@@ -27,6 +27,52 @@ export type McpAuth =
   | { type: "bearer"; vaultKey: string }
   | { type: "headers"; headers: Record<string, string> };
 
+/**
+ * What the model sees of an MCP tool result, fixed for structured-only servers.
+ *
+ * The SDK's default `toModelOutput` maps `result.content` to model blocks and
+ * only falls back to raw JSON when `content` is missing entirely. Newer MCP
+ * servers (Airtable among them) return their payload in `structuredContent`
+ * with `content: []` — the spec says they SHOULD mirror it into a text block,
+ * but nothing enforces that — and the default then hands the model an empty
+ * result while the stored message (what the UI renders) keeps the full object.
+ * The agent reports "empty content" for a call that visibly succeeded.
+ *
+ * When `structuredContent` is present and `content` carries no text, the model
+ * gets the structured payload as JSON instead. Everything else keeps the SDK's
+ * behavior via `original`.
+ */
+export function withStructuredContentFallback(
+  original: ((args: never) => unknown) | undefined,
+): (args: { toolCallId: string; input: unknown; output: unknown }) => unknown {
+  return (args) => {
+    const result = args.output as {
+      content?: unknown;
+      structuredContent?: unknown;
+      isError?: boolean;
+    } | null;
+    if (
+      result &&
+      typeof result === "object" &&
+      !result.isError &&
+      result.structuredContent != null &&
+      Array.isArray(result.content) &&
+      // "No text": empty, or only parts with empty/absent text (some servers
+      // pad with a blank text block instead of omitting content).
+      result.content.every(
+        (part) =>
+          !(part as { type?: string; text?: string }).text?.trim?.() &&
+          (part as { type?: string }).type === "text",
+      )
+    ) {
+      return { type: "json", value: result.structuredContent };
+    }
+    return original
+      ? (original as (a: typeof args) => unknown)(args)
+      : { type: "json", value: args.output };
+  };
+}
+
 /** MCP tool annotations (sensitivity hints) the server may advertise. */
 export interface McpToolInfo {
   name: string;
@@ -360,7 +406,14 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
             // the primitive for a hard block, which approval can't express.
             if (conn.visible && !conn.visible(info)) continue;
             const key = `${conn.name}_${name}`; // namespace to avoid collisions
-            tools[key] = tool;
+            // Patch the SDK's model-output mapping so structured-only results
+            // (structuredContent + empty content) reach the model as JSON
+            // instead of an empty block.
+            const sdkTool = tool as { toModelOutput?: (args: never) => unknown };
+            tools[key] = {
+              ...sdkTool,
+              toModelOutput: withStructuredContentFallback(sdkTool.toModelOutput),
+            };
             if (needsMcpApproval(conn.approval, info)) {
               toolApproval[key] = "user-approval";
             }
