@@ -187,6 +187,13 @@ export type WebFetchToolOutput =
  * oriented instead of staring at a silently-emptied result. Text results keep
  * the default JSON view.
  */
+/** Human-readable size — never "0 KB" for a real payload. */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function webFetchToModelOutput({ output }: { output: unknown }): ToolResultOutput {
   const r = output as WebFetchToolOutput;
   if (r && typeof r === "object" && r.ok && r.kind === "media") {
@@ -195,7 +202,7 @@ export function webFetchToModelOutput({ output }: { output: unknown }): ToolResu
       value: [
         {
           type: "text",
-          text: `Fetched ${r.mediaType} (${Math.round(r.bytes / 1024)} KB) from ${r.url}:`,
+          text: `Fetched ${r.mediaType} (${formatBytes(r.bytes)}) from ${r.url}:`,
         },
         { type: "file", mediaType: r.mediaType, data: { type: "data", data: r.data } },
       ],

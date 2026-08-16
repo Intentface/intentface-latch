@@ -16,7 +16,7 @@ describe("webFetchToModelOutput", () => {
     expect(webFetchToModelOutput({ output })).toEqual({
       type: "content",
       value: [
-        { type: "text", text: "Fetched image/png (0 KB) from https://example.com/logo.png:" },
+        { type: "text", text: "Fetched image/png (5 B) from https://example.com/logo.png:" },
         { type: "file", mediaType: "image/png", data: { type: "data", data: "aGVsbG8=" } },
       ],
     });
