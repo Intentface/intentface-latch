@@ -24,7 +24,7 @@ export const ApprovalCard = ({ part }: { part: ToolPart }) => {
 
   if (connection) {
     return (
-      <div className="rounded-2xl border border-primary-border bg-primary-bg p-3 [corner-shape:squircle]">
+      <div className="w-full rounded-2xl border border-primary-border bg-primary-bg p-3 [corner-shape:squircle]">
         {deciding ? (
           <div className="flex items-center gap-2 text-sm text-ink-secondary">
             <Loader2 className="size-4 animate-spin" />
@@ -42,10 +42,7 @@ export const ApprovalCard = ({ part }: { part: ToolPart }) => {
               automatically. Or dismiss this and tell the agent what to do
               instead.
             </p>
-            <div className="flex gap-2">
-              <Button size="sm" onClick={() => connect(connection, approvalId)}>
-                Connect {connection}
-              </Button>
+            <div className="flex justify-end gap-2">
               {/* The way out when the connection can't be completed at all (bad
                   credentials, a provider that never redirects back). Denying
                   resumes the turn, so the agent can offer another route. */}
@@ -56,6 +53,9 @@ export const ApprovalCard = ({ part }: { part: ToolPart }) => {
               >
                 Dismiss
               </Button>
+              <Button size="sm" onClick={() => connect(connection, approvalId)}>
+                Connect {connection}
+              </Button>
             </div>
           </>
         )}
@@ -64,21 +64,14 @@ export const ApprovalCard = ({ part }: { part: ToolPart }) => {
   }
 
   return (
-    <div className="rounded-2xl border border-primary-border bg-primary-bg p-3 [corner-shape:squircle]">
+    <div className="w-full rounded-2xl border border-primary-border bg-primary-bg p-3 [corner-shape:squircle]">
       <div className="text-sm text-ink-primary">
         Approve <span className="font-medium">{toolNameOf(part)}</span>?
       </div>
-      <pre className="my-1.5 overflow-x-auto text-xs text-ink-secondary">
+      <pre className="my-1.5 max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-xs text-ink-secondary">
         {JSON.stringify(part.input, null, 2)}
       </pre>
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          disabled={deciding}
-          onClick={() => decide(approvalId, true)}
-        >
-          Approve
-        </Button>
+      <div className="flex justify-end gap-2">
         <Button
           size="sm"
           variant="outline"
@@ -86,6 +79,13 @@ export const ApprovalCard = ({ part }: { part: ToolPart }) => {
           onClick={() => decide(approvalId, false)}
         >
           Deny
+        </Button>
+        <Button
+          size="sm"
+          disabled={deciding}
+          onClick={() => decide(approvalId, true)}
+        >
+          Approve
         </Button>
       </div>
     </div>

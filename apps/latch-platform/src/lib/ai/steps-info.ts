@@ -3,18 +3,22 @@
 // approval gate), so it lives in the app, not the generic Steps primitive.
 
 import type { UnknownPart } from "@intentface/chat/types"
+import { splitReasoningByHeaders } from "@/lib/ai/message-info"
+import { getToolParts } from "@/lib/ai/segments"
+import type { MessageSegment } from "@/lib/ai/segments"
 import type { ToolLabels } from "@/lib/ai/tool-labels"
 import {
   approvalOf,
-  
-  
   isAnyToolPart,
   isAwaitingApproval,
-  
-  
-  toolNameOf
+  toolNameOf,
 } from "@/lib/ai/types"
-import type {AskUserInput, AskUserQuestion, StepStatus, ToolPart} from "@/lib/ai/types";
+import type {
+  AskUserInput,
+  AskUserQuestion,
+  StepStatus,
+  ToolPart,
+} from "@/lib/ai/types"
 
 /**
  * A tool result arrives either as an object (the optimistic `addToolResult`
@@ -208,4 +212,142 @@ export const getToolCallInfo = (
     awaitingApproval,
     approvalId: approvalOf(part)?.id,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Steps-level derivation — the rows, and what the header says about them all.
+// ---------------------------------------------------------------------------
+
+export type StepsSummary = {
+  toolCount: number
+  questionCount: number
+}
+
+/** Counts a turn's work. Wording belongs to the caller, not here. */
+export const getStepsSummary = (
+  segments: readonly MessageSegment[]
+): StepsSummary => {
+  let toolCount = 0
+  let questionCount = 0
+
+  for (const part of getToolParts(segments)) {
+    if (part.type !== "tool-askUser") {
+      toolCount++
+      continue
+    }
+    const input = part.input as AskUserInput | undefined
+    questionCount += input?.questions?.length ?? 0
+  }
+
+  return { toolCount, questionCount }
+}
+
+/**
+ * A row's kind-specific payload. Everything a row needs to render *except* its
+ * markup — icons and JSX stay in the component, so this whole module stays
+ * testable without React.
+ */
+export type StepDetail =
+  | { kind: "reasoning"; body: string | null }
+  | { kind: "tool"; part: ToolPart; info: ToolCallInfo }
+  | { kind: "ask-user"; info: AskUserStepInfo }
+
+export type Step = {
+  /** Stable across renders: segment index, then position within it. */
+  key: string
+  label: string
+  status: StepStatus
+  detail: StepDetail
+}
+
+/**
+ * Flattens segments into the timeline's rows. Reasoning splits into one row per
+ * markdown header, so a long think reads as a list of moves rather than a wall.
+ *
+ * `isActive` marks the turn as still running: only then can the last reasoning
+ * section be the one being written.
+ */
+export const getSteps = (
+  segments: readonly MessageSegment[],
+  { isActive, labels }: { isActive: boolean; labels: ToolLabels }
+): Step[] => {
+  const steps: Step[] = []
+
+  segments.forEach((segment, i) => {
+    if (segment.type === "reasoning") {
+      const text = segment.parts.map((p) => p.text).join("")
+      const streaming = isActive && segment === segments.at(-1)
+      const sections = splitReasoningByHeaders([text])
+
+      sections.forEach((section, j) => {
+        steps.push({
+          key: `r-${i}-${j}`,
+          label: section.header ?? "Thinking",
+          status:
+            streaming && j === sections.length - 1 ? "active" : "complete",
+          detail: { kind: "reasoning", body: section.body || null },
+        })
+      })
+      return
+    }
+
+    if (segment.type !== "tool") return
+
+    segment.parts.forEach((part, j) => {
+      if (part.type === "tool-askUser") {
+        const info = getAskUserStepInfo(part)
+        steps.push({
+          key: `a-${i}-${j}`,
+          label: info.label,
+          status: info.status,
+          detail: { kind: "ask-user", info },
+        })
+        return
+      }
+      const info = getToolCallInfo(part, labels)
+      steps.push({
+        key: `t-${i}-${j}`,
+        label: info.label,
+        status: info.status,
+        detail: { kind: "tool", part, info },
+      })
+    })
+  })
+
+  return steps
+}
+
+// ---------------------------------------------------------------------------
+/**
+ * The header's label while a turn runs: what's happening *now*, in the present
+ * tense — never a row's past-tense label.
+ *
+ * Priority is deliberate. An approval gate outranks a running call because the
+ * turn is really waiting on the user; between tool rounds nothing is running,
+ * so the most recent tool holds rather than dropping back to "Thinking" once
+ * tools have started.
+ */
+export const getActiveLabel = (
+  segments: readonly MessageSegment[],
+  labels: ToolLabels
+): string => {
+  const toolParts = getToolParts(segments)
+  const gated = toolParts.find((p) => isAwaitingApproval(p))
+  const running = toolParts.find(
+    (p) => p.state === "input-streaming" || p.state === "input-available"
+  )
+  const active = gated ?? running ?? toolParts.at(-1)
+
+  if (!active) return "Thinking..."
+  if (gated) return "Waiting for your approval"
+
+  if (active.type === "tool-askUser") {
+    const input = active.input as AskUserInput | undefined
+    const count = input?.questions?.length ?? 0
+    return `Asking ${count === 1 ? "question" : "questions"}`
+  }
+
+  const name = toolNameOf(active)
+  const input = (active.input as Record<string, unknown>) ?? {}
+  return labels[name]?.active(input) ?? `Running ${name}`
 }

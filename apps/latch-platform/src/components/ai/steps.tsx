@@ -56,7 +56,17 @@ type StepsPanelProps = ComponentProps<typeof StepsPrimitive.Panel>
 const StepsPanel = ({ className, children, ...props }: StepsPanelProps) => (
   <StepsPrimitive.Panel
     className={cn(
-      "mt-2 flex flex-col",
+      // The vertical gap is padding, not margin: padding sits inside the border
+      // box, so it collapses with the height instead of vanishing in one frame
+      // when the closed panel leaves layout. `box-sizing: border-box` will not
+      // compress padding under `h-0`, so the closed states zero it explicitly
+      // and `padding` joins the transition.
+      "flex flex-col overflow-hidden py-2",
+      "h-auto [interpolate-size:allow-keywords]",
+      "transition-[height,padding,opacity] duration-200 ease-out",
+      "data-ending-style:h-0 data-ending-style:py-0 data-ending-style:opacity-0",
+      "data-starting-style:h-0 data-starting-style:py-0 data-starting-style:opacity-0",
+      "*:shrink-0",
       // The rail: a nested item's panel indents behind a vertical line, so
       // depth reads visually without any depth counter. `[data-nested]` is set
       // by the primitive on items that sit inside another item.
