@@ -1,0 +1,158 @@
+---
+title: Operations
+description: Durability, schedules and human-in-the-loop — running agents in production without a workflow engine.
+---
+
+Three things a real deployment needs, all built on the same idea: **the log is the source of truth, so state is a fold of it.**
+
+## Durability
+
+A turn that outlives its invocation needs to survive the process dying. Latch does this with a lease, a heartbeat and a reaper — no workflow engine, no queue service, no worker that must stay alive.
+
+```ts
+createRuntime({
+  storage,
+  context,
+  agents,
+  durability: { enabled: true },
+});
+```
+
+What happens:
+
+1. **Claim** — the run is claimed with a lease (`owner`, `fencingToken`, expiry).
+2. **Heartbeat** — the holder extends the lease while it works.
+3. **Die** — the process is killed mid-turn. Nothing is lost: every step so far is already in the log.
+4. **Reap** — a later `tick()`/`sweep()` sees the expired lease and reclaims the run.
+5. **Resume** — the turn re-runs from persisted history and completes server-side.
+
+Point any cron at `sweep()` — it reaps and resumes in one call:
+
+```ts title="The whole durability wiring"
+await runtime.sweep({ maxAttempts: 5 });
+// → { reaped: RunRecord[], resumed: RunOutcome[] }
+```
+
+`maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `tick()` and `resume(runId)` are the same machinery split apart, for when you want to reap and resume separately.
+
+On a long-lived Node process, use the in-process scheduler instead of an external cron:
+
+```ts
+import { createIntervalScheduler } from "@intentface/latch-core";
+
+const scheduler = createIntervalScheduler({
+  intervalMs: 30_000,
+  onTick: () => runtime.sweep(),
+  onError: (error) => log.warn({ error }, "sweep failed"),
+});
+scheduler.start();
+```
+
+Ticks never overlap — a slow tick skips the next fire rather than stacking — and the timer is `unref`'d so it won't hold the process open on its own.
+
+<Callout title="Why this is safe on every node at once">
+Reaping and claiming are atomic single-row transitions (see [Storage](/docs/storage)). Firing `sweep()` on all nodes simultaneously is fine: each run is claimed exactly once, and fencing tokens stop a revived stale worker from overwriting newer state.
+</Callout>
+
+## Schedules
+
+Schedules are **rows**, not timers. Core stores the cron expression and the captured identity; what makes time pass is your infrastructure.
+
+```ts
+await runtime.schedule({
+  principal,
+  agent: "reporter",
+  cron: "0 9 * * 1", // null = one-shot, fired on the next runDue()
+  timezone: "Europe/Helsinki",
+  prompt: "Summarise last week's signups.",
+  delivery: { kind: "slack", channel: "C123" }, // opaque to core
+});
+```
+
+Core needs a cron evaluator — it deliberately ships no cron library:
+
+```ts
+import { Cron } from "croner";
+
+createRuntime({
+  // …
+  cron: (expr, afterMs, timezone) =>
+    new Cron(expr, { timezone }).nextRun(new Date(afterMs))?.getTime() ?? null,
+});
+```
+
+Then fire due schedules from the same route as `sweep`:
+
+```ts
+await runtime.runDue(); // → { fired, errors }  — all tenants, each claimed once
+```
+
+Each fire reconstructs the principal from the stored identity blob, runs the turn, and advances the schedule.
+
+### Delivering somewhere other than a fresh chat
+
+By default a fired schedule runs in a new chat. If the report should land in the conversation the person actually replies in — a Slack thread, a Telegram DM — supply `runSchedule`:
+
+```ts
+createRuntime({
+  // …
+  runSchedule: async ({ schedule, principal }) => {
+    const target = parseDelivery(schedule.delivery); // yours; core never reads this
+    if (!target) return false; // fall through to the default
+    await deliverIntoChannel({ schedule, principal, target });
+    return true; // we handled it
+  },
+});
+```
+
+Return `true` only when you ran *and* delivered it. Anything else — `false`, `undefined`, or a throw — falls through to core's default, so a stale target (bot disabled, user unlinked) still gets the work done in a chat rather than losing the fire. Core keeps owning the claim, the lease and the advance either way.
+
+`runScheduleNow` makes a schedule due immediately and lets it fire through the ordinary `runDue` path — so "run now" can never drift from what the cron actually does.
+
+## Human-in-the-loop
+
+Approval is a **state of the run**, not a UI convention. A gated tool call ends the turn with an `approval-requested` part and the run status `awaiting_input`. It survives restarts and deploys, because it's just message state in the log.
+
+```ts
+// The agent declares the gate.
+defineAgent<Principal>(() => ({
+  model,
+  tools: { chargeCustomer },
+  toolApproval: { chargeCustomer: "user-approval" },
+}));
+```
+
+The decision round-trips as a normal request:
+
+```ts
+return runtime.applyApproval({
+  chatId,
+  principal,
+  decisions: [{ approvalId, approved: true }],
+});
+// → Response: the continuation stream
+```
+
+Approved tools execute; denied ones are skipped and the turn continues — a denial is an *answer*, not a cancellation, so the agent can say what it will do instead.
+
+### Client-handled tools
+
+A tool with no `execute` (an `askUser`-style questionnaire) pauses the same way and resumes with `applyToolResult`:
+
+```ts
+await runtime.applyToolResult({ chatId, principal, toolCallId, output });
+```
+
+If other client tool calls in the same step still need results, this returns an empty `200` and waits for them.
+
+### Through subagents
+
+A gated tool *inside* a subagent suspends the parent turn and surfaces to the same human — it does not auto-approve out of sight. Interactive top-level turns propagate their approval mode down; autonomous ones (cron, `runAgent`) auto-approve, which is the correct default when there is no human present.
+
+<Callout type="warn" title="Reversibility is architectural">
+An agent can only offer undo if the harness kept a checkpoint. "Approve the irreversible, make the rest reversible" is good design advice that depends on infrastructure you have to have built first — the log is what makes it possible here.
+</Callout>
+
+## Compaction as an operation
+
+Long-lived chats need their projection trimmed. See [Turn inputs](/docs/turn-inputs#compaction) — worth running on a schedule for chats that never end, rather than waiting for a context-window error.

@@ -2,30 +2,44 @@
 
 The framework core for building agents on the **AI SDK v7** — the runtime, the message/identity model, and the pluggable seams everything else plugs into. Dependency-light and host-agnostic (no HTTP framework, no DB, no provider SDKs).
 
-## What it does
+📖 **Full documentation: [`apps/docs`](../../apps/docs)** — run `pnpm --filter @intentface/latch-docs dev` and open http://localhost:3100/docs.
 
-- **Runtime** (`createRuntime`) — the composition root + operations facade. Runs one agent turn with a `ToolLoopAgent`, streams UIMessage parts, persists messages/runs/usage, and handles:
-  - **Approvals** (HITL): a turn pauses on a gated tool (`applyApproval` resumes it).
-  - **Durability** (opt-in): run leases + heartbeats + a cron reaper (`tick`/`sweep`) re-drive interrupted runs.
-  - **Subagents**: a `spawn_agent` tool that runs another agent in an isolated child run.
-  - **Schedules**: cron/one-shot agent runs (`schedule`/`runDue`) via a pluggable cron seam.
-- **Message model** — `AppMessage` = a typed AI SDK `UIMessage` with `metadata` (visibility, usage, cost, model). The source of truth; usage/cost incl. cached-prompt split live here.
-- **Seams** (interfaces the platform fills): `StorageAdapter`, `ConnectionRegistry`, `Vault`, `Pricing`, `MemoryProvider` (agents declaring `memory` get an injected index block + scope-bound recall/save tools — see `@intentface/latch-memory`), the `cron`/`sandbox`/`harnessTools`/`resolveProviderTools` runtime hooks, and `Principal` (opaque identity — authz is the integrator's job).
-- **Helpers** — `defineAgent`, `defineContext`, `mergeConnections`, `computeCost`/`staticPricing`, projections (`toModelMessages`/`toClientMessages`).
-
-## Usage
+## In one screen
 
 ```ts
-import { createRuntime, defineAgent } from "@intentface/latch-core";
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
 
 const runtime = createRuntime<Principal, Ctx>({
-  storage, context, agents, connections,
-  pricing, sandbox, harnessTools, cron, durability: { enabled: true },
+  storage, // chats, messages, runs, usage, schedules
+  context, // per-turn RuntimeContext built from the principal
+  agents, // name → agent factory
+  // …optional seams: pricing, connections, memory, cron, sandbox, telemetry
 });
 
-const res = await runtime.handleChat({ agent: "assistant", principal, message });
+const response = await runtime.handleChat({ agent: "assistant", principal, message });
 ```
+
+## What it does
+
+- **Runtime** (`createRuntime`) — composition root + operations facade. Runs one agent turn with a `ToolLoopAgent`, streams `UIMessage` parts, persists messages/runs/usage, and handles approvals (HITL), durability (leases + reaper), subagents, and schedules.
+- **Message model** — `AppMessage` = a typed AI SDK `UIMessage`. The source of truth; two axes (`visibility`, `sendToModel`) drive the client and model projections.
+- **Seams** — `StorageAdapter`, `ConnectionRegistry`, `Vault`, `Pricing`, `MemoryProvider`, plus the `cron` / `sandbox` / `harnessTools` / `telemetry` hooks. `Principal` stays opaque: authz is the integrator's job.
+- **Helpers** — `defineAgent`, `defineContext`, `mergeConnections`, `computeCost` / `staticPricing`, `toModelMessages` / `toClientMessages`.
+
+## Docs map
+
+| Page | Covers |
+| --- | --- |
+| Introduction | what it is, the adoption tiers, a minimal runtime |
+| Runtime | every config field, every operation, what a turn does in order |
+| Agents | `defineAgent`, capability flags, subagents, dynamic agents |
+| Turn inputs | principal, context, messages, projections, compaction |
+| Storage | the `StorageAdapter` contract and the guarantees it must make |
+| Operations | durability, schedules, human-in-the-loop |
+| Seams | connections, vault, memory, pricing, telemetry, sandbox |
+
+Runnable examples live in [`apps/example`](../../apps/example) — 23 smoke scripts covering persistence, durability, resume, approvals, MCP, vault, cost and observability.
 
 ## Where it fits
 
-The base of the `@intentface/latch-*` stack. Mount it over HTTP with `@intentface/latch-server`; persist with `@intentface/latch-drizzle`; add tools via `@intentface/latch-mcp` / `@intentface/latch-openapi`; reach chat platforms with `@intentface/latch-channels`.
+The base of the `@intentface/latch-*` stack. Mount it over HTTP with `latch-server`; persist with `latch-drizzle`; add tools via `latch-mcp` / `latch-openapi`; reach chat platforms with `latch-channels`. Chat UI primitives live in a separate repo, [`@intentface/chat`](https://github.com/Intentface/intentface-chat).

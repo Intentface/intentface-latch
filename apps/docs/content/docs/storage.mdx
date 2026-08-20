@@ -1,0 +1,105 @@
+---
+title: Storage
+description: The StorageAdapter contract — the one seam you can't omit, and the guarantees it has to make.
+---
+
+Storage is the only required seam with real behavioural obligations. `@intentface/latch-drizzle` implements it for Postgres and SQLite; this page is what you need if you're writing another one, or debugging one.
+
+```ts
+createRuntime({ storage, context, agents });
+```
+
+## What it stores
+
+Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every read is scoped by it.
+
+| Record | Holds |
+| --- | --- |
+| `ChatRecord` | id, owner, agent, title, `kind`, timestamps |
+| `RunRecord` | status, identity blob, lease fields, attempt count, token usage, cost, error |
+| `RunLease` | `{ owner, fencingToken }` — proof of single-writer ownership |
+| `UsageRecord` | per-run token/cost row for billing rollups |
+| `ScheduleRecord` | cron, timezone, prompt, opaque `delivery`, `nextRunAt`, lease fields |
+
+Two fields are **opaque and must round-trip byte-for-byte**: `RunRecord.identity` (the serialized principal) and `ScheduleRecord.delivery` (the host's delivery target). Core never interprets either.
+
+`ChatRecord.kind` is an open vocabulary: `"user"` for conversations, `"internal"` for runtime-created sub-threads (the `sub_…` chats `spawn_agent` mints). `listChats({ kind: "user" })` is how a sidebar hides the machinery.
+
+## The methods
+
+```ts
+interface StorageAdapter<P> {
+  // Chats
+  createChat, getChat, listChats
+  // Messages
+  loadMessages, appendMessages
+  // Runs
+  createRun, updateRun, getRun, listRuns
+  // Durability
+  claimRun, heartbeatRun, reclaimRun, reapExpiredRuns
+  // Usage
+  recordUsage
+  // Schedules
+  createSchedule, listSchedules, deleteSchedule, bumpSchedule,
+  claimDueSchedules, completeSchedule
+}
+```
+
+## Guarantees you must provide
+
+These are what make the runtime safe on multiple nodes. Getting them wrong produces bugs that only appear under concurrency — the expensive kind.
+
+### Claims are atomic and exactly-once
+
+`claimRun` and `claimDueSchedules` must be **single atomic transitions** (one conditional `UPDATE … WHERE`), not read-then-write. Every node's cron fires `sweep()` and `runDue()` concurrently; correctness comes entirely from the database refusing the second claimant.
+
+Get this wrong and you get double-fired schedules and two workers streaming into the same run.
+
+### Fencing tokens gate stale writers
+
+`RunLease` carries a monotonic `fencingToken`, bumped on every claim. Guarded writes must land **only** if `(owner, fencingToken)` still match the row.
+
+The scenario: a worker's lease expires (it was slow, not dead), the reaper reassigns the run, and then the original worker wakes up and tries to write. Without fencing it overwrites newer state. This is why the token exists and why it must be checked in the `WHERE` clause, not in application code.
+
+### Ownership scoping is not optional
+
+Every read takes a principal and must filter by the derived owner key. `getRun` in particular is a **direct, ownership-scoped lookup** — not a capped scan — so ownership checks stay correct on arbitrarily old runs.
+
+### Chat id collisions surface as a conflict
+
+`createChat` must throw `ChatConflictError` when the id exists. Clients supply chat ids, so a caller can collide with a chat they don't own: the scoped `getChat` misses, and the insert races into the primary key. The typed error is what lets the HTTP layer answer `409` instead of `500`.
+
+```ts
+import { ChatConflictError } from "@intentface/latch-core";
+
+try {
+  await storage.createChat(principal, { agent, id });
+} catch (error) {
+  if (error instanceof ChatConflictError) return new Response(null, { status: 409 });
+  throw error;
+}
+```
+
+### Messages append, never mutate
+
+`appendMessages` is the write path. Approval decisions, tool results and compaction boundaries are all recorded as appended message state — the log is the source of truth, and history is not rewritten in place.
+
+## Using the shipped adapter
+
+```ts
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+
+const client = createClient({ url: "file:local.db" });
+const db = drizzle(client, { schema });
+await migrate(db);
+
+const storage = createSqliteAdapter(db, { owner });
+```
+
+The adapter takes the db, not a connection string — your app owns the connection and the pool. Tables are prefixed `latch_*`, and the package ships the migrations; consume those rather than hand-declaring the schema in your own migration folder.
+
+<Callout title="A concurrency test is worth more than a unit test here">
+The failure modes above are invisible to single-threaded tests. `apps/example/src/durability.smoke.ts` and `resume.smoke.ts` exercise claim, heartbeat, reap and resume against a real database; point them at a new adapter before trusting it.
+</Callout>

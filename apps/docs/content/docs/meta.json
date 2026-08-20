@@ -1,0 +1,12 @@
+{
+  "title": "Latch",
+  "pages": [
+    "index",
+    "runtime",
+    "agents",
+    "turn-inputs",
+    "storage",
+    "operations",
+    "seams"
+  ]
+}

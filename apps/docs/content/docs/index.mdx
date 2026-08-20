@@ -1,0 +1,105 @@
+---
+title: Introduction
+description: Latch is the reusable backend for building, persisting and operating agents — embedded in your own stack.
+---
+
+Latch is a **backend framework for agent products**, built on the Vercel AI SDK. It exists because every agent feature needs the same plumbing — message persistence, a tool loop, per-tenant context, approvals, durability, cost accounting, MCP wiring — and rebuilding that per project is where the interesting work goes to die.
+
+It is a **library, not a platform**. It runs inside your backend, behind your auth, against your database, on serverless or a VM. Nothing about it requires a resident process or a second distributed system.
+
+## What you get
+
+- **`createRuntime`** — the composition root and operations facade. One turn, streamed as AI SDK `UIMessage` parts, with messages/runs/usage persisted.
+- **An append-only run log** — state is a fold of it, so streaming, resume, audit and cost are all reads of the same record.
+- **Human-in-the-loop** as a *run state* — a gated tool suspends the run; a decision resumes it, even through delegation to subagents.
+- **Durability** without a workflow engine — run leases + heartbeats + a cron-driven reaper.
+- **Schedules** — cron/one-shot agent runs, multi-tenant, claimed exactly once.
+- **Per-run cost** — token usage priced per model, including the cached-prompt split.
+- **Seams for everything else** — storage, connections (MCP/OpenAPI), vault, memory, sandbox, telemetry, pricing.
+
+## Adoption tiers
+
+Each tier is additive. Moving up never requires a rewrite or a data migration.
+
+| Tier | Add | Infrastructure | You get |
+| --- | --- | --- | --- |
+| **0 — Stateless** | `latch-core` | none | `defineAgent` + context + tools + streaming. Roughly the AI SDK with ergonomics. Runs in any serverless function. |
+| **1 — Persistence** | `+ latch-drizzle` + a database | a DB | Run-to-completion in one invocation, with messages, runs, token usage and cost persisted. No durability machinery. |
+| **2 — Durability** | `+ a cron` | the DB + a scheduled tick | Runs survive a crash: lease, heartbeat, reaper, resume-from-history. |
+
+MCP tools, workspaces, memory, scheduling and channels are independent opt-ins at any tier.
+
+<Callout title="Start at the tier you need">
+Tier 0 is a single file and no infrastructure. Most teams should ship that first, then add persistence when a conversation needs to outlive a request.
+</Callout>
+
+## Install
+
+The packages are not on the public npm registry yet. Inside this monorepo they resolve as workspace dependencies:
+
+```json title="package.json"
+{
+  "dependencies": {
+    "@intentface/latch-core": "workspace:*",
+    "@intentface/latch-drizzle": "workspace:*"
+  }
+}
+```
+
+`ai` (v7+) is a peer dependency — your app owns the version. `zod` v4 is the only runtime dependency of core.
+
+## A minimal runtime
+
+Tier 0, no database. Everything here is real API; the executable version of this wiring lives in `apps/example/src/setup.ts`.
+
+```ts title="latch.ts"
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { anthropic } from "@ai-sdk/anthropic";
+
+// Your identity type. Latch never interprets it — see Turn inputs.
+interface Principal {
+  orgId: string;
+  userId?: string;
+}
+
+const context = defineContext<Principal, { orgId: string }>({
+  build: ({ principal }) => ({ orgId: principal.orgId }),
+});
+
+const agents = {
+  assistant: defineAgent<Principal>(() => ({
+    model: anthropic("claude-sonnet-4-6"),
+    instructions: "You are a helpful assistant.",
+  })),
+};
+
+export const runtime = createRuntime<Principal, { orgId: string }>({
+  storage,   // see Storage
+  context,
+  agents,
+});
+```
+
+Then run a turn from a route — the return value is a streaming `Response`:
+
+```ts title="app/api/chat/route.ts"
+export async function POST(request: Request) {
+  const { chatId, message } = await request.json();
+  const principal = await authenticate(request); // yours
+
+  return runtime.handleChat({ agent: "assistant", chatId, principal, message });
+}
+```
+
+## Where to go next
+
+- **[Runtime](/docs/runtime)** — every config field and every operation.
+- **[Agents](/docs/agents)** — `defineAgent` and the capability flags.
+- **[Turn inputs](/docs/turn-inputs)** — principal, context, and the three views of a message.
+- **[Storage](/docs/storage)** — the adapter contract, if you're writing one.
+- **[Operations](/docs/operations)** — durability, schedules, approvals.
+- **[Seams](/docs/seams)** — memory, connections, vault, sandbox, telemetry, pricing.
+
+<Callout type="info" title="Reading this as an agent">
+Append `.md` to any page URL for the markdown source, and start from `/llms.txt` for an index of every page.
+</Callout>
