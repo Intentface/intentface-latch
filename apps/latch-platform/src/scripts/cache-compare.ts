@@ -43,7 +43,11 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--agent") out.agent = next();
     else if (a === "--set") out.set = next();
     else if (a === "--prompt") out.prompts.push(next());
-    else if (a === "--repeats") out.repeats = Math.max(1, Number(next()));
+    else if (a === "--repeats") {
+      const n = Number(next());
+      if (!Number.isInteger(n) || n < 1) throw new Error(`--repeats must be a positive integer, got: ${n}`);
+      out.repeats = n;
+    }
     else throw new Error(`unknown arg: ${a}`);
   }
   if (!out.org || !out.agent) {
@@ -76,8 +80,19 @@ async function runArm(input: {
     agent: input.agent,
     cases: input.cases,
     promptCaching: input.promptCaching,
+    // Serialized on purpose: parallel runs in the ON arm race the first cache
+    // write (both miss, both pay the write premium), understating the hit rate.
+    concurrency: 1,
     onAttempt: (done, total) => console.log(`[${input.label}] attempt ${done}/${total}`),
   });
+
+  // A comparison over errored runs is noise, not data — bail loudly.
+  const errored = results
+    .flatMap((r) => (r.attempts?.length ? r.attempts : [r]))
+    .filter((a) => a.reasons.includes("run errored")).length;
+  if (errored > 0) {
+    throw new Error(`[${input.label}] ${errored} attempt(s) errored — aborting the comparison`);
+  }
 
   // Read the usage the arm's runs recorded — the thread ids tie results to
   // their `latch_runs` rows (one turn each; subagent turns land in sub-chats

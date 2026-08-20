@@ -169,9 +169,10 @@ export async function getLatch(): Promise<{
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
   // (`[org]`) — used for org-level credentials.
   const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
-  // The serialized form the drizzle adapter stores in owner columns — raw-SQL
-  // stores (caching stats) and per-principal cache keys must match it exactly.
-  const ownerKeyStr = (p: Principal) => owner(p).map(encodeURIComponent).join("/");
+  // The serialized form the drizzle adapter stores in owner columns is the
+  // same derivation as `ownerTagOf` — raw-SQL stores (caching stats) and
+  // per-principal cache keys reuse it so all three can never drift apart.
+  const ownerKeyStr = ownerTagOf;
 
   const db = drizzle(client, { schema }); // adapters take a pre-built drizzle db
   const storage = createSqliteAdapter<Principal>(db, { owner });

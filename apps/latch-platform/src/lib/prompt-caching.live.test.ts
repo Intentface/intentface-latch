@@ -43,12 +43,15 @@ describe.skipIf(!live)("prompt caching (LIVE Anthropic calls)", () => {
     };
     markLastFunctionTool(tools, plan.toolProviderOptions!);
 
+    // Unique per invocation: a rerun inside the 5m TTL would otherwise find
+    // the PREVIOUS run's cache and report a read (not a write) on turn 1.
+    const stamp = `Test invocation ${Date.now()}-${Math.random().toString(36).slice(2)}.`;
     const agent = new ToolLoopAgent({
       model: anthropic(MODEL_ID),
       instructions: [
         {
           role: "system",
-          content: `You are a terse test agent. Answer in one short sentence.\n\n${PADDING}`,
+          content: `You are a terse test agent. Answer in one short sentence.\n${stamp}\n\n${PADDING}`,
           providerOptions: plan.systemProviderOptions,
         },
         { role: "system", content: currentDateLine() },

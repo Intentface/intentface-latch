@@ -78,9 +78,25 @@ export function promptCachingPlanFor(
     const key = opts.cacheKeySuffix
       ? `latch:agent:${opts.agent}:${opts.cacheKeySuffix}`
       : `latch:agent:${opts.agent}`;
-    return { requestProviderOptions: { openai: { promptCacheKey: key } } };
+    // OpenAI caps prompt_cache_key at 64 chars and 400s the whole turn past
+    // it — agent names and principal keys are unbounded, so an over-long key
+    // collapses to a deterministic hash of the full key material (routing
+    // only needs stability, not readability).
+    const bounded = key.length <= 64 ? key : `latch:${fnv1a64(key)}`;
+    return { requestProviderOptions: { openai: { promptCacheKey: bounded } } };
   }
   return undefined;
+}
+
+/** FNV-1a 64-bit over a string — dependency-free stable fingerprint. */
+function fnv1a64(input: string): string {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= BigInt(input.charCodeAt(i));
+    hash = (hash * prime) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
 
 /**
@@ -116,14 +132,7 @@ export function mergeProviderOptions(
  * across a chat's turns, one of the main prompt-cache invalidators.
  */
 export function toolsetHash(names: Iterable<string>): string {
-  const sorted = [...names].sort().join(",");
-  let hash = 0xcbf29ce484222325n;
-  const prime = 0x100000001b3n;
-  for (let i = 0; i < sorted.length; i++) {
-    hash ^= BigInt(sorted.charCodeAt(i));
-    hash = (hash * prime) & 0xffffffffffffffffn;
-  }
-  return hash.toString(16).padStart(16, "0");
+  return fnv1a64([...names].sort().join(","));
 }
 
 /**

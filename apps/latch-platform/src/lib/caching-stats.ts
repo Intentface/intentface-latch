@@ -94,6 +94,10 @@ export function createCachingStats(deps: { client: Client; pricing: Pricing }) {
   const { client, pricing } = deps;
 
   async function loadRuns(ownerKey: string, sinceMs: number): Promise<RunRow[]> {
+    // Inner select: cap by RECENCY (a flat LIMIT on the chat-ordered rows
+    // would drop whole recent chats once the window overflows). Usage join is
+    // grouped to one row per run — run_id isn't unique in latch_usage, and a
+    // duplicate row there must not double-count the run.
     const res = await client.execute({
       sql: `SELECT r.agent AS agent, r.chat_id AS chat_id, r.started_at AS started_at,
                    r.ended_at AS ended_at,
@@ -103,15 +107,20 @@ export function createCachingStats(deps: { client: Client; pricing: Pricing }) {
                    COALESCE(r.usage_cache_write_tokens, 0) AS cache_write,
                    COALESCE(r.cost_total, 0) AS cost,
                    r.tools_hash AS tools_hash, u.model AS model
-            FROM latch_runs r
-            JOIN latch_chats c ON c.id = r.chat_id
-            LEFT JOIN latch_usage u ON u.run_id = r.id
-            WHERE c.owner = ? AND c.kind = 'user'
-              AND COALESCE(r.kind, 'turn') = 'turn'
-              AND r.status IN ('completed', 'awaiting_input')
-              AND r.started_at >= ?
-            ORDER BY r.chat_id, r.started_at
-            LIMIT 20000`,
+            FROM (
+              SELECT r.* FROM latch_runs r
+              JOIN latch_chats c ON c.id = r.chat_id
+              WHERE c.owner = ? AND c.kind = 'user'
+                AND COALESCE(r.kind, 'turn') = 'turn'
+                AND r.status IN ('completed', 'awaiting_input')
+                AND r.started_at >= ?
+              ORDER BY r.started_at DESC
+              LIMIT 20000
+            ) r
+            LEFT JOIN (
+              SELECT run_id, MIN(model) AS model FROM latch_usage GROUP BY run_id
+            ) u ON u.run_id = r.id
+            ORDER BY r.chat_id, r.started_at`,
       args: [ownerKey, sinceMs],
     });
     return res.rows.map((row) => ({

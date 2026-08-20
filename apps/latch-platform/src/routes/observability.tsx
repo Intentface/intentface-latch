@@ -23,13 +23,17 @@ export const Route = createFileRoute("/observability")({
     const principal = await currentPrincipalFn();
     if (!principal) throw redirect({ to: "/login" });
   },
-  loader: async () => ({
-    feed: await listObservabilityFn({ data: {} }),
-    agents: await listAgentsFn(),
-    // Per-agent cache hit rate + lint suggestions (own runs, 7d). Loaded once —
-    // unlike the trace feed this moves slowly, so it isn't polled.
-    caching: await cachingStatsFn(),
-  }),
+  loader: async () => {
+    // Independent server fns — fetch concurrently. `caching` (per-agent hit
+    // rate + lint, own runs, 7d) loads once; unlike the trace feed it moves
+    // slowly, so it isn't polled.
+    const [feed, agents, caching] = await Promise.all([
+      listObservabilityFn({ data: {} }),
+      listAgentsFn(),
+      cachingStatsFn(),
+    ]);
+    return { feed, agents, caching };
+  },
   component: ObservabilityPage,
 });
 
