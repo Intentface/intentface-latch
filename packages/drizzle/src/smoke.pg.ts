@@ -54,11 +54,12 @@ async function main() {
   const otherOrg = await store.loadMessages({ org: "org_b" }, chat.id);
   assert(otherOrg.length === 0, "owner isolation (org_b sees nothing)");
 
-  const run = await store.createRun(me, { chatId: chat.id, agent: "support" });
+  const run = await store.createRun(me, { chatId: chat.id, agent: "support", kind: "turn" });
   await store.updateRun(run.id, {
     status: "completed",
     usageInputTokens: 5,
     usageOutputTokens: 3,
+    toolsHash: "cafebabecafebabe",
     endedAt: Date.now(),
   });
   await store.recordUsage(me, {
@@ -66,10 +67,14 @@ async function main() {
     model: "mock",
     inputTokens: 5,
     outputTokens: 3,
+    cacheReadTokens: 2,
+    cacheWriteTokens: 1,
     cost: 0.0001,
   });
   const gotRun = await store.getRun(run.id);
   assert(gotRun?.status === "completed", "run updated to completed");
+  assert(gotRun?.kind === "turn", "run kind persisted");
+  assert(gotRun?.toolsHash === "cafebabecafebabe", "run toolsHash persisted");
 
   // Schedules: the opaque delivery blob and the owner-fenced "run now" bump.
   // Worth running on BOTH dialects — `delivery` is jsonb here and json-in-text

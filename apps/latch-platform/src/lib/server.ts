@@ -152,6 +152,29 @@ export const listRunsFn = createServerFn({ method: "GET" }).handler(async () => 
   }));
 });
 
+/**
+ * Per-agent prompt-cache stats + lint suggestions for /caching. Scoped to the
+ * caller's own runs (the same boundary as /runs); agent configs feed the
+ * config-dependent lint rules (R1/R6/R8).
+ */
+export const cachingStatsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return { agents: [], windowDays: 7 };
+  const { cachingStats, ownerKeyFor, agentStore } = await getLatch();
+  const records = await agentStore.listRecords(principal);
+  const agents = await cachingStats.statsFor({
+    ownerKey: ownerKeyFor(principal),
+    windowDays: 7,
+    agents: records.map((r) => ({
+      name: r.name,
+      modelId: r.modelId,
+      instructions: r.instructions,
+      memoryEnabled: !!r.exec?.memory,
+    })),
+  });
+  return { agents, windowDays: 7 };
+});
+
 /** Client-projected history for one chat (useChat initial messages). */
 export const loadHistoryFn = createServerFn({ method: "GET" })
   .validator((chatId: string) => chatId)

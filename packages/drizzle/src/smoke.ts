@@ -56,7 +56,7 @@ async function main() {
   assert(otherOrg.length === 0, "owner isolation (org_b sees nothing)");
 
   // Run + identity + usage.
-  const run = await store.createRun(me, { chatId: chat.id, agent: "support" });
+  const run = await store.createRun(me, { chatId: chat.id, agent: "support", kind: "turn" });
   assert(
     JSON.stringify(run.identity) === JSON.stringify(me),
     "run stores the identity blob (for resume)",
@@ -65,6 +65,7 @@ async function main() {
     status: "completed",
     usageInputTokens: 5,
     usageOutputTokens: 3,
+    toolsHash: "cafebabecafebabe",
     endedAt: Date.now(),
   });
   await store.recordUsage(me, {
@@ -72,10 +73,14 @@ async function main() {
     model: "mock",
     inputTokens: 5,
     outputTokens: 3,
+    cacheReadTokens: 2,
+    cacheWriteTokens: 1,
     cost: 0.0001,
   });
   const gotRun = await store.getRun(run.id);
   assert(gotRun?.status === "completed", "run updated to completed");
+  assert(gotRun?.kind === "turn", "run kind persisted");
+  assert(gotRun?.toolsHash === "cafebabecafebabe", "run toolsHash persisted");
 
   // Schedules: the opaque delivery blob and the owner-fenced "run now" bump.
   await scheduleSmoke({ store, me, other: { org: "org_b", user: "user_2" }, assert });

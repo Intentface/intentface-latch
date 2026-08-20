@@ -26,12 +26,15 @@ export async function runEvalCases({
   judgeModel,
   onResult,
   onAttempt,
+  promptCaching,
 }: {
   runtime: Pick<Runtime<Principal>, "runAgent" | "loadHistory">;
   principal: Principal;
   agent: string;
   cases: EvalCase[];
   concurrency?: number;
+  /** Per-run prompt-caching override — the A/B lever for cache-compare. */
+  promptCaching?: boolean;
   /** Pinned judge for rubric criteria — required iff any case declares a rubric. */
   judgeModel?: LanguageModel;
   /** Fires as each CASE finishes all its attempts (completion order). */
@@ -46,6 +49,7 @@ export async function runEvalCases({
         agent,
         prompt: c.input,
         blockGated: true,
+        ...(promptCaching !== undefined ? { promptCaching } : {}),
       });
       const history = await runtime.loadHistory({ chatId: threadId, principal });
       const toolCalls = extractToolCalls(history);

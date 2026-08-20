@@ -19,4 +19,5 @@ export * from "./vault.js";
 export * from "./projections.js";
 export * from "./compaction.js";
 export * from "./pricing.js";
+export * from "./prompt-caching.js";
 export * from "./telemetry.js";

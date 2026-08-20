@@ -66,6 +66,8 @@ import {
 } from "./google-workspace";
 import { resolveProviderTools } from "./provider-tools";
 import { makeResolveReasoningOptions } from "./reasoning";
+import { makeResolvePromptCaching } from "./prompt-caching";
+import { createCachingStats } from "./caching-stats";
 
 /** Our typed runtime context (built per turn from the principal). */
 interface Ctx {
@@ -110,6 +112,10 @@ let cached:
       runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
+      /** Per-agent prompt-cache stats + lint for /caching. */
+      cachingStats: ReturnType<typeof createCachingStats>;
+      /** The adapter's serialized owner key for a principal (raw-SQL scoping). */
+      ownerKeyFor: (p: Principal) => string;
       handler: LatchHandler;
       memoryStore: MemoryStore<Principal>;
       memoryJobs: MemoryJobStore;
@@ -136,6 +142,8 @@ export async function getLatch(): Promise<{
   runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
+  cachingStats: ReturnType<typeof createCachingStats>;
+  ownerKeyFor: (p: Principal) => string;
   handler: LatchHandler;
   memoryStore: MemoryStore<Principal>;
   memoryJobs: MemoryJobStore;
@@ -161,6 +169,9 @@ export async function getLatch(): Promise<{
   // (`[org,user]`); a userId-stripped principal yields the org-shared owner
   // (`[org]`) — used for org-level credentials.
   const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
+  // The serialized form the drizzle adapter stores in owner columns — raw-SQL
+  // stores (caching stats) and per-principal cache keys must match it exactly.
+  const ownerKeyStr = (p: Principal) => owner(p).map(encodeURIComponent).join("/");
 
   const db = drizzle(client, { schema }); // adapters take a pre-built drizzle db
   const storage = createSqliteAdapter<Principal>(db, { owner });
@@ -468,6 +479,17 @@ export async function getLatch(): Promise<{
     resolveProviderTools,
     // Per-agent reasoning effort → provider options (gated to reasoning models).
     resolveReasoningOptions: makeResolveReasoningOptions(catalog.models),
+    // Prompt caching: explicit breakpoints for Anthropic, a cache routing key
+    // for OpenAI (see lib/prompt-caching.ts). LATCH_PROMPT_CACHING=0 disables
+    // it platform-wide (the control arm of a before/after comparison).
+    ...(process.env.LATCH_PROMPT_CACHING !== "0"
+      ? {
+          resolvePromptCaching: makeResolvePromptCaching<Principal>(
+            catalog.models,
+            ownerKeyStr,
+          ),
+        }
+      : {}),
     // Langfuse observability (opt-in via LANGFUSE_* env): every run becomes a
     // trace tagged owner/agent/run; attached-eval judges + user feedback land
     // on it as scores. Absent keys → undefined → zero behavior change.
@@ -580,6 +602,8 @@ export async function getLatch(): Promise<{
     runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
+    cachingStats: createCachingStats({ client, pricing: catalog.pricing }),
+    ownerKeyFor: ownerKeyStr,
     handler,
     memoryStore,
     memoryJobs,

@@ -31,7 +31,11 @@ function RunsPage() {
   const runs = Route.useLoaderData();
   const totalCost = runs.reduce((s, r) => s + r.cost, 0);
   const totalTokens = runs.reduce((s, r) => s + r.inputTokens + r.outputTokens, 0);
+  const totalInput = runs.reduce((s, r) => s + r.inputTokens, 0);
   const totalCached = runs.reduce((s, r) => s + (r.cacheReadTokens ?? 0), 0);
+  // Headline cache effectiveness: reads / total input (input is the TOTAL,
+  // cache reads included, so this is a plain share).
+  const hitRate = totalInput > 0 ? totalCached / totalInput : 0;
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">
@@ -39,8 +43,13 @@ function RunsPage() {
         <h1 className="text-lg font-semibold">Runs</h1>
         <div className="text-muted-foreground text-sm">
           {runs.length} runs · {totalTokens.toLocaleString()} tokens
-          {totalCached > 0 && <> · {totalCached.toLocaleString()} cached</>} · $
-          {totalCost.toFixed(4)}
+          {totalCached > 0 && (
+            <>
+              {" "}
+              · {totalCached.toLocaleString()} cached ({(hitRate * 100).toFixed(0)}% hit)
+            </>
+          )}{" "}
+          · ${totalCost.toFixed(4)}
         </div>
       </div>
 

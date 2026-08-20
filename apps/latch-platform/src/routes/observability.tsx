@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { ExternalLink, ThumbsUp, EyeOff } from "lucide-react";
-import { currentPrincipalFn, listAgentsFn, listObservabilityFn } from "@/lib/server";
+import {
+  cachingStatsFn,
+  currentPrincipalFn,
+  listAgentsFn,
+  listObservabilityFn,
+} from "@/lib/server";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -21,6 +26,9 @@ export const Route = createFileRoute("/observability")({
   loader: async () => ({
     feed: await listObservabilityFn({ data: {} }),
     agents: await listAgentsFn(),
+    // Per-agent cache hit rate + lint suggestions (own runs, 7d). Loaded once —
+    // unlike the trace feed this moves slowly, so it isn't polled.
+    caching: await cachingStatsFn(),
   }),
   component: ObservabilityPage,
 });
@@ -166,6 +174,37 @@ function ObservabilityPage() {
               {a.name}: {a.average.toFixed(2)} (n={a.count})
             </Badge>
           ))}
+        </div>
+      )}
+
+      {/* Prompt-caching health per agent (own runs, 7d): hit rate + lint rule
+          badges — hover a rule code for the explanation. Respects the agent
+          filter above. */}
+      {initial.caching.agents.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted-foreground text-xs">
+            caching ({initial.caching.windowDays}d):
+          </span>
+          {initial.caching.agents
+            .filter((c) => !agent || c.agent === agent)
+            .map((c) => (
+              <Badge key={c.agent} variant="outline" className="gap-1.5">
+                {c.agent}: {(c.hitRate * 100).toFixed(0)}%
+                {c.suggestions.map((s) => (
+                  <span
+                    key={s.rule}
+                    title={s.message}
+                    className={`cursor-help ${
+                      s.severity === "warn"
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {s.rule}
+                  </span>
+                ))}
+              </Badge>
+            ))}
         </div>
       )}
 

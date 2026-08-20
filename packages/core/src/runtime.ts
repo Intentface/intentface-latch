@@ -32,6 +32,12 @@ import {
 } from "./projections.js";
 import { summarizeForCompaction } from "./compaction.js";
 import { computeCost, type Pricing } from "./pricing.js";
+import {
+  markLastFunctionTool,
+  mergeProviderOptions,
+  toolsetHash,
+  type PromptCachingPlan,
+} from "./prompt-caching.js";
 import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import type {
   ChatRecord,
@@ -222,6 +228,19 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     effort: string,
   ) => { providerOptions?: Record<string, unknown>; maxOutputTokens?: number } | undefined;
   /**
+   * Resolve the prompt-caching plan for a model id — kept out of core (the
+   * platform owns the model catalog, so it knows the provider family; core
+   * only applies the plan). Typically implemented as
+   * `promptCachingPlanFor(providerOf(modelId), { agent, cacheKeySuffix })`.
+   * `memoryScoped` is true when the turn's system prompt is per-principal
+   * (memory-enabled agent) — use it to scope OpenAI's cache routing key.
+   * Absent hook (or `undefined` for a model) → no caching options are set.
+   */
+  resolvePromptCaching?: (
+    modelId: string,
+    args: { agent: string; memoryScoped: boolean; principal: P },
+  ) => PromptCachingPlan | undefined;
+  /**
    * Wrap a set of tools into a single code-mode tool (the model writes JS that
    * calls them as functions). Supplied by the platform (e.g. via
    * `experimental-ai-sdk-code-mode`), so core needs no QuickJS dep. Used when an
@@ -380,6 +399,12 @@ export interface Runtime<P> {
      * absent on resume.
      */
     turnContext?: unknown;
+    /**
+     * Per-turn prompt-caching override. `false` = set no caching provider
+     * options for this run (the control arm of an A/B comparison); default on
+     * when the runtime has a `resolvePromptCaching` hook.
+     */
+    promptCaching?: boolean;
   }): Promise<{ threadId: string; answer: string }>;
   /**
    * Summarize a conversation and append a compaction boundary, so later turns
@@ -1078,6 +1103,12 @@ export function createRuntime<P, RC = unknown>(
      * Only meaningful with `autoApprove` (an autonomous run).
      */
     blockGated?: boolean;
+    /**
+     * Per-turn prompt-caching override (defaults on when the runtime has a
+     * `resolvePromptCaching` hook). `false` = set no caching options this turn
+     * — the control arm of an A/B comparison.
+     */
+    promptCaching?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
     /** Telemetry linkage: the run that spawned this subagent turn (if any). */
@@ -1477,6 +1508,28 @@ export function createRuntime<P, RC = unknown>(
       ? config.resolveReasoningOptions(modelId, cfg.effort ?? "")
       : undefined;
 
+    // Prompt-caching plan for this model's provider (platform hook — see
+    // `prompt-caching.ts` for the breakpoint layout). `promptCaching: false`
+    // (e.g. the control arm of an A/B comparison) skips it for this turn only.
+    const caching =
+      args.promptCaching === false
+        ? undefined
+        : config.resolvePromptCaching?.(modelId, {
+            agent: run.agent,
+            memoryScoped: !!(cfg.memory && config.memory),
+            principal,
+          });
+    if (caching?.toolProviderOptions) {
+      markLastFunctionTool(tools, caching.toolProviderOptions, activeTools);
+    }
+    // Fingerprint the toolset the model will actually see — persisted on the
+    // run so churn across a chat's turns (a cache invalidator) is queryable.
+    const toolsHash = toolsetHash(activeTools ?? Object.keys(tools));
+    const providerOptions = mergeProviderOptions(
+      reasoning?.providerOptions,
+      caching?.requestProviderOptions,
+    );
+
     // Telemetry seam: per-run AI SDK telemetry options + trace correlation
     // identity, resolved once per turn (undefined → nothing traced).
     const telemetryMeta: TelemetryRunMeta<P> = {
@@ -1505,13 +1558,29 @@ export function createRuntime<P, RC = unknown>(
       model: cfg.model,
       // Every agent gets a trailing "today's date" line — after the memory
       // block, so it stays the tail. Day-granularity by design — see
-      // `currentDateLine` for the prompt-cache reasoning.
-      instructions: [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
+      // `currentDateLine` for the prompt-cache reasoning. With a caching plan,
+      // the instructions become a MARKED system message and the date line a
+      // separate unmarked one, so the daily flip lands after the breakpoint
+      // instead of invalidating it at midnight UTC.
+      instructions: caching?.systemProviderOptions
+        ? [
+            ...(instructions
+              ? [
+                  {
+                    role: "system",
+                    content: instructions,
+                    providerOptions: caching.systemProviderOptions,
+                  },
+                ]
+              : []),
+            { role: "system", content: currentDateLine() },
+          ]
+        : [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
       tools,
       toolApproval,
       stopWhen,
       activeTools,
-      ...(reasoning?.providerOptions ? { providerOptions: reasoning.providerOptions } : {}),
+      ...(providerOptions ? { providerOptions } : {}),
       ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
       ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
     } as ConstructorParameters<typeof ToolLoopAgent>[0]);
@@ -1772,6 +1841,7 @@ export function createRuntime<P, RC = unknown>(
               usageCacheReadTokens: cacheReadTokens || undefined,
               usageCacheWriteTokens: cacheWriteTokens || undefined,
               costTotal: cost,
+              toolsHash,
               endedAt: paused ? undefined : Date.now(),
             },
             lease,
@@ -1783,6 +1853,8 @@ export function createRuntime<P, RC = unknown>(
               model: modelId,
               inputTokens,
               outputTokens,
+              ...(cacheReadTokens ? { cacheReadTokens } : {}),
+              ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
               cost,
             });
           }
@@ -1912,7 +1984,7 @@ export function createRuntime<P, RC = unknown>(
       return { run, lease: { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } };
     }
     return {
-      run: await storage.createRun(principal, { chatId, agent: agentName }),
+      run: await storage.createRun(principal, { chatId, agent: agentName, kind: "turn" }),
       lease: undefined,
     };
   }
@@ -2321,7 +2393,13 @@ export function createRuntime<P, RC = unknown>(
     // provider mapping turns into "thinking off", so reuse the host's hook rather
     // than hardcoding provider shapes here.
     const noThinking = config.resolveReasoningOptions?.(modelId, "minimal")?.providerOptions;
-    const run = await storage.createRun(principal, { chatId, agent: chat.agent });
+    const run = await storage.createRun(principal, {
+      chatId,
+      agent: chat.agent,
+      // Not a conversational turn — stats/rollups filter on kind so a
+      // compaction's cache-less usage never depresses an agent's hit rate.
+      kind: "compaction",
+    });
     try {
       const { text, truncated, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
@@ -2385,6 +2463,8 @@ export function createRuntime<P, RC = unknown>(
         model: modelId,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        ...(usage.cacheReadTokens ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+        ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
         cost,
       });
       return { summary: text, compacted: live.length };
@@ -2526,6 +2606,7 @@ export function createRuntime<P, RC = unknown>(
     parentRunId,
     rootChatId,
     turnContext,
+    promptCaching,
   }: {
     principal: P;
     agent: string;
@@ -2533,6 +2614,8 @@ export function createRuntime<P, RC = unknown>(
     threadId?: string;
     depth: number;
     blockGated?: boolean;
+    /** Per-turn prompt-caching override (see buildTurn). */
+    promptCaching?: boolean;
     /**
      * Per-turn request payload for THIS run, passed to `context.build` and the
      * agent factory (see `HandleChatInput.turnContext`). Ephemeral — applies to
@@ -2590,6 +2673,7 @@ export function createRuntime<P, RC = unknown>(
       runtimeCtx,
       autoApprove,
       blockGated,
+      promptCaching,
       depth,
       parentRunId,
       rootChatId,
@@ -2771,8 +2855,17 @@ export function createRuntime<P, RC = unknown>(
     tick: reapTick,
     handleChat,
     runTurnStream,
-    runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext }) =>
-      runSubagent({ principal, agent, prompt, threadId, depth: 1, blockGated, turnContext }),
+    runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext, promptCaching }) =>
+      runSubagent({
+        principal,
+        agent,
+        prompt,
+        threadId,
+        depth: 1,
+        blockGated,
+        turnContext,
+        promptCaching,
+      }),
     compactChat,
     loadHistory,
     listChats,

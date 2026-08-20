@@ -25,13 +25,14 @@ const DDL = [
      lease_owner TEXT, lease_expires_at INTEGER, fencing_token INTEGER, heartbeat_at INTEGER,
      attempt INTEGER, usage_input_tokens INTEGER,
      usage_output_tokens INTEGER, usage_cache_read_tokens INTEGER, usage_cache_write_tokens INTEGER,
-     cost_total REAL, error TEXT,
+     cost_total REAL, kind TEXT, tools_hash TEXT, error TEXT,
      started_at INTEGER NOT NULL, ended_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS latch_runs_chat_idx ON latch_runs (chat_id)`,
   `CREATE INDEX IF NOT EXISTS latch_runs_reaper_idx ON latch_runs (status, lease_expires_at)`,
   `CREATE TABLE IF NOT EXISTS latch_usage (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL,
      model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+     cache_read_tokens INTEGER, cache_write_tokens INTEGER,
      cost REAL NOT NULL, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_usage_owner_idx ON latch_usage (owner)`,
   `CREATE TABLE IF NOT EXISTS latch_secrets (
@@ -86,6 +87,10 @@ const ALTERS = [
   `ALTER TABLE latch_schedules ADD COLUMN delivery TEXT`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_read_tokens INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN usage_cache_write_tokens INTEGER`,
+  `ALTER TABLE latch_runs ADD COLUMN kind TEXT`,
+  `ALTER TABLE latch_runs ADD COLUMN tools_hash TEXT`,
+  `ALTER TABLE latch_usage ADD COLUMN cache_read_tokens INTEGER`,
+  `ALTER TABLE latch_usage ADD COLUMN cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`,
   `ALTER TABLE latch_memory_chat_state ADD COLUMN last_extracted_key TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.

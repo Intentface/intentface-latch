@@ -74,6 +74,10 @@ export const runs = sqliteTable(
     usageCacheReadTokens: integer("usage_cache_read_tokens"),
     usageCacheWriteTokens: integer("usage_cache_write_tokens"),
     costTotal: real("cost_total"),
+    /** Run kind: 'turn' (default) vs 'compaction' — keeps cache/hit-rate stats clean. */
+    kind: text("kind"),
+    /** sha256 of the sorted tool names this turn sent — detects toolset churn. */
+    toolsHash: text("tools_hash"),
     error: text("error"),
     startedAt: integer("started_at").notNull(),
     endedAt: integer("ended_at"),
@@ -113,6 +117,8 @@ export const usage = sqliteTable(
     model: text("model").notNull(),
     inputTokens: integer("input_tokens").notNull(),
     outputTokens: integer("output_tokens").notNull(),
+    cacheReadTokens: integer("cache_read_tokens"),
+    cacheWriteTokens: integer("cache_write_tokens"),
     cost: real("cost").notNull(),
     createdAt: integer("created_at").notNull(),
   },
