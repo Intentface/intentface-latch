@@ -76,7 +76,8 @@ export const runs = sqliteTable(
     costTotal: real("cost_total"),
     /** Run kind: 'turn' (default) vs 'compaction' — keeps cache/hit-rate stats clean. */
     kind: text("kind"),
-    /** sha256 of the sorted tool names this turn sent — detects toolset churn. */
+    /** Opaque fingerprint of the sorted tool names this turn sent (see
+     * `toolsetHash`) — detects toolset churn. */
     toolsHash: text("tools_hash"),
     error: text("error"),
     startedAt: integer("started_at").notNull(),

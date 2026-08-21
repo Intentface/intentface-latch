@@ -81,9 +81,11 @@ export interface RunRecord {
    */
   kind?: string | null;
   /**
-   * sha256 hex of the turn's sorted tool names — same hash ⇔ same toolset, so
-   * churn across a chat's runs (MCP drops, auth-gated `connect_*` toggles) is
-   * detectable without storing the full list.
+   * Opaque fingerprint of the turn's sorted tool names — same hash ⇔ same
+   * toolset, so churn across a chat's runs (MCP drops, auth-gated `connect_*`
+   * toggles) is detectable without storing the full list. Produced by
+   * `toolsetHash` (currently 16 hex chars); treat the width as unspecified and
+   * store it as variable-length text.
    */
   toolsHash?: string | null;
   error?: string | null;
