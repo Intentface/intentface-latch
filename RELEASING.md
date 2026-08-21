@@ -29,6 +29,12 @@ driven by [changesets](https://github.com/changesets/changesets); no one runs
 So a release is always two merges: your change, then the version PR. Nothing
 publishes straight off a feature merge.
 
+`pnpm release` runs `typecheck:packages`, `test`, `build` and `verify:publish`
+before `changeset publish`, so publishing unverified packages isn't possible even
+by invoking it directly. The workflow also runs those four as separate steps —
+for legible CI output, and so a failure lands before the changesets action starts.
+Turbo caches, so the duplication is nearly free.
+
 ## Lockstep versioning
 
 Every package releases at the **same version** — `fixed: [["@intentface/latch-*"]]`

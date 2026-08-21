@@ -11,7 +11,7 @@
     "verify:publish": "node scripts/verify-publish.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "pnpm build && changeset publish"
+    "release": "pnpm typecheck:packages && pnpm test && pnpm build && pnpm verify:publish && changeset publish"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.1",

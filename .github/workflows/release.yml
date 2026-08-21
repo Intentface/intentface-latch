@@ -36,6 +36,11 @@ jobs:
       # the registry — a published version can be deprecated but not replaced.
       # Scoped to packages/* on purpose: an app's typecheck failing shouldn't
       # block a library release, and apps are not published from here.
+      #
+      # `pnpm release` re-runs all four (so a direct invocation can't skip them),
+      # but they run here as separate steps for legible per-check CI output and
+      # to fail before the changesets action does any work. Turbo caches, so the
+      # second pass costs almost nothing.
       - run: pnpm typecheck:packages
       - run: pnpm test
       - run: pnpm build
