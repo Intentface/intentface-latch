@@ -73,6 +73,11 @@ export const runs = pgTable(
     usageCacheReadTokens: integer("usage_cache_read_tokens"),
     usageCacheWriteTokens: integer("usage_cache_write_tokens"),
     costTotal: doublePrecision("cost_total"),
+    /** Run kind: 'turn' (default) vs 'compaction' — keeps cache/hit-rate stats clean. */
+    kind: text("kind"),
+    /** Opaque fingerprint of the sorted tool names this turn sent (see
+     * `toolsetHash`) — detects toolset churn. */
+    toolsHash: text("tools_hash"),
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }).notNull(),
     endedAt: bigint("ended_at", { mode: "number" }),
@@ -109,6 +114,8 @@ export const usage = pgTable(
     model: text("model").notNull(),
     inputTokens: integer("input_tokens").notNull(),
     outputTokens: integer("output_tokens").notNull(),
+    cacheReadTokens: integer("cache_read_tokens"),
+    cacheWriteTokens: integer("cache_write_tokens"),
     cost: doublePrecision("cost").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },

@@ -75,6 +75,19 @@ export interface RunRecord {
   usageCacheReadTokens?: number;
   usageCacheWriteTokens?: number;
   costTotal?: number;
+  /**
+   * Run kind: `'turn'` (default when absent) vs `'compaction'` (the runtime's
+   * internal summarize-and-mark run) — lets stats/rollups exclude non-turn runs.
+   */
+  kind?: string | null;
+  /**
+   * Opaque fingerprint of the turn's sorted tool names — same hash ⇔ same
+   * toolset, so churn across a chat's runs (MCP drops, auth-gated `connect_*`
+   * toggles) is detectable without storing the full list. Produced by
+   * `toolsetHash` (currently 16 hex chars); treat the width as unspecified and
+   * store it as variable-length text.
+   */
+  toolsHash?: string | null;
   error?: string | null;
   startedAt: number;
   endedAt?: number | null;
@@ -98,6 +111,9 @@ export interface UsageRecord {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Prompt-cache breakdown (subsets of `inputTokens`); absent = none reported. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   cost: number;
   createdAt: number;
 }
@@ -171,7 +187,10 @@ export interface StorageAdapter<P> {
 
   // runs (per-turn execution record)
   /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */
-  createRun(principal: P, input: { chatId: string; agent: string }): Promise<RunRecord>;
+  createRun(
+    principal: P,
+    input: { chatId: string; agent: string; kind?: string },
+  ): Promise<RunRecord>;
   /**
    * T2 durable: create a run already leased to `owner` (fencingToken starts at 1,
    * lease expires at now + ttlMs). `owner` here is the LEASE owner (instance id),

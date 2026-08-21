@@ -95,6 +95,8 @@ export function createSqliteAdapter<P>(
     usageCacheReadTokens: r.usageCacheReadTokens ?? undefined,
     usageCacheWriteTokens: r.usageCacheWriteTokens ?? undefined,
     costTotal: r.costTotal ?? undefined,
+    kind: r.kind,
+    toolsHash: r.toolsHash,
     error: r.error,
     startedAt: r.startedAt,
     endedAt: r.endedAt,
@@ -250,6 +252,7 @@ export function createSqliteAdapter<P>(
         agent: input.agent,
         status: "active" as RunStatus,
         identity: principal,
+        kind: input.kind,
         startedAt: now,
       };
       await db.insert(schema.runs).values(row);
@@ -399,6 +402,8 @@ export function createSqliteAdapter<P>(
         model: input.model,
         inputTokens: input.inputTokens,
         outputTokens: input.outputTokens,
+        cacheReadTokens: input.cacheReadTokens,
+        cacheWriteTokens: input.cacheWriteTokens,
         cost: input.cost,
         createdAt: Date.now(),
       });
