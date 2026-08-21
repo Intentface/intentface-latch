@@ -2,9 +2,13 @@
   "title": "Latch",
   "pages": [
     "index",
+    "install",
+    "packages",
+    "hosting",
     "runtime",
     "agents",
     "turn-inputs",
+    "principals",
     "storage",
     "operations",
     "seams"
