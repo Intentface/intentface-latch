@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit the version bump, push tags
+      pull-requests: write # open/update the "Version Packages" PR
+      packages: write # publish to GitHub Packages
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets needs history to diff against baseBranch
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # Writes an .npmrc pointing @intentface at GitHub Packages.
+          registry-url: https://npm.pkg.github.com
+          scope: "@intentface"
+
+      - run: pnpm install --frozen-lockfile
+
+      # Gate the release on what actually ships. A broken build must never reach
+      # the registry — a published version can be deprecated but not replaced.
+      # Scoped to packages/* on purpose: an app's typecheck failing shouldn't
+      # block a library release, and apps are not published from here.
+      - run: pnpm typecheck:packages
+      - run: pnpm test
+      - run: pnpm build
+
+      # Packs every package and asserts each `exports` target exists in the
+      # tarball. Catches the publish-shape bugs that are invisible in a
+      # workspace — see RELEASING.md.
+      - run: pnpm verify:publish
+
+      # With changesets present: opens/updates a version PR.
+      # With none (the version PR just merged): publishes.
+      - uses: changesets/action@v1
+        with:
+          version: pnpm version-packages
+          publish: pnpm release
+          commit: "chore(release): version packages"
+          title: "chore(release): version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `changeset publish` reads this for the registry auth.
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
