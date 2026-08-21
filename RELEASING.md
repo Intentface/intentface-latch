@@ -58,16 +58,37 @@ range overlaps the consumer's own range, and one copy of core serves both.
 (Dev dependencies stay `workspace:*` — they are never published, so a range
 there communicates nothing.)
 
+### What this does not fix
+
+A caret below 1.0.0 never spans minors: `^0.1.0` means `>=0.1.0 <0.2.0-0`, so
+`0.2.0` does not satisfy it. Under lockstep every `minor` changeset opens a new
+`0.x` line, so a consumer holding `latch-server@0.1.x` while resolving
+`latch-core@0.2.0` duplicates core again, exactly as before.
+
+**Below 1.0.0 this only dedupes patch releases within one minor line.** Two
+consequences worth keeping in mind:
+
+- Prefer `patch` over `minor` where the change honestly is one, since each minor
+  starts a fresh line consumers must cross together.
+- The durable fix is either reaching 1.0.0 (where `^1.2.0` spans every 1.x) or
+  making `latch-core` a `peerDependency` of the packages that need one shared
+  instance — the only mechanism that *guarantees* a single copy rather than
+  making duplication unlikely. Worth deciding at or before 1.0.
+
+Also note the caret is inert at `0.0.x` for the same reason: `^0.0.1` admits
+only `0.0.1`. That is why this landed before the 0.1.0 release rather than
+after — at 0.1.0 the ranges start meaning something.
+
 ## Lockstep versioning
 
 Every package releases at the **same version** — `fixed: [["@intentface/latch-*"]]`
 in `.changeset/config.json`.
 
 Matching versions across the scope is what we build, test and ship, so it is the
-combination to reach for. It is no longer the *only* safe one — that is what the
-caret ranges above are for — but it keeps the changelogs legible (one version,
-one story) and it means "upgrade the scope" is a single decision rather than a
-compatibility matrix.
+combination to reach for — and below 1.0.0 it is still the only one that holds
+across a minor bump, for the reason in the section above. It also keeps the
+changelogs legible (one version, one story) and makes "upgrade the scope" a
+single decision rather than a compatibility matrix.
 
 ## The release job installs only `packages/*`
 
