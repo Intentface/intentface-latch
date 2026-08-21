@@ -47,6 +47,24 @@ consumer who installs `latch-server@0.1.0` alongside `latch-core@0.2.0` gets
 of instanceof checks. Lockstep makes that state impossible to express: matching
 versions across the scope is the only supported combination.
 
+## The release job installs only `packages/*`
+
+`pnpm install --frozen-lockfile --filter "./packages/**" --filter "."` — the
+release builds, tests and publishes libraries, so an app's dependencies aren't
+needed.
+
+That filter is load-bearing. `apps/latch-platform` depends on
+`@intentface/chat`, published from a **different repository**. The workflow maps
+the whole `@intentface` scope to GitHub Packages, and the default `GITHUB_TOKEN`
+is scoped to *this* repo — so it can't read a package owned by another one, and a
+full install fails with `ERR_PNPM_FETCH_403`. (403, not 404: the package exists,
+the token just isn't allowed to fetch it.)
+
+If a package under `packages/*` ever takes a cross-repo `@intentface`
+dependency, either grant this repository read access to that package in its
+GitHub Packages settings, or replace `GITHUB_TOKEN` with a PAT carrying
+`read:packages`.
+
 ## Consuming the packages
 
 ```ini title=".npmrc"
