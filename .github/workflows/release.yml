@@ -26,11 +26,23 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          # Writes an .npmrc pointing @intentface at GitHub Packages.
+          # Writes an .npmrc mapping the @intentface scope to GitHub Packages and
+          # adding the auth line publishing needs. Keep `scope` — without it,
+          # setup-node repoints the DEFAULT registry, sending every install there.
           registry-url: https://npm.pkg.github.com
           scope: "@intentface"
 
-      - run: pnpm install --frozen-lockfile
+      # Only packages/* and the workspace root — the release builds, tests and
+      # publishes libraries, so an app's dependencies are dead weight here.
+      #
+      # It is also load-bearing, not just an optimisation. `apps/latch-platform`
+      # depends on `@intentface/chat`, which is published from a DIFFERENT repo.
+      # The scope mapping above sends it to GitHub Packages, where the default
+      # `GITHUB_TOKEN` — scoped to this repository — can't read it, so a full
+      # install dies on `ERR_PNPM_FETCH_403`. If a package under packages/* ever
+      # takes a cross-repo @intentface dependency, grant this repo read access to
+      # that package (or swap in a PAT with read:packages).
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "."
 
       # Gate the release on what actually ships. A broken build must never reach
       # the registry — a published version can be deprecated but not replaced.
