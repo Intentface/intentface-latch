@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Check, ChevronDown, FlaskConical, Loader2, Scale, TriangleAlert, X } from "lucide-react";
-import { cn, Message } from "@intentface/latch-ui";
-import type { AppUIMessage, ToolPart } from "@intentface/latch-ui";
+import { ChatMessageItem } from "@/components/chat/message-item";
+import type { AppUIMessage, ToolPart } from "@/lib/ai/types";
+import { cn } from "@/lib/utils";
 import type { AppMessage } from "@intentface/latch-core";
 import type { CompactCaseResult, EvalProgressData } from "@/lib/evals/store";
 import { loadHistory } from "@/lib/latch-client";
@@ -199,7 +200,15 @@ function CaseRow({ result }: { result: CompactCaseResult }) {
           {loading ? (
             <p className="text-ink-tertiary text-xs">Loading transcript…</p>
           ) : msgs && msgs.length > 0 ? (
-            msgs.map((m) => <Message key={m.id} message={m as unknown as AppUIMessage} />)
+            msgs.map((m) => (
+              <ChatMessageItem
+                key={m.id}
+                message={m as unknown as AppUIMessage}
+                isLast={false}
+                isStreaming={false}
+                readOnly
+              />
+            ))
           ) : (
             <p className="text-ink-tertiary text-xs">
               {result.threadId ? "No messages." : "No transcript for this case."}

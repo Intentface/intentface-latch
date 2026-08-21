@@ -17,13 +17,9 @@ import {
   Users,
   Wrench,
 } from "lucide-react";
-import {
-  Dialog,
-  Sidebar,
-  ThemeCustomizer,
-  useSettingsStore,
-  type ThreadAutoScrollMode,
-} from "@intentface/latch-ui";
+import { DisplaySettingsPanel } from "@/components/display-settings";
+import { Dialog } from "@/components/ui/dialog";
+import { Sidebar } from "@/components/ui/sidebar";
 import { recentChatsFn } from "@/lib/server";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { LatchLogo } from "@/components/latch-logo";
@@ -53,8 +49,6 @@ const NAV: NavItem[] = [
   { to: "/members", label: "Members", icon: Users },
 ];
 
-const ACTIVE = { className: "bg-base-active text-ink-primary" };
-
 export function AppSidebar() {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -82,21 +76,41 @@ export function AppSidebar() {
 
   return (
     <Sidebar>
-      <Sidebar.Header>
+      <Sidebar.Header className="flex-row items-center justify-between">
         <Link to="/" className="inline-flex px-1">
           <LatchLogo className="h-7 w-auto" />
         </Link>
+        <Sidebar.Trigger />
       </Sidebar.Header>
 
       <Sidebar.Content className="px-2">
         {session && (
           <Sidebar.Group>
             <Sidebar.Menu>
+              <Sidebar.MenuItem>
+                <Sidebar.MenuButton
+                  isActive={pathname === "/chat"}
+                  render={
+                    <Link to="/chat">
+                      <Plus />
+                      <span>New Chat</span>
+                    </Link>
+                  }
+                />
+              </Sidebar.MenuItem>
+            </Sidebar.Menu>
+          </Sidebar.Group>
+        )}
+
+        {session && (
+          <Sidebar.Group>
+            <Sidebar.Menu>
               {NAV.map(({ to, label, icon: Icon }) => (
                 <Sidebar.MenuItem key={to}>
                   <Sidebar.MenuButton
+                    isActive={pathname === to || pathname.startsWith(`${to}/`)}
                     render={
-                      <Link to={to} activeProps={ACTIVE}>
+                      <Link to={to}>
                         <Icon />
                         <span>{label}</span>
                       </Link>
@@ -110,21 +124,20 @@ export function AppSidebar() {
 
         {session && chats.length > 0 && (
           <Sidebar.Group>
-            <Sidebar.GroupLabel>Recent</Sidebar.GroupLabel>
+            <Sidebar.GroupLabel>Threads</Sidebar.GroupLabel>
             <Sidebar.GroupContent>
               <Sidebar.Menu>
                 {chats.map((c) => (
                   <Sidebar.MenuItem key={c.id}>
                     <Sidebar.MenuButton
-                      size="sm"
+                      isActive={pathname === `/chat/${c.id}`}
                       render={
                         <Link
                           to="/chat/$chatId"
                           params={{ chatId: c.id }}
                           search={{ agent: undefined }}
-                          activeProps={ACTIVE}
                         >
-                          <span>{c.title?.trim() || c.agent}</span>
+                          <span className="flex-1 truncate">{c.title?.trim() || c.agent}</span>
                         </Link>
                       }
                     />
@@ -243,38 +256,17 @@ function AccountMenu({
   );
 }
 
-const SCROLL_MODES: { value: ThreadAutoScrollMode; label: string }[] = [
-  { value: "follow", label: "Follow — land at top, stick while streaming" },
-  { value: "bottom", label: "Bottom — always stick to the latest" },
-  { value: "jump", label: "Jump — land at top, no auto-follow" },
-  { value: "off", label: "Off — manual scrolling" },
-];
-
-/** Settings modal: theme customizer + chat scroll behavior. Controlled. */
+/** Settings modal: the same display-options panel the chat's gear opens. */
 function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const scrollMode = useSettingsStore((s) => s.scrollMode);
-  const setScrollMode = useSettingsStore((s) => s.setScrollMode);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className="max-w-md">
-        <Dialog.Title>Settings</Dialog.Title>
-        <Dialog.Description>Theme and chat preferences.</Dialog.Description>
-        <div className="mt-5 space-y-6">
-          <ThemeCustomizer className="w-full" />
-          <div className="space-y-2">
-            <label className="text-ink-secondary text-xs font-medium">Auto-scroll</label>
-            <Select
-              className="w-full"
-              value={scrollMode}
-              onChange={(e) => setScrollMode(e.target.value as ThreadAutoScrollMode)}
-            >
-              {SCROLL_MODES.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </Select>
-          </div>
+      <Dialog.Content className="max-w-md p-0">
+        <div className="p-4 pb-0">
+          <Dialog.Title>Settings</Dialog.Title>
+          <Dialog.Description>Theme and thread preferences.</Dialog.Description>
+        </div>
+        <div className="mt-4">
+          <DisplaySettingsPanel />
         </div>
       </Dialog.Content>
     </Dialog>
