@@ -87,7 +87,14 @@ interface Principal {
 }
 
 const storage = createSqliteAdapter<Principal>(db, {
-  owner: (p) => (p.scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""]),
+  owner: (p) => {
+    if (p.scope === "org") return [p.orgId];
+    // Same rule as Pattern 1, and `?? ""` breaks it just as `!` would: every
+    // principal missing a userId would collide into one shared [orgId, ""]
+    // bucket — a cross-user leak dressed as a default.
+    if (!p.userId) throw new Error("user scope requires a userId");
+    return [p.orgId, p.userId];
+  },
 });
 ```
 
