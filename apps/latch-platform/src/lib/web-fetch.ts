@@ -25,8 +25,73 @@ const HONEST_UA = "intentface-latch-agent";
 export type WebFetchFormat = "markdown" | "text" | "html";
 
 export type WebFetchResult =
-  | { ok: true; status: number; contentType: string; content: string; truncated: boolean }
+  | { ok: true; kind: "text"; status: number; contentType: string; content: string; truncated: boolean }
+  | {
+      ok: true;
+      kind: "media";
+      status: number;
+      contentType: string;
+      /** The normalized type the model-facing file part will carry. */
+      mediaType: SupportedMediaType;
+      /** Base64-encoded bytes. */
+      data: string;
+      /** Original (pre-base64) size. */
+      bytes: number;
+    }
   | { ok: false; error: string };
+
+/**
+ * Media the fetch returns as bytes for the model to SEE rather than as decoded
+ * text: the image types every provider's vision input accepts, plus PDF
+ * (Anthropic renders it as a document block; providers without tool-result PDF
+ * support drop the part but keep the accompanying text).
+ */
+export type SupportedMediaType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/gif"
+  | "image/webp"
+  | "application/pdf";
+
+/**
+ * Anthropic caps images at 5 MB of source data; staying under it here beats a
+ * provider error after the fetch already succeeded.
+ */
+const MAX_MEDIA_SIZE = 4.5 * 1024 * 1024;
+
+/**
+ * What media the body is, if it's a type worth showing the model. The
+ * Content-Type header decides when it's one of ours; magic bytes rescue the
+ * common case of a server that lies (application/octet-stream, text/plain) —
+ * sniffing is deliberately limited to unambiguous signatures.
+ */
+export function detectMedia(contentType: string, bytes: Uint8Array): SupportedMediaType | null {
+  const declared = contentType.split(";")[0].trim().toLowerCase();
+  if (
+    declared === "image/png" ||
+    declared === "image/jpeg" ||
+    declared === "image/gif" ||
+    declared === "image/webp" ||
+    declared === "application/pdf"
+  ) {
+    return declared;
+  }
+  if (declared === "image/jpg") return "image/jpeg";
+
+  // Magic bytes, only when the declared type doesn't commit to something else
+  // textual (an HTML page that happens to start with %PDF is not a PDF).
+  if (declared.startsWith("text/") || declared.includes("html")) return null;
+  const ascii = (start: number, s: string) =>
+    bytes.length >= start + s.length &&
+    s.split("").every((ch, i) => bytes[start + i] === ch.charCodeAt(0));
+  if (ascii(0, "%PDF-")) return "application/pdf";
+  if (bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, "PNG")) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    return "image/jpeg";
+  if (ascii(0, "GIF87a") || ascii(0, "GIF89a")) return "image/gif";
+  if (ascii(0, "RIFF") && ascii(8, "WEBP")) return "image/webp";
+  return null;
+}
 
 /**
  * Full SSRF gate for one hop: protocol, the string-level blocklist, and the DNS
@@ -198,6 +263,29 @@ export async function webFetch(args: {
   }
 
   const contentType = response.headers.get("content-type") ?? "";
+
+  // Images and PDFs come back as bytes so the model can SEE them (the tool's
+  // toModelOutput turns them into provider image/document blocks). Text-decoding
+  // them — the previous behavior — produced mojibake the model couldn't use.
+  const mediaType = detectMedia(contentType, new Uint8Array(buffer));
+  if (mediaType) {
+    if (buffer.byteLength > MAX_MEDIA_SIZE) {
+      return {
+        ok: false,
+        error: `Media too large for model input (${(buffer.byteLength / (1024 * 1024)).toFixed(1)} MB, max ${MAX_MEDIA_SIZE / (1024 * 1024)} MB).`,
+      };
+    }
+    return {
+      ok: true,
+      kind: "media",
+      status: response.status,
+      contentType,
+      mediaType,
+      data: Buffer.from(buffer).toString("base64"),
+      bytes: buffer.byteLength,
+    };
+  }
+
   const isHtml = contentType.includes("text/html");
   const body = new TextDecoder().decode(buffer);
   const raw =
@@ -208,5 +296,5 @@ export async function webFetch(args: {
         : body;
 
   const { text: content, truncated } = headTruncate(raw);
-  return { ok: true, status: response.status, contentType, content, truncated };
+  return { ok: true, kind: "text", status: response.status, contentType, content, truncated };
 }

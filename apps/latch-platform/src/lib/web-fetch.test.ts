@@ -29,7 +29,7 @@ vi.mock("@intentface/latch-net/pinned", () => ({
     ),
 }));
 
-const { webFetch } = await import("./web-fetch");
+const { webFetch, detectMedia } = await import("./web-fetch");
 
 /** A redirect response; `fetch` is called with `redirect: "manual"` so we see these. */
 const redirectTo = (location: string) =>
@@ -156,5 +156,68 @@ describe("web_fetch SSRF gate", () => {
       error: "Host is not allowed.",
     });
     expect(attempted()).toEqual(["cf.example", "cf.example"]);
+  });
+});
+
+describe("media passthrough", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2]);
+  const PDF = new TextEncoder().encode("%PDF-1.7 fake body");
+
+  it("detects supported media from the content-type header", () => {
+    expect(detectMedia("image/png", new Uint8Array())).toBe("image/png");
+    expect(detectMedia("image/jpg; charset=binary", new Uint8Array())).toBe("image/jpeg");
+    expect(detectMedia("application/pdf", new Uint8Array())).toBe("application/pdf");
+    expect(detectMedia("text/html", PDF)).toBeNull(); // declared text wins over magic
+  });
+
+  it("sniffs magic bytes when the server lies with octet-stream", () => {
+    expect(detectMedia("application/octet-stream", PNG)).toBe("image/png");
+    expect(detectMedia("", JPEG)).toBe("image/jpeg");
+    expect(detectMedia("application/octet-stream", PDF)).toBe("application/pdf");
+    expect(detectMedia("application/octet-stream", new TextEncoder().encode("hello"))).toBeNull();
+  });
+
+  it("returns an image as base64 media instead of decoding it as text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(PNG, { status: 200, headers: { "content-type": "image/png" } }),
+      ),
+    );
+    const r = await webFetch({ url: "https://example.com/logo.png" });
+    expect(r).toMatchObject({ ok: true, kind: "media", mediaType: "image/png", bytes: PNG.length });
+    if (r.ok && r.kind === "media") {
+      expect(Buffer.from(r.data, "base64")).toEqual(Buffer.from(PNG));
+    }
+  });
+
+  it("rejects media over the model-input cap", async () => {
+    const big = new Uint8Array(5 * 1024 * 1024);
+    big.set([0x89, 0x50, 0x4e, 0x47]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(big, { status: 200, headers: { "content-type": "image/png" } }),
+      ),
+    );
+    const r = await webFetch({ url: "https://example.com/huge.png" });
+    expect(r).toMatchObject({ ok: false });
+    if (!r.ok) expect(r.error).toMatch(/too large/i);
+  });
+
+  it("still returns HTML as markdown text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("<html><body><h1>Hi</h1></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+    const r = await webFetch({ url: "https://example.com/" });
+    expect(r).toMatchObject({ ok: true, kind: "text" });
+    if (r.ok && r.kind === "text") expect(r.content).toContain("# Hi");
   });
 });
