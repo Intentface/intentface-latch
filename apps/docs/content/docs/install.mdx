@@ -65,7 +65,9 @@ interface Principal {
 
 const client = createClient({ url: "file:local.db" });
 const db = drizzle(client, { schema });
-await migrate(db);
+
+// `migrate` executes DDL, so it takes the libSQL client — not the drizzle db.
+await migrate(client);
 
 // The owner key is your isolation boundary — see /docs/principals.
 const storage = createSqliteAdapter<Principal>(db, {

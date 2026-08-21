@@ -23,8 +23,8 @@ What happens:
 1. **Claim** — the run is claimed with a lease (`owner`, `fencingToken`, expiry).
 2. **Heartbeat** — the holder extends the lease while it works.
 3. **Die** — the process is killed mid-turn. Nothing is lost: every step so far is already in the log.
-4. **Reap** — a later `tick()`/`sweep()` sees the expired lease and reclaims the run.
-5. **Resume** — the turn re-runs from persisted history and completes server-side.
+4. **Reap** — a later `tick()`/`sweep()` finds runs whose lease has expired, marks them `errored`, clears the owner and bumps the fencing token (invalidating any zombie holder).
+5. **Resume** — `resume(runId)` reclaims the run under a fresh lease and re-runs it from persisted history, completing server-side.
 
 Point any cron at `sweep()` — it reaps and resumes in one call:
 
@@ -33,7 +33,7 @@ await runtime.sweep({ maxAttempts: 5 });
 // → { reaped: RunRecord[], resumed: RunOutcome[] }
 ```
 
-`maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `tick()` and `resume(runId)` are the same machinery split apart, for when you want to reap and resume separately.
+`maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `tick()` and `resume(runId)` are the same machinery split apart — `tick()` reaps expired leases, `resume(runId)` reclaims and re-runs one run — for when you want the two halves separately.
 
 On a long-lived Node process, use the in-process scheduler instead of an external cron:
 
@@ -147,7 +147,19 @@ If other client tool calls in the same step still need results, this returns an 
 
 ### Through subagents
 
-A gated tool *inside* a subagent suspends the parent turn and surfaces to the same human — it does not auto-approve out of sight. Interactive top-level turns propagate their approval mode down; autonomous ones (cron, `runAgent`) auto-approve, which is the correct default when there is no human present.
+A gated tool *inside* a subagent suspends the parent turn and surfaces to the same human — it does not auto-approve out of sight.
+
+`runAgent` runs a turn with no client consuming the stream, so there is no one to ask. It defaults to **`blockGated: true`**: approval-gated tools are stubbed rather than executed, and the agent is told they were unavailable. That's the safe default — an unattended turn can't quietly perform the very actions you gated.
+
+```ts
+// Gated tools are stubbed — the agent works around them.
+await runtime.runAgent({ principal, agent: "reporter", prompt });
+
+// Opt in to executing them unattended. You are asserting no human is needed.
+await runtime.runAgent({ principal, agent: "reporter", prompt, blockGated: false });
+```
+
+Set `blockGated: false` deliberately, for agents whose gated tools are safe to run without a human — a scheduled report that must actually send. It is the one place where "autonomous" and "approved" are the same decision.
 
 <Callout type="warn" title="Reversibility is architectural">
 An agent can only offer undo if the harness kept a checkpoint. "Approve the irreversible, make the rest reversible" is good design advice that depends on infrastructure you have to have built first — the log is what makes it possible here.

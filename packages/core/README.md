@@ -2,7 +2,7 @@
 
 The framework core for building agents on the **AI SDK v7** — the runtime, the message/identity model, and the pluggable seams everything else plugs into. Dependency-light and host-agnostic (no HTTP framework, no DB, no provider SDKs).
 
-📖 **Full documentation: [`apps/docs`](../../apps/docs)** — run `pnpm --filter @intentface/latch-docs dev` and open http://localhost:3100/docs.
+📖 **Full documentation:** [docs source](https://github.com/Intentface/intentface-latch/tree/main/apps/docs) — to read it locally, run `pnpm --filter @intentface/latch-docs dev` and open http://localhost:3100/docs.
 
 ## In one screen
 
@@ -38,7 +38,7 @@ const response = await runtime.handleChat({ agent: "assistant", principal, messa
 | Operations | durability, schedules, human-in-the-loop |
 | Seams | connections, vault, memory, pricing, telemetry, sandbox |
 
-Runnable examples live in [`apps/example`](../../apps/example) — 23 smoke scripts covering persistence, durability, resume, approvals, MCP, vault, cost and observability.
+Runnable examples live in [`apps/example`](https://github.com/Intentface/intentface-latch/tree/main/apps/example) (source) — 23 smoke scripts covering persistence, durability, resume, approvals, MCP, vault, cost and observability.
 
 ## Where it fits
 

@@ -165,14 +165,17 @@ const vault = createVault<Principal>({ store, masterKey });
 
 const context = defineContext<Principal, Ctx>({
   build: async ({ principal }) => ({
+    // `toolsContext` receives the built context and the resolver — not the
+    // principal. Carry it through here or a secret can't be scoped.
+    principal,
     orgId: principal.orgId,
     plan: await lookupPlan(principal.orgId),
   }),
   // `secrets` is the read-side resolver. Called per turn, per principal.
-  toolsContext: (ctx, secrets, { principal }) => ({
+  toolsContext: async (ctx, secrets) => ({
     crm: {
       baseUrl: ctx.plan === "enterprise" ? EU_ENDPOINT : US_ENDPOINT,
-      apiKey: secrets(principal, "crm_api_key"),
+      apiKey: await secrets(ctx.principal, "crm_api_key"),
     },
   }),
 });
@@ -189,7 +192,7 @@ const lookupCustomer = tool({
   execute: async ({ email }, { experimental_context }) => {
     const { crm } = experimental_context as ToolsContext;
     const res = await fetch(`${crm.baseUrl}/customers?email=${encodeURIComponent(email)}`, {
-      headers: { authorization: `Bearer ${await crm.apiKey}` },
+      headers: { authorization: `Bearer ${crm.apiKey}` },
     });
     return res.json();
   },

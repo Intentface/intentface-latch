@@ -11,7 +11,7 @@ createRuntime({ storage, context, agents });
 
 ## What it stores
 
-Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every read is scoped by it.
+Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every method that *takes a principal* scopes its read by it. A few internal methods take a bare id instead (`getRun`, `reclaimRun`, `reapExpiredRuns`); those are runtime machinery, not a caller-facing API, and they are **not** ownership-scoped. Reach for the [Runtime operations](/docs/runtime) rather than the adapter when you're serving a request.
 
 | Record | Holds |
 | --- | --- |
@@ -23,7 +23,7 @@ Five record types. The adapter owns the **owner key** — an opaque string it de
 
 Two fields are **opaque and must round-trip byte-for-byte**: `RunRecord.identity` (the serialized principal) and `ScheduleRecord.delivery` (the host's delivery target). Core never interprets either.
 
-`ChatRecord.kind` is an open vocabulary: `"user"` for conversations, `"internal"` for runtime-created sub-threads (the `sub_…` chats `spawn_agent` mints). `listChats({ kind: "user" })` is how a sidebar hides the machinery.
+`ChatRecord.kind` is an open vocabulary: `"user"` for conversations, `"internal"` for runtime-created sub-threads (the `sub_…` chats `spawn_agent` mints). `listChats(principal, { kind: "user" })` is how a sidebar hides the machinery.
 
 ## The methods
 
@@ -51,7 +51,7 @@ These are what make the runtime safe on multiple nodes. Getting them wrong produ
 
 ### Claims are atomic and exactly-once
 
-`claimRun` and `claimDueSchedules` must be **single atomic transitions** (one conditional `UPDATE … WHERE`), not read-then-write. Every node's cron fires `sweep()` and `runDue()` concurrently; correctness comes entirely from the database refusing the second claimant.
+`claimRun`, `reclaimRun` and `claimDueSchedules` must be **single atomic transitions** (one conditional `UPDATE … WHERE`), not read-then-write. Every node's cron fires `sweep()` and `runDue()` concurrently; correctness comes entirely from the database refusing the second claimant.
 
 Get this wrong and you get double-fired schedules and two workers streaming into the same run.
 
@@ -63,7 +63,9 @@ The scenario: a worker's lease expires (it was slow, not dead), the reaper reass
 
 ### Ownership scoping is not optional
 
-Every read takes a principal and must filter by the derived owner key. `getRun` in particular is a **direct, ownership-scoped lookup** — not a capped scan — so ownership checks stay correct on arbitrarily old runs.
+Every read that **takes a principal** must filter by the derived owner key — `listChats`, `loadMessages`, `listRuns`, `listSchedules`. Filter in the query, not after it: a capped scan that slices in application code silently stops being correct once a tenant has more rows than the cap.
+
+`getRun(id)` takes no principal and is deliberately unscoped — the reaper and resume path look runs up by id alone. Never serve it straight to a caller; go through `Runtime.getRun`, which scopes the lookup for you.
 
 ### Chat id collisions surface as a conflict
 
@@ -93,7 +95,9 @@ import { drizzle } from "drizzle-orm/libsql";
 
 const client = createClient({ url: "file:local.db" });
 const db = drizzle(client, { schema });
-await migrate(db);
+
+// `migrate` executes DDL, so it takes the libSQL client — not the drizzle db.
+await migrate(client);
 
 const storage = createSqliteAdapter(db, { owner });
 ```

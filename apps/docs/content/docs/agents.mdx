@@ -17,7 +17,17 @@ const assistant = defineAgent<Principal, RuntimeContext>(({ principal, context }
 const agents = { assistant };
 ```
 
-`defineAgent` is identity — it exists purely so the types flow. A plain object works too when nothing needs the caller.
+`defineAgent` accepts either form and always returns an `AgentFactory`: hand it a factory and it passes it through; hand it a static `AgentConfig` and it wraps it as `() => config`. It also attaches optional `meta`.
+
+```ts
+// Static config — wrapped into a factory for you.
+const weekly = defineAgent<Principal>({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: "Summarise the week.",
+});
+```
+
+So it isn't cosmetic: the registry holds factories, and a bare `AgentConfig` object doesn't satisfy that contract. Use `defineAgent` for both shapes.
 
 ## The config
 

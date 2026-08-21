@@ -38,18 +38,27 @@ If the value your owner key derives from can change mid-session — an "active o
 ```ts
 import { defineContext } from "@intentface/latch-core";
 
-const context = defineContext<Principal, { orgId: string; orgName: string }>({
+const context = defineContext<Principal, Ctx>({
   build: async ({ principal }) => ({
+    // Carry the principal through — `toolsContext` receives the built context
+    // and the resolver, not the principal, so this is how a secret gets scoped.
+    principal,
     orgId: principal.orgId,
     orgName: await lookupOrgName(principal.orgId),
   }),
-  toolsContext: (ctx, secrets) => ({
-    crm: { apiKey: secrets(principal, "crm_api_key") },
+  toolsContext: async (ctx, secrets) => ({
+    crm: { apiKey: await secrets(ctx.principal, "crm_api_key") },
   }),
 });
 ```
 
 The type then flows into `defineAgent`, tools and hooks with no `any`.
+
+<Callout title="toolsContext takes two arguments">
+`(runtime, secrets)` — the built context and the `SecretResolver`. There is no
+third `{ principal }` parameter, so anything a secret lookup needs must be put
+into the context by `build` first.
+</Callout>
 
 <Callout type="warn" title="turnContext is ephemeral — derive from the principal">
 `build` also receives `turnContext`: the per-turn request payload (parsed body, active document, UI selection). It is **never persisted with the run**, so a resumed or scheduled turn rebuilds context *without it*. Anything durable must derive from the principal. Reading identity out of `turnContext` produces a turn that works interactively and breaks on resume — which is the worst kind of bug, because it only appears after a crash.

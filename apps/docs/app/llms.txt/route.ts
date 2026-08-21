@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
+import type { Item, Node, Root } from "fumadocs-core/page-tree";
 import { source } from "@/lib/source";
-
-const SITE = process.env.NEXT_PUBLIC_DOCS_URL ?? "http://localhost:3100";
 
 /**
  * The agent entry point: one page listing every doc with its description and a
@@ -14,36 +13,60 @@ const SUMMARY = [
   "Every page below is markdown: append `.md` to any docs URL to fetch the same content as plain text.",
 ].join("\n");
 
-type TreeNode = {
-  type: string;
-  name?: ReactNode;
-  url?: string;
-  children?: TreeNode[];
-};
-
 // Page-tree names are ReactNode; ours come from frontmatter, so they're strings.
 const asText = (value: ReactNode): string => (typeof value === "string" ? value : "");
 
-function walk(nodes: TreeNode[], depth = 0): string[] {
+const isExternal = (page: Item): boolean =>
+  page.external ?? /^[a-z][a-z0-9+.-]*:\/\//i.test(page.url);
+
+/**
+ * One list entry per page. Absolute URLs are emitted verbatim — prefixing the
+ * site origin onto `https://…` would produce a broken link, and an external page
+ * has no `.md` twin to fetch.
+ */
+function lineFor(page: Item, site: string): string {
+  const slug = page.url.replace(/^\/docs\/?/, "").split("/").filter(Boolean);
+  const doc = source.getPage(slug);
+  const title = asText(page.name) || doc?.data.title || page.url;
+  const described = doc?.data.description ? `: ${doc.data.description}` : "";
+  const href = isExternal(page) ? page.url : `${site}${page.url}.md`;
+  return `- [${title}](${href})${described}`;
+}
+
+function walk(nodes: Node[], site: string, depth = 0): string[] {
   const lines: string[] = [];
   for (const node of nodes) {
-    if (node.type === "folder") {
-      const name = asText(node.name);
-      if (name) lines.push(`${"#".repeat(Math.min(depth + 2, 6))} ${name}`, "");
-      lines.push(...walk(node.children ?? [], depth + 1));
-      continue;
+    switch (node.type) {
+      case "page":
+        lines.push(lineFor(node, site));
+        break;
+      case "folder": {
+        const name = asText(node.name);
+        if (name) lines.push(`${"#".repeat(Math.min(depth + 2, 6))} ${name}`, "");
+        // A folder's own index page is a real page — listing only `children`
+        // silently drops it (and it is usually the section's overview).
+        if (node.index) lines.push(lineFor(node.index, site));
+        lines.push(...walk(node.children, site, depth + 1));
+        break;
+      }
+      case "separator": {
+        const name = asText(node.name);
+        if (name) lines.push("", `${"#".repeat(Math.min(depth + 2, 6))} ${name}`, "");
+        break;
+      }
     }
-    if (node.type !== "page" || !node.url) continue;
-    const page = source.getPage(node.url.replace(/^\/docs\/?/, "").split("/").filter(Boolean));
-    const title = asText(node.name) || page?.data.title || node.url;
-    const description = page?.data.description ? `: ${page.data.description}` : "";
-    lines.push(`- [${title}](${SITE}${node.url}.md)${description}`);
   }
   return lines;
 }
 
-export function GET() {
-  const tree = source.getPageTree() as unknown as TreeNode;
+export function GET(request: Request): Response {
+  // Derive the origin from the request so a deployed response never emits
+  // localhost links. NEXT_PUBLIC_DOCS_URL overrides it for the case where the
+  // public origin differs from what the app sees (a proxy or rewrite).
+  const configured = process.env.NEXT_PUBLIC_DOCS_URL?.trim();
+  const site = (configured || new URL(request.url).origin).replace(/\/+$/, "");
+
+  const tree = source.getPageTree() as Root;
   const body = [
     "# Latch documentation",
     "",
@@ -51,7 +74,7 @@ export function GET() {
     "",
     "## Pages",
     "",
-    ...walk(tree.children ?? []),
+    ...walk(tree.children, site),
     "",
   ].join("\n");
 
