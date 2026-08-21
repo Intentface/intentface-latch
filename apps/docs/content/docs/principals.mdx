@@ -18,7 +18,7 @@ const storage = createSqliteAdapter<Principal>(db, {
 });
 ```
 
-Change that one function and you change who can see what. Everything below is a variation on it.
+`owner` returns the key's **segments**, not a string — the adapter escapes each one and joins them (so a `/` or `%` inside an id can't forge a boundary). Change that one function and you change who can see what. Everything below is a variation on it.
 
 <Callout title="Two responsibilities, clearly split">
 Latch enforces **isolation** — a read scoped to an owner key cannot return
@@ -32,8 +32,18 @@ is structural; authorization is policy.
 The SaaS default, and the one most apps want. Include the user in the key:
 
 ```ts
-owner: (p) => [p.orgId, p.userId!]
+owner: (p) => {
+  // Don't assert with `p.userId!` — a principal that reached here without a
+  // userId would key as [orgId, undefined] and quietly land in a bucket
+  // nobody can read back. Make the requirement explicit instead.
+  if (!p.userId) throw new Error("per-user isolation requires a userId");
+  return [p.orgId, p.userId];
+},
 ```
+
+If your `Principal` type makes `userId` required, the check is free and the
+throw is unreachable — which is the better shape when every entry point has a
+human behind it.
 
 Now every chat, run, usage row and schedule belongs to one person. `listChats` for user A can never return user B's conversation, even inside the same customer account — not because a `WHERE` clause was remembered, but because the adapter has no key that would reach it.
 
@@ -64,25 +74,36 @@ The principal still carries `userId`; it's just not part of the key. Keep it, be
 
 ## Pattern 3 — Personal and shared, in one app
 
-Most real products want both: private assistants *and* team agents. Put the decision on the record rather than in the key function, and derive the key from the record's scope:
+Most real products want both: private assistants *and* team agents. The storage `owner` seam takes one function, so put the scope in the **principal** and let the key follow it:
 
 ```ts
 type Scope = "user" | "org";
 
-const ownerFor = (p: Principal, scope: Scope): string =>
-  (scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""])
-    .map(encodeURIComponent)
-    .join("/");
+interface Principal {
+  orgId: string;
+  userId?: string;
+  /** Which bucket this turn reads and writes. Resolved with the session. */
+  scope: Scope;
+}
+
+const storage = createSqliteAdapter<Principal>(db, {
+  owner: (p) => (p.scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""]),
+});
 ```
 
-A personal agent resolves under the caller's key; an org agent resolves under the org's. The same principal produces both, so one user can hold private conversations and shared ones side by side.
+A personal agent runs with `scope: "user"` and resolves under the caller's key; an org agent runs with `scope: "org"` and resolves under the org's. The same human produces both, so they hold private conversations and shared ones side by side.
 
-<Callout type="warn" title="Derive the key in exactly one place">
-This function is security-critical and it is tempting to inline. Two copies that
-escape differently — one using `encodeURIComponent`, one a bare template string —
-produce *different keys for the same principal* as soon as an id contains a `/`
-or `%`. The rows don't leak; they vanish, which is harder to notice and harder to
-debug. Export one helper and use it everywhere.
+The scope has to be **part of the principal**, not an extra argument, because it must survive serialization: a resumed or cron-fired turn rebuilds the principal from the stored `identity` blob, and a scope passed alongside it would be lost — the turn would then read from the wrong bucket.
+
+<Callout type="warn" title="Your own tables need the same rule — and won't get it for free">
+Latch's tables are safe here: you return segments and the adapter escapes and
+joins them. Your *own* owner-scoped tables have no such seam, so if you build a
+key by hand, do it in exactly one exported helper.
+
+Two copies that escape differently — one calling `encodeURIComponent`, one a bare
+template string — produce **different keys for the same principal** as soon as an
+id contains a `/` or `%`. The rows don't leak; they vanish. No error is raised,
+and the data still exists under a key nothing now generates.
 </Callout>
 
 ## Pattern 4 — A database per tenant

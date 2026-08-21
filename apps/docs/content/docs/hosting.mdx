@@ -184,14 +184,20 @@ import { latch } from "./latch-handler";
 const app = express();
 const handle = nodeAdapter(latch);
 
-// Before any body parser.
-app.all("/api/latch/*", async (req, res, next) => {
+// Before any body parser. Express 5 requires a NAMED wildcard — a bare
+// "/api/latch/*" throws at registration. On Express 4 use "/api/latch/*".
+app.all("/api/latch/*splat", async (req, res, next) => {
   if (!(await handle(req, res))) next();
 });
 
 app.use(express.json()); // the rest of your app
 app.listen(3000);
 ```
+
+Express 5 moved to `path-to-regexp` v8, which dropped anonymous `*`. Mounting
+with `app.use("/api/latch", …)` also works and is version-agnostic — but note
+`req.url` is then stripped of the mount prefix, so pass the same prefix as
+`basePath` or the handler won't recognise its own routes.
 </Tab>
 
 <Tab value="Fastify">
@@ -235,7 +241,8 @@ const handle = nodeAdapter(latch);
 
 @Controller("api/latch")
 export class LatchController {
-  @All("*")
+  // Named wildcard: Nest 11 runs Express 5, where a bare "*" is invalid.
+  @All("*splat")
   async proxy(
     @Req() req: IncomingMessage,
     @Res() res: ServerResponse,

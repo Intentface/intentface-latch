@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { Item, Node, Root } from "fumadocs-core/page-tree";
-import { source } from "@/lib/source";
+import { DOCS_BASE_URL, source } from "@/lib/source";
 
 /**
  * The agent entry point: one page listing every doc with its description and a
@@ -25,7 +25,13 @@ const isExternal = (page: Item): boolean =>
  * has no `.md` twin to fetch.
  */
 function lineFor(page: Item, site: string): string {
-  const slug = page.url.replace(/^\/docs\/?/, "").split("/").filter(Boolean);
+  // Derive the slug from the configured base URL, not a hardcoded "/docs" — if
+  // the two drift, getPage returns undefined for every node and each entry
+  // silently loses its title and description with no error.
+  const slug = page.url
+    .slice(page.url.startsWith(DOCS_BASE_URL) ? DOCS_BASE_URL.length : 0)
+    .split("/")
+    .filter(Boolean);
   const doc = source.getPage(slug);
   const title = asText(page.name) || doc?.data.title || page.url;
   const described = doc?.data.description ? `: ${doc.data.description}` : "";
