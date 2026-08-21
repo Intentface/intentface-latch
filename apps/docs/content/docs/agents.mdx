@@ -1,0 +1,121 @@
+---
+title: Agents
+description: defineAgent, the capability flags, and how an agent resolves per turn.
+---
+
+An agent is a **factory**, not a static object — it runs per turn and receives the caller's principal and context, so the same registry entry can behave differently per tenant.
+
+```ts
+import { defineAgent } from "@intentface/latch-core";
+import { anthropic } from "@ai-sdk/anthropic";
+
+const assistant = defineAgent<Principal, RuntimeContext>(({ principal, context }) => ({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: `You are helping ${context.orgName}.`,
+}));
+
+const agents = { assistant };
+```
+
+`defineAgent` accepts either form and always returns an `AgentFactory`: hand it a factory and it passes it through; hand it a static `AgentConfig` and it wraps it as `() => config`. It also attaches optional `meta`.
+
+```ts
+// Static config — wrapped into a factory for you.
+const weekly = defineAgent<Principal>({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: "Summarise the week.",
+});
+```
+
+So it isn't cosmetic: the registry holds factories, and a bare `AgentConfig` object doesn't satisfy that contract. Use `defineAgent` for both shapes.
+
+## The config
+
+### Model and prompt
+
+| Field | Notes |
+| --- | --- |
+| `model` | An AI SDK `LanguageModel`. Required. |
+| `instructions` | The system prompt. The runtime appends the memory index (if any) and a current-date line. |
+| `effort` | `"minimal" \| "low" \| "medium" \| "high"` — mapped to provider reasoning options by `resolveReasoningOptions`, and ignored on non-reasoning models. |
+
+### Tools
+
+| Field | Notes |
+| --- | --- |
+| `tools` | Static tools, available every turn. |
+| `toolSources` | Dynamic sources opened per turn and closed after (MCP, OpenAPI). |
+| `connections` | Names from the runtime's connection registry. Resolved to a per-turn source: each authorized connection's tools, plus a gated `connect_<name>` tool for any still needing OAuth. Unknown names are ignored. |
+| `enabledTools` | Whitelist of namespaced tool names the model may call. Omitted → all. Tools a source marks `alwaysActive` (like `connect_<name>`) stay callable regardless. |
+| `disableTools` | Names of harness/default tools to drop for this agent. |
+| `toolDescriptions` | Per-tool description overrides, by namespaced name — tailor a connection tool's guidance for this agent. |
+
+### Capabilities
+
+Each of these needs the matching runtime seam; without it the flag is a no-op.
+
+| Field | Requires | Gives the agent |
+| --- | --- | --- |
+| `defaultTools` | `harnessTools.app` | The app-process harness tools (`true` for all, or an array of names). |
+| `sandbox` + `sandboxProvider` | `sandbox` resolver, `harnessTools.sandbox` | A per-chat workspace plus `bash`/`read_file`/`write_file`/`glob`/`grep`. |
+| `renderTools` | `harnessTools.render` | Headless-browser fetch. Deliberately **not** swept in by `defaultTools: true`. |
+| `providerWebTools` | `resolveProviderTools` | The provider's native server-side web search/fetch. |
+| `codeMode` | `codeModeWrap` | The model writes JS calling the selected tools as functions, one program instead of many round-trips. |
+| `memory` | `memory` provider | A compiled memory index in the prompt plus `memory_search`/`memory_save`. See [Seams](/docs/seams). |
+| `subagents` | — | A `spawn_agent` tool that runs one of the named agents as a child run. |
+
+### Control
+
+| Field | Notes |
+| --- | --- |
+| `toolApproval` | The HITL policy — per-tool `"user-approval"`, an object with a reason, or a function. A gated call ends the turn with an `approval-requested` part. |
+| `maxSteps` | Tool-loop ceiling. Omitted → the SDK default (20). |
+| `smoothStream` | Even out bursty token deltas. Presentation only — it does not change what gets persisted. |
+
+<Callout type="warn" title="maxSteps: 'unlimited' removes the backstop">
+It lets the loop run until the model stops calling tools. That is occasionally what you want and is also how a runaway agent burns a budget. Prefer a number.
+</Callout>
+
+## Subagents
+
+Listing `subagents` adds a `spawn_agent` tool. Each subagent run is **its own persisted thread** (`kind: "internal"`, id prefixed `sub_`), so it keeps its own history and doesn't pollute the parent's context. The returned `threadId` can be passed back to continue the same subagent with full context.
+
+```ts
+defineAgent<Principal>(() => ({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: "Delegate research to the researcher agent.",
+  subagents: ["researcher"],
+}));
+```
+
+Two properties worth knowing:
+
+- A subagent is a **normal agent run autonomously** — its own tools, its own model.
+- Approval propagates. A gated tool inside a subagent suspends the *parent* turn and surfaces to the human, rather than auto-approving out of sight. See [Operations](/docs/operations).
+
+## Dynamic agents
+
+Agents that live in a database rather than in code resolve through the `dynamicAgents` seam:
+
+```ts
+createRuntime({
+  storage,
+  context,
+  agents, // code-declared
+  dynamicAgents: {
+    async get(principal, name) {
+      const row = await db.agents.find({ orgId: principal.orgId, name });
+      return row ? { config: toAgentConfig(row), meta: { title: row.title } } : null;
+    },
+    async list(principal) {
+      /* … */
+    },
+  },
+});
+```
+
+`runtime.listAgents(principal)` returns both sets, so a picker shows code-declared and user-created agents together. This is what makes "agents are data" work: one deploy serves any number of agents per tenant, and changing a prompt is a row update rather than a release.
+
+## Metadata
+
+`AgentMeta` (`title`, `description`) is display-only and surfaced by `listAgents`. Set it wherever a human picks an agent from a list.

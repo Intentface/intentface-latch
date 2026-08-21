@@ -1,0 +1,118 @@
+---
+title: Install
+description: Add the packages from GitHub Packages, wire a database, and get a runtime answering turns.
+---
+
+The `@intentface/latch-*` packages publish to **GitHub Packages**, not the public npm registry. Two lines of config, then install normally.
+
+## Registry access
+
+Add an `.npmrc` at your project root:
+
+```ini title=".npmrc"
+@intentface:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+`GITHUB_TOKEN` needs the **`read:packages`** scope and nothing else — a classic PAT or a fine-grained token both work. Keep it in your environment, not in the file:
+
+```bash
+export GITHUB_TOKEN=ghp_…
+```
+
+<Callout type="warn" title="CI needs the token too">
+The default `GITHUB_TOKEN` in GitHub Actions can read packages in the same organization. Elsewhere — Vercel, Fly, a Docker build — set `GITHUB_TOKEN` as a build-time secret, or installs fail with a `401` that looks like a missing package.
+</Callout>
+
+## What to install
+
+Start with two packages. Everything else is additive, and nothing else is required.
+
+```bash
+pnpm add @intentface/latch-core @intentface/latch-drizzle ai @ai-sdk/anthropic
+```
+
+`ai` is a **peer dependency** (`>=7.0.0`) — core deliberately doesn't pin your AI SDK version. Its only runtime dependency is `zod`.
+
+Add the rest as you need the capability:
+
+| Package | Adds |
+| --- | --- |
+| `latch-server` | a mountable HTTP surface — see [Hosting](/docs/hosting) |
+| `latch-mcp` | MCP connections, with an SSRF allowlist and vault-brokered auth |
+| `latch-openapi` | connections from an OpenAPI spec |
+| `latch-memory` | persistent agent memory across sessions |
+| `latch-channels` | Slack, Telegram and WhatsApp |
+| `latch-langfuse` | OpenTelemetry tracing, one trace per run |
+| `latch-agent-builder` | agents defined as data, created from your UI |
+| `latch-net` | SSRF blocklist and a rebinding-safe pinned `fetch` |
+
+`latch-renderer` is not in this list on purpose: it's a headless-browser service
+you deploy, not a package you install. See [Packages](/docs/packages#latch-renderer).
+
+## A first runtime
+
+Storage is the one seam you can't omit. `latch-drizzle` ships adapters for SQLite and Postgres, plus the migrations.
+
+```ts title="latch.ts"
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
+import { anthropic } from "@ai-sdk/anthropic";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+
+interface Principal {
+  orgId: string;
+  userId?: string;
+}
+
+const client = createClient({ url: "file:local.db" });
+const db = drizzle(client, { schema });
+
+// `migrate` executes DDL, so it takes the libSQL client — not the drizzle db.
+await migrate(client);
+
+// The owner key is your isolation boundary — see /docs/principals.
+const storage = createSqliteAdapter<Principal>(db, {
+  owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
+});
+
+const context = defineContext<Principal, { orgId: string }>({
+  build: async ({ principal }) => ({ orgId: principal.orgId }),
+});
+
+export const runtime = createRuntime<Principal, { orgId: string }>({
+  storage,
+  context,
+  agents: {
+    assistant: defineAgent<Principal>(() => ({
+      model: anthropic("claude-sonnet-4-6"),
+      instructions: "You are a concise, helpful assistant.",
+    })),
+  },
+});
+```
+
+Run a turn:
+
+```ts
+const response = await runtime.handleChat({
+  agent: "assistant",
+  principal: { orgId: "acme", userId: "u_1" },
+  message: {
+    id: crypto.randomUUID(),
+    role: "user",
+    parts: [{ type: "text", text: "Hello." }],
+  },
+});
+```
+
+`handleChat` returns a `Response` streaming AI SDK UI message parts — hand it straight back from your route, or read it yourself.
+
+Tables are prefixed `latch_*`. Consume the package's migrations rather than hand-declaring the schema in your own migration folder.
+
+## Where to go next
+
+- [Hosting](/docs/hosting) — mount it in Hono, Express, Fastify, NestJS, or any Web-standard host
+- [Principals](/docs/principals) — make each of your end users own only their own sessions
+- [Runtime](/docs/runtime) — every config field and operation

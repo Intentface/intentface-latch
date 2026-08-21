@@ -1,0 +1,176 @@
+---
+title: Seams
+description: The optional interfaces — connections, vault, memory, pricing, telemetry, sandbox — and what each buys you.
+---
+
+Everything past storage, context and agents is optional. Each seam is a plain interface; supply it and a capability appears, omit it and that capability doesn't exist. This page is the catalogue.
+
+## Connections — MCP and OpenAPI tools
+
+A connection registry turns an agent's `connections: ["linear", "airtable"]` into a per-turn tool source: each authorized connection's tools namespaced `<name>_<tool>`, plus a gated `connect_<name>` tool for any that still need OAuth.
+
+```ts
+createRuntime({
+  // …
+  connections: {
+    async open(principal, names) {
+      /* → OpenToolSet */
+    },
+  },
+});
+```
+
+`@intentface/latch-mcp` implements this over MCP servers and adds two guards core doesn't have: a **per-tenant SSRF allowlist** (an unlisted host throws before a socket opens) and **vault-brokered auth** (bearer tokens resolved per tenant, never in agent config). `@intentface/latch-openapi` does the same for OpenAPI specs.
+
+Helpers for composing sources by hand:
+
+```ts
+import { mergeToolSources, mergeConnections } from "@intentface/latch-core";
+```
+
+<Callout title="Approval policy travels with the tools">
+An MCP tool's own annotations (`destructiveHint`, `readOnlyHint`) drive whether it needs approval, so a mutating third-party tool arrives gated without you enumerating it. For servers that ship no annotations, `latch-mcp` offers a tool-name verb heuristic.
+</Callout>
+
+## Vault — secrets the model never sees
+
+```ts
+import { createVault } from "@intentface/latch-core";
+
+const vault = createVault<Principal>({ store, masterKey });
+
+createRuntime({ secrets: vault.resolver /* … */ });
+```
+
+`Vault` is `set`/`get`/`has`/`delete`/`list` plus a `resolver` — the read-side `SecretResolver` you hand to `context.toolsContext`, so a tool receives a resolved credential while the model receives nothing. `list` returns **keys only, never values**, by contract.
+
+`SecretStore` is the storage half (envelope-encrypted rows by default; swap for KMS/Vault/Doppler). `@intentface/latch-core/node` exports `deriveMasterKey` for the Node key derivation.
+
+## Memory — persistent facts across sessions
+
+```ts
+defineAgent<Principal>(() => ({
+  model,
+  memory: { scope: "agent-user", connection: "loredex" },
+}));
+```
+
+With a `MemoryProvider` wired, each turn gets the provider's compiled index appended to the instructions plus `memory_search`/`memory_save` tools; background jobs handle extraction and consolidation out of band.
+
+The load-bearing part is that **scopes are hard boundaries**:
+
+| Scope | Remembers |
+| --- | --- |
+| `agent-user` | this agent, for this user |
+| `agent-org` | this agent, shared across the org |
+| `user` | this user, across agents |
+
+Tools are path-locked at construction and consolidation never crosses a scope, so a personal agent's memory and a company-wide agent's memory differ by *declaration*, not by convention. `@intentface/latch-memory` is the implementation.
+
+## Pricing — per-run cost
+
+```ts
+import { staticPricing, computeCost } from "@intentface/latch-core";
+
+createRuntime({
+  // …
+  pricing: staticPricing({
+    "claude-sonnet-4-6": {
+      inputPer1M: 3,
+      outputPer1M: 15,
+      cacheReadPer1M: 0.3,
+      cacheWritePer1M: 3.75,
+    },
+  }),
+});
+```
+
+Without it, recorded cost is `0` — usage is still tracked. `ModelPrice` handles what real invoices actually contain: separate cache-read and cache-write rates, and a `tier` that reprices the whole turn once input exceeds a threshold (long-context pricing).
+
+Cost lands in three places: the message metadata, the run row, and a usage row per turn — so per-tenant COGS is a query, not a reconstruction.
+
+## Telemetry — tracing
+
+```ts
+import { langfuseTelemetry } from "@intentface/latch-langfuse";
+
+createRuntime({
+  // …
+  telemetry: langfuseTelemetry({ ownerTag: (p) => p.orgId }),
+});
+```
+
+The seam supplies per-run AI SDK telemetry options, an optional trace wrapper around the model call, and a post-turn hook. `latch-langfuse` implements it over a standard OpenTelemetry provider: one trace per run, its id derived deterministically from the run id, tagged by owner and agent. Omit the seam and nothing is traced, at zero cost.
+
+## Observability — plain event callbacks
+
+Distinct from `telemetry` (which is the OTel/span plumbing). These are callbacks for your own analytics:
+
+```ts
+createRuntime({
+  // …
+  observability: {
+    onStep: (event) => metrics.increment("agent.step", { agent: event.agent }),
+    onFinish: (event) => analytics.track("turn_finished", event),
+    onError: (event) => log.error(event),
+  },
+});
+```
+
+They fire for subagent turns too — distinguish via `depth` (`0` = top level). All hooks are fire-and-forget: a thrown or rejected hook is swallowed, so telemetry can never break a turn.
+
+## Sandbox — a workspace for the agent
+
+```ts
+createRuntime({
+  // …
+  sandbox: ({ principal, chatId, agent, provider }) =>
+    provider === "daytona"
+      ? createDaytonaSession({ chatId })
+      : createLocalSession({ chatId }),
+  harnessTools: { sandbox: sandboxTools, app: appTools },
+});
+```
+
+Core holds no sandbox backend. It resolves the AI SDK `Experimental_SandboxSession` through this function and passes it to the model; the tools that operate on it come from `harnessTools.sandbox`. One sandbox per chat.
+
+<Callout title="Escalate compute deliberately">
+Most agents need well-shaped tools over your own API, not a shell. When a task genuinely needs compute, the rungs are: an embedded JS runtime, a virtual shell, then a real Linux sandbox. Keeping the agent *outside* the sandbox — handing it in as a tool — is what stops sandboxes becoming your unit of scale.
+</Callout>
+
+## Harness tools
+
+```ts
+harnessTools: {
+  sandbox,          // bash / read_file / write_file / glob / grep
+  app,              // web_fetch, todo, ask_question — record or per-turn factory
+  render,           // headless-browser fetch (separate capability flag)
+  approval,         // default gates by tool name, e.g. { create_schedule: "user-approval" }
+}
+```
+
+`approval` here is a *default* — an agent that names the same tool in its own `toolApproval` wins, so a host can ship a side-effecting harness tool gated by default without freezing that choice for every agent.
+
+## Provider tools and reasoning
+
+```ts
+resolveProviderTools: (modelId) =>
+  modelId.startsWith("claude")
+    ? { web_search: anthropic.tools.webSearch_20260209() }
+    : {};
+
+resolveReasoningOptions: (modelId, effort) =>
+  modelId.startsWith("claude")
+    ? { providerOptions: { anthropic: { thinking: { budgetTokens: budgetFor(effort) } } } }
+    : undefined;
+```
+
+Both exist so core carries no provider SDK. Keep the tool keys consistent across providers (`web_search`, `web_fetch`) and your prompts and rendering stay provider-agnostic.
+
+## Code mode
+
+```ts
+codeModeWrap: (tools, { agent }) => createCodeModeTool(tools, { agent });
+```
+
+Wraps a tool set into a single tool the model drives by writing JS — one program instead of N round-trips, which matters for fan-out and multi-step composition. The runtime calls it when an agent sets `codeMode`. Core needs no QuickJS dependency because of this seam.

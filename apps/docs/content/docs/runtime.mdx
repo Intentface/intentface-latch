@@ -1,0 +1,138 @@
+---
+title: Runtime
+description: createRuntime is the composition root and the operations facade — the only thing your routes, cron and tests talk to.
+---
+
+`createRuntime(config)` is core's front door. You build it **once** from the seams you've chosen; it resolves which parts to use and exposes every operation. Routes, cron jobs, CLIs and tests call the runtime — never the seams directly.
+
+```ts
+import { createRuntime } from "@intentface/latch-core";
+
+const runtime = createRuntime<Principal, RuntimeContext>({ storage, context, agents });
+```
+
+Both type parameters are yours: `Principal` is your identity type, `RuntimeContext` the shape your agents and tools receive.
+
+## Configuration
+
+### Required
+
+| Field | What it does |
+| --- | --- |
+| `storage` | The `StorageAdapter` — chats, messages, runs, usage, schedules. See [Storage](/docs/storage). |
+| `context` | A `defineContext` definition: builds `RuntimeContext` per turn from the principal. See [Turn inputs](/docs/turn-inputs). |
+| `agents` | The registry: `Record<string, AgentFactory>`. See [Agents](/docs/agents). |
+
+### Optional
+
+Every field below is a seam. Omit it and the corresponding capability simply doesn't exist — no errors, no stubs.
+
+| Field | Effect when omitted |
+| --- | --- |
+| `secrets` | Tools get no secret resolver. |
+| `durability` | Runs complete in-invocation only; no leases, no resume. |
+| `pricing` | Recorded cost is `0`. |
+| `connections` | An agent's `connections: [...]` is ignored. |
+| `dynamicAgents` | Only code-declared agents exist. |
+| `memory` | An agent's `memory` declaration is ignored. |
+| `cron` | Recurring schedules can't be created (one-shot still works). |
+| `runSchedule` | Scheduled fires always run in a fresh chat. |
+| `sandbox` | `sandbox: true` agents get no workspace. |
+| `harnessTools` | No default/sandbox/render tools are available to attach. |
+| `resolveProviderTools` | `providerWebTools` is a no-op. |
+| `resolveReasoningOptions` | `effort` falls back to the provider default. |
+| `codeModeWrap` | `codeMode` is a no-op. |
+| `telemetry` | Nothing is traced. |
+| `observability` | No event callbacks fire. |
+| `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is. |
+
+<Callout title="Why so many seams are functions">
+Core carries no provider SDK, no sandbox backend, no OTel dependency and no cron library. Anything that would drag one in is a function you supply — which is also what keeps core installable in a serverless function.
+</Callout>
+
+## Operations
+
+The `Runtime<P>` interface groups into four jobs.
+
+### Run a turn
+
+```ts
+// Streaming, persisted, resumable. The normal path.
+runtime.handleChat({ agent, chatId, principal, message, request, turnContext });
+// → Promise<Response>  (SSE stream of UIMessage parts)
+```
+
+`chatId` is create-or-continue; omit it to start a new chat.
+
+```ts
+// Streamed but persists NOTHING — no chat, run, message or usage rows.
+runtime.runTurnStream({ agent, principal, messages, format, onComplete });
+
+// One autonomous turn to completion in a throwaway thread, no streaming.
+runtime.runAgent({ principal, agent, prompt, threadId, blockGated });
+// → Promise<{ threadId, answer }>
+```
+
+`runTurnStream` suits read-mostly single shots where a durable chat would be churn (inline editor assist). `runAgent` is for programmatic use — an Agent Builder testing an agent it just wrote. Its `blockGated` defaults to **true**, stubbing approval-gated tools so a test run has no real side effects.
+
+### Read history
+
+```ts
+runtime.loadHistory({ chatId, principal }); // client projection: internal/redacted filtered out
+runtime.listChats({ principal, limit, kind }); // kind: "user" hides internal sub_… threads
+runtime.listRuns({ principal, limit });
+runtime.getRun({ principal, runId }); // direct, ownership-scoped lookup
+runtime.listAgents(principal); // code-declared + dynamic, for a picker
+```
+
+### Resume a paused turn
+
+```ts
+runtime.applyApproval({ chatId, principal, decisions }); // → Response (continuation stream)
+runtime.applyToolResult({ chatId, principal, toolCallId, output });
+runtime.compactChat({ chatId, principal, focus }); // → { summary, compacted } | null
+```
+
+See [Operations](/docs/operations) for the full approval lifecycle.
+
+### Operate it
+
+```ts
+runtime.tick({ now, error }); // reap lease-expired runs
+runtime.resume(runId); // re-claim and finish one interrupted run
+runtime.sweep({ maxAttempts }); // reap + auto-resume — the cron entry point
+runtime.runDue({ now }); // fire all due schedules, all tenants
+
+runtime.schedule({ principal, agent, cron, timezone, prompt, delivery });
+runtime.listSchedules({ principal });
+runtime.unschedule({ principal, id });
+runtime.runScheduleNow({ principal, id });
+```
+
+`sweep` and `runDue` are the two operations a cron should call. Both are safe to fire on every node concurrently: reaping and claiming are atomic single-row transitions, so each run and each schedule is handled exactly once.
+
+```ts title="One route is the whole operational surface"
+export async function POST(request: Request) {
+  assertCronSecret(request); // yours
+  await runtime.runDue(); // fire due schedules
+  await runtime.sweep(); // reap + resume interrupted runs
+  return new Response("ok");
+}
+```
+
+<Callout type="warn" title="Guard the cron route">
+`sweep` and `runDue` are system-wide — they act across all tenants and take no principal. Whatever exposes them must authenticate, and should fail closed when its secret is unset rather than leaving every tenant's schedules runnable by anyone.
+</Callout>
+
+## What a turn actually does
+
+The order matters when you're debugging a seam.
+
+1. **Context** — `context.build({ principal, request, turnContext })` produces `RuntimeContext`; `context.toolsContext` resolves per-tool context (secrets).
+2. **Agent** — the factory runs, returning an `AgentConfig`. Dynamic agents resolve here.
+3. **Tools** — static `tools`, plus each `ToolSource` opened for this turn (connections/MCP), plus harness, sandbox, render and memory tools per the agent's flags. Sources are closed when the turn ends.
+4. **Instructions** — the agent's `instructions`, plus the memory provider's compiled index block, plus the current date line.
+5. **Model** — one `ToolLoopAgent` stream. `smoothStream`, `maxSteps`, `enabledTools`, reasoning options and code-mode wrapping all apply here.
+6. **Persist** — the user and assistant messages, the run row, and a usage row carrying the priced cost.
+
+A gated tool call ends step 5 early with an `approval-requested` part; the run goes `awaiting_input` and waits for `applyApproval`.

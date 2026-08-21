@@ -1,0 +1,211 @@
+---
+title: Packages
+description: What each @intentface/latch-* package does, when you need it, and what it depends on.
+---
+
+Core is the runtime and the seams. Every other package is an implementation *behind* a seam — add it when you want the capability, skip it and the capability doesn't exist.
+
+| Package | Add it when you want |
+| --- | --- |
+| [`latch-core`](#latch-core) | always — the runtime and the seams |
+| [`latch-drizzle`](#latch-drizzle) | almost always — storage, on SQLite or Postgres |
+| [`latch-server`](#latch-server) | an HTTP surface you don't have to write |
+| [`latch-mcp`](#latch-mcp) | tools from MCP servers |
+| [`latch-openapi`](#latch-openapi) | tools from an OpenAPI spec |
+| [`latch-memory`](#latch-memory) | agents that remember across sessions |
+| [`latch-channels`](#latch-channels) | Slack, Telegram, WhatsApp |
+| [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
+| [`latch-langfuse`](#latch-langfuse) | tracing |
+| [`latch-net`](#latch-net) | SSRF protection for your own fetches |
+| [`latch-renderer`](#latch-renderer) | a headless browser for page fetches |
+
+---
+
+## latch-core
+
+**The runtime, the message model, and every seam.** `createRuntime` is both the composition root and the operations facade — it runs turns, persists messages and runs, and handles approvals, durability, subagents, schedules and compaction.
+
+Dependency-light on purpose: `zod` is the only runtime dependency, `ai` (>= 7) is a peer, and there is no HTTP framework, no database driver and no provider SDK anywhere in it.
+
+```ts
+import { createRuntime, defineAgent, defineContext, createVault } from "@intentface/latch-core";
+```
+
+Key exports: `createRuntime` · `defineAgent` · `defineContext` · `createVault` · `mergeConnections` · `mergeToolSources` · `toModelMessages` / `toClientMessages` · `staticPricing` / `computeCost` · `createIntervalScheduler`.
+
+There is also `@intentface/latch-core/node` for the Node-only key derivation (`deriveMasterKey`).
+
+→ [Runtime](/docs/runtime) · [Seams](/docs/seams)
+
+## latch-drizzle
+
+**Storage, plus the tables.** Implements the `StorageAdapter` contract for SQLite/libSQL and Postgres, and ships the migrations — tables prefixed `latch_*`.
+
+```ts
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
+
+const storage = createSqliteAdapter<Principal>(db, { owner });
+```
+
+It takes the `db`, not a connection string — your app owns the connection and the pool.
+
+Beyond the core adapter it also provides the **secret store** (envelope-encrypted rows behind `createVault`), the **memory job store**, and an **agent-builder store** so DB-defined agents work without you writing that table.
+
+Key exports: `createSqliteAdapter` · `createPostgresAdapter` · `migrate` / `migratePostgres` · `createSqliteSecretStore` · `createPostgresSecretStore` · `createMemoryJobStore` · `createSqliteAgentBuilderStore` · `schema`.
+
+<Callout title="Writing your own adapter?">
+The [Storage](/docs/storage) page lists four behavioural guarantees — atomic
+claims, fencing tokens, owner scoping, append-only messages. They only fail
+under concurrency, so point the durability and resume smoke tests at a new
+adapter before trusting it.
+</Callout>
+
+## latch-server
+
+**One mountable handler for the whole runtime.** A framework-agnostic `(Request) => Promise<Response | undefined>` covering chat, approvals, chat and run lists, history, schedules, and the generic connection OAuth.
+
+```ts
+import { createLatchHandler, createCronerEvaluator } from "@intentface/latch-server";
+import { createLatchHono } from "@intentface/latch-server/hono";
+```
+
+`hono` stays an optional peer because the adapter lives on a subpath. Also supplies `createCronerEvaluator()` for the `cron` seam, since core ships no cron library.
+
+→ [Hosting](/docs/hosting)
+
+## latch-mcp
+
+**MCP servers as agent tools**, with two guards core doesn't have: a per-tenant **SSRF allowlist** (an unlisted host throws before a socket opens) and **vault-brokered auth** (tokens resolved per tenant, never in agent config).
+
+```ts
+import { createMcpConnections, defineMcpConnection, oauth, bearer } from "@intentface/latch-mcp";
+```
+
+Handles both auth styles: **DCR** (dynamic client registration — the MCP default, no pre-registration needed) and a pre-registered client via `oauth({ clientId, clientSecret })`, which is what Google, Slack and most non-MCP-native providers require.
+
+An MCP tool's own annotations (`destructiveHint`, `readOnlyHint`) drive whether it needs approval, so a mutating third-party tool arrives gated without you enumerating it. For servers that ship no annotations there's `nameHeuristicApproval`.
+
+Key exports: `createMcpConnections` · `defineMcpConnection` · `createMcpHost` · `createMcpOAuth` · `none` / `bearer` / `headers` / `oauth` · `needsMcpApproval` · `nameHeuristicApproval`.
+
+## latch-openapi
+
+**Tools from an OpenAPI spec.** Same `ConnectionRegistry` shape as `latch-mcp`, so an agent's `connections: [...]` resolves across both kinds — useful for your own internal APIs, which usually have a spec and no MCP server.
+
+Key exports: `bearer` · `apiKey` · `headers` · `isHostAllowed`. Uses `@apidevtools/swagger-parser` to resolve specs.
+
+## latch-memory
+
+**Facts that survive the conversation.** Wire the `MemoryProvider` seam and each turn gets a compiled index appended to its instructions plus `memory_search` / `memory_save` tools; background jobs handle extraction and consolidation out of band.
+
+The load-bearing property is that **scopes are hard boundaries** — `agent-user`, `agent-org` and `user` are stored in disjoint subtrees, tools are path-locked at construction, and consolidation never crosses a scope. A personal agent's memory and a company-wide agent's memory differ by *declaration*, not convention.
+
+```ts
+defineAgent<Principal>(() => ({
+  model,
+  memory: { scope: "agent-user", connection: "loredex" },
+}));
+```
+
+Key exports: `createMemoryProvider` · `createLoredexStore` · `scopeRefOf` · the extraction/consolidation prompts and schemas.
+
+→ [Seams](/docs/seams#memory--persistent-facts-across-sessions)
+
+## latch-channels
+
+**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, runs the turn in the background, and streams the answer back as progressive message edits. Approvals and questionnaires render as native platform UI, and `/new` and `/compact` work as commands.
+
+```ts
+import { slackChannel } from "@intentface/latch-channels/slack";
+import { telegramChannel } from "@intentface/latch-channels/telegram";
+import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
+```
+
+A channel is just another caller of the runtime — the same `handleChat`, the same storage, the same approvals as your web app. Only the rendering differs.
+
+You supply the persistence: which agent a bot serves, the identity links, held messages, delivery dedup, and the per-chat turn lease.
+
+<Callout type="warn" title="Resolve the human, not the installer">
+Decide deliberately whether a turn runs as the *person messaging* or as the
+account that installed the bot. Getting this wrong keys every row to the wrong
+owner and silently disables per-user memory — see the worked example in
+[Principals](/docs/principals#make-sure-the-principal-is-the-person-you-think-it-is).
+</Callout>
+
+## latch-agent-builder
+
+**Agents as data.** The `AgentRecord` model and the `AgentBuilderStore` seam, which doubles as core's `DynamicAgentStore` — so records your users create in your UI are runnable by your runtime, resolving to the same `AgentConfig` a code-declared agent would.
+
+A record carries the model, instructions, connections, per-tool selection and approval overrides, execution capabilities, and a scope (`user` or `org`). `latch-drizzle` ships the storage.
+
+Key exports: `createAgentBuilder` · `normalizeAgentName` · `sharedReadTools` · the `AgentBuilderExtension` seam for host-specific builder tools.
+
+## latch-langfuse
+
+**Tracing over standard OpenTelemetry.** One trace per run, its id derived deterministically from the run id, tagged by owner and agent. Implements core's `telemetry` seam; omit the seam and nothing is traced, at zero cost.
+
+```ts
+import { langfuseTelemetry } from "@intentface/latch-langfuse";
+
+createRuntime({ telemetry: langfuseTelemetry({ ownerTag: (p) => p.orgId }) });
+```
+
+Also exposes `postScore` for writing evaluation scores back onto a run's trace.
+
+## latch-net
+
+**SSRF protection.** The host blocklist (private ranges, loopback, link-local, IPv6 equivalents) and a **pinned fetch** on the `./pinned` subpath that resolves a host once and connects to that address — closing the DNS-rebinding window between the check and the request.
+
+Used by `latch-mcp` and `latch-openapi`. Worth importing directly for any fetch driven by model output or user-supplied URLs.
+
+```ts
+import { isBlockedHost } from "@intentface/latch-net";
+import { pinnedFetch } from "@intentface/latch-net/pinned";
+```
+
+## latch-renderer
+
+**A headless browser as a service.** Unlike the others this is a *deployable server*, not a library — it depends on `playwright`, so it runs as its own process rather than inside your app.
+
+Fetches a page with JavaScript executed and returns structured parts (`text`, `jsonLd`, `links`, `clickables`, `html`) instead of raw markup, so a render costs a fraction of the context a full DOM would. Has its own SSRF guard, since the URLs it visits often come from model output.
+
+---
+
+## Choosing a starting set
+
+<Tabs items={['Minimal', 'Typical SaaS', 'Everything']}>
+
+<Tab value="Minimal">
+```bash
+pnpm add @intentface/latch-core @intentface/latch-drizzle ai @ai-sdk/anthropic
+```
+A runtime with persistence. You call `handleChat` from your own routes. No HTTP
+surface, no tools beyond what you define in code.
+</Tab>
+
+<Tab value="Typical SaaS">
+```bash
+pnpm add @intentface/latch-core @intentface/latch-drizzle \
+         @intentface/latch-server @intentface/latch-mcp \
+         @intentface/latch-memory ai @ai-sdk/anthropic
+```
+Persistence, a mounted API, third-party tools with per-tenant auth, and agents
+that remember. This covers most products.
+</Tab>
+
+<Tab value="Everything">
+```bash
+pnpm add @intentface/latch-core @intentface/latch-drizzle \
+         @intentface/latch-server @intentface/latch-mcp \
+         @intentface/latch-openapi @intentface/latch-memory \
+         @intentface/latch-channels @intentface/latch-agent-builder \
+         @intentface/latch-langfuse @intentface/latch-net \
+         ai @ai-sdk/anthropic
+```
+Add capabilities when you want them rather than up front — each one is a seam
+you fill, and an unfilled seam costs nothing at runtime.
+</Tab>
+
+</Tabs>
+
+All packages version in lockstep, so matching majors and minors across
+`@intentface/latch-*` is the supported combination.
