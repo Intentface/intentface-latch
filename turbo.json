@@ -5,6 +5,7 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".output/**", ".vercel/output/**"]
     },
-    "typecheck": { "dependsOn": ["^build"] }
+    "typecheck": { "dependsOn": ["^build"] },
+    "test": { "dependsOn": ["^build"] }
   }
 }

@@ -24,7 +24,18 @@
   ],
   "sideEffects": false,
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://npm.pkg.github.com",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      },
+      "./pinned": {
+        "types": "./dist/pinned-fetch.d.ts",
+        "import": "./dist/pinned-fetch.js"
+      }
+    }
   },
   "engines": {
     "node": ">=20.18.1"
@@ -41,5 +52,10 @@
     "@types/node": "^22",
     "typescript": "^5.7.0",
     "vitest": "^4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Intentface/intentface-latch.git",
+    "directory": "packages/net"
   }
 }
