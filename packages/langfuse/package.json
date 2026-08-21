@@ -34,7 +34,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@intentface/latch-core": "workspace:*",
+    "@intentface/latch-core": "workspace:^",
     "@langfuse/client": "^5.9.1",
     "@langfuse/otel": "^5.9.1",
     "@langfuse/tracing": "^5.9.1",

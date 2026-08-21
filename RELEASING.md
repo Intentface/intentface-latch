@@ -35,17 +35,39 @@ by invoking it directly. The workflow also runs those four as separate steps —
 for legible CI output, and so a failure lands before the changesets action starts.
 Turbo caches, so the duplication is nearly free.
 
+## Internal dependencies use `workspace:^`, not `workspace:*`
+
+The distinction decides what a consumer's `node_modules` looks like, so it is
+worth stating plainly. `pnpm publish` rewrites the workspace protocol at pack
+time, and the two forms rewrite differently:
+
+| in the repo | in the tarball |
+| --- | --- |
+| `workspace:*` | `"@intentface/latch-core": "0.1.0"` — **exact** |
+| `workspace:^` | `"@intentface/latch-core": "^0.1.0"` — a range |
+
+With exact pins, a consumer who declares `"@intentface/latch-core": "^0.1.0"`
+and installs fresh after `0.1.1` ships resolves core to `0.1.1` at the top
+level — while `latch-server@0.1.0` still demands exactly `0.1.0`. The resolver
+satisfies both by nesting a **second copy of core**, with its own module
+registry and its own `instanceof` identities. Nothing errors; things just stop
+being the same class.
+
+So every internal dependency in `packages/*` is `workspace:^`. The published
+range overlaps the consumer's own range, and one copy of core serves both.
+(Dev dependencies stay `workspace:*` — they are never published, so a range
+there communicates nothing.)
+
 ## Lockstep versioning
 
 Every package releases at the **same version** — `fixed: [["@intentface/latch-*"]]`
-in `.changeset/config.json`. This isn't cosmetic.
+in `.changeset/config.json`.
 
-`pnpm publish` rewrites `workspace:*` to an **exact** pin. A packed
-`latch-server` declares `"@intentface/latch-core": "0.0.0"` — not `^0.0.0`. So a
-consumer who installs `latch-server@0.1.0` alongside `latch-core@0.2.0` gets
-**two copies of core** in `node_modules`, with two module registries and two sets
-of instanceof checks. Lockstep makes that state impossible to express: matching
-versions across the scope is the only supported combination.
+Matching versions across the scope is what we build, test and ship, so it is the
+combination to reach for. It is no longer the *only* safe one — that is what the
+caret ranges above are for — but it keeps the changelogs legible (one version,
+one story) and it means "upgrade the scope" is a single decision rather than a
+compatibility matrix.
 
 ## The release job installs only `packages/*`
 
@@ -100,6 +122,9 @@ Before adding a new package to the scope:
 
 - `files` includes everything the `exports` map points at
 - `publishConfig.exports` mirrors `exports`, without `development`
+- internal `@intentface/latch-*` dependencies are `workspace:^`, not
+  `workspace:*` — see above; `*` publishes an exact pin and duplicates the
+  dependency in consumer installs
 - `repository.directory` points at the package (GitHub Packages links the
   package to the repo through this)
 - `private: true` if it isn't meant to be published — `latch-renderer` is a

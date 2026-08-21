@@ -360,7 +360,7 @@ importers:
   packages/agent-builder:
     dependencies:
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       zod:
         specifier: ^4.0.0
@@ -398,13 +398,13 @@ importers:
   packages/drizzle:
     dependencies:
       '@intentface/latch-agent-builder':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../agent-builder
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       '@intentface/latch-memory':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../memory
       '@libsql/client':
         specifier: ^0.15.0
@@ -429,7 +429,7 @@ importers:
   packages/langfuse:
     dependencies:
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       '@langfuse/client':
         specifier: ^5.9.1
@@ -466,7 +466,7 @@ importers:
   packages/latch-channels:
     dependencies:
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
     devDependencies:
       '@types/node':
@@ -485,10 +485,10 @@ importers:
   packages/mcp:
     dependencies:
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       '@intentface/latch-net':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../net
     devDependencies:
       '@ai-sdk/mcp':
@@ -507,7 +507,7 @@ importers:
   packages/memory:
     dependencies:
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
     devDependencies:
       '@intentface/latch-mcp':
@@ -551,10 +551,10 @@ importers:
         specifier: ^10.1.1
         version: 10.1.1(openapi-types@12.1.3)
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       '@intentface/latch-net':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../net
     devDependencies:
       ai:
@@ -580,10 +580,10 @@ importers:
   packages/server:
     dependencies:
       '@intentface/latch-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       '@intentface/latch-mcp':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../mcp
       croner:
         specifier: ^10.0.1

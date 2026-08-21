@@ -36,11 +36,11 @@
     "smoke:agents": "tsx src/agent-store.smoke.ts"
   },
   "dependencies": {
-    "@intentface/latch-agent-builder": "workspace:*",
-    "@intentface/latch-core": "workspace:*",
+    "@intentface/latch-agent-builder": "workspace:^",
+    "@intentface/latch-core": "workspace:^",
     "@libsql/client": "^0.15.0",
     "drizzle-orm": "^0.45.0",
-    "@intentface/latch-memory": "workspace:*"
+    "@intentface/latch-memory": "workspace:^"
   },
   "peerDependencies": {
     "ai": ">=7.0.0-beta.178"

@@ -13,6 +13,10 @@
  * Nothing enforces that the two maps agree, so this script re-derives the truth
  * from the tarball rather than the source manifest.
  *
+ * The same reasoning covers internal dependency ranges: `workspace:*` and
+ * `workspace:^` are indistinguishable in the workspace and produce very
+ * different consumer installs, so that is checked from the tarball too.
+ *
  * Run: `pnpm verify:publish`
  */
 import { execSync } from "node:child_process";
@@ -87,6 +91,19 @@ try {
         !files.includes(value.slice(2))
       ) {
         problems.push(`${field} → ${value} is not in the tarball`);
+      }
+    }
+    // Internal deps must publish as RANGES. `workspace:*` rewrites to an exact
+    // pin, so a consumer on `^0.1.0` who resolves core to 0.1.1 gets a second,
+    // nested copy of core to satisfy a sibling's `0.1.0` — two module
+    // registries, two sets of instanceof identities, no error. `workspace:^`
+    // publishes `^0.1.0` and dedupes. See RELEASING.md.
+    for (const [name, range] of Object.entries(shipped.dependencies ?? {})) {
+      if (!name.startsWith("@intentface/")) continue;
+      if (/^\d/.test(range)) {
+        problems.push(
+          `dependency ${name} publishes as the exact pin "${range}" — use workspace:^ in package.json`,
+        );
       }
     }
     // GitHub Packages links a package to its repo through this field.
