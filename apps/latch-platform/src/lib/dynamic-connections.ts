@@ -15,6 +15,7 @@ import {
   createOpenApiConnections,
   defineOpenApiConnection,
 } from "@intentface/latch-openapi";
+import { credentialPrincipalOf } from "./session";
 import type { Principal } from "./session";
 import type { ConnectionStore, ScopedConnection } from "./connection-store";
 import type { NamedSecrets } from "./named-secrets";
@@ -123,6 +124,25 @@ export function createDynamicConnections(opts: {
   const { store, secrets, vault, onConnectionError } = opts;
   const callbackBase = opts.callbackBaseUrl.replace(/\/$/, "");
 
+  // GRANTS live under the ACTING human; CONFIG resolves under the turn's own
+  // principal. The OAuth flows receive this wrapped vault, so every token/
+  // verifier/client/state read-write maps the principal through
+  // credentialPrincipalOf — while their lazy config resolvers (store.get for
+  // serverUrl/scopes/client secrets) keep the FULL turn principal and thus the
+  // binding's view of which connection a name means. Splitting here (rather
+  // than wrapping principals at call sites) is what prevents the config-
+  // substitution hole: with grant-keyed config lookups, an actor's same-named
+  // PERSONAL connection (personal wins over org in store.get) could point an
+  // org binding's flow at an arbitrary serverUrl.
+  const grantVault: Vault<Principal> = {
+    set: (p, k, v) => vault.set(credentialPrincipalOf(p), k, v),
+    get: (p, k) => vault.get(credentialPrincipalOf(p), k),
+    has: (p, k) => vault.has(credentialPrincipalOf(p), k),
+    delete: (p, k) => vault.delete(credentialPrincipalOf(p), k),
+    list: (p) => vault.list(credentialPrincipalOf(p)),
+    resolver: vault.resolver,
+  };
+
   // Normalize non-conformant OAuth discovery from proxied MCP servers: force the
   // https scheme (servers behind TLS-terminating proxies advertise http) and
   // strip the issuer's trailing slash (the SDK's RFC 8414 check is strict).
@@ -145,7 +165,7 @@ export function createDynamicConnections(opts: {
     if (!o) {
       const redirectUrl = `${callbackBase}/${name}/callback`;
       o = createMcpOAuth<Principal>({
-        vault,
+        vault: grantVault,
         config: {
           name,
           serverUrl: async (p) => {
@@ -196,7 +216,7 @@ export function createDynamicConnections(opts: {
     let o = oauth2Cache.get(name);
     if (!o) {
       o = createOAuth2Flow<Principal>({
-        vault,
+        vault: grantVault,
         name,
         callbackBaseUrl: callbackBase,
         config: async (p) => {
@@ -229,7 +249,10 @@ export function createDynamicConnections(opts: {
             ),
           };
         },
-        ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
+        ownerKey: (p) => {
+          const c = credentialPrincipalOf(p);
+          return `${c.orgId}/${c.userId ?? ""}`;
+        },
       });
       oauth2Cache.set(name, o);
     }
@@ -333,6 +356,9 @@ export function createDynamicConnections(opts: {
     return {
       async open(principal): Promise<OpenToolSet> {
         const o = oauthFor(conn.name);
+        // The FULL turn principal flows into the flow: grant storage maps to
+        // the acting human inside grantVault, while config lookups keep the
+        // binding's view — see grantVault for why the split lives there.
         if (!(await o.isAuthorized(principal))) {
           return { tools: {}, toolApproval: {}, close: async () => {} };
         }
@@ -456,6 +482,10 @@ export function createDynamicConnections(opts: {
     // provider().invalidateCredentials on disconnect). The MCP client itself
     // must keep getting the real OAuthClientProvider from `oauthFor` — see
     // mcpOAuthSource, which deliberately bypasses this dispatcher.
+    // The full principal flows through; grant storage maps to the acting human
+    // inside grantVault, so a channel connect card completes for the person
+    // who clicked it — never onto the binding owner's key — while config keeps
+    // the binding's view of the connection.
     oauth: (name) => ({
       isAuthorized: async (p) => (await flowFor(p, name)).isAuthorized(p),
       start: async (p, o) => (await flowFor(p, name)).start(p, o),

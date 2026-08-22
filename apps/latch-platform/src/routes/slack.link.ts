@@ -122,6 +122,15 @@ async function handleLink(request: Request): Promise<Response> {
   if (pending && pending.appId === appId) {
     const resolved = await getSlackChannelForApp(pending.appId);
     if (resolved) {
+      // The replay is a turn on behalf of the human who JUST linked: carry
+      // them as the actor, exactly as a live message from them would —
+      // otherwise the very first thing a freshly linked member does runs on
+      // the binder's grants.
+      const principal = {
+        orgId: app.orgId,
+        userId: app.userId,
+        actorUserId: session.principal.userId!,
+      };
       waitUntil(
         resolved.channel
           .runMessage({
@@ -129,6 +138,7 @@ async function handleLink(request: Request): Promise<Response> {
             root: pending.threadRoot,
             userId: slackUserId,
             prompt: pending.prompt,
+            principal,
           })
           .catch((e) => console.error("[slack] post-link replay failed:", e)),
       );

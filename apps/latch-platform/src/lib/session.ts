@@ -10,6 +10,27 @@ export interface Principal {
   orgId: string;
   /** Optional: omitted to address org-shared resources (e.g. an org-level credential). */
   userId?: string;
+  /**
+   * The human ACTING through this principal when it differs from `userId` —
+   * set by channel turns (Slack) where the chat must stay owned by one stable
+   * key (the binding's, so a shared thread never fragments per member) while
+   * CREDENTIALS must resolve per typist (a member must never read through
+   * another member's OAuth grants). Ignored by the `owner` derivation; consumed
+   * by `credentialPrincipalOf`. Serialized with the run like every other field,
+   * so resumes keep acting as the same human.
+   */
+  actorUserId?: string;
+}
+
+/**
+ * The principal OAuth grants resolve under: the acting human when present,
+ * else the principal itself. Every per-user credential read/write (MCP oauth
+ * tokens, oauth2 grants) must go through this — resolving grants under the
+ * raw channel principal is exactly the bug where everyone in a Slack channel
+ * silently reads through the binding owner's integrations.
+ */
+export function credentialPrincipalOf(p: Principal): Principal {
+  return p.actorUserId ? { orgId: p.orgId, userId: p.actorUserId } : p;
 }
 
 /**
