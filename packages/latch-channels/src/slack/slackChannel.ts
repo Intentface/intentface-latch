@@ -153,6 +153,14 @@ export interface SlackChannelConfig<P> {
    * impossible. Omitted → falls back to the weaker `bot_id`/`subtype` check.
    */
   botUserId?: string;
+  /**
+   * Scopes this app's Slack threads to their own Latch chats — pass the Slack
+   * app id. Omitting it shares one chat per thread with every other bot in the
+   * channel (see the chat-id notes above): they answer each other's messages
+   * and interleave one history. Optional only so existing hosts keep
+   * compiling; supply it.
+   */
+  chatNamespace?: string;
   /** Per-agent display identity (defaults applied by the bot user). */
   botName?: string;
   iconEmoji?: string;
@@ -188,26 +196,41 @@ interface Bound<P> {
 }
 
 // ── The Slack chat-id format ────────────────────────────────────────────────
-// `slack_<channel>_<threadRoot>`: a Latch conversation is anchored to a Slack
-// thread, so continuing one means knowing its root `ts`. Defined once here and
-// read back by `parseSlackChatId` — hosts that need to go the other way (a
-// scheduled run posting an anchor and threading under it) use these rather
-// than re-deriving the shape.
+// `slack_<app>_<channel>_<threadRoot>`: a Latch conversation is anchored to a
+// Slack thread AND to the app that owns it. Defined once here and read back by
+// `parseSlackChatId` — hosts that need to go the other way (a scheduled run
+// posting an anchor and threading under it) use these rather than re-deriving
+// the shape.
+//
+// The `app` segment is not cosmetic. Several bots commonly sit in one channel,
+// and every one of them receives `message.channels` for the same message.
+// Without the segment they share ONE chat per thread, which means (a) each
+// bot's `isFollowedThread` sees the others' replies as its own history, so a
+// single un-mentioned follow-up is answered by EVERY bot in the channel, and
+// (b) they read and write one interleaved history, so an agent answers out of
+// another agent's conversation. Both were observed in production.
+//
+// Legacy ids (no app segment) still parse, so threads that predate the fix
+// keep resolving; new ones are namespaced.
 
-/** Build the chat id for a Slack thread. */
-export function slackChatId(channel: string, root: string): string {
-  return `slack_${channel}_${root}`;
+/** Build the chat id for a Slack thread, scoped to the owning app. */
+export function slackChatId(channel: string, root: string, app?: string): string {
+  return app ? `slack_${app}_${channel}_${root}` : `slack_${channel}_${root}`;
 }
 
 /**
  * The inverse of `slackChatId`, or null when `id` isn't one of ours. A thread
- * root is a Slack `ts` (`1712345678.000100`), which pins the split — channel
- * ids never contain a dot.
+ * root is a Slack `ts` (`1712345678.000100`), which pins the tail — and neither
+ * app nor channel ids contain `_`, which pins the head.
  */
-export function parseSlackChatId(id: string): { channel: string; root: string } | null {
-  const m = /^slack_(.+)_(\d+\.\d+)$/.exec(id);
-  if (!m) return null;
-  return { channel: m[1]!, root: m[2]! };
+export function parseSlackChatId(
+  id: string,
+): { channel: string; root: string; app?: string } | null {
+  const scoped = /^slack_([^_]+)_([^_]+)_(\d+\.\d+)$/.exec(id);
+  if (scoped) return { app: scoped[1]!, channel: scoped[2]!, root: scoped[3]! };
+  const legacy = /^slack_(.+)_(\d+\.\d+)$/.exec(id);
+  if (!legacy) return null;
+  return { channel: legacy[1]!, root: legacy[2]! };
 }
 
 /**
@@ -254,7 +277,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
   const identity = { username: config.botName, icon_emoji: config.iconEmoji };
 
   /** chatId for a Slack thread — anchors a Latch conversation to the thread. */
-  const chatIdFor = slackChatId;
+  const chatIdFor = (channel: string, root: string) =>
+    slackChatId(channel, root, config.chatNamespace);
 
   // ── Drive one turn and render it ──────────────────────────────────────────
   async function runTurn(b: Bound<P>, ev: SlackEvent, teamId: string): Promise<void> {

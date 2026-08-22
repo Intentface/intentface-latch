@@ -101,6 +101,10 @@ export async function getSlackChannelForApp(appId: string) {
     // config). Absent on bindings installed before it was captured; those fall
     // back to bot_id/subtype until the app is reinstalled.
     botUserId: app.botUserId,
+    // Scope this bot's threads to their own chats. Several bots share a
+    // channel and all receive the same message events — unscoped, they answer
+    // each other's messages and interleave one history.
+    chatNamespace: appId,
     // Circuit breaker: one live turn per thread. A run is "live" only while
     // active and recently heartbeated — a crashed run's row lingers until the
     // reaper, and must not wedge the thread shut.
