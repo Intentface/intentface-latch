@@ -153,6 +153,28 @@ export interface SlackChannelConfig<P> {
    * impossible. Omitted → falls back to the weaker `bot_id`/`subtype` check.
    */
   botUserId?: string;
+  /**
+   * Scopes this app's Slack threads to their own Latch chats — pass the Slack
+   * app id. Omitting it shares one chat per thread with every other bot in the
+   * channel (see the chat-id notes above): they answer each other's messages
+   * and interleave one history. Optional only so existing hosts keep
+   * compiling; supply it.
+   */
+  chatNamespace?: string;
+  /**
+   * Adopt a pre-`chatNamespace` thread instead of stranding it. Called with
+   * both candidate ids; return the one to use.
+   *
+   * Threads created before scoping live at the unscoped id, and switching them
+   * to a scoped one would hide their history: plain replies stop being
+   * followed, and a later mention starts an empty chat. Hosts should return
+   * the legacy id when a chat exists there AND belongs to THIS agent, and the
+   * scoped id otherwise — which keeps each thread with the bot that actually
+   * owns it while the other bots in the channel get their own fresh chats
+   * (i.e. it heals the shared-thread bug rather than perpetuating it).
+   * Omitted → always the scoped id.
+   */
+  resolveChatId?: (ids: { scoped: string; legacy: string }) => Promise<string>;
   /** Per-agent display identity (defaults applied by the bot user). */
   botName?: string;
   iconEmoji?: string;
@@ -188,26 +210,61 @@ interface Bound<P> {
 }
 
 // ── The Slack chat-id format ────────────────────────────────────────────────
-// `slack_<channel>_<threadRoot>`: a Latch conversation is anchored to a Slack
-// thread, so continuing one means knowing its root `ts`. Defined once here and
-// read back by `parseSlackChatId` — hosts that need to go the other way (a
-// scheduled run posting an anchor and threading under it) use these rather
-// than re-deriving the shape.
+// `slack_<app>_<channel>_<threadRoot>`: a Latch conversation is anchored to a
+// Slack thread AND to the app that owns it. Defined once here and read back by
+// `parseSlackChatId` — hosts that need to go the other way (a scheduled run
+// posting an anchor and threading under it) use these rather than re-deriving
+// the shape.
+//
+// The `app` segment is not cosmetic. Several bots commonly sit in one channel,
+// and every one of them receives `message.channels` for the same message.
+// Without the segment they share ONE chat per thread, which means (a) each
+// bot's `isFollowedThread` sees the others' replies as its own history, so a
+// single un-mentioned follow-up is answered by EVERY bot in the channel, and
+// (b) they read and write one interleaved history, so an agent answers out of
+// another agent's conversation. Both were observed in production.
+//
+// Legacy ids (no app segment) still parse, so threads that predate the fix
+// keep resolving; new ones are namespaced.
 
-/** Build the chat id for a Slack thread. */
-export function slackChatId(channel: string, root: string): string {
-  return `slack_${channel}_${root}`;
+/**
+ * `_` separates the id's segments, so it cannot appear inside one. Slack's own
+ * ids (A…/C…/D…/G…) never contain `_` or `%`, making this the identity for
+ * every real id — but `chatNamespace` is host-supplied, so the encoding has to
+ * be REVERSIBLE rather than merely safe: collapsing `_` to `-` would map
+ * `my_app` and `my-app` onto one chat (sharing their history, the very bug
+ * this scoping fixes) and hand the mangled id back as an app id to whatever
+ * reads the chat id.
+ */
+const encodeSeg = (v: string) => v.replace(/%/g, "%25").replace(/_/g, "%5F");
+const decodeSeg = (v: string) => v.replace(/%5F/g, "_").replace(/%25/g, "%");
+
+/** Build the chat id for a Slack thread, scoped to the owning app. */
+export function slackChatId(channel: string, root: string, app?: string): string {
+  return app
+    ? `slack_${encodeSeg(app)}_${encodeSeg(channel)}_${root}`
+    : `slack_${channel}_${root}`;
 }
 
 /**
  * The inverse of `slackChatId`, or null when `id` isn't one of ours. A thread
- * root is a Slack `ts` (`1712345678.000100`), which pins the split — channel
- * ids never contain a dot.
+ * root is a Slack `ts` (`1712345678.000100`), which pins the tail — and neither
+ * app nor channel ids contain `_`, which pins the head.
  */
-export function parseSlackChatId(id: string): { channel: string; root: string } | null {
-  const m = /^slack_(.+)_(\d+\.\d+)$/.exec(id);
-  if (!m) return null;
-  return { channel: m[1]!, root: m[2]! };
+export function parseSlackChatId(
+  id: string,
+): { channel: string; root: string; app?: string } | null {
+  const scoped = /^slack_([^_]+)_([^_]+)_(\d+\.\d+)$/.exec(id);
+  if (scoped) {
+    return {
+      app: decodeSeg(scoped[1]!),
+      channel: decodeSeg(scoped[2]!),
+      root: scoped[3]!,
+    };
+  }
+  const legacy = /^slack_(.+)_(\d+\.\d+)$/.exec(id);
+  if (!legacy) return null;
+  return { channel: legacy[1]!, root: legacy[2]! };
 }
 
 /**
@@ -253,8 +310,27 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
 
   const identity = { username: config.botName, icon_emoji: config.iconEmoji };
 
-  /** chatId for a Slack thread — anchors a Latch conversation to the thread. */
-  const chatIdFor = slackChatId;
+  /**
+   * chatId for a Slack thread — anchors a Latch conversation to the thread and
+   * to this app. Async because a host may adopt a legacy (unscoped) chat; see
+   * `resolveChatId`.
+   */
+  const chatIdFor = async (channel: string, root: string): Promise<string> => {
+    const scoped = slackChatId(channel, root, config.chatNamespace);
+    if (!config.chatNamespace || !config.resolveChatId) return scoped;
+    const legacy = slackChatId(channel, root);
+    return config.resolveChatId({ scoped, legacy }).catch((e) => {
+      // A failed lookup must not drop the turn — but note this is STICKY: the
+      // turn runs at the scoped id, `handleChat` creates that chat, and every
+      // later resolve short-circuits on "scoped exists". A transient error
+      // therefore forks an owned thread permanently, so it must be loud.
+      console.error(
+        `[slack] chat-id resolve failed for ${scoped}; using the scoped id (legacy history, if any, will stay detached):`,
+        e,
+      );
+      return scoped;
+    });
+  };
 
   // ── Drive one turn and render it ──────────────────────────────────────────
   async function runTurn(b: Bound<P>, ev: SlackEvent, teamId: string): Promise<void> {
@@ -315,13 +391,18 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       if (auth.principal !== undefined) turnPrincipal = auth.principal;
     }
 
+    // Resolve the chat id ONCE for the whole turn: it can hit storage (legacy
+    // adoption), and resolving twice risks the context seed and the turn
+    // landing in different chats if one resolution hits the error fallback.
+    const turnChatId = await chatIdFor(channel, root);
+
     // First time the bot engages a thread that already had human chat: seed the
     // prior thread messages as context, so it knows what "this" refers to.
     let context: string | undefined;
     if (ev.thread_ts) {
       try {
         const existing = await b.tenant.runtime.loadHistory({
-          chatId: chatIdFor(channel, root),
+          chatId: turnChatId,
           principal: turnPrincipal,
         });
         if (existing.length === 0) {
@@ -344,12 +425,20 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     // Circuit breaker, last thing before the turn: never stack turns on one
     // thread. Checked HERE (not at dispatch) so it covers mentions, DMs and
     // thread-following alike, and only after the gate has spent its work.
-    if (config.isBusy && (await config.isBusy(chatIdFor(channel, root)).catch(() => false))) {
-      console.warn(`[slack] chat ${chatIdFor(channel, root)} already has a live turn — skipping`);
+    if (config.isBusy && (await config.isBusy(turnChatId).catch(() => false))) {
+      console.warn(`[slack] chat ${turnChatId} already has a live turn — skipping`);
       return;
     }
 
-    await runMessageBound(b, { channel, root, userId, prompt, context, principal: turnPrincipal });
+    await runMessageBound(b, {
+      channel,
+      root,
+      userId,
+      prompt,
+      context,
+      principal: turnPrincipal,
+      chatId: turnChatId,
+    });
   }
 
   /**
@@ -368,10 +457,12 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       context?: string;
       /** Per-message principal (the authorizeUser resolver's); tenant's when absent. */
       principal?: P;
+      /** Pre-resolved chat id (runTurn resolves once, incl. legacy adoption). */
+      chatId?: string;
     },
   ): Promise<void> {
     const principal = ctx.principal ?? b.tenant.principal;
-    const chatId = chatIdFor(ctx.channel, ctx.root);
+    const chatId = ctx.chatId ?? (await chatIdFor(ctx.channel, ctx.root));
     await b.api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "is thinking…" });
 
     const text = ctx.context
@@ -694,7 +785,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         !(ev.text ?? "").includes("<@") &&
         config.isFollowedThread
       ) {
-        const chatId = chatIdFor(ev.channel, ev.thread_ts);
+        const chatId = await chatIdFor(ev.channel, ev.thread_ts);
         if (await config.isFollowedThread(chatId)) {
           console.log(`[slack] following thread ${chatId}`);
           const b = await resolveFor();

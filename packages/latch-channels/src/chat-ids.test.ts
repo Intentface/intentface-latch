@@ -56,4 +56,63 @@ describe("slack chat ids", () => {
     expect(parseSlackChatId("slack_C012AB3CD")).toBeNull();
     expect(parseSlackChatId("")).toBeNull();
   });
+
+  it("scopes a thread to its app, and round-trips the app back", () => {
+    // Several bots sit in one channel and all receive the same message
+    // events. Unscoped, they share one chat: each one's isFollowedThread sees
+    // the others' replies as its own history, so an un-mentioned follow-up is
+    // answered by EVERY bot, out of one interleaved history. Observed live.
+    const id = slackChatId("C012AB3CD", "1712345678.000100", "A0BRZHRTHLJ");
+    expect(id).toBe("slack_A0BRZHRTHLJ_C012AB3CD_1712345678.000100");
+    expect(parseSlackChatId(id)).toEqual({
+      app: "A0BRZHRTHLJ",
+      channel: "C012AB3CD",
+      root: "1712345678.000100",
+    });
+  });
+
+  it("gives two apps different chats for the same thread", () => {
+    const a = slackChatId("C012AB3CD", "1712345678.000100", "A0AAAAAAA");
+    const b = slackChatId("C012AB3CD", "1712345678.000100", "A0BBBBBBB");
+    expect(a).not.toBe(b);
+  });
+
+  it("still parses legacy unscoped ids", () => {
+    // Threads that predate the fix must keep resolving.
+    expect(parseSlackChatId("slack_C012AB3CD_1712345678.000100")).toEqual({
+      channel: "C012AB3CD",
+      root: "1712345678.000100",
+    });
+  });
+
+  it("encodes a separator inside a segment REVERSIBLY", () => {
+    // `_` separates segments. Collapsing it (e.g. to `-`) would map `my_app`
+    // and `my-app` onto one chat — the sharing this scoping exists to stop —
+    // and hand a mangled app id to whatever reads the chat id back.
+    const underscored = slackChatId("C012AB3CD", "1712345678.000100", "my_app");
+    const hyphened = slackChatId("C012AB3CD", "1712345678.000100", "my-app");
+    expect(underscored).not.toBe(hyphened);
+    expect(parseSlackChatId(underscored)).toEqual({
+      app: "my_app",
+      channel: "C012AB3CD",
+      root: "1712345678.000100",
+    });
+    expect(parseSlackChatId(hyphened)?.app).toBe("my-app");
+  });
+
+  it("round-trips a segment containing the escape character itself", () => {
+    const id = slackChatId("C012AB3CD", "1712345678.000100", "a%5Fb");
+    expect(parseSlackChatId(id)?.app).toBe("a%5Fb");
+  });
+
+  it("scopes DM and group-DM threads too", () => {
+    for (const channel of ["D012AB3CD", "G012AB3CD"]) {
+      const id = slackChatId(channel, "1712345678.000100", "A0BRZHRTHLJ");
+      expect(parseSlackChatId(id)).toEqual({
+        app: "A0BRZHRTHLJ",
+        channel,
+        root: "1712345678.000100",
+      });
+    }
+  });
 });

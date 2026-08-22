@@ -404,8 +404,8 @@ const askUser = tool({
  * for a web chat. This is the whole reason the model never names a recipient:
  * a schedule created from a Telegram DM can only ever push back into THAT DM.
  *
- * Slack chat ids carry the channel but not the app, so the app is recovered
- * from the agent binding — and only when it's unambiguous.
+ * Scoped Slack chat ids name the app outright; legacy ones don't, so for those
+ * the app is recovered from the agent binding — and only when unambiguous.
  */
 async function deliveryForChat(
   chatId: string,
@@ -417,6 +417,9 @@ async function deliveryForChat(
 
   const slack = parseSlackChatId(chatId);
   if (!slack) return undefined;
+  // Scoped id: the app is right there — no guessing, and it works for an agent
+  // with several bots (which the ambiguity bail below has to refuse).
+  if (slack.app) return { kind: "slack", appId: slack.app, channel: slack.channel };
   const { slackStore } = await getLatch();
   const { parseAgentRef } = await import("@/lib/agent-store");
   const apps = await slackStore.appsForAgent(principal.orgId, parseAgentRef(agentRef).name);
