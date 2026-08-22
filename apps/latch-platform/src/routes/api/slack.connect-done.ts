@@ -69,9 +69,16 @@ async function handleConnectDone(request: Request): Promise<Response> {
 
   // Resume in the background — the browser gets its confirmation immediately,
   // the answer streams into the thread (same pattern as the webhook's defer).
+  // The resumed turn runs with the CLICKER as actor: their fresh grant is the
+  // one the reopened toolset must resolve, not the binding owner's.
   waitUntil(
     resolved.channel
-      .resumeApproval({ chatId, approvalId, userId: slackUser })
+      .resumeApproval({
+        chatId,
+        approvalId,
+        userId: slackUser,
+        principal: { orgId: app.orgId, userId: app.userId, actorUserId: session.userId },
+      })
       .catch((e) => console.error("[slack] connect-done resume failed:", e)),
   );
 

@@ -14,6 +14,7 @@ import {
   createOpenApiConnections,
   defineOpenApiConnection,
 } from "@intentface/latch-openapi";
+import { credentialPrincipalOf } from "./session";
 import type { Principal } from "./session";
 import type { ConnectionStore, ScopedConnection } from "./connection-store";
 import type { NamedSecrets } from "./named-secrets";
@@ -259,7 +260,7 @@ export function createDynamicConnections(opts: {
           ? openApiBearer<Principal>({
               getToken: (p) =>
                 oauth2FlowFor(conn.name)
-                  .accessTokenFor(p)
+                  .accessTokenFor(credentialPrincipalOf(p))
                   .catch(() => undefined),
             })
           : conn.auth && conn.auth.kind !== "oauth"
@@ -293,7 +294,7 @@ export function createDynamicConnections(opts: {
   function openapiOAuth2Source(conn: ScopedConnection): ToolSource<Principal> {
     return {
       async open(principal): Promise<OpenToolSet> {
-        if (!(await oauth2FlowFor(conn.name).isAuthorized(principal))) {
+        if (!(await oauth2FlowFor(conn.name).isAuthorized(credentialPrincipalOf(principal)))) {
           return { tools: {}, toolApproval: {}, close: async () => {} };
         }
         return openapiSource(conn).open(principal);
@@ -332,14 +333,18 @@ export function createDynamicConnections(opts: {
     return {
       async open(principal): Promise<OpenToolSet> {
         const o = oauthFor(conn.name);
-        if (!(await o.isAuthorized(principal))) {
+        // Grants resolve under the ACTING human (credentialPrincipalOf): in a
+        // shared channel the turn principal keeps the binding's userId for
+        // chat ownership, but the typist must never ride the binder's tokens.
+        const grantP = credentialPrincipalOf(principal);
+        if (!(await o.isAuthorized(grantP))) {
           return { tools: {}, toolApproval: {}, close: async () => {} };
         }
         return createMcpHost<Principal>({
           allowedHosts: [hostOf(url)],
           onConnectionError,
           connections: [
-            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch },
+            { name: conn.name, url, authProvider: o.provider(grantP), fetch: discoveryFetch },
           ],
         }).open(principal);
       },
@@ -422,10 +427,10 @@ export function createDynamicConnections(opts: {
         tools[key] = connectTool(conn.name);
         const authed = isOAuthMcp
           ? await oauthFor(conn.name)
-              .isAuthorized(principal)
+              .isAuthorized(credentialPrincipalOf(principal))
               .catch(() => false)
           : await oauth2FlowFor(conn.name)
-              .isAuthorized(principal)
+              .isAuthorized(credentialPrincipalOf(principal))
               .catch(() => false);
         if (!authed) toolApproval[key] = "user-approval";
         alwaysActive.push(key);
@@ -456,14 +461,19 @@ export function createDynamicConnections(opts: {
     // provider().invalidateCredentials on disconnect). The MCP client itself
     // must keep getting the real OAuthClientProvider from `oauthFor` — see
     // mcpOAuthSource, which deliberately bypasses this dispatcher.
+    // Grants land under the ACTING human (credentialPrincipalOf) so a channel
+    // connect card completes for the person who clicked it — never onto the
+    // binding owner's key.
     oauth: (name) => ({
-      isAuthorized: async (p) => (await flowFor(p, name)).isAuthorized(p),
-      start: async (p, o) => (await flowFor(p, name)).start(p, o),
-      finish: async (p, params) => (await flowFor(p, name)).finish(p, params),
+      isAuthorized: async (p) => (await flowFor(p, name)).isAuthorized(credentialPrincipalOf(p)),
+      start: async (p, o) => (await flowFor(p, name)).start(credentialPrincipalOf(p), o),
+      finish: async (p, params) => (await flowFor(p, name)).finish(credentialPrincipalOf(p), params),
       provider: (p) =>
         ({
           invalidateCredentials: async (scope: string) =>
-            (await flowFor(p, name)).provider(p).invalidateCredentials?.(scope as never),
+            (await flowFor(p, name))
+              .provider(credentialPrincipalOf(p))
+              .invalidateCredentials?.(scope as never),
         }) as unknown as ReturnType<McpOAuth<Principal>["provider"]>,
     }),
 

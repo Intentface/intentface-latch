@@ -163,6 +163,73 @@ describe("dynamic oauth2 OpenAPI connections", () => {
     await opened.close();
   });
 
+  it("a channel actor resolves grants under THEIR key — never the binding owner's", async () => {
+    // Shared-thread turns keep the binding's userId for chat ownership and
+    // carry the typist as actorUserId. The security property: the typist's own
+    // grant unlocks the tools, and a typist WITHOUT a grant gets the connect
+    // card even though the binding owner is fully connected — no riding
+    // another member's OAuth tokens, in either direction.
+    stubFetch();
+    const vault = memoryVault();
+    const store = createConnectionStore(vault);
+    const secrets = createNamedSecrets(vault);
+    const owner: Principal = { orgId: "org1", userId: "binder" };
+    await store.add(owner, "org", {
+      kind: "openapi",
+      name: "strava",
+      openapi: { spec: SPEC_URL, baseUrl: API_BASE },
+      auth: {
+        kind: "oauth2",
+        authorizeUrl: "https://idp.example.com/oauth/authorize",
+        tokenUrl: "https://idp.example.com/oauth/token",
+        clientId: "cid-1",
+        clientSecret: "sec-1",
+        scopes: ["read"],
+      },
+    });
+    const dynamic = createDynamicConnections({
+      store,
+      secrets,
+      vault,
+      callbackBaseUrl: "http://localhost:3000/api/latch/connections",
+    });
+    const cfg = oauth2ConfigFingerprint({
+      authorizeUrl: "https://idp.example.com/oauth/authorize",
+      tokenUrl: "https://idp.example.com/oauth/token",
+      clientId: "cid-1",
+      clientSecret: "sec-1",
+      scopes: ["read"],
+      fingerprint: JSON.stringify([SPEC_URL, API_BASE]),
+    });
+    // The BINDING OWNER has a grant; the actor "alice" does not (yet).
+    await vault.set(
+      owner,
+      "oauth2:strava:tokens",
+      JSON.stringify({ access_token: "at-owner", refresh_token: "rt", expires_at: Date.now() + 3_600_000, cfg }),
+    );
+
+    // Alice types in the channel: turn principal = binding + actor alice.
+    const aliceTurn: Principal = { orgId: "org1", userId: "binder", actorUserId: "alice" };
+    const before = await dynamic.hostFor(["strava"]).open(aliceTurn);
+    expect(Object.keys(before.tools)).toEqual(["connect_strava"]); // owner's grant does NOT leak to alice
+    expect(before.toolApproval).toMatchObject({ connect_strava: "user-approval" });
+    await before.close();
+
+    // Alice connects (grant under HER key), and the same turn principal unlocks.
+    await vault.set(
+      { orgId: "org1", userId: "alice" },
+      "oauth2:strava:tokens",
+      JSON.stringify({ access_token: "at-alice", refresh_token: "rt", expires_at: Date.now() + 3_600_000, cfg }),
+    );
+    const after = await dynamic.hostFor(["strava"]).open(aliceTurn);
+    expect(Object.keys(after.tools).sort()).toEqual(["connect_strava", "strava_getAthlete"]);
+    const tool = after.tools.strava_getAthlete as {
+      execute: (input: unknown, options: unknown) => Promise<unknown>;
+    };
+    await tool.execute({}, { toolCallId: "t1", messages: [], context: { principal: aliceTurn } });
+    await after.close();
+  });
+
   it("authorized: connect_<name> loses its approval gate and no-ops to {connected:true}", async () => {
     // A model primed by its own history ("I need to connect first…") may call
     // connect_* even though the connection is live. Gated, that parks a

@@ -577,7 +577,11 @@ export async function getLatch(): Promise<{
     const app = await slackStore.resolve(slackApp);
     if (!app) return null;
     if (!(await isOrgMember(session.userId, app.orgId))) return null;
-    return { orgId: app.orgId, userId: app.userId };
+    // Binding principal for chat/flow state, the CLICKER as the actor: the
+    // grant then lands under their credential key (credentialPrincipalOf in
+    // the oauth dispatcher), which is what the per-user Slack turn checks —
+    // one member's sign-in never satisfies (or pollutes) another's.
+    return { orgId: app.orgId, userId: app.userId, actorUserId: session.userId };
   };
 
   const handler = createLatchHandler<Principal>({
