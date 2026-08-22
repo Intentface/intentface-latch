@@ -97,6 +97,24 @@ export async function getSlackChannelForApp(appId: string) {
         linkUrl: buildLinkUrl(baseUrl(), appId, team, userId),
       };
     },
+    // The bot's own user id — the reliable self-message check (see the channel
+    // config). Absent on bindings installed before it was captured; those fall
+    // back to bot_id/subtype until the app is reinstalled.
+    botUserId: app.botUserId,
+    // Circuit breaker: one live turn per thread. A run is "live" only while
+    // active and recently heartbeated — a crashed run's row lingers until the
+    // reaper, and must not wedge the thread shut.
+    isBusy: async (chatId) => {
+      const runs = await runtime.listRuns({ principal, limit: 25 });
+      const cutoff = Date.now() - 2 * 60_000;
+      return runs.some(
+        (r) =>
+          r.chatId === chatId &&
+          r.status === "active" &&
+          !r.endedAt &&
+          Math.max(r.heartbeatAt ?? 0, r.startedAt) > cutoff,
+      );
+    },
     // Thread-following: a Latch chat exists for a thread the bot has replied in.
     isFollowedThread: async (chatId) => {
       const msgs = await runtime.loadHistory({ chatId, principal });

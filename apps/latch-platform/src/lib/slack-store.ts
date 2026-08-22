@@ -57,6 +57,11 @@ export async function migrateSlack(client: Client): Promise<void> {
   } catch {
     /* column already exists */
   }
+  try {
+    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN bot_user_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 /** Vault credential key names for a Slack app's secrets (stored at org scope). */
@@ -95,9 +100,18 @@ export interface SlackApp {
    * person's access.
    */
   credentialMode?: "per-user" | "shared";
+  /**
+   * The bot's own Slack user id, captured at install (`oauth.v2.access` →
+   * `bot_user_id`). The AUTHORITATIVE self-check: `bot_id`/`subtype` are absent
+   * on some post shapes, and a bot message that isn't recognized as one passes
+   * the thread-following gate — the bot answers its own message, posts again,
+   * and the thread runs away (observed: 22 runs and 44 events from ~3 real
+   * exchanges). Comparing `event.user` to this id can't miss.
+   */
+  botUserId?: string;
 }
 
-const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode
+const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id
               FROM latch_slack_app`;
 
 const rowToApp = (r: Record<string, unknown>): SlackApp => ({
@@ -109,6 +123,7 @@ const rowToApp = (r: Record<string, unknown>): SlackApp => ({
   userId: r.user_id ? String(r.user_id) : undefined,
   botName: r.bot_name ? String(r.bot_name) : undefined,
   credentialMode: r.credential_mode === "shared" ? "shared" : "per-user",
+  botUserId: r.bot_user_id ? String(r.bot_user_id) : undefined,
 });
 
 export function createSlackStore(client: Client) {
@@ -124,14 +139,17 @@ export function createSlackStore(client: Client) {
       const now = Date.now();
       const res = await client.execute({
         sql: `INSERT INTO latch_slack_app
-                (app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(app_id) DO UPDATE SET
                 team_id = excluded.team_id, agent = excluded.agent,
                 agent_scope = excluded.agent_scope,
                 user_id = excluded.user_id,
                 bot_name = excluded.bot_name,
                 credential_mode = excluded.credential_mode,
+                -- Re-binds that don't re-run OAuth carry no bot user id; keep
+                -- the stored one rather than nulling the loop guard.
+                bot_user_id = COALESCE(excluded.bot_user_id, latch_slack_app.bot_user_id),
                 updated_at = excluded.updated_at
               WHERE latch_slack_app.org_id = excluded.org_id`,
         args: [
@@ -143,6 +161,7 @@ export function createSlackStore(client: Client) {
           app.userId ?? null,
           app.botName ?? null,
           app.credentialMode ?? "per-user",
+          app.botUserId ?? null,
           now,
           now,
         ],

@@ -48,6 +48,8 @@ async function handleOauth(request: Request): Promise<Response> {
         orgId: app.orgId,
         userId: app.userId,
         botName: app.botName,
+        // The loop guard: without it the bot can answer its own messages.
+        botUserId: res.botUserId,
       });
       // Auto-link the installer (the owner) so they can use the bot right away.
       if (res.authedUserId && app.userId) {
