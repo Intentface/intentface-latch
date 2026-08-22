@@ -112,10 +112,11 @@ export async function getSlackChannelForApp(appId: string) {
     // through to their own scoped chats. So the migration heals the shared
     // thread rather than freezing it.
     resolveChatId: async ({ scoped, legacy }) => {
-      const chats = await runtime.listChats({ principal, limit: 200 });
-      const own = chats.find((c) => c.id === scoped);
-      if (own) return scoped; // already migrated
-      const old = chats.find((c) => c.id === legacy);
+      // Two direct id lookups — never a capped scan: a tenant with more chats
+      // than the page size would silently miss its own legacy thread and
+      // strand it.
+      if (await runtime.getChat({ principal, id: scoped })) return scoped; // migrated already
+      const old = await runtime.getChat({ principal, id: legacy });
       const boundAgent = app.agentScope ? `${app.agentScope}:${app.agent}` : app.agent;
       return old && old.agent === boundAgent ? legacy : scoped;
     },

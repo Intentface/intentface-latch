@@ -440,6 +440,12 @@ export interface Runtime<P> {
     limit?: number;
     kind?: string;
   }): Promise<ChatRecord[]>;
+  /**
+   * One chat by id, scoped to the caller (null when it isn't theirs or doesn't
+   * exist). A direct lookup, not a capped scan — so "does this chat exist, and
+   * whose agent is it?" stays correct for a tenant with any number of chats.
+   */
+  getChat(input: { principal: P; id: string }): Promise<ChatRecord | null>;
   /** The caller's runs, most-recent first (status, usage, cost — for an ops view). */
   listRuns(input: {
     principal: P;
@@ -2600,6 +2606,16 @@ export function createRuntime<P, RC = unknown>(
     return storage.listRuns(principal, { limit });
   }
 
+  async function getChatById({
+    principal,
+    id,
+  }: {
+    principal: P;
+    id: string;
+  }): Promise<ChatRecord | null> {
+    return storage.getChat(principal, id);
+  }
+
   async function getRun({
     principal,
     runId,
@@ -2978,6 +2994,7 @@ export function createRuntime<P, RC = unknown>(
     compactChat,
     loadHistory,
     listChats,
+    getChat: getChatById,
     listRuns,
     getRun,
     resume: resumeRun,
