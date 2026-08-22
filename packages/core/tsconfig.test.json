@@ -1,0 +1,8 @@
+{
+  // Type-checks the test files the build tsconfig excludes — vitest transforms
+  // without checking, so without this a fixture drifting from its interface
+  // never fails CI.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "exclude": []
+}

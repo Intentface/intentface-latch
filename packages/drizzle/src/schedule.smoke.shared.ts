@@ -87,10 +87,45 @@ export async function scheduleSmoke<P>({
     "claim carries the identity blob (to rebuild the principal)",
   );
 
-  // Spend it, then confirm a finished schedule can't be re-armed.
+  // The double-fire contract, in two halves, on a simulated clock (`now` is a
+  // parameter everywhere, so no sleeping). The row is currently leased by
+  // node-1 (30s, from the claim above) with nextRunAt=0 from the bump.
+  //
+  // First the hazard: the claim lease is stamped once and never renewed, so an
+  // EXPIRED lease alone does not protect an occurrence — the row is
+  // re-claimable the moment the TTL lapses, same owner or not. This is exactly
+  // why the runtime must consume the occurrence before firing anything slow.
+  const t1 = Date.now() + 60_000; // node-1's 30s lease has expired by here
+  await store.claimDueSchedules(t1, 0, "node-1"); // re-claim, already-expired lease
+  assert(
+    (await store.claimDueSchedules(t1 + 1, 30_000, "node-2")).some(
+      (s) => s.id === created.id,
+    ),
+    "an expired claim lease alone does NOT protect an occurrence (contract, not a bug)",
+  );
+
+  // Second, the protection: once the occurrence is CONSUMED (nextRunAt
+  // advanced past now), no claimer can take it again — lease state is
+  // irrelevant. This is the write the runtime issues between claim and fire.
   await store.completeSchedule(
     created.id,
-    { nextRunAt: Date.now(), lastRunAt: Date.now(), enabled: false },
+    { nextRunAt: t1 + 24 * 60 * 60 * 1000, lastRunAt: t1, enabled: true },
+    "node-2",
+  );
+  assert(
+    !(await store.claimDueSchedules(t1 + 60_000, 30_000, "node-3")).some(
+      (s) => s.id === created.id,
+    ),
+    "a claimed-and-advanced occurrence is not re-claimable, even with the lease expired",
+  );
+
+  // Spend it, then confirm a finished schedule can't be re-armed.
+  await store.bumpSchedule(me, created.id); // re-arm so the one-shot spend below is reachable
+  const t2 = t1 + 120_000; // past node-2's completeSchedule-cleared lease either way
+  await store.claimDueSchedules(t2, 30_000, "node-1");
+  await store.completeSchedule(
+    created.id,
+    { nextRunAt: t2, lastRunAt: t2, enabled: false },
     "node-1",
   );
   assert(
