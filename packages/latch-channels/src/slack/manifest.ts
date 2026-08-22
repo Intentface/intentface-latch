@@ -37,13 +37,30 @@ export const SLACK_BOT_SCOPES = [
 ];
 const BOT_SCOPES = SLACK_BOT_SCOPES;
 
+/**
+ * Slack's "short description" limit as the CREATE-APP WIZARD enforces it. The
+ * manifest reference documents 140 for `display_information.description`, but
+ * the wizard rejects a 124-char description as "too long" (observed live) and
+ * leaves its confirm button disabled until it fits — the app-listing limit of
+ * 100 is the one that actually gates creation. Trimmed at a word boundary so a
+ * long agent description doesn't get cut mid-word.
+ */
+const DESCRIPTION_MAX = 100;
+
+function trimDescription(text: string): string {
+  if (text.length <= DESCRIPTION_MAX) return text;
+  const cut = text.slice(0, DESCRIPTION_MAX - 1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > DESCRIPTION_MAX / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
 /** Build the Slack manifest object (JSON-serializable). */
 export function slackManifest(input: SlackManifestInput): Record<string, unknown> {
   const name = input.displayName.slice(0, 35); // Slack app name limit.
   return {
     display_information: {
       name,
-      description: (input.description ?? `${name} on Latch`).slice(0, 140),
+      description: trimDescription(input.description ?? `${name} on Latch`),
     },
     features: {
       bot_user: { display_name: name, always_online: true },
