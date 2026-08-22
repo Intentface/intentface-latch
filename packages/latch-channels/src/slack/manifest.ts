@@ -49,9 +49,14 @@ const DESCRIPTION_MAX = 100;
 
 function trimDescription(text: string): string {
   if (text.length <= DESCRIPTION_MAX) return text;
-  const cut = text.slice(0, DESCRIPTION_MAX - 1);
-  const lastSpace = cut.lastIndexOf(" ");
-  return `${(lastSpace > DESCRIPTION_MAX / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+  let cut = text.slice(0, DESCRIPTION_MAX - 1);
+  // Never end the cut on a high surrogate — slicing inside an astral pair
+  // (an emoji, say) would ship a lone surrogate in the manifest.
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  // Break at the LAST whitespace of any kind (newlines, tabs, NBSP — not just
+  // spaces), unless that would give up more than half the budget.
+  const lastWs = /\s\S*$/.exec(cut)?.index ?? -1;
+  return `${(lastWs > DESCRIPTION_MAX / 2 ? cut.slice(0, lastWs) : cut).trimEnd()}…`;
 }
 
 /** Build the Slack manifest object (JSON-serializable). */
