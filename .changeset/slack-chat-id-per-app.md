@@ -11,6 +11,12 @@ both observed in production: each bot's `isFollowedThread` saw the other bots' r
 history, so a single un-mentioned follow-up was answered by **every** bot in the channel; and they
 read and wrote one interleaved history, so an agent answered out of another agent's conversation.
 
-`parseSlackChatId` still parses legacy unscoped ids (and now returns `app` when present), so
-threads predating the fix keep resolving. Hosts should pass `chatNamespace` — new threads then get
-their own chat per bot.
+`parseSlackChatId` still parses legacy unscoped ids (and now returns `app` when present). For
+threads that predate scoping, `slackChannel` also takes `resolveChatId({ scoped, legacy })`: a host
+returns the legacy id when a chat exists there **and belongs to this agent**, and the scoped id
+otherwise — so the bot that owns an existing thread keeps its history while the other bots that
+were sharing that chat fall through to their own. Without the hook an existing thread would switch
+to a scoped id and its history would go invisible (plain replies unfollowed, a later mention
+starting an empty chat).
+
+Hosts should pass `chatNamespace`, and `resolveChatId` if they have threads from before the fix.

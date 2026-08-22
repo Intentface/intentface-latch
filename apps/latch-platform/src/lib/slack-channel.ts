@@ -105,6 +105,20 @@ export async function getSlackChannelForApp(appId: string) {
     // channel and all receive the same message events — unscoped, they answer
     // each other's messages and interleave one history.
     chatNamespace: appId,
+    // Threads that predate scoping live at the unscoped id. Adopt one ONLY
+    // when it belongs to this binding's agent: the bot that actually owns the
+    // thread keeps its history, while the other bots in the channel — which
+    // were sharing that same chat and answering each other's messages — fall
+    // through to their own scoped chats. So the migration heals the shared
+    // thread rather than freezing it.
+    resolveChatId: async ({ scoped, legacy }) => {
+      const chats = await runtime.listChats({ principal, limit: 200 });
+      const own = chats.find((c) => c.id === scoped);
+      if (own) return scoped; // already migrated
+      const old = chats.find((c) => c.id === legacy);
+      const boundAgent = app.agentScope ? `${app.agentScope}:${app.agent}` : app.agent;
+      return old && old.agent === boundAgent ? legacy : scoped;
+    },
     // Circuit breaker: one live turn per thread. A run is "live" only while
     // active and recently heartbeated — a crashed run's row lingers until the
     // reaper, and must not wedge the thread shut.
