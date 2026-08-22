@@ -1049,17 +1049,31 @@ function fireObs<E>(
  * can be tightened in a single place. Non-`Error` throws and unbounded
  * payloads never pass through verbatim.
  */
-function clientErrorMessage(error: unknown): string {
+/** Keys whose values are masked when a non-`Error` throw is serialized. */
+const SECRETISH_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential/i;
+
+export function clientErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
   if (message) return message.length > 500 ? `${message.slice(0, 499)}…` : message;
   // A non-Error throw or an empty-message Error still carries signal — a raw
   // HTTP body, a JSON-RPC error object, a string. Describe it instead of
   // masking: the bare mask turned an MCP server's `404 {"error":"Session not
-  // found"}` into an undebuggable generic string. Same bounded-exposure policy
-  // as above; JSON.stringify can throw on cycles, hence the try.
-  if (error instanceof Error && error.name !== "Error") return `${error.name} (no message)`;
+  // found"}` into an undebuggable generic string. Serialization masks
+  // secret-shaped fields (a thrown response object can embed headers or
+  // tokens) and stays bounded; JSON.stringify can throw on cycles, hence the
+  // try. Exported so hosts render connection failures through the SAME
+  // exposure policy instead of reinventing (String(err) → "[object Object]").
+  if (error instanceof Error) {
+    const name = error.name?.trim();
+    if (name && name !== "Error") return `${name.slice(0, 100)} (no message)`;
+  }
   try {
-    const desc = typeof error === "string" ? error : JSON.stringify(error);
+    const desc =
+      typeof error === "string"
+        ? error
+        : JSON.stringify(error, (key, value) =>
+            key && SECRETISH_KEY.test(key) ? "[redacted]" : (value as unknown),
+          );
     if (desc && desc !== "{}" && desc !== "null" && desc !== '""' && desc !== "undefined") {
       return `An error occurred: ${desc.length > 300 ? `${desc.slice(0, 299)}…` : desc}`;
     }

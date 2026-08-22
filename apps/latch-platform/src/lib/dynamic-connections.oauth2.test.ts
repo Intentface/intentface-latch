@@ -403,17 +403,27 @@ describe("oauth2 client secrets held by reference", () => {
     stubFetch();
     const { dynamic, secrets, authorize } = await setup({ clientSecretRef: "strava_client_secret" });
     await authorize();
-    expect(Object.keys((await dynamic.hostFor(["strava"]).open(principal)).tools)).toContain(
-      "strava_getAthlete",
-    );
+    const live = await dynamic.hostFor(["strava"]).open(principal);
+    try {
+      expect(Object.keys(live.tools)).toContain("strava_getAthlete");
+    } finally {
+      await live.close();
+    }
     await secrets.remove(principal, "strava_client_secret", "user");
     const opened = await dynamic.hostFor(["strava"]).open(principal);
-    expect(Object.keys(opened.tools)).toEqual(["connect_strava"]);
-    expect(opened.toolApproval).toMatchObject({ connect_strava: "user-approval" });
-    expect(opened.alwaysActive).toContain("connect_strava");
-    const description = (opened.tools.connect_strava as { description: string }).description;
-    expect(description).toContain("FAILED to open");
-    await opened.close();
+    try {
+      expect(Object.keys(opened.tools)).toEqual(["connect_strava"]);
+      expect(opened.toolApproval).toMatchObject({ connect_strava: "user-approval" });
+      expect(opened.alwaysActive).toContain("connect_strava");
+      const description = (opened.tools.connect_strava as { description: string }).description;
+      expect(description).toContain("FAILED to open");
+      // The REASON must survive into the prompt — not "[object Object]", not
+      // an empty parenthesis. This failure is the deleted referenced secret.
+      expect(description).toContain('secret "strava_client_secret"');
+      expect(description).not.toContain("[object Object]");
+    } finally {
+      await opened.close();
+    }
   });
 
   it("revokes the connection when its referenced secret is deleted", async () => {

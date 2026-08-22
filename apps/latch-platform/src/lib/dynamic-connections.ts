@@ -1,4 +1,5 @@
 import { tool, jsonSchema } from "ai";
+import { clientErrorMessage } from "@intentface/latch-core";
 import type {
   ConnectionRegistry,
   OpenToolSet,
@@ -396,10 +397,9 @@ export function createDynamicConnections(opts: {
         // answer, and the reason is one hover away instead of buried in server
         // logs.
         const key = `connect_${conn.name}`;
-        tools[key] = connectTool(
-          conn.name,
-          error instanceof Error && error.message.trim() ? error.message : String(error),
-        );
+        // clientErrorMessage: the one bounded, secret-redacting exposure policy —
+        // String(err) on a thrown response object is just "[object Object]".
+        tools[key] = connectTool(conn.name, clientErrorMessage(error));
         toolApproval[key] = "user-approval";
         alwaysActive.push(key);
         continue;
