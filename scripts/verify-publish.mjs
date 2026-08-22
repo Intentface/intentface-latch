@@ -13,6 +13,10 @@
  * Nothing enforces that the two maps agree, so this script re-derives the truth
  * from the tarball rather than the source manifest.
  *
+ * The same reasoning covers internal dependency ranges: `workspace:*` and
+ * `workspace:^` are indistinguishable in the workspace and produce very
+ * different consumer installs, so that is checked from the tarball too.
+ *
  * Run: `pnpm verify:publish`
  */
 import { execSync } from "node:child_process";
@@ -22,6 +26,20 @@ import { join } from "node:path";
 
 const REGISTRY = "https://npm.pkg.github.com";
 const out = mkdtempSync(join(tmpdir(), "latch-pack-"));
+/**
+ * Package names in this workspace — the set the range rule applies to. Derived
+ * rather than matched on the `@intentface/` prefix, which also covers packages
+ * published from other repositories.
+ */
+const workspaceNames = new Set(
+  readdirSync("packages").flatMap((dir) => {
+    try {
+      return [JSON.parse(readFileSync(`packages/${dir}/package.json`, "utf8")).name];
+    } catch {
+      return [];
+    }
+  }),
+);
 let failures = 0;
 
 /** Every string leaf of an exports map, at any condition depth. */
@@ -87,6 +105,32 @@ try {
         !files.includes(value.slice(2))
       ) {
         problems.push(`${field} → ${value} is not in the tarball`);
+      }
+    }
+    // Internal deps must publish as CARET RANGES. `workspace:*` rewrites to an
+    // exact pin, so a consumer on `^0.1.0` who resolves core to 0.1.1 gets a
+    // second, nested copy of core to satisfy a sibling's `0.1.0` — two module
+    // registries, two sets of instanceof identities, no error. `workspace:^`
+    // publishes `^0.1.0` and dedupes. See RELEASING.md.
+    //
+    // Requiring a leading `^` rather than merely rejecting a leading digit: the
+    // policy is `workspace:^`, and this also catches `=0.1.0` (a hand-written
+    // exact pin pnpm ships untouched) and `~0.1.0`.
+    //
+    // Peers are checked too — an internal package added as a `workspace:*` peer
+    // rewrites to an exact pin exactly the same way.
+    //
+    // Scoped to THIS workspace's names, not the whole @intentface scope:
+    // `@intentface/chat` is published from another repository, so "use
+    // workspace:^" would be impossible advice for it.
+    for (const field of ["dependencies", "peerDependencies"]) {
+      for (const [name, range] of Object.entries(shipped[field] ?? {})) {
+        if (!workspaceNames.has(name)) continue;
+        if (!range.startsWith("^")) {
+          problems.push(
+            `${field}.${name} ships as "${range}" — must be a caret range; use workspace:^ in package.json`,
+          );
+        }
       }
     }
     // GitHub Packages links a package to its repo through this field.

@@ -39,7 +39,7 @@
     "eval:regen-fixtures": "tsx evals/generate.ts"
   },
   "dependencies": {
-    "@intentface/latch-core": "workspace:*"
+    "@intentface/latch-core": "workspace:^"
   },
   "peerDependencies": {
     "ai": ">=7.0.0"
