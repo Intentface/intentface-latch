@@ -67,7 +67,16 @@ export async function getSlackChannelForApp(appId: string) {
             message: "This app serves a personal agent — only its owner can use it.",
           };
         }
-        return { allowed: true };
+        // Per-user credentials by default: the turn keeps the BINDING's
+        // userId (chat ownership stays stable, so the shared thread never
+        // fragments per member) but carries the TYPIST as the actor —
+        // credential resolution (credentialPrincipalOf) then uses THEIR OAuth
+        // grants, never the binding owner's. Without this, every member read
+        // and wrote through whatever the binder had connected.
+        return {
+          allowed: true,
+          principal: { orgId: app.orgId, userId: app.userId, actorUserId: identity.userId },
+        };
       }
       await slackStore.setPending({
         teamId: team,

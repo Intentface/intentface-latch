@@ -97,7 +97,18 @@ export interface SlackChannelConfig<P> {
    * Gate inbound users: given the triggering Slack identity, decide whether to
    * run. Return `{ allowed: false, linkUrl }` to refuse and prompt the user to
    * link their platform account (posted ephemerally). Omitted → everyone in the
-   * channel may use the bot. The turn still runs as the tenant's `principal`.
+   * channel may use the bot.
+   *
+   * Return `principal` alongside `allowed: true` to run THIS message's turn as
+   * that principal instead of the tenant's — the resolver contract Telegram
+   * already uses. This is how a shared channel bot acts with the TYPIST's own
+   * credentials rather than the installer's: without it, everyone in the
+   * channel reads (and writes) through whatever the binding owner connected —
+   * which is a data-exposure problem, not just an attribution one. The
+   * principal is opaque to this channel; the host decides how it encodes
+   * "shared thread, per-user credentials" (e.g. keeping chat ownership stable
+   * while carrying the actor for credential resolution). Omitted → the
+   * tenant's `principal`, as before.
    */
   authorizeUser?: (user: {
     teamId: string;
@@ -105,7 +116,7 @@ export interface SlackChannelConfig<P> {
     channelId: string;
     threadRoot: string;
     prompt: string;
-  }) => Promise<{ allowed: boolean; linkUrl?: string; message?: string }>;
+  }) => Promise<{ allowed: boolean; linkUrl?: string; message?: string; principal?: P }>;
   /**
    * For thread-following: is this thread one the bot is already active in (so a
    * plain message — no @-mention — should be handled)? Omitted → only mentions
@@ -230,8 +241,9 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     }
 
     // Gate: only linked platform users may drive the agent.
+    let turnPrincipal = b.tenant.principal;
     if (config.authorizeUser) {
-      let auth: { allowed: boolean; linkUrl?: string; message?: string };
+      let auth: { allowed: boolean; linkUrl?: string; message?: string; principal?: P };
       try {
         auth = await config.authorizeUser({
           teamId,
@@ -270,6 +282,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         }
         return;
       }
+      if (auth.principal !== undefined) turnPrincipal = auth.principal;
     }
 
     // First time the bot engages a thread that already had human chat: seed the
@@ -279,7 +292,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       try {
         const existing = await b.tenant.runtime.loadHistory({
           chatId: chatIdFor(channel, root),
-          principal: b.tenant.principal,
+          principal: turnPrincipal,
         });
         if (existing.length === 0) {
           const replies = await b.api.threadReplies(channel, ev.thread_ts);
@@ -298,7 +311,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       }
     }
 
-    await runMessageBound(b, { channel, root, userId, prompt, context });
+    await runMessageBound(b, { channel, root, userId, prompt, context, principal: turnPrincipal });
   }
 
   /**
@@ -315,8 +328,11 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       prompt: string;
       /** Optional prior-thread context to prepend (seeded on first engagement). */
       context?: string;
+      /** Per-message principal (the authorizeUser resolver's); tenant's when absent. */
+      principal?: P;
     },
   ): Promise<void> {
+    const principal = ctx.principal ?? b.tenant.principal;
     const chatId = chatIdFor(ctx.channel, ctx.root);
     await b.api.setStatus({ channel_id: ctx.channel, thread_ts: ctx.root, status: "is thinking…" });
 
@@ -334,10 +350,10 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       const res = await b.tenant.runtime.handleChat({
         agent: config.agent,
         chatId,
-        principal: b.tenant.principal,
+        principal,
         message,
       });
-      await renderRun(b, res, { channel: ctx.channel, root: ctx.root, userId: ctx.userId, chatId });
+      await renderRun(b, res, { channel: ctx.channel, root: ctx.root, userId: ctx.userId, chatId, principal });
     } catch (e) {
       console.error("[slack] runMessage failed:", e);
       const msg = e instanceof Error ? e.message : String(e);
@@ -359,7 +375,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
   async function renderRun(
     b: Bound<P>,
     res: Response,
-    ctx: { channel: string; root: string; userId: string; chatId: string },
+    ctx: { channel: string; root: string; userId: string; chatId: string; principal?: P },
   ): Promise<void> {
     let text = "";
     let errorMsg: string | null = null;
@@ -410,7 +426,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     // Approvals are message state, not stream chunks — check fresh history.
     const history = await b.tenant.runtime.loadHistory({
       chatId: ctx.chatId,
-      principal: b.tenant.principal,
+      principal: ctx.principal ?? b.tenant.principal,
     });
     for (const pa of pendingApprovals(history)) {
       if (pa.isConnect && pa.connectionName && config.authorizeUrl) {
@@ -449,9 +465,10 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     b: Bound<P>,
     payload: {
       actions?: { action_id: string; value?: string }[];
+      team?: { id?: string };
       channel?: { id: string };
       message?: { ts: string; thread_ts?: string };
-      user?: { id: string };
+      user?: { id: string; team_id?: string };
     },
   ): Promise<void> {
     const action = payload.actions?.[0];
@@ -463,10 +480,44 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     const ts = payload.message?.ts ?? "";
     const root = payload.message?.thread_ts ?? ts;
 
+    // The resume re-runs the agent from history — a real turn, with tool
+    // access. Gate and resolve the CLICKER exactly like a message author:
+    // their principal (their credentials) drives the resumed turn, and an
+    // unlinked bystander can't approve gated tools by being in the channel.
+    let principal = b.tenant.principal;
+    if (config.authorizeUser) {
+      let auth: { allowed: boolean; linkUrl?: string; message?: string; principal?: P };
+      try {
+        auth = await config.authorizeUser({
+          teamId: payload.team?.id ?? payload.user?.team_id ?? "",
+          userId: payload.user?.id ?? "",
+          channelId: channel,
+          threadRoot: root,
+          prompt: "",
+        });
+      } catch (e) {
+        console.error("[slack] interaction auth check failed:", e);
+        return;
+      }
+      if (!auth.allowed) {
+        const link = auth.linkUrl ? ` <${auth.linkUrl}|Link your Latch account>` : "";
+        await b.api
+          .postEphemeral({
+            channel,
+            user: payload.user?.id ?? "",
+            thread_ts: payload.message?.thread_ts,
+            text: (auth.message ?? "Link your Latch account to act on approvals.") + link,
+          })
+          .catch(() => {});
+        return;
+      }
+      if (auth.principal !== undefined) principal = auth.principal;
+    }
+
     // Resolve the approval; collapse the buttons into a settled card.
     const res = await b.tenant.runtime.applyApproval({
       chatId: decoded.ref.chatId,
-      principal: b.tenant.principal,
+      principal,
       decisions: [{ approvalId: decoded.ref.approvalId, approved: decoded.approved }],
     });
     if (ts) {
@@ -483,6 +534,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       root,
       userId: payload.user?.id ?? "",
       chatId: decoded.ref.chatId,
+      principal,
     });
   }
 
@@ -643,6 +695,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     approvalId: string;
     /** Slack user the ephemeral follow-ups (further connect cards) target. */
     userId: string;
+    /** Principal the resumed turn runs as (the connecting user's); tenant's when absent. */
+    principal?: P;
     tenant?: SlackTenant<P>;
   }): Promise<void> {
     const b = ctx.tenant
@@ -655,9 +709,10 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     }
     const parsed = parseSlackChatId(ctx.chatId);
     if (!parsed) return;
+    const principal = ctx.principal ?? b.tenant.principal;
     const history = await b.tenant.runtime.loadHistory({
       chatId: ctx.chatId,
-      principal: b.tenant.principal,
+      principal,
     });
     const pending = pendingApprovals(history).find((pa) => pa.approvalId === ctx.approvalId);
     if (!pending?.isConnect) return;
@@ -669,7 +724,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     });
     const res = await b.tenant.runtime.applyApproval({
       chatId: ctx.chatId,
-      principal: b.tenant.principal,
+      principal,
       decisions: [{ approvalId: ctx.approvalId, approved: true }],
     });
     await renderRun(b, res, {
@@ -677,6 +732,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       root: parsed.root,
       userId: ctx.userId,
       chatId: ctx.chatId,
+      principal,
     });
   }
 
