@@ -759,6 +759,23 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       console.log(
         `[slack] event type=${ev.type} channel_type=${ev.channel_type} fromBot=${fromBot} self=${selfUser} mention=${isMention} dm=${isDm}`,
       );
+      /**
+       * Claim a MESSAGE, not a delivery. Slack sends one message as several
+       * events with distinct `event_id`s — a mention inside a DM arrives as
+       * BOTH `app_mention` and `message.im`, and the gate below accepts each,
+       * so the retry dedupe above (keyed on the delivery) let both run: two
+       * turns milliseconds apart on one message, observed in production.
+       * `(channel, ts)` is the message's identity across every shape it
+       * arrives in. Claimed only on the paths that actually run a turn, so an
+       * ignored event never consumes it.
+       */
+      const claimMessage = async (channel: string, ts: string): Promise<boolean> => {
+        if (!config.seen) return true;
+        const taken = await config.seen(`msg:${channel}:${ts}`);
+        if (taken) console.log(`[slack] message ${channel}:${ts} already claimed — dropped`);
+        return !taken;
+      };
+
       const resolveFor = () =>
         resolveBound({
           kind: "event",
@@ -769,13 +786,16 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           payload: body,
         });
       if ((isMention || isDm) && !fromBot && ev.channel && ev.ts) {
+        if (!(await claimMessage(ev.channel, ev.ts))) return ok();
         const b = await resolveFor();
         if (!b) return ok(); // unroutable tenant — ACK so Slack stops retrying
         defer(runTurn(b, ev, body.team_id ?? ""));
       } else if (
         // Thread-following: a plain message (no @-mention — those arrive as
-        // app_mention and are handled above, avoiding a double-run) in a thread
-        // the bot is already active in.
+        // app_mention and are handled above) in a thread the bot is already
+        // active in. The `<@` test keeps a channel mention out of here; the
+        // message claim above is what stops the DM case, where one mention
+        // arrives as BOTH app_mention and message.im.
         ev.type === "message" &&
         ev.channel_type !== "im" &&
         !fromBot &&
@@ -788,6 +808,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         const chatId = await chatIdFor(ev.channel, ev.thread_ts);
         if (await config.isFollowedThread(chatId)) {
           console.log(`[slack] following thread ${chatId}`);
+          if (!ev.ts || !(await claimMessage(ev.channel, ev.ts))) return ok();
           const b = await resolveFor();
           if (!b) return ok();
           defer(runTurn(b, ev, body.team_id ?? ""));
