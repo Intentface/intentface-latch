@@ -337,6 +337,17 @@ export function createDynamicConnections(opts: {
         // Grants resolve under the ACTING human (credentialPrincipalOf): in a
         // shared channel the turn principal keeps the binding's userId for
         // chat ownership, but the typist must never ride the binder's tokens.
+        //
+        // The flow's lazy CONFIG lookups (serverUrl/scopes via store.get) also
+        // receive grantP, and that is safe by the store's precedence: get()
+        // checks the ORG record first, so for an org connection every actor
+        // resolves the identical config — an actor's same-named personal
+        // record can never substitute its target under an org connection's
+        // grants. The only divergence is an org agent riding the BINDER's
+        // personal connection record: other actors then fail closed (flow
+        // throws → no tools → reconnect card) rather than pairing config from
+        // one owner with tokens from another. Personal-agent bindings can't
+        // diverge at all — authorizeUser restricts them to actor === binder.
         const grantP = credentialPrincipalOf(principal);
         if (!(await o.isAuthorized(grantP))) {
           return { tools: {}, toolApproval: {}, close: async () => {} };

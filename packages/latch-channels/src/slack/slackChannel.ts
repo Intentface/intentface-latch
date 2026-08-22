@@ -665,6 +665,13 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     userId: string;
     prompt: string;
     context?: string;
+    /**
+     * Principal the replayed turn runs as. A post-link replay is a turn on
+     * behalf of the human who JUST linked — without this it would run as the
+     * tenant's principal (the binding owner's credentials), which is exactly
+     * what per-user credential resolution exists to prevent.
+     */
+    principal?: P;
     tenant?: SlackTenant<P>;
   }): Promise<void> {
     const b = ctx.tenant
