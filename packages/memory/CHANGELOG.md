@@ -1,5 +1,12 @@
 # @intentface/latch-memory
 
+## 0.3.0
+
+### Patch Changes
+
+- Updated dependencies [ddfa57b]
+  - @intentface/latch-core@0.3.0
+
 ## 0.2.0
 
 ### Patch Changes

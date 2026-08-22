@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Latch core — runtime, types, and seams for building agents on the AI SDK.",
   "license": "MIT",
   "type": "module",
