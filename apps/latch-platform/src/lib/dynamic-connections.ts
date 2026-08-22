@@ -381,12 +381,25 @@ export function createDynamicConnections(opts: {
       if (opened.alwaysActive) alwaysActive.push(...opened.alwaysActive);
       closes.push(opened.close);
 
-      // Interactive connections always expose a gated connect_<name> (present
-      // even when authorized, so an approved historical call can execute on resume).
+      // Interactive connections always expose a connect_<name> (present even
+      // when authorized, so an approved historical call can execute on resume) —
+      // but the approval gate only applies while UNAUTHORIZED. Once connected,
+      // a call executes immediately and returns {connected:true}: a model primed
+      // by its own history ("I need to connect first…") course-corrects mid-turn
+      // instead of dead-ending into a sign-in card for a connection that is
+      // already live. Observed on Slack: connect via the UI didn't resolve the
+      // thread's parked card, and every later message re-carded.
       if (isOAuthMcp || isOAuth2OpenApi) {
         const key = `connect_${conn.name}`;
         tools[key] = connectTool(conn.name);
-        toolApproval[key] = "user-approval";
+        const authed = isOAuthMcp
+          ? await oauthFor(conn.name)
+              .isAuthorized(principal)
+              .catch(() => false)
+          : await oauth2FlowFor(conn.name)
+              .isAuthorized(principal)
+              .catch(() => false);
+        if (!authed) toolApproval[key] = "user-approval";
         alwaysActive.push(key);
       }
     }

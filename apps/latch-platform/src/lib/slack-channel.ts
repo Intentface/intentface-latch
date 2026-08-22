@@ -89,10 +89,25 @@ export async function getSlackChannelForApp(appId: string) {
       return msgs.length > 0;
     },
     authorizeUrl: (name, ctx) => {
-      const q = new URLSearchParams({
+      // `slackApp` makes the generic authorize/callback run under the APP
+      // BINDING's principal (see resolveContext in latch.ts) — the grant must
+      // land under the key the Slack turn checks, not the browser session's,
+      // or signing in never satisfies the card that asked for it. `returnTo`
+      // goes to the connect-done route, which approves the parked
+      // `connect_<name>` and resumes the turn INTO THE THREAD — the web chat
+      // page can't do it: the resumed stream would render in the browser, and
+      // for any org member but the binding owner the page isn't even theirs.
+      const done = new URLSearchParams({
+        app: appId,
         chatId: ctx.chatId,
         approvalId: ctx.approvalId,
-        returnTo: `${baseUrl()}/chat/${ctx.chatId}`,
+        user: ctx.userId,
+      });
+      const q = new URLSearchParams({
+        slackApp: appId,
+        chatId: ctx.chatId,
+        approvalId: ctx.approvalId,
+        returnTo: `${baseUrl()}/api/slack/connect-done?${done}`,
       });
       return `${baseUrl()}/api/latch/connections/${name}/authorize?${q}`;
     },
