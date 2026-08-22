@@ -580,7 +580,10 @@ export async function getLatch(): Promise<{
     // Binding principal for chat/flow state, the CLICKER as the actor: the
     // grant then lands under their credential key (credentialPrincipalOf in
     // the oauth dispatcher), which is what the per-user Slack turn checks —
-    // one member's sign-in never satisfies (or pollutes) another's.
+    // one member's sign-in never satisfies (or pollutes) another's. A 'shared'
+    // binding drops the actor: the clicker is knowingly connecting FOR the
+    // bot, so the grant lands on the binding key everyone uses.
+    if (app.credentialMode === "shared") return { orgId: app.orgId, userId: app.userId };
     return { orgId: app.orgId, userId: app.userId, actorUserId: session.userId };
   };
 

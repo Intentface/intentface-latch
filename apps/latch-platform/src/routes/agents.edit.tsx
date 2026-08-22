@@ -982,7 +982,14 @@ function MemoryStatus({ agent }: { agent: string }) {
  * Slack as its own @-handle. (One-button automation is a later upgrade.)
  */
 function SlackSection({ agent }: { agent: string }) {
-  const [apps, setApps] = useState<{ appId: string; botName?: string }[]>([]);
+  const [apps, setApps] = useState<
+    { appId: string; botName?: string; credentialMode?: "per-user" | "shared" }[]
+  >([]);
+  // Whose integration credentials turns use. Default per-user: each member
+  // connects (and acts through) their own grants. "Shared" is the explicit
+  // opt-in to power the bot with the CREATOR's grants for everyone — a real
+  // access decision, so it is a visible checkbox, never a silent default.
+  const [shareCreds, setShareCreds] = useState(false);
   const [manifest, setManifest] = useState<{ manifestJson: string; createUrl: string } | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [creating, setCreating] = useState(false);
@@ -1004,7 +1011,11 @@ function SlackSection({ agent }: { agent: string }) {
       slackManifestFn({ data: agent }),
       slackConfigStatusFn(),
     ]);
-    setApps(all.filter((a) => a.agent === agent).map((a) => ({ appId: a.appId, botName: a.botName })));
+    setApps(
+      all
+        .filter((a) => a.agent === agent)
+        .map((a) => ({ appId: a.appId, botName: a.botName, credentialMode: a.credentialMode })),
+    );
     setManifest(man);
     setConfigured(cfg.configured);
   }, [agent]);
@@ -1021,7 +1032,9 @@ function SlackSection({ agent }: { agent: string }) {
     }
     setCreating(true);
     setError(null);
-    const res = await createSlackAppFn({ data: agent });
+    const res = await createSlackAppFn({
+      data: { agent, credentialMode: shareCreds ? ("shared" as const) : ("per-user" as const) },
+    });
     if (res.ok) {
       window.location.href = res.authorizeUrl; // → Slack install → /api/slack/oauth
       return;
@@ -1070,6 +1083,7 @@ function SlackSection({ agent }: { agent: string }) {
         clientId: clientId.trim(),
         clientSecret: clientSecret.trim(),
         signingSecret: signingSecret.trim(),
+        credentialMode: shareCreds ? ("shared" as const) : ("per-user" as const),
       },
     });
     if (res.ok) {
@@ -1111,6 +1125,11 @@ function SlackSection({ agent }: { agent: string }) {
                   {a.botName ?? "Slack bot"}
                 </div>
                 <p className="text-ink-tertiary truncate font-mono text-xs">{a.appId}</p>
+                <p className="text-ink-tertiary text-xs">
+                  {a.credentialMode === "shared"
+                    ? "Shared credentials — everyone acts through the creator's integrations"
+                    : "Per-user credentials — each member connects their own integrations"}
+                </p>
               </div>
               <Button type="button" variant="ghost" size="sm" onClick={() => disconnect(a.appId)}>
                 <Trash2 className="size-3.5" /> Disconnect
@@ -1119,6 +1138,25 @@ function SlackSection({ agent }: { agent: string }) {
           ))}
         </div>
       )}
+
+      <label className="text-ink-secondary flex items-start gap-2 text-xs">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={shareCreds}
+          onChange={(e) => setShareCreds(e.target.checked)}
+        />
+        <span>
+          Share <strong>my</strong> integration credentials with everyone using this bot.
+          <span className="text-ink-tertiary">
+            {" "}
+            Off (default): each member connects their own integrations and acts with their own
+            access. On: every member's messages read and write through integrations{" "}
+            <strong>you</strong> connect — only enable this for a bot meant to act as one shared
+            identity.
+          </span>
+        </span>
+      </label>
 
       <div className="flex flex-wrap items-center gap-3">
         <Button type="button" size="sm" onClick={createBot} disabled={creating}>
