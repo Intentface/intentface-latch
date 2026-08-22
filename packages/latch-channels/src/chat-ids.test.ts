@@ -84,4 +84,26 @@ describe("slack chat ids", () => {
       root: "1712345678.000100",
     });
   });
+
+  it("sanitises an underscore in the app segment so the id stays parseable", () => {
+    // `_` separates segments; an underscored namespace would read back as a
+    // legacy id with a garbage channel.
+    const id = slackChatId("C012AB3CD", "1712345678.000100", "my_app");
+    expect(parseSlackChatId(id)).toEqual({
+      app: "my-app",
+      channel: "C012AB3CD",
+      root: "1712345678.000100",
+    });
+  });
+
+  it("scopes DM and group-DM threads too", () => {
+    for (const channel of ["D012AB3CD", "G012AB3CD"]) {
+      const id = slackChatId(channel, "1712345678.000100", "A0BRZHRTHLJ");
+      expect(parseSlackChatId(id)).toEqual({
+        app: "A0BRZHRTHLJ",
+        channel,
+        root: "1712345678.000100",
+      });
+    }
+  });
 });

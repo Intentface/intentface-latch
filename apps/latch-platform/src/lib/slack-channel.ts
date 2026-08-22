@@ -114,17 +114,35 @@ export async function getSlackChannelForApp(appId: string) {
     resolveChatId: async ({ scoped, legacy }) => {
       // Two direct id lookups — never a capped scan: a tenant with more chats
       // than the page size would silently miss its own legacy thread and
-      // strand it.
+      // strand it, which is the very failure this migration exists to prevent.
       if (await runtime.getChat({ principal, id: scoped })) return scoped; // migrated already
       const old = await runtime.getChat({ principal, id: legacy });
+      if (!old) return scoped;
+      // Match the pinned form the channel passes to handleChat (so chat.agent
+      // is exactly this), and ALSO the bare name: chats created before scope
+      // pinning stored `agent` unpinned, and a binding that gained a scope
+      // afterwards would otherwise fail to recognise its own thread — the
+      // stranding this hook exists to avoid. A same-named agent in the other
+      // scope could in principle be adopted that way; that is strictly better
+      // than orphaning a live thread, and only applies to pre-pinning chats.
+      //
+      // Known hole, deliberately left: adoption keys on the AGENT, not the
+      // app, so two apps bound to the SAME agent in one channel both adopt the
+      // legacy chat and keep sharing it — the incident behaviour, preserved
+      // for that niche until one of them is rebound.
       const boundAgent = app.agentScope ? `${app.agentScope}:${app.agent}` : app.agent;
-      return old && old.agent === boundAgent ? legacy : scoped;
+      return old.agent === boundAgent || old.agent === app.agent ? legacy : scoped;
     },
     // Circuit breaker: one live turn per thread. A run is "live" only while
     // active and recently heartbeated — a crashed run's row lingers until the
     // reaper, and must not wedge the thread shut.
     isBusy: async (chatId) => {
-      const runs = await runtime.listRuns({ principal, limit: 25 });
+      // A capped scan, unlike resolveChatId's id lookups — `listRuns` has no
+      // chat filter. The limit is generous because a storm (exactly when this
+      // matters) also mints subagent and compaction runs that share the page;
+      // past it the breaker fails OPEN, which is the safe direction for a
+      // best-effort damper. A chatId filter on listRuns would make it precise.
+      const runs = await runtime.listRuns({ principal, limit: 200 });
       const cutoff = Date.now() - 2 * 60_000;
       return runs.some(
         (r) =>

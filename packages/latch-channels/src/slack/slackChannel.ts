@@ -227,9 +227,17 @@ interface Bound<P> {
 // Legacy ids (no app segment) still parse, so threads that predate the fix
 // keep resolving; new ones are namespaced.
 
-/** Build the chat id for a Slack thread, scoped to the owning app. */
+/**
+ * Build the chat id for a Slack thread, scoped to the owning app.
+ *
+ * `_` separates the segments, so it cannot appear inside one — Slack's own ids
+ * (A…/C…/D…/G…) never do, but a host is free to pass any `chatNamespace`, and
+ * an underscored one would mint ids that `parseSlackChatId` reads back as
+ * legacy with a garbage channel (breaking, e.g., where a resumed turn posts).
+ * Sanitised rather than rejected: a thrown error here would drop a live turn.
+ */
 export function slackChatId(channel: string, root: string, app?: string): string {
-  return app ? `slack_${app}_${channel}_${root}` : `slack_${channel}_${root}`;
+  return app ? `slack_${app.replace(/_/g, "-")}_${channel}_${root}` : `slack_${channel}_${root}`;
 }
 
 /**
@@ -299,9 +307,17 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     const scoped = slackChatId(channel, root, config.chatNamespace);
     if (!config.chatNamespace || !config.resolveChatId) return scoped;
     const legacy = slackChatId(channel, root);
-    return config
-      .resolveChatId({ scoped, legacy })
-      .catch(() => scoped); // a failed lookup must not drop the turn
+    return config.resolveChatId({ scoped, legacy }).catch((e) => {
+      // A failed lookup must not drop the turn — but note this is STICKY: the
+      // turn runs at the scoped id, `handleChat` creates that chat, and every
+      // later resolve short-circuits on "scoped exists". A transient error
+      // therefore forks an owned thread permanently, so it must be loud.
+      console.error(
+        `[slack] chat-id resolve failed for ${scoped}; using the scoped id (legacy history, if any, will stay detached):`,
+        e,
+      );
+      return scoped;
+    });
   };
 
   // ── Drive one turn and render it ──────────────────────────────────────────
@@ -363,13 +379,18 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       if (auth.principal !== undefined) turnPrincipal = auth.principal;
     }
 
+    // Resolve the chat id ONCE for the whole turn: it can hit storage (legacy
+    // adoption), and resolving twice risks the context seed and the turn
+    // landing in different chats if one resolution hits the error fallback.
+    const turnChatId = await chatIdFor(channel, root);
+
     // First time the bot engages a thread that already had human chat: seed the
     // prior thread messages as context, so it knows what "this" refers to.
     let context: string | undefined;
     if (ev.thread_ts) {
       try {
         const existing = await b.tenant.runtime.loadHistory({
-          chatId: await chatIdFor(channel, root),
+          chatId: turnChatId,
           principal: turnPrincipal,
         });
         if (existing.length === 0) {
@@ -392,7 +413,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     // Circuit breaker, last thing before the turn: never stack turns on one
     // thread. Checked HERE (not at dispatch) so it covers mentions, DMs and
     // thread-following alike, and only after the gate has spent its work.
-    const turnChatId = await chatIdFor(channel, root);
     if (config.isBusy && (await config.isBusy(turnChatId).catch(() => false))) {
       console.warn(`[slack] chat ${turnChatId} already has a live turn — skipping`);
       return;
