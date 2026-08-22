@@ -122,7 +122,14 @@ export interface UsageRecord {
  * A scheduled agent run. Like a run, it carries the opaque `identity` blob so a
  * cron tick (no request) can rebuild the principal and run the turn. `cron` is a
  * customer-evaluated expression (the runtime takes a `cron` evaluator); null =
- * one-shot. A `lease` makes `claimDueSchedules` exactly-once across nodes.
+ * one-shot.
+ *
+ * The `lease` alone does NOT make an occurrence exactly-once: it is stamped at
+ * claim time and never renewed, so it only serializes claimers within one TTL.
+ * What prevents a double fire is the runtime consuming the occurrence
+ * (advancing `nextRunAt` via `completeSchedule`) immediately after the claim,
+ * before the fire — after that write the row is no longer due, whatever the
+ * lease says.
  */
 export interface ScheduleRecord {
   id: string;
@@ -292,16 +299,24 @@ export interface StorageAdapter<P> {
   bumpSchedule(principal: P, id: string): Promise<boolean>;
   /**
    * System op (no principal): atomically claim due schedules (`enabled`,
-   * `nextRunAt <= now`, lease unset/expired) for `owner`, stamping a lease so a
-   * concurrent node can't double-fire. Returns the claimed records (with
-   * `identity`). Mirrors the run reclaim transition.
+   * `nextRunAt <= now`, lease unset/expired) for `owner`, stamping a lease.
+   * Returns the claimed records (with `identity`). Mirrors the run reclaim
+   * transition.
+   *
+   * The lease serializes claimers only within one `ttlMs` window — it is never
+   * renewed, and the predicate re-claims (same owner included) the moment it
+   * expires. Callers MUST consume the occurrence via `completeSchedule` before
+   * doing anything slower than the TTL, or a long fire is re-claimable for its
+   * whole duration.
    */
   claimDueSchedules(now: number, ttlMs: number, owner: string): Promise<ScheduleRecord[]>;
   /**
-   * Finish a fired schedule: advance `nextRunAt`/`enabled`, set `lastRunAt`,
-   * clear the lease. Fenced by `owner`: only the node holding the claim lease
-   * may complete it, so a node whose lease expired mid-fire (schedule since
-   * re-claimed elsewhere) can't clobber the newer claim.
+   * Consume a claimed occurrence: advance `nextRunAt`/`enabled`, set
+   * `lastRunAt`, clear the lease. The runtime calls this between the claim and
+   * the fire — after this write the row is no longer due (or no longer
+   * enabled), so the occurrence cannot be claimed twice. Fenced by `owner`:
+   * only the node holding the claim lease may apply it, so a node whose lease
+   * expired can't clobber a newer claim.
    */
   completeSchedule(
     id: string,

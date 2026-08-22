@@ -470,7 +470,10 @@ export function createSqliteAdapter<P>(
     },
 
     async claimDueSchedules(now, ttlMs, owner) {
-      // Atomic exactly-once claim: stamp a lease on due, unclaimed/expired rows.
+      // Atomic claim: stamp a lease on due, unclaimed/expired rows. NOT
+      // exactly-once on its own — the lease is never renewed, so it only
+      // serializes claimers within one TTL; the runtime makes the occurrence
+      // at-most-once by advancing nextRunAt (completeSchedule) before firing.
       const claimed = await db
         .update(schema.schedules)
         .set({ leaseOwner: owner, leaseExpiresAt: now + ttlMs })

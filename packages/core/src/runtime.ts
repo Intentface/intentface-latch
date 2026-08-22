@@ -538,10 +538,20 @@ export interface Runtime<P> {
   runScheduleNow(input: { principal: P; id: string }): Promise<boolean>;
   /**
    * Fire all due schedules across ALL tenants (system op — the cron entry point).
-   * Claims each exactly-once, reconstructs its principal, runs the turn in a
-   * fresh chat (or via `runSchedule`, when the host handles the fire), and
-   * advances the schedule. Point a platform cron (or the in-process scheduler)
-   * at this.
+   * Claims each, consumes the occurrence (advances `nextRunAt` BEFORE firing,
+   * so no concurrent claimer can fire it again), reconstructs its principal,
+   * and runs the turn in a fresh chat (or via `runSchedule`, when the host
+   * handles the fire). Point a platform cron (or the in-process scheduler) at
+   * this.
+   *
+   * Occurrences are at-most-once: a process that dies mid-fire does not retry
+   * the occurrence — the run row survives and `sweep()` resumes the turn
+   * instead, so recovery never means a second paid attempt.
+   *
+   * Awaits each fired turn to completion before returning. A driver that also
+   * gates on this promise (the in-process interval scheduler does) is stalled
+   * for the duration of the longest turn — fan out per tenant rather than
+   * looping serially if that matters to you.
    */
   runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }>;
 }
@@ -1168,16 +1178,36 @@ export function createRuntime<P, RC = unknown>(
       }
     };
     if (dur.enabled && lease) {
+      // A THROWN heartbeat write means "we don't know if we still hold the
+      // lease" — very different from `held === false` ("someone else owns this
+      // run"). Swallowing it silently let a run whose beats were all failing
+      // keep streaming at full token cost while the reaper reclaimed it and a
+      // second worker resumed the same turn. So: retry transient failures, but
+      // once consecutive failures span a full TTL the lease has provably
+      // expired — abort, exactly as if `held` had come back false.
+      let missedBeats = 0;
+      const maxMissedBeats = Math.max(1, Math.ceil(dur.leaseTtlMs / dur.heartbeatMs));
       heartbeat = setInterval(() => {
         void storage
           .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs, lease.fencingToken)
           .then((held) => {
+            missedBeats = 0;
             if (!held) {
               stopHeartbeat();
               abort.abort(new Error("lease lost"));
             }
           })
-          .catch(() => {});
+          .catch((e) => {
+            missedBeats++;
+            console.warn(
+              `[durability] heartbeat write failed for run ${run.id} (${missedBeats}/${maxMissedBeats}):`,
+              e,
+            );
+            if (missedBeats >= maxMissedBeats) {
+              stopHeartbeat();
+              abort.abort(new Error("lease lost: heartbeat writes failing for a full TTL"));
+            }
+          });
       }, dur.heartbeatMs);
       // Don't let the heartbeat alone keep a Node process alive.
       (heartbeat as { unref?: () => void }).unref?.();
@@ -1757,11 +1787,20 @@ export function createRuntime<P, RC = unknown>(
       // UI-stream per-step hook: checkpoint the in-progress assistant message
       // (with any completed tool results) so a crash mid-turn doesn't repeat
       // them on resume. Durable turns only — keeps T1 write counts unchanged.
+      //
+      // Guarded on the turn's abort signal: `appendMessages` has no lease
+      // fence (only `updateRun` does), so once this worker has lost the lease
+      // a reclaimed copy of the run may be replaying into this same chat —
+      // an un-guarded checkpoint from the zombie would interleave with it,
+      // and every later resume replays the polluted history.
       onStepEnd: dur.enabled
         ? ({ responseMessage }: { responseMessage: AppMessage }) => {
+            if (abort.signal.aborted) return;
             void storage
               .appendMessages(resolvedChatId, [responseMessage])
-              .catch(() => {});
+              .catch((e) =>
+                console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e),
+              );
           }
         : undefined,
       onFinish: async ({
@@ -2810,15 +2849,43 @@ export function createRuntime<P, RC = unknown>(
     let fired = 0;
     let errors = 0;
     for (const s of claimed) {
-      // Advance regardless of outcome so a failing schedule can't hot-loop.
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
+      // Consume the occurrence BEFORE firing, not after. The claim lease is
+      // stamped once (never heartbeated), so while a fire is in flight the row
+      // still reads `enabled AND nextRunAt <= now` — and once the lease TTL
+      // (default 30s) lapses, ANY claimer re-fires the same occurrence: a
+      // second node, a deploy overlap, the POST /cron/run backstop, even this
+      // same instance's next tick. A scheduled agent turn routinely outlives
+      // the TTL, and each duplicate is a full paid turn. Advancing first makes
+      // the occurrence at-most-once: after this write the row is no longer due
+      // (or no longer enabled, for one-shots), so it cannot be claimed again
+      // regardless of lease state. Run-level durability — not an occurrence
+      // retry — is what recovers a fire that dies mid-turn: the run row
+      // survives and `sweep()` resumes it. For work that is billed per
+      // attempt, "ran twice" is strictly worse than "ran once, resumed".
+      try {
+        await storage.completeSchedule(
+          s.id,
+          { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null },
+          dur.instanceId,
+        );
+      } catch (e) {
+        // Cannot consume the occurrence → do NOT fire. Firing anyway would
+        // leave the row due, and every subsequent tick would fire it again —
+        // the swallowed version of this write was itself a repeat-fire bug.
+        console.error(`[schedule] failed to advance ${s.id}; skipping this fire:`, e);
+        errors++;
+        continue;
+      }
       try {
         const principal = await reconstructPrincipal(s.identity);
         // Give the host first refusal (e.g. run it in the user's channel thread
         // and stream the answer there). A hook that throws is treated as "not
         // handled": the fire still happens the default way, so a broken
         // delivery target degrades to a normal chat run instead of losing the
-        // occurrence entirely.
+        // occurrence entirely. Hosts: only throw BEFORE doing paid work — a
+        // hook that already ran the agent and then throws (say, on delivery)
+        // makes the fallback a second full turn for the same occurrence.
         let handled = false;
         if (config.runSchedule) {
           try {
@@ -2835,16 +2902,12 @@ export function createRuntime<P, RC = unknown>(
           await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
         }
         fired++;
-      } catch {
+      } catch (e) {
+        // The occurrence is already consumed (above), so this cannot repeat-
+        // fire — but a silent `errors++` left hosts unable to see WHY a
+        // schedule produced nothing.
+        console.error(`[schedule] fire failed for ${s.id} (${s.agent}):`, e);
         errors++;
-      } finally {
-        await storage
-          .completeSchedule(
-            s.id,
-            { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null },
-            dur.instanceId,
-          )
-          .catch(() => {});
       }
     }
     return { fired, errors };

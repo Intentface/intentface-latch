@@ -122,11 +122,17 @@ createLatchHandler({
   runtime: (principal) => runtimeFor(principal.orgId),
   resolveContext,
   cronRun: async () => {
-    for (const tenant of await listTenants()) {
-      const rt = await runtimeFor(tenant);
-      await rt.runDue();
-      await rt.sweep();
-    }
+    // Not a serial for-loop: `runDue` awaits each scheduled turn to
+    // completion, so one tenant's hour-long agent turn would stall every
+    // tenant after it — including the `sweep` that recovers their crashed
+    // runs. Fan out, and don't let one tenant's failure skip the rest.
+    await Promise.allSettled(
+      (await listTenants()).map(async (tenant) => {
+        const rt = await runtimeFor(tenant);
+        await rt.runDue();
+        await rt.sweep();
+      }),
+    );
   },
 });
 ```
