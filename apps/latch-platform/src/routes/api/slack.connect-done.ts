@@ -26,19 +26,31 @@ async function handleConnectDone(request: Request): Promise<Response> {
   const slackUser = url.searchParams.get("user") ?? "";
   const error = url.searchParams.get("error");
 
+  // Everything interpolated below is escaped — this branch renders BEFORE any
+  // auth check, so an unescaped query param would be reflected XSS on the app
+  // origin for any unauthenticated visitor.
+  const esc = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   const page = (title: string, body: string, status = 200) =>
     new Response(
-      `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
+      `<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>` +
         `<body style="font-family:system-ui;display:grid;place-items:center;min-height:80vh">` +
-        `<div style="text-align:center;max-width:28rem"><h1 style="font-size:1.2rem">${title}</h1>` +
-        `<p style="color:#555">${body}</p></div>`,
+        `<div style="text-align:center;max-width:28rem"><h1 style="font-size:1.2rem">${esc(title)}</h1>` +
+        `<p style="color:#555">${esc(body)}</p></div>`,
       { status, headers: { "content-type": "text/html; charset=utf-8" } },
     );
 
   // The callback appends ?error= on a failed exchange — surface it rather than
   // claiming success and resuming a turn whose connection is still dead.
+  // Allowlisted to the codes the callback actually emits; anything else reads
+  // as an unknown error rather than echoing attacker-chosen text.
   if (error) {
-    return page("Connection failed", `The sign-in didn't complete (${error}). Close this tab and try the card in Slack again.`, 400);
+    const known = error === "missing_code" || error === "exchange_failed" ? error : "unknown error";
+    return page("Connection failed", `The sign-in didn't complete (${known}). Close this tab and try the card in Slack again.`, 400);
   }
   if (!appId || !chatId || !approvalId) return page("Invalid link", "This link is missing its context.", 400);
 
