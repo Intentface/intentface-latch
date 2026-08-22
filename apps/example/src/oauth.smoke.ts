@@ -27,9 +27,15 @@ async function main() {
   await migrate(client);
   const vault = createVault<Principal>({ store: createSqliteSecretStore<Principal>(latchDb(client), { owner }), masterKey: randomKey() });
 
+  // Kept in its own `string` binding: `McpOAuthConfig.serverUrl` also accepts a
+  // per-principal resolver, so reading it back off the annotated config widens
+  // to `string | ((principal) => …)` and won't pass where a `string | URL` is
+  // wanted. The test knows the value, so bind it rather than cast it back.
+  const serverUrl = "https://mcp.linear.app/mcp";
+
   const config: McpOAuthConfig = {
     name: "linear",
-    serverUrl: "https://mcp.linear.app/mcp",
+    serverUrl,
     redirectUrl: "https://app.example.com/connections/linear/callback",
     clientMetadata: {
       redirect_uris: ["https://app.example.com/connections/linear/callback"],
@@ -77,10 +83,10 @@ async function main() {
   );
 
   // --- authorization-server allowlist ------------------------------------
-  provider.validateAuthorizationServerURL!(config.serverUrl, "https://auth.linear.app");
+  provider.validateAuthorizationServerURL!(serverUrl, "https://auth.linear.app");
   let blocked = false;
   try {
-    provider.validateAuthorizationServerURL!(config.serverUrl, "https://evil-idp.com");
+    provider.validateAuthorizationServerURL!(serverUrl, "https://evil-idp.com");
   } catch {
     blocked = true;
   }
