@@ -124,6 +124,25 @@ export function createDynamicConnections(opts: {
   const { store, secrets, vault, onConnectionError } = opts;
   const callbackBase = opts.callbackBaseUrl.replace(/\/$/, "");
 
+  // GRANTS live under the ACTING human; CONFIG resolves under the turn's own
+  // principal. The OAuth flows receive this wrapped vault, so every token/
+  // verifier/client/state read-write maps the principal through
+  // credentialPrincipalOf — while their lazy config resolvers (store.get for
+  // serverUrl/scopes/client secrets) keep the FULL turn principal and thus the
+  // binding's view of which connection a name means. Splitting here (rather
+  // than wrapping principals at call sites) is what prevents the config-
+  // substitution hole: with grant-keyed config lookups, an actor's same-named
+  // PERSONAL connection (personal wins over org in store.get) could point an
+  // org binding's flow at an arbitrary serverUrl.
+  const grantVault: Vault<Principal> = {
+    set: (p, k, v) => vault.set(credentialPrincipalOf(p), k, v),
+    get: (p, k) => vault.get(credentialPrincipalOf(p), k),
+    has: (p, k) => vault.has(credentialPrincipalOf(p), k),
+    delete: (p, k) => vault.delete(credentialPrincipalOf(p), k),
+    list: (p) => vault.list(credentialPrincipalOf(p)),
+    resolver: vault.resolver,
+  };
+
   // Normalize non-conformant OAuth discovery from proxied MCP servers: force the
   // https scheme (servers behind TLS-terminating proxies advertise http) and
   // strip the issuer's trailing slash (the SDK's RFC 8414 check is strict).
@@ -146,7 +165,7 @@ export function createDynamicConnections(opts: {
     if (!o) {
       const redirectUrl = `${callbackBase}/${name}/callback`;
       o = createMcpOAuth<Principal>({
-        vault,
+        vault: grantVault,
         config: {
           name,
           serverUrl: async (p) => {
@@ -197,7 +216,7 @@ export function createDynamicConnections(opts: {
     let o = oauth2Cache.get(name);
     if (!o) {
       o = createOAuth2Flow<Principal>({
-        vault,
+        vault: grantVault,
         name,
         callbackBaseUrl: callbackBase,
         config: async (p) => {
@@ -230,7 +249,10 @@ export function createDynamicConnections(opts: {
             ),
           };
         },
-        ownerKey: (p) => `${p.orgId}/${p.userId ?? ""}`,
+        ownerKey: (p) => {
+          const c = credentialPrincipalOf(p);
+          return `${c.orgId}/${c.userId ?? ""}`;
+        },
       });
       oauth2Cache.set(name, o);
     }
@@ -261,7 +283,7 @@ export function createDynamicConnections(opts: {
           ? openApiBearer<Principal>({
               getToken: (p) =>
                 oauth2FlowFor(conn.name)
-                  .accessTokenFor(credentialPrincipalOf(p))
+                  .accessTokenFor(p)
                   .catch(() => undefined),
             })
           : conn.auth && conn.auth.kind !== "oauth"
@@ -295,7 +317,7 @@ export function createDynamicConnections(opts: {
   function openapiOAuth2Source(conn: ScopedConnection): ToolSource<Principal> {
     return {
       async open(principal): Promise<OpenToolSet> {
-        if (!(await oauth2FlowFor(conn.name).isAuthorized(credentialPrincipalOf(principal)))) {
+        if (!(await oauth2FlowFor(conn.name).isAuthorized(principal))) {
           return { tools: {}, toolApproval: {}, close: async () => {} };
         }
         return openapiSource(conn).open(principal);
@@ -334,29 +356,17 @@ export function createDynamicConnections(opts: {
     return {
       async open(principal): Promise<OpenToolSet> {
         const o = oauthFor(conn.name);
-        // Grants resolve under the ACTING human (credentialPrincipalOf): in a
-        // shared channel the turn principal keeps the binding's userId for
-        // chat ownership, but the typist must never ride the binder's tokens.
-        //
-        // The flow's lazy CONFIG lookups (serverUrl/scopes via store.get) also
-        // receive grantP, and that is safe by the store's precedence: get()
-        // checks the ORG record first, so for an org connection every actor
-        // resolves the identical config — an actor's same-named personal
-        // record can never substitute its target under an org connection's
-        // grants. The only divergence is an org agent riding the BINDER's
-        // personal connection record: other actors then fail closed (flow
-        // throws → no tools → reconnect card) rather than pairing config from
-        // one owner with tokens from another. Personal-agent bindings can't
-        // diverge at all — authorizeUser restricts them to actor === binder.
-        const grantP = credentialPrincipalOf(principal);
-        if (!(await o.isAuthorized(grantP))) {
+        // The FULL turn principal flows into the flow: grant storage maps to
+        // the acting human inside grantVault, while config lookups keep the
+        // binding's view — see grantVault for why the split lives there.
+        if (!(await o.isAuthorized(principal))) {
           return { tools: {}, toolApproval: {}, close: async () => {} };
         }
         return createMcpHost<Principal>({
           allowedHosts: [hostOf(url)],
           onConnectionError,
           connections: [
-            { name: conn.name, url, authProvider: o.provider(grantP), fetch: discoveryFetch },
+            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch },
           ],
         }).open(principal);
       },
@@ -438,10 +448,10 @@ export function createDynamicConnections(opts: {
         tools[key] = connectTool(conn.name);
         const authed = isOAuthMcp
           ? await oauthFor(conn.name)
-              .isAuthorized(credentialPrincipalOf(principal))
+              .isAuthorized(principal)
               .catch(() => false)
           : await oauth2FlowFor(conn.name)
-              .isAuthorized(credentialPrincipalOf(principal))
+              .isAuthorized(principal)
               .catch(() => false);
         if (!authed) toolApproval[key] = "user-approval";
         alwaysActive.push(key);
@@ -472,19 +482,18 @@ export function createDynamicConnections(opts: {
     // provider().invalidateCredentials on disconnect). The MCP client itself
     // must keep getting the real OAuthClientProvider from `oauthFor` — see
     // mcpOAuthSource, which deliberately bypasses this dispatcher.
-    // Grants land under the ACTING human (credentialPrincipalOf) so a channel
-    // connect card completes for the person who clicked it — never onto the
-    // binding owner's key.
+    // The full principal flows through; grant storage maps to the acting human
+    // inside grantVault, so a channel connect card completes for the person
+    // who clicked it — never onto the binding owner's key — while config keeps
+    // the binding's view of the connection.
     oauth: (name) => ({
-      isAuthorized: async (p) => (await flowFor(p, name)).isAuthorized(credentialPrincipalOf(p)),
-      start: async (p, o) => (await flowFor(p, name)).start(credentialPrincipalOf(p), o),
-      finish: async (p, params) => (await flowFor(p, name)).finish(credentialPrincipalOf(p), params),
+      isAuthorized: async (p) => (await flowFor(p, name)).isAuthorized(p),
+      start: async (p, o) => (await flowFor(p, name)).start(p, o),
+      finish: async (p, params) => (await flowFor(p, name)).finish(p, params),
       provider: (p) =>
         ({
           invalidateCredentials: async (scope: string) =>
-            (await flowFor(p, name))
-              .provider(credentialPrincipalOf(p))
-              .invalidateCredentials?.(scope as never),
+            (await flowFor(p, name)).provider(p).invalidateCredentials?.(scope as never),
         }) as unknown as ReturnType<McpOAuth<Principal>["provider"]>,
     }),
 
