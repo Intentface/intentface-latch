@@ -1186,8 +1186,27 @@ export function createRuntime<P, RC = unknown>(
       // once consecutive failures span a full TTL the lease has provably
       // expired — abort, exactly as if `held` had come back false.
       let missedBeats = 0;
+      let beatInFlight = false;
       const maxMissedBeats = Math.max(1, Math.ceil(dur.leaseTtlMs / dur.heartbeatMs));
+      const missBeat = (why: string, e?: unknown) => {
+        missedBeats++;
+        console.warn(
+          `[durability] heartbeat ${why} for run ${run.id} (${missedBeats}/${maxMissedBeats})`,
+          e ?? "",
+        );
+        if (missedBeats >= maxMissedBeats) {
+          stopHeartbeat();
+          abort.abort(new Error("lease lost: heartbeats failing for a full TTL"));
+        }
+      };
       heartbeat = setInterval(() => {
+        // A write that never settles is as blind as one that throws — count it
+        // against the TTL budget instead of stacking another write on top.
+        if (beatInFlight) {
+          missBeat("write still unsettled from the previous interval");
+          return;
+        }
+        beatInFlight = true;
         void storage
           .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs, lease.fencingToken)
           .then((held) => {
@@ -1197,16 +1216,9 @@ export function createRuntime<P, RC = unknown>(
               abort.abort(new Error("lease lost"));
             }
           })
-          .catch((e) => {
-            missedBeats++;
-            console.warn(
-              `[durability] heartbeat write failed for run ${run.id} (${missedBeats}/${maxMissedBeats}):`,
-              e,
-            );
-            if (missedBeats >= maxMissedBeats) {
-              stopHeartbeat();
-              abort.abort(new Error("lease lost: heartbeat writes failing for a full TTL"));
-            }
+          .catch((e) => missBeat("write failed", e))
+          .finally(() => {
+            beatInFlight = false;
           });
       }, dur.heartbeatMs);
       // Don't let the heartbeat alone keep a Node process alive.
@@ -1793,6 +1805,12 @@ export function createRuntime<P, RC = unknown>(
       // a reclaimed copy of the run may be replaying into this same chat —
       // an un-guarded checkpoint from the zombie would interleave with it,
       // and every later resume replays the polluted history.
+      //
+      // Best-effort, not a fence: the lease can be lost between this check and
+      // the write committing. Closing that window needs a lease/fencing-token
+      // check inside the storage write itself — an adapter interface change,
+      // tracked as a follow-up. With the heartbeat now aborting within one TTL
+      // of losing contact, the exposure is bounded to ~leaseTtlMs.
       onStepEnd: dur.enabled
         ? ({ responseMessage }: { responseMessage: AppMessage }) => {
             if (abort.signal.aborted) return;

@@ -29,6 +29,7 @@ const SCHEDULE: ScheduleRecord = {
   cron: "0 8 * * *",
   prompt: "daily digest",
   nextRunAt: 0,
+  enabled: true,
   createdAt: 0,
 };
 
