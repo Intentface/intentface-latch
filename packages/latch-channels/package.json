@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-channels",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Latch channels — bring a Latch agent to chat platforms (Slack first). A generic run→render-event projection plus per-platform adapters, reusing the core runtime, storage and durability (no separate state store).",
   "license": "MIT",
   "type": "module",
