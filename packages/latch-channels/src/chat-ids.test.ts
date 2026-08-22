@@ -85,15 +85,24 @@ describe("slack chat ids", () => {
     });
   });
 
-  it("sanitises an underscore in the app segment so the id stays parseable", () => {
-    // `_` separates segments; an underscored namespace would read back as a
-    // legacy id with a garbage channel.
-    const id = slackChatId("C012AB3CD", "1712345678.000100", "my_app");
-    expect(parseSlackChatId(id)).toEqual({
-      app: "my-app",
+  it("encodes a separator inside a segment REVERSIBLY", () => {
+    // `_` separates segments. Collapsing it (e.g. to `-`) would map `my_app`
+    // and `my-app` onto one chat — the sharing this scoping exists to stop —
+    // and hand a mangled app id to whatever reads the chat id back.
+    const underscored = slackChatId("C012AB3CD", "1712345678.000100", "my_app");
+    const hyphened = slackChatId("C012AB3CD", "1712345678.000100", "my-app");
+    expect(underscored).not.toBe(hyphened);
+    expect(parseSlackChatId(underscored)).toEqual({
+      app: "my_app",
       channel: "C012AB3CD",
       root: "1712345678.000100",
     });
+    expect(parseSlackChatId(hyphened)?.app).toBe("my-app");
+  });
+
+  it("round-trips a segment containing the escape character itself", () => {
+    const id = slackChatId("C012AB3CD", "1712345678.000100", "a%5Fb");
+    expect(parseSlackChatId(id)?.app).toBe("a%5Fb");
   });
 
   it("scopes DM and group-DM threads too", () => {

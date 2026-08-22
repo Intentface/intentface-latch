@@ -228,16 +228,22 @@ interface Bound<P> {
 // keep resolving; new ones are namespaced.
 
 /**
- * Build the chat id for a Slack thread, scoped to the owning app.
- *
- * `_` separates the segments, so it cannot appear inside one — Slack's own ids
- * (A…/C…/D…/G…) never do, but a host is free to pass any `chatNamespace`, and
- * an underscored one would mint ids that `parseSlackChatId` reads back as
- * legacy with a garbage channel (breaking, e.g., where a resumed turn posts).
- * Sanitised rather than rejected: a thrown error here would drop a live turn.
+ * `_` separates the id's segments, so it cannot appear inside one. Slack's own
+ * ids (A…/C…/D…/G…) never contain `_` or `%`, making this the identity for
+ * every real id — but `chatNamespace` is host-supplied, so the encoding has to
+ * be REVERSIBLE rather than merely safe: collapsing `_` to `-` would map
+ * `my_app` and `my-app` onto one chat (sharing their history, the very bug
+ * this scoping fixes) and hand the mangled id back as an app id to whatever
+ * reads the chat id.
  */
+const encodeSeg = (v: string) => v.replace(/%/g, "%25").replace(/_/g, "%5F");
+const decodeSeg = (v: string) => v.replace(/%5F/g, "_").replace(/%25/g, "%");
+
+/** Build the chat id for a Slack thread, scoped to the owning app. */
 export function slackChatId(channel: string, root: string, app?: string): string {
-  return app ? `slack_${app.replace(/_/g, "-")}_${channel}_${root}` : `slack_${channel}_${root}`;
+  return app
+    ? `slack_${encodeSeg(app)}_${encodeSeg(channel)}_${root}`
+    : `slack_${channel}_${root}`;
 }
 
 /**
@@ -249,7 +255,13 @@ export function parseSlackChatId(
   id: string,
 ): { channel: string; root: string; app?: string } | null {
   const scoped = /^slack_([^_]+)_([^_]+)_(\d+\.\d+)$/.exec(id);
-  if (scoped) return { app: scoped[1]!, channel: scoped[2]!, root: scoped[3]! };
+  if (scoped) {
+    return {
+      app: decodeSeg(scoped[1]!),
+      channel: decodeSeg(scoped[2]!),
+      root: scoped[3]!,
+    };
+  }
   const legacy = /^slack_(.+)_(\d+\.\d+)$/.exec(id);
   if (!legacy) return null;
   return { channel: legacy[1]!, root: legacy[2]! };
