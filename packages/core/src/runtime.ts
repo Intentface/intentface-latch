@@ -1051,8 +1051,22 @@ function fireObs<E>(
  */
 function clientErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
-  if (!message) return "An error occurred.";
-  return message.length > 500 ? `${message.slice(0, 499)}…` : message;
+  if (message) return message.length > 500 ? `${message.slice(0, 499)}…` : message;
+  // A non-Error throw or an empty-message Error still carries signal — a raw
+  // HTTP body, a JSON-RPC error object, a string. Describe it instead of
+  // masking: the bare mask turned an MCP server's `404 {"error":"Session not
+  // found"}` into an undebuggable generic string. Same bounded-exposure policy
+  // as above; JSON.stringify can throw on cycles, hence the try.
+  if (error instanceof Error && error.name !== "Error") return `${error.name} (no message)`;
+  try {
+    const desc = typeof error === "string" ? error : JSON.stringify(error);
+    if (desc && desc !== "{}" && desc !== "null" && desc !== '""' && desc !== "undefined") {
+      return `An error occurred: ${desc.length > 300 ? `${desc.slice(0, 299)}…` : desc}`;
+    }
+  } catch {
+    // circular or non-serializable — fall through to the mask
+  }
+  return "An error occurred.";
 }
 
 export function createRuntime<P, RC = unknown>(

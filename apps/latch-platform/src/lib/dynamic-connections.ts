@@ -74,13 +74,23 @@ function tokenHeaders(conn: ScopedConnection, token: string): Record<string, str
     : { Authorization: `Bearer ${token}` };
 }
 
-/** The synthetic, approval-gated tool that asks the user to authorize a connection. */
-function connectTool(name: string) {
+/**
+ * The synthetic tool that asks the user to (re)authorize a connection.
+ * Approval-gated by the caller when the connection is unauthorized or broken;
+ * ungated (an immediate no-op) when it's live. `openError` carries the reason
+ * a declared connection failed to open, so the MODEL knows the difference
+ * between "never connected" and "connected but broken" — and so does whoever
+ * reads the transcript.
+ */
+function connectTool(name: string, openError?: string) {
   return tool({
-    description:
-      `Connect the "${name}" integration. The user must authorize access first — ` +
-      `calling this prompts them to connect. Only call it when ${name}'s own ` +
-      `tools are not already available.`,
+    description: openError
+      ? `Reconnect the "${name}" integration. It is configured but FAILED to open ` +
+        `this turn (${openError.slice(0, 200)}); its tools are unavailable until it is ` +
+        `reconnected. Calling this prompts the user to reconnect.`
+      : `Connect the "${name}" integration. The user must authorize access first — ` +
+        `calling this prompts them to connect. Only call it when ${name}'s own ` +
+        `tools are not already available.`,
     inputSchema: jsonSchema<Record<string, never>>({
       type: "object",
       properties: {},
@@ -362,18 +372,36 @@ export function createDynamicConnections(opts: {
               : openapiSource(conn)
             : undefined;
       if (!source) continue;
-      let opened: OpenToolSet;
+      const interactive = isOAuthMcp || isOAuth2OpenApi;
+      let opened: OpenToolSet | null = null;
       try {
         // A connection whose referenced secret has been deleted is REVOKED — it
         // contributes no tools and says why, instead of sending unauthenticated
         // requests. Resolving here (rather than only at call time) makes the
         // tool simply absent, which the agent handles far better than a runtime
-        // failure. The same containment covers any other open failure: one bad
-        // connection must not take the rest of the turn's tools down with it.
+        // failure. One bad connection must not take the rest of the turn's
+        // tools down with it — but for INTERACTIVE connections the failure must
+        // not be silent either (below): a declared connection quietly missing
+        // let an agent answer confidently without the plane it was built
+        // around, and nobody — user, model, or transcript — could tell.
         await staticToken(secrets, conn, principal);
         opened = await source.open(principal);
       } catch (error) {
         onConnectionError?.(conn.name, error);
+        if (!interactive) continue;
+        // Fail LOUD for interactive connections: expose a GATED reconnect tool
+        // whose description carries the failure, exactly like the unauthorized
+        // case. The model confronts the breakage (a gated call parks the turn
+        // and renders a connect card) instead of degrading into a generic
+        // answer, and the reason is one hover away instead of buried in server
+        // logs.
+        const key = `connect_${conn.name}`;
+        tools[key] = connectTool(
+          conn.name,
+          error instanceof Error && error.message.trim() ? error.message : String(error),
+        );
+        toolApproval[key] = "user-approval";
+        alwaysActive.push(key);
         continue;
       }
       Object.assign(tools, opened.tools);
@@ -389,7 +417,7 @@ export function createDynamicConnections(opts: {
       // instead of dead-ending into a sign-in card for a connection that is
       // already live. Observed on Slack: connect via the UI didn't resolve the
       // thread's parked card, and every later message re-carded.
-      if (isOAuthMcp || isOAuth2OpenApi) {
+      if (interactive) {
         const key = `connect_${conn.name}`;
         tools[key] = connectTool(conn.name);
         const authed = isOAuthMcp

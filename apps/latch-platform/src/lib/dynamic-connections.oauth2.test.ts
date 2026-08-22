@@ -390,10 +390,16 @@ describe("oauth2 client secrets held by reference", () => {
     ]);
   });
 
-  it("exposes no oauth2 API tools once the client secret is deleted", async () => {
+  it("a broken connection exposes ONLY a gated reconnect tool carrying the reason", async () => {
     // The grant is still in the vault, but the client it was minted for can no
-    // longer authenticate. Expose nothing rather than let a call go out on a
-    // token we can't refresh.
+    // longer authenticate: no API tools may go out on a token we can't refresh.
+    // But a declared connection failing must not VANISH either — silently
+    // absent tools let an agent answer confidently without the plane it was
+    // built around (observed live: a generic market answer instead of "your
+    // client workspace is unreachable"). The failure surfaces as a GATED
+    // connect_<name> whose description names the reason: the model confronts
+    // the breakage (gated call → parked turn → connect card) instead of
+    // degrading into a generic answer.
     stubFetch();
     const { dynamic, secrets, authorize } = await setup({ clientSecretRef: "strava_client_secret" });
     await authorize();
@@ -401,7 +407,13 @@ describe("oauth2 client secrets held by reference", () => {
       "strava_getAthlete",
     );
     await secrets.remove(principal, "strava_client_secret", "user");
-    expect(Object.keys((await dynamic.hostFor(["strava"]).open(principal)).tools)).toEqual([]);
+    const opened = await dynamic.hostFor(["strava"]).open(principal);
+    expect(Object.keys(opened.tools)).toEqual(["connect_strava"]);
+    expect(opened.toolApproval).toMatchObject({ connect_strava: "user-approval" });
+    expect(opened.alwaysActive).toContain("connect_strava");
+    const description = (opened.tools.connect_strava as { description: string }).description;
+    expect(description).toContain("FAILED to open");
+    await opened.close();
   });
 
   it("revokes the connection when its referenced secret is deleted", async () => {
