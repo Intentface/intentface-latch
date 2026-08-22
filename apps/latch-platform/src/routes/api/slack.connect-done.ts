@@ -77,7 +77,10 @@ async function handleConnectDone(request: Request): Promise<Response> {
         chatId,
         approvalId,
         userId: slackUser,
-        principal: { orgId: app.orgId, userId: app.userId, actorUserId: session.userId },
+        principal:
+          app.credentialMode === "shared"
+            ? { orgId: app.orgId, userId: app.userId }
+            : { orgId: app.orgId, userId: app.userId, actorUserId: session.userId },
       })
       .catch((e) => console.error("[slack] connect-done resume failed:", e)),
   );

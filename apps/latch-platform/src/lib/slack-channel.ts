@@ -73,6 +73,11 @@ export async function getSlackChannelForApp(appId: string) {
         // credential resolution (credentialPrincipalOf) then uses THEIR OAuth
         // grants, never the binding owner's. Without this, every member read
         // and wrote through whatever the binder had connected.
+        //
+        // 'shared' is the EXPLICIT opt-out, chosen at bind time ("power this
+        // bot with my integrations") and shown on the binding — everyone then
+        // acts through the binder's grants, knowingly.
+        if (app.credentialMode === "shared") return { allowed: true };
         return {
           allowed: true,
           principal: { orgId: app.orgId, userId: app.userId, actorUserId: identity.userId },

@@ -1446,6 +1446,8 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
       clientId: string;
       clientSecret: string;
       signingSecret: string;
+      /** Whose grants turns use — see SlackApp.credentialMode. Default per-user. */
+      credentialMode?: "per-user" | "shared";
     }) => data,
   )
   .handler(async ({ data }) => {
@@ -1485,6 +1487,7 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
       orgId: principal.orgId,
       userId: principal.userId,
       botName,
+      credentialMode: data.credentialMode,
     });
     if (!bound) return { ok: false as const, error: "app already bound" };
 
@@ -1548,8 +1551,11 @@ export const setSlackConfigTokenFn = createServerFn({ method: "POST" })
  * bot token. No tokens are ever pasted by hand.
  */
 export const createSlackAppFn = createServerFn({ method: "POST" })
-  .validator((agent: string) => agent)
-  .handler(async ({ data: agent }) => {
+  // Legacy string input = { agent } — callers predate the credential-mode flag.
+  .validator((data: string | { agent: string; credentialMode?: "per-user" | "shared" }) =>
+    typeof data === "string" ? { agent: data } : data,
+  )
+  .handler(async ({ data: { agent, credentialMode } }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const { runtime, slackStore, credentials, agentStore } = await getLatch();
@@ -1601,6 +1607,7 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
       orgId: principal.orgId,
       userId: principal.userId,
       botName: displayName,
+      credentialMode,
     });
     if (!bound) return { ok: false as const, error: "app already bound" };
 

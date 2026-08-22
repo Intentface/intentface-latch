@@ -52,6 +52,11 @@ export async function migrateSlack(client: Client): Promise<void> {
   } catch {
     /* column already exists */
   }
+  try {
+    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN credential_mode TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 /** Vault credential key names for a Slack app's secrets (stored at org scope). */
@@ -80,9 +85,19 @@ export interface SlackApp {
   orgId: string;
   userId?: string;
   botName?: string;
+  /**
+   * Whose credentials turns run with. `'per-user'` (the default, and what a
+   * NULL column reads as): each member acts with their own grants — a member
+   * without one gets their own sign-in card. `'shared'`: every member acts
+   * through the BINDING CREATOR's grants — an explicit, consented choice made
+   * at bind time ("power this bot with my integrations"), never a silent
+   * default, because it means anyone in the channel reads through that
+   * person's access.
+   */
+  credentialMode?: "per-user" | "shared";
 }
 
-const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name
+const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode
               FROM latch_slack_app`;
 
 const rowToApp = (r: Record<string, unknown>): SlackApp => ({
@@ -93,6 +108,7 @@ const rowToApp = (r: Record<string, unknown>): SlackApp => ({
   orgId: String(r.org_id),
   userId: r.user_id ? String(r.user_id) : undefined,
   botName: r.bot_name ? String(r.bot_name) : undefined,
+  credentialMode: r.credential_mode === "shared" ? "shared" : "per-user",
 });
 
 export function createSlackStore(client: Client) {
@@ -108,13 +124,15 @@ export function createSlackStore(client: Client) {
       const now = Date.now();
       const res = await client.execute({
         sql: `INSERT INTO latch_slack_app
-                (app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(app_id) DO UPDATE SET
                 team_id = excluded.team_id, agent = excluded.agent,
                 agent_scope = excluded.agent_scope,
                 user_id = excluded.user_id,
-                bot_name = excluded.bot_name, updated_at = excluded.updated_at
+                bot_name = excluded.bot_name,
+                credential_mode = excluded.credential_mode,
+                updated_at = excluded.updated_at
               WHERE latch_slack_app.org_id = excluded.org_id`,
         args: [
           app.appId,
@@ -124,6 +142,7 @@ export function createSlackStore(client: Client) {
           app.orgId,
           app.userId ?? null,
           app.botName ?? null,
+          app.credentialMode ?? "per-user",
           now,
           now,
         ],

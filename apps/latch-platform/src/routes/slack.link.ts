@@ -125,12 +125,12 @@ async function handleLink(request: Request): Promise<Response> {
       // The replay is a turn on behalf of the human who JUST linked: carry
       // them as the actor, exactly as a live message from them would —
       // otherwise the very first thing a freshly linked member does runs on
-      // the binder's grants.
-      const principal = {
-        orgId: app.orgId,
-        userId: app.userId,
-        actorUserId: session.principal.userId!,
-      };
+      // the binder's grants. A 'shared' binding drops the actor, same as the
+      // live-message gate.
+      const principal =
+        app.credentialMode === "shared"
+          ? { orgId: app.orgId, userId: app.userId }
+          : { orgId: app.orgId, userId: app.userId, actorUserId: session.principal.userId! };
       waitUntil(
         resolved.channel
           .runMessage({
