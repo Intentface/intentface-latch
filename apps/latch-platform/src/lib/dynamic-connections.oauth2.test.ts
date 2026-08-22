@@ -163,6 +163,26 @@ describe("dynamic oauth2 OpenAPI connections", () => {
     await opened.close();
   });
 
+  it("authorized: connect_<name> loses its approval gate and no-ops to {connected:true}", async () => {
+    // A model primed by its own history ("I need to connect first…") may call
+    // connect_* even though the connection is live. Gated, that parks a
+    // sign-in card for a connection that's already connected — the Slack
+    // dead-end. Ungated, the call executes, returns connected:true, and the
+    // model course-corrects within the same turn.
+    stubFetch();
+    const { dynamic, authorize } = await setup();
+    await authorize();
+    const opened = await dynamic.hostFor(["strava"]).open(principal);
+    expect(opened.toolApproval).not.toHaveProperty("connect_strava");
+    const connect = opened.tools.connect_strava as {
+      execute: (input: unknown, options: unknown) => Promise<unknown>;
+    };
+    await expect(
+      connect.execute({}, { toolCallId: "t1", messages: [], context: { principal } }),
+    ).resolves.toEqual({ connected: true, connection: "strava" });
+    await opened.close();
+  });
+
   it("authorized: API tools appear and calls carry the brokered bearer token", async () => {
     const calls = stubFetch();
     const { dynamic, authorize } = await setup();

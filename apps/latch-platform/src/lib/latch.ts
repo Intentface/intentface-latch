@@ -41,6 +41,7 @@ import type {DynamicConnections} from "./dynamic-connections";
 import { createAgentStore, evalOwnerOfRecord, migrateAgents  } from "./agent-store";
 import type {AgentStore} from "./agent-store";
 import { memoryAgentOf } from "./memory/agent-identity";
+import { isOrgMember } from "./auth";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
 import { createTelegramStore, migrateTelegram } from "./telegram-store";
@@ -544,11 +545,50 @@ export async function getLatch(): Promise<{
         : dynamic.testTools(name, p),
   };
 
+  // Slack connect flow: a sign-in card in a thread points the browser at the
+  // generic connections authorize route with `slackApp=<appId>`. The grant must
+  // land under the principal the SLACK TURN checks — the app binding's — not
+  // the browser session's, or signing in never satisfies the card that asked
+  // for it (the tokens and the flow's code verifier both live per-owner-key).
+  // Scoped HARD to the authorize/callback routes: anywhere else a `?slackApp=`
+  // param must not let a member read another principal's chats. Membership in
+  // the binding's org is required — the same gate that lets them drive the bot.
+  // On the callback (no query params of ours survive the IdP round-trip) the
+  // appId comes back via OAuth state; forging state there buys nothing, because
+  // `finish()` validates it against the state `start()` stored under this same
+  // principal, and `start()` sits behind this membership check.
+  const CONNECT_OAUTH_ROUTE = /^\/api\/latch\/connections\/[^/]+\/(authorize|callback)$/;
+  const resolveContext = async (
+    request: Request,
+    extra?: { oauthState?: Record<string, unknown> },
+  ): Promise<Principal | null> => {
+    const session = await getPrincipalFromHeaders(request.headers);
+    const url = new URL(request.url);
+    const m = url.pathname.match(CONNECT_OAUTH_ROUTE);
+    const slackApp = m
+      ? m[1] === "authorize"
+        ? url.searchParams.get("slackApp")
+        : typeof extra?.oauthState?.slackApp === "string"
+          ? extra.oauthState.slackApp
+          : null
+      : null;
+    if (!slackApp) return session;
+    if (!session?.userId) return null;
+    const app = await slackStore.resolve(slackApp);
+    if (!app) return null;
+    if (!(await isOrgMember(session.userId, app.orgId))) return null;
+    return { orgId: app.orgId, userId: app.userId };
+  };
+
   const handler = createLatchHandler<Principal>({
     runtime,
     connections: handlerConnections,
     basePath: "/api/latch",
-    resolveContext: (request) => getPrincipalFromHeaders(request.headers),
+    resolveContext,
+    // Folded into the OAuth state by the authorize route so the callback —
+    // whose query string is the IdP's, not ours — can rebuild the same
+    // binding principal above.
+    stateParams: ["slackApp"],
     // Guards POST /api/latch/cron/run for an external cron in prod. That route is
     // NOT user-authed and fires every tenant's due schedules, so in production an
     // unset secret must leave this undefined — the handler then 404s the route

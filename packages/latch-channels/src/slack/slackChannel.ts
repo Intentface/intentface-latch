@@ -626,5 +626,59 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     return runMessageBound(b, ctx);
   }
 
-  return { handleRequest, runMessage };
+  /**
+   * Approve a parked `connect_<name>` and render the resumed run back into the
+   * thread — the host calls this after the connection's OAuth completes in the
+   * browser, so the Slack conversation continues where the sign-in card
+   * paused it instead of dead-ending until the next @-mention.
+   *
+   * Restricted to CONNECT approvals by verifying against fresh history: unlike
+   * the Approve/Deny buttons (whose payloads arrive Slack-signed), this is
+   * reached from a browser redirect, so the approvalId alone must not be able
+   * to approve an arbitrary gated tool. A non-connect or already-settled
+   * approval is a silent no-op.
+   */
+  async function resumeApproval(ctx: {
+    chatId: string;
+    approvalId: string;
+    /** Slack user the ephemeral follow-ups (further connect cards) target. */
+    userId: string;
+    tenant?: SlackTenant<P>;
+  }): Promise<void> {
+    const b = ctx.tenant
+      ? { tenant: ctx.tenant, api: slackApi(ctx.tenant.botToken) }
+      : staticBound;
+    if (!b) {
+      throw new Error(
+        "slackChannel.resumeApproval: pass `tenant` when the channel uses resolve()",
+      );
+    }
+    const parsed = parseSlackChatId(ctx.chatId);
+    if (!parsed) return;
+    const history = await b.tenant.runtime.loadHistory({
+      chatId: ctx.chatId,
+      principal: b.tenant.principal,
+    });
+    const pending = pendingApprovals(history).find((pa) => pa.approvalId === ctx.approvalId);
+    if (!pending?.isConnect) return;
+
+    await b.api.setStatus({
+      channel_id: parsed.channel,
+      thread_ts: parsed.root,
+      status: "is thinking…",
+    });
+    const res = await b.tenant.runtime.applyApproval({
+      chatId: ctx.chatId,
+      principal: b.tenant.principal,
+      decisions: [{ approvalId: ctx.approvalId, approved: true }],
+    });
+    await renderRun(b, res, {
+      channel: parsed.channel,
+      root: parsed.root,
+      userId: ctx.userId,
+      chatId: ctx.chatId,
+    });
+  }
+
+  return { handleRequest, runMessage, resumeApproval };
 }
