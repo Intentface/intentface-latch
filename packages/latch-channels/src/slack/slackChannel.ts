@@ -125,12 +125,23 @@ export interface SlackChannelConfig<P> {
   isFollowedThread?: (chatId: string) => Promise<boolean>;
   /**
    * Is a turn already running for this chat? A circuit breaker, checked before
-   * EVERY inbound turn: whatever the trigger, a Slack thread should never have
-   * several agent turns executing at once. Without it a single mis-classified
-   * self-message ran 8 concurrent turns on one thread (22 runs from ~3 real
-   * exchanges) — each one posting, each post arriving as another event. A
-   * feedback loop can outrun any single filter; this caps the blast radius to
-   * one turn. Omitted → no cap (previous behaviour).
+   * EVERY inbound message turn: whatever the trigger, a Slack thread should
+   * never have several agent turns executing at once. Without it a single
+   * mis-classified self-message ran 8 concurrent turns on one thread (22 runs
+   * from ~3 real exchanges) — each one posting, each post arriving as another
+   * event.
+   *
+   * Best-effort by construction, and deliberately so. It is a read-then-act
+   * preflight, so two deliveries arriving in the same instant can both observe
+   * an idle chat; it damps a runaway (which is a SUSTAINED loop, and each
+   * generation is caught) rather than guaranteeing one-at-a-time. It also does
+   * not cover approval resumes — an approval normally arrives while the turn
+   * is parked, not running. A real guarantee means atomic admission in the
+   * storage layer (`claimRun` refusing a second live run per chat), which
+   * changes the adapter contract and would have to accommodate the concurrent
+   * runs Latch creates on purpose: subagents, compaction, and approval
+   * continuations. That is a deliberate design decision, not a widened preflight.
+   * Omitted → no cap (previous behaviour).
    */
   isBusy?: (chatId: string) => Promise<boolean>;
   /**
