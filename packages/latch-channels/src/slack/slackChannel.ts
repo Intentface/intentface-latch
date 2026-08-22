@@ -123,6 +123,36 @@ export interface SlackChannelConfig<P> {
    * and DMs trigger the bot.
    */
   isFollowedThread?: (chatId: string) => Promise<boolean>;
+  /**
+   * Is a turn already running for this chat? A circuit breaker, checked before
+   * EVERY inbound message turn: whatever the trigger, a Slack thread should
+   * never have several agent turns executing at once. Without it a single
+   * mis-classified self-message ran 8 concurrent turns on one thread (22 runs
+   * from ~3 real exchanges) — each one posting, each post arriving as another
+   * event.
+   *
+   * Best-effort by construction, and deliberately so. It is a read-then-act
+   * preflight, so two deliveries arriving in the same instant can both observe
+   * an idle chat; it damps a runaway (which is a SUSTAINED loop, and each
+   * generation is caught) rather than guaranteeing one-at-a-time. It also does
+   * not cover approval resumes — an approval normally arrives while the turn
+   * is parked, not running. A real guarantee means atomic admission in the
+   * storage layer (`claimRun` refusing a second live run per chat), which
+   * changes the adapter contract and would have to accommodate the concurrent
+   * runs Latch creates on purpose: subagents, compaction, and approval
+   * continuations. That is a deliberate design decision, not a widened preflight.
+   * Omitted → no cap (previous behaviour).
+   */
+  isBusy?: (chatId: string) => Promise<boolean>;
+  /**
+   * The bot's own Slack user id. The authoritative self-check: a message the
+   * bot posted must never start a turn, and `bot_id`/`subtype` are absent on
+   * some post shapes — a self-message that slips through the thread-following
+   * gate makes the bot answer itself, post again, and run away. Supply this
+   * (captured at install as `bot_user_id`) and the loop is structurally
+   * impossible. Omitted → falls back to the weaker `bot_id`/`subtype` check.
+   */
+  botUserId?: string;
   /** Per-agent display identity (defaults applied by the bot user). */
   botName?: string;
   iconEmoji?: string;
@@ -309,6 +339,14 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       } catch (e) {
         console.error("[slack] thread context fetch failed:", e);
       }
+    }
+
+    // Circuit breaker, last thing before the turn: never stack turns on one
+    // thread. Checked HERE (not at dispatch) so it covers mentions, DMs and
+    // thread-following alike, and only after the gate has spent its work.
+    if (config.isBusy && (await config.isBusy(chatIdFor(channel, root)).catch(() => false))) {
+      console.warn(`[slack] chat ${chatIdFor(channel, root)} already has a live turn — skipping`);
+      return;
     }
 
     await runMessageBound(b, { channel, root, userId, prompt, context, principal: turnPrincipal });
@@ -560,19 +598,34 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       if (payloadStr) {
         const payload = JSON.parse(payloadStr) as {
           type?: string;
+          trigger_id?: string;
           team?: { id?: string };
           user?: { id?: string; team_id?: string };
         };
         if (payload.type === "block_actions") {
-          const b = await resolveBound({
-            kind: "interaction",
-            type: payload.type,
-            teamId: payload.team?.id ?? payload.user?.team_id,
-            userId: payload.user?.id,
-            payload,
-          });
-          if (!b) return ok(); // unroutable tenant — ACK so Slack stops retrying
-          defer(runInteraction(b, payload as never));
+          // Interactions are retried by Slack exactly like events, and the
+          // resume they trigger is a full agent turn — so they need the same
+          // atomic dedupe. `trigger_id` is unique per interaction delivery.
+          if (payload.trigger_id && config.seen && (await config.seen(payload.trigger_id))) {
+            console.log(`[slack] duplicate interaction ${payload.trigger_id} — dropped`);
+            return ok();
+          }
+          // Resolve the tenant INSIDE the deferred work: a cold start doing DB
+          // + Vault reads before the ACK can blow Slack's 3s window and earn a
+          // retry — which, before the dedupe above, meant a duplicate turn.
+          defer(
+            (async () => {
+              const b = await resolveBound({
+                kind: "interaction",
+                type: payload.type,
+                teamId: payload.team?.id ?? payload.user?.team_id,
+                userId: payload.user?.id,
+                payload,
+              });
+              if (!b) return; // unroutable tenant — already ACKed
+              await runInteraction(b, payload as never);
+            })().catch((e) => console.error("[slack] interaction failed:", e)),
+          );
           return ok();
         }
       }
@@ -606,9 +659,14 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       const ev = body.event;
       const isMention = ev.type === "app_mention";
       const isDm = ev.type === "message" && ev.channel_type === "im";
-      const fromBot = Boolean(ev.bot_id) || ev.subtype === "bot_message";
+      // `ev.user === botUserId` is the reliable arm; bot_id/subtype are the
+      // fallback for bindings installed before the id was captured.
+      const selfUser = Boolean(
+        config.botUserId && ev.user && ev.user === config.botUserId,
+      );
+      const fromBot = selfUser || Boolean(ev.bot_id) || ev.subtype === "bot_message";
       console.log(
-        `[slack] event type=${ev.type} channel_type=${ev.channel_type} fromBot=${fromBot} mention=${isMention} dm=${isDm}`,
+        `[slack] event type=${ev.type} channel_type=${ev.channel_type} fromBot=${fromBot} self=${selfUser} mention=${isMention} dm=${isDm}`,
       );
       const resolveFor = () =>
         resolveBound({
