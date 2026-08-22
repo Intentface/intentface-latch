@@ -63,6 +63,15 @@ async function handleConnectDone(request: Request): Promise<Response> {
   if (!(await isOrgMember(session.userId, app.orgId))) {
     return page("No access", "Your Latch account isn't a member of this agent's organization.", 403);
   }
+  // Shared bindings: only the creator may (re)connect the shared credential
+  // state — mirrors the resolveContext gate on the authorize/callback legs.
+  if (app.credentialMode === "shared" && (!app.userId || session.userId !== app.userId)) {
+    return page(
+      "No access",
+      "This bot runs on its creator's shared credentials — only they can manage its connections.",
+      403,
+    );
+  }
 
   const resolved = await getSlackChannelForApp(appId);
   if (!resolved) return page("Unknown app", "This Slack app is no longer bound.", 404);
@@ -77,7 +86,10 @@ async function handleConnectDone(request: Request): Promise<Response> {
         chatId,
         approvalId,
         userId: slackUser,
-        principal: { orgId: app.orgId, userId: app.userId, actorUserId: session.userId },
+        principal:
+          app.credentialMode === "shared"
+            ? { orgId: app.orgId, userId: app.userId }
+            : { orgId: app.orgId, userId: app.userId, actorUserId: session.userId },
       })
       .catch((e) => console.error("[slack] connect-done resume failed:", e)),
   );
