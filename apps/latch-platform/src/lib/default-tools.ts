@@ -21,8 +21,26 @@ export const SCHEDULE_TOOLS: string[] = [
 ];
 
 /**
+ * The Slack capability = the conversation tools together: reads are gated on
+ * the requester's channel membership server-side, and `post_to_channel` is
+ * approval-gated. They self-refuse outside a Slack conversation, so granting
+ * them to an agent that also runs on the web is harmless.
+ */
+export const SLACK_TOOLS: string[] = [
+  "slack_read_thread",
+  "slack_read_channel",
+  "slack_list_channels",
+  "post_to_channel",
+];
+
+/**
  * Every defaultTools name the editor owns a toggle for. Anything an agent has
  * beyond these (a future default tool added server-side) is preserved on save.
+ *
+ * SLACK_TOOLS is deliberately NOT in this list yet: the editor has no Slack
+ * toggle, and a known-but-untoggled name would be DROPPED by buildDefaultTools
+ * on the next save. Until the toggle ships, slack tool grants ride the
+ * preserve-verbatim path.
  */
 export const KNOWN_DEFAULT_TOOLS: string[] = ["web_fetch", "askUser", ...SCHEDULE_TOOLS];
 
