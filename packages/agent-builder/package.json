@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-agent-builder",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Latch agent builder — the meta-agent that designs, creates, and updates agents from a conversation. Host-agnostic core with an extension seam (evals, tool authoring) so hosts plug in what they support.",
   "license": "MIT",
   "type": "module",
