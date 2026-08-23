@@ -38,6 +38,7 @@ import {
   SLACK_CONFIG_TOKEN_KEY,
   SLACK_CONFIG_REFRESH_KEY,
 } from "./slack-store";
+import { buildOauthState } from "./slack-oauth-state";
 import { createAppFromManifest } from "./slack-admin";
 import { telegramVaultKeys } from "./telegram-store";
 import { whatsappVaultKeys } from "./whatsapp-store";
@@ -1490,12 +1491,14 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
       credentialMode: data.credentialMode,
     });
     if (!bound) return { ok: false as const, error: "app already bound" };
+    // The generated manifest is the v2 (agent_view) shape.
+    await slackStore.setManifestVersion(data.appId, principal.orgId, 2);
 
     const authorizeUrl =
       `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(data.clientId)}` +
       `&scope=${encodeURIComponent(SLACK_BOT_SCOPES.join(","))}` +
       `&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}` +
-      `&state=${encodeURIComponent(data.appId)}`;
+      `&state=${encodeURIComponent(buildOauthState(data.appId, { userId: principal.userId!, manifestVersion: 2 }))}`;
     return { ok: true as const, authorizeUrl };
   });
 
@@ -1610,10 +1613,12 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
       credentialMode,
     });
     if (!bound) return { ok: false as const, error: "app already bound" };
+    // Created from the v2 (agent_view) manifest.
+    await slackStore.setManifestVersion(created.appId, principal.orgId, 2);
 
     // Send the installer to Slack; we carry the app id back via `state`.
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
-    const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(created.appId)}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
+    const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(buildOauthState(created.appId, { userId: principal.userId!, manifestVersion: 2 }))}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
     return { ok: true as const, authorizeUrl };
   });
 

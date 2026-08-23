@@ -8,37 +8,95 @@ import { baseUrl } from "./base-url";
 import type { Principal } from "./session";
 
 /**
- * Build the Slack channel for one app (resolved by `api_app_id`), wired to the
- * runtime + Vault + identity gate. Shared by the webhook route and the
- * post-link resume. Returns null if the app isn't registered.
+ * Build the v2 Slack channel for one app (resolved by `api_app_id`), wired to
+ * the runtime + Vault + identity gate + admission stores. Shared by the
+ * webhook route, the post-link replay, the connect-done resume, and scheduled
+ * delivery. Returns null when the app isn't registered OR has no captured
+ * `bot_user_id`/`team_id` — the v2 channel requires both (one reinstall per
+ * pre-capture binding; the health row in the editor says so).
  */
+
+/** In-instance throttle so health touches don't add a write per event. */
+const lastTouch = new Map<string, number>();
+
+// Claim TTLs owned here (policy), passed through the adapter's claimOnce.
 export async function getSlackChannelForApp(appId: string) {
   const { runtime, slackStore, credentials } = await getLatch();
   const app = await slackStore.resolve(appId);
   if (!app) return null;
+  if (!app.botUserId || !app.teamId) {
+    console.warn(`[slack] binding ${appId} lacks bot_user_id/team_id — reinstall required`);
+    return null;
+  }
 
   const principal: Principal = { orgId: app.orgId, userId: app.userId };
   const keys = slackVaultKeys(appId);
+  const disabled = app.status === "disabled";
 
   const channel = slackChannel<Principal>({
     // Scope-pinned agent ref (agent-store.ts): the binding runs the record it
     // was created for — a linked member's same-named personal agent can never
     // shadow an org binding. Unpinned = code-registry agent.
     agent: app.agentScope ? `${app.agentScope}:${app.agent}` : app.agent,
+    appId,
     principal,
     botName: app.botName,
     botToken: async () => (await credentials.get(principal, keys.botToken, "org")) ?? "",
     signingSecret: async () => (await credentials.get(principal, keys.signingSecret, "org")) ?? "",
+    botUserId: app.botUserId,
+    teamId: app.teamId,
     runtime: {
       handleChat: (i) => runtime.handleChat(i),
       applyApproval: (i) => runtime.applyApproval(i),
       loadHistory: (i) => runtime.loadHistory(i),
     },
-    waitUntil: (p) => waitUntil(p),
-    seen: (eventId) => slackStore.seen(eventId),
+    waitUntil: (p) => {
+      waitUntil(p);
+      // Health signal, throttled per instance: events are arriving + verifying.
+      const now = Date.now();
+      if (now - (lastTouch.get(appId) ?? 0) > 60_000) {
+        lastTouch.set(appId, now);
+        waitUntil(slackStore.touchEvent(appId).catch(() => {}));
+      }
+    },
+
+    // ── Admission (all atomic, all in the store) ──────────────────────────────
+    claimOnce: (key, ttlMs) => slackStore.claimOnce(`${appId}:${key}`, ttlMs),
+    claimTurn: (chatId) => slackStore.claimTurn(chatId),
+    releaseTurn: (chatId, token) => slackStore.releaseTurn(chatId, token),
+    threads: {
+      claim: async (chatId, meta) => {
+        const row = await slackStore.claimThread({
+          chatId,
+          appId,
+          initiatorSlackUserId: meta.initiatorUserId,
+        });
+        return {
+          initiatorUserId: row.initiatorSlackUserId,
+          teamId: meta.teamId,
+          createdAt: row.createdAt,
+        };
+      },
+      get: async (chatId) => {
+        const row = await slackStore.getThread(chatId);
+        if (!row) return null;
+        return {
+          initiatorUserId: row.initiatorSlackUserId,
+          teamId: app.teamId ?? "",
+          createdAt: row.createdAt,
+        };
+      },
+      markStopped: (chatId) => slackStore.markThreadStopped(chatId),
+      stoppedSince: (chatId, sinceMs) => slackStore.threadStoppedSince(chatId, sinceMs),
+    },
+
+    // ── Identity gate ─────────────────────────────────────────────────────────
     // Only linked platform users may drive the agent. On refusal, stash the
     // message so it can be replayed once they link.
     authorizeUser: async ({ teamId, userId, channelId, threadRoot, prompt }) => {
+      // A disabled binding (uninstalled/revoked) never replies — Slack may
+      // still deliver queued events for a while.
+      if (disabled) return { allowed: false, silent: true };
       const team = teamId || app.teamId || "";
       const identity = await slackStore.resolveIdentity(team, userId);
       if (identity) {
@@ -68,11 +126,9 @@ export async function getSlackChannelForApp(appId: string) {
           };
         }
         // Per-user credentials by default: the turn keeps the BINDING's
-        // userId (chat ownership stays stable, so the shared thread never
-        // fragments per member) but carries the TYPIST as the actor —
-        // credential resolution (credentialPrincipalOf) then uses THEIR OAuth
-        // grants, never the binding owner's. Without this, every member read
-        // and wrote through whatever the binder had connected.
+        // userId (chat ownership stays stable) but carries the TYPIST as the
+        // actor — credential resolution (credentialPrincipalOf) then uses
+        // THEIR OAuth grants, never the binding owner's.
         //
         // 'shared' is the EXPLICIT opt-out, chosen at bind time ("power this
         // bot with my integrations") and shown on the binding — everyone then
@@ -84,9 +140,9 @@ export async function getSlackChannelForApp(appId: string) {
         };
       }
       await slackStore.setPending({
+        appId,
         teamId: team,
         slackUserId: userId,
-        appId,
         channel: channelId,
         threadRoot,
         prompt,
@@ -97,75 +153,30 @@ export async function getSlackChannelForApp(appId: string) {
         linkUrl: buildLinkUrl(baseUrl(), appId, team, userId),
       };
     },
-    // The bot's own user id — the reliable self-message check (see the channel
-    // config). Absent on bindings installed before it was captured; those fall
-    // back to bot_id/subtype until the app is reinstalled.
-    botUserId: app.botUserId,
-    // Scope this bot's threads to their own chats. Several bots share a
-    // channel and all receive the same message events — unscoped, they answer
-    // each other's messages and interleave one history.
-    chatNamespace: appId,
-    // Threads that predate scoping live at the unscoped id. Adopt one ONLY
-    // when it belongs to this binding's agent: the bot that actually owns the
-    // thread keeps its history, while the other bots in the channel — which
-    // were sharing that same chat and answering each other's messages — fall
-    // through to their own scoped chats. So the migration heals the shared
-    // thread rather than freezing it.
-    resolveChatId: async ({ scoped, legacy }) => {
-      // Two direct id lookups — never a capped scan: a tenant with more chats
-      // than the page size would silently miss its own legacy thread and
-      // strand it, which is the very failure this migration exists to prevent.
-      if (await runtime.getChat({ principal, id: scoped })) return scoped; // migrated already
-      const old = await runtime.getChat({ principal, id: legacy });
-      if (!old) return scoped;
-      // Match the pinned form the channel passes to handleChat (so chat.agent
-      // is exactly this), and ALSO the bare name: chats created before scope
-      // pinning stored `agent` unpinned, and a binding that gained a scope
-      // afterwards would otherwise fail to recognise its own thread — the
-      // stranding this hook exists to avoid. A same-named agent in the other
-      // scope could in principle be adopted that way; that is strictly better
-      // than orphaning a live thread, and only applies to pre-pinning chats.
-      //
-      // Known hole, deliberately left: adoption keys on the AGENT, not the
-      // app, so two apps bound to the SAME agent in one channel both adopt the
-      // legacy chat and keep sharing it — the incident behaviour, preserved
-      // for that niche until one of them is rebound.
-      const boundAgent = app.agentScope ? `${app.agentScope}:${app.agent}` : app.agent;
-      return old.agent === boundAgent || old.agent === app.agent ? legacy : scoped;
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+    onLifecycle: async ({ type }) => {
+      // The binding goes dark rather than erroring forever against a dead
+      // token. clientId/clientSecret/signingSecret stay in the Vault so a
+      // reinstall revives it without re-pasting; the bot token is dead anyway.
+      await slackStore.setStatus(appId, "disabled", type);
+      await credentials.remove(principal, keys.botToken, "org").catch(() => {});
+      console.warn(`[slack] binding ${appId} disabled (${type})`);
     },
-    // Circuit breaker: one live turn per thread. A run is "live" only while
-    // active and recently heartbeated — a crashed run's row lingers until the
-    // reaper, and must not wedge the thread shut.
-    isBusy: async (chatId) => {
-      // A capped scan, unlike resolveChatId's id lookups — `listRuns` has no
-      // chat filter. The limit is generous because a storm (exactly when this
-      // matters) also mints subagent and compaction runs that share the page;
-      // past it the breaker fails OPEN, which is the safe direction for a
-      // best-effort damper. A chatId filter on listRuns would make it precise.
-      const runs = await runtime.listRuns({ principal, limit: 200 });
-      const cutoff = Date.now() - 2 * 60_000;
-      return runs.some(
-        (r) =>
-          r.chatId === chatId &&
-          r.status === "active" &&
-          !r.endedAt &&
-          Math.max(r.heartbeatAt ?? 0, r.startedAt) > cutoff,
+
+    onFeedback: async (f) => {
+      // Recorded for now; a Langfuse score is the natural next step.
+      console.log(
+        `[slack] feedback app=${appId} user=${f.userId} channel=${f.channelId} sentiment=${f.sentiment}`,
       );
     },
-    // Thread-following: a Latch chat exists for a thread the bot has replied in.
-    isFollowedThread: async (chatId) => {
-      const msgs = await runtime.loadHistory({ chatId, principal });
-      return msgs.length > 0;
-    },
+
     authorizeUrl: (name, ctx) => {
       // `slackApp` makes the generic authorize/callback run under the APP
       // BINDING's principal (see resolveContext in latch.ts) — the grant must
-      // land under the key the Slack turn checks, not the browser session's,
-      // or signing in never satisfies the card that asked for it. `returnTo`
-      // goes to the connect-done route, which approves the parked
-      // `connect_<name>` and resumes the turn INTO THE THREAD — the web chat
-      // page can't do it: the resumed stream would render in the browser, and
-      // for any org member but the binding owner the page isn't even theirs.
+      // land under the key the Slack turn checks, not the browser session's.
+      // `returnTo` goes to the connect-done route, which approves the parked
+      // `connect_<name>` and resumes the turn INTO THE THREAD.
       const done = new URLSearchParams({
         app: appId,
         chatId: ctx.chatId,

@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { waitUntil } from "@vercel/functions";
 import { getLatch } from "@/lib/latch";
+import { parseSlackChatId } from "@intentface/latch-channels/slack";
 import { getSlackChannelForApp } from "@/lib/slack-channel";
 import { getPrincipalFromHeaders } from "@/lib/session";
 import { isOrgMember } from "@/lib/auth";
@@ -60,6 +61,14 @@ async function handleConnectDone(request: Request): Promise<Response> {
   const { slackStore } = await getLatch();
   const app = await slackStore.resolve(appId);
   if (!app) return page("Unknown app", "This Slack app is no longer bound.", 404);
+  // `app` and `chatId` arrive as independent query params — bind them to each
+  // other before any gate reads state through either: the chat id must name
+  // THIS app, or the initiator check below would resolve against the wrong
+  // binding's workspace.
+  const chatRef = parseSlackChatId(chatId);
+  if (!chatRef || chatRef.app !== appId) {
+    return page("Invalid link", "This link doesn't match its conversation.", 400);
+  }
   if (!(await isOrgMember(session.userId, app.orgId))) {
     return page("No access", "Your Latch account isn't a member of this agent's organization.", 403);
   }
@@ -71,6 +80,27 @@ async function handleConnectDone(request: Request): Promise<Response> {
       "This bot runs on its creator's shared credentials — only they can manage its connections.",
       403,
     );
+  }
+  // Per-user bindings: only the thread's INITIATOR may complete a connect for
+  // it — the resumed turn runs with the completing user's grants, and threads
+  // are initiator-owned, so anyone else finishing the OAuth here would splice
+  // their credentials into someone else's conversation.
+  if (app.credentialMode !== "shared") {
+    const thread = await slackStore.getThread(chatId);
+    if (!thread || thread.appId !== appId) {
+      return page("Unknown conversation", "This conversation no longer exists.", 404);
+    }
+    const initiator = await slackStore.resolveIdentity(
+      app.teamId ?? "",
+      thread.initiatorSlackUserId,
+    );
+    if (!initiator || initiator.userId !== session.userId) {
+      return page(
+        "No access",
+        "Only the person this conversation belongs to can connect integrations for it.",
+        403,
+      );
+    }
   }
 
   const resolved = await getSlackChannelForApp(appId);

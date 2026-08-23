@@ -14,8 +14,6 @@ export interface SlackManifestInput {
   requestUrl: string;
   /** OAuth redirect URL (the install callback) — required for install flow. */
   redirectUrl?: string;
-  /** Optional slash command (e.g. "latch") → same request URL. */
-  slashCommand?: string;
 }
 
 /** Bot scopes for the supported feature set (mentions, DMs, posting, status). */
@@ -27,11 +25,16 @@ export const SLACK_BOT_SCOPES = [
   "im:read",
   "im:write",
   "channels:history",
-  // List public channels — needed by the mirage sandbox's read-only /slack
-  // mount. Deliberately NOT groups:read: private channels stay unlistable, so
-  // the mount is public-channels-only at the API level.
+  // List public channels — pickers and the mirage sandbox's read-only /slack
+  // mount (its transport guard forces types=public_channel regardless).
   "channels:read",
   "groups:history",
+  // Membership checks on private channels for the requester-visibility gate
+  // (conversations.members). Listing stays public-only above.
+  "groups:read",
+  // Reserved for a later per-binding "auto-join public channels" opt-in —
+  // granted now so enabling it won't need a reinstall.
+  "channels:join",
   "assistant:write",
   "commands",
 ];
@@ -69,19 +72,9 @@ export function slackManifest(input: SlackManifestInput): Record<string, unknown
     },
     features: {
       bot_user: { display_name: name, always_online: true },
-      assistant_view: { assistant_description: `Chat with ${name}`.slice(0, 200) },
-      ...(input.slashCommand
-        ? {
-            slash_commands: [
-              {
-                command: `/${input.slashCommand}`,
-                url: input.requestUrl,
-                description: `Talk to ${name}`,
-                should_escape: false,
-              },
-            ],
-          }
-        : {}),
+      // Agent Sessions (the "Agents" pane). Replaces the deprecated
+      // assistant_view (sunset Feb 2027); Slack treats the flip as ONE-WAY.
+      agent_view: { agent_description: `Chat with ${name}`.slice(0, 200) },
     },
     oauth_config: {
       ...(input.redirectUrl ? { redirect_urls: [input.redirectUrl] } : {}),
@@ -91,13 +84,21 @@ export function slackManifest(input: SlackManifestInput): Record<string, unknown
       event_subscriptions: {
         request_url: input.requestUrl,
         // message.channels/groups power thread-following (continue without
-        // re-@-mentioning); mentions still come via app_mention.
+        // re-@-mentioning); mentions still come via app_mention. Subscribing
+        // to agent_session_stopped is what makes the native Stop button
+        // appear; tokens_revoked/app_uninstalled let the host disable dead
+        // bindings instead of erroring forever.
         bot_events: [
           "app_mention",
           "message.im",
           "message.channels",
           "message.groups",
-          "assistant_thread_started",
+          "app_home_opened",
+          "app_context_changed",
+          "agent_session_stopped",
+          "agent_session_title_changed",
+          "tokens_revoked",
+          "app_uninstalled",
         ],
       },
       interactivity: { is_enabled: true, request_url: input.requestUrl },

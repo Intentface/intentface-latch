@@ -409,22 +409,19 @@ const askUser = tool({
  */
 async function deliveryForChat(
   chatId: string,
-  principal: Principal,
-  agentRef: string,
+  _principal: Principal,
+  _agentRef: string,
 ): Promise<ScheduleDelivery | undefined> {
   const tg = parseTelegramChatId(chatId);
   if (tg) return { kind: "telegram", botId: tg.botRef };
 
+  // v2 Slack chat ids name their app outright — no guessing, and it works for
+  // an agent with several bots. v1 ids no longer parse (clean break): a chat
+  // that predates the rewrite can't create scheduled deliveries; a new thread
+  // can.
   const slack = parseSlackChatId(chatId);
   if (!slack) return undefined;
-  // Scoped id: the app is right there — no guessing, and it works for an agent
-  // with several bots (which the ambiguity bail below has to refuse).
-  if (slack.app) return { kind: "slack", appId: slack.app, channel: slack.channel };
-  const { slackStore } = await getLatch();
-  const { parseAgentRef } = await import("@/lib/agent-store");
-  const apps = await slackStore.appsForAgent(principal.orgId, parseAgentRef(agentRef).name);
-  if (apps.length !== 1) return undefined;
-  return { kind: "slack", appId: apps[0]!.appId, channel: slack.channel };
+  return { kind: "slack", appId: slack.app, channel: slack.channel };
 }
 
 /** What the runtime puts on `options.context` (see runtime.ts `toolsContext`). */

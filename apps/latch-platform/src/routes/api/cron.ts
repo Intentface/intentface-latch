@@ -28,9 +28,14 @@ async function runCron(request: Request): Promise<Response> {
     const got = Buffer.from(request.headers.get("authorization") ?? "");
     if (expected.length !== got.length || !timingSafeEqual(expected, got)) return forbidden();
   }
-  const { runtime } = await getLatch();
+  const { runtime, slackStore } = await getLatch();
   const due = await runtime.runDue().catch((e: unknown) => ({ error: String(e) }));
   const swept = await runtime.sweep().catch((e: unknown) => ({ error: String(e) }));
+  // Retention for the Slack channel's TTL'd tables (dedupe claims, held
+  // replays, turn leases, and the legacy event table until it's dropped).
+  await slackStore.pruneExpired().catch((e: unknown) => {
+    console.error("[cron] slack prune failed:", e);
+  });
   // Dev-only escape hatch: `?force=1` drops the idle gate so a fresh chat can
   // be extracted immediately (manual e2e testing). Never honored in prod.
   const force =

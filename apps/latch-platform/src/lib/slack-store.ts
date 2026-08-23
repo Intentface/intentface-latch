@@ -46,21 +46,72 @@ export async function migrateSlack(client: Client): Promise<void> {
     created_at INTEGER NOT NULL,
     PRIMARY KEY (team_id, slack_user_id)
   )`);
-  // Idempotent add for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
-  try {
-    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN agent_scope TEXT`);
-  } catch {
-    /* column already exists */
-  }
-  try {
-    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN credential_mode TEXT`);
-  } catch {
-    /* column already exists */
-  }
-  try {
-    await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN bot_user_id TEXT`);
-  } catch {
-    /* column already exists */
+  // ── v2 tables ──────────────────────────────────────────────────────────────
+  // One TTL'd dedupe table replaces grow-forever latch_slack_event. Keys carry
+  // a kind prefix + app id (`evt:A…:Ev…`, `msg:A…:…`, `act:A…:…`, `note:A…:…`)
+  // so the three claim families can never collide in one PK namespace.
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_slack_dedupe (
+    key TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+  )`);
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_slack_dedupe_exp ON latch_slack_dedupe(expires_at)`,
+  );
+  // Thread ownership (initiator-owned chats) + the cross-instance stop flag.
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_slack_thread (
+    chat_id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL,
+    initiator_slack_user_id TEXT NOT NULL,
+    initiator_user_id TEXT,
+    stopped_at INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+  // Pending replays keyed BY APP: the old (team, user) PK meant one pending
+  // message per user per workspace — a second app's held message clobbered
+  // the first and was then discarded on link.
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_slack_pending2 (
+    app_id TEXT NOT NULL,
+    team_id TEXT NOT NULL,
+    slack_user_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    thread_root TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (app_id, team_id, slack_user_id)
+  )`);
+  // One-turn-per-chat leases — same table the Telegram/WhatsApp stores create
+  // (chat ids are namespaced per channel, so sharing it is safe by design).
+  await client.execute(`CREATE TABLE IF NOT EXISTS latch_channel_turn (
+    chat_id TEXT PRIMARY KEY,
+    token TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL
+  )`);
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_slack_app_org_agent ON latch_slack_app(org_id, agent)`,
+  );
+  // Reverse lookup: which Slack identity is a given Latch user in a workspace
+  // (scheduled deliveries need Slack ids, not Latch ids).
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_slack_identity_user ON latch_slack_identity(user_id, team_id)`,
+  );
+
+  // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
+  for (const col of [
+    "agent_scope TEXT",
+    "credential_mode TEXT",
+    "bot_user_id TEXT",
+    "status TEXT", // NULL reads as 'active'; 'disabled' after uninstall/revoke
+    "disabled_reason TEXT",
+    "manifest_version INTEGER", // NULL/1 = pre-agent_view manifest; 2 = migrated
+    "unattended_channels TEXT", // JSON array: post_to_channel allowlist
+    "last_event_at INTEGER", // bot health: last verified webhook event
+  ]) {
+    try {
+      await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
   }
 }
 
@@ -106,27 +157,83 @@ export interface SlackApp {
    * on some post shapes, and a bot message that isn't recognized as one passes
    * the thread-following gate — the bot answers its own message, posts again,
    * and the thread runs away (observed: 22 runs and 44 events from ~3 real
-   * exchanges). Comparing `event.user` to this id can't miss.
+   * exchanges). Comparing `event.user` to this id can't miss. The v2 channel
+   * REQUIRES it — a binding without one must be reinstalled.
    */
   botUserId?: string;
+  /** 'disabled' after tokens_revoked/app_uninstalled; NULL reads as 'active'. */
+  status?: "active" | "disabled";
+  disabledReason?: string;
+  /** NULL/1 = pre-agent_view manifest; 2 = migrated to the v2 manifest. */
+  manifestVersion?: number;
+  /** Channel ids where post_to_channel runs WITHOUT approval (digests). */
+  unattendedChannels?: string[];
+  /** Last verified webhook event (bot health). */
+  lastEventAt?: number;
 }
 
-const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id
+/** A Slack-anchored chat's ownership row. */
+export interface SlackThread {
+  chatId: string;
+  appId: string;
+  initiatorSlackUserId: string;
+  initiatorUserId?: string;
+  stoppedAt?: number;
+  createdAt: number;
+}
+
+const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id,
+                     status, disabled_reason, manifest_version, unattended_channels, last_event_at
               FROM latch_slack_app`;
 
-const rowToApp = (r: Record<string, unknown>): SlackApp => ({
-  appId: String(r.app_id),
-  teamId: r.team_id ? String(r.team_id) : undefined,
-  agent: String(r.agent),
-  agentScope: r.agent_scope === "org" || r.agent_scope === "user" ? r.agent_scope : undefined,
-  orgId: String(r.org_id),
-  userId: r.user_id ? String(r.user_id) : undefined,
-  botName: r.bot_name ? String(r.bot_name) : undefined,
-  credentialMode: r.credential_mode === "shared" ? "shared" : "per-user",
-  botUserId: r.bot_user_id ? String(r.bot_user_id) : undefined,
-});
+const rowToApp = (r: Record<string, unknown>): SlackApp => {
+  let unattended: string[] | undefined;
+  try {
+    unattended = r.unattended_channels
+      ? (JSON.parse(String(r.unattended_channels)) as string[])
+      : undefined;
+  } catch {
+    unattended = undefined; // corrupt allowlist fails CLOSED (everything gated)
+  }
+  return {
+    appId: String(r.app_id),
+    teamId: r.team_id ? String(r.team_id) : undefined,
+    agent: String(r.agent),
+    agentScope: r.agent_scope === "org" || r.agent_scope === "user" ? r.agent_scope : undefined,
+    orgId: String(r.org_id),
+    userId: r.user_id ? String(r.user_id) : undefined,
+    botName: r.bot_name ? String(r.bot_name) : undefined,
+    credentialMode: r.credential_mode === "shared" ? "shared" : "per-user",
+    botUserId: r.bot_user_id ? String(r.bot_user_id) : undefined,
+    status: r.status === "disabled" ? "disabled" : "active",
+    disabledReason: r.disabled_reason ? String(r.disabled_reason) : undefined,
+    manifestVersion: r.manifest_version ? Number(r.manifest_version) : undefined,
+    unattendedChannels: unattended,
+    lastEventAt: r.last_event_at ? Number(r.last_event_at) : undefined,
+  };
+};
+
+const TURN_LEASE_MS = 5 * 60_000;
 
 export function createSlackStore(client: Client) {
+  async function getThread(chatId: string): Promise<SlackThread | null> {
+    const res = await client.execute({
+      sql: `SELECT chat_id, app_id, initiator_slack_user_id, initiator_user_id, stopped_at, created_at
+            FROM latch_slack_thread WHERE chat_id = ? LIMIT 1`,
+      args: [chatId],
+    });
+    const r = res.rows[0] as Record<string, unknown> | undefined;
+    if (!r) return null;
+    return {
+      chatId: String(r.chat_id),
+      appId: String(r.app_id),
+      initiatorSlackUserId: String(r.initiator_slack_user_id),
+      initiatorUserId: r.initiator_user_id ? String(r.initiator_user_id) : undefined,
+      stoppedAt: r.stopped_at ? Number(r.stopped_at) : undefined,
+      createdAt: Number(r.created_at),
+    };
+  }
+
   return {
     /**
      * Bind (or rebind) a Slack app to an agent + owner. Returns false when the
@@ -240,71 +347,240 @@ export function createSlackStore(client: Client) {
       return r ? { userId: String(r.user_id), orgId: String(r.org_id) } : null;
     },
 
-    /** Hold the message that triggered a link prompt, to replay after linking. */
+    /** Hold the message that triggered a link prompt, to replay after linking.
+     *  Keyed BY APP: two apps in one workspace hold pendings independently. */
     async setPending(input: {
+      appId: string;
       teamId: string;
       slackUserId: string;
-      appId: string;
       channel: string;
       threadRoot: string;
       prompt: string;
     }): Promise<void> {
+      const now = Date.now();
       await client.execute({
-        sql: `INSERT INTO latch_slack_pending
-                (team_id, slack_user_id, app_id, channel, thread_root, prompt, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(team_id, slack_user_id) DO UPDATE SET
-                app_id = excluded.app_id, channel = excluded.channel,
-                thread_root = excluded.thread_root, prompt = excluded.prompt,
+        sql: `INSERT INTO latch_slack_pending2
+                (app_id, team_id, slack_user_id, channel, thread_root, prompt, expires_at, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(app_id, team_id, slack_user_id) DO UPDATE SET
+                channel = excluded.channel, thread_root = excluded.thread_root,
+                prompt = excluded.prompt, expires_at = excluded.expires_at,
                 created_at = excluded.created_at`,
         args: [
+          input.appId,
           input.teamId,
           input.slackUserId,
-          input.appId,
           input.channel,
           input.threadRoot,
           input.prompt,
-          Date.now(),
+          now + 30 * 60_000, // matches the signed link URL's expiry
+          now,
         ],
       });
     },
 
-    /** Fetch and clear a held message (replay-once). */
+    /** Fetch and clear a held message (replay-once); expired rows are gone. */
     async takePending(
+      appId: string,
       teamId: string,
       slackUserId: string,
-    ): Promise<{ appId: string; channel: string; threadRoot: string; prompt: string } | null> {
+    ): Promise<{ channel: string; threadRoot: string; prompt: string } | null> {
+      const now = Date.now();
       const res = await client.execute({
-        sql: `SELECT app_id, channel, thread_root, prompt FROM latch_slack_pending
-              WHERE team_id = ? AND slack_user_id = ? LIMIT 1`,
-        args: [teamId, slackUserId],
+        sql: `SELECT channel, thread_root, prompt FROM latch_slack_pending2
+              WHERE app_id = ? AND team_id = ? AND slack_user_id = ? AND expires_at >= ?
+              LIMIT 1`,
+        args: [appId, teamId, slackUserId, now],
       });
       const r = res.rows[0] as Record<string, unknown> | undefined;
-      if (!r) return null;
       await client.execute({
-        sql: `DELETE FROM latch_slack_pending WHERE team_id = ? AND slack_user_id = ?`,
-        args: [teamId, slackUserId],
+        sql: `DELETE FROM latch_slack_pending2
+              WHERE app_id = ? AND team_id = ? AND slack_user_id = ?`,
+        args: [appId, teamId, slackUserId],
       });
+      if (!r) return null;
       return {
-        appId: String(r.app_id),
         channel: String(r.channel),
         threadRoot: String(r.thread_root),
         prompt: String(r.prompt),
       };
     },
 
+    // ── Admission primitives (the v2 channel's whole guard surface) ──────────
+
     /**
-     * Mark a Slack event id as handled; returns true if it was ALREADY seen
-     * (so the caller should drop it). Relies on the PK conflict — a fresh insert
-     * affects 1 row, a duplicate affects 0.
+     * Atomic TTL'd test-and-set: TRUE when THIS call claimed the key. Prunes
+     * expired rows on the way in, so the table stays bounded by the live TTL
+     * window instead of growing forever like latch_slack_event did.
      */
-    async seen(eventId: string): Promise<boolean> {
-      const res = await client.execute({
-        sql: `INSERT INTO latch_slack_event (event_id, created_at) VALUES (?, ?)
-              ON CONFLICT(event_id) DO NOTHING`,
-        args: [eventId, Date.now()],
+    async claimOnce(key: string, ttlMs: number): Promise<boolean> {
+      const now = Date.now();
+      await client.execute({
+        sql: `DELETE FROM latch_slack_dedupe WHERE expires_at < ?`,
+        args: [now],
       });
-      return res.rowsAffected === 0;
+      const res = await client.execute({
+        sql: `INSERT INTO latch_slack_dedupe (key, expires_at) VALUES (?, ?)
+              ON CONFLICT(key) DO NOTHING`,
+        args: [key, now + ttlMs],
+      });
+      return res.rowsAffected === 1;
+    },
+
+    /**
+     * One-turn-per-chat lease; expired leases are reclaimed (crash safety).
+     * Returns a claimant token, or null when the chat's turn is taken. The
+     * release is fenced on the token — same semantics as the Telegram store,
+     * over the same shared table.
+     */
+    async claimTurn(chatId: string): Promise<string | null> {
+      const now = Date.now();
+      await client.execute({
+        sql: `DELETE FROM latch_channel_turn WHERE expires_at < ?`,
+        args: [now],
+      });
+      const token = crypto.randomUUID();
+      const res = await client.execute({
+        sql: `INSERT INTO latch_channel_turn (chat_id, token, expires_at) VALUES (?, ?, ?)
+              ON CONFLICT(chat_id) DO NOTHING`,
+        args: [chatId, token, now + TURN_LEASE_MS],
+      });
+      return res.rowsAffected === 1 ? token : null;
+    },
+
+    async releaseTurn(chatId: string, token: string): Promise<void> {
+      await client.execute({
+        sql: `DELETE FROM latch_channel_turn WHERE chat_id = ? AND token = ?`,
+        args: [chatId, token],
+      });
+    },
+
+    // ── Thread ownership + stop flag ──────────────────────────────────────────
+
+    /** Atomic first-writer-wins; returns the OWNING row either way. */
+    async claimThread(input: {
+      chatId: string;
+      appId: string;
+      initiatorSlackUserId: string;
+      initiatorUserId?: string;
+    }): Promise<SlackThread> {
+      await client.execute({
+        sql: `INSERT INTO latch_slack_thread
+                (chat_id, app_id, initiator_slack_user_id, initiator_user_id, created_at)
+              VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(chat_id) DO NOTHING`,
+        args: [
+          input.chatId,
+          input.appId,
+          input.initiatorSlackUserId,
+          input.initiatorUserId ?? null,
+          Date.now(),
+        ],
+      });
+      const row = await getThread(input.chatId);
+      if (!row) throw new Error(`slack thread claim failed for ${input.chatId}`);
+      return row;
+    },
+
+    getThread,
+
+    async markThreadStopped(chatId: string): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_thread SET stopped_at = ? WHERE chat_id = ?`,
+        args: [Date.now(), chatId],
+      });
+    },
+
+    async threadStoppedSince(chatId: string, sinceMs: number): Promise<boolean> {
+      const res = await client.execute({
+        sql: `SELECT 1 FROM latch_slack_thread WHERE chat_id = ? AND stopped_at > ? LIMIT 1`,
+        args: [chatId, sinceMs],
+      });
+      return res.rows.length > 0;
+    },
+
+    // ── Binding lifecycle & health ────────────────────────────────────────────
+
+    /** Disable/enable a binding (uninstall, token revocation, manual). */
+    async setStatus(
+      appId: string,
+      status: "active" | "disabled",
+      reason?: string,
+    ): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_app SET status = ?, disabled_reason = ?, updated_at = ?
+              WHERE app_id = ?`,
+        args: [status === "active" ? null : status, reason ?? null, Date.now(), appId],
+      });
+    },
+
+    /** Every binding in a workspace (lifecycle events carry only team_id). */
+    async appsForTeam(teamId: string): Promise<SlackApp[]> {
+      const res = await client.execute({
+        sql: `${APP_COLUMNS} WHERE team_id = ?`,
+        args: [teamId],
+      });
+      return res.rows.map((r) => rowToApp(r as Record<string, unknown>));
+    },
+
+    async setManifestVersion(appId: string, orgId: string, version: number): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_app SET manifest_version = ?, updated_at = ?
+              WHERE app_id = ? AND org_id = ?`,
+        args: [version, Date.now(), appId, orgId],
+      });
+    },
+
+    async setUnattendedChannels(appId: string, orgId: string, channels: string[]): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_app SET unattended_channels = ?, updated_at = ?
+              WHERE app_id = ? AND org_id = ?`,
+        args: [JSON.stringify(channels), Date.now(), appId, orgId],
+      });
+    },
+
+    /** Bot health: a verified webhook event arrived for this app. */
+    async touchEvent(appId: string): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_app SET last_event_at = ? WHERE app_id = ?`,
+        args: [Date.now(), appId],
+      });
+    },
+
+    /** The Slack identity a Latch user linked in a workspace (delivery targets). */
+    async slackUserFor(teamId: string, userId: string): Promise<string | null> {
+      const res = await client.execute({
+        sql: `SELECT slack_user_id FROM latch_slack_identity
+              WHERE user_id = ? AND team_id = ? LIMIT 1`,
+        args: [userId, teamId],
+      });
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      return r ? String(r.slack_user_id) : null;
+    },
+
+    /** Cron retention: TTL'd tables plus the legacy event table (24h). */
+    async pruneExpired(): Promise<void> {
+      const now = Date.now();
+      await client.execute({
+        sql: `DELETE FROM latch_slack_dedupe WHERE expires_at < ?`,
+        args: [now],
+      });
+      await client.execute({
+        sql: `DELETE FROM latch_slack_pending2 WHERE expires_at < ?`,
+        args: [now],
+      });
+      await client.execute({
+        sql: `DELETE FROM latch_channel_turn WHERE expires_at < ?`,
+        args: [now],
+      });
+      await client.execute({
+        sql: `DELETE FROM latch_slack_event WHERE created_at < ?`,
+        args: [now - 24 * 3600_000],
+      });
+      await client.execute({
+        sql: `DELETE FROM latch_slack_pending WHERE created_at < ?`,
+        args: [now - 24 * 3600_000],
+      });
     },
   };
 }
