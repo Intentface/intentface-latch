@@ -1,5 +1,11 @@
 # @intentface/latch-langfuse
 
+## 0.3.1
+
+### Patch Changes
+
+- @intentface/latch-core@0.3.1
+
 ## 0.3.0
 
 ### Patch Changes
