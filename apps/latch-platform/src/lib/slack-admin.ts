@@ -67,6 +67,47 @@ export async function createAppFromManifest(opts: {
   };
 }
 
+/**
+ * Push a new manifest onto an EXISTING app (the migrate-to-v2 flow). Same
+ * expired-token rotate-once-and-retry contract as `createAppFromManifest`.
+ */
+export async function updateAppManifest(opts: {
+  configToken: string;
+  refreshToken?: string;
+  appId: string;
+  manifest: Record<string, unknown>;
+  onRotate?: (rotated: { token: string; refreshToken: string }) => Promise<void> | void;
+}): Promise<void> {
+  const manifestStr = JSON.stringify(opts.manifest);
+  let token = opts.configToken;
+
+  let r = await post("apps.manifest.update", {
+    token,
+    app_id: opts.appId,
+    manifest: manifestStr,
+  });
+  if (r.ok !== true && r.error === "token_expired" && opts.refreshToken) {
+    const rotated = await rotateConfigToken(opts.refreshToken);
+    await opts.onRotate?.(rotated);
+    token = rotated.token;
+    r = await post("apps.manifest.update", { token, app_id: opts.appId, manifest: manifestStr });
+  }
+  if (r.ok !== true) throw new Error(`slack:apps.manifest.update: ${String(r.error)}`);
+}
+
+/** Is this bot token alive, and who is it? (Binding health row.) */
+export async function authTest(
+  botToken: string,
+): Promise<{ ok: boolean; teamId?: string; botUserId?: string; error?: string }> {
+  const r = await post("auth.test", { token: botToken });
+  if (r.ok !== true) return { ok: false, error: String(r.error ?? "unknown") };
+  return {
+    ok: true,
+    teamId: r.team_id ? String(r.team_id) : undefined,
+    botUserId: r.user_id ? String(r.user_id) : undefined,
+  };
+}
+
 /** Exchange an OAuth install `code` for the workspace bot token. */
 export async function oauthAccess(opts: {
   clientId: string;

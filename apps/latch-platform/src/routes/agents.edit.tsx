@@ -38,8 +38,12 @@ import {
   saveTelegramTokenFn,
   saveWhatsappCredentialsFn,
   setSlackConfigTokenFn,
+  slackAppChannelsFn,
+  slackAppHealthFn,
   slackConfigStatusFn,
   slackManifestFn,
+  migrateSlackAppFn,
+  updateSlackAppSettingsFn,
   telegramWebhookStatusFn,
   unbindSlackAppFn,
   whatsappWebhookInfoFn,
@@ -976,20 +980,25 @@ function MemoryStatus({ agent }: { agent: string }) {
 }
 
 /**
- * Turn this agent into its own Slack bot (own-app-per-agent). The manual flow:
- * copy the generated manifest → create the app in Slack → install it → paste
- * the bot token + signing secret back here. Once bound, the agent answers in
- * Slack as its own @-handle. (One-button automation is a later upgrade.)
+ * Turn this agent into its own Slack bot (own-app-per-agent). One-button via
+ * the org config token, or the manual manifest flow. Each binding card shows
+ * health (token, events), the manifest generation with a migrate-to-v2
+ * button, whose credentials the bot uses, and the unattended-posting
+ * allowlist.
  */
 function SlackSection({ agent }: { agent: string }) {
   const [apps, setApps] = useState<
-    { appId: string; botName?: string; credentialMode?: "per-user" | "shared" }[]
+    {
+      appId: string;
+      botName?: string;
+      credentialMode?: "per-user" | "shared";
+    }[]
   >([]);
   // Whose integration credentials turns use. Default per-user: each member
   // connects (and acts through) their own grants. "Shared" is the explicit
   // opt-in to power the bot with the CREATOR's grants for everyone — a real
-  // access decision, so it is a visible checkbox, never a silent default.
-  const [shareCreds, setShareCreds] = useState(false);
+  // access decision, so it's a visible choice, never a silent default.
+  const [credMode, setCredMode] = useState<"per-user" | "shared">("per-user");
   const [manifest, setManifest] = useState<{ manifestJson: string; createUrl: string } | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [creating, setCreating] = useState(false);
@@ -1032,9 +1041,7 @@ function SlackSection({ agent }: { agent: string }) {
     }
     setCreating(true);
     setError(null);
-    const res = await createSlackAppFn({
-      data: { agent, credentialMode: shareCreds ? ("shared" as const) : ("per-user" as const) },
-    });
+    const res = await createSlackAppFn({ data: { agent, credentialMode: credMode } });
     if (res.ok) {
       window.location.href = res.authorizeUrl; // → Slack install → /api/slack/oauth
       return;
@@ -1083,7 +1090,7 @@ function SlackSection({ agent }: { agent: string }) {
         clientId: clientId.trim(),
         clientSecret: clientSecret.trim(),
         signingSecret: signingSecret.trim(),
-        credentialMode: shareCreds ? ("shared" as const) : ("per-user" as const),
+        credentialMode: credMode,
       },
     });
     if (res.ok) {
@@ -1106,57 +1113,69 @@ function SlackSection({ agent }: { agent: string }) {
         <h2 className="text-ink-primary text-sm font-semibold">Slack</h2>
       </div>
       <p className="text-ink-tertiary text-xs">
-        Give this agent its own Slack app and @-handle. Mention it or DM it, and it answers as this
-        agent — tool approvals show up as buttons right in the thread.
+        Give this agent its own Slack app and @-handle. Mention it, DM it, or open it from Slack's
+        Agents pane — answers stream in, tool calls show as task cards, and approvals are buttons
+        in the thread.
       </p>
 
       {apps.length > 0 && (
         <div className="space-y-2">
           {apps.map((a) => (
-            <div
-              key={a.appId}
-              className="border-primary-border flex items-center gap-3 rounded-lg border p-3"
-            >
-              <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
-                <Hash className="size-3.5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-ink-primary truncate text-sm font-medium">
-                  {a.botName ?? "Slack bot"}
-                </div>
-                <p className="text-ink-tertiary truncate font-mono text-xs">{a.appId}</p>
-                <p className="text-ink-tertiary text-xs">
-                  {a.credentialMode === "shared"
-                    ? "Shared credentials — everyone acts through the creator's integrations"
-                    : "Per-user credentials — each member connects their own integrations"}
-                </p>
-              </div>
-              <Button type="button" variant="ghost" size="sm" onClick={() => disconnect(a.appId)}>
-                <Trash2 className="size-3.5" /> Disconnect
-              </Button>
-            </div>
+            <SlackAppCard key={a.appId} app={a} onDisconnect={() => disconnect(a.appId)} />
           ))}
+          <details className="text-xs">
+            <summary className="text-ink-tertiary hover:text-ink-secondary cursor-pointer">
+              Setup checklist — if the bot isn't answering
+            </summary>
+            <ul className="text-ink-tertiary mt-1 list-disc space-y-0.5 pl-5">
+              <li>
+                Invite the bot to the channels it should work in: <code>/invite @{"{bot}"}</code>.
+              </li>
+              <li>
+                Each teammate DMs the bot once and follows its sign-in card — that links their
+                Slack identity to their Latch account (and their own integrations).
+              </li>
+              <li>The health row below the bot's name shows token and event status.</li>
+            </ul>
+          </details>
         </div>
       )}
 
-      <label className="text-ink-secondary flex items-start gap-2 text-xs">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={shareCreds}
-          onChange={(e) => setShareCreds(e.target.checked)}
-        />
-        <span>
-          Share <strong>my</strong> integration credentials with everyone using this bot.
-          <span className="text-ink-tertiary">
-            {" "}
-            Off (default): each member connects their own integrations and acts with their own
-            access. On: every member's messages read and write through integrations{" "}
-            <strong>you</strong> connect — only enable this for a bot meant to act as one shared
-            identity.
+      <fieldset className="space-y-1.5">
+        <FieldLabel>Whose integrations does the bot use?</FieldLabel>
+        <label className="text-ink-secondary flex items-start gap-2 text-xs">
+          <input
+            type="radio"
+            name="slack-cred-mode"
+            className="mt-0.5"
+            checked={credMode === "per-user"}
+            onChange={() => setCredMode("per-user")}
+          />
+          <span>
+            <strong>Per-user (default).</strong>{" "}
+            <span className="text-ink-tertiary">
+              Each teammate connects their own integrations and the bot acts with THEIR access.
+              Nobody can read through anyone else's accounts.
+            </span>
           </span>
-        </span>
-      </label>
+        </label>
+        <label className="text-ink-secondary flex items-start gap-2 text-xs">
+          <input
+            type="radio"
+            name="slack-cred-mode"
+            className="mt-0.5"
+            checked={credMode === "shared"}
+            onChange={() => setCredMode("shared")}
+          />
+          <span>
+            <strong>Shared — everyone acts through my integrations.</strong>{" "}
+            <span className="text-ink-tertiary">
+              Every member's messages read and write through integrations YOU connect — one shared
+              service identity. Only pick this deliberately; it's shown on the binding.
+            </span>
+          </span>
+        </label>
+      </fieldset>
 
       <div className="flex flex-wrap items-center gap-3">
         <Button type="button" size="sm" onClick={createBot} disabled={creating}>
@@ -1306,6 +1325,201 @@ function SlackSection({ agent }: { agent: string }) {
         </div>
       )}
     </section>
+  );
+}
+
+/** Relative "3m ago" for the health row. */
+function timeAgo(ts: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
+/** One bound Slack app: identity, credential mode, health, migrate, settings. */
+function SlackAppCard({
+  app,
+  onDisconnect,
+}: {
+  app: { appId: string; botName?: string; credentialMode?: "per-user" | "shared" };
+  onDisconnect: () => void;
+}) {
+  const [health, setHealth] = useState<Awaited<ReturnType<typeof slackAppHealthFn>>>(null);
+  const [channels, setChannels] = useState<{ id: string; name: string }[] | null>(null);
+  const [allow, setAllow] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [migrateManifest, setMigrateManifest] = useState<string | null>(null);
+  const [migrateUrl, setMigrateUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void slackAppHealthFn({ data: app.appId }).then((h) => {
+      setHealth(h);
+      if (h) setAllow(h.unattendedChannels);
+    });
+  }, [app.appId]);
+
+  async function migrate() {
+    setBusy(true);
+    setError(null);
+    const res = await migrateSlackAppFn({ data: app.appId });
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.error ?? "Migration failed.");
+      return;
+    }
+    if (res.updated) {
+      // Manifest pushed — the reinstall completes the flip (one-way per Slack).
+      window.location.href = res.reinstallUrl;
+      return;
+    }
+    // No config token: manual path — paste the manifest, then reinstall.
+    setMigrateManifest(res.manifestJson ?? null);
+    setMigrateUrl(res.reinstallUrl);
+  }
+
+  async function loadChannels() {
+    if (channels !== null) return;
+    setChannels(await slackAppChannelsFn({ data: app.appId }));
+  }
+
+  async function saveAllow() {
+    setBusy(true);
+    const res = await updateSlackAppSettingsFn({
+      data: { appId: app.appId, unattendedChannels: allow },
+    });
+    setBusy(false);
+    if (res.ok) {
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    }
+  }
+
+  const v2 = (health?.manifestVersion ?? 1) >= 2;
+  const disabled = health?.status === "disabled";
+  const needsReinstall = health ? !health.hasBotUserId : false;
+
+  return (
+    <div className="border-primary-border space-y-2 rounded-lg border p-3">
+      <div className="flex items-center gap-3">
+        <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
+          <Hash className="size-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-ink-primary flex items-center gap-2 truncate text-sm font-medium">
+            {app.botName ?? "Slack bot"}
+            {health && (
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                  disabled
+                    ? "bg-destructive/10 text-destructive"
+                    : v2
+                      ? "bg-tertiary text-ink-secondary"
+                      : "bg-destructive/10 text-destructive",
+                )}
+              >
+                {disabled ? "DISABLED" : v2 ? "v2 · Agent Sessions" : "v1 manifest"}
+              </span>
+            )}
+          </div>
+          <p className="text-ink-tertiary truncate font-mono text-xs">{app.appId}</p>
+          <p className="text-ink-tertiary text-xs">
+            {app.credentialMode === "shared"
+              ? "Shared credentials — everyone acts through the creator's integrations"
+              : "Per-user credentials — each member connects their own integrations"}
+          </p>
+        </div>
+        <Button type="button" variant="ghost" size="sm" onClick={onDisconnect}>
+          <Trash2 className="size-3.5" /> Disconnect
+        </Button>
+      </div>
+
+      {health && (
+        <p className="text-ink-tertiary text-xs">
+          Token: {health.tokenOk ? "OK" : "not working"} · Events:{" "}
+          {health.lastEventAt
+            ? `last ${timeAgo(health.lastEventAt)}`
+            : "none yet — is the bot invited to a channel?"}
+          {disabled && health.disabledReason ? ` · disabled: ${health.disabledReason}` : null}
+        </p>
+      )}
+
+      {needsReinstall && (
+        <p className="text-destructive text-xs">
+          This binding predates identity capture and can't receive messages — reinstall the app
+          {v2 ? "" : " (Migrate below does both)"}.
+        </p>
+      )}
+
+      {health && !v2 && (
+        <div className="space-y-1.5">
+          <Button type="button" size="sm" variant="secondary" onClick={migrate} disabled={busy}>
+            {busy ? "Migrating…" : "Migrate to v2 (Agents pane, streaming)"}
+          </Button>
+          <p className="text-ink-tertiary text-xs">
+            Updates the app's manifest and reinstalls it. One-way: Slack doesn't allow reverting
+            from the new Agents surface. Existing threads keep working.
+          </p>
+          {migrateManifest && migrateUrl && (
+            <div className="space-y-1.5">
+              <p className="text-ink-tertiary text-xs">
+                No config token saved — paste this manifest into the app's{" "}
+                <span className="font-mono">App Manifest</span> page on api.slack.com, then{" "}
+                <a href={migrateUrl} className="text-accent hover:underline">
+                  reinstall the app
+                </a>
+                .
+              </p>
+              <pre className="bg-tertiary text-ink-secondary max-h-40 overflow-auto rounded-md p-2 font-mono text-[11px]">
+                {migrateManifest}
+              </pre>
+            </div>
+          )}
+          {error && <p className="text-destructive text-xs">{error}</p>}
+        </div>
+      )}
+
+      <details className="text-xs" onToggle={(e) => e.currentTarget.open && void loadChannels()}>
+        <summary className="text-ink-tertiary hover:text-ink-secondary cursor-pointer">
+          Unattended posting ({allow.length ? `${allow.length} channel(s)` : "off"})
+        </summary>
+        <div className="mt-1 space-y-1.5">
+          <p className="text-ink-tertiary">
+            In these channels the agent's <code>post_to_channel</code> runs WITHOUT an approval
+            card — for scheduled digests. Everywhere else a human approves each post.
+          </p>
+          {channels === null ? (
+            <p className="text-ink-tertiary">Loading channels…</p>
+          ) : (
+            <div className="max-h-40 space-y-0.5 overflow-auto">
+              {channels.map((c) => (
+                <label key={c.id} className="text-ink-secondary flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={allow.includes(c.id)}
+                    onChange={(e) =>
+                      setAllow((prev) =>
+                        e.target.checked ? [...prev, c.id] : prev.filter((x) => x !== c.id),
+                      )
+                    }
+                  />
+                  #{c.name}
+                </label>
+              ))}
+              {channels.length === 0 && (
+                <p className="text-ink-tertiary">No public channels visible to the bot.</p>
+              )}
+            </div>
+          )}
+          <Button type="button" size="sm" variant="ghost" onClick={saveAllow} disabled={busy}>
+            {saved ? "Saved" : "Save allowlist"}
+          </Button>
+        </div>
+      </details>
+    </div>
   );
 }
 
