@@ -1633,7 +1633,7 @@ export const migrateSlackAppFn = createServerFn({ method: "POST" })
       `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(clientId)}` +
       `&scope=${encodeURIComponent(SLACK_BOT_SCOPES.join(","))}` +
       `&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}` +
-      `&state=${encodeURIComponent(buildOauthState(appId, { manifestVersion: 2 }))}`;
+      `&state=${encodeURIComponent(buildOauthState(appId, { userId: principal.userId!, manifestVersion: 2 }))}`;
 
     const configToken = await credentials.get(principal, SLACK_CONFIG_TOKEN_KEY, "org");
     if (!configToken) {
