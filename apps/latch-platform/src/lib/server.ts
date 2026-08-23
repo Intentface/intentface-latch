@@ -6,6 +6,7 @@ import {
   slackManifest,
   createFromManifestUrl,
   SLACK_BOT_SCOPES,
+  slackApi,
 } from "@intentface/latch-channels/slack";
 import {
   isLangfuseConfigured,
@@ -39,7 +40,7 @@ import {
   SLACK_CONFIG_REFRESH_KEY,
 } from "./slack-store";
 import { buildOauthState } from "./slack-oauth-state";
-import { createAppFromManifest } from "./slack-admin";
+import { createAppFromManifest, updateAppManifest, authTest } from "./slack-admin";
 import { telegramVaultKeys } from "./telegram-store";
 import { whatsappVaultKeys } from "./whatsapp-store";
 import { baseUrl } from "./base-url";
@@ -1521,8 +1522,145 @@ export const unbindSlackAppFn = createServerFn({ method: "POST" })
     // authenticated user could delete any org's binding by app id.
     const app = await slackStore.resolve(appId);
     if (!app || !canManageBot(app, principal)) return { ok: false };
+    // The binding's Vault secrets go with it — bot token, signing secret and
+    // client creds must not outlive the binding (telegram/whatsapp parity).
+    const { credentials } = await getLatch();
+    for (const key of Object.values(slackVaultKeys(appId))) {
+      await credentials.remove(principal, key, "org").catch(() => {});
+    }
     await slackStore.unbind(appId, principal.orgId);
     return { ok: true };
+  });
+
+/**
+ * Binding health for the editor's Slack card: token liveness (auth.test),
+ * whether events are arriving, and what the v2 channel requires (bot user id,
+ * manifest version). Org-member readable; secrets never leave the server.
+ */
+export const slackAppHealthFn = createServerFn({ method: "GET" })
+  .validator((appId: string) => appId)
+  .handler(async ({ data: appId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { slackStore, credentials } = await getLatch();
+    const app = await slackStore.resolve(appId);
+    if (!app || app.orgId !== principal.orgId) return null;
+    const token = await credentials.get(
+      { orgId: app.orgId, userId: app.userId },
+      slackVaultKeys(appId).botToken,
+      "org",
+    );
+    const auth = token ? await authTest(token).catch(() => ({ ok: false })) : { ok: false };
+    return {
+      status: app.status ?? "active",
+      disabledReason: app.disabledReason,
+      manifestVersion: app.manifestVersion ?? 1,
+      hasBotUserId: Boolean(app.botUserId && app.teamId),
+      lastEventAt: app.lastEventAt ?? null,
+      tokenOk: auth.ok,
+      unattendedChannels: app.unattendedChannels ?? [],
+    };
+  });
+
+/** Public channels the bot can see — options for the unattended allowlist. */
+export const slackAppChannelsFn = createServerFn({ method: "GET" })
+  .validator((appId: string) => appId)
+  .handler(async ({ data: appId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const { slackStore, credentials } = await getLatch();
+    const app = await slackStore.resolve(appId);
+    if (!app || app.orgId !== principal.orgId) return [];
+    const token = await credentials.get(
+      { orgId: app.orgId, userId: app.userId },
+      slackVaultKeys(appId).botToken,
+      "org",
+    );
+    if (!token) return [];
+    try {
+      return await slackApi(token).conversationsList();
+    } catch {
+      return [];
+    }
+  });
+
+/** Save the post_to_channel unattended allowlist (creator-gated). */
+export const updateSlackAppSettingsFn = createServerFn({ method: "POST" })
+  .validator((data: { appId: string; unattendedChannels: string[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false };
+    const { slackStore } = await getLatch();
+    const app = await slackStore.resolve(data.appId);
+    if (!app || !canManageBot(app, principal)) return { ok: false };
+    // Channel ids only — names would silently stop matching on a rename.
+    const channels = [...new Set(data.unattendedChannels)]
+      .filter((c) => /^[CG][A-Z0-9]{4,}$/.test(c))
+      .slice(0, 50);
+    await slackStore.setUnattendedChannels(data.appId, principal.orgId, channels);
+    return { ok: true, channels };
+  });
+
+/**
+ * Migrate a binding to the v2 (agent_view) manifest: push the new manifest via
+ * apps.manifest.update (config token, rotate-on-expiry), then hand back the
+ * reinstall URL whose signed state flips `manifest_version` only after the
+ * OAuth exchange succeeds. Without a config token the manifest JSON is
+ * returned for the manual paste path. NOTE: Slack treats the agent_view flip
+ * as one-way.
+ */
+export const migrateSlackAppFn = createServerFn({ method: "POST" })
+  .validator((appId: string) => appId)
+  .handler(async ({ data: appId }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime, slackStore, credentials, agentStore } = await getLatch();
+    const app = await slackStore.resolve(appId);
+    if (!app || !canManageBot(app, principal)) return { ok: false as const, error: "not_found" };
+
+    const record = await boundAgentRecord(agentStore, principal, app.agent);
+    const info = (await runtime.listAgents(principal)).find((a) => a.name === app.agent);
+    const manifest = slackManifest({
+      displayName: app.botName ?? record.title ?? info?.title ?? app.agent,
+      description: info?.description,
+      requestUrl: `${baseUrl()}/api/slack`,
+      redirectUrl: `${baseUrl()}/api/slack/oauth`,
+    });
+
+    const clientId = await credentials.get(principal, slackVaultKeys(appId).clientId, "org");
+    if (!clientId) return { ok: false as const, error: "no_client_id" };
+    const reinstallUrl =
+      `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(clientId)}` +
+      `&scope=${encodeURIComponent(SLACK_BOT_SCOPES.join(","))}` +
+      `&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}` +
+      `&state=${encodeURIComponent(buildOauthState(appId, { userId: principal.userId!, manifestVersion: 2 }))}`;
+
+    const configToken = await credentials.get(principal, SLACK_CONFIG_TOKEN_KEY, "org");
+    if (!configToken) {
+      return {
+        ok: true as const,
+        updated: false,
+        manifestJson: JSON.stringify(manifest, null, 2),
+        reinstallUrl,
+      };
+    }
+    const refreshToken =
+      (await credentials.get(principal, SLACK_CONFIG_REFRESH_KEY, "org")) ?? undefined;
+    try {
+      await updateAppManifest({
+        configToken,
+        refreshToken,
+        appId,
+        manifest,
+        onRotate: async (rot) => {
+          await credentials.set(principal, SLACK_CONFIG_TOKEN_KEY, "org", rot.token);
+          await credentials.set(principal, SLACK_CONFIG_REFRESH_KEY, "org", rot.refreshToken);
+        },
+      });
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : "update_failed" };
+    }
+    return { ok: true as const, updated: true, reinstallUrl };
   });
 
 // ── C: one-button create via org App-Configuration token ────────────────────
