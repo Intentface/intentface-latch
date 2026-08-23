@@ -65,9 +65,9 @@ beforeEach(async () => {
       const respond = (payload: Record<string, unknown>) =>
         new Response(JSON.stringify(payload), { status: 200 });
       if (method === "conversations.members") {
-        const err = world.memberError.get(body.channel!);
+        const err = world.memberError.get(String(body.channel));
         if (err) return respond({ ok: false, error: err });
-        return respond({ ok: true, members: world.members.get(body.channel!) ?? [] });
+        return respond({ ok: true, members: world.members.get(String(body.channel)) ?? [] });
       }
       if (method === "conversations.history" || method === "conversations.replies") {
         return respond({
@@ -154,7 +154,7 @@ describe("slack tools: post_to_channel", () => {
   it("posts the full text as markdown", async () => {
     const r = await post.execute({ channel: "C9", text: "# Summary\nAll good." }, ctx());
     expect(r.posted).toBe(true);
-    const sent = calls("chat.postMessage")[0]!.body;
+    const sent = calls("chat.postMessage")[0].body;
     expect(sent.markdown_text).toBe("# Summary\nAll good.");
     expect(sent.channel).toBe("C9");
   });
@@ -163,5 +163,13 @@ describe("slack tools: post_to_channel", () => {
     const r = await post.execute({ channel: "C9", text: "   " }, ctx());
     expect(r.error).toBeDefined();
     expect(calls("chat.postMessage").length).toBe(0);
+  });
+
+  it("rejects oversized posts instead of silently truncating what was approved", async () => {
+    const r = await post.execute({ channel: "C9", text: "x".repeat(12_001) }, ctx());
+    expect(String(r.error)).toContain("12000");
+    expect(calls("chat.postMessage").length).toBe(0);
+    const ok = await post.execute({ channel: "C9", text: "x".repeat(12_000) }, ctx());
+    expect(ok.posted).toBe(true);
   });
 });

@@ -4,10 +4,11 @@ import {
   slackApi,
   SlackApiError,
   notificationText,
-  type SlackClient,
 } from "@intentface/latch-channels/slack";
+import type { SlackClient } from "@intentface/latch-channels/slack";
 import { getLatch } from "@/lib/latch";
-import { slackVaultKeys, type SlackApp } from "@/lib/slack-store";
+import { slackVaultKeys } from "@/lib/slack-store";
+import type { SlackApp } from "@/lib/slack-store";
 import type { Principal } from "@/lib/session";
 
 /**
@@ -37,7 +38,7 @@ type ToolCtx = {
   principal: Principal;
   run?: { id: string; chatId: string; agent: string };
 };
-const ctxOf = (o: unknown): ToolCtx => (o as { context?: ToolCtx }).context ?? ({} as ToolCtx);
+const ctxOf = (o: unknown): Partial<ToolCtx> => (o as { context?: ToolCtx }).context ?? {};
 
 interface SlackToolCtx {
   api: SlackClient;
@@ -239,10 +240,17 @@ const post_to_channel = tool({
     const { ctx, error } = await slackCtx(options);
     if (!ctx) return { error };
     if (!args.text.trim()) return { error: "Nothing to post." };
+    // The user approved args.text EXACTLY — never publish a silently different
+    // (truncated) message. Over the markdown limit → make the model shorten it.
+    if (args.text.length > 12_000) {
+      return {
+        error: `Message is ${args.text.length} characters — Slack's limit is 12000. Shorten it and try again.`,
+      };
+    }
     try {
       const r = await ctx.api.postMessage({
         channel: args.channel,
-        markdown_text: args.text.slice(0, 12_000),
+        markdown_text: args.text,
         text: notificationText(args.text),
       });
       return { posted: true, channel: r.channel, ts: r.ts };
