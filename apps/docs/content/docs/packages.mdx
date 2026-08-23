@@ -112,7 +112,7 @@ Key exports: `createMemoryProvider` · `createLoredexStore` · `scopeRefOf` · t
 
 ## latch-channels
 
-**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, runs the turn in the background, and streams the answer live. Approvals render as native platform UI. Per adapter: Slack uses native message streaming with tool calls as task cards, the Agents-pane surface, initiator-owned threads and signed approval buttons; Telegram and WhatsApp stream via progressive message edits and add questionnaires plus `/new` and `/compact` commands.
+**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, and runs the turn in the background. Approvals render as native platform UI. Per adapter: Slack uses native message streaming with tool calls as task cards, the Agents-pane surface, initiator-owned threads and signed approval buttons; Telegram streams via progressive message edits; WhatsApp posts the completed answer (its messages can't be edited). Telegram and WhatsApp add questionnaires plus `/new` and `/compact` commands.
 
 ```ts
 import { slackChannel } from "@intentface/latch-channels/slack";

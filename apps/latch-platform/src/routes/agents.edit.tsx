@@ -1355,10 +1355,19 @@ function SlackAppCard({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void slackAppHealthFn({ data: app.appId }).then((h) => {
-      setHealth(h);
-      if (h) setAllow(h.unattendedChannels);
-    });
+    let alive = true;
+    slackAppHealthFn({ data: app.appId })
+      .then((h) => {
+        if (!alive) return;
+        setHealth(h);
+        if (h) setAllow(h.unattendedChannels);
+      })
+      .catch(() => {
+        if (alive) setError("Couldn't load the bot's health.");
+      });
+    return () => {
+      alive = false;
+    };
   }, [app.appId]);
 
   async function migrate() {
@@ -1367,7 +1376,7 @@ function SlackAppCard({
     const res = await migrateSlackAppFn({ data: app.appId });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "Migration failed.");
+      setError(res.error);
       return;
     }
     if (res.updated) {
@@ -1376,24 +1385,39 @@ function SlackAppCard({
       return;
     }
     // No config token: manual path — paste the manifest, then reinstall.
-    setMigrateManifest(res.manifestJson ?? null);
+    setMigrateManifest(res.manifestJson);
     setMigrateUrl(res.reinstallUrl);
   }
 
   async function loadChannels() {
     if (channels !== null) return;
-    setChannels(await slackAppChannelsFn({ data: app.appId }));
+    try {
+      setChannels(await slackAppChannelsFn({ data: app.appId }));
+    } catch {
+      setChannels([]);
+      setError("Couldn't list the workspace's channels.");
+    }
   }
 
   async function saveAllow() {
     setBusy(true);
-    const res = await updateSlackAppSettingsFn({
-      data: { appId: app.appId, unattendedChannels: allow },
-    });
-    setBusy(false);
-    if (res.ok) {
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+    try {
+      const res = await updateSlackAppSettingsFn({
+        data: { appId: app.appId, unattendedChannels: allow },
+      });
+      if (res.ok) {
+        // The server validates and caps the list — show what it actually
+        // stored, not what was selected.
+        setAllow(res.channels);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1500);
+      } else {
+        setError("Couldn't save the allowlist.");
+      }
+    } catch {
+      setError("Couldn't save the allowlist.");
+    } finally {
+      setBusy(false);
     }
   }
 
