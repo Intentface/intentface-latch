@@ -1498,7 +1498,7 @@ export const installSlackAppFn = createServerFn({ method: "POST" })
       `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(data.clientId)}` +
       `&scope=${encodeURIComponent(SLACK_BOT_SCOPES.join(","))}` +
       `&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}` +
-      `&state=${encodeURIComponent(buildOauthState(data.appId, { manifestVersion: 2 }))}`;
+      `&state=${encodeURIComponent(buildOauthState(data.appId, { userId: principal.userId!, manifestVersion: 2 }))}`;
     return { ok: true as const, authorizeUrl };
   });
 
@@ -1618,7 +1618,7 @@ export const createSlackAppFn = createServerFn({ method: "POST" })
 
     // Send the installer to Slack; we carry the app id back via `state`.
     const sep = created.oauthAuthorizeUrl.includes("?") ? "&" : "?";
-    const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(buildOauthState(created.appId, { manifestVersion: 2 }))}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
+    const authorizeUrl = `${created.oauthAuthorizeUrl}${sep}state=${encodeURIComponent(buildOauthState(created.appId, { userId: principal.userId!, manifestVersion: 2 }))}&redirect_uri=${encodeURIComponent(`${baseUrl()}/api/slack/oauth`)}`;
     return { ok: true as const, authorizeUrl };
   });
 

@@ -4,6 +4,7 @@ import { slackVaultKeys } from "@/lib/slack-store";
 import { verifyOauthState } from "@/lib/slack-oauth-state";
 import { oauthAccess } from "@/lib/slack-admin";
 import { baseUrl } from "@/lib/base-url";
+import { getPrincipalFromHeaders } from "@/lib/session";
 import type { Principal } from "@/lib/session";
 
 /**
@@ -27,7 +28,18 @@ async function handleOauth(request: Request): Promise<Response> {
   if (!code || !state) return back("error");
   const appId = state.appId;
 
+  // The completing browser must be the user who STARTED the install — the
+  // creator gate that minted this state has to hold at completion time too,
+  // and a leaked install URL must be useless to anyone else.
+  const session = await getPrincipalFromHeaders(request.headers);
+  if (!session?.userId || session.userId !== state.userId) return back("error");
+
   const { slackStore, credentials } = await getLatch();
+  // Single-use: consume the state before honoring it, so a completed install
+  // URL can't be replayed within its 30-minute window.
+  if (!(await slackStore.claimOnce(`oauthstate:${state.sig}`, 30 * 60_000))) {
+    return back("error");
+  }
   const app = await slackStore.resolve(appId);
   if (!app) return back("error");
 
