@@ -1,15 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { getLatch } from "@/lib/latch";
 import { slackVaultKeys } from "@/lib/slack-store";
+import { verifyOauthState } from "@/lib/slack-oauth-state";
 import { oauthAccess } from "@/lib/slack-admin";
 import { baseUrl } from "@/lib/base-url";
 import type { Principal } from "@/lib/session";
 
 /**
- * Slack OAuth install callback for the one-button (C) flow. After the user
- * approves the install, Slack redirects here with `?code=…&state=<appId>`. We
- * resolve the app's owner + client creds, exchange the code for the bot token,
- * and store it in the Vault — completing the bind with zero token pasting.
+ * Slack OAuth install callback. After the user approves the install, Slack
+ * redirects here with `?code=…&state=…`. The state is SIGNED (see
+ * slack-oauth-state.ts) — a bare app id would let anyone who can steer a
+ * browser here complete an exchange for a flow Latch never started. We resolve
+ * the app's owner + client creds, exchange the code for the bot token, and
+ * store it in the Vault — completing the bind with zero token pasting. A
+ * `manifestVersion` flag in the state marks a migrate-to-v2 reinstall and is
+ * recorded only after the exchange succeeds.
  */
 
 const back = (status: string) =>
@@ -18,8 +23,9 @@ const back = (status: string) =>
 async function handleOauth(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const appId = url.searchParams.get("state");
-  if (!code || !appId) return back("error");
+  const state = verifyOauthState(url.searchParams.get("state") ?? "");
+  if (!code || !state) return back("error");
+  const appId = state.appId;
 
   const { slackStore, credentials } = await getLatch();
   const app = await slackStore.resolve(appId);
@@ -59,6 +65,13 @@ async function handleOauth(request: Request): Promise<Response> {
           userId: app.userId,
           orgId: app.orgId,
         });
+      }
+      // A reinstall revives a binding disabled by uninstall/revocation.
+      if (app.status === "disabled") await slackStore.setStatus(appId, "active");
+      // A migrate-reinstall completes only here — the manifest may have been
+      // updated earlier, but v2 features need the reinstall's fresh grants.
+      if (state.manifestVersion) {
+        await slackStore.setManifestVersion(appId, app.orgId, state.manifestVersion);
       }
     }
   } catch {

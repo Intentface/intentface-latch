@@ -72,6 +72,25 @@ async function handleConnectDone(request: Request): Promise<Response> {
       403,
     );
   }
+  // Per-user bindings: only the thread's INITIATOR may complete a connect for
+  // it — the resumed turn runs with the completing user's grants, and threads
+  // are initiator-owned, so anyone else finishing the OAuth here would splice
+  // their credentials into someone else's conversation.
+  if (app.credentialMode !== "shared") {
+    const thread = await slackStore.getThread(chatId);
+    if (!thread) return page("Unknown conversation", "This conversation no longer exists.", 404);
+    const initiator = await slackStore.resolveIdentity(
+      app.teamId ?? "",
+      thread.initiatorSlackUserId,
+    );
+    if (!initiator || initiator.userId !== session.userId) {
+      return page(
+        "No access",
+        "Only the person this conversation belongs to can connect integrations for it.",
+        403,
+      );
+    }
+  }
 
   const resolved = await getSlackChannelForApp(appId);
   if (!resolved) return page("Unknown app", "This Slack app is no longer bound.", 404);

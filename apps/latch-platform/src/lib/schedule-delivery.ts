@@ -361,9 +361,13 @@ async function runSlackDelivery(
   principal: Principal,
   target: SlackTarget,
 ): Promise<boolean> {
-  const { credentials } = await getLatch();
+  const { credentials, slackStore } = await getLatch();
   const resolved = await getSlackChannelForApp(target.appId);
   if (!resolved) return false;
+  if (resolved.app.status === "disabled") {
+    console.warn(`[schedule] ${schedule.id}: binding ${target.appId} is disabled — skipping`);
+    return false;
+  }
 
   const token = await credentials.get(
     { orgId: principal.orgId, userId: target.ownerUserId },
@@ -381,11 +385,21 @@ async function runSlackDelivery(
     text: `:alarm_clock: ${summarize(schedule.prompt)}`,
   });
 
+  // The adapter expects a SLACK user id: it becomes the thread's initiator
+  // (who may drive follow-ups) and the target of ephemeral connect cards. The
+  // schedule stores the LATCH owner — translate via their linked identity.
+  // Unlinked owner → fall back to the raw id: the digest still posts, and
+  // interactive follow-ups start working the moment they link.
+  const ownerSlackId =
+    (resolved.app.teamId
+      ? await slackStore.slackUserFor(resolved.app.teamId, target.ownerUserId)
+      : null) ?? target.ownerUserId;
+
   try {
     await resolved.channel.runMessage({
       channel: anchor.channel,
       root: anchor.ts,
-      userId: target.ownerUserId,
+      userId: ownerSlackId,
       prompt: schedule.prompt,
     });
   } catch (e) {

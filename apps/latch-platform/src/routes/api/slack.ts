@@ -37,10 +37,16 @@ async function handleSlack(request: Request): Promise<Response> {
   if (challenge !== undefined) {
     return new Response(challenge, { status: 200, headers: { "content-type": "text/plain" } });
   }
-  if (!appId) return new Response("unknown app", { status: 400 });
+  // Unroutable payloads get a 200, never an error: Slack retries non-2xx
+  // deliveries and disables the subscription of an app that keeps failing —
+  // a stale binding must go quiet, not create a retry storm.
+  if (!appId) return new Response(null, { status: 200 });
 
   const resolved = await getSlackChannelForApp(appId);
-  if (!resolved) return new Response("app not registered", { status: 404 });
+  if (!resolved) {
+    console.warn(`[slack] event for unregistered/unmigrated app ${appId} — dropped`);
+    return new Response(null, { status: 200 });
+  }
   return resolved.channel.handleRequest(request);
 }
 

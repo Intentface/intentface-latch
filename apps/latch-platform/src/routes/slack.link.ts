@@ -115,12 +115,12 @@ async function handleLink(request: Request): Promise<Response> {
   });
 
   // Continue the conversation: replay the message that triggered the link.
-  // Only for the app this link was signed for — `takePending` is keyed on
-  // (team, user), so a pending message queued by a DIFFERENT app in the same
-  // workspace must not be executed under this binding's principal.
-  const pending = await slackStore.takePending(teamId, slackUserId);
-  if (pending && pending.appId === appId) {
-    const resolved = await getSlackChannelForApp(pending.appId);
+  // `takePending` is keyed BY APP — a pending message queued by a different
+  // app in the same workspace stays held for ITS OWN link, instead of being
+  // clobbered or discarded like the old (team, user)-keyed table did.
+  const pending = await slackStore.takePending(appId, teamId, slackUserId);
+  if (pending) {
+    const resolved = await getSlackChannelForApp(appId);
     if (resolved) {
       // The replay is a turn on behalf of the human who JUST linked: carry
       // them as the actor, exactly as a live message from them would —
