@@ -164,7 +164,11 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
   }
 
   return {
-    /** Post a message (`text`, Block Kit `blocks`, and/or `markdown_text`). */
+    /**
+     * Post a message. NOTE: `markdown_text` is EXCLUSIVE with `text`/`blocks`
+     * (`markdown_text_conflict`) — for markdown with a notification fallback,
+     * use `markdown` blocks + `text` instead.
+     */
     async postMessage(input: {
       channel: string;
       text?: string;
