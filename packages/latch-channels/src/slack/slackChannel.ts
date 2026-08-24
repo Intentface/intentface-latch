@@ -324,6 +324,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       anchorTs?: string;
       /** Slack user the turn belongs to — approval cards bind to them. */
       userId: string;
+      /** Name for tool events in a resume stream (which carries no names). */
+      resumedToolName?: string;
       principal: P;
       turnStartedAt: number;
     },
@@ -338,6 +340,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       shouldStop: () => config.threads.stoppedSince(ctx.chatId, ctx.turnStartedAt),
       feedback: config.feedback ?? false,
       identity,
+      ...(ctx.resumedToolName ? { resumedToolName: ctx.resumedToolName } : {}),
       ...(config.onStreamMode
         ? {
             // Return the promise — the renderer awaits it so the persistence
@@ -856,6 +859,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           ? { anchorTs: payload.message.thread_ts ?? payload.message.ts }
           : {}),
         userId: clicker,
+        ...(decoded.tool ? { resumedToolName: decoded.tool } : {}),
         principal,
         turnStartedAt,
       });
@@ -1063,6 +1067,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         root: parsed.root,
         ...(ctx.anchorTs !== undefined ? { anchorTs: ctx.anchorTs } : {}),
         userId: ctx.userId,
+        resumedToolName: pending.toolName,
         principal,
         turnStartedAt,
       });
