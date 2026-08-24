@@ -277,6 +277,23 @@ describe("renderSlackStream — mode telemetry + status box", () => {
     expect(statuses).toEqual(["is thinking…", "is using web_search…", "", ""]);
   });
 
+  it("awaits telemetry persistence before the turn settles", async () => {
+    const { api } = fakeApi();
+    let persisted = false;
+    await renderSlackStream(
+      gen({ type: "text-delta", text: "hi" }, { type: "finish" }),
+      opts(api, {
+        onStreamMode: () => new Promise<void>((r) => setTimeout(() => {
+          persisted = true;
+          r();
+        }, 20)),
+      }),
+    );
+    // A fire-and-forget write would still be pending here; on serverless the
+    // function may freeze the moment the turn promise resolves.
+    expect(persisted).toBe(true);
+  });
+
   it("never streams task_display_mode (Slack rejected it as invalid_arguments)", async () => {
     const { api, calls } = fakeApi();
     await renderSlackStream(gen({ type: "text-delta", text: "hi" }, { type: "finish" }), opts(api));

@@ -214,8 +214,10 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       thread_ts?: string;
       recipient_team_id?: string;
       recipient_user_id?: string;
-      /** `"task"` = timeline as executed; `"plan"` = checklist upfront. */
-      task_display_mode?: "task" | "plan";
+      /** `"timeline"` (default) = task cards interleaved with the streamed
+       *  text; `"plan"` = tasks grouped in one plan block. Anything else is
+       *  `invalid_arguments` — the "task" value we first shipped was one. */
+      task_display_mode?: "timeline" | "plan";
       chunks?: StreamChunk[];
       markdown_text?: string;
     }): Promise<{ ts: string; channel: string }> {

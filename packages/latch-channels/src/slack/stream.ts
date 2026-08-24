@@ -139,8 +139,19 @@ export async function renderSlackStream(
     pendingChunks.push(taskChunk(REASONING_TASK_ID, "Thinking", "complete"));
   }
 
-  const reportMode = (info: { mode: "stream" | "fallback"; code?: string; detail?: string }) => {
-    void Promise.resolve(opts.onStreamMode?.(info)).catch(() => {});
+  // AWAITED, not fire-and-forget: on serverless the platform's waitUntil
+  // tracks the turn promise — a detached telemetry write can lose the race
+  // with function freeze on a short turn.
+  const reportMode = async (info: {
+    mode: "stream" | "fallback";
+    code?: string;
+    detail?: string;
+  }) => {
+    try {
+      await opts.onStreamMode?.(info);
+    } catch (e) {
+      console.error("[slack] stream-mode telemetry failed:", e);
+    }
   };
   const status = (text: string) => {
     void Promise.resolve(opts.setStatus?.(text)).catch(() => {});
@@ -156,7 +167,7 @@ export async function renderSlackStream(
       });
       ts = r.ts;
       mode = "stream";
-      reportMode({ mode: "stream" });
+      await reportMode({ mode: "stream" });
     } catch (e) {
       if (isStoppedByUser(e)) {
         stopped = true;
@@ -165,7 +176,7 @@ export async function renderSlackStream(
       console.error("[slack] startStream unavailable — falling back to post+update:", e);
       mode = "fallback";
       const err = e instanceof SlackApiError ? e : undefined;
-      reportMode({
+      await reportMode({
         mode: "fallback",
         ...(err?.code ? { code: err.code } : {}),
         ...(err?.detail ? { detail: err.detail } : {}),

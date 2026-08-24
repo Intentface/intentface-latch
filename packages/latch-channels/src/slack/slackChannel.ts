@@ -330,8 +330,10 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       identity,
       ...(config.onStreamMode
         ? {
+            // Return the promise — the renderer awaits it so the persistence
+            // write is inside the turn the host's waitUntil tracks.
             onStreamMode: (info: { mode: "stream" | "fallback"; code?: string; detail?: string }) =>
-              void config.onStreamMode?.({ chatId: ctx.chatId, ...info }).catch(() => {}),
+              config.onStreamMode?.({ chatId: ctx.chatId, ...info }),
           }
         : {}),
       // The legacy free-text status box ("is thinking…"). Assistant/DM
