@@ -312,13 +312,20 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       chatId: string;
       channel: string;
       root: string;
+      /**
+       * The triggering Slack message's ts, for chats whose id carries no
+       * thread root (the `_dm` chat): `chat.startStream` needs a thread
+       * anchor, so un-threaded DM turns stream as replies to the message
+       * that asked — the chat IDENTITY stays `_dm` regardless.
+       */
+      anchorTs?: string;
       /** Slack user the turn belongs to — approval cards bind to them. */
       userId: string;
       principal: P;
       turnStartedAt: number;
     },
   ): Promise<void> {
-    const threadTs = threadTsOf(ctx.root);
+    const threadTs = threadTsOf(ctx.root) ?? ctx.anchorTs;
     const result = await renderSlackStream(consumeRun(res), {
       api: b.api,
       channel: ctx.channel,
@@ -415,6 +422,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       chatId: string;
       channel: string;
       root: string;
+      anchorTs?: string;
       userId: string;
       prompt: string;
       context?: string;
@@ -449,7 +457,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       await b.api
         .postMessage({
           channel: ctx.channel,
-          thread_ts: threadTsOf(ctx.root),
+          thread_ts: threadTsOf(ctx.root) ?? ctx.anchorTs,
           text: GENERIC_ERROR,
           ...identity,
         })
@@ -634,6 +642,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId,
         channel: ev.channel,
         root,
+        ...(ev.ts ? { anchorTs: ev.thread_ts ?? ev.ts } : {}),
         userId,
         prompt,
         ...(context !== undefined ? { context } : {}),
@@ -832,6 +841,11 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId: decoded.chatId,
         channel: parsed.channel,
         root: parsed.root,
+        // The card lives where the turn rendered — its thread anchors the
+        // resume for `_dm` chats (whose id carries no root).
+        ...(payload.message?.thread_ts || payload.message?.ts
+          ? { anchorTs: payload.message.thread_ts ?? payload.message.ts }
+          : {}),
         userId: clicker,
         principal,
         turnStartedAt,

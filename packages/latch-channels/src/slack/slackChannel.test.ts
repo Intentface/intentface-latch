@@ -120,7 +120,12 @@ function harness(overrides: Partial<SlackChannelConfig<P>> = {}) {
   let postSeq = 0;
   const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     const method = String(url).split("/").pop()!;
-    const body = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")));
+    const raw = String(init?.body ?? "");
+    const ct = String((init?.headers as Record<string, string>)?.["content-type"] ?? "");
+    // Streaming methods post JSON; everything else is form-encoded.
+    const body = ct.includes("application/json")
+      ? (JSON.parse(raw) as Record<string, string>)
+      : Object.fromEntries(new URLSearchParams(raw));
     calls.push({ method, body });
     const payload =
       method === "chat.startStream"
@@ -332,6 +337,23 @@ describe("slackChannel v2 — admission", () => {
     await h.flush();
     expect(h.runtime.handleChat).toHaveBeenCalledTimes(2);
     expect(h.stores.leases.size).toBe(0);
+  });
+
+  it("anchors un-threaded DM streams to the asking message, chat identity stays _dm", async () => {
+    const h = harness();
+    await h.channel.handleRequest(
+      signedRequest(
+        eventBody({ type: "message", channel_type: "im", channel: "D1", ts: "6.1", user: "U1", text: "hi" }),
+      ),
+    );
+    await h.flush();
+    // The chat is the durable `_dm` identity…
+    const input = h.runtime.handleChat.mock.calls[0]![0] as { chatId: string };
+    expect(input.chatId).toBe("slack2_A1_D1_dm");
+    // …but the stream threads under the message that asked — chat.startStream
+    // needs a thread anchor in DMs (no anchor → permanent post+update fallback).
+    const start = h.of("chat.startStream")[0]!;
+    expect(start.body.thread_ts).toBe("6.1");
   });
 
   it("keeps un-threaded DM messages in ONE continuous chat", async () => {
