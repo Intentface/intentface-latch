@@ -161,6 +161,18 @@ export interface SlackChannelConfig<P> {
     teamId: string;
   }) => Promise<void>;
 
+  /**
+   * Streaming-engine telemetry: called once per rendered turn with the mode
+   * (`stream`, or `fallback` + Slack's refusal code). Hosts persist it so the
+   * binding health row can say WHY a bot is in edited-message mode.
+   */
+  onStreamMode?: (info: {
+    chatId: string;
+    mode: "stream" | "fallback";
+    code?: string;
+    detail?: string;
+  }) => Promise<void>;
+
   /** Native 👍/👎 on final answers. */
   feedback?: boolean;
   onFeedback?: (f: {
@@ -316,6 +328,21 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       shouldStop: () => config.threads.stoppedSince(ctx.chatId, ctx.turnStartedAt),
       feedback: config.feedback ?? false,
       identity,
+      ...(config.onStreamMode
+        ? {
+            onStreamMode: (info: { mode: "stream" | "fallback"; code?: string; detail?: string }) =>
+              void config.onStreamMode?.({ chatId: ctx.chatId, ...info }).catch(() => {}),
+          }
+        : {}),
+      // The legacy free-text status box ("is thinking…"). Assistant/DM
+      // surfaces only, and it needs a thread — best-effort by construction
+      // (the api call swallows its own errors).
+      ...(threadTs
+        ? {
+            setStatus: (text: string) =>
+              b.api.setStatus({ channel_id: ctx.channel, thread_ts: threadTs, status: text }),
+          }
+        : {}),
     });
     if (result.stopped) {
       await setSession(b.api, ctx.channel, ctx.root, "active");

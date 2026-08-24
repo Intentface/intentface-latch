@@ -1471,6 +1471,12 @@ function SlackAppCard({
         </p>
       )}
 
+      {health?.streamError && (
+        <p className="text-ink-tertiary text-xs">
+          Streaming degraded (answers post as edited messages): {health.streamError}
+        </p>
+      )}
+
       {needsReinstall && (
         <p className="text-destructive text-xs">
           This binding predates identity capture and can't receive messages — reinstall the app

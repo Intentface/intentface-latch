@@ -1559,6 +1559,7 @@ export const slackAppHealthFn = createServerFn({ method: "GET" })
       lastEventAt: app.lastEventAt ?? null,
       tokenOk: auth.ok,
       unattendedChannels: app.unattendedChannels ?? [],
+      streamError: app.lastStreamError ?? null,
     };
   });
 

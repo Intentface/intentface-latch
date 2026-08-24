@@ -24,19 +24,27 @@ export class SlackApiError extends Error {
   readonly code?: string;
   /** Seconds Slack asked us to wait, when it said. */
   readonly retryAfterS?: number;
+  /**
+   * Slack's `response_metadata.messages`, when present — for
+   * `invalid_arguments` it names the offending field as a JSON pointer,
+   * which is the difference between a fix and a guessing game.
+   */
+  readonly detail?: string;
 
   constructor(
     method: string,
     status: number,
     code?: string,
     retryAfterS?: number,
+    detail?: string,
   ) {
-    super(`slack:${method} failed: ${code ?? status}`);
+    super(`slack:${method} failed: ${code ?? status}${detail ? ` (${detail})` : ""}`);
     this.name = "SlackApiError";
     this.method = method;
     this.status = status;
     if (code !== undefined) this.code = code;
     if (retryAfterS !== undefined) this.retryAfterS = retryAfterS;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 
@@ -79,7 +87,23 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
   const sleep = options.sleep ?? defaultSleep;
   const timeoutMs = options.timeoutMs ?? 10_000;
 
+  /** Methods whose nested payloads (chunks/blocks) go as real JSON. */
+  const JSON_METHODS = new Set(["chat.startStream", "chat.appendStream", "chat.stopStream"]);
+
   async function once(method: string, params: Record<string, unknown>): Promise<Response> {
+    const auth = `Bearer ${await resolveToken(token)}`;
+    if (JSON_METHODS.has(method)) {
+      const body: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null) body[k] = v;
+      }
+      return fetchImpl(`${baseUrl}/${method}`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    }
     const form = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v === undefined || v === null) continue;
@@ -88,7 +112,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
     return fetchImpl(`${baseUrl}/${method}`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${await resolveToken(token)}`,
+        authorization: auth,
         "content-type": "application/x-www-form-urlencoded; charset=utf-8",
       },
       body: form,
@@ -126,7 +150,14 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
 
       const json = (await res.json()) as Record<string, unknown>;
       if (json.ok !== true) {
-        throw new SlackApiError(method, res.status, String(json.error ?? "unknown_error"));
+        const meta = (json.response_metadata as { messages?: string[] } | undefined)?.messages;
+        throw new SlackApiError(
+          method,
+          res.status,
+          String(json.error ?? "unknown_error"),
+          undefined,
+          meta?.length ? meta.join("; ").slice(0, 500) : undefined,
+        );
       }
       return json;
     }

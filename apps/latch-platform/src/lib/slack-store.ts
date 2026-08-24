@@ -106,6 +106,7 @@ export async function migrateSlack(client: Client): Promise<void> {
     "manifest_version INTEGER", // NULL/1 = pre-agent_view manifest; 2 = migrated
     "unattended_channels TEXT", // JSON array: post_to_channel allowlist
     "last_event_at INTEGER", // bot health: last verified webhook event
+    "last_stream_error TEXT", // why the streaming renderer degraded, if it did
   ]) {
     try {
       await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN ${col}`);
@@ -170,6 +171,8 @@ export interface SlackApp {
   unattendedChannels?: string[];
   /** Last verified webhook event (bot health). */
   lastEventAt?: number;
+  /** Slack's refusal (code + detail) the last time streaming degraded. */
+  lastStreamError?: string;
 }
 
 /** A Slack-anchored chat's ownership row. */
@@ -183,7 +186,7 @@ export interface SlackThread {
 }
 
 const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id,
-                     status, disabled_reason, manifest_version, unattended_channels, last_event_at
+                     status, disabled_reason, manifest_version, unattended_channels, last_event_at, last_stream_error
               FROM latch_slack_app`;
 
 const rowToApp = (r: Record<string, unknown>): SlackApp => {
@@ -210,6 +213,7 @@ const rowToApp = (r: Record<string, unknown>): SlackApp => {
     manifestVersion: r.manifest_version ? Number(r.manifest_version) : undefined,
     unattendedChannels: unattended,
     lastEventAt: r.last_event_at ? Number(r.last_event_at) : undefined,
+    lastStreamError: r.last_stream_error ? String(r.last_stream_error) : undefined,
   };
 };
 
@@ -536,6 +540,14 @@ export function createSlackStore(client: Client) {
         sql: `UPDATE latch_slack_app SET unattended_channels = ?, updated_at = ?
               WHERE app_id = ? AND org_id = ?`,
         args: [JSON.stringify(channels), Date.now(), appId, orgId],
+      });
+    },
+
+    /** Streaming health: null = native streaming worked on the last turn. */
+    async setStreamError(appId: string, error: string | null): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_app SET last_stream_error = ? WHERE app_id = ?`,
+        args: [error, appId],
       });
     },
 

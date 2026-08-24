@@ -164,6 +164,15 @@ export async function getSlackChannelForApp(appId: string) {
       console.warn(`[slack] binding ${appId} disabled (${type})`);
     },
 
+    // Streaming health: the card's health row shows WHY a bot is in
+    // edited-message fallback (throttled: only writes on change is overkill —
+    // one small UPDATE per turn is fine at this scale).
+    onStreamMode: async ({ mode, code, detail }) => {
+      const value =
+        mode === "stream" ? null : `${code ?? "unknown"}${detail ? `: ${detail}` : ""}`.slice(0, 300);
+      await slackStore.setStreamError(appId, value).catch(() => {});
+    },
+
     onFeedback: async (f) => {
       // Recorded for now; a Langfuse score is the natural next step.
       console.log(
