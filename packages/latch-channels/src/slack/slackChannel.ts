@@ -134,6 +134,9 @@ export interface SlackChannelConfig<P> {
     userId: string;
     channelId: string;
     threadRoot: string;
+    /** The asking message's ts — hosts holding the message for a post-link
+     *  replay keep it so the replay can thread where the question was. */
+    anchorTs?: string;
     prompt: string;
   }) => Promise<{
     allowed: boolean;
@@ -159,6 +162,18 @@ export interface SlackChannelConfig<P> {
   onLifecycle?: (info: {
     type: "tokens_revoked" | "app_uninstalled";
     teamId: string;
+  }) => Promise<void>;
+
+  /**
+   * Streaming-engine telemetry: called once per rendered turn with the mode
+   * (`stream`, or `fallback` + Slack's refusal code). Hosts persist it so the
+   * binding health row can say WHY a bot is in edited-message mode.
+   */
+  onStreamMode?: (info: {
+    chatId: string;
+    mode: "stream" | "fallback";
+    code?: string;
+    detail?: string;
   }) => Promise<void>;
 
   /** Native 👍/👎 on final answers. */
@@ -300,13 +315,20 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       chatId: string;
       channel: string;
       root: string;
+      /**
+       * The triggering Slack message's ts, for chats whose id carries no
+       * thread root (the `_dm` chat): `chat.startStream` needs a thread
+       * anchor, so un-threaded DM turns stream as replies to the message
+       * that asked — the chat IDENTITY stays `_dm` regardless.
+       */
+      anchorTs?: string;
       /** Slack user the turn belongs to — approval cards bind to them. */
       userId: string;
       principal: P;
       turnStartedAt: number;
     },
   ): Promise<void> {
-    const threadTs = threadTsOf(ctx.root);
+    const threadTs = threadTsOf(ctx.root) ?? ctx.anchorTs;
     const result = await renderSlackStream(consumeRun(res), {
       api: b.api,
       channel: ctx.channel,
@@ -316,6 +338,23 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       shouldStop: () => config.threads.stoppedSince(ctx.chatId, ctx.turnStartedAt),
       feedback: config.feedback ?? false,
       identity,
+      ...(config.onStreamMode
+        ? {
+            // Return the promise — the renderer awaits it so the persistence
+            // write is inside the turn the host's waitUntil tracks.
+            onStreamMode: (info: { mode: "stream" | "fallback"; code?: string; detail?: string }) =>
+              config.onStreamMode?.({ chatId: ctx.chatId, ...info }),
+          }
+        : {}),
+      // The legacy free-text status box ("is thinking…"). Assistant/DM
+      // surfaces only, and it needs a thread — best-effort by construction
+      // (the api call swallows its own errors).
+      ...(threadTs
+        ? {
+            setStatus: (text: string) =>
+              b.api.setStatus({ channel_id: ctx.channel, thread_ts: threadTs, status: text }),
+          }
+        : {}),
     });
     if (result.stopped) {
       await setSession(b.api, ctx.channel, ctx.root, "active");
@@ -342,7 +381,9 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           const url = config.authorizeUrl(pa.connectionName, {
             chatId: ctx.chatId,
             channelId: ctx.channel,
-            threadTs: ctx.root,
+            // The EFFECTIVE thread (anchor included) — the host carries it
+            // through connect-done so the resume renders where the card is.
+            threadTs: threadTs ?? ctx.root,
             userId: ctx.userId,
             approvalId: pa.approvalId,
           });
@@ -386,6 +427,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       chatId: string;
       channel: string;
       root: string;
+      anchorTs?: string;
       userId: string;
       prompt: string;
       context?: string;
@@ -420,7 +462,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       await b.api
         .postMessage({
           channel: ctx.channel,
-          thread_ts: threadTsOf(ctx.root),
+          thread_ts: threadTsOf(ctx.root) ?? ctx.anchorTs,
           text: GENERIC_ERROR,
           ...identity,
         })
@@ -469,7 +511,10 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     //    resolve to the same chat.
     const root = ev.thread_ts ?? (ev.channel.startsWith("D") ? DM_ROOT : ev.ts);
     const chatId = slackChatId(config.appId, ev.channel, root);
-    const threadTs = threadTsOf(root);
+    // For `_dm` chats the asking message anchors everything this turn posts
+    // (streams need a thread there; notices stay next to what they answer).
+    const anchorTs = ev.thread_ts ?? ev.ts;
+    const threadTs = threadTsOf(root) ?? anchorTs;
 
     const existing = await config.threads.get(chatId);
     if (mode === "thread-follow" && !existing) return; // not our thread
@@ -503,6 +548,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           userId,
           channelId: ev.channel,
           threadRoot: root,
+          anchorTs,
           prompt,
         });
       } catch (e) {
@@ -605,6 +651,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId,
         channel: ev.channel,
         root,
+        anchorTs,
         userId,
         prompt,
         ...(context !== undefined ? { context } : {}),
@@ -803,6 +850,11 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId: decoded.chatId,
         channel: parsed.channel,
         root: parsed.root,
+        // The card lives where the turn rendered — its thread anchors the
+        // resume for `_dm` chats (whose id carries no root).
+        ...(payload.message?.thread_ts || payload.message?.ts
+          ? { anchorTs: payload.message.thread_ts ?? payload.message.ts }
+          : {}),
         userId: clicker,
         principal,
         turnStartedAt,
@@ -926,6 +978,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     channel: string;
     /** Thread root ts, or `dm` for the un-threaded DM chat. */
     root: string;
+    /** For `dm` roots: the message ts the replayed turn should thread under. */
+    anchorTs?: string;
     userId: string;
     prompt: string;
     context?: string;
@@ -953,6 +1007,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId,
         channel: ctx.channel,
         root: ctx.root,
+        ...(ctx.anchorTs !== undefined ? { anchorTs: ctx.anchorTs } : {}),
         userId: ctx.userId,
         prompt: ctx.prompt,
         ...(ctx.context !== undefined ? { context: ctx.context } : {}),
@@ -972,6 +1027,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     chatId: string;
     approvalId: string;
     userId: string;
+    /** For `_dm` chats: the thread the connect card lives in. */
+    anchorTs?: string;
     principal?: P;
     tenant?: SlackTenant<P>;
   }): Promise<void> {
@@ -1004,6 +1061,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId: ctx.chatId,
         channel: parsed.channel,
         root: parsed.root,
+        ...(ctx.anchorTs !== undefined ? { anchorTs: ctx.anchorTs } : {}),
         userId: ctx.userId,
         principal,
         turnStartedAt,

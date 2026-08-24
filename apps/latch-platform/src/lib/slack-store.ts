@@ -76,6 +76,7 @@ export async function migrateSlack(client: Client): Promise<void> {
     channel TEXT NOT NULL,
     thread_root TEXT NOT NULL,
     prompt TEXT NOT NULL,
+    anchor_ts TEXT,
     expires_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (app_id, team_id, slack_user_id)
@@ -106,12 +107,18 @@ export async function migrateSlack(client: Client): Promise<void> {
     "manifest_version INTEGER", // NULL/1 = pre-agent_view manifest; 2 = migrated
     "unattended_channels TEXT", // JSON array: post_to_channel allowlist
     "last_event_at INTEGER", // bot health: last verified webhook event
+    "last_stream_error TEXT", // why the streaming renderer degraded, if it did
   ]) {
     try {
       await client.execute(`ALTER TABLE latch_slack_app ADD COLUMN ${col}`);
     } catch {
       /* column already exists */
     }
+  }
+  try {
+    await client.execute(`ALTER TABLE latch_slack_pending2 ADD COLUMN anchor_ts TEXT`);
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -170,6 +177,8 @@ export interface SlackApp {
   unattendedChannels?: string[];
   /** Last verified webhook event (bot health). */
   lastEventAt?: number;
+  /** Slack's refusal (code + detail) the last time streaming degraded. */
+  lastStreamError?: string;
 }
 
 /** A Slack-anchored chat's ownership row. */
@@ -183,7 +192,7 @@ export interface SlackThread {
 }
 
 const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id,
-                     status, disabled_reason, manifest_version, unattended_channels, last_event_at
+                     status, disabled_reason, manifest_version, unattended_channels, last_event_at, last_stream_error
               FROM latch_slack_app`;
 
 const rowToApp = (r: Record<string, unknown>): SlackApp => {
@@ -210,6 +219,7 @@ const rowToApp = (r: Record<string, unknown>): SlackApp => {
     manifestVersion: r.manifest_version ? Number(r.manifest_version) : undefined,
     unattendedChannels: unattended,
     lastEventAt: r.last_event_at ? Number(r.last_event_at) : undefined,
+    lastStreamError: r.last_stream_error ? String(r.last_stream_error) : undefined,
   };
 };
 
@@ -355,15 +365,17 @@ export function createSlackStore(client: Client) {
       slackUserId: string;
       channel: string;
       threadRoot: string;
+      anchorTs?: string;
       prompt: string;
     }): Promise<void> {
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_slack_pending2
-                (app_id, team_id, slack_user_id, channel, thread_root, prompt, expires_at, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (app_id, team_id, slack_user_id, channel, thread_root, anchor_ts, prompt, expires_at, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(app_id, team_id, slack_user_id) DO UPDATE SET
                 channel = excluded.channel, thread_root = excluded.thread_root,
+                anchor_ts = excluded.anchor_ts,
                 prompt = excluded.prompt, expires_at = excluded.expires_at,
                 created_at = excluded.created_at`,
         args: [
@@ -372,6 +384,7 @@ export function createSlackStore(client: Client) {
           input.slackUserId,
           input.channel,
           input.threadRoot,
+          input.anchorTs ?? null,
           input.prompt,
           now + 30 * 60_000, // matches the signed link URL's expiry
           now,
@@ -384,10 +397,10 @@ export function createSlackStore(client: Client) {
       appId: string,
       teamId: string,
       slackUserId: string,
-    ): Promise<{ channel: string; threadRoot: string; prompt: string } | null> {
+    ): Promise<{ channel: string; threadRoot: string; anchorTs?: string; prompt: string } | null> {
       const now = Date.now();
       const res = await client.execute({
-        sql: `SELECT channel, thread_root, prompt FROM latch_slack_pending2
+        sql: `SELECT channel, thread_root, anchor_ts, prompt FROM latch_slack_pending2
               WHERE app_id = ? AND team_id = ? AND slack_user_id = ? AND expires_at >= ?
               LIMIT 1`,
         args: [appId, teamId, slackUserId, now],
@@ -402,6 +415,7 @@ export function createSlackStore(client: Client) {
       return {
         channel: String(r.channel),
         threadRoot: String(r.thread_root),
+        anchorTs: r.anchor_ts ? String(r.anchor_ts) : undefined,
         prompt: String(r.prompt),
       };
     },
@@ -536,6 +550,14 @@ export function createSlackStore(client: Client) {
         sql: `UPDATE latch_slack_app SET unattended_channels = ?, updated_at = ?
               WHERE app_id = ? AND org_id = ?`,
         args: [JSON.stringify(channels), Date.now(), appId, orgId],
+      });
+    },
+
+    /** Streaming health: null = native streaming worked on the last turn. */
+    async setStreamError(appId: string, error: string | null): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_app SET last_stream_error = ? WHERE app_id = ?`,
+        args: [error, appId],
       });
     },
 

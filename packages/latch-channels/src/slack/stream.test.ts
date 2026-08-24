@@ -224,6 +224,84 @@ describe("renderSlackStream — streaming mode", () => {
   });
 });
 
+describe("renderSlackStream — mode telemetry + status box", () => {
+  it("reports stream mode once on success", async () => {
+    const { api } = fakeApi();
+    const modes: unknown[] = [];
+    await renderSlackStream(
+      gen({ type: "text-delta", text: "hi" }, { type: "finish" }),
+      opts(api, { onStreamMode: (i) => void modes.push(i) }),
+    );
+    expect(modes).toEqual([{ mode: "stream" }]);
+  });
+
+  it("reports fallback with Slack's code and detail", async () => {
+    const { api } = fakeApi({
+      async startStream() {
+        throw new SlackApiError(
+          "chat.startStream",
+          200,
+          "invalid_arguments",
+          undefined,
+          "[ERROR] json-pointer:/task_display_mode",
+        );
+      },
+    });
+    const modes: { mode: string; code?: string; detail?: string }[] = [];
+    await renderSlackStream(
+      gen({ type: "text-delta", text: "hi" }, { type: "finish" }),
+      opts(api, { onStreamMode: (i) => void modes.push(i) }),
+    );
+    expect(modes).toEqual([
+      {
+        mode: "fallback",
+        code: "invalid_arguments",
+        detail: "[ERROR] json-pointer:/task_display_mode",
+      },
+    ]);
+  });
+
+  it("drives the legacy status box through the turn and clears it", async () => {
+    const { api } = fakeApi();
+    const statuses: string[] = [];
+    await renderSlackStream(
+      gen(
+        { type: "reasoning-delta", text: "hmm" },
+        { type: "tool-start", toolCallId: "t1", toolName: "web_search", input: {} },
+        { type: "tool-end", toolCallId: "t1", toolName: "web_search", output: {} },
+        { type: "text-delta", text: "done" },
+        { type: "finish" },
+      ),
+      opts(api, { setStatus: (t) => void statuses.push(t) }),
+    );
+    expect(statuses).toEqual(["is thinking…", "is using web_search…", "", ""]);
+  });
+
+  it("awaits telemetry persistence before the turn settles", async () => {
+    const { api } = fakeApi();
+    let persisted = false;
+    await renderSlackStream(
+      gen({ type: "text-delta", text: "hi" }, { type: "finish" }),
+      opts(api, {
+        onStreamMode: () => new Promise<void>((r) => setTimeout(() => {
+          persisted = true;
+          r();
+        }, 20)),
+      }),
+    );
+    // A fire-and-forget write would still be pending here; on serverless the
+    // function may freeze the moment the turn promise resolves.
+    expect(persisted).toBe(true);
+  });
+
+  it("never streams task_display_mode (Slack rejected it as invalid_arguments)", async () => {
+    const { api, calls } = fakeApi();
+    await renderSlackStream(gen({ type: "text-delta", text: "hi" }, { type: "finish" }), opts(api));
+    const start = calls.find((c) => c.method === "startStream")!;
+    expect("task_display_mode" in start.args).toBe(false);
+  });
+});
+
 describe("renderSlackStream — fallback + edge modes", () => {
   it("falls back to post+update when startStream is unavailable", async () => {
     const { api, calls } = fakeApi({

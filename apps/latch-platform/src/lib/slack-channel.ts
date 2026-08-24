@@ -93,7 +93,7 @@ export async function getSlackChannelForApp(appId: string) {
     // ── Identity gate ─────────────────────────────────────────────────────────
     // Only linked platform users may drive the agent. On refusal, stash the
     // message so it can be replayed once they link.
-    authorizeUser: async ({ teamId, userId, channelId, threadRoot, prompt }) => {
+    authorizeUser: async ({ teamId, userId, channelId, threadRoot, anchorTs, prompt }) => {
       // A disabled binding (uninstalled/revoked) never replies — Slack may
       // still deliver queued events for a while.
       if (disabled) return { allowed: false, silent: true };
@@ -145,6 +145,7 @@ export async function getSlackChannelForApp(appId: string) {
         slackUserId: userId,
         channel: channelId,
         threadRoot,
+        ...(anchorTs ? { anchorTs } : {}),
         prompt,
       });
       return {
@@ -162,6 +163,15 @@ export async function getSlackChannelForApp(appId: string) {
       await slackStore.setStatus(appId, "disabled", type);
       await credentials.remove(principal, keys.botToken, "org").catch(() => {});
       console.warn(`[slack] binding ${appId} disabled (${type})`);
+    },
+
+    // Streaming health: the card's health row shows WHY a bot is in
+    // edited-message fallback (throttled: only writes on change is overkill —
+    // one small UPDATE per turn is fine at this scale).
+    onStreamMode: async ({ mode, code, detail }) => {
+      const value =
+        mode === "stream" ? null : `${code ?? "unknown"}${detail ? `: ${detail}` : ""}`.slice(0, 300);
+      await slackStore.setStreamError(appId, value).catch(() => {});
     },
 
     onFeedback: async (f) => {
@@ -182,6 +192,9 @@ export async function getSlackChannelForApp(appId: string) {
         chatId: ctx.chatId,
         approvalId: ctx.approvalId,
         user: ctx.userId,
+        // The effective thread (a real ts for `_dm` chats) — connect-done
+        // hands it back so the resume renders where the card is.
+        ...(/^\d+\.\d+$/.test(ctx.threadTs) ? { anchor: ctx.threadTs } : {}),
       });
       const q = new URLSearchParams({
         slackApp: appId,

@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { SlackApiError, slackApi } from "./api.js";
 
-type Call = { url: string; body: URLSearchParams };
+type Call = { url: string; body: URLSearchParams; contentType: string; raw: string };
 
 /** A scripted fetch: each entry answers one call, recording it. */
 function scriptedFetch(responses: (() => Response)[]) {
   const calls: Call[] = [];
   const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(url), body: new URLSearchParams(String(init?.body)) });
+    const raw = String(init?.body);
+    calls.push({
+      url: String(url),
+      body: new URLSearchParams(raw),
+      contentType: String((init?.headers as Record<string, string>)?.["content-type"] ?? ""),
+      raw,
+    });
     const next = responses.shift();
     if (!next) throw new Error("unexpected fetch call");
     return next();
@@ -70,7 +76,7 @@ describe("slack api client", () => {
     }
   });
 
-  it("encodes chunks as JSON-in-form", async () => {
+  it("sends the streaming methods as real JSON bodies", async () => {
     const { fetchImpl, calls } = scriptedFetch([ok()]);
     const api = slackApi("xoxb-t", { fetchImpl, sleep });
     await api.appendStream({
@@ -78,8 +84,47 @@ describe("slack api client", () => {
       ts: "1.2",
       chunks: [{ type: "task_update", id: "t1", title: "Using web_search", status: "complete" }],
     });
-    const sent = JSON.parse(calls[0]!.body.get("chunks")!);
-    expect(sent[0]).toMatchObject({ type: "task_update", id: "t1", status: "complete" });
+    expect(calls[0]!.contentType).toContain("application/json");
+    const sent = JSON.parse(calls[0]!.raw) as {
+      channel: string;
+      chunks: { type: string; id: string; status: string }[];
+    };
+    expect(sent.channel).toBe("C1");
+    expect(sent.chunks[0]).toMatchObject({ type: "task_update", id: "t1", status: "complete" });
+  });
+
+  it("keeps non-streaming methods form-encoded", async () => {
+    const { fetchImpl, calls } = scriptedFetch([ok({ ts: "1.2", channel: "C1" })]);
+    const api = slackApi("xoxb-t", { fetchImpl, sleep });
+    await api.postMessage({ channel: "C1", text: "hi" });
+    expect(calls[0]!.contentType).toContain("application/x-www-form-urlencoded");
+    expect(calls[0]!.body.get("channel")).toBe("C1");
+  });
+
+  it("captures Slack's response_metadata detail on argument errors", async () => {
+    const { fetchImpl } = scriptedFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error: "invalid_arguments",
+            response_metadata: {
+              messages: ["[ERROR] failed to match all allowed schemas [json-pointer:/chunks/0]"],
+            },
+          }),
+          { status: 200 },
+        ),
+    ]);
+    const api = slackApi("xoxb-t", { fetchImpl, sleep });
+    try {
+      await api.startStream({ channel: "C1" });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(SlackApiError);
+      expect((e as SlackApiError).code).toBe("invalid_arguments");
+      expect((e as SlackApiError).detail).toContain("json-pointer:/chunks/0");
+      expect((e as SlackApiError).message).toContain("json-pointer");
+    }
   });
 
   it("paginates conversations.members and fails CLOSED past the page cap", async () => {

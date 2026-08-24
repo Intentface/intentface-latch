@@ -40,6 +40,23 @@ export interface SlackStreamOptions {
   recipientUserId?: string;
   /** Cross-instance stop flag (host-backed); polled once per flush tick. */
   shouldStop?: () => Promise<boolean>;
+  /**
+   * Called once, when the engine is decided — `stream`, or `fallback` with
+   * Slack's refusal code/detail. Hosts surface it (binding health) so a bot
+   * stuck in post+update mode is diagnosable without log spelunking.
+   */
+  onStreamMode?: (info: {
+    mode: "stream" | "fallback";
+    code?: string;
+    detail?: string;
+  }) => void | Promise<void>;
+  /**
+   * Best-effort free-text status next to the bot's name ("is thinking…",
+   * "is using web_search…"). Renders in assistant/DM surfaces only; the host
+   * wires it to the LEGACY assistant.threads.setStatus (free text has no
+   * agents.sessions equivalent) — revisit before Slack's Feb 2027 sunset.
+   */
+  setStatus?: (text: string) => void | Promise<void>;
   /** Append the native 👍/👎 row to the final message. */
   feedback?: boolean;
   /** `postMessage` identity for the fallback engine (needs chat:write.customize). */
@@ -122,6 +139,24 @@ export async function renderSlackStream(
     pendingChunks.push(taskChunk(REASONING_TASK_ID, "Thinking", "complete"));
   }
 
+  // AWAITED, not fire-and-forget: on serverless the platform's waitUntil
+  // tracks the turn promise — a detached telemetry write can lose the race
+  // with function freeze on a short turn.
+  const reportMode = async (info: {
+    mode: "stream" | "fallback";
+    code?: string;
+    detail?: string;
+  }) => {
+    try {
+      await opts.onStreamMode?.(info);
+    } catch (e) {
+      console.error("[slack] stream-mode telemetry failed:", e);
+    }
+  };
+  const status = (text: string) => {
+    void Promise.resolve(opts.setStatus?.(text)).catch(() => {});
+  };
+
   async function start(): Promise<void> {
     try {
       const r = await opts.api.startStream({
@@ -129,10 +164,10 @@ export async function renderSlackStream(
         ...threadArgs,
         ...(opts.recipientTeamId ? { recipient_team_id: opts.recipientTeamId } : {}),
         ...(opts.recipientUserId ? { recipient_user_id: opts.recipientUserId } : {}),
-        task_display_mode: "task",
       });
       ts = r.ts;
       mode = "stream";
+      await reportMode({ mode: "stream" });
     } catch (e) {
       if (isStoppedByUser(e)) {
         stopped = true;
@@ -140,6 +175,12 @@ export async function renderSlackStream(
       }
       console.error("[slack] startStream unavailable — falling back to post+update:", e);
       mode = "fallback";
+      const err = e instanceof SlackApiError ? e : undefined;
+      await reportMode({
+        mode: "fallback",
+        ...(err?.code ? { code: err.code } : {}),
+        ...(err?.detail ? { detail: err.detail } : {}),
+      });
     }
   }
 
@@ -248,6 +289,7 @@ export async function renderSlackStream(
           reasoningOpen = true;
           pendingChunks.push(taskChunk(REASONING_TASK_ID, "Thinking", "in_progress"));
           statusLine = "Thinking…";
+          status("is thinking…");
           flushDue = true;
         }
         break;
@@ -255,6 +297,7 @@ export async function renderSlackStream(
         closeReasoning();
         pendingChunks.push(taskChunk(ev.toolCallId, `Using ${ev.toolName}`, "in_progress"));
         statusLine = `Running ${ev.toolName}…`;
+        status(`is using ${ev.toolName}…`);
         flushDue = true;
         break;
       case "tool-end":
@@ -262,6 +305,7 @@ export async function renderSlackStream(
           taskChunk(ev.toolCallId, `Using ${ev.toolName}`, ev.error ? "error" : "complete"),
         );
         statusLine = "";
+        status("");
         flushDue = true;
         break;
       case "error":
@@ -277,6 +321,7 @@ export async function renderSlackStream(
   // ── Finalize ───────────────────────────────────────────────────────────────
 
   closeReasoning();
+  status("");
 
   // `mode` is only ever assigned inside the closures above; read it through a
   // function so control-flow narrowing doesn't freeze it at the initial "none".
