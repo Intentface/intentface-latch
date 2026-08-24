@@ -1,5 +1,12 @@
 # @intentface/latch-mcp
 
+## 0.4.1
+
+### Patch Changes
+
+- @intentface/latch-core@0.4.1
+  - @intentface/latch-net@0.4.1
+
 ## 0.4.0
 
 ### Patch Changes
