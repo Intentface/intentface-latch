@@ -443,6 +443,9 @@ export async function renderSlackStream(
       tailDelivered = await opts.api.stopStream(stopArgs).then(
         () => true,
         (e2: unknown) => {
+          // The viewer stopping between the two attempts is a delivery
+          // verdict, not a failure — never post the tail they refused.
+          if (isStoppedByUser(e2)) return true;
           console.error("[slack] stopStream failed twice:", e2);
           return false;
         },

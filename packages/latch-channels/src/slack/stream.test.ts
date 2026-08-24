@@ -348,6 +348,30 @@ describe("renderSlackStream — resilience (text must never vanish)", () => {
     expect(JSON.stringify(recovery.args.blocks)).toContain("tail never streamed");
   });
 
+  it("never posts the tail when the viewer stopped during the close retry", async () => {
+    let closes = 0;
+    const { api, calls } = fakeApi({
+      async stopStream() {
+        closes++;
+        if (closes === 1) throw new SlackApiError("chat.stopStream", 500);
+        throw new SlackApiError("chat.stopStream", 200, "stopped_by_user");
+      },
+    });
+    let t = 0;
+    await renderSlackStream(
+      gen(
+        { type: "text-delta", text: "opening. " },
+        { type: "text-delta", text: "refused tail" },
+        { type: "finish" },
+      ),
+      opts(api, { flushIntervalMs: 60_000, now: () => (t += 1) }),
+    );
+    // No recovery post: the only postMessage-free path is streamed-only calls.
+    expect(
+      calls.filter((c) => c.method === "postMessage" && JSON.stringify(c.args).includes("refused tail")),
+    ).toEqual([]);
+  });
+
   it("settles open task cards before closing (parked approvals are not warnings)", async () => {
     const { api, calls } = fakeApi();
     await renderSlackStream(
