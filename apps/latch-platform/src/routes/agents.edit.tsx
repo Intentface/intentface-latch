@@ -49,7 +49,7 @@ import {
   whatsappWebhookInfoFn,
 } from "@/lib/server";
 import { authorizeUrl } from "@/lib/latch-client";
-import { buildDefaultTools, hasDefaultTool, SCHEDULE_TOOLS } from "@/lib/default-tools";
+import { buildDefaultTools, hasDefaultTool, SCHEDULE_TOOLS, SLACK_TOOLS } from "@/lib/default-tools";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -123,6 +123,11 @@ function AgentEditor() {
     SCHEDULE_TOOLS.some((n) => hasDefaultTool(prevDefaultTools, n)),
   );
   const [scheduleTouched, setScheduleTouched] = useState(false);
+  // Slack conversation tools travel as one capability, same rules as schedules.
+  const [slackToolsOn, setSlackToolsOn] = useState(
+    SLACK_TOOLS.some((n) => hasDefaultTool(prevDefaultTools, n)),
+  );
+  const [slackTouched, setSlackTouched] = useState(false);
   // render_fetch is its own capability flag (like sandbox), not a defaultTools
   // member — so `defaultTools: true` never implies it.
   const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
@@ -306,6 +311,8 @@ function AgentEditor() {
         askUser: askUserTool,
         schedules: scheduleTools,
         schedulesTouched: scheduleTouched,
+        slackTools: slackToolsOn,
+        slackTouched,
         prev: prevDefaultTools,
       });
       // Memory only saves with a valid connection pick (the picker defaults to
@@ -618,6 +625,24 @@ function AgentEditor() {
               : the agent can set up its own recurring runs (“brief me every weekday at 8”) and
               deliver them to a linked Telegram/Slack channel. Creating one asks the user for
               approval first; runs fire at most every 15 minutes.
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch
+              checked={slackToolsOn}
+              onCheckedChange={() => {
+                setSlackTouched(true);
+                setSlackToolsOn((v) => !v);
+              }}
+            />
+            <span>
+              Slack tools —{" "}
+              <span className="font-mono">
+                slack_read_thread / slack_read_channel / slack_list_channels / post_to_channel
+              </span>
+              : in Slack conversations the agent can read threads/channels the requesting user is
+              a member of (checked live, fails closed) and post to other channels behind an
+              approval card. Outside Slack these tools refuse themselves — safe to leave on.
             </span>
           </label>
           <label className="flex items-center gap-2 text-xs">

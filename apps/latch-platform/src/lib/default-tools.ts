@@ -36,13 +36,13 @@ export const SLACK_TOOLS: string[] = [
 /**
  * Every defaultTools name the editor owns a toggle for. Anything an agent has
  * beyond these (a future default tool added server-side) is preserved on save.
- *
- * SLACK_TOOLS is deliberately NOT in this list yet: the editor has no Slack
- * toggle, and a known-but-untoggled name would be DROPPED by buildDefaultTools
- * on the next save. Until the toggle ships, slack tool grants ride the
- * preserve-verbatim path.
  */
-export const KNOWN_DEFAULT_TOOLS: string[] = ["web_fetch", "askUser", ...SCHEDULE_TOOLS];
+export const KNOWN_DEFAULT_TOOLS: string[] = [
+  "web_fetch",
+  "askUser",
+  ...SCHEDULE_TOOLS,
+  ...SLACK_TOOLS,
+];
 
 /** Whether the agent's stored `defaultTools` grants the named tool. */
 export function hasDefaultTool(prev: boolean | string[] | undefined, name: string): boolean {
@@ -68,10 +68,13 @@ export function buildDefaultTools(opts: {
   askUser: boolean;
   schedules: boolean;
   schedulesTouched: boolean;
+  slackTools: boolean;
+  slackTouched: boolean;
   prev: boolean | string[] | undefined;
 }): string[] | undefined {
   const prevList = opts.prev === true ? KNOWN_DEFAULT_TOOLS : Array.isArray(opts.prev) ? opts.prev : [];
   const prevSchedule = prevList.filter((n) => SCHEDULE_TOOLS.includes(n));
+  const prevSlack = prevList.filter((n) => SLACK_TOOLS.includes(n));
   const preserved = prevList.filter(
     (n) => !KNOWN_DEFAULT_TOOLS.includes(n) && n !== "render_fetch",
   );
@@ -80,10 +83,19 @@ export function buildDefaultTools(opts: {
       ? SCHEDULE_TOOLS
       : prevSchedule
     : [];
+  // Same preservation rule as schedules: a stored PARTIAL subset survives an
+  // untouched save; only an explicit toggle change expands it to the full
+  // capability.
+  const slack = opts.slackTools
+    ? opts.slackTouched || prevSlack.length === 0
+      ? SLACK_TOOLS
+      : prevSlack
+    : [];
   const names = [
     ...(opts.webTools ? ["web_fetch"] : []),
     ...(opts.askUser ? ["askUser"] : []),
     ...schedule,
+    ...slack,
     ...preserved,
   ];
   return names.length ? [...new Set(names)] : undefined;

@@ -4,6 +4,7 @@ import {
   hasDefaultTool,
   KNOWN_DEFAULT_TOOLS,
   SCHEDULE_TOOLS,
+  SLACK_TOOLS,
 } from "./default-tools";
 
 /** The editor's toggle init, mirrored here so the round-trips test the real flow. */
@@ -12,6 +13,8 @@ function togglesFor(prev: boolean | string[] | undefined) {
     webTools: hasDefaultTool(prev, "web_fetch"),
     askUser: hasDefaultTool(prev, "askUser"),
     schedules: SCHEDULE_TOOLS.some((n) => hasDefaultTool(prev, n)),
+    slackTools: SLACK_TOOLS.some((n) => hasDefaultTool(prev, n)),
+    slackTouched: false,
   };
 }
 
@@ -23,6 +26,8 @@ describe("buildDefaultTools", () => {
         askUser: false,
         schedules: false,
         schedulesTouched: false,
+        slackTools: false,
+        slackTouched: false,
         prev: undefined,
       }),
     ).toBeUndefined();
@@ -34,6 +39,8 @@ describe("buildDefaultTools", () => {
       askUser: false,
       schedules: true,
       schedulesTouched: true,
+      slackTools: false,
+      slackTouched: false,
       prev: undefined,
     });
     expect(saved).toEqual(SCHEDULE_TOOLS);
@@ -83,7 +90,7 @@ describe("buildDefaultTools", () => {
   });
 
   it("round-trips an unchanged full grant byte-for-byte", () => {
-    const prev = ["web_fetch", "askUser", ...SCHEDULE_TOOLS];
+    const prev = ["web_fetch", "askUser", ...SCHEDULE_TOOLS, ...SLACK_TOOLS];
     const saved = buildDefaultTools({
       ...togglesFor(prev),
       schedulesTouched: false,
@@ -100,5 +107,51 @@ describe("buildDefaultTools", () => {
       prev,
     });
     expect(saved).toEqual(["web_fetch", "future_tool"]);
+  });
+});
+
+describe("buildDefaultTools — slack capability", () => {
+  it("grants the full slack capability on an explicit toggle", () => {
+    const saved = buildDefaultTools({
+      webTools: false,
+      askUser: false,
+      schedules: false,
+      schedulesTouched: false,
+      slackTools: true,
+      slackTouched: true,
+      prev: undefined,
+    });
+    expect(saved).toEqual(SLACK_TOOLS);
+  });
+
+  it("preserves a partial slack subset on an untouched save", () => {
+    // Grants made via the API before the toggle existed (e.g. post_to_channel
+    // only) must survive an unrelated editor save.
+    const prev = ["post_to_channel"];
+    const saved = buildDefaultTools({ ...togglesFor(prev), schedulesTouched: false, prev });
+    expect(saved).toEqual(["post_to_channel"]);
+  });
+
+  it("expands a partial subset only on an explicit toggle", () => {
+    const prev = ["post_to_channel"];
+    const saved = buildDefaultTools({
+      ...togglesFor(prev),
+      schedulesTouched: false,
+      slackTouched: true,
+      prev,
+    });
+    expect(saved).toEqual(SLACK_TOOLS);
+  });
+
+  it("drops the slack tools when the toggle is turned off", () => {
+    const prev = [...SLACK_TOOLS, "web_fetch"];
+    const saved = buildDefaultTools({
+      ...togglesFor(prev),
+      schedulesTouched: false,
+      slackTools: false,
+      slackTouched: true,
+      prev,
+    });
+    expect(saved).toEqual(["web_fetch"]);
   });
 });
