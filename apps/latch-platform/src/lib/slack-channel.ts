@@ -187,7 +187,11 @@ export async function getSlackChannelForApp(appId: string) {
         slackApp: appId,
         chatId: ctx.chatId,
         approvalId: ctx.approvalId,
-        returnTo: `${baseUrl()}/api/slack/connect-done?${done}`,
+        // RELATIVE path, load-bearing: the connections callback's
+        // open-redirect guard (safeReturnTo) rejects absolute URLs and falls
+        // back to `/` — an absolute returnTo means connect-done NEVER runs
+        // and the thread silently never resumes.
+        returnTo: `/api/slack/connect-done?${done}`,
       });
       return `${baseUrl()}/api/latch/connections/${name}/authorize?${q}`;
     },

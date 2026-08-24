@@ -89,7 +89,9 @@ export async function getWhatsappChannelForBot(botId: string) {
       const q = new URLSearchParams({
         chatId: ctx.chatId,
         approvalId: ctx.approvalId,
-        returnTo: `${baseUrl()}/chat/${ctx.chatId}`,
+        // RELATIVE: the callback's open-redirect guard rejects absolute
+        // URLs and lands the user on `/` instead of their chat.
+        returnTo: `/chat/${ctx.chatId}`,
       });
       return `${baseUrl()}/api/latch/connections/${name}/authorize?${q}`;
     },
