@@ -162,7 +162,7 @@ describe("slack tools: post_to_channel", () => {
     // (markdown_text_conflict) — the observed live failure.
     expect(sent.markdown_text).toBeUndefined();
     expect(sent.text).toBeDefined();
-    const blocks = JSON.parse(sent.blocks!) as { type: string; text: string }[];
+    const blocks = JSON.parse(sent.blocks) as { type: string; text: string }[];
     expect(blocks[0]).toEqual({ type: "markdown", text: "# Summary\nAll good." });
     expect(sent.channel).toBe("C9");
   });
