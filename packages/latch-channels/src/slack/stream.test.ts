@@ -302,6 +302,105 @@ describe("renderSlackStream — mode telemetry + status box", () => {
   });
 });
 
+describe("renderSlackStream — resilience (text must never vanish)", () => {
+  it("flips to post+update mid-turn when the stream expires, delivering the full text", async () => {
+    let appends = 0;
+    const { api, calls } = fakeApi({
+      async appendStream() {
+        appends++;
+        throw new SlackApiError("chat.appendStream", 200, "message_not_in_streaming_state");
+      },
+    });
+    const r = await renderSlackStream(
+      gen(
+        { type: "text-delta", text: "the answer " },
+        { type: "text-delta", text: "in full" },
+        { type: "finish" },
+      ),
+      opts(api),
+    );
+    expect(r.mode).toBe("fallback");
+    expect(appends).toBe(1); // no retrying into a corpse
+    // The full text arrived on a FRESH regular message.
+    const post = calls.filter((c) => c.method === "postMessage").pop()!;
+    expect(JSON.stringify(post.args.blocks)).toContain("the answer in full");
+    expect(calls.filter((c) => c.method === "stopStream")).toEqual([]);
+  });
+
+  it("posts the undelivered tail as a regular message when the close fails for good", async () => {
+    const { api, calls } = fakeApi({
+      async stopStream() {
+        throw new SlackApiError("chat.stopStream", 200, "message_not_in_streaming_state");
+      },
+    });
+    let t = 0;
+    const r = await renderSlackStream(
+      gen(
+        { type: "text-delta", text: "first flushed. " },
+        { type: "text-delta", text: "tail never streamed" },
+        { type: "finish" },
+      ),
+      // Large interval: only the stream-opening flush sends; the rest is tail.
+      opts(api, { flushIntervalMs: 60_000, now: () => (t += 1) }),
+    );
+    expect(r.mode).toBe("stream");
+    const recovery = calls.filter((c) => c.method === "postMessage").pop()!;
+    expect(JSON.stringify(recovery.args.blocks)).toContain("tail never streamed");
+  });
+
+  it("never posts the tail when the viewer stopped during the close retry", async () => {
+    let closes = 0;
+    const { api, calls } = fakeApi({
+      async stopStream() {
+        closes++;
+        if (closes === 1) throw new SlackApiError("chat.stopStream", 500);
+        throw new SlackApiError("chat.stopStream", 200, "stopped_by_user");
+      },
+    });
+    let t = 0;
+    await renderSlackStream(
+      gen(
+        { type: "text-delta", text: "opening. " },
+        { type: "text-delta", text: "refused tail" },
+        { type: "finish" },
+      ),
+      opts(api, { flushIntervalMs: 60_000, now: () => (t += 1) }),
+    );
+    // No recovery post: the only postMessage-free path is streamed-only calls.
+    expect(
+      calls.filter((c) => c.method === "postMessage" && JSON.stringify(c.args).includes("refused tail")),
+    ).toEqual([]);
+  });
+
+  it("settles open task cards before closing (parked approvals are not warnings)", async () => {
+    const { api, calls } = fakeApi();
+    await renderSlackStream(
+      gen(
+        // A gated tool: input arrives, the turn parks — no tool-end ever.
+        { type: "tool-start", toolCallId: "t9", toolName: "post_to_channel", input: {} },
+        { type: "finish" },
+      ),
+      opts(api),
+    );
+    const all = calls.flatMap(chunksOf).filter((c) => c.type === "task_update" && c.id === "t9");
+    expect(all.map((c) => (c as { status: string }).status)).toEqual(["in_progress", "complete"]);
+  });
+
+  it("names resumed tools whose stream carries no tool name", async () => {
+    const { api, calls } = fakeApi();
+    await renderSlackStream(
+      gen(
+        { type: "tool-end", toolCallId: "t1", toolName: "", output: {} },
+        { type: "text-delta", text: "done" },
+        { type: "finish" },
+      ),
+      opts(api, { resumedToolName: "post_to_channel" }),
+    );
+    const task = calls.flatMap(chunksOf).find((c) => c.type === "task_update")!;
+    expect((task as { title: string }).title).toBe("Using post_to_channel");
+  });
+});
+
 describe("renderSlackStream — fallback + edge modes", () => {
   it("falls back to post+update when startStream is unavailable", async () => {
     const { api, calls } = fakeApi({

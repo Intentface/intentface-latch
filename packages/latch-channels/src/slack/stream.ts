@@ -51,6 +51,13 @@ export interface SlackStreamOptions {
     detail?: string;
   }) => void | Promise<void>;
   /**
+   * Title for tool events whose stream carries no name — an approval RESUME
+   * only replays the tool's output event (the call happened in the parked
+   * turn), so the name lookup comes back empty and the task card would read
+   * "Using ". Callers that know the resumed tool pass it here.
+   */
+  resumedToolName?: string;
+  /**
    * Best-effort free-text status next to the bot's name ("is thinking…",
    * "is using web_search…"). Renders in assistant/DM surfaces only; the host
    * wires it to the LEGACY assistant.threads.setStatus (free text has no
@@ -106,6 +113,14 @@ function isStoppedByUser(e: unknown): boolean {
   return e instanceof SlackApiError && e.code === "stopped_by_user";
 }
 
+/** The streamed message is gone or already finalized — appends can never land. */
+function isDeadStream(e: unknown): boolean {
+  return (
+    e instanceof SlackApiError &&
+    (e.code === "message_not_in_streaming_state" || e.code === "message_not_found")
+  );
+}
+
 export async function renderSlackStream(
   events: AsyncIterable<RenderEvent>,
   opts: SlackStreamOptions,
@@ -129,14 +144,29 @@ export async function renderSlackStream(
   let reasoningOpen = false;
   let lastFlushAt = 0;
   let flushDue = false; // tool/reasoning transitions force the next flush
+  // Tasks still in_progress. A stream closed with open tasks renders them as
+  // warnings (⚠️) — a parked approval must settle its card instead.
+  const openTasks = new Map<string, string>();
 
   const threadArgs = opts.threadTs ? { thread_ts: opts.threadTs } : {};
+
+  function queueTask(id: string, title: string, st: "in_progress" | "complete" | "error") {
+    pendingChunks.push(taskChunk(id, title, st));
+    if (st === "in_progress") openTasks.set(id, title);
+    else openTasks.delete(id);
+  }
+
+  /** Settle whatever is still open (approval-parked turns end mid-task). */
+  function settleOpenTasks() {
+    for (const [id, title] of openTasks) pendingChunks.push(taskChunk(id, title, "complete"));
+    openTasks.clear();
+  }
 
   /** Close the collapsed "Thinking" task the moment something visible happens. */
   function closeReasoning() {
     if (!reasoningOpen) return;
     reasoningOpen = false;
-    pendingChunks.push(taskChunk(REASONING_TASK_ID, "Thinking", "complete"));
+    queueTask(REASONING_TASK_ID, "Thinking", "complete");
   }
 
   // AWAITED, not fire-and-forget: on serverless the platform's waitUntil
@@ -208,6 +238,18 @@ export async function renderSlackStream(
     } catch (e) {
       if (isStoppedByUser(e)) {
         stopped = true;
+        return;
+      }
+      if (isDeadStream(e)) {
+        // Slack expires an idle stream (e.g. while the model thinks after a
+        // tool result). Retrying into a corpse loses the whole answer — flip
+        // to the post+update engine on a FRESH message. Text appended before
+        // the death may render twice across the two messages; duplicated
+        // beats vanished.
+        console.error("[slack] stream expired mid-turn — switching to post+update:", e);
+        mode = "fallback";
+        ts = undefined;
+        lastRendered = "";
         return;
       }
       if (e instanceof SlackApiError && e.status === 429) {
@@ -287,27 +329,29 @@ export async function renderSlackStream(
         // Never render reasoning text — one collapsed task tells the story.
         if (!reasoningOpen) {
           reasoningOpen = true;
-          pendingChunks.push(taskChunk(REASONING_TASK_ID, "Thinking", "in_progress"));
+          queueTask(REASONING_TASK_ID, "Thinking", "in_progress");
           statusLine = "Thinking…";
           status("is thinking…");
           flushDue = true;
         }
         break;
-      case "tool-start":
+      case "tool-start": {
         closeReasoning();
-        pendingChunks.push(taskChunk(ev.toolCallId, `Using ${ev.toolName}`, "in_progress"));
-        statusLine = `Running ${ev.toolName}…`;
-        status(`is using ${ev.toolName}…`);
+        const name = ev.toolName || opts.resumedToolName || "tool";
+        queueTask(ev.toolCallId, `Using ${name}`, "in_progress");
+        statusLine = `Running ${name}…`;
+        status(`is using ${name}…`);
         flushDue = true;
         break;
-      case "tool-end":
-        pendingChunks.push(
-          taskChunk(ev.toolCallId, `Using ${ev.toolName}`, ev.error ? "error" : "complete"),
-        );
+      }
+      case "tool-end": {
+        const name = ev.toolName || opts.resumedToolName || "tool";
+        queueTask(ev.toolCallId, `Using ${name}`, ev.error ? "error" : "complete");
         statusLine = "";
         status("");
         flushDue = true;
         break;
+      }
       case "error":
         errorMessage = ev.message;
         continue;
@@ -321,6 +365,7 @@ export async function renderSlackStream(
   // ── Finalize ───────────────────────────────────────────────────────────────
 
   closeReasoning();
+  settleOpenTasks();
   status("");
 
   // `mode` is only ever assigned inside the closures above; read it through a
@@ -385,17 +430,42 @@ export async function renderSlackStream(
     ...(pendingChunks.length ? { chunks: pendingChunks } : {}),
     ...(finalBlocks.length ? { blocks: finalBlocks } : {}),
   };
+  let tailDelivered = false;
   try {
     await opts.api.stopStream(stopArgs);
+    tailDelivered = true;
   } catch (e) {
-    if (!isStoppedByUser(e)) {
-      // One more try after a beat, then leave the stream to Slack's own
-      // timeout — the content is safe, the overflow path below still runs.
+    if (isStoppedByUser(e)) {
+      tailDelivered = true; // the viewer cut it off — nothing owed
+    } else if (!isDeadStream(e)) {
+      // One more try after a beat for transient failures.
       await sleep(1000);
-      await opts.api.stopStream(stopArgs).catch((e2) => {
-        console.error("[slack] stopStream failed twice; stream left to expire:", e2);
-      });
+      tailDelivered = await opts.api.stopStream(stopArgs).then(
+        () => true,
+        (e2: unknown) => {
+          // The viewer stopping between the two attempts is a delivery
+          // verdict, not a failure — never post the tail they refused.
+          if (isStoppedByUser(e2)) return true;
+          console.error("[slack] stopStream failed twice:", e2);
+          return false;
+        },
+      );
+    } else {
+      console.error("[slack] stream already expired at close:", e);
     }
+  }
+  // The tail (text the stream never delivered) must NEVER vanish: if the
+  // close failed, post it as a regular message. Degraded, but it arrives.
+  if (!tailDelivered && (tail || finalBlocks.length)) {
+    await opts.api
+      .postMessage({
+        channel: opts.channel,
+        ...threadArgs,
+        blocks: [...(tail ? markdownBlocks(tail) : []), ...finalBlocks],
+        text: notificationText(tail || errorMessage || "Answer"),
+        ...(opts.identity ?? {}),
+      })
+      .catch((e) => console.error("[slack] tail recovery post failed:", e));
   }
 
   const overflowTs: string[] = [];
