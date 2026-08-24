@@ -25,6 +25,11 @@ async function handleConnectDone(request: Request): Promise<Response> {
   const chatId = url.searchParams.get("chatId") ?? "";
   const approvalId = url.searchParams.get("approvalId") ?? "";
   const slackUser = url.searchParams.get("user") ?? "";
+  // Thread anchor for `_dm` chats; format-validated because it feeds a Slack
+  // thread_ts. Worst case for a forged value is threading the resume onto a
+  // different message in the SAME conversation.
+  const anchorRaw = url.searchParams.get("anchor") ?? "";
+  const anchorTs = /^\d+\.\d+$/.test(anchorRaw) ? anchorRaw : undefined;
   const error = url.searchParams.get("error");
 
   // Everything interpolated below is escaped — this branch renders BEFORE any
@@ -116,6 +121,7 @@ async function handleConnectDone(request: Request): Promise<Response> {
         chatId,
         approvalId,
         userId: slackUser,
+        ...(anchorTs ? { anchorTs } : {}),
         principal:
           app.credentialMode === "shared"
             ? { orgId: app.orgId, userId: app.userId }

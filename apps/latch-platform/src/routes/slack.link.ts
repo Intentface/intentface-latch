@@ -136,6 +136,7 @@ async function handleLink(request: Request): Promise<Response> {
           .runMessage({
             channel: pending.channel,
             root: pending.threadRoot,
+            ...(pending.anchorTs ? { anchorTs: pending.anchorTs } : {}),
             userId: slackUserId,
             prompt: pending.prompt,
             principal,

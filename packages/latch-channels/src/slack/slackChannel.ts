@@ -134,6 +134,9 @@ export interface SlackChannelConfig<P> {
     userId: string;
     channelId: string;
     threadRoot: string;
+    /** The asking message's ts — hosts holding the message for a post-link
+     *  replay keep it so the replay can thread where the question was. */
+    anchorTs?: string;
     prompt: string;
   }) => Promise<{
     allowed: boolean;
@@ -378,7 +381,9 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           const url = config.authorizeUrl(pa.connectionName, {
             chatId: ctx.chatId,
             channelId: ctx.channel,
-            threadTs: ctx.root,
+            // The EFFECTIVE thread (anchor included) — the host carries it
+            // through connect-done so the resume renders where the card is.
+            threadTs: threadTs ?? ctx.root,
             userId: ctx.userId,
             approvalId: pa.approvalId,
           });
@@ -506,7 +511,10 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     //    resolve to the same chat.
     const root = ev.thread_ts ?? (ev.channel.startsWith("D") ? DM_ROOT : ev.ts);
     const chatId = slackChatId(config.appId, ev.channel, root);
-    const threadTs = threadTsOf(root);
+    // For `_dm` chats the asking message anchors everything this turn posts
+    // (streams need a thread there; notices stay next to what they answer).
+    const anchorTs = ev.thread_ts ?? ev.ts;
+    const threadTs = threadTsOf(root) ?? anchorTs;
 
     const existing = await config.threads.get(chatId);
     if (mode === "thread-follow" && !existing) return; // not our thread
@@ -540,6 +548,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           userId,
           channelId: ev.channel,
           threadRoot: root,
+          anchorTs,
           prompt,
         });
       } catch (e) {
@@ -642,7 +651,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId,
         channel: ev.channel,
         root,
-        ...(ev.ts ? { anchorTs: ev.thread_ts ?? ev.ts } : {}),
+        anchorTs,
         userId,
         prompt,
         ...(context !== undefined ? { context } : {}),
@@ -969,6 +978,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     channel: string;
     /** Thread root ts, or `dm` for the un-threaded DM chat. */
     root: string;
+    /** For `dm` roots: the message ts the replayed turn should thread under. */
+    anchorTs?: string;
     userId: string;
     prompt: string;
     context?: string;
@@ -996,6 +1007,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId,
         channel: ctx.channel,
         root: ctx.root,
+        ...(ctx.anchorTs !== undefined ? { anchorTs: ctx.anchorTs } : {}),
         userId: ctx.userId,
         prompt: ctx.prompt,
         ...(ctx.context !== undefined ? { context: ctx.context } : {}),
@@ -1015,6 +1027,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     chatId: string;
     approvalId: string;
     userId: string;
+    /** For `_dm` chats: the thread the connect card lives in. */
+    anchorTs?: string;
     principal?: P;
     tenant?: SlackTenant<P>;
   }): Promise<void> {
@@ -1047,6 +1061,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         chatId: ctx.chatId,
         channel: parsed.channel,
         root: parsed.root,
+        ...(ctx.anchorTs !== undefined ? { anchorTs: ctx.anchorTs } : {}),
         userId: ctx.userId,
         principal,
         turnStartedAt,

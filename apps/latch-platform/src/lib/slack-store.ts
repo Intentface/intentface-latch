@@ -76,6 +76,7 @@ export async function migrateSlack(client: Client): Promise<void> {
     channel TEXT NOT NULL,
     thread_root TEXT NOT NULL,
     prompt TEXT NOT NULL,
+    anchor_ts TEXT,
     expires_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (app_id, team_id, slack_user_id)
@@ -113,6 +114,11 @@ export async function migrateSlack(client: Client): Promise<void> {
     } catch {
       /* column already exists */
     }
+  }
+  try {
+    await client.execute(`ALTER TABLE latch_slack_pending2 ADD COLUMN anchor_ts TEXT`);
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -359,15 +365,17 @@ export function createSlackStore(client: Client) {
       slackUserId: string;
       channel: string;
       threadRoot: string;
+      anchorTs?: string;
       prompt: string;
     }): Promise<void> {
       const now = Date.now();
       await client.execute({
         sql: `INSERT INTO latch_slack_pending2
-                (app_id, team_id, slack_user_id, channel, thread_root, prompt, expires_at, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (app_id, team_id, slack_user_id, channel, thread_root, anchor_ts, prompt, expires_at, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(app_id, team_id, slack_user_id) DO UPDATE SET
                 channel = excluded.channel, thread_root = excluded.thread_root,
+                anchor_ts = excluded.anchor_ts,
                 prompt = excluded.prompt, expires_at = excluded.expires_at,
                 created_at = excluded.created_at`,
         args: [
@@ -376,6 +384,7 @@ export function createSlackStore(client: Client) {
           input.slackUserId,
           input.channel,
           input.threadRoot,
+          input.anchorTs ?? null,
           input.prompt,
           now + 30 * 60_000, // matches the signed link URL's expiry
           now,
@@ -388,10 +397,10 @@ export function createSlackStore(client: Client) {
       appId: string,
       teamId: string,
       slackUserId: string,
-    ): Promise<{ channel: string; threadRoot: string; prompt: string } | null> {
+    ): Promise<{ channel: string; threadRoot: string; anchorTs?: string; prompt: string } | null> {
       const now = Date.now();
       const res = await client.execute({
-        sql: `SELECT channel, thread_root, prompt FROM latch_slack_pending2
+        sql: `SELECT channel, thread_root, anchor_ts, prompt FROM latch_slack_pending2
               WHERE app_id = ? AND team_id = ? AND slack_user_id = ? AND expires_at >= ?
               LIMIT 1`,
         args: [appId, teamId, slackUserId, now],
@@ -406,6 +415,7 @@ export function createSlackStore(client: Client) {
       return {
         channel: String(r.channel),
         threadRoot: String(r.thread_root),
+        anchorTs: r.anchor_ts ? String(r.anchor_ts) : undefined,
         prompt: String(r.prompt),
       };
     },
