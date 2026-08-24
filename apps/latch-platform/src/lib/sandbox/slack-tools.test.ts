@@ -37,6 +37,7 @@ const ctx = (chatId = CHAT) => ({
 const world = {
   members: new Map<string, string[]>(),
   memberError: new Map<string, string>(), // channel → slack error code
+  postError: undefined as string | undefined,
   calls: [] as { method: string; body: Record<string, string> }[],
 };
 
@@ -54,6 +55,7 @@ beforeEach(async () => {
   await slackStore.claimThread({ chatId: CHAT, appId: "A1", initiatorSlackUserId: "UREQ" });
   world.members.clear();
   world.memberError.clear();
+  world.postError = undefined;
   world.calls = [];
 
   vi.stubGlobal(
@@ -79,6 +81,7 @@ beforeEach(async () => {
         return respond({ ok: true, channels: [{ id: "C9", name: "general" }] });
       }
       if (method === "chat.postMessage") {
+        if (world.postError) return respond({ ok: false, error: world.postError });
         return respond({ ok: true, ts: "10.1", channel: body.channel });
       }
       return respond({ ok: true });
@@ -151,12 +154,23 @@ describe("slack tools: post_to_channel", () => {
     expect(slackToolsApproval.post_to_channel).toBe("user-approval");
   });
 
-  it("posts the full text as markdown", async () => {
+  it("posts the full text as markdown blocks + notification text — NEVER markdown_text with text", async () => {
     const r = await post.execute({ channel: "C9", text: "# Summary\nAll good." }, ctx());
     expect(r.posted).toBe(true);
     const sent = calls("chat.postMessage")[0].body;
-    expect(sent.markdown_text).toBe("# Summary\nAll good.");
+    // chat.postMessage rejects markdown_text combined with text
+    // (markdown_text_conflict) — the observed live failure.
+    expect(sent.markdown_text).toBeUndefined();
+    expect(sent.text).toBeDefined();
+    const blocks = JSON.parse(sent.blocks!) as { type: string; text: string }[];
+    expect(blocks[0]).toEqual({ type: "markdown", text: "# Summary\nAll good." });
     expect(sent.channel).toBe("C9");
+  });
+
+  it("relays Slack's error code instead of a bare failure", async () => {
+    world.postError = "msg_too_long";
+    const r = await post.execute({ channel: "C9", text: "hello" }, ctx());
+    expect(String(r.error)).toContain("msg_too_long");
   });
 
   it("refuses empty posts", async () => {

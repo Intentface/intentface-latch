@@ -3,6 +3,7 @@ import {
   parseSlackChatId,
   slackApi,
   SlackApiError,
+  markdownBlocks,
   notificationText,
 } from "@intentface/latch-channels/slack";
 import type { SlackClient } from "@intentface/latch-channels/slack";
@@ -248,9 +249,12 @@ const post_to_channel = tool({
       };
     }
     try {
+      // markdown blocks + notification text: chat.postMessage REJECTS
+      // markdown_text combined with text (markdown_text_conflict) — this is
+      // the same pattern the streaming fallback engine uses.
       const r = await ctx.api.postMessage({
         channel: args.channel,
-        markdown_text: args.text,
+        blocks: markdownBlocks(args.text),
         text: notificationText(args.text),
       });
       return { posted: true, channel: r.channel, ts: r.ts };
@@ -259,7 +263,11 @@ const post_to_channel = tool({
         return { error: "The bot isn't in that channel — ask a member to /invite it, then try again." };
       }
       console.error("[slack-tools] post failed:", e);
-      return { error: "Posting failed." };
+      // Relay Slack's code/detail — a bare "failed" hides the cause from the
+      // user AND from whoever debugs the transcript later.
+      const why =
+        e instanceof SlackApiError ? `${e.code ?? e.status}${e.detail ? `: ${e.detail}` : ""}` : "unexpected error";
+      return { error: `Posting failed (${why}).` };
     }
   },
 });
