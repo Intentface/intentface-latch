@@ -2912,6 +2912,39 @@ export function createRuntime<P, RC = unknown>(
     let errors = 0;
     for (const s of claimed) {
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
+      // Orphan guard: a schedule whose agent no longer resolves (the agent was
+      // deleted after scheduling) is retired here, BEFORE the advance, while
+      // the claim lease still fences the write — after `completeSchedule`
+      // clears the lease, no further write to the row can land. Only an
+      // explicit "resolve returned nothing" disables: a throw (DB blip,
+      // catalog not yet loaded) must not permanently kill a healthy schedule,
+      // so it falls through to the normal fire path and surfaces there. Hosts
+      // without a dynamic registry are exempt — their agents may live behind
+      // `runSchedule` where core cannot see them.
+      let principal: P | null = null;
+      let known = true;
+      if (config.dynamicAgents && !config.agents[s.agent]) {
+        try {
+          principal = await reconstructPrincipal(s.identity);
+          known = !!(await config.dynamicAgents.resolve(s.agent, principal));
+        } catch {
+          known = true;
+        }
+      }
+      if (!known) {
+        console.warn(`[schedule] ${s.id}: agent ${s.agent} no longer exists — disabling`);
+        try {
+          await storage.completeSchedule(
+            s.id,
+            { nextRunAt: next ?? now, lastRunAt: now, enabled: false },
+            dur.instanceId,
+          );
+        } catch (e) {
+          console.error(`[schedule] failed to disable orphaned ${s.id}:`, e);
+        }
+        errors++;
+        continue;
+      }
       // Consume the occurrence BEFORE firing, not after. The claim lease is
       // stamped once (never heartbeated), so while a fire is in flight the row
       // still reads `enabled AND nextRunAt <= now` — and once the lease TTL
@@ -2940,7 +2973,7 @@ export function createRuntime<P, RC = unknown>(
         continue;
       }
       try {
-        const principal = await reconstructPrincipal(s.identity);
+        const firePrincipal = principal ?? (await reconstructPrincipal(s.identity));
         // Give the host first refusal (e.g. run it in the user's channel thread
         // and stream the answer there). A hook that throws is treated as "not
         // handled": the fire still happens the default way, so a broken
@@ -2951,17 +2984,17 @@ export function createRuntime<P, RC = unknown>(
         let handled = false;
         if (config.runSchedule) {
           try {
-            handled = await config.runSchedule({ schedule: s, principal });
+            handled = await config.runSchedule({ schedule: s, principal: firePrincipal });
           } catch (e) {
             console.error(`[schedule] runSchedule hook failed for ${s.id}:`, e);
           }
         }
         if (!handled) {
-          const chat = await storage.createChat(principal, {
+          const chat = await storage.createChat(firePrincipal, {
             agent: s.agent,
             title: s.prompt.slice(0, 80),
           });
-          await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+          await runTurnToCompletion(firePrincipal, s.agent, userMessageOf(s.prompt), chat.id);
         }
         fired++;
       } catch (e) {

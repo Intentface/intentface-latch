@@ -362,6 +362,43 @@ describe("delete_agent cascade", () => {
     expect(deps.schedules.map((s) => s.agent)).toEqual(["other"]);
   });
 
+  it("cascades scope-pinned refs, but never the OTHER scope's pin", async () => {
+    // Hosts schedule `run.agent` verbatim, which carries a channel's `org:`/
+    // `user:` pin — a bare-name compare misses those (the org:tankka bug). And
+    // the converse: deleting the org record must not take a `user:`-pinned
+    // schedule for a same-named personal agent with it.
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute({ ...SAVE, scope: "org" });
+    deps.schedules.push(
+      {
+        id: "sch_pin_org",
+        agent: "org:my-agent",
+        cron: "* * * * *",
+        prompt: "pinned org",
+        nextRunAt: 0,
+        lastRunAt: null,
+        enabled: true,
+      },
+      {
+        id: "sch_pin_user",
+        agent: "user:my-agent",
+        cron: "* * * * *",
+        prompt: "pinned user (same name, other scope)",
+        nextRunAt: 0,
+        lastRunAt: null,
+        enabled: true,
+      },
+    );
+
+    const res = (await tools.delete_agent!.execute({ name: "my-agent", scope: "org" })) as Record<
+      string,
+      unknown
+    >;
+    expect(res.removedSchedules).toBe(1);
+    expect(deps.schedules.map((s) => s.agent)).toEqual(["user:my-agent"]);
+  });
+
   it("flags the org-scope blind spot instead of pretending", async () => {
     const deps = makeDeps();
     const { tools } = await openTools(deps);

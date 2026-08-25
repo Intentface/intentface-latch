@@ -1,4 +1,4 @@
-import { createClient } from "@libsql/client";
+import { createClient, type Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import {
   createRuntime,
@@ -122,6 +122,8 @@ let cached:
       memoryJobs: MemoryJobStore;
       /** Batch user-profile lookup (cached) — runner attribution on /observability. */
       resolveUsers: (userIds: string[]) => Promise<Map<string, UserProfile>>;
+      /** The shared libsql client, for cross-owner maintenance ops (agent-delete cascade). */
+      client: Client;
     }
   | undefined;
 
@@ -149,6 +151,8 @@ export async function getLatch(): Promise<{
   memoryStore: MemoryStore<Principal>;
   memoryJobs: MemoryJobStore;
   resolveUsers: (userIds: string[]) => Promise<Map<string, UserProfile>>;
+  /** The shared libsql client, for cross-owner maintenance ops (e.g. agent-delete cascade). */
+  client: Client;
 }> {
   if (cached) return cached;
 
@@ -661,6 +665,7 @@ export async function getLatch(): Promise<{
     memoryStore,
     memoryJobs,
     resolveUsers,
+    client,
   };
   return cached;
 }

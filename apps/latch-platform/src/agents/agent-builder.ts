@@ -576,11 +576,27 @@ async function builderTools(principal: Principal): Promise<Record<string, unknow
     }),
 
     delete_agent: tool({
-      description: "Delete one of the user's agents. Destructive — pauses for the user's approval.",
+      description:
+        "Delete one of the user's agents. Destructive — pauses for the user's approval. " +
+        "Also deletes the agent's schedules and disables its Telegram/WhatsApp bot bindings, " +
+        "so nothing keeps firing at a dead agent.",
       inputSchema: z.object({ name: z.string(), scope: SCOPE }),
       execute: async ({ name, scope }) => {
-        await agentStore.remove(principal, scope, name);
-        return { deleted: name, scope };
+        // Org agents are shared; the cascade reaches other members' schedules
+        // and the org's bots — admin-only, same gate as the UI delete.
+        if (scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+          return { error: "Deleting an org agent requires an org admin." };
+        }
+        const { deleteAgentCascade } = await import("@/lib/agent-delete");
+        const res = await deleteAgentCascade(principal, scope, name);
+        if (!res.ok) return { error: res.error };
+        return {
+          deleted: name,
+          scope,
+          deletedSchedules: res.deletedSchedules,
+          disabledBots: res.disabledBots,
+          ...(res.warnings.length ? { warnings: res.warnings } : {}),
+        };
       },
     }),
 

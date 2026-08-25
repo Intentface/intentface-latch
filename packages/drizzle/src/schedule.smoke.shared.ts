@@ -139,7 +139,54 @@ export async function scheduleSmoke<P>({
     "a disabled schedule can't be resurrected by bumping",
   );
 
+  // The lease fence on completeSchedule, both halves. runDue's orphan guard
+  // (agent deleted → disable instead of fire) relies on issuing its disable as
+  // the SINGLE pre-advance write while the claim lease is still held — a
+  // second write after the advance would be fenced out silently, because
+  // completeSchedule clears leaseOwner and matches on it.
+  const orphan = await store.createSchedule(me, {
+    agent: "deleted-agent",
+    cron: "0 8 * * *",
+    prompt: "orphaned fire",
+    nextRunAt: 0,
+  });
+  const t3 = t2 + 240_000; // past every lease stamped above
+  const claimedOrphan = await store.claimDueSchedules(t3, 30_000, "node-1");
+  assert(
+    claimedOrphan.some((s) => s.id === orphan.id),
+    "the orphan schedule is claimable while enabled",
+  );
+  // Wrong lease owner: the write must no-op, not disable someone else's claim.
+  await store.completeSchedule(
+    orphan.id,
+    { nextRunAt: t3, lastRunAt: t3, enabled: false },
+    "node-9",
+  );
+  const afterFenced = await store.listSchedules(me);
+  assert(
+    afterFenced.find((s) => s.id === orphan.id)?.enabled === true,
+    "completeSchedule from a non-lease-holder is fenced out (still enabled)",
+  );
+  // Correct owner, lease still held: the disable lands — the orphan-guard write.
+  await store.completeSchedule(
+    orphan.id,
+    { nextRunAt: t3, lastRunAt: t3, enabled: false },
+    "node-1",
+  );
+  const afterDisable = await store.listSchedules(me);
+  assert(
+    afterDisable.find((s) => s.id === orphan.id)?.enabled === false,
+    "lease-holder disable lands (orphan guard write)",
+  );
+  assert(
+    !(await store.claimDueSchedules(t3 + 120_000, 30_000, "node-2")).some(
+      (s) => s.id === orphan.id,
+    ),
+    "a disabled orphan is never claimed again",
+  );
+
   await store.deleteSchedule(me, created.id);
   await store.deleteSchedule(me, plain.id);
+  await store.deleteSchedule(me, orphan.id);
   assert((await store.listSchedules(me)).length === 0, "schedules delete cleanly");
 }

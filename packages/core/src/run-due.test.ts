@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createRuntime } from "./runtime.js";
+import { createRuntime, type DynamicAgentStore } from "./runtime.js";
+import type { AgentConfig } from "./agent.js";
 import { defineContext } from "./context.js";
 import type { ScheduleRecord, StorageAdapter } from "./storage.js";
 
@@ -62,6 +63,7 @@ function runtimeWith(
   opts: {
     cron?: (expr: string, afterMs: number) => number | null;
     runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
+    dynamicAgents?: DynamicAgentStore<P>;
   },
 ) {
   return createRuntime<P>({
@@ -70,6 +72,7 @@ function runtimeWith(
     agents: {},
     cron: opts.cron,
     runSchedule: opts.runSchedule,
+    dynamicAgents: opts.dynamicAgents,
   });
 }
 
@@ -160,5 +163,101 @@ describe("runDue consumes the occurrence before firing", () => {
 
     expect(res).toEqual({ fired: 0, errors: 1 });
     expect(consumed).toBe(1); // consumed exactly once — never re-written after the failure
+  });
+});
+
+describe("runDue orphan guard (dynamic-agent hosts)", () => {
+  // With a dynamic registry configured, a schedule whose agent no longer
+  // resolves is disabled in the SINGLE pre-advance completeSchedule write —
+  // the adapter's lease fence means a second write after the advance would
+  // silently match zero rows.
+  const noAgents: DynamicAgentStore<P> = {
+    resolve: async () => undefined,
+    list: async () => [],
+  };
+
+  it("disables an orphaned schedule instead of firing it", async () => {
+    let consumed = 0;
+    let patch: { nextRunAt: number; enabled: boolean } | undefined;
+    let firedHook = false;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async (_id, p) => {
+        consumed++;
+        patch = p as typeof patch;
+      },
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        firedHook = true;
+        return true;
+      },
+      dynamicAgents: noAgents,
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(firedHook).toBe(false);
+    expect(consumed).toBe(1); // one write: the disable IS the consume
+    expect(patch).toEqual({ nextRunAt: 1_000_000, lastRunAt: 100, enabled: false });
+    expect(res).toEqual({ fired: 0, errors: 1 });
+  });
+
+  it("a resolver THROW does not disable — the schedule advances and fires normally", async () => {
+    // Auto-disable is a one-way door; a DB blip must not permanently kill a
+    // healthy schedule. Only an explicit "resolve returned nothing" retires it.
+    let patch: { enabled: boolean } | undefined;
+    let firedHook = false;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async (_id, p) => {
+        patch = p as typeof patch;
+      },
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        firedHook = true;
+        return true;
+      },
+      dynamicAgents: {
+        resolve: async () => {
+          throw new Error("catalog unavailable");
+        },
+        list: async () => [],
+      },
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(firedHook).toBe(true);
+    expect(patch?.enabled).toBe(true);
+    expect(res).toEqual({ fired: 1, errors: 0 });
+  });
+
+  it("a resolvable dynamic agent fires normally", async () => {
+    let firedHook = false;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        firedHook = true;
+        return true;
+      },
+      dynamicAgents: {
+        resolve: async (name) =>
+          name === "digest" ? ({ instructions: "hi" } as AgentConfig<P>) : undefined,
+        list: async () => [],
+      },
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(firedHook).toBe(true);
+    expect(res).toEqual({ fired: 1, errors: 0 });
   });
 });
