@@ -32,6 +32,7 @@ const record = (name: string, scope: "org" | "user"): AgentRecord => ({
 
 let client: Client
 let deps: AgentDeleteDeps
+let agentStore: ReturnType<typeof createAgentStore>
 let telegramStore: ReturnType<typeof createTelegramStore>
 let whatsappStore: ReturnType<typeof createWhatsappStore>
 
@@ -61,7 +62,7 @@ beforeEach(async () => {
     next_run_at INTEGER NOT NULL, last_run_at INTEGER, enabled INTEGER NOT NULL,
     lease_owner TEXT, lease_expires_at INTEGER, created_at INTEGER NOT NULL)`)
 
-  const agentStore = createAgentStore(client, () => ({}) as LanguageModel)
+  agentStore = createAgentStore(client, () => ({}) as LanguageModel)
   telegramStore = createTelegramStore(client)
   whatsappStore = createWhatsappStore(client)
   deps = { agentStore, telegramStore, whatsappStore, client }
@@ -89,10 +90,10 @@ describe("deleteAgentCascade", () => {
       "s6_mine_user_pin",
     ])
     // The org record is gone; the colleague's personal tankka survives.
-    expect(await deps.agentStore.getRecord(ME, "org:tankka")).toBeUndefined()
-    expect(
-      (await deps.agentStore.getRecord(COLLEAGUE, "user:tankka"))?.scope
-    ).toBe("user")
+    expect(await agentStore.getRecord(ME, "org:tankka")).toBeUndefined()
+    expect((await agentStore.getRecord(COLLEAGUE, "user:tankka"))?.scope).toBe(
+      "user"
+    )
   })
 
   it("disables the deleted scope's bot bindings and no others, keeping the rows", async () => {
@@ -147,9 +148,7 @@ describe("deleteAgentCascade", () => {
     const res = await deleteAgentCascade(ME, "org", "tankka", failing)
     expect(res.ok).toBe(false)
     expect(res.error).toMatch(/NOT deleted/)
-    expect((await deps.agentStore.getRecord(ME, "org:tankka"))?.scope).toBe(
-      "org"
-    )
+    expect((await agentStore.getRecord(ME, "org:tankka"))?.scope).toBe("org")
   })
 
   it("a user-scope delete never reaches the org record's schedules", async () => {
@@ -161,9 +160,55 @@ describe("deleteAgentCascade", () => {
     expect(res.ok).toBe(true)
     expect(res.deletedSchedules).toBe(1)
     expect(await scheduleIds()).toEqual(["s_org_pin"])
-    expect((await deps.agentStore.getRecord(ME, "org:tankka"))?.scope).toBe(
-      "org"
+    expect((await agentStore.getRecord(ME, "org:tankka"))?.scope).toBe("org")
+  })
+
+  it("a user-scope delete never touches another member's same-named personal agent", async () => {
+    // Two members each own a personal "tankka" — same (name, scope) labels,
+    // different records. ME's delete must take only ME's rows and bindings.
+    await agentStore.upsert(ME, record("tankka", "user"))
+    await seedSchedule("s_me_bare", ME, "tankka") // personal wins → ME's record
+    await seedSchedule("s_colleague_bare", COLLEAGUE, "tankka") // → THEIR record
+    await telegramStore.create({
+      id: "bot_me",
+      agent: "tankka",
+      agentScope: "user",
+      orgId: "org1",
+      userId: "me",
+      handle: "me_bot",
+    })
+    await telegramStore.create({
+      id: "bot_colleague",
+      agent: "tankka",
+      agentScope: "user",
+      orgId: "org1",
+      userId: "colleague",
+      handle: "colleague_bot",
+    })
+
+    const res = await deleteAgentCascade(ME, "user", "tankka", deps)
+
+    expect(res.ok).toBe(true)
+    expect(res.deletedSchedules).toBe(1)
+    expect(await scheduleIds()).toEqual(["s_colleague_bare"])
+    expect(res.disabledBots).toEqual(["telegram:me_bot"])
+    const bots = await telegramStore.listForOrg("org1")
+    expect(bots.find((b) => b.id === "bot_me")?.status).toBe("disabled")
+    expect(bots.find((b) => b.id === "bot_colleague")?.status).toBe("active")
+    expect((await agentStore.getRecord(COLLEAGUE, "user:tankka"))?.scope).toBe(
+      "user"
     )
+  })
+
+  it("normalizes a display-form name before matching anything", async () => {
+    // The builder tool can pass "Tankka " where the stored name is "tankka" —
+    // an unnormalized cascade would match nothing and still report success.
+    await seedSchedule("s_pin", ME, "org:tankka")
+    const res = await deleteAgentCascade(ME, "org", "Tankka ", deps)
+    expect(res.ok).toBe(true)
+    expect(res.deletedSchedules).toBe(1)
+    expect(await scheduleIds()).toEqual([])
+    expect(await agentStore.getRecord(ME, "org:tankka")).toBeUndefined()
   })
 
   it("an unreadable identity is left for the runDue orphan guard, with a warning", async () => {

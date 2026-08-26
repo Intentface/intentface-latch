@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client"
 import type { Principal } from "./session"
 import type { CredentialScope } from "./credentials"
+import { agentOwnerKey, normalizeAgentName, parseAgentRef } from "./agent-store"
 import type { AgentStore } from "./agent-store"
 import type { createTelegramStore } from "./telegram-store"
 import type { createWhatsappStore } from "./whatsapp-store"
@@ -58,6 +59,17 @@ export async function deleteAgentCascade(
     deps ?? (await (await import("./latch")).getLatch())
   const warnings: string[] = []
 
+  // Stored names are normalized (both writers run normalizeAgentName), but a
+  // caller — the builder tool especially — may hand us the display form
+  // ("My Agent"), which would match nothing and report success anyway.
+  // Normalize once here; strip a scope pin first, since normalizing a pinned
+  // ref would mangle it ("org:tankka" → "org-tankka").
+  const target = normalizeAgentName(parseAgentRef(name).name)
+  // The row being deleted, as an identity: two members' same-named personal
+  // agents share (name, scope) but are different records — matching on the
+  // labels alone would let one member's delete take the other's rows.
+  const targetOwner = agentOwnerKey(principal, scope)
+
   // 1. Record the doomed schedule rows BEFORE the delete, while the ref still
   //    resolves. A stored ref is the bare name or a scope pin (`org:name` /
   //    `user:name` — normalizeAgentName strips `:`, so IN over the three forms
@@ -74,9 +86,9 @@ export async function deleteAgentCascade(
     sql: `SELECT id, agent, identity FROM latch_schedules
           WHERE agent IN (?, ?, ?) AND (owner = ? OR substr(owner, 1, ?) = ?)`,
     args: [
-      name,
-      `org:${name}`,
-      `user:${name}`,
+      target,
+      `org:${target}`,
+      `user:${target}`,
       org,
       orgPrefix.length,
       orgPrefix,
@@ -96,7 +108,15 @@ export async function deleteAgentCascade(
       continue
     }
     const rec = await agentStore.getRecord(rowPrincipal, String(row.agent))
-    if (rec && rec.scope === scope && rec.name === name)
+    // Same record, not just same labels: the resolved record's owner row is
+    // ownerKey(rowPrincipal, rec.scope) by construction (find only matches the
+    // caller's own keys), so equality with the deleted row's key pins identity.
+    if (
+      rec &&
+      rec.scope === scope &&
+      rec.name === target &&
+      agentOwnerKey(rowPrincipal, rec.scope) === targetOwner
+    )
       doomed.push(String(row.id))
   }
 
@@ -104,7 +124,20 @@ export async function deleteAgentCascade(
   //    failure here aborts a fully recoverable operation. Bot rows are KEPT
   //    (tokens/config survive; re-enable is a setStatus flip). A binding with
   //    no agentScope points at a code-registry agent and can never mean a UI
-  //    record, so it is never touched.
+  //    record, so it is never touched. A user-scope delete additionally
+  //    requires the binding's owning user to be the caller — listForOrg
+  //    returns every member's bindings, and two members' same-named personal
+  //    agents are different records.
+  const bindingMatches = (b: {
+    agent: string
+    agentScope?: CredentialScope
+    userId?: string
+    status: string
+  }): boolean =>
+    b.agent === target &&
+    b.agentScope === scope &&
+    b.status === "active" &&
+    (scope !== "user" || b.userId === principal.userId)
   const disabledBots: string[] = []
   const undo: (() => Promise<void>)[] = []
   try {
@@ -113,15 +146,13 @@ export async function deleteAgentCascade(
       whatsappStore.listForOrg(principal.orgId),
     ])
     for (const b of tgBots) {
-      if (b.agent !== name || b.agentScope !== scope || b.status !== "active")
-        continue
+      if (!bindingMatches(b)) continue
       await telegramStore.setStatus(b.id, "disabled")
       undo.push(() => telegramStore.setStatus(b.id, "active"))
       disabledBots.push(`telegram:${b.handle}`)
     }
     for (const b of waBots) {
-      if (b.agent !== name || b.agentScope !== scope || b.status !== "active")
-        continue
+      if (!bindingMatches(b)) continue
       await whatsappStore.setStatus(b.id, "disabled")
       undo.push(() => whatsappStore.setStatus(b.id, "active"))
       disabledBots.push(`whatsapp:${b.handle}`)
@@ -141,7 +172,7 @@ export async function deleteAgentCascade(
   }
 
   // 3. The irreversible step.
-  await agentStore.remove(principal, scope, name)
+  await agentStore.remove(principal, scope, target)
 
   // 4. Delete the recorded schedule rows — best-effort past the point of no
   //    return. Direct SQL, not runtime.unschedule: an org agent's schedules
