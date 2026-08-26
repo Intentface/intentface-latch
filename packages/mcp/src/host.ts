@@ -4,6 +4,7 @@ import {
   type MCPTransport,
   type OAuthClientProvider,
 } from "@ai-sdk/mcp";
+import type { SingleToolApprovalFunction, ToolApprovalStatus } from "ai";
 import type { SecretResolver } from "@intentface/latch-core";
 import {
   isBlockedHost,
@@ -87,8 +88,9 @@ export interface McpToolInfo {
 
 /**
  * Per-CALL approval decision for one tool: evaluated with the model's input
- * each time it calls the tool, so policy can key on ARGUMENTS. This is the
- * escape hatch for meta-tool servers — one `execute_tool` multiplexing every
+ * each time it calls the tool (synchronously or async — return `boolean` or
+ * `Promise<boolean>`), so policy can key on ARGUMENTS. This is the escape
+ * hatch for meta-tool servers — one `execute_tool` multiplexing every
  * operation through its arguments carries a single annotation set, so a
  * per-tool boolean can only gate everything or nothing.
  */
@@ -100,11 +102,11 @@ export type McpCallApproval = (input: unknown) => boolean | Promise<boolean>;
  *   server marks `destructiveHint: true` or explicitly `readOnlyHint: false`.
  * - `"all"` / `"none"`: gate every tool / no tool.
  * - a predicate: decide per tool from its annotations. Return a boolean for a
- *   whole-tool decision, or an {@link McpCallApproval} — `(input) => boolean` —
- *   to decide per call (e.g. gate `execute_tool` only when
- *   `input.toolName` starts with `create_`). Annotations stay the first-class
- *   signal; the call function is for tools whose annotations structurally
- *   can't say enough.
+ *   whole-tool decision, or an {@link McpCallApproval} —
+ *   `(input) => boolean | Promise<boolean>` — to decide per call (e.g. gate
+ *   `execute_tool` only when `input.toolName` starts with `create_`).
+ *   Annotations stay the first-class signal; the call function is for tools
+ *   whose annotations structurally can't say enough.
  */
 export type McpApprovalPolicy =
   | "destructive"
@@ -136,6 +138,15 @@ export function needsMcpApproval(
 }
 
 /**
+ * One tool's value in the AI SDK's `toolApproval` map: an approval status
+ * (`"user-approval"` = always gate; `undefined` = not applicable, never gate)
+ * or a per-call function the SDK evaluates with the call input.
+ */
+export type McpToolApprovalValue =
+  | ToolApprovalStatus
+  | SingleToolApprovalFunction<unknown, unknown, unknown>;
+
+/**
  * Resolve a policy to the value the AI SDK's `toolApproval` map takes for one
  * tool: `"user-approval"` (always gate), `undefined` (never gate), or a
  * per-call function the SDK evaluates with the call input.
@@ -143,10 +154,7 @@ export function needsMcpApproval(
 export function mcpApprovalValue(
   policy: McpApprovalPolicy | undefined,
   tool: McpToolInfo,
-):
-  | "user-approval"
-  | ((input: unknown) => Promise<"user-approval" | undefined>)
-  | undefined {
+): McpToolApprovalValue {
   const gate = needsMcpApproval(policy, tool);
   if (typeof gate === "function") {
     // `undefined` is the SDK's "not-applicable" — the call runs ungated.
@@ -330,7 +338,7 @@ export interface OpenMcp {
    * and the MCP servers' tool annotations (`<name>_<tool>: "user-approval"`).
    * Merged into the agent's `toolApproval` by the runtime.
    */
-  toolApproval: Record<string, unknown>;
+  toolApproval: Record<string, McpToolApprovalValue>;
   /** Close every underlying client. Call when the turn finishes. */
   close(): Promise<void>;
 }
@@ -384,7 +392,7 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
 
       const clients: MCPClient[] = [];
       const tools: Record<string, unknown> = {};
-      const toolApproval: Record<string, unknown> = {};
+      const toolApproval: Record<string, McpToolApprovalValue> = {};
       const closeAll = () =>
         Promise.all(clients.map((c) => c.close().catch(() => {}))).then(
           () => undefined,

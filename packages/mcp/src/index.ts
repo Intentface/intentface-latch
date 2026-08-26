@@ -20,6 +20,7 @@ export type {
   McpAuth,
   McpApprovalPolicy,
   McpCallApproval,
+  McpToolApprovalValue,
   McpToolInfo,
   NameHeuristicOptions,
   OpenMcp,
