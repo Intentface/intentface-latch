@@ -35,16 +35,23 @@ export function credentialPrincipalOf(p: Principal): Principal {
 
 /**
  * The bridge: better-auth session → our `Principal`.
- * Active organization = tenant (`orgId`); signed-in users with no active org
- * fall back to a personal scope. Returns null when not authenticated.
+ * Active organization = tenant (`orgId`). A session WITHOUT an active org
+ * yields null — same as unauthenticated. No fallback: defaulting a missing
+ * org to a personal tenant once silently split one user's owner-keyed data
+ * (OAuth tokens landed under `user:<id>` while the connection lived under
+ * the real org). Every session is born pinned (`session.create.before` in
+ * auth.ts + `ensurePersonalOrg` at signup), so null here means a stale
+ * pre-hook session — re-login cures it. Fail loudly, never guess.
  */
 export async function getPrincipalFromHeaders(
   headers: Headers,
 ): Promise<Principal | null> {
   const session = await auth.api.getSession({ headers });
-  if (!session) return null;
-  const orgId = session.session.activeOrganizationId ?? `user:${session.user.id}`;
-  return { orgId, userId: session.user.id };
+  if (!session?.session.activeOrganizationId) return null;
+  return {
+    orgId: session.session.activeOrganizationId,
+    userId: session.user.id,
+  };
 }
 
 /** Ambient version — uses the real request Headers (works during SSR). */
@@ -62,10 +69,13 @@ export async function getSessionUserFromHeaders(
   headers: Headers,
 ): Promise<{ principal: Principal; name?: string; email?: string } | null> {
   const session = await auth.api.getSession({ headers });
-  if (!session) return null;
-  const orgId = session.session.activeOrganizationId ?? `user:${session.user.id}`;
+  // No active org → null, same as getPrincipalFromHeaders — never default.
+  if (!session?.session.activeOrganizationId) return null;
   return {
-    principal: { orgId, userId: session.user.id },
+    principal: {
+      orgId: session.session.activeOrganizationId,
+      userId: session.user.id,
+    },
     name: session.user.name ?? undefined,
     email: session.user.email ?? undefined,
   };
