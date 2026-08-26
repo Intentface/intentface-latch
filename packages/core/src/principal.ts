@@ -12,6 +12,19 @@
  * from the principal), and authorization lives in the customer's app. There is
  * no `Scope`, no `orgId`/`userId` — those, if they exist, live in the
  * customer's `P` and the `owner` function they give their adapter.
+ *
+ * CONTRACT — principals persist in CLEARTEXT. The runtime serializes `P`
+ * verbatim onto durable rows (`runs.identity`, `schedules.identity`, memory
+ * episodes) and into OAuth flow state, and replays it on resume/cron — days
+ * or months later. Therefore a principal must carry DURABLE IDENTIFIERS ONLY:
+ *   - never secrets or tokens (they'd be stored unencrypted and replayed
+ *     stale — credentials belong in the Vault);
+ *   - no PII beyond ids (emails, names — they'd spread across tables and
+ *     complicate erasure);
+ *   - nothing volatile (roles, flags, session state — a replayed copy would
+ *     silently disagree with reality; derive those per turn in
+ *     `context.build`, and re-validate stale identity in
+ *     `reconstructPrincipal`).
  */
 
 /** Maps an incoming web request to a `Principal`. Customer-provided. Null = unauthenticated. */

@@ -13,6 +13,15 @@ import type { AppMessage } from "./message.js";
  * own schema). The framework never reads a field of `P`. System ops (the reaper
  * / resume) act by id without a principal and recover identity from the run.
  *
+ * CONTRACT — the owner key is derived ONCE, at root-resource creation; child
+ * rows inherit their parent's stamped owner (messages → chat, usage → run,
+ * OAuth tokens → the flow that started them). Never re-derive an owner from a
+ * live principal in a DIFFERENT request context than the one that created the
+ * root — callbacks, webhooks, and cron arrive with degraded or absent
+ * sessions, and a re-derived key silently lands data in the wrong bucket.
+ * Identity that must cross requests is pinned as data (a run's identity blob,
+ * the OAuth flow state) and rebuilt via `reconstructPrincipal`.
+ *
  * v1 surface = the four tables in the plan: chats, messages, runs, usage.
  * `messages` is the source of truth (content + execution metadata on the row).
  */

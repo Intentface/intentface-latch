@@ -269,6 +269,30 @@ const summarize = (prompt: string, max = 80) => {
 };
 
 /**
+ * Fire-time identity re-validation. A schedule's principal is a snapshot
+ * pinned at creation; the human behind it may have left the org since. When
+ * the acting user is no longer a member, remove the schedule (via the
+ * caller-supplied `unschedule` — owner-fenced, the fired principal IS the
+ * schedule's) and return true: the fire is handled (suppressed), never run
+ * as a departed member. The delivery legs below re-check membership per
+ * fire already; this guards the default fresh-chat path too.
+ */
+export async function removeIfActorDeparted(
+  input: { schedule: ScheduleRecord; principal: Principal },
+  unschedule: (args: { principal: Principal; id: string }) => Promise<void>,
+): Promise<boolean> {
+  const { schedule, principal } = input;
+  const actor = principal.actorUserId ?? principal.userId;
+  if (!actor || (await isOrgMember(actor, principal.orgId))) return false;
+  console.warn(
+    `[schedule] ${schedule.id} (agent ${schedule.agent}): user ${actor} is no ` +
+      `longer a member of ${principal.orgId} — removing schedule`,
+  );
+  await unschedule({ principal, id: schedule.id });
+  return true;
+}
+
+/**
  * `createRuntime({ runSchedule })`: run this fire in its delivery channel.
  *
  * Returns false for "not handled" — no target, an invalid one, or an

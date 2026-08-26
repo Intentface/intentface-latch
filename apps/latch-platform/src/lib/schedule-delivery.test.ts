@@ -34,6 +34,7 @@ const {
   deliveryOptions,
   listAgentChannels,
   parseScheduleDelivery,
+  removeIfActorDeparted,
   resolveDelivery,
   resolveOfferedDelivery,
 } = await import("./schedule-delivery");
@@ -298,5 +299,50 @@ describe("resolveOfferedDelivery", () => {
     await expect(
       resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b1" }),
     ).rejects.toThrow(DeliveryError);
+  });
+});
+
+describe("removeIfActorDeparted", () => {
+  // The fire-time identity re-check: a schedule's principal is a snapshot
+  // pinned at creation, and firing it for a departed member would keep acting
+  // in the org indefinitely. The guard removes the schedule instead.
+  const schedule = { id: "s1", agent: "todo" } as never;
+
+  it("lets a current member's schedule fire (no unschedule)", async () => {
+    const unschedule = vi.fn(async () => {});
+    const handled = await removeIfActorDeparted(
+      { schedule, principal: owner },
+      unschedule,
+    );
+    expect(handled).toBe(false);
+    expect(unschedule).not.toHaveBeenCalled();
+  });
+
+  it("removes a departed member's schedule and suppresses the fire", async () => {
+    members.clear(); // u1 left org1
+    const unschedule = vi.fn(async () => {});
+    const handled = await removeIfActorDeparted(
+      { schedule, principal: owner },
+      unschedule,
+    );
+    expect(handled).toBe(true);
+    expect(unschedule).toHaveBeenCalledWith({ principal: owner, id: "s1" });
+  });
+
+  it("checks the ACTING human on a channel principal (actorUserId)", async () => {
+    // A Slack-created schedule carries the binding principal with the typist
+    // as actor — the actor's membership is what must still hold.
+    members.clear();
+    members.add("binder@org1"); // binding creator is still a member…
+    const unschedule = vi.fn(async () => {});
+    const handled = await removeIfActorDeparted(
+      {
+        schedule,
+        principal: { orgId: "org1", userId: "binder", actorUserId: "typist" },
+      },
+      unschedule,
+    );
+    expect(handled).toBe(true); // …but the ACTOR left, so the schedule goes
+    expect(unschedule).toHaveBeenCalled();
   });
 });

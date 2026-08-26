@@ -39,7 +39,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:^",
@@ -58,7 +59,8 @@
   "devDependencies": {
     "ai": "7.0.0-beta.178",
     "hono": "^4.6.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4"
   },
   "repository": {
     "type": "git",

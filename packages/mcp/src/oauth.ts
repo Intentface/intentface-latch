@@ -320,6 +320,14 @@ export function createMcpOAuth<P>(opts: {
         callbackState: params.state,
         fetchFn: config.fetch,
       });
+      // Single-use flow state: the CSRF state and PKCE verifier are spent the
+      // moment the exchange succeeds — delete them so a replayed callback URL
+      // finds no stored flow material to validate against. (The platform's
+      // oauth2 path already does this; tokens/client/as_info must survive.)
+      await Promise.all([
+        vault.delete(principal, vaultKey(config.name, "state")),
+        vault.delete(principal, vaultKey(config.name, "verifier")),
+      ]);
       return { status: "authorized" };
     },
 

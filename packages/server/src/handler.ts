@@ -44,15 +44,35 @@ export interface LatchHandlerConfig<P> {
   /**
    * Map a request to a Principal (your existing auth). Null → 401.
    *
-   * The OAuth callback can run without an app session, so its decoded `state`
-   * is passed as `extra.oauthState` — a `resolveContext` can rebuild the
-   * principal from it (e.g. a `workspaceId` baked into the flow) when the
-   * request itself doesn't carry enough context.
+   * NOT consulted for identity on the OAuth callback when the flow carries a
+   * pinned principal (every flow started by this handler does): the callback
+   * rebuilds identity from the flow state via `reconstructPrincipal` instead,
+   * so a degraded session at redirect time can never change where credentials
+   * land. `extra.oauthState` (the decoded state) is still passed on legacy
+   * callbacks whose state predates pinning — deprecated, remove-later.
    */
   resolveContext: (
     request: Request,
     extra?: { oauthState?: Record<string, unknown> },
   ) => P | null | Promise<P | null>;
+  /**
+   * Rebuild a Principal from the identity pinned into the OAuth flow state at
+   * `authorize` time (the mirror of the runtime's `reconstructPrincipal` for
+   * resume/cron). Called on the OAuth callback INSTEAD of `resolveContext` —
+   * the pinned identity is the source of truth; the live session is not
+   * consulted. Override to validate (e.g. re-check org membership) or
+   * re-hydrate; return null to reject the callback (401). Default: cast.
+   */
+  reconstructPrincipal?: (
+    identity: unknown,
+    request: Request,
+  ) => P | null | Promise<P | null>;
+  /**
+   * Maximum age of an OAuth flow, from `authorize` to `callback`. A callback
+   * whose pinned flow state is older redirects with `?error=flow_expired`.
+   * Default: 30 minutes.
+   */
+  oauthFlowMaxAgeMs?: number;
   /**
    * Connection registry (enables the connection routes), or a per-principal
    * resolver — the latter lets a consumer build a tenant-scoped registry (e.g.
@@ -77,9 +97,13 @@ export interface LatchHandlerConfig<P> {
   /**
    * Extra query-param names on `connections/:name/authorize` to fold verbatim
    * into the OAuth `state` (alongside the built-in chatId/approvalId/returnTo/
-   * scope). Lets a consumer thread its own context (e.g. a tenant id) through
-   * the flow so `resolveContext` can rebuild the principal from
-   * `extra.oauthState` on the session-less callback. Default: none.
+   * scope). Default: none.
+   *
+   * @deprecated for identity: the resolved principal is now pinned into the
+   * flow state automatically and rebuilt on the callback via
+   * `reconstructPrincipal` — threading tenant ids through `stateParams` +
+   * `extra.oauthState` for that purpose is no longer needed. Still fine for
+   * non-identity context a host wants echoed back.
    */
   stateParams?: string[];
   /**
@@ -206,18 +230,42 @@ export function createLatchHandler<P>(
       const name = seg[1];
       const action = seg[2];
 
-      // The callback may run before/without an app session, so decode its OAuth
-      // state up front and hand it to resolveContext — a consumer can rebuild
-      // the principal from it (e.g. a workspaceId baked into the flow).
+      // The callback arrives at a moment we don't control (an IdP redirect),
+      // so its identity must NEVER come from the live session — a degraded
+      // session there is exactly how credentials end up under the wrong owner.
+      // Every flow this handler starts pins the resolved principal into the
+      // state (`__latch`); the callback rebuilds identity from that pin. The
+      // pin is tamper-evident: the full state string is exact-matched against
+      // the copy stored (owner-keyed) at authorize time, so a forged payload
+      // never survives the exchange.
       const callbackState =
         name && action === "callback" && method === "GET"
           ? (decodeOAuthState(url.searchParams.get("state")) ?? undefined)
           : undefined;
 
-      const principal = await resolveContext(
-        request,
-        callbackState ? { oauthState: callbackState } : undefined,
-      );
+      const pinned = callbackState?.__latch as
+        | { p?: unknown; iat?: number }
+        | undefined;
+      let principal: P | null;
+      if (pinned && pinned.p !== undefined && typeof pinned.iat === "number") {
+        const maxAge = config.oauthFlowMaxAgeMs ?? 30 * 60_000;
+        if (Date.now() - pinned.iat > maxAge) {
+          return redirectTo((callbackState?.returnTo as string) ?? "/", {
+            error: "flow_expired",
+          });
+        }
+        principal = await (config.reconstructPrincipal ?? ((id) => id as P))(
+          pinned.p,
+          request,
+        );
+      } else {
+        // Non-callback routes, and legacy callbacks whose state predates
+        // pinning (deprecated fallback — remove once in-flight flows drain).
+        principal = await resolveContext(
+          request,
+          callbackState ? { oauthState: callbackState } : undefined,
+        );
+      }
       if (!principal) return json({ error: "unauthorized" }, 401);
 
       const conns = await resolveConnections(principal);
@@ -246,10 +294,19 @@ export function createLatchHandler<P>(
           const value = url.searchParams.get(key);
           if (value !== null) extraState[key] = value;
         }
-        const state =
-          chatId || approvalId || returnTo || scope || Object.keys(extraState).length > 0
-            ? { ...extraState, chatId, approvalId, returnTo, scope }
-            : undefined;
+        // Pin the resolved principal (+ issue time) into the flow state. The
+        // callback rebuilds identity from this pin via `reconstructPrincipal`
+        // — the live session at redirect time never decides where credentials
+        // land. Principals are IDs-only by contract, so the payload is small
+        // and non-sensitive; integrity comes from the stored-state exact match.
+        const state = {
+          ...extraState,
+          chatId,
+          approvalId,
+          returnTo,
+          scope,
+          __latch: { p: principal, iat: Date.now() },
+        };
         // A connection resolved as OAuth-capable but not actually configured for
         // it (e.g. a dynamic name whose stored record isn't oauth) throws here —
         // surface it as a 400 rather than starting an orphan flow.

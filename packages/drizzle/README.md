@@ -23,6 +23,14 @@ const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
 const storage = createSqliteAdapter<Principal>(client, { owner });
 ```
 
+**Owner-key contract.** `owner` must be a pure projection of the *stable* part
+of your principal — durable ids from your database, never per-session state
+(an "active org" that can be null on some requests will silently split one
+user's data across two keys). The key is derived once, at root-resource
+creation; child rows inherit it. Never re-derive it from a live principal in
+a different request context (OAuth callbacks, webhooks, cron) — pin identity
+into the flow/run and rebuild it via `reconstructPrincipal` instead.
+
 ## Where it fits
 
 The T1 (persistence) tier under `@intentface/latch-core`. Swap it for another `StorageAdapter` implementation behind the same contract.
