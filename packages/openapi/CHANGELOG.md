@@ -1,5 +1,12 @@
 # @intentface/latch-openapi
 
+## 0.5.0
+
+### Patch Changes
+
+- @intentface/latch-core@0.5.0
+  - @intentface/latch-net@0.5.0
+
 ## 0.4.1
 
 ### Patch Changes
