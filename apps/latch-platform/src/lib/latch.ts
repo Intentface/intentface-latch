@@ -456,21 +456,12 @@ export async function getLatch(): Promise<{
     // absent or no longer authorized → core runs the fire the ordinary way.
     // Imported lazily: this module reaches back into `getLatch()`.
     runSchedule: async (input) => {
-      // Fire-time identity re-validation: the pinned principal is a snapshot,
-      // and the human behind it may have left the org since. The delivery
-      // legs (Slack/Telegram) already re-check membership per fire; this
-      // covers the default fresh-chat path too — and REMOVES the schedule
-      // instead of letting it fire forever as a departed member.
-      const actor = credentialPrincipalOf(input.principal).userId;
-      if (actor && !(await isOrgMember(actor, input.principal.orgId))) {
-        console.warn(
-          `[schedule] ${input.schedule.id} (agent ${input.schedule.agent}): ` +
-            `user ${actor} is no longer a member of ${input.principal.orgId} — removing schedule`,
-        );
-        await runtime.unschedule({ principal: input.principal, id: input.schedule.id });
-        return true; // handled → the fire is suppressed, occurrence already consumed
-      }
-      return (await import("./schedule-delivery")).runScheduledDelivery(input);
+      // Fire-time identity re-validation first: a departed member's schedule
+      // is REMOVED instead of firing forever under a stale principal.
+      const sd = await import("./schedule-delivery");
+      if (await sd.removeIfActorDeparted(input, (args) => runtime.unschedule(args)))
+        return true; // handled → fire suppressed, occurrence already consumed
+      return sd.runScheduledDelivery(input);
     },
     // Rates (USD per 1M tokens) from models.dev.
     pricing: catalog.pricing,

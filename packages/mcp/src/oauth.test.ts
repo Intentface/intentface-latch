@@ -18,7 +18,7 @@ vi.mock("@ai-sdk/mcp", () => ({
   auth: authMock,
 }));
 
-const { createMcpOAuth } = await import("./oauth.js");
+const { createMcpOAuth, decodeOAuthState } = await import("./oauth.js");
 
 interface P {
   userId: string;
@@ -155,6 +155,68 @@ describe("authorizationParams", () => {
     expect(url.searchParams.get("client_id")).toBe("abc"); // SDK params kept
     expect(url.searchParams.get("access_type")).toBe("offline");
     expect(url.searchParams.get("prompt")).toBe("consent");
+  });
+});
+
+describe("state encoding", () => {
+  it("round-trips app context (incl. a pinned principal) through decodeOAuthState", async () => {
+    // The handler pins the resolved principal into the flow state at
+    // authorize time; the callback must recover it byte-for-byte.
+    const { oauth } = build(undefined);
+    const stateData = {
+      returnTo: "/chat/c1",
+      __latch: { p: { orgId: "org_a", userId: "u1" }, iat: 1_700_000_000_000 },
+    };
+    let sent: string | undefined;
+    authMock.mockImplementationOnce(async (provider: {
+      state: () => string;
+      saveState: (s: string) => Promise<void>;
+      redirectToAuthorization: (url: URL) => void;
+    }) => {
+      sent = provider.state();
+      await provider.saveState(sent);
+      provider.redirectToAuthorization(new URL("https://idp.example/authorize"));
+      return "REDIRECT";
+    });
+    await oauth.start({ userId: "u1" }, { state: stateData });
+    expect(decodeOAuthState(sent)).toEqual(stateData);
+  });
+
+  it("returns undefined for a bare csrf or garbage", () => {
+    expect(decodeOAuthState("deadbeef")).toBeUndefined();
+    expect(decodeOAuthState("deadbeef.%%%not-b64%%%")).toBeUndefined();
+    expect(decodeOAuthState(null)).toBeUndefined();
+  });
+});
+
+describe("finish", () => {
+  it("deletes the spent state + verifier but keeps tokens/client/as_info", async () => {
+    // Single-use flow state: a replayed callback URL must find no stored flow
+    // material — while the durable credential parts survive.
+    const { vault, oauth } = build(undefined);
+    const p: P = { userId: "u1" };
+    for (const part of ["tokens", "verifier", "state", "client", "as_info"]) {
+      await vault.set(p, `mcp_oauth:loredex:${part}`, "x");
+    }
+    authMock.mockResolvedValueOnce("AUTHORIZED");
+    await oauth.finish(p, { code: "abc", state: "deadbeef" });
+    expect(await vault.has(p, "mcp_oauth:loredex:state")).toBe(false);
+    expect(await vault.has(p, "mcp_oauth:loredex:verifier")).toBe(false);
+    expect(await vault.has(p, "mcp_oauth:loredex:tokens")).toBe(true);
+    expect(await vault.has(p, "mcp_oauth:loredex:client")).toBe(true);
+    expect(await vault.has(p, "mcp_oauth:loredex:as_info")).toBe(true);
+  });
+
+  it("does not delete flow state when the exchange throws", async () => {
+    // A transient exchange failure must leave the flow re-tryable.
+    const { vault, oauth } = build(undefined);
+    const p: P = { userId: "u1" };
+    await vault.set(p, "mcp_oauth:loredex:state", "s");
+    await vault.set(p, "mcp_oauth:loredex:verifier", "v");
+    authMock.mockRejectedValueOnce(new Error("exchange failed"));
+    await expect(oauth.finish(p, { code: "abc", state: "s" })).rejects.toThrow();
+    expect(await vault.has(p, "mcp_oauth:loredex:state")).toBe(true);
+    expect(await vault.has(p, "mcp_oauth:loredex:verifier")).toBe(true);
   });
 });
 
