@@ -85,7 +85,7 @@ describe("runDue → runSchedule hook", () => {
       delivery: { kind: "telegram", botId: "bot-1" },
     });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
     expect(seen).toHaveLength(1);
     expect(seen[0]!.principal).toEqual(principal);
     expect(seen[0]!.schedule.prompt).toBe("morning brief");
@@ -100,7 +100,7 @@ describe("runDue → runSchedule hook", () => {
     const runtime = build(async () => false);
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "brief me" });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
     const chats = await runtime.listChats({ principal });
     expect(chats).toHaveLength(1);
     expect(chats[0]!.agent).toBe("briefer");
@@ -112,7 +112,7 @@ describe("runDue → runSchedule hook", () => {
     });
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "brief me" });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
     expect(await runtime.listChats({ principal })).toHaveLength(1);
   });
 
@@ -128,14 +128,14 @@ describe("runDue → runSchedule hook", () => {
     // A recurring schedule's first fire is its first cron occurrence, not now.
     const due = before.nextRunAt;
 
-    expect(await runtime.runDue({ now: due })).toEqual({ fired: 1, errors: 0 });
+    expect(await runtime.runDue({ now: due })).toEqual({ fired: 1, errors: 0, skipped: 0 });
     const after = (await runtime.listSchedules({ principal }))[0]!;
     expect(after.nextRunAt).toBeGreaterThan(before.nextRunAt);
     expect(after.enabled).toBe(true);
     expect(after.lastRunAt).toBeTruthy();
 
     // A second tick at the same instant finds nothing due — it advanced past it.
-    expect(await runtime.runDue({ now: due })).toEqual({ fired: 0, errors: 0 });
+    expect(await runtime.runDue({ now: due })).toEqual({ fired: 0, errors: 0, skipped: 0 });
   });
 
   it("a one-shot is spent after firing", async () => {
@@ -143,7 +143,7 @@ describe("runDue → runSchedule hook", () => {
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "once" });
     await runtime.runDue();
     expect((await runtime.listSchedules({ principal }))[0]!.enabled).toBe(false);
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
   });
 });
 
@@ -197,10 +197,10 @@ describe("runScheduleNow", () => {
       cron: "*/15 * * * *",
       prompt: "later",
     });
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
 
     expect(await runtime.runScheduleNow({ principal, id: created.id })).toBe(true);
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
     expect(fired).toEqual([created.id]);
   });
 
@@ -219,7 +219,7 @@ describe("runScheduleNow", () => {
       prompt: "later",
     });
     expect(await runtime.runScheduleNow({ principal: other, id: created.id })).toBe(false);
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
   });
 
   it("won't resurrect a spent one-shot", async () => {
@@ -234,6 +234,6 @@ describe("runScheduleNow", () => {
     expect((await runtime.listSchedules({ principal }))[0]!.enabled).toBe(false);
 
     expect(await runtime.runScheduleNow({ principal, id: created.id })).toBe(false);
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
   });
 });

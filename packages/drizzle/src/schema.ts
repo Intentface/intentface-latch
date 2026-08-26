@@ -249,6 +249,10 @@ export const schedules = sqliteTable(
     delivery: text("delivery", { mode: "json" }),
     nextRunAt: integer("next_run_at").notNull(),
     lastRunAt: integer("last_run_at"),
+    /** Parked-predecessor policy ('skip' | 'fire'); null = the default ('skip'). */
+    onParked: text("on_parked"),
+    /** Chat of the last default-path fire (see StorageAdapter.noteScheduleFire). */
+    lastChatId: text("last_chat_id"),
     enabled: integer("enabled").notNull(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: integer("lease_expires_at"),

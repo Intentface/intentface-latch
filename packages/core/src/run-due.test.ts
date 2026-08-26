@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRuntime } from "./runtime.js";
 import { defineContext } from "./context.js";
 import type { ScheduleRecord, StorageAdapter } from "./storage.js";
+import type { AppMessage } from "./message.js";
 
 /**
  * The occurrence-consumption contract of `runDue`, which is what stands
@@ -97,7 +98,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     expect(order).toEqual(["consume", "fire"]);
     expect(advanced).toEqual({ nextRunAt: NEXT, lastRunAt: 100, enabled: true });
-    expect(res).toEqual({ fired: 1, errors: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
   });
 
   it("disables a one-shot (cron: null) at consume time", async () => {
@@ -136,7 +137,32 @@ describe("runDue consumes the occurrence before firing", () => {
     const res = await rt.runDue({ now: 100 });
 
     expect(firedHook).toBe(false);
-    expect(res).toEqual({ fired: 0, errors: 1 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0 });
+  });
+
+  it("stamps the fire's chat via noteScheduleFire so the next occurrence can see it", async () => {
+    // The default path errors later (agent "digest" isn't registered), but the
+    // stamp happens between createChat and the turn — assert it regardless.
+    const stamps: unknown[] = [];
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      createChat: async () => ({
+        id: "chat_new",
+        owner: "org_a",
+        agent: "digest",
+        createdAt: 0,
+        updatedAt: 0,
+      }),
+      noteScheduleFire: async (id: string, patch: unknown) => {
+        stamps.push([id, patch]);
+      },
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => false });
+
+    await rt.runDue({ now: 100 });
+
+    expect(stamps).toEqual([["sch_1", { lastChatId: "chat_new" }]]);
   });
 
   it("a failed fire is an error, but the occurrence stays consumed (no repeat)", async () => {
@@ -158,7 +184,108 @@ describe("runDue consumes the occurrence before firing", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 1 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0 });
     expect(consumed).toBe(1); // consumed exactly once — never re-written after the failure
+  });
+});
+
+describe("onParked: the parked-predecessor guard", () => {
+  /** A chat whose last message carries an undecided approval — a parked turn. */
+  const PARKED_MESSAGES = [
+    { id: "m1", role: "user", parts: [{ type: "text", text: "daily digest" }] },
+    {
+      id: "m2",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-execute_tool",
+          toolCallId: "tc_1",
+          state: "approval-requested",
+          approval: { id: "ap_1" },
+        },
+      ],
+    },
+  ] as unknown as AppMessage[];
+  const PARKED_SCHEDULE = { ...SCHEDULE, lastChatId: "chat_prev" };
+
+  it("skips the occurrence (consumed, not fired) while the last fire's chat is parked", async () => {
+    let consumed = 0;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [PARKED_SCHEDULE],
+      completeSchedule: async () => {
+        consumed++;
+      },
+      loadMessages: async () => PARKED_MESSAGES,
+    });
+    let firedHook = false;
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        firedHook = true;
+        return true;
+      },
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1 });
+    expect(firedHook).toBe(false); // the host hook is skipped too — nothing runs
+    expect(consumed).toBe(1); // the occurrence is spent, so the row isn't hot-looped
+  });
+
+  it('onParked: "fire" opts out — never even reads the previous chat', async () => {
+    // loadMessages is NOT stubbed: the Proxy throws if the check runs at all.
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [{ ...PARKED_SCHEDULE, onParked: "fire" as const }],
+      completeSchedule: async () => {},
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+  });
+
+  it("a settled predecessor fires normally", async () => {
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [PARKED_SCHEDULE],
+      completeSchedule: async () => {},
+      // The approval was decided — the fold says "not pending".
+      loadMessages: async () =>
+        [
+          {
+            id: "m2",
+            role: "assistant",
+            parts: [
+              {
+                type: "tool-execute_tool",
+                toolCallId: "tc_1",
+                state: "approval-requested",
+                approval: { id: "ap_1", approved: true },
+              },
+            ],
+          },
+        ] as unknown as AppMessage[],
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+  });
+
+  it("a failed parked-check never blocks the fire", async () => {
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [PARKED_SCHEDULE],
+      completeSchedule: async () => {},
+      loadMessages: async () => {
+        throw new Error("db hiccup");
+      },
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
   });
 });

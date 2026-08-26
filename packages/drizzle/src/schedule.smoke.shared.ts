@@ -51,6 +51,24 @@ export async function scheduleSmoke<P>({
   });
   assert(plain.delivery === undefined, "absent delivery reads back as undefined");
 
+  // onParked round-trips; absent = undefined (the runtime defaults it to skip).
+  assert(plain.onParked === undefined, "absent onParked reads back as undefined");
+  const alwaysFire = await store.createSchedule(me, {
+    agent: "briefer",
+    cron: "0 8 * * *",
+    prompt: "fire regardless",
+    nextRunAt: soon,
+    onParked: "fire",
+  });
+  assert(alwaysFire.onParked === "fire", "onParked survives a create round trip");
+
+  // noteScheduleFire stamps the fire's chat for the next occurrence's check.
+  assert(plain.lastChatId == null, "lastChatId starts unset");
+  await store.noteScheduleFire?.(plain.id, { lastChatId: "chat_fire_1" });
+  const stamped = (await store.listSchedules(me)).find((s) => s.id === plain.id);
+  assert(stamped?.lastChatId === "chat_fire_1", "noteScheduleFire stamps lastChatId");
+  await store.deleteSchedule(me, alwaysFire.id);
+
   // Not due yet.
   assert(
     (await store.claimDueSchedules(Date.now(), 30_000, "node-1")).length === 0,

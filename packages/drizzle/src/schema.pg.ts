@@ -226,6 +226,10 @@ export const schedules = pgTable(
     delivery: jsonb("delivery"),
     nextRunAt: bigint("next_run_at", { mode: "number" }).notNull(),
     lastRunAt: bigint("last_run_at", { mode: "number" }),
+    /** Parked-predecessor policy ('skip' | 'fire'); null = the default ('skip'). */
+    onParked: text("on_parked"),
+    /** Chat of the last default-path fire (see StorageAdapter.noteScheduleFire). */
+    lastChatId: text("last_chat_id"),
     enabled: integer("enabled").notNull(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),

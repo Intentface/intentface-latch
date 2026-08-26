@@ -115,6 +115,8 @@ export function createSqliteAdapter<P>(
     delivery: r.delivery ?? undefined,
     nextRunAt: r.nextRunAt,
     lastRunAt: r.lastRunAt,
+    onParked: (r.onParked ?? undefined) as ScheduleRecord["onParked"],
+    lastChatId: r.lastChatId,
     enabled: r.enabled === 1,
     leaseOwner: r.leaseOwner,
     leaseExpiresAt: r.leaseExpiresAt,
@@ -422,6 +424,8 @@ export function createSqliteAdapter<P>(
         delivery: input.delivery ?? null,
         nextRunAt: input.nextRunAt,
         lastRunAt: null,
+        onParked: input.onParked ?? null,
+        lastChatId: null,
         enabled: 1,
         leaseOwner: null,
         leaseExpiresAt: null,
@@ -506,6 +510,16 @@ export function createSqliteAdapter<P>(
         .where(
           and(eq(schema.schedules.id, id), eq(schema.schedules.leaseOwner, owner)),
         );
+    },
+
+    async noteScheduleFire(id, patch) {
+      // Unfenced by design (see StorageAdapter): runs AFTER completeSchedule
+      // cleared the lease, and a concurrent claimer overwriting it stamps its
+      // own equally-valid chat.
+      await db
+        .update(schema.schedules)
+        .set({ lastChatId: patch.lastChatId })
+        .where(eq(schema.schedules.id, id));
     },
   };
 }

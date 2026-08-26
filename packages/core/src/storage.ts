@@ -163,6 +163,22 @@ export interface ScheduleRecord {
   /** Epoch ms of the next due fire. */
   nextRunAt: number;
   lastRunAt?: number | null;
+  /**
+   * What a fire does when the PREVIOUS fire's chat is still parked waiting on
+   * a human (an undecided approval or question). `"skip"` (the default when
+   * absent) consumes the occurrence without running — no new parked chat, no
+   * paid tokens, and the next occurrence re-checks. `"fire"` always runs
+   * (pre-existing behavior): pick it for schedules whose every occurrence
+   * matters even while one waits, e.g. a daily digest.
+   */
+  onParked?: "skip" | "fire";
+  /**
+   * The chat the LAST default-path fire ran in (stamped via
+   * `noteScheduleFire`), so the next occurrence can see a parked predecessor.
+   * Null/absent until the first fire, or when the host's `runSchedule` hook
+   * handles fires itself.
+   */
+  lastChatId?: string | null;
   enabled: boolean;
   /** Single-fire lease (exactly-once claim), same shape as runs. */
   leaseOwner?: string | null;
@@ -289,6 +305,8 @@ export interface StorageAdapter<P> {
       nextRunAt: number;
       /** Host-defined delivery target, stored verbatim (see `ScheduleRecord.delivery`). */
       delivery?: unknown;
+      /** Parked-predecessor policy (see `ScheduleRecord.onParked`); absent = `"skip"`. */
+      onParked?: "skip" | "fire";
     },
   ): Promise<ScheduleRecord>;
   /** The caller's schedules, most-recently-created first. */
@@ -332,4 +350,12 @@ export interface StorageAdapter<P> {
     patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
     owner: string,
   ): Promise<void>;
+  /**
+   * OPTIONAL system op (no principal): remember which chat a fire ran in, so
+   * the next occurrence can check `onParked` against it. Best-effort and
+   * unfenced — a concurrent claimer overwriting it stamps its own equally-valid
+   * chat. Adapters that don't implement it simply never skip parked fires
+   * (the pre-`onParked` behavior).
+   */
+  noteScheduleFire?(id: string, patch: { lastChatId: string }): Promise<void>;
 }
