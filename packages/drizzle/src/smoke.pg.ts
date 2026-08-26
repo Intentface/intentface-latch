@@ -76,6 +76,22 @@ async function main() {
   assert(gotRun?.kind === "turn", "run kind persisted");
   assert(gotRun?.toolsHash === "cafebabecafebabe", "run toolsHash persisted");
 
+  // listChats projects the LATEST run's status onto each chat (lastRunStatus).
+  const listed = await store.listChats(me);
+  assert(
+    listed[0]?.lastRunStatus === "completed",
+    "listChats projects the latest run's status",
+  );
+  // A strictly later startedAt — "latest" must not tie with the first run.
+  await new Promise((r) => setTimeout(r, 2));
+  const parked = await store.createRun(me, { chatId: chat.id, agent: "support", kind: "turn" });
+  await store.updateRun(parked.id, { status: "awaiting_input" });
+  const listedParked = await store.listChats(me);
+  assert(
+    listedParked[0]?.lastRunStatus === "awaiting_input",
+    "a parked latest run surfaces awaiting_input on the chat list",
+  );
+
   // Schedules: the opaque delivery blob and the owner-fenced "run now" bump.
   // Worth running on BOTH dialects — `delivery` is jsonb here and json-in-text
   // on sqlite, so a round trip is the only proof they agree.

@@ -52,7 +52,9 @@ const NAV: NavItem[] = [
 export function AppSidebar() {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
+  const [chats, setChats] = useState<
+    { id: string; title: string | null; agent: string; lastRunStatus?: string | null }[]
+  >([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
 
@@ -138,6 +140,13 @@ export function AppSidebar() {
                           search={{ agent: undefined }}
                         >
                           <span className="flex-1 truncate">{c.title?.trim() || c.agent}</span>
+                          {c.lastRunStatus === "awaiting_input" && (
+                            <span
+                              className="size-1.5 shrink-0 rounded-full bg-amber-500"
+                              title="Waiting for your input"
+                              aria-label="Waiting for your input"
+                            />
+                          )}
                         </Link>
                       }
                     />
