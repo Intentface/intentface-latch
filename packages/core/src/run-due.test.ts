@@ -162,7 +162,9 @@ describe("runDue consumes the occurrence before firing", () => {
 
     await rt.runDue({ now: 100 });
 
-    expect(stamps).toEqual([["sch_1", { lastChatId: "chat_new" }]]);
+    // firedAt = the lastRunAt completeSchedule wrote (the runDue `now`), so
+    // the adapter can fence the stamp to THIS occurrence.
+    expect(stamps).toEqual([["sch_1", { lastChatId: "chat_new", firedAt: 100 }]]);
   });
 
   it("a failed fire is an error, but the occurrence stays consumed (no repeat)", async () => {

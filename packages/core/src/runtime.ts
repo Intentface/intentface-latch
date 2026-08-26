@@ -3006,8 +3006,10 @@ export function createRuntime<P, RC = unknown>(
           });
           // Remember where this fire ran so the NEXT occurrence can see a
           // parked predecessor. Stamped before the turn (a parked turn still
-          // "completes" the await); optional — see StorageAdapter.
-          await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id });
+          // "completes" the await); optional — see StorageAdapter. `firedAt`
+          // is the lastRunAt this fire's completeSchedule wrote above, so a
+          // delayed stamp can't clobber a newer occurrence's.
+          await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id, firedAt: now });
           await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
         }
         fired++;

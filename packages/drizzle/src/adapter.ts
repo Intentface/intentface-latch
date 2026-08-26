@@ -513,13 +513,16 @@ export function createSqliteAdapter<P>(
     },
 
     async noteScheduleFire(id, patch) {
-      // Unfenced by design (see StorageAdapter): runs AFTER completeSchedule
-      // cleared the lease, and a concurrent claimer overwriting it stamps its
-      // own equally-valid chat.
+      // Fenced by the OCCURRENCE (see StorageAdapter): the stamp only lands
+      // while last_run_at still holds the value this fire's completeSchedule
+      // wrote — a delayed stamp from an older fire no-ops once a newer
+      // occurrence has consumed.
       await db
         .update(schema.schedules)
         .set({ lastChatId: patch.lastChatId })
-        .where(eq(schema.schedules.id, id));
+        .where(
+          and(eq(schema.schedules.id, id), eq(schema.schedules.lastRunAt, patch.firedAt)),
+        );
     },
   };
 }

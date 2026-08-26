@@ -352,10 +352,17 @@ export interface StorageAdapter<P> {
   ): Promise<void>;
   /**
    * OPTIONAL system op (no principal): remember which chat a fire ran in, so
-   * the next occurrence can check `onParked` against it. Best-effort and
-   * unfenced — a concurrent claimer overwriting it stamps its own equally-valid
+   * the next occurrence can check `onParked` against it. Best-effort, and
+   * fenced by the OCCURRENCE rather than the lease: `firedAt` is the
+   * `lastRunAt` this fire's `completeSchedule` just wrote, and the stamp only
+   * lands while the row still carries it — a delayed stamp from an older fire
+   * no-ops once a newer occurrence has consumed (e.g. a `runScheduleNow` bump
+   * overlapping a long turn), so `lastChatId` always names the newest fire's
    * chat. Adapters that don't implement it simply never skip parked fires
    * (the pre-`onParked` behavior).
    */
-  noteScheduleFire?(id: string, patch: { lastChatId: string }): Promise<void>;
+  noteScheduleFire?(
+    id: string,
+    patch: { lastChatId: string; firedAt: number },
+  ): Promise<void>;
 }
