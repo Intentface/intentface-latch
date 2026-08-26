@@ -1028,11 +1028,24 @@ function markSubagentApprovalResolved(
  * reject that ("This model does not support assistant message prefill. The
  * conversation must end with a user message.").
  *
- * Trim trailing non-tool parts (text/reasoning/step boundaries) that follow the
- * final tool/approval part of the last assistant message, so the projection ends
- * on the tool result (a user turn) and the model generates a fresh continuation.
- * Returns a shallow copy touching only the last message — the persisted history
- * (with the provisional text) is left intact; this shapes the resumed call only.
+ * Drop the trailing text/reasoning that follows the final TOOL part of the last
+ * assistant message, so the projection ends on the tool result (a user turn) and
+ * the model generates a fresh continuation. Returns a shallow copy touching only
+ * the last message.
+ *
+ * **The anchor must be a part the model projection keeps.** `toModelMessages`
+ * drops every `data-*` part, so anchoring on a bubbled `data-subagent-approval`
+ * kept the text BEFORE it — leaving the projection ending on assistant text,
+ * i.e. exactly the prefill this exists to prevent. That is the shape the
+ * agent-builder produces on every approval round: `… tool-spawn_agent,
+ * data-subagent-progress, data-subagent-approval, step-start, text,
+ * data-subagent-approval`. Only `tool-*` / `dynamic-tool` anchor.
+ *
+ * Parts after the anchor that the model never sees (`data-*`, `step-start`) are
+ * KEPT: the resumed turn's `onFinish` re-persists this message, so removing them
+ * would erase the approval markers the UI renders and `hasPendingApproval` reads.
+ * The trailing text is dropped from stored history for the same reason — it is
+ * provisional commentary about a decision that has now been made.
  */
 export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
   if (messages.length === 0) return messages;
@@ -1040,19 +1053,22 @@ export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage
   const last = messages[lastIndex];
   if (last.role !== "assistant") return messages;
   const parts = (last.parts ?? []) as { type: string }[];
-  // Last part that anchors a model-turn boundary we must keep: a tool call/result
-  // or a bubbled subagent approval. Everything after it is trailing commentary.
-  let keepUntil = -1;
+  // Last part that survives into the model projection as a turn boundary.
+  let anchor = -1;
   for (let i = parts.length - 1; i >= 0; i--) {
     const t = parts[i].type;
-    if (t.startsWith("tool-") || t === "dynamic-tool" || t === "data-subagent-approval") {
-      keepUntil = i;
+    if (t.startsWith("tool-") || t === "dynamic-tool") {
+      anchor = i;
       break;
     }
   }
-  // No tool/approval anchor, or nothing trailing to drop → leave untouched.
-  if (keepUntil === -1 || keepUntil === parts.length - 1) return messages;
-  const trimmed = { ...last, parts: parts.slice(0, keepUntil + 1) } as AppMessage;
+  // No tool anchor at all → nothing safe to say about this shape; leave it.
+  if (anchor === -1) return messages;
+  const isPrefill = (t: string) => t === "text" || t === "reasoning";
+  const tail = parts.slice(anchor + 1);
+  if (!tail.some((p) => isPrefill(p.type))) return messages;
+  const kept = [...parts.slice(0, anchor + 1), ...tail.filter((p) => !isPrefill(p.type))];
+  const trimmed = { ...last, parts: kept } as AppMessage;
   return [...messages.slice(0, lastIndex), trimmed];
 }
 
