@@ -10,6 +10,7 @@ export {
   isHostAllowed,
   buildAuthHeaders,
   needsMcpApproval,
+  mcpApprovalValue,
   nameHeuristicApproval,
 } from "./host.js";
 export type {
@@ -18,6 +19,7 @@ export type {
   McpConnection,
   McpAuth,
   McpApprovalPolicy,
+  McpCallApproval,
   McpToolInfo,
   NameHeuristicOptions,
   OpenMcp,

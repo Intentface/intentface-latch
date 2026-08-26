@@ -86,29 +86,74 @@ export interface McpToolInfo {
 }
 
 /**
+ * Per-CALL approval decision for one tool: evaluated with the model's input
+ * each time it calls the tool, so policy can key on ARGUMENTS. This is the
+ * escape hatch for meta-tool servers — one `execute_tool` multiplexing every
+ * operation through its arguments carries a single annotation set, so a
+ * per-tool boolean can only gate everything or nothing.
+ */
+export type McpCallApproval = (input: unknown) => boolean | Promise<boolean>;
+
+/**
  * Which of a connection's tools require human approval before running.
  * - `"destructive"` (default): respect MCP's built-in hints — gate any tool the
  *   server marks `destructiveHint: true` or explicitly `readOnlyHint: false`.
  * - `"all"` / `"none"`: gate every tool / no tool.
- * - a predicate: decide per tool from its annotations.
+ * - a predicate: decide per tool from its annotations. Return a boolean for a
+ *   whole-tool decision, or an {@link McpCallApproval} — `(input) => boolean` —
+ *   to decide per call (e.g. gate `execute_tool` only when
+ *   `input.toolName` starts with `create_`). Annotations stay the first-class
+ *   signal; the call function is for tools whose annotations structurally
+ *   can't say enough.
  */
 export type McpApprovalPolicy =
   | "destructive"
   | "all"
   | "none"
-  | ((tool: McpToolInfo) => boolean);
+  | ((tool: McpToolInfo) => boolean | McpCallApproval);
 
-/** Apply an approval policy to one tool (defaults to `"destructive"`). */
+/** The `"destructive"` rule: annotations say destructive / not read-only. */
+function destructiveByAnnotations(tool: McpToolInfo): boolean {
+  const a = tool.annotations ?? {};
+  return a.destructiveHint === true || a.readOnlyHint === false;
+}
+
+/**
+ * Apply an approval policy to one tool (defaults to `"destructive"`).
+ * A function result means "decide per call with the input" — truthy for
+ * gating purposes wherever a whole-tool answer is needed (a policy that must
+ * be decided without input is treated conservatively as gated).
+ */
 export function needsMcpApproval(
   policy: McpApprovalPolicy | undefined,
   tool: McpToolInfo,
-): boolean {
+): boolean | McpCallApproval {
   const p = policy ?? "destructive";
   if (typeof p === "function") return p(tool);
   if (p === "all") return true;
   if (p === "none") return false;
-  const a = tool.annotations ?? {};
-  return a.destructiveHint === true || a.readOnlyHint === false;
+  return destructiveByAnnotations(tool);
+}
+
+/**
+ * Resolve a policy to the value the AI SDK's `toolApproval` map takes for one
+ * tool: `"user-approval"` (always gate), `undefined` (never gate), or a
+ * per-call function the SDK evaluates with the call input.
+ */
+export function mcpApprovalValue(
+  policy: McpApprovalPolicy | undefined,
+  tool: McpToolInfo,
+):
+  | "user-approval"
+  | ((input: unknown) => Promise<"user-approval" | undefined>)
+  | undefined {
+  const gate = needsMcpApproval(policy, tool);
+  if (typeof gate === "function") {
+    // `undefined` is the SDK's "not-applicable" — the call runs ungated.
+    return async (input: unknown) =>
+      (await gate(input)) ? "user-approval" : undefined;
+  }
+  return gate ? "user-approval" : undefined;
 }
 
 /** Tuning for {@link nameHeuristicApproval} — extra verbs merged into the defaults. */
@@ -200,7 +245,7 @@ export function nameHeuristicApproval(
     const a = tool.annotations ?? {};
     // Annotations are authoritative when present — reuse the destructive rule.
     if (a.readOnlyHint !== undefined || a.destructiveHint !== undefined) {
-      return needsMcpApproval("destructive", tool);
+      return destructiveByAnnotations(tool);
     }
     // No hints — fall back to the tool-name verb heuristic.
     return pattern.test(normalizeToolName(tool.name));
@@ -414,9 +459,8 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
               ...sdkTool,
               toModelOutput: withStructuredContentFallback(sdkTool.toModelOutput),
             };
-            if (needsMcpApproval(conn.approval, info)) {
-              toolApproval[key] = "user-approval";
-            }
+            const approvalValue = mcpApprovalValue(conn.approval, info);
+            if (approvalValue !== undefined) toolApproval[key] = approvalValue;
           }
         } catch (error) {
           config.onConnectionError?.(conn.name, error);

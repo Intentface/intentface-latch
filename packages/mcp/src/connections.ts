@@ -110,8 +110,11 @@ export interface McpConnectionDef<P = unknown> {
    * Which of this connection's tools require human approval. Default
    * `"destructive"` — respect the MCP server's own annotations (gate tools it
    * marks destructive / not read-only). `"all"`, `"none"`, or a per-tool
-   * predicate `(tool) => boolean`. For policy that varies by caller, use
-   * {@link approvalFor} instead.
+   * predicate `(tool) => boolean` — which may instead return a per-CALL
+   * function `(input) => boolean`, evaluated with the model's arguments each
+   * call, for meta-tool servers whose one tool multiplexes every operation
+   * (gate `execute_tool` only when `input.toolName` starts with `create_`).
+   * For policy that varies by caller, use {@link approvalFor} instead.
    */
   approval?: McpApprovalPolicy;
   /**
