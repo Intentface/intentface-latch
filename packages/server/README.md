@@ -15,6 +15,31 @@ The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web 
 
 `resolveContext(request)` turns a request into your `Principal` (bring-your-own auth). A Hono adapter is exported from the `/hono` subpath.
 
+## OAuth callback identity
+
+The connection callback is the one route that does NOT authenticate via
+`resolveContext`. An IdP redirect arrives at a moment you don't control, so a
+degraded session there must never decide where credentials land. Instead,
+`authorize` pins the resolved principal into the OAuth flow state, and the
+callback rebuilds it from that pin:
+
+```ts
+createLatchHandler<Principal>({
+  runtime, connections, resolveContext,
+  // Validate/re-hydrate the pinned identity on the callback (e.g. re-check
+  // org membership). Null → 401. Default: trust the pin as-is.
+  reconstructPrincipal: async (identity) => validateMembership(identity),
+  oauthFlowMaxAgeMs: 30 * 60_000, // authorize → callback TTL (the default)
+});
+```
+
+A callback whose pin is older than `oauthFlowMaxAgeMs` redirects with
+`?error=flow_expired` (the user just re-runs connect). The pin is
+tamper-evident — the full state string is exact-matched against the copy the
+flow stored at `start()` — and principals are IDs-only by contract
+(see `@intentface/latch-core`'s `principal.ts`), so nothing sensitive rides
+in the URL.
+
 ## Usage
 
 ```ts
