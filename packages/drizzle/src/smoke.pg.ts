@@ -91,6 +91,18 @@ async function main() {
     listedParked[0]?.lastRunStatus === "awaiting_input",
     "a parked latest run surfaces awaiting_input on the chat list",
   );
+  // Equal startedAt (ms precision can tie): the id-desc tie-break must pick
+  // the same row on every read and on both dialects.
+  const tieAt = Date.now() + 60_000;
+  await db.insert(schema.runs).values([
+    { id: "run_tie_a", chatId: chat.id, agent: "support", status: "completed", startedAt: tieAt },
+    { id: "run_tie_b", chatId: chat.id, agent: "support", status: "errored", startedAt: tieAt },
+  ]);
+  const listedTied = await store.listChats(me);
+  assert(
+    listedTied[0]?.lastRunStatus === "errored",
+    "started_at ties break deterministically by id desc",
+  );
 
   // Schedules: the opaque delivery blob and the owner-fenced "run now" bump.
   // Worth running on BOTH dialects — `delivery` is jsonb here and json-in-text

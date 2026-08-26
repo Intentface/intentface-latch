@@ -178,9 +178,12 @@ export function createSqliteAdapter<P>(
       // Explicitly aliased raw SQL: drizzle renders `${schema.chats.id}`
       // UNQUALIFIED inside a select-field subquery, where it resolves to the
       // runs table's own `id` and the correlation silently never matches.
+      // `id desc` breaks started_at ties (ms precision) deterministically —
+      // an arbitrary but STABLE pick, so the projection can't flap between
+      // reads or disagree across dialects.
       const lastRunStatus = sql<
         string | null
-      >`(select r.status from ${sql.raw(getTableName(schema.runs))} r where r.chat_id = ${sql.raw(getTableName(schema.chats))}.id order by r.started_at desc limit 1)`;
+      >`(select r.status from ${sql.raw(getTableName(schema.runs))} r where r.chat_id = ${sql.raw(getTableName(schema.chats))}.id order by r.started_at desc, r.id desc limit 1)`;
       const rows = await db
         .select({ ...getTableColumns(schema.chats), lastRunStatus })
         .from(schema.chats)
