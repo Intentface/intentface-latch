@@ -288,7 +288,6 @@ export function createOAuth2Flow<TPrincipal>(opts: {
       const cfg = await opts.config(principal);
       const authorizeUrl = await assertPublicHttpsUrl(cfg.authorizeUrl);
       const csrf = randomHex(16);
-      await vault.set(principal, vaultKey("csrf"), csrf);
       // PKCE S256 — always sent; servers without PKCE support must ignore it.
       const verifier = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
         "base64url",
@@ -298,9 +297,12 @@ export function createOAuth2Flow<TPrincipal>(opts: {
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
       ).toString("base64url");
       // Same `<csrf>.<b64url(payload)>` format as latch-mcp's flows, so the
-      // handler's `decodeOAuthState` (returnTo, chat resume) works on our
-      // callbacks too.
+      // handler's `decodeOAuthState` (returnTo, chat resume, the pinned
+      // `__latch` principal) works on our callbacks too. Store the FULL state
+      // string, not just the csrf half: `finish` exact-matches the whole
+      // thing, making the payload tamper-evident like the MCP path.
       const state = `${csrf}.${b64url(startOpts?.state ?? {})}`;
+      await vault.set(principal, vaultKey("csrf"), state);
       const params = new URLSearchParams({
         client_id: cfg.clientId,
         redirect_uri: redirectUri,
@@ -318,9 +320,12 @@ export function createOAuth2Flow<TPrincipal>(opts: {
     },
 
     async finish(principal, params) {
-      const csrf = await vault.get(principal, vaultKey("csrf"));
-      const got = params.state?.split(".")[0];
-      if (!csrf || !got || got !== csrf) throw new Error("OAuth state mismatch");
+      // Exact-match the FULL state string (csrf + payload) against the stored
+      // copy — a tampered payload (returnTo, pinned principal) fails here even
+      // when the csrf half is genuine.
+      const storedState = await vault.get(principal, vaultKey("csrf"));
+      if (!storedState || !params.state || params.state !== storedState)
+        throw new Error("OAuth state mismatch");
       await vault.delete(principal, vaultKey("csrf"));
       const verifier = await vault.get(principal, vaultKey("verifier"));
       await vault.delete(principal, vaultKey("verifier"));

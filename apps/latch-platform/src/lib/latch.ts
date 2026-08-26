@@ -28,7 +28,7 @@ import { Cron } from "croner";
 import { connectionDefs } from "@/connections";
 import { agents } from "@/agents";
 import { secretEnv } from "./env";
-import { getPrincipalFromHeaders  } from "./session";
+import { credentialPrincipalOf, getPrincipalFromHeaders } from "./session";
 import type {Principal} from "./session";
 import { createCredentials  } from "./credentials";
 import type {Credentials} from "./credentials";
@@ -592,14 +592,46 @@ export async function getLatch(): Promise<{
     return { orgId: app.orgId, userId: app.userId, actorUserId: session.userId };
   };
 
+  // OAuth-callback identity: the handler rebuilds the principal from the pin
+  // baked into the flow state at authorize time — the live session at redirect
+  // time never decides where credentials land (a session with no active org
+  // once stored org-connection tokens under the personal owner). Validate the
+  // shape and re-check that the acting human is still an org member; every
+  // gate that produced the pinned principal (slackApp binding, shared-mode
+  // creator-only) already ran at authorize time.
+  const reconstructOAuthPrincipal = async (
+    identity: unknown,
+  ): Promise<Principal | null> => {
+    if (typeof identity !== "object" || identity === null) return null;
+    const p = identity as Partial<Principal>;
+    if (typeof p.orgId !== "string" || !p.orgId) return null;
+    if (p.userId !== undefined && typeof p.userId !== "string") return null;
+    if (p.actorUserId !== undefined && typeof p.actorUserId !== "string") return null;
+    const principal: Principal = {
+      orgId: p.orgId,
+      ...(p.userId ? { userId: p.userId } : {}),
+      ...(p.actorUserId ? { actorUserId: p.actorUserId } : {}),
+    };
+    // Flows are always started by a human — an identity with no acting user
+    // is malformed, not an org-level flow.
+    const actor = credentialPrincipalOf(principal).userId;
+    if (!actor) return null;
+    if (!(await isOrgMember(actor, principal.orgId))) return null;
+    return principal;
+  };
+
   const handler = createLatchHandler<Principal>({
     runtime,
     connections: handlerConnections,
     basePath: "/api/latch",
     resolveContext,
-    // Folded into the OAuth state by the authorize route so the callback —
-    // whose query string is the IdP's, not ours — can rebuild the same
-    // binding principal above.
+    reconstructPrincipal: reconstructOAuthPrincipal,
+    // LEGACY: only read by the deprecated no-pin callback fallback now that
+    // the authorize route pins the full resolved principal into the state.
+    // The authorize-leg `?slackApp=` handling in resolveContext above is what
+    // still matters — it PRODUCES the binding principal that gets pinned.
+    // TODO(remove): drop this + resolveContext's callback-leg slackApp branch
+    // once in-flight pre-pin flows have drained.
     stateParams: ["slackApp"],
     // Guards POST /api/latch/cron/run for an external cron in prod. That route is
     // NOT user-authed and fires every tenant's due schedules, so in production an
