@@ -879,15 +879,20 @@ export const saveUserMemorySchemaFn = createServerFn({ method: "POST" })
     }
   });
 
-/** Delete a UI agent at its scope. */
+/** Delete a UI agent at its scope, cascading its schedules + channel bindings. */
 export const deleteAgentFn = createServerFn({ method: "POST" })
   .validator((data: { name: string; scope: "user" | "org" }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false };
-    const { agentStore } = await getLatch();
-    await agentStore.remove(principal, data.scope, data.name);
-    return { ok: true };
+    // Same gate as removeConnectionFn: org-shared agents are admin-managed —
+    // the cascade reaches other members' schedules and the org's bots.
+    if (data.scope === "org" && !(await isOrgAdmin(principal.userId!, principal.orgId))) {
+      return { ok: false };
+    }
+    const { deleteAgentCascade } = await import("./agent-delete");
+    const res = await deleteAgentCascade(principal, data.scope, data.name);
+    return { ok: res.ok, warnings: res.warnings, error: res.error };
   });
 
 /** The caller's scheduled agents, for the Schedules page. */

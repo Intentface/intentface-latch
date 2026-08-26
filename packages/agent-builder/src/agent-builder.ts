@@ -472,8 +472,20 @@ async function builderTools<P>(
         let removedSchedules = 0;
         const scheduleCleanupFailures: string[] = [];
         if (scheduling) {
-          const mine = (await runtime.listSchedules({ principal })).filter(
-            (s) => s.agent === target,
+          // A stored ref may carry a host-written scope pin (`org:name` /
+          // `user:name` — hosts schedule `run.agent` verbatim; stored names
+          // never contain `:`). Compare the parsed name, and when pinned, the
+          // pin too — a bare `name` match against a pinned ref misses it, and
+          // deleting the org record must not take a `user:`-pinned schedule
+          // for a same-named personal agent with it.
+          const refMatches = (ref: string): boolean => {
+            const pin = /^(org|user):(.+)$/.exec(ref);
+            return pin
+              ? pin[2] === target && pin[1] === scope
+              : ref === target;
+          };
+          const mine = (await runtime.listSchedules({ principal })).filter((s) =>
+            refMatches(s.agent),
           );
           for (const s of mine) {
             try {
