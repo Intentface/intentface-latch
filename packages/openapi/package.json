@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-openapi",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Latch OpenAPI connections — turn an OpenAPI 3.x doc into agent tools, with a per-tenant SSRF allowlist and brokered auth.",
   "license": "MIT",
   "type": "module",
