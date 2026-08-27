@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-memory",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Latch agent memory — always-loaded compiled index, searchable episodic store, and background extraction/consolidation over a pluggable MemoryStore (Loredex-backed first).",
   "license": "MIT",
   "type": "module",
