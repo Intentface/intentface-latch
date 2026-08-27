@@ -66,6 +66,7 @@ await runtime.schedule({
   timezone: "Europe/Helsinki",
   prompt: "Summarise last week's signups.",
   delivery: { kind: "slack", channel: "C123" }, // opaque to core
+  onParked: "skip", // the default; see "When a fire stops for a human" below
 });
 ```
 
@@ -84,10 +85,20 @@ createRuntime({
 Then fire due schedules from the same route as `sweep`:
 
 ```ts
-await runtime.runDue(); // → { fired, errors }  — all tenants, each claimed once
+await runtime.runDue();
+// → { fired, errors, skipped, parked }  — all tenants, each claimed once
 ```
 
 Each fire reconstructs the principal from the stored identity blob, runs the turn, and advances the schedule.
+
+### When a fire stops for a human
+
+An unattended turn can meet an approval gate, and then it **parks**: the tokens are spent, no answer is produced, and nobody is there to decide. Latch treats that as a legitimate outcome (a scheduled agent asking before it mutates something is the point of the gate) and makes it loud rather than impossible:
+
+- **`parked`** counts fires that ran and stopped waiting on a human. They are counted in `fired` too — the turn did run — and logged on the tick it happens, which matters for a one-shot schedule that has no later occurrence.
+- **`onParked`** decides what the *next* occurrence does while the previous fire is still waiting: `"skip"` (the default) consumes the occurrence without running, so a recurring schedule can't mint a new parked chat and a new bill every tick; `"fire"` always runs, for a digest whose every occurrence matters even while one waits. `skipped` counts those.
+- **Which conversations need a person** is a plain list read: `ChatRecord.lastRunStatus` is `"awaiting_input"` for a chat whose latest run is waiting, and self-heals when the conversation moves on.
+- **To push a notification** rather than wait for someone to look, use `observability.onFinish` and check `trigger` — see [Observability](/docs/seams#observability--plain-event-callbacks). `status: "awaiting_input"` with `trigger: "schedule"` is precisely "a fire nobody can answer".
 
 ### Delivering somewhere other than a fresh chat
 

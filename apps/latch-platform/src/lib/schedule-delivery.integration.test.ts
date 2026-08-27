@@ -48,7 +48,7 @@ let client: Client;
  * 1.1's remaining half: the turn "completed" as far as the stream is
  * concerned, but no answer was produced and nobody is there to approve.
  */
-function buildParking() {
+function buildParking(observability?: Record<string, unknown>) {
   const gateStream = () =>
     new ReadableStream({
       start(c) {
@@ -89,6 +89,7 @@ function buildParking() {
       }),
     },
     cron: (_expr, afterMs) => afterMs + 15 * 60 * 1000,
+    observability: observability as never,
   });
 }
 
@@ -140,6 +141,49 @@ describe("runDue reports a fire that parked on a human", () => {
     const chats = await runtime.listChats({ principal });
     expect(chats).toHaveLength(1);
     expect(chats[0]!.lastRunStatus).toBe("awaiting_input");
+  });
+});
+
+describe("observability marks WHO set the turn off", () => {
+  it('stamps trigger: "schedule" on a fire, so a park is distinguishable from an interactive one', async () => {
+    const finished: { status: string; trigger: string; chatId: string }[] = [];
+    const runtime = buildParking({
+      onFinish: (e: { status: string; trigger: string; chatId: string }) => {
+        finished.push({ status: e.status, trigger: e.trigger, chatId: e.chatId });
+      },
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "how many?" });
+    await runtime.runDue();
+
+    // The hook already carries principal/chatId/runId/cost — `trigger` is what
+    // makes it actionable: awaiting_input + schedule = nobody can answer this,
+    // push it. The same status under "chat" is a gate in front of a live user.
+    expect(finished).toHaveLength(1);
+    expect(finished[0]!.status).toBe("awaiting_input");
+    expect(finished[0]!.trigger).toBe("schedule");
+  });
+
+  it('stamps trigger: "chat" on a user-driven turn — same agent, same gate', async () => {
+    const triggers: string[] = [];
+    const runtime = buildParking({
+      onFinish: (e: { trigger: string }) => triggers.push(e.trigger),
+    });
+    const res = await runtime.handleChat({
+      principal,
+      agent: "briefer",
+      chatId: "chat_interactive",
+      message: {
+        id: "m1",
+        role: "user",
+        parts: [{ type: "text", text: "hi" }],
+        metadata: { visibility: "user", createdAt: 0 },
+      },
+    } as never);
+    await res.text();
+    // Parks on the very same gate as the scheduled fire above — only the
+    // trigger tells the two apart, which is the whole point.
+    expect(triggers).toEqual(["chat"]);
   });
 });
 

@@ -270,6 +270,29 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
 }
 
 /** Fields common to every observability event. */
+/**
+ * What started this turn — and, in practice, whether a human is at the other
+ * end of it:
+ *
+ * - `"chat"` — a user message (`handleChat` / `runTurnStream`). Someone is
+ *   watching the stream.
+ * - `"decision"` — a human answered a pending request: an approval decision or
+ *   a client-handled tool result. Someone is watching.
+ * - `"schedule"` — a cron/one-shot fire (`runDue`). NOBODY is watching.
+ * - `"resume"` — the durability sweep recovered a crashed run and drove it to
+ *   completion server-side. Nobody is watching.
+ *
+ * That distinction is what makes the observability hooks usable as an
+ * operational notification channel and not just an analytics feed: a turn that
+ * finishes `awaiting_input` under `"schedule"` or `"resume"` is a person who
+ * needs to be told, while the same status under `"chat"` or `"decision"` is
+ * just a gate rendering in front of someone who can answer it.
+ *
+ * A subagent turn inherits its parent's trigger (like `rootChatId`), so a
+ * whole delegation tree is attributable to what set it off.
+ */
+export type TurnTrigger = "chat" | "decision" | "schedule" | "resume";
+
 export interface ObservabilityEventBase<P> {
   principal: P;
   chatId: string;
@@ -280,6 +303,8 @@ export interface ObservabilityEventBase<P> {
   modelId: string;
   /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
   depth: number;
+  /** What started this turn — see {@link TurnTrigger}. */
+  trigger: TurnTrigger;
 }
 
 /** One completed generation step (model call + any tool calls made in it). */
@@ -1175,6 +1200,12 @@ export function createRuntime<P, RC = unknown>(
     promptCaching?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
+    /**
+     * What started this turn (see `TurnTrigger`). Stamped on every
+     * observability event so a host can tell an unattended park — nobody to
+     * answer the gate — from an interactive one. Defaults to `"chat"`.
+     */
+    trigger?: TurnTrigger;
     /** Telemetry linkage: the run that spawned this subagent turn (if any). */
     parentRunId?: string;
     /** Telemetry linkage: the top-level conversation id (threaded through
@@ -1217,6 +1248,7 @@ export function createRuntime<P, RC = unknown>(
     const autoApprove = args.autoApprove ?? false;
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
+    const trigger = args.trigger ?? "chat";
     const ephemeral = args.ephemeral ?? false;
     // The top-level conversation id — this turn's own chat unless a spawn
     // threaded a root down. Subagent turns spawned below inherit it, so a whole
@@ -1476,6 +1508,9 @@ export function createRuntime<P, RC = unknown>(
             // down so the subagent's trace nests under this conversation.
             parentRunId: run.id,
             rootChatId,
+            // A subagent inherits what set the tree off, so a scheduled fire's
+            // delegate is still attributable to the schedule (see TurnTrigger).
+            trigger,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -1808,6 +1843,7 @@ export function createRuntime<P, RC = unknown>(
               agent: run.agent,
               modelId,
               depth,
+              trigger,
               step: {
                 text: step.text,
                 finishReason: step.finishReason,
@@ -1923,6 +1959,7 @@ export function createRuntime<P, RC = unknown>(
             agent: run.agent,
             modelId,
             depth,
+            trigger,
             status: "errored",
             usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
             cost,
@@ -1977,6 +2014,7 @@ export function createRuntime<P, RC = unknown>(
           agent: run.agent,
           modelId,
           depth,
+          trigger,
           status: paused ? "awaiting_input" : "completed",
           usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
           cost,
@@ -2007,6 +2045,7 @@ export function createRuntime<P, RC = unknown>(
           agent: run.agent,
           modelId,
           depth,
+          trigger,
           error,
         });
         // The AI SDK's onError must return the client string synchronously, so
@@ -2244,6 +2283,8 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages,
       runtimeCtx,
+      // Crash recovery, driven server-side: nobody is watching this stream.
+      trigger: "resume",
     });
     await res.text();
 
@@ -2376,6 +2417,9 @@ export function createRuntime<P, RC = unknown>(
       // the tool result (a user turn), not an assistant prefill.
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
+      // A human just decided something, so a human is present — even if this
+      // turn parks again on the NEXT gate (see TurnTrigger).
+      trigger: "decision",
     });
   }
 
@@ -2440,6 +2484,8 @@ export function createRuntime<P, RC = unknown>(
       // Resume: same prefill guard as applyApproval (see trimTrailingAssistantPrefill).
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
+      // A client-handled tool result is a human answering (see TurnTrigger).
+      trigger: "decision",
     });
   }
 
@@ -2686,6 +2732,8 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [message],
       runtimeCtx,
+      // A cron/one-shot fire — no human at the other end (see TurnTrigger).
+      trigger: "schedule",
     });
     await res.text();
     // The fold over the persisted log — the same truth every interactive path
@@ -2741,6 +2789,7 @@ export function createRuntime<P, RC = unknown>(
     rootChatId,
     turnContext,
     promptCaching,
+    trigger,
   }: {
     principal: P;
     agent: string;
@@ -2761,6 +2810,8 @@ export function createRuntime<P, RC = unknown>(
     parentRunId?: string;
     /** Telemetry: the top-level conversation id (shared session across the tree). */
     rootChatId?: string;
+    /** What set the delegation tree off (see `TurnTrigger`); inherited as-is. */
+    trigger?: TurnTrigger;
     /**
      * Waive HITL approvals inside the subagent. Default true (autonomous runs —
      * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
@@ -2811,6 +2862,7 @@ export function createRuntime<P, RC = unknown>(
       depth,
       parentRunId,
       rootChatId,
+      trigger,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
       // streams them into the parent turn). Observation must never break the
       // run — the primary stream is drained independently below.
@@ -2889,6 +2941,8 @@ export function createRuntime<P, RC = unknown>(
       // Keep the resumed turn nested under the original trace/session.
       parentRunId: linkage?.parentRunId,
       rootChatId: linkage?.rootChatId,
+      // Reached only by a human deciding the bubbled-up approval.
+      trigger: "decision",
     });
     await res.text();
     const after = await storage.loadMessages(principal, subChatId);
