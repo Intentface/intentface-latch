@@ -4,6 +4,8 @@ import { drizzle } from "drizzle-orm/libsql";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Runtime, ScheduleRecord } from "@intentface/latch-core";
+import { tool } from "ai";
+import { z } from "zod";
 import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 
@@ -40,6 +42,56 @@ const textStream = (text: string) =>
 
 let client: Client;
 
+/**
+ * A runtime whose agent always calls an approval-gated tool — so a scheduled
+ * fire runs, spends its tokens, and stops waiting on a human. This is finding
+ * 1.1's remaining half: the turn "completed" as far as the stream is
+ * concerned, but no answer was produced and nobody is there to approve.
+ */
+function buildParking() {
+  const gateStream = () =>
+    new ReadableStream({
+      start(c) {
+        for (const p of [
+          { type: "stream-start", warnings: [] },
+          { type: "response-metadata", id: "r", modelId: "mock", timestamp: new Date(0) },
+          {
+            type: "tool-call",
+            toolCallId: "tc_1",
+            toolName: "gated",
+            input: JSON.stringify({ n: 1 }),
+          },
+          { type: "finish", finishReason: "tool-calls", usage },
+        ])
+          c.enqueue(p);
+        c.close();
+      },
+    });
+  const model = new MockLanguageModelV3({ doStream: async () => ({ stream: gateStream() }) });
+  const db = drizzle(client, { schema });
+  return createRuntime<P, { orgId: string }>({
+    storage: createSqliteAdapter<P>(db, { owner: (p) => [p.orgId, p.userId] }),
+    context: defineContext<P, { orgId: string }>({
+      build: ({ principal: p }) => ({ orgId: p.orgId }),
+    }),
+    agents: {
+      briefer: defineAgent<P>({
+        model: model as never,
+        instructions: "test agent",
+        tools: {
+          gated: tool({
+            description: "needs approval",
+            inputSchema: z.object({ n: z.number() }),
+            execute: async ({ n }) => ({ ok: n }),
+          }),
+        },
+        toolApproval: { gated: "user-approval" },
+      }),
+    },
+    cron: (_expr, afterMs) => afterMs + 15 * 60 * 1000,
+  });
+}
+
 /** A runtime whose only interesting seam is `runSchedule`. */
 function build(runSchedule?: (i: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>) {
   const model = new MockLanguageModelV3({
@@ -69,6 +121,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("runDue reports a fire that parked on a human", () => {
+  it("counts it in `parked` (and in `fired` — the turn did run)", async () => {
+    const runtime = buildParking();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "how many?" });
+
+    // fired: the turn happened and was paid for. parked: it produced no
+    // answer and is waiting on someone. A one-shot has no later occurrence
+    // to reveal that, so this tick has to say it.
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1 });
+    expect(warn.mock.calls.some(([m]) => String(m).includes("fire parked waiting on a human"))).toBe(
+      true,
+    );
+
+    // And the chat it parked in is discoverable through the ordinary list —
+    // lastRunStatus is the operator-facing half of the same signal.
+    const chats = await runtime.listChats({ principal });
+    expect(chats).toHaveLength(1);
+    expect(chats[0]!.lastRunStatus).toBe("awaiting_input");
+  });
+});
+
 describe("runDue → runSchedule hook", () => {
   it("hands the fire to the host, with the schedule's delivery and principal", async () => {
     const seen: { schedule: ScheduleRecord; principal: P }[] = [];
@@ -85,7 +159,7 @@ describe("runDue → runSchedule hook", () => {
       delivery: { kind: "telegram", botId: "bot-1" },
     });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
     expect(seen).toHaveLength(1);
     expect(seen[0]!.principal).toEqual(principal);
     expect(seen[0]!.schedule.prompt).toBe("morning brief");
@@ -100,7 +174,7 @@ describe("runDue → runSchedule hook", () => {
     const runtime = build(async () => false);
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "brief me" });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
     const chats = await runtime.listChats({ principal });
     expect(chats).toHaveLength(1);
     expect(chats[0]!.agent).toBe("briefer");
@@ -112,7 +186,7 @@ describe("runDue → runSchedule hook", () => {
     });
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "brief me" });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
     expect(await runtime.listChats({ principal })).toHaveLength(1);
   });
 
@@ -128,14 +202,14 @@ describe("runDue → runSchedule hook", () => {
     // A recurring schedule's first fire is its first cron occurrence, not now.
     const due = before.nextRunAt;
 
-    expect(await runtime.runDue({ now: due })).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(await runtime.runDue({ now: due })).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
     const after = (await runtime.listSchedules({ principal }))[0]!;
     expect(after.nextRunAt).toBeGreaterThan(before.nextRunAt);
     expect(after.enabled).toBe(true);
     expect(after.lastRunAt).toBeTruthy();
 
     // A second tick at the same instant finds nothing due — it advanced past it.
-    expect(await runtime.runDue({ now: due })).toEqual({ fired: 0, errors: 0, skipped: 0 });
+    expect(await runtime.runDue({ now: due })).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("a one-shot is spent after firing", async () => {
@@ -143,7 +217,7 @@ describe("runDue → runSchedule hook", () => {
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "once" });
     await runtime.runDue();
     expect((await runtime.listSchedules({ principal }))[0]!.enabled).toBe(false);
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0 });
   });
 });
 
@@ -197,10 +271,10 @@ describe("runScheduleNow", () => {
       cron: "*/15 * * * *",
       prompt: "later",
     });
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0 });
 
     expect(await runtime.runScheduleNow({ principal, id: created.id })).toBe(true);
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
     expect(fired).toEqual([created.id]);
   });
 
@@ -219,7 +293,7 @@ describe("runScheduleNow", () => {
       prompt: "later",
     });
     expect(await runtime.runScheduleNow({ principal: other, id: created.id })).toBe(false);
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("won't resurrect a spent one-shot", async () => {
@@ -234,6 +308,6 @@ describe("runScheduleNow", () => {
     expect((await runtime.listSchedules({ principal }))[0]!.enabled).toBe(false);
 
     expect(await runtime.runScheduleNow({ principal, id: created.id })).toBe(false);
-    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0 });
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0 });
   });
 });

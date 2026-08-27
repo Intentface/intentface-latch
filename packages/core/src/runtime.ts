@@ -568,10 +568,18 @@ export interface Runtime<P> {
    * fire's chat is still parked on a human (see `ScheduleRecord.onParked`) —
    * distinct from `errors` so a quiet schedule is legible as "waiting on you",
    * never mistaken for "ran fine" or "broken".
+   *
+   * `parked` counts fires that RAN and then stopped waiting on a human (an
+   * approval or question they cannot answer) — tokens spent, no answer
+   * delivered. They are counted in `fired` too: the turn did happen. A
+   * non-zero `parked` is the signal to go look — a cron whose every fire parks
+   * is paying for nothing, and for a one-shot schedule there is no later
+   * occurrence to notice. Chats awaiting a human are queryable via
+   * `ChatRecord.lastRunStatus`.
    */
   runDue(opts?: {
     now?: number;
-  }): Promise<{ fired: number; errors: number; skipped: number }>;
+  }): Promise<{ fired: number; errors: number; skipped: number; parked: number }>;
 }
 
 /** A user's decision on one pending tool-approval request. */
@@ -2653,13 +2661,19 @@ export function createRuntime<P, RC = unknown>(
     } as AppMessage;
   }
 
-  /** Run one turn to completion server-side (no client consuming the stream). */
+  /**
+   * Run one turn to completion server-side (no client consuming the stream).
+   * Reports whether the turn ended PARKED — waiting on a human (an undecided
+   * approval or client tool result) rather than finished. An unattended caller
+   * (`runDue`) needs that: the stream ending is not the same as an answer, and
+   * a parked scheduled turn has spent its tokens and produced nothing.
+   */
   async function runTurnToCompletion(
     principal: P,
     agentName: string,
     message: AppMessage,
     chatId: string,
-  ): Promise<void> {
+  ): Promise<{ parked: boolean }> {
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agentName, principal);
     await storage.appendMessages(chatId, [message]);
     const { run, lease } = await openRun(principal, chatId, agentName);
@@ -2674,6 +2688,13 @@ export function createRuntime<P, RC = unknown>(
       runtimeCtx,
     });
     await res.text();
+    // The fold over the persisted log — the same truth every interactive path
+    // trusts — not the run row, which a parked turn also leaves behind.
+    const after = await storage.loadMessages(principal, chatId);
+    const last = after[after.length - 1];
+    return {
+      parked: hasPendingApproval(after) || (!!last && hasPendingToolResult([last])),
+    };
   }
 
   /** Merged agent directory (code-declared + dynamic) — name/title/description. */
@@ -2922,12 +2943,13 @@ export function createRuntime<P, RC = unknown>(
 
   async function runDue(opts?: {
     now?: number;
-  }): Promise<{ fired: number; errors: number; skipped: number }> {
+  }): Promise<{ fired: number; errors: number; skipped: number; parked: number }> {
     const now = opts?.now ?? Date.now();
     const claimed = await storage.claimDueSchedules(now, dur.leaseTtlMs, dur.instanceId);
     let fired = 0;
     let errors = 0;
     let skipped = 0;
+    let parked = 0;
     for (const s of claimed) {
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
       // Consume the occurrence BEFORE firing, not after. The claim lease is
@@ -3010,7 +3032,22 @@ export function createRuntime<P, RC = unknown>(
           // is the lastRunAt this fire's completeSchedule wrote above, so a
           // delayed stamp can't clobber a newer occurrence's.
           await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id, firedAt: now });
-          await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+          const outcome = await runTurnToCompletion(
+            principal,
+            s.agent,
+            userMessageOf(s.prompt),
+            chat.id,
+          );
+          if (outcome.parked) {
+            // Say it on THIS tick, not the next one: a one-shot has no next
+            // occurrence, and even a cron's operator shouldn't have to wait
+            // for the skip message to learn that a paid fire produced nothing.
+            parked++;
+            console.warn(
+              `[schedule] ${s.id} (${s.agent}): fire parked waiting on a human in ` +
+                `chat ${chat.id} — no answer was delivered`,
+            );
+          }
         }
         fired++;
       } catch (e) {
@@ -3021,7 +3058,7 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       }
     }
-    return { fired, errors, skipped };
+    return { fired, errors, skipped, parked };
   }
 
   return {

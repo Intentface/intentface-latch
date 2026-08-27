@@ -98,7 +98,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     expect(order).toEqual(["consume", "fire"]);
     expect(advanced).toEqual({ nextRunAt: NEXT, lastRunAt: 100, enabled: true });
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("disables a one-shot (cron: null) at consume time", async () => {
@@ -137,7 +137,7 @@ describe("runDue consumes the occurrence before firing", () => {
     const res = await rt.runDue({ now: 100 });
 
     expect(firedHook).toBe(false);
-    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0 });
   });
 
   it("stamps the fire's chat via noteScheduleFire so the next occurrence can see it", async () => {
@@ -186,7 +186,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0 });
     expect(consumed).toBe(1); // consumed exactly once — never re-written after the failure
   });
 });
@@ -230,7 +230,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1 });
+    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1, parked: 0 });
     expect(firedHook).toBe(false); // the host hook is skipped too — nothing runs
     expect(consumed).toBe(1); // the occurrence is spent, so the row isn't hot-looped
   });
@@ -245,7 +245,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("a settled predecessor fires normally", async () => {
@@ -273,7 +273,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("a failed parked-check never blocks the fire", async () => {
@@ -288,6 +288,6 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 });
