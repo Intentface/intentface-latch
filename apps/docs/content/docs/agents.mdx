@@ -3,19 +3,21 @@ title: Agents
 description: defineAgent, the capability flags, and how an agent resolves per turn.
 ---
 
-An agent is a **factory**, not a static object — it runs per turn and receives the caller's principal and context, so the same registry entry can behave differently per tenant.
+An agent is a **factory**, not a static object — it runs per turn and receives `{ context, principal, turnContext }`, so the same registry entry can behave differently per tenant. `context` is the runtime context your `context.build` produced for this turn; `principal` is the caller; `turnContext` is the ephemeral per-request payload (absent on resume/cron — never require it).
 
 ```ts
 import { defineAgent } from "@intentface/latch-core";
 import { anthropic } from "@ai-sdk/anthropic";
 
-const assistant = defineAgent<Principal, RuntimeContext>(({ principal, context }) => ({
+const assistant = defineAgent<Principal, RuntimeContext>(({ context, principal }) => ({
   model: anthropic("claude-sonnet-4-6"),
   instructions: `You are helping ${context.orgName}.`,
 }));
 
 const agents = { assistant };
 ```
+
+(The same value is also available under the legacy name `runtime` — deprecated, because it collides with the composition root `createRuntime` returns.)
 
 `defineAgent` accepts either form and always returns an `AgentFactory`: hand it a factory and it passes it through; hand it a static `AgentConfig` and it wraps it as `() => config`. It also attaches optional `meta`.
 

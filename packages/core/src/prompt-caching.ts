@@ -88,6 +88,38 @@ export function promptCachingPlanFor(
   return undefined;
 }
 
+/**
+ * The DEFAULT caching plan, used when the runtime has no `resolvePromptCaching`
+ * hook: derive the provider family from the model object itself — every AI SDK
+ * `LanguageModel` carries a `provider` string (`"anthropic.messages"`,
+ * `"openai.responses"`, …) — and apply {@link promptCachingPlanFor}. Measured
+ * on a real MCP-heavy agent, this is a ~6x difference in unit cost (a ~32k-token
+ * tool catalogue re-billed every step vs read from cache), which is not a
+ * default a customer should have to discover by reading source.
+ *
+ * Deliberately conservative: only FIRST-PARTY Anthropic/OpenAI provider ids
+ * match (Bedrock/Vertex ids don't contain these substrings), because the
+ * Anthropic plan's request-level `cache_control` is a first-party feature.
+ * Unknown providers get no plan and are untouched. Opt out entirely with
+ * `resolvePromptCaching: () => undefined`, or per turn with
+ * `promptCaching: false`.
+ */
+export function defaultPromptCachingPlan(
+  model: unknown,
+  agent: string,
+): PromptCachingPlan | undefined {
+  const provider =
+    typeof model === "object" && model !== null
+      ? String((model as { provider?: unknown }).provider ?? "")
+      : "";
+  const family = provider.includes("anthropic")
+    ? "anthropic"
+    : provider.includes("openai")
+      ? "openai"
+      : undefined;
+  return promptCachingPlanFor(family, { agent });
+}
+
 /** FNV-1a 64-bit over a string — dependency-free stable fingerprint. */
 function fnv1a64(input: string): string {
   let hash = 0xcbf29ce484222325n;

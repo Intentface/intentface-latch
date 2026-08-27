@@ -10,6 +10,7 @@
     "turn-inputs",
     "principals",
     "storage",
+    "client",
     "operations",
     "seams"
   ]
