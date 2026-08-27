@@ -1,5 +1,22 @@
 # @intentface/latch-core
 
+## 0.7.0
+
+### Minor Changes
+
+- fcef9d2: The mounted HTTP surface catches up with the runtime, and an unattended fire that parks is now reported.
+  
+  - `POST /schedules` forwards `delivery` and `onParked` (both were silently dropped, which made the whole `runSchedule` delivery seam unreachable through the handler); an unknown `onParked` is a 400 rather than a silent default.
+  - New `GET /schedules/:id` (owner-scoped, 404 for anything not in the caller's own list) and `POST /schedules/:id/run-now`, which arms the schedule for the next tick so "run now" goes through the ordinary `runDue` path instead of drifting from it.
+  - `GET /runs` no longer returns each run's `identity` — the serialized principal is durable server state and a customer type the docs invite you to extend, so it never enters a browser payload. Read it server-side via `runtime.listRuns`.
+  - `runDue` returns a new `parked` count: fires that ran and then stopped waiting on a human (tokens spent, no answer delivered), logged on the tick it happens. Counted in `fired` too — the turn did run. This matters most for a one-shot schedule, which has no later occurrence for `onParked` to skip.
+  - Docs: the callback route's "resume a waiting chat" comment was wrong (it redirects; resuming is the client's job) — corrected, and the client continuation protocol is now documented in the server README.
+- fcef9d2: Observability events now carry `trigger` — what started the turn, and so whether anyone is watching it: `"chat"` (a user message), `"decision"` (a human answered an approval or a client-handled tool), `"programmatic"` (a direct `runAgent` call — no client stream, so `runAgent` takes a `trigger` for hosts that know a person is waiting), `"schedule"` (a cron/one-shot fire), `"resume"` (the durability sweep recovering a crashed run). A subagent turn inherits its parent's trigger, like `rootChatId`.
+  
+  This is what makes `observability.onFinish` usable as an operational notification channel rather than only an analytics feed: it already carries `principal`, `chatId`, `runId`, `agent`, `status` and `cost`, but `status: "awaiting_input"` was indistinguishable between a scheduled fire nobody can answer and a gate rendering in front of a live user. Now `status === "awaiting_input" && (trigger === "schedule" || trigger === "resume")` is exactly "go tell this turn's owner". Documented in the Observability and Schedules seams, with a push example — no new seam, and no second overlapping way to learn the same fact.
+  
+  Relatedly, `runSchedule` may now return `{ handled, chatId?, parked? }` instead of a bare boolean. A host that takes over delivery owns the chat its fire ran in, so only it can report that chat (which the next occurrence's `onParked` check reads) and whether the fire parked (which joins `runDue`'s `parked` count). A bare `true`/`false` behaves exactly as before.
+
 ## 0.6.0
 
 ### Minor Changes
