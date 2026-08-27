@@ -33,6 +33,7 @@ import {
 import { summarizeForCompaction } from "./compaction.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import {
+  defaultPromptCachingPlan,
   markLastFunctionTool,
   mergeProviderOptions,
   toolsetHash,
@@ -238,13 +239,18 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     effort: string,
   ) => { providerOptions?: Record<string, unknown>; maxOutputTokens?: number } | undefined;
   /**
-   * Resolve the prompt-caching plan for a model id — kept out of core (the
-   * platform owns the model catalog, so it knows the provider family; core
-   * only applies the plan). Typically implemented as
+   * Resolve the prompt-caching plan for a model id. Supply it when you own a
+   * model catalog (you know the provider family better than the model object
+   * does) or need per-principal cache routing — typically
    * `promptCachingPlanFor(providerOf(modelId), { agent, cacheKeySuffix })`.
    * `memoryScoped` is true when the turn's system prompt is per-principal
    * (memory-enabled agent) — use it to scope OpenAI's cache routing key.
-   * Absent hook (or `undefined` for a model) → no caching options are set.
+   *
+   * ABSENT hook → caching defaults ON for first-party Anthropic/OpenAI models
+   * (see `defaultPromptCachingPlan`; measured ~6x unit cost on MCP-heavy
+   * agents). Opt out with `resolvePromptCaching: () => undefined`, or per turn
+   * with `promptCaching: false`. Returning `undefined` for a model disables
+   * caching for it.
    */
   resolvePromptCaching?: (
     modelId: string,
@@ -1179,7 +1185,7 @@ export function createRuntime<P, RC = unknown>(
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
     const cfg = factory
-      ? await factory({ runtime: runtimeCtx, principal, turnContext })
+      ? await factory({ context: runtimeCtx, runtime: runtimeCtx, principal, turnContext })
       : await config.dynamicAgents?.resolve(agentName, principal);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
@@ -1666,11 +1672,18 @@ export function createRuntime<P, RC = unknown>(
     const caching =
       args.promptCaching === false
         ? undefined
-        : config.resolvePromptCaching?.(modelId, {
-            agent: run.agent,
-            memoryScoped: !!(cfg.memory && config.memory),
-            principal,
-          });
+        : config.resolvePromptCaching
+          ? config.resolvePromptCaching(modelId, {
+              agent: run.agent,
+              memoryScoped: !!(cfg.memory && config.memory),
+              principal,
+            })
+          : // No hook → caching is ON by default for first-party Anthropic /
+            // OpenAI models (derived from the model object's `provider`).
+            // Measured at ~6x unit cost on MCP-heavy agents — too expensive to
+            // leave off for hosts that never found the hook. Opt out with
+            // `resolvePromptCaching: () => undefined`.
+            defaultPromptCachingPlan(cfg.model, run.agent);
     if (caching?.toolProviderOptions) {
       markLastFunctionTool(tools, caching.toolProviderOptions, activeTools);
     }

@@ -89,6 +89,44 @@ Without it, recorded cost is `0` — usage is still tracked. `ModelPrice` handle
 
 Cost lands in three places: the message metadata, the run row, and a usage row per turn — so per-tenant COGS is a query, not a reconstruction.
 
+## Prompt caching — the 6× default
+
+On by default for first-party Anthropic and OpenAI models — no configuration
+needed. An MCP-heavy agent re-sends its tool catalogue on every step; provider
+prompt caching is the difference between a viable and an unviable unit cost:
+
+| Same question, same agent | Input | Cache read | Cost |
+| --- | --- | --- | --- |
+| Without caching | 33,355 | 0 | $0.1698 |
+| With, warm | 29,028 | 27,306 | $0.0290 |
+
+The default derives the provider family from the model object itself and
+places the breakpoints for you (tools → system prompt → a rolling request-level
+marker, with the volatile date line kept after the system breakpoint so the
+daily flip never invalidates it). Supply `resolvePromptCaching` when you own a
+model catalog or need per-principal cache routing:
+
+```ts
+import { promptCachingPlanFor } from "@intentface/latch-core";
+
+createRuntime({
+  // …
+  resolvePromptCaching: (modelId, { agent, memoryScoped, principal }) =>
+    promptCachingPlanFor(providerOf(modelId), {
+      agent,
+      // Memory-enabled agents have per-principal system prompts — scope
+      // OpenAI's cache routing key so different prefixes don't co-route.
+      cacheKeySuffix: memoryScoped ? ownerKey(principal) : undefined,
+    }),
+});
+```
+
+Off switches: `resolvePromptCaching: () => undefined` (everywhere), or
+`promptCaching: false` on a single `runAgent` call (the control arm of an A/B
+cost comparison). Anthropic's 5-minute cache TTL means agents whose turns
+arrive slower than that won't benefit — that's inherent to the provider, not a
+Latch setting.
+
 ## Telemetry — tracing
 
 ```ts

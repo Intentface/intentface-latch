@@ -190,6 +190,16 @@ export interface AgentInfo extends AgentMeta {
  * runtime can list agents for a picker.
  */
 export type AgentFactory<P, RuntimeContext = unknown> = ((ctx: {
+  /**
+   * The runtime CONTEXT built by `context.build` for this turn (org name, plan,
+   * feature flags — see `ContextDefinition`). Prefer this name.
+   */
+  context: RuntimeContext;
+  /**
+   * @deprecated Alias of `context`. The name collides with the composition
+   * root `createRuntime` returns — two different things called "runtime" made
+   * every example ambiguous. Kept for factories already written against it.
+   */
   runtime: RuntimeContext;
   principal: P;
   /**
