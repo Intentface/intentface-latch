@@ -22,12 +22,15 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   GET  runs                           list the tenant's runs (usage/cost)
  *   GET  agents                         the registered agents (for a picker)
  *   GET  schedules                      list the tenant's scheduled agents
- *   POST schedules                      create one ({agent, cron, prompt})
+ *   GET  schedules/:id                  one schedule (404 if not the tenant's)
+ *   POST schedules                      create one ({agent, cron, prompt,
+ *                                       timezone?, delivery?, onParked?})
+ *   POST schedules/:id/run-now          make it due on the next tick
  *   DELETE schedules/:id                delete one
  *   POST cron/run                       fire ALL due schedules (host-guarded, no user auth)
  *   GET  connections                    per-connection status for the tenant
  *   GET  connections/:name/authorize    begin OAuth → 302 to the IdP
- *   GET  connections/:name/callback     finish OAuth (+ resume a waiting chat)
+ *   GET  connections/:name/callback     finish OAuth → 302 back (see below)
  *   POST connections/:name/disconnect   drop the tenant's stored credentials
  *   POST connections/:name/test         open the connection, list its tools
  */
@@ -329,7 +332,13 @@ export function createLatchHandler<P>(
         return redirect(res.authorizationUrl);
       }
 
-      // GET connections/:name/callback → finish OAuth, resume a waiting chat
+      // GET connections/:name/callback → finish OAuth, then redirect. It does
+      // NOT resume a waiting turn: the browser must not sit on a blank page
+      // for a whole run. Resuming is the CLIENT's job after the redirect —
+      // find the pending `connect_<name>` approval in the chat's history and
+      // submit it to `POST agents/:agent/:id/approvals`, which returns the
+      // continuation stream. See the "OAuth callback identity" section of the
+      // package README for the full client protocol.
       if (name && action === "callback" && method === "GET") {
         if (!oauth) return json({ error: `not an OAuth connection: ${name}` }, 400);
         const code = url.searchParams.get("code");
@@ -506,7 +515,13 @@ export function createLatchHandler<P>(
       const principal = await resolveContext(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
-      return json({ runs: await rt.listRuns({ principal }) });
+      // `identity` is the serialized Principal — durable SERVER state, and a
+      // customer type the docs invite you to extend (plan tier, impersonation
+      // markers, support-actor ids). It has no business in a browser payload,
+      // so this projection drops it. Read it server-side via `listRuns` if you
+      // need it.
+      const runs = (await rt.listRuns({ principal })).map(({ identity: _identity, ...run }) => run);
+      return json({ runs });
     }
 
     // --- schedules (cron-driven agents) -----------------------------------
@@ -524,9 +539,20 @@ export function createLatchHandler<P>(
           cron?: string | null;
           timezone?: string;
           prompt?: string;
+          delivery?: unknown;
+          onParked?: unknown;
         };
         if (!body.agent || !body.prompt) {
           return json({ error: "agent and prompt are required" }, 400);
+        }
+        // Reject an unknown policy rather than silently defaulting it: a
+        // caller that meant "fire" and typo'd must not get "skip" plus a 200.
+        if (
+          body.onParked !== undefined &&
+          body.onParked !== "skip" &&
+          body.onParked !== "fire"
+        ) {
+          return json({ error: 'onParked must be "skip" or "fire"' }, 400);
         }
         try {
           const record = await rt.schedule({
@@ -535,13 +561,34 @@ export function createLatchHandler<P>(
             cron: body.cron ?? null,
             timezone: body.timezone,
             prompt: body.prompt,
+            // Host-interpreted, opaque to core (see `RuntimeConfig.runSchedule`).
+            // Forwarded verbatim — dropping it silently made the whole delivery
+            // seam unreachable through this handler.
+            delivery: body.delivery,
+            onParked: body.onParked as "skip" | "fire" | undefined,
           });
           return json({ schedule: record });
         } catch (e) {
           return json({ error: e instanceof Error ? e.message : "schedule failed" }, 400);
         }
       }
-      if (id && method === "DELETE") {
+      // GET schedules/:id — owner-scoped read. Filtered from the caller's own
+      // list, so another tenant's id is indistinguishable from a missing one.
+      if (id && !seg[2] && method === "GET") {
+        const found = (await rt.listSchedules({ principal })).find((sch) => sch.id === id);
+        if (!found) return json({ error: "not found" }, 404);
+        return json({ schedule: found });
+      }
+      // POST schedules/:id/run-now — arm it for the next tick. Deliberately
+      // NOT a direct fire: it goes through the ordinary runDue path (same
+      // claim, same occurrence consume, same delivery), so "run now" can't
+      // drift from what the cron actually does.
+      if (id && seg[2] === "run-now" && method === "POST") {
+        const armed = await rt.runScheduleNow({ principal, id });
+        if (!armed) return json({ error: "not found, or already spent" }, 404);
+        return json({ ok: true });
+      }
+      if (id && !seg[2] && method === "DELETE") {
         await rt.unschedule({ principal, id });
         return json({ ok: true });
       }

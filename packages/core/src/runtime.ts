@@ -152,11 +152,21 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * stale (bot disabled, user unlinked) still gets the work done in a chat
    * rather than losing the fire.
    *
+   * A host that wants the SAME accounting the default path gets can return the
+   * object form instead of a bare boolean: `chatId` lets the next occurrence's
+   * `onParked` check see this fire's conversation, and `parked` joins `runDue`'s
+   * `parked` count. Core cannot derive either itself — the host owns the chat a
+   * channel fire runs in. Omit them and this fire simply isn't accounted (the
+   * bare-boolean behavior), which is correct for a host that reports its own.
+   *
    * Core keeps owning the claim, the lease and the advance either way, and
    * stays entirely channel-blind: `schedule.delivery` is opaque here and only
    * ever interpreted by this hook.
    */
-  runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
+  runSchedule?: (input: {
+    schedule: ScheduleRecord;
+    principal: P;
+  }) => Promise<boolean | { handled: boolean; chatId?: string; parked?: boolean }>;
   /**
    * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
    * Returns the AI SDK `Experimental_SandboxSession` passed to the model
@@ -270,6 +280,33 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
 }
 
 /** Fields common to every observability event. */
+/**
+ * What started this turn — and, in practice, whether a human is at the other
+ * end of it:
+ *
+ * - `"chat"` — a user message (`handleChat` / `runTurnStream`). Someone is
+ *   watching the stream.
+ * - `"decision"` — a human answered a pending request: an approval decision or
+ *   a client-handled tool result. Someone is watching.
+ * - `"schedule"` — a cron/one-shot fire (`runDue`). NOBODY is watching.
+ * - `"programmatic"` — the host called `runAgent` directly (a background job, a
+ *   webhook handler, a test run). There is no client stream, and only the host
+ *   knows whether a person is waiting on the result — so `runAgent` takes a
+ *   `trigger` to say when it does.
+ * - `"resume"` — the durability sweep recovered a crashed run and drove it to
+ *   completion server-side. Nobody is watching.
+ *
+ * That distinction is what makes the observability hooks usable as an
+ * operational notification channel and not just an analytics feed: a turn that
+ * finishes `awaiting_input` under `"schedule"` or `"resume"` is a person who
+ * needs to be told, while the same status under `"chat"` or `"decision"` is
+ * just a gate rendering in front of someone who can answer it.
+ *
+ * A subagent turn inherits its parent's trigger (like `rootChatId`), so a
+ * whole delegation tree is attributable to what set it off.
+ */
+export type TurnTrigger = "chat" | "decision" | "programmatic" | "schedule" | "resume";
+
 export interface ObservabilityEventBase<P> {
   principal: P;
   chatId: string;
@@ -280,6 +317,8 @@ export interface ObservabilityEventBase<P> {
   modelId: string;
   /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
   depth: number;
+  /** What started this turn — see {@link TurnTrigger}. */
+  trigger: TurnTrigger;
 }
 
 /** One completed generation step (model call + any tool calls made in it). */
@@ -405,6 +444,13 @@ export interface Runtime<P> {
      * when the runtime has a `resolvePromptCaching` hook.
      */
     promptCaching?: boolean;
+    /**
+     * How to classify this run on the observability events (see `TurnTrigger`).
+     * Defaults to `"programmatic"` — there is no client stream here, so the
+     * safe assumption is that nobody is watching, and a host that knows better
+     * (a webhook with a user waiting) says so by passing `"chat"`.
+     */
+    trigger?: TurnTrigger;
   }): Promise<{ threadId: string; answer: string }>;
   /**
    * Summarize a conversation and append a compaction boundary, so later turns
@@ -568,10 +614,18 @@ export interface Runtime<P> {
    * fire's chat is still parked on a human (see `ScheduleRecord.onParked`) —
    * distinct from `errors` so a quiet schedule is legible as "waiting on you",
    * never mistaken for "ran fine" or "broken".
+   *
+   * `parked` counts fires that RAN and then stopped waiting on a human (an
+   * approval or question they cannot answer) — tokens spent, no answer
+   * delivered. They are counted in `fired` too: the turn did happen. A
+   * non-zero `parked` is the signal to go look — a cron whose every fire parks
+   * is paying for nothing, and for a one-shot schedule there is no later
+   * occurrence to notice. Chats awaiting a human are queryable via
+   * `ChatRecord.lastRunStatus`.
    */
   runDue(opts?: {
     now?: number;
-  }): Promise<{ fired: number; errors: number; skipped: number }>;
+  }): Promise<{ fired: number; errors: number; skipped: number; parked: number }>;
 }
 
 /** A user's decision on one pending tool-approval request. */
@@ -1167,6 +1221,12 @@ export function createRuntime<P, RC = unknown>(
     promptCaching?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
     depth?: number;
+    /**
+     * What started this turn (see `TurnTrigger`). Stamped on every
+     * observability event so a host can tell an unattended park — nobody to
+     * answer the gate — from an interactive one. Defaults to `"chat"`.
+     */
+    trigger?: TurnTrigger;
     /** Telemetry linkage: the run that spawned this subagent turn (if any). */
     parentRunId?: string;
     /** Telemetry linkage: the top-level conversation id (threaded through
@@ -1209,6 +1269,7 @@ export function createRuntime<P, RC = unknown>(
     const autoApprove = args.autoApprove ?? false;
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
+    const trigger = args.trigger ?? "chat";
     const ephemeral = args.ephemeral ?? false;
     // The top-level conversation id — this turn's own chat unless a spawn
     // threaded a root down. Subagent turns spawned below inherit it, so a whole
@@ -1468,6 +1529,9 @@ export function createRuntime<P, RC = unknown>(
             // down so the subagent's trace nests under this conversation.
             parentRunId: run.id,
             rootChatId,
+            // A subagent inherits what set the tree off, so a scheduled fire's
+            // delegate is still attributable to the schedule (see TurnTrigger).
+            trigger,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -1800,6 +1864,7 @@ export function createRuntime<P, RC = unknown>(
               agent: run.agent,
               modelId,
               depth,
+              trigger,
               step: {
                 text: step.text,
                 finishReason: step.finishReason,
@@ -1915,6 +1980,7 @@ export function createRuntime<P, RC = unknown>(
             agent: run.agent,
             modelId,
             depth,
+            trigger,
             status: "errored",
             usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
             cost,
@@ -1969,6 +2035,7 @@ export function createRuntime<P, RC = unknown>(
           agent: run.agent,
           modelId,
           depth,
+          trigger,
           status: paused ? "awaiting_input" : "completed",
           usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
           cost,
@@ -1999,6 +2066,7 @@ export function createRuntime<P, RC = unknown>(
           agent: run.agent,
           modelId,
           depth,
+          trigger,
           error,
         });
         // The AI SDK's onError must return the client string synchronously, so
@@ -2236,6 +2304,8 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages,
       runtimeCtx,
+      // Crash recovery, driven server-side: nobody is watching this stream.
+      trigger: "resume",
     });
     await res.text();
 
@@ -2368,6 +2438,9 @@ export function createRuntime<P, RC = unknown>(
       // the tool result (a user turn), not an assistant prefill.
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
+      // A human just decided something, so a human is present — even if this
+      // turn parks again on the NEXT gate (see TurnTrigger).
+      trigger: "decision",
     });
   }
 
@@ -2432,6 +2505,8 @@ export function createRuntime<P, RC = unknown>(
       // Resume: same prefill guard as applyApproval (see trimTrailingAssistantPrefill).
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
+      // A client-handled tool result is a human answering (see TurnTrigger).
+      trigger: "decision",
     });
   }
 
@@ -2653,13 +2728,19 @@ export function createRuntime<P, RC = unknown>(
     } as AppMessage;
   }
 
-  /** Run one turn to completion server-side (no client consuming the stream). */
+  /**
+   * Run one turn to completion server-side (no client consuming the stream).
+   * Reports whether the turn ended PARKED — waiting on a human (an undecided
+   * approval or client tool result) rather than finished. An unattended caller
+   * (`runDue`) needs that: the stream ending is not the same as an answer, and
+   * a parked scheduled turn has spent its tokens and produced nothing.
+   */
   async function runTurnToCompletion(
     principal: P,
     agentName: string,
     message: AppMessage,
     chatId: string,
-  ): Promise<void> {
+  ): Promise<{ parked: boolean }> {
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agentName, principal);
     await storage.appendMessages(chatId, [message]);
     const { run, lease } = await openRun(principal, chatId, agentName);
@@ -2672,8 +2753,17 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [message],
       runtimeCtx,
+      // A cron/one-shot fire — no human at the other end (see TurnTrigger).
+      trigger: "schedule",
     });
     await res.text();
+    // The fold over the persisted log — the same truth every interactive path
+    // trusts — not the run row, which a parked turn also leaves behind.
+    const after = await storage.loadMessages(principal, chatId);
+    const last = after[after.length - 1];
+    return {
+      parked: hasPendingApproval(after) || (!!last && hasPendingToolResult([last])),
+    };
   }
 
   /** Merged agent directory (code-declared + dynamic) — name/title/description. */
@@ -2720,6 +2810,7 @@ export function createRuntime<P, RC = unknown>(
     rootChatId,
     turnContext,
     promptCaching,
+    trigger,
   }: {
     principal: P;
     agent: string;
@@ -2740,6 +2831,8 @@ export function createRuntime<P, RC = unknown>(
     parentRunId?: string;
     /** Telemetry: the top-level conversation id (shared session across the tree). */
     rootChatId?: string;
+    /** What set the delegation tree off (see `TurnTrigger`); inherited as-is. */
+    trigger?: TurnTrigger;
     /**
      * Waive HITL approvals inside the subagent. Default true (autonomous runs —
      * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
@@ -2790,6 +2883,7 @@ export function createRuntime<P, RC = unknown>(
       depth,
       parentRunId,
       rootChatId,
+      trigger,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
       // streams them into the parent turn). Observation must never break the
       // run — the primary stream is drained independently below.
@@ -2868,6 +2962,8 @@ export function createRuntime<P, RC = unknown>(
       // Keep the resumed turn nested under the original trace/session.
       parentRunId: linkage?.parentRunId,
       rootChatId: linkage?.rootChatId,
+      // Reached only by a human deciding the bubbled-up approval.
+      trigger: "decision",
     });
     await res.text();
     const after = await storage.loadMessages(principal, subChatId);
@@ -2922,12 +3018,13 @@ export function createRuntime<P, RC = unknown>(
 
   async function runDue(opts?: {
     now?: number;
-  }): Promise<{ fired: number; errors: number; skipped: number }> {
+  }): Promise<{ fired: number; errors: number; skipped: number; parked: number }> {
     const now = opts?.now ?? Date.now();
     const claimed = await storage.claimDueSchedules(now, dur.leaseTtlMs, dur.instanceId);
     let fired = 0;
     let errors = 0;
     let skipped = 0;
+    let parked = 0;
     for (const s of claimed) {
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
       // Consume the occurrence BEFORE firing, not after. The claim lease is
@@ -2994,7 +3091,27 @@ export function createRuntime<P, RC = unknown>(
         let handled = false;
         if (config.runSchedule) {
           try {
-            handled = await config.runSchedule({ schedule: s, principal });
+            const outcome = await config.runSchedule({ schedule: s, principal });
+            handled = typeof outcome === "boolean" ? outcome : outcome.handled;
+            // The host owns the chat a channel fire ran in, so it is the only
+            // one that can report it. Same accounting as the default path when
+            // it does: stamp the chat for the next `onParked` check, and count
+            // a park that nobody can answer.
+            if (handled && typeof outcome === "object") {
+              if (outcome.chatId) {
+                await storage.noteScheduleFire?.(s.id, {
+                  lastChatId: outcome.chatId,
+                  firedAt: now,
+                });
+              }
+              if (outcome.parked) {
+                parked++;
+                console.warn(
+                  `[schedule] ${s.id} (${s.agent}): host-delivered fire parked waiting on a ` +
+                    `human${outcome.chatId ? ` in chat ${outcome.chatId}` : ""} — no answer was delivered`,
+                );
+              }
+            }
           } catch (e) {
             console.error(`[schedule] runSchedule hook failed for ${s.id}:`, e);
           }
@@ -3010,7 +3127,22 @@ export function createRuntime<P, RC = unknown>(
           // is the lastRunAt this fire's completeSchedule wrote above, so a
           // delayed stamp can't clobber a newer occurrence's.
           await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id, firedAt: now });
-          await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
+          const outcome = await runTurnToCompletion(
+            principal,
+            s.agent,
+            userMessageOf(s.prompt),
+            chat.id,
+          );
+          if (outcome.parked) {
+            // Say it on THIS tick, not the next one: a one-shot has no next
+            // occurrence, and even a cron's operator shouldn't have to wait
+            // for the skip message to learn that a paid fire produced nothing.
+            parked++;
+            console.warn(
+              `[schedule] ${s.id} (${s.agent}): fire parked waiting on a human in ` +
+                `chat ${chat.id} — no answer was delivered`,
+            );
+          }
         }
         fired++;
       } catch (e) {
@@ -3021,7 +3153,7 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       }
     }
-    return { fired, errors, skipped };
+    return { fired, errors, skipped, parked };
   }
 
   return {
@@ -3029,7 +3161,18 @@ export function createRuntime<P, RC = unknown>(
     tick: reapTick,
     handleChat,
     runTurnStream,
-    runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext, promptCaching }) =>
+    runAgent: ({
+      principal,
+      agent,
+      prompt,
+      threadId,
+      blockGated = true,
+      turnContext,
+      promptCaching,
+      // No client stream: assume unattended unless the host says otherwise, so
+      // a park here can't be silently filtered out as "someone's watching".
+      trigger = "programmatic",
+    }) =>
       runSubagent({
         principal,
         agent,
@@ -3039,6 +3182,7 @@ export function createRuntime<P, RC = unknown>(
         blockGated,
         turnContext,
         promptCaching,
+        trigger,
       }),
     compactChat,
     loadHistory,

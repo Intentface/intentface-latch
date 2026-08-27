@@ -62,7 +62,10 @@ function runtimeWith(
   storage: StorageAdapter<P>,
   opts: {
     cron?: (expr: string, afterMs: number) => number | null;
-    runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
+    runSchedule?: (input: {
+      schedule: ScheduleRecord;
+      principal: P;
+    }) => Promise<boolean | { handled: boolean; chatId?: string; parked?: boolean }>;
   },
 ) {
   return createRuntime<P>({
@@ -98,7 +101,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     expect(order).toEqual(["consume", "fire"]);
     expect(advanced).toEqual({ nextRunAt: NEXT, lastRunAt: 100, enabled: true });
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("disables a one-shot (cron: null) at consume time", async () => {
@@ -137,7 +140,7 @@ describe("runDue consumes the occurrence before firing", () => {
     const res = await rt.runDue({ now: 100 });
 
     expect(firedHook).toBe(false);
-    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0 });
   });
 
   it("stamps the fire's chat via noteScheduleFire so the next occurrence can see it", async () => {
@@ -186,7 +189,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0 });
     expect(consumed).toBe(1); // consumed exactly once — never re-written after the failure
   });
 });
@@ -230,7 +233,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1 });
+    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1, parked: 0 });
     expect(firedHook).toBe(false); // the host hook is skipped too — nothing runs
     expect(consumed).toBe(1); // the occurrence is spent, so the row isn't hot-looped
   });
@@ -245,7 +248,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("a settled predecessor fires normally", async () => {
@@ -273,7 +276,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 
   it("a failed parked-check never blocks the fire", async () => {
@@ -288,6 +291,66 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
+  });
+});
+
+describe("a runSchedule host can join the same accounting", () => {
+  it("stamps the host's chatId and counts its parked fire", async () => {
+    const stamps: unknown[] = [];
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      noteScheduleFire: async (id: string, patch: unknown) => {
+        stamps.push([id, patch]);
+      },
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      // The host owns the channel conversation, so it is the only one that can
+      // report which chat this fire ran in and whether it stopped for a human.
+      runSchedule: async () => ({ handled: true, chatId: "chat_slack_thread", parked: true }),
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1 });
+    expect(stamps).toEqual([["sch_1", { lastChatId: "chat_slack_thread", firedAt: 100 }]]);
+  });
+
+  it("a bare `true` is still handled — and simply isn't accounted", async () => {
+    // storage.noteScheduleFire is NOT stubbed: the Proxy throws if core tries
+    // to stamp a chat the host never told it about.
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    expect(await rt.runDue({ now: 100 })).toEqual({
+      fired: 1,
+      errors: 0,
+      skipped: 0,
+      parked: 0,
+    });
+  });
+
+  it("{ handled: false } falls through to the default path, like `false`", async () => {
+    let created = 0;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      createChat: async () => {
+        created++;
+        throw new Error("stop here — reaching createChat proves the fall-through");
+      },
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => ({ handled: false }),
+    });
+
+    await rt.runDue({ now: 100 });
+    expect(created).toBe(1);
   });
 });
