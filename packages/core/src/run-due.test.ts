@@ -62,7 +62,10 @@ function runtimeWith(
   storage: StorageAdapter<P>,
   opts: {
     cron?: (expr: string, afterMs: number) => number | null;
-    runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
+    runSchedule?: (input: {
+      schedule: ScheduleRecord;
+      principal: P;
+    }) => Promise<boolean | { handled: boolean; chatId?: string; parked?: boolean }>;
   },
 ) {
   return createRuntime<P>({
@@ -306,8 +309,7 @@ describe("a runSchedule host can join the same accounting", () => {
       cron: () => 1_000_000,
       // The host owns the channel conversation, so it is the only one that can
       // report which chat this fire ran in and whether it stopped for a human.
-      runSchedule: async () =>
-        ({ handled: true, chatId: "chat_slack_thread", parked: true }) as never,
+      runSchedule: async () => ({ handled: true, chatId: "chat_slack_thread", parked: true }),
     });
 
     const res = await rt.runDue({ now: 100 });
@@ -345,7 +347,7 @@ describe("a runSchedule host can join the same accounting", () => {
     });
     const rt = runtimeWith(storage, {
       cron: () => 1_000_000,
-      runSchedule: async () => ({ handled: false }) as never,
+      runSchedule: async () => ({ handled: false }),
     });
 
     await rt.runDue({ now: 100 });
