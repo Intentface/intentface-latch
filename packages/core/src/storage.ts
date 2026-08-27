@@ -358,8 +358,14 @@ export interface StorageAdapter<P> {
    * lands while the row still carries it — a delayed stamp from an older fire
    * no-ops once a newer occurrence has consumed (e.g. a `runScheduleNow` bump
    * overlapping a long turn), so `lastChatId` always names the newest fire's
-   * chat. Adapters that don't implement it simply never skip parked fires
-   * (the pre-`onParked` behavior).
+   * chat. ACCEPTED residual: two occurrences consumed in the SAME millisecond
+   * share a fence value — that takes a consume + bump + re-claim + re-consume
+   * across independent actors inside 1ms, and the worst outcome is one
+   * skipped or one extra fire that self-corrects next occurrence; closing it
+   * would mean widening `completeSchedule`'s contract to return a unique
+   * revision, which this best-effort field doesn't justify. Adapters that
+   * don't implement it simply never skip parked fires (the pre-`onParked`
+   * behavior).
    */
   noteScheduleFire?(
     id: string,
