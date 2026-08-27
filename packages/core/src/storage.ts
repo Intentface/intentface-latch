@@ -55,6 +55,16 @@ export interface ChatRecord {
    * Open vocabulary — a host may stamp its own kinds via `createChat`.
    */
   kind?: string;
+  /**
+   * Status of the chat's most recent run, derived at READ time by `listChats`
+   * (never stored — the message log stays the source of truth). Lets a list UI
+   * flag chats parked on a human (`awaiting_input` = an approval or question is
+   * waiting) without loading each chat's messages. "Most recent" makes it
+   * self-healing: a continuation opens a new run, so a superseded pause stops
+   * showing the moment the conversation moves on. Optional — an adapter MAY
+   * omit it, and `getChat`/`createChat` never populate it.
+   */
+  lastRunStatus?: RunStatus;
   createdAt: number;
   updatedAt: number;
 }

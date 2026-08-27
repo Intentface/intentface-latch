@@ -52,7 +52,9 @@ const NAV: NavItem[] = [
 export function AppSidebar() {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const [chats, setChats] = useState<{ id: string; title: string | null; agent: string }[]>([]);
+  const [chats, setChats] = useState<
+    { id: string; title: string | null; agent: string; lastRunStatus?: string | null }[]
+  >([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
 
@@ -66,11 +68,17 @@ export function AppSidebar() {
       return;
     }
     let cancelled = false;
-    void recentChatsFn()
-      .then((c) => !cancelled && setChats(c as typeof chats))
-      .catch(() => {});
+    const load = () =>
+      void recentChatsFn()
+        .then((c) => !cancelled && setChats(c as typeof chats))
+        .catch(() => {});
+    load();
+    // A run can park waiting on the user with no navigation at all (a cron
+    // fire) — poll slowly so the waiting dot appears without moving around.
+    const poll = setInterval(load, 60_000);
     return () => {
       cancelled = true;
+      clearInterval(poll);
     };
   }, [session, chatKey]);
 
@@ -138,6 +146,18 @@ export function AppSidebar() {
                           search={{ agent: undefined }}
                         >
                           <span className="flex-1 truncate">{c.title?.trim() || c.agent}</span>
+                          {c.lastRunStatus === "awaiting_input" && (
+                            <>
+                              {/* Part of the LINK's accessible name — an
+                                  aria-label on a bare span never reaches it. */}
+                              <span className="sr-only">— waiting for your input</span>
+                              <span
+                                aria-hidden
+                                className="size-1.5 shrink-0 rounded-full bg-amber-500"
+                                title="Waiting for your input"
+                              />
+                            </>
+                          )}
                         </Link>
                       }
                     />

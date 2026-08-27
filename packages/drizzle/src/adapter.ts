@@ -1,5 +1,18 @@
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
-import { and, asc, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  getTableColumns,
+  getTableName,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   ChatConflictError,
   type AppMessage,
@@ -158,8 +171,21 @@ export function createSqliteAdapter<P>(
     async listChats(principal, opts) {
       // No kind → all chats (back-compatible); kind → only that kind.
       const scope = eq(schema.chats.owner, ownerKey(principal));
+      // The latest run's status per chat, as one correlated subquery over
+      // latch_runs_chat_idx — NOT a per-chat run scan in the caller. Latest
+      // only: a continuation opens a new run, so a superseded pause stops
+      // reporting `awaiting_input` the moment the conversation moves on.
+      // Explicitly aliased raw SQL: drizzle renders `${schema.chats.id}`
+      // UNQUALIFIED inside a select-field subquery, where it resolves to the
+      // runs table's own `id` and the correlation silently never matches.
+      // `id desc` breaks started_at ties (ms precision) deterministically —
+      // an arbitrary but STABLE pick, so the projection can't flap between
+      // reads or disagree across dialects.
+      const lastRunStatus = sql<
+        string | null
+      >`(select r.status from ${sql.raw(getTableName(schema.runs))} r where r.chat_id = ${sql.raw(getTableName(schema.chats))}.id order by r.started_at desc, r.id desc limit 1)`;
       const rows = await db
-        .select()
+        .select({ ...getTableColumns(schema.chats), lastRunStatus })
         .from(schema.chats)
         .where(
           opts?.kind !== undefined
@@ -168,7 +194,10 @@ export function createSqliteAdapter<P>(
         )
         .orderBy(sql`${schema.chats.updatedAt} desc`)
         .limit(opts?.limit ?? 100);
-      return rows.map(rowToChat);
+      return rows.map((r) => ({
+        ...rowToChat(r),
+        ...(r.lastRunStatus ? { lastRunStatus: r.lastRunStatus as RunStatus } : {}),
+      }));
     },
 
     async loadMessages(principal, chatId) {

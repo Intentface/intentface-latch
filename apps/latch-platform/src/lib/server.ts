@@ -105,7 +105,14 @@ export const recentChatsFn = createServerFn({ method: "GET" }).handler(async () 
   return chats
     .filter((c) => !c.id.startsWith("sub_"))
     .slice(0, 10)
-    .map((c) => ({ id: c.id, title: c.title ?? null, agent: c.agent }));
+    .map((c) => ({
+      id: c.id,
+      title: c.title ?? null,
+      agent: c.agent,
+      // Derived by the adapter from the chat's latest run — free here, and the
+      // sidebar's only signal that a turn is parked waiting on the user.
+      lastRunStatus: c.lastRunStatus ?? null,
+    }));
 });
 
 /** The tenant's chats for the chat-list page (includes per-chat cost totals). */
