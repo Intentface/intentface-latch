@@ -152,11 +152,21 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * stale (bot disabled, user unlinked) still gets the work done in a chat
    * rather than losing the fire.
    *
+   * A host that wants the SAME accounting the default path gets can return the
+   * object form instead of a bare boolean: `chatId` lets the next occurrence's
+   * `onParked` check see this fire's conversation, and `parked` joins `runDue`'s
+   * `parked` count. Core cannot derive either itself — the host owns the chat a
+   * channel fire runs in. Omit them and this fire simply isn't accounted (the
+   * bare-boolean behavior), which is correct for a host that reports its own.
+   *
    * Core keeps owning the claim, the lease and the advance either way, and
    * stays entirely channel-blind: `schedule.delivery` is opaque here and only
    * ever interpreted by this hook.
    */
-  runSchedule?: (input: { schedule: ScheduleRecord; principal: P }) => Promise<boolean>;
+  runSchedule?: (input: {
+    schedule: ScheduleRecord;
+    principal: P;
+  }) => Promise<boolean | { handled: boolean; chatId?: string; parked?: boolean }>;
   /**
    * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
    * Returns the AI SDK `Experimental_SandboxSession` passed to the model
@@ -279,6 +289,10 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
  * - `"decision"` — a human answered a pending request: an approval decision or
  *   a client-handled tool result. Someone is watching.
  * - `"schedule"` — a cron/one-shot fire (`runDue`). NOBODY is watching.
+ * - `"programmatic"` — the host called `runAgent` directly (a background job, a
+ *   webhook handler, a test run). There is no client stream, and only the host
+ *   knows whether a person is waiting on the result — so `runAgent` takes a
+ *   `trigger` to say when it does.
  * - `"resume"` — the durability sweep recovered a crashed run and drove it to
  *   completion server-side. Nobody is watching.
  *
@@ -291,7 +305,7 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
  * A subagent turn inherits its parent's trigger (like `rootChatId`), so a
  * whole delegation tree is attributable to what set it off.
  */
-export type TurnTrigger = "chat" | "decision" | "schedule" | "resume";
+export type TurnTrigger = "chat" | "decision" | "programmatic" | "schedule" | "resume";
 
 export interface ObservabilityEventBase<P> {
   principal: P;
@@ -430,6 +444,13 @@ export interface Runtime<P> {
      * when the runtime has a `resolvePromptCaching` hook.
      */
     promptCaching?: boolean;
+    /**
+     * How to classify this run on the observability events (see `TurnTrigger`).
+     * Defaults to `"programmatic"` — there is no client stream here, so the
+     * safe assumption is that nobody is watching, and a host that knows better
+     * (a webhook with a user waiting) says so by passing `"chat"`.
+     */
+    trigger?: TurnTrigger;
   }): Promise<{ threadId: string; answer: string }>;
   /**
    * Summarize a conversation and append a compaction boundary, so later turns
@@ -3070,7 +3091,27 @@ export function createRuntime<P, RC = unknown>(
         let handled = false;
         if (config.runSchedule) {
           try {
-            handled = await config.runSchedule({ schedule: s, principal });
+            const outcome = await config.runSchedule({ schedule: s, principal });
+            handled = typeof outcome === "boolean" ? outcome : outcome.handled;
+            // The host owns the chat a channel fire ran in, so it is the only
+            // one that can report it. Same accounting as the default path when
+            // it does: stamp the chat for the next `onParked` check, and count
+            // a park that nobody can answer.
+            if (handled && typeof outcome === "object") {
+              if (outcome.chatId) {
+                await storage.noteScheduleFire?.(s.id, {
+                  lastChatId: outcome.chatId,
+                  firedAt: now,
+                });
+              }
+              if (outcome.parked) {
+                parked++;
+                console.warn(
+                  `[schedule] ${s.id} (${s.agent}): host-delivered fire parked waiting on a ` +
+                    `human${outcome.chatId ? ` in chat ${outcome.chatId}` : ""} — no answer was delivered`,
+                );
+              }
+            }
           } catch (e) {
             console.error(`[schedule] runSchedule hook failed for ${s.id}:`, e);
           }
@@ -3120,7 +3161,18 @@ export function createRuntime<P, RC = unknown>(
     tick: reapTick,
     handleChat,
     runTurnStream,
-    runAgent: ({ principal, agent, prompt, threadId, blockGated = true, turnContext, promptCaching }) =>
+    runAgent: ({
+      principal,
+      agent,
+      prompt,
+      threadId,
+      blockGated = true,
+      turnContext,
+      promptCaching,
+      // No client stream: assume unattended unless the host says otherwise, so
+      // a park here can't be silently filtered out as "someone's watching".
+      trigger = "programmatic",
+    }) =>
       runSubagent({
         principal,
         agent,
@@ -3130,6 +3182,7 @@ export function createRuntime<P, RC = unknown>(
         blockGated,
         turnContext,
         promptCaching,
+        trigger,
       }),
     compactChat,
     loadHistory,

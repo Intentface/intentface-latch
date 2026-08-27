@@ -291,3 +291,64 @@ describe("onParked: the parked-predecessor guard", () => {
     expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
   });
 });
+
+describe("a runSchedule host can join the same accounting", () => {
+  it("stamps the host's chatId and counts its parked fire", async () => {
+    const stamps: unknown[] = [];
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      noteScheduleFire: async (id: string, patch: unknown) => {
+        stamps.push([id, patch]);
+      },
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      // The host owns the channel conversation, so it is the only one that can
+      // report which chat this fire ran in and whether it stopped for a human.
+      runSchedule: async () =>
+        ({ handled: true, chatId: "chat_slack_thread", parked: true }) as never,
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1 });
+    expect(stamps).toEqual([["sch_1", { lastChatId: "chat_slack_thread", firedAt: 100 }]]);
+  });
+
+  it("a bare `true` is still handled — and simply isn't accounted", async () => {
+    // storage.noteScheduleFire is NOT stubbed: the Proxy throws if core tries
+    // to stamp a chat the host never told it about.
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    expect(await rt.runDue({ now: 100 })).toEqual({
+      fired: 1,
+      errors: 0,
+      skipped: 0,
+      parked: 0,
+    });
+  });
+
+  it("{ handled: false } falls through to the default path, like `false`", async () => {
+    let created = 0;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      createChat: async () => {
+        created++;
+        throw new Error("stop here — reaching createChat proves the fall-through");
+      },
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => ({ handled: false }) as never,
+    });
+
+    await rt.runDue({ now: 100 });
+    expect(created).toBe(1);
+  });
+});

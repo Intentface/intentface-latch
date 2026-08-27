@@ -95,8 +95,8 @@ Each fire reconstructs the principal from the stored identity blob, runs the tur
 
 An unattended turn can meet an approval gate, and then it **parks**: the tokens are spent, no answer is produced, and nobody is there to decide. Latch treats that as a legitimate outcome (a scheduled agent asking before it mutates something is the point of the gate) and makes it loud rather than impossible:
 
-- **`parked`** counts fires that ran and stopped waiting on a human. They are counted in `fired` too — the turn did run — and logged on the tick it happens, which matters for a one-shot schedule that has no later occurrence.
-- **`onParked`** decides what the *next* occurrence does while the previous fire is still waiting: `"skip"` (the default) consumes the occurrence without running, so a recurring schedule can't mint a new parked chat and a new bill every tick; `"fire"` always runs, for a digest whose every occurrence matters even while one waits. `skipped` counts those.
+- **`parked`** counts fires that ran and stopped waiting on a human. They are counted in `fired` too — the turn did run — and logged on the tick it happens, which is what a one-shot schedule needs: it has no later occurrence to reveal it. Core can account for this itself on the default fresh-chat path; a host that takes over delivery via `runSchedule` owns the chat its fire ran in, so it opts into the same accounting by returning `{ handled: true, chatId, parked }` instead of a bare `true`.
+- **`onParked`** decides what the *next* occurrence does while the previous fire is still waiting (against the chat the last fire reported — the default path's own, or the `chatId` a `runSchedule` host returned): `"skip"` (the default) consumes the occurrence without running, so a recurring schedule can't mint a new parked chat and a new bill every tick; `"fire"` always runs, for a digest whose every occurrence matters even while one waits. `skipped` counts those.
 - **Which conversations need a person** is a plain list read: `ChatRecord.lastRunStatus` is `"awaiting_input"` for a chat whose latest run is waiting, and self-heals when the conversation moves on.
 - **To push a notification** rather than wait for someone to look, use `observability.onFinish` and check `trigger` — see [Observability](/docs/seams#observability--plain-event-callbacks). `status: "awaiting_input"` with `trigger: "schedule"` is precisely "a fire nobody can answer".
 
@@ -110,8 +110,11 @@ createRuntime({
   runSchedule: async ({ schedule, principal }) => {
     const target = parseDelivery(schedule.delivery); // yours; core never reads this
     if (!target) return false; // fall through to the default
-    await deliverIntoChannel({ schedule, principal, target });
-    return true; // we handled it
+    const { chatId, parked } = await deliverIntoChannel({ schedule, principal, target });
+    // `true` is enough. The object form opts this fire into the same accounting
+    // the default path gets: `chatId` is what the next occurrence's `onParked`
+    // check reads, and `parked` joins runDue's `parked` count.
+    return { handled: true, chatId, parked };
   },
 });
 ```
