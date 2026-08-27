@@ -90,6 +90,8 @@ export function createPostgresAdapter<P>(
     delivery: r.delivery ?? undefined,
     nextRunAt: r.nextRunAt,
     lastRunAt: r.lastRunAt,
+    onParked: (r.onParked ?? undefined) as ScheduleRecord["onParked"],
+    lastChatId: r.lastChatId,
     enabled: r.enabled === 1,
     leaseOwner: r.leaseOwner,
     leaseExpiresAt: r.leaseExpiresAt,
@@ -416,6 +418,8 @@ export function createPostgresAdapter<P>(
         delivery: input.delivery ?? null,
         nextRunAt: input.nextRunAt,
         lastRunAt: null,
+        onParked: input.onParked ?? null,
+        lastChatId: null,
         enabled: 1,
         leaseOwner: null,
         leaseExpiresAt: null,
@@ -495,6 +499,19 @@ export function createPostgresAdapter<P>(
         // node re-claimed the schedule, this no-ops instead of clobbering it.
         .where(
           and(eq(schema.schedules.id, id), eq(schema.schedules.leaseOwner, owner)),
+        );
+    },
+
+    async noteScheduleFire(id, patch) {
+      // Fenced by the OCCURRENCE (see StorageAdapter): the stamp only lands
+      // while last_run_at still holds the value this fire's completeSchedule
+      // wrote — a delayed stamp from an older fire no-ops once a newer
+      // occurrence has consumed.
+      await db
+        .update(schema.schedules)
+        .set({ lastChatId: patch.lastChatId })
+        .where(
+          and(eq(schema.schedules.id, id), eq(schema.schedules.lastRunAt, patch.firedAt)),
         );
     },
   };

@@ -528,6 +528,11 @@ export interface Runtime<P> {
      * `RuntimeConfig.runSchedule`). Stored verbatim; core never reads it.
      */
     delivery?: unknown;
+    /**
+     * What a fire does while the previous fire's chat is still parked waiting
+     * on a human (see `ScheduleRecord.onParked`). Default `"skip"`.
+     */
+    onParked?: "skip" | "fire";
   }): Promise<ScheduleRecord>;
   /** The caller's schedules. */
   listSchedules(input: { principal: P }): Promise<ScheduleRecord[]>;
@@ -558,8 +563,15 @@ export interface Runtime<P> {
    * gates on this promise (the in-process interval scheduler does) is stalled
    * for the duration of the longest turn — fan out per tenant rather than
    * looping serially if that matters to you.
+   *
+   * `skipped` counts occurrences consumed WITHOUT running because the previous
+   * fire's chat is still parked on a human (see `ScheduleRecord.onParked`) —
+   * distinct from `errors` so a quiet schedule is legible as "waiting on you",
+   * never mistaken for "ran fine" or "broken".
    */
-  runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }>;
+  runDue(opts?: {
+    now?: number;
+  }): Promise<{ fired: number; errors: number; skipped: number }>;
 }
 
 /** A user's decision on one pending tool-approval request. */
@@ -2872,6 +2884,7 @@ export function createRuntime<P, RC = unknown>(
     timezone,
     prompt,
     delivery,
+    onParked,
   }: {
     principal: P;
     agent: string;
@@ -2879,6 +2892,7 @@ export function createRuntime<P, RC = unknown>(
     timezone?: string;
     prompt: string;
     delivery?: unknown;
+    onParked?: "skip" | "fire";
   }): Promise<ScheduleRecord> {
     // Accept code-declared or dynamic (UI-created) agents.
     const known =
@@ -2902,14 +2916,18 @@ export function createRuntime<P, RC = unknown>(
       prompt,
       nextRunAt,
       delivery,
+      onParked,
     });
   }
 
-  async function runDue(opts?: { now?: number }): Promise<{ fired: number; errors: number }> {
+  async function runDue(opts?: {
+    now?: number;
+  }): Promise<{ fired: number; errors: number; skipped: number }> {
     const now = opts?.now ?? Date.now();
     const claimed = await storage.claimDueSchedules(now, dur.leaseTtlMs, dur.instanceId);
     let fired = 0;
     let errors = 0;
+    let skipped = 0;
     for (const s of claimed) {
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
       // Consume the occurrence BEFORE firing, not after. The claim lease is
@@ -2941,6 +2959,31 @@ export function createRuntime<P, RC = unknown>(
       }
       try {
         const principal = await reconstructPrincipal(s.identity);
+        // Parked-predecessor guard: when the LAST fire's chat is still waiting
+        // on a human (an undecided approval or tool result), firing again just
+        // mints another parked chat and pays for the tokens up to the gate —
+        // on every tick, forever. `onParked: "skip"` (the default) consumes
+        // the occurrence without running instead; the answer is one approval
+        // away in the existing chat, and the next occurrence re-checks. The
+        // truth is the message-log fold, not run rows — same predicates the
+        // interactive paths trust. Best-effort: a failed check must never
+        // block a fire.
+        if ((s.onParked ?? "skip") === "skip" && s.lastChatId) {
+          try {
+            const prior = await storage.loadMessages(principal, s.lastChatId);
+            const last = prior[prior.length - 1];
+            if (hasPendingApproval(prior) || (last && hasPendingToolResult([last]))) {
+              console.warn(
+                `[schedule] ${s.id} (${s.agent}): previous fire's chat ${s.lastChatId} ` +
+                  `is still waiting on a human — skipping this occurrence (onParked: skip)`,
+              );
+              skipped++;
+              continue;
+            }
+          } catch (e) {
+            console.error(`[schedule] ${s.id}: parked check failed; firing anyway:`, e);
+          }
+        }
         // Give the host first refusal (e.g. run it in the user's channel thread
         // and stream the answer there). A hook that throws is treated as "not
         // handled": the fire still happens the default way, so a broken
@@ -2961,6 +3004,12 @@ export function createRuntime<P, RC = unknown>(
             agent: s.agent,
             title: s.prompt.slice(0, 80),
           });
+          // Remember where this fire ran so the NEXT occurrence can see a
+          // parked predecessor. Stamped before the turn (a parked turn still
+          // "completes" the await); optional — see StorageAdapter. `firedAt`
+          // is the lastRunAt this fire's completeSchedule wrote above, so a
+          // delayed stamp can't clobber a newer occurrence's.
+          await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id, firedAt: now });
           await runTurnToCompletion(principal, s.agent, userMessageOf(s.prompt), chat.id);
         }
         fired++;
@@ -2972,7 +3021,7 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       }
     }
-    return { fired, errors };
+    return { fired, errors, skipped };
   }
 
   return {

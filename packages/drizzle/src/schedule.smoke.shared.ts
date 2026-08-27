@@ -51,6 +51,19 @@ export async function scheduleSmoke<P>({
   });
   assert(plain.delivery === undefined, "absent delivery reads back as undefined");
 
+  // onParked round-trips; absent = undefined (the runtime defaults it to skip).
+  assert(plain.onParked === undefined, "absent onParked reads back as undefined");
+  const alwaysFire = await store.createSchedule(me, {
+    agent: "briefer",
+    cron: "0 8 * * *",
+    prompt: "fire regardless",
+    nextRunAt: soon,
+    onParked: "fire",
+  });
+  assert(alwaysFire.onParked === "fire", "onParked survives a create round trip");
+
+  await store.deleteSchedule(me, alwaysFire.id);
+
   // Not due yet.
   assert(
     (await store.claimDueSchedules(Date.now(), 30_000, "node-1")).length === 0,
@@ -138,6 +151,36 @@ export async function scheduleSmoke<P>({
     ),
     "a disabled schedule can't be resurrected by bumping",
   );
+
+  // noteScheduleFire stamps the fire's chat — fenced by the OCCURRENCE: it
+  // only lands while last_run_at still holds the value this fire's
+  // completeSchedule wrote, so a delayed stamp from an older overlapping fire
+  // (runScheduleNow during a long turn) can't overwrite a newer one's.
+  const stampMe = await store.createSchedule(me, {
+    agent: "briefer",
+    cron: null,
+    prompt: "stamp test",
+    nextRunAt: 0,
+  });
+  assert(stampMe.lastChatId == null, "lastChatId starts unset");
+  const tFire = Date.now() + 300_000; // past every lease/claim time used above
+  await store.claimDueSchedules(tFire, 30_000, "node-1");
+  await store.completeSchedule(
+    stampMe.id,
+    { nextRunAt: tFire, lastRunAt: tFire, enabled: false },
+    "node-1",
+  );
+  await store.noteScheduleFire?.(stampMe.id, { lastChatId: "chat_fire_1", firedAt: tFire });
+  let stamped = (await store.listSchedules(me)).find((s) => s.id === stampMe.id);
+  assert(stamped?.lastChatId === "chat_fire_1", "noteScheduleFire stamps lastChatId");
+  // An OLDER fire's delayed stamp carries its own (stale) firedAt — must no-op.
+  await store.noteScheduleFire?.(stampMe.id, { lastChatId: "chat_stale", firedAt: tFire - 1 });
+  stamped = (await store.listSchedules(me)).find((s) => s.id === stampMe.id);
+  assert(
+    stamped?.lastChatId === "chat_fire_1",
+    "a stale fire's stamp (older occurrence) no-ops",
+  );
+  await store.deleteSchedule(me, stampMe.id);
 
   await store.deleteSchedule(me, created.id);
   await store.deleteSchedule(me, plain.id);
