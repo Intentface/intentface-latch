@@ -123,9 +123,12 @@ createRuntime({
 
 Off switches: `resolvePromptCaching: () => undefined` (everywhere), or
 `promptCaching: false` on a single `runAgent` call (the control arm of an A/B
-cost comparison). Anthropic's 5-minute cache TTL means agents whose turns
-arrive slower than that won't benefit — that's inherent to the provider, not a
-Latch setting.
+cost comparison). The built-in plan leaves the cache TTL at Anthropic's
+5-minute default, so agents whose turns arrive slower than that won't benefit
+from it as shipped — Anthropic also offers an explicit `ttl: "1h"` (at a
+higher cache-write price), which you can opt into by returning your own plan:
+`{ ...cacheControl: { type: "ephemeral", ttl: "1h" } }` from
+`resolvePromptCaching`.
 
 ## Telemetry — tracing
 

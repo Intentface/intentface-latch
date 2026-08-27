@@ -26,8 +26,13 @@ sibling markdown renderer, as its reference example shows.
 A gated tool call ends the stream with the assistant message carrying a part in
 `state: "approval-requested"`. Nothing else will happen until someone decides —
 render those parts as approve/deny UI and submit the decision to
-`POST /agents/:agent/:id/approvals`. The response is a **continuation stream**
-of the same turn.
+`POST /agents/:agent/:id/approvals`. When the decision resumes the turn, the
+response is a **continuation stream** of the same turn. When the same step has
+*other* gated calls still undecided, the turn cannot resume yet — the response
+is an **empty 200**, and the remaining cards stay live for their own
+decisions. Check the response's `Content-Type` for `text/event-stream` before
+feeding it to your stream reader; an empty body parsed as SSE fails
+confusingly.
 
 Denying is a real answer, not a cancel: the turn resumes and the agent says
 what it will do instead. A user typing a new message instead of deciding also
