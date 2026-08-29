@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { trimTrailingAssistantPrefill } from "./runtime.js";
+import { toModelMessages } from "./projections.js";
 import type { AppMessage } from "./message.js";
 
 /**
@@ -42,15 +43,17 @@ describe("trimTrailingAssistantPrefill", () => {
       ]),
     ];
 
-    // The text goes. The approval markers and step boundary stay: the model
-    // never sees them, and the resumed turn re-persists this message, so
-    // dropping them would erase what the UI renders and `hasPendingApproval`
-    // reads.
+    // The text goes, and the step boundary goes WITH it — `step-start` tells
+    // the converter to open a new assistant message, and with the text gone
+    // that message is empty, so keeping it ends the projection on
+    // `{ role: "assistant", content: [] }` (see the projection tests below).
+    // The approval markers stay: the model never sees them, and the resumed
+    // turn re-persists this message, so dropping them would erase what the UI
+    // renders and `hasPendingApproval` reads.
     expect(types(trimTrailingAssistantPrefill(messages)[1])).toEqual([
       "tool-spawn_agent",
       "data-subagent-progress",
       "data-subagent-approval",
-      "step-start",
       "data-subagent-approval",
     ]);
   });
@@ -89,5 +92,58 @@ describe("trimTrailingAssistantPrefill", () => {
   it("ignores history that does not end on an assistant turn", () => {
     const messages = [msg("user", [{ type: "text", text: "hello" }])];
     expect(trimTrailingAssistantPrefill(messages)).toBe(messages);
+  });
+});
+
+/**
+ * The assertions that actually pin the bug class. The trim's own output can
+ * look right while the converted projection still ends on an assistant
+ * message — which is the thing providers reject. Assert on what the MODEL
+ * receives, not only on the parts array.
+ */
+describe("the converted projection after trimming", () => {
+  const paused = [
+    msg("user", [{ type: "text", text: "build me an agent" }]),
+    msg("assistant", [
+      {
+        type: "tool-spawn_agent",
+        toolCallId: "tc1",
+        state: "output-available",
+        input: {},
+        output: { status: "awaiting_approval" },
+      },
+      { type: "data-subagent-approval", data: { approvalId: "sapv_1", approved: true } },
+      { type: "step-start" },
+      { type: "text", text: "Once approved, it'll be OKR Status Reporter…" },
+      { type: "data-subagent-approval", data: { approvalId: "sapv_2", approved: true } },
+    ]),
+  ];
+
+  it("ends on the tool result — the user's side — after the trim", async () => {
+    const modelMsgs = await toModelMessages(trimTrailingAssistantPrefill(paused));
+    expect((modelMsgs[modelMsgs.length - 1] as { role: string }).role).toBe("tool");
+  });
+
+  it("regression: untrimmed, it ends on assistant text (the prefill)", async () => {
+    const modelMsgs = await toModelMessages(paused);
+    expect((modelMsgs[modelMsgs.length - 1] as { role: string }).role).toBe("assistant");
+  });
+
+  it("near-miss: keeping step-start ends it on an EMPTY assistant message", async () => {
+    // What a trim that keeps step-start produces for this shape — the reason
+    // step-start is in the drop set.
+    const keptStepStart = [
+      paused[0],
+      msg("assistant", [
+        (paused[1].parts as { type: string }[])[0],
+        { type: "data-subagent-approval", data: { approvalId: "sapv_1", approved: true } },
+        { type: "step-start" },
+        { type: "data-subagent-approval", data: { approvalId: "sapv_2", approved: true } },
+      ] as never),
+    ];
+    const modelMsgs = await toModelMessages(keptStepStart);
+    const last = modelMsgs[modelMsgs.length - 1] as { role: string; content: unknown[] };
+    expect(last.role).toBe("assistant");
+    expect(last.content).toEqual([]);
   });
 });

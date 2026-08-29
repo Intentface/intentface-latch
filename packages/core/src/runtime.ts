@@ -1041,11 +1041,18 @@ function markSubagentApprovalResolved(
  * data-subagent-progress, data-subagent-approval, step-start, text,
  * data-subagent-approval`. Only `tool-*` / `dynamic-tool` anchor.
  *
- * Parts after the anchor that the model never sees (`data-*`, `step-start`) are
- * KEPT: the resumed turn's `onFinish` re-persists this message, so removing them
- * would erase the approval markers the UI renders and `hasPendingApproval` reads.
- * The trailing text is dropped from stored history for the same reason — it is
- * provisional commentary about a decision that has now been made.
+ * `data-*` parts after the anchor are KEPT: the resumed turn's `onFinish`
+ * re-persists this message, so removing them would erase the approval markers
+ * the UI renders and `hasPendingApproval` reads. Trailing `step-start` is
+ * DROPPED along with the text: it is invisible content, but it instructs
+ * `convertToModelMessages` to open a NEW assistant message — and with the text
+ * gone, that message is empty, so the projection would still end on the
+ * assistant (`{ role: "assistant", content: [] }`), trading the prefill
+ * rejection for an empty-content one. The only thing in that step was the
+ * narration being removed, so history loses nothing but an empty divider.
+ * The trailing text is dropped from stored history too — it is provisional
+ * commentary about a decision that has now been made; the resumed turn
+ * regenerates the real continuation.
  */
 export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
   if (messages.length === 0) return messages;
@@ -1064,7 +1071,9 @@ export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage
   }
   // No tool anchor at all → nothing safe to say about this shape; leave it.
   if (anchor === -1) return messages;
-  const isPrefill = (t: string) => t === "text" || t === "reasoning";
+  // step-start joins text/reasoning: see the doc comment — keeping it ends the
+  // projection on an EMPTY assistant message, which providers also reject.
+  const isPrefill = (t: string) => t === "text" || t === "reasoning" || t === "step-start";
   const tail = parts.slice(anchor + 1);
   if (!tail.some((p) => isPrefill(p.type))) return messages;
   const kept = [...parts.slice(0, anchor + 1), ...tail.filter((p) => !isPrefill(p.type))];
