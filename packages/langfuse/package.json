@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-langfuse",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Latch observability on Langfuse — one-line tracing for latch runtimes via the AI SDK telemetry integration, plus score and trace-read helpers for platforms.",
   "license": "MIT",
   "type": "module",
