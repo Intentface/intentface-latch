@@ -165,9 +165,10 @@ export interface SlackChannelConfig<P> {
   }) => Promise<void>;
 
   /**
-   * Streaming-engine telemetry: called once per rendered turn with the mode
-   * (`stream`, or `fallback` + Slack's refusal code). Hosts persist it so the
-   * binding health row can say WHY a bot is in edited-message mode.
+   * Streaming-engine telemetry: called when the engine is decided (`stream`,
+   * or `fallback` + Slack's refusal code) and again if a live stream dies
+   * mid-turn. Hosts persist the last value so the binding health row can say
+   * WHY a bot degraded to post-at-finish mode.
    */
   onStreamMode?: (info: {
     chatId: string;
@@ -193,9 +194,6 @@ export interface SlackChannelConfig<P> {
         teamId: string;
       }) => Promise<{ title: string; message: string }[]>);
 
-  /** Per-agent display identity (fallback engine posts only). */
-  botName?: string;
-  iconEmoji?: string;
   /** Test seam for the Slack Web API client. */
   apiOptions?: SlackApiOptions;
 }
@@ -284,8 +282,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     return guarded;
   };
 
-  const identity = { username: config.botName, icon_emoji: config.iconEmoji };
-
   /** Session-surface status; a no-op outside the bot's DM channel. */
   async function setSession(
     api: SlackClient,
@@ -339,7 +335,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       recipientUserId: ctx.userId,
       shouldStop: () => config.threads.stoppedSince(ctx.chatId, ctx.turnStartedAt),
       feedback: config.feedback ?? false,
-      identity,
       ...(ctx.resumedToolName ? { resumedToolName: ctx.resumedToolName } : {}),
       ...(config.onStreamMode
         ? {
@@ -413,7 +408,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
             ...(threadTs ? { thread_ts: threadTs } : {}),
             blocks: approvalBlocksV2(value, pa.toolName, pa.input),
             text: `Approve ${pa.toolName}?`,
-            ...identity,
           });
         }
       }
@@ -467,7 +461,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           channel: ctx.channel,
           thread_ts: threadTsOf(ctx.root) ?? ctx.anchorTs,
           text: GENERIC_ERROR,
-          ...identity,
         })
         .catch(() => {});
       await setSession(b.api, ctx.channel, ctx.root, "active");

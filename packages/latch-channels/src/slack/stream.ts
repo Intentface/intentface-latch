@@ -16,10 +16,12 @@
  * server-side; we just stop rendering it.
  *
  * If `startStream` itself fails (surface doesn't support it, missing recipient,
- * restricted workspace) the whole turn degrades to the FALLBACK engine — one
- * `postMessage` edited in place at a gentler cadence (Slack guidance:
- * `chat.update` ≤ 1/3s), with a status line instead of task cards. Same
- * mechanic as the Telegram edit loop.
+ * restricted workspace) or the stream dies mid-turn, the turn degrades to the
+ * FALLBACK engine: buffer everything and post the finished answer ONCE at the
+ * end. Never edit-to-mimic — a message that looks like it's streaming must BE
+ * streaming. A stream that died mid-turn is deleted (its stranded task cards
+ * would otherwise render as ⚠️ forever) and the full text arrives in the
+ * final post instead.
  *
  * The streamed message holds up to `maxStreamedChars`; anything past it lands
  * in a follow-up message of native `markdown` blocks, so a long answer is
@@ -31,7 +33,10 @@ import { SlackApiError, type SlackClient, type StreamChunk } from "./api.js";
 import { errorBlocks, feedbackActions, markdownBlocks, notificationText } from "./blocks.js";
 
 export interface SlackStreamOptions {
-  api: Pick<SlackClient, "startStream" | "appendStream" | "stopStream" | "postMessage" | "update">;
+  api: Pick<
+    SlackClient,
+    "startStream" | "appendStream" | "stopStream" | "postMessage" | "deleteMessage"
+  >;
   channel: string;
   /** Thread to render into; omit for an un-threaded DM reply. */
   threadTs?: string;
@@ -41,9 +46,10 @@ export interface SlackStreamOptions {
   /** Cross-instance stop flag (host-backed); polled once per flush tick. */
   shouldStop?: () => Promise<boolean>;
   /**
-   * Called once, when the engine is decided — `stream`, or `fallback` with
-   * Slack's refusal code/detail. Hosts surface it (binding health) so a bot
-   * stuck in post+update mode is diagnosable without log spelunking.
+   * Called when the engine is decided — `stream`, or `fallback` with Slack's
+   * refusal code/detail — and AGAIN if a live stream dies mid-turn (the turn
+   * then finishes as `fallback`). Hosts surface the last value (binding
+   * health) so a degraded bot is diagnosable without log spelunking.
    */
   onStreamMode?: (info: {
     mode: "stream" | "fallback";
@@ -66,10 +72,7 @@ export interface SlackStreamOptions {
   setStatus?: (text: string) => void | Promise<void>;
   /** Append the native 👍/👎 row to the final message. */
   feedback?: boolean;
-  /** `postMessage` identity for the fallback engine (needs chat:write.customize). */
-  identity?: { username?: string; icon_emoji?: string };
   flushIntervalMs?: number;
-  fallbackUpdateIntervalMs?: number;
   /** Text budget of the streamed message itself; the rest overflows. */
   maxStreamedChars?: number;
   /** Injectable clock/sleep for tests. */
@@ -127,7 +130,6 @@ export async function renderSlackStream(
 ): Promise<SlackStreamResult> {
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? defaultSleep;
-  const fallbackInterval = opts.fallbackUpdateIntervalMs ?? 3000;
   const maxStreamed = opts.maxStreamedChars ?? MAX_APPEND_CHARS;
   let flushInterval = opts.flushIntervalMs ?? 500;
 
@@ -137,8 +139,6 @@ export async function renderSlackStream(
   let pendingText = ""; // accumulated, not yet flushed
   let pendingChunks: StreamChunk[] = [];
   let ts: string | undefined;
-  let statusLine = ""; // fallback engine only
-  let lastRendered = ""; // fallback engine dedupe
   let errorMessage: string | undefined;
   let stopped = false;
   let reasoningOpen = false;
@@ -203,7 +203,7 @@ export async function renderSlackStream(
         stopped = true;
         return;
       }
-      console.error("[slack] startStream unavailable — falling back to post+update:", e);
+      console.error("[slack] startStream unavailable — will post the answer at finish:", e);
       mode = "fallback";
       const err = e instanceof SlackApiError ? e : undefined;
       await reportMode({
@@ -243,13 +243,20 @@ export async function renderSlackStream(
       if (isDeadStream(e)) {
         // Slack expires an idle stream (e.g. while the model thinks after a
         // tool result). Retrying into a corpse loses the whole answer — flip
-        // to the post+update engine on a FRESH message. Text appended before
-        // the death may render twice across the two messages; duplicated
-        // beats vanished.
-        console.error("[slack] stream expired mid-turn — switching to post+update:", e);
+        // to the fallback engine, which posts the FULL text once at finish.
+        // The corpse is deleted: it can never be finalized, so its open task
+        // cards would render as ⚠️ forever, and its partial text would
+        // duplicate the final post's.
+        console.error("[slack] stream expired mid-turn — will post the answer at finish:", e);
+        const corpse = ts;
         mode = "fallback";
         ts = undefined;
-        lastRendered = "";
+        await reportMode({ mode: "fallback", code: (e as SlackApiError).code ?? "dead_stream" });
+        if (corpse) {
+          await opts.api
+            .deleteMessage({ channel: opts.channel, ts: corpse })
+            .catch((e2) => console.error("[slack] dead-stream cleanup failed:", e2));
+        }
         return;
       }
       if (e instanceof SlackApiError && e.status === 429) {
@@ -263,43 +270,34 @@ export async function renderSlackStream(
     }
   }
 
-  /** Fallback-mode flush: one message, edited in place, status line inline. */
-  async function flushFallback(final: boolean): Promise<void> {
-    let body = text;
-    if (!final && statusLine) body += `\n\n⏳ ${statusLine}`;
-    if (!body.trim() && !final) return;
-    if (body === lastRendered && !final) return;
-    const blocks = markdownBlocks(body).slice(0, 8);
-    if (final) {
-      if (errorMessage) blocks.push(...errorBlocks(errorMessage));
-      if (opts.feedback) blocks.push(feedbackActions());
+  /**
+   * Fallback engine: nothing renders mid-turn — the finished answer posts
+   * ONCE here. No chat.update, ever: a message that looks like it's
+   * streaming must BE streaming.
+   */
+  async function postFallbackFinal(): Promise<void> {
+    if (!text.trim() && !errorMessage) return;
+    const all = markdownBlocks(text);
+    const blocks = all.slice(0, 8);
+    if (all.length > blocks.length) {
+      blocks.push({
+        type: "markdown",
+        text: "_Answer truncated for Slack — the full turn is available in Latch._",
+      });
     }
-    try {
-      if (ts === undefined) {
-        const r = await opts.api.postMessage({
-          channel: opts.channel,
-          ...threadArgs,
-          blocks,
-          text: notificationText(body),
-          ...(opts.identity ?? {}),
-        });
-        ts = r.ts;
-      } else {
-        await opts.api.update({ channel: opts.channel, ts, blocks, text: notificationText(body) });
-      }
-      lastRendered = body;
-      lastFlushAt = now();
-      pendingText = "";
-      pendingChunks = [];
-    } catch (e) {
-      if (final) throw e;
-      console.error("[slack] fallback update failed (will retry on next flush):", e);
-    }
+    if (errorMessage) blocks.push(...errorBlocks(errorMessage));
+    if (opts.feedback) blocks.push(feedbackActions());
+    const r = await opts.api.postMessage({
+      channel: opts.channel,
+      ...threadArgs,
+      blocks,
+      text: notificationText(text || errorMessage || "Answer"),
+    });
+    ts = r.ts;
   }
 
   async function maybeFlush(): Promise<void> {
-    const interval = mode === "fallback" ? fallbackInterval : flushInterval;
-    const due = flushDue || now() - lastFlushAt >= interval;
+    const due = flushDue || now() - lastFlushAt >= flushInterval;
     const hasWork = pendingText.length > 0 || pendingChunks.length > 0;
     if (!hasWork || (!due && mode !== "none")) return;
 
@@ -313,8 +311,13 @@ export async function renderSlackStream(
       stopped = true;
       return;
     }
-    if (mode === "stream") await flushStream();
-    else await flushFallback(false);
+    if (mode === "stream") {
+      await flushStream();
+    } else {
+      // Fallback: nothing renders mid-turn. Mark the tick so the stop poll
+      // above keeps its cadence instead of running on every event.
+      lastFlushAt = now();
+    }
   }
 
   for await (const ev of events) {
@@ -323,14 +326,12 @@ export async function renderSlackStream(
         closeReasoning();
         text += ev.text;
         pendingText += ev.text;
-        statusLine = "";
         break;
       case "reasoning-delta":
         // Never render reasoning text — one collapsed task tells the story.
         if (!reasoningOpen) {
           reasoningOpen = true;
           queueTask(REASONING_TASK_ID, "Thinking", "in_progress");
-          statusLine = "Thinking…";
           status("is thinking…");
           flushDue = true;
         }
@@ -339,7 +340,6 @@ export async function renderSlackStream(
         closeReasoning();
         const name = ev.toolName || opts.resumedToolName || "tool";
         queueTask(ev.toolCallId, `Using ${name}`, "in_progress");
-        statusLine = `Running ${name}…`;
         status(`is using ${name}…`);
         flushDue = true;
         break;
@@ -347,7 +347,6 @@ export async function renderSlackStream(
       case "tool-end": {
         const name = ev.toolName || opts.resumedToolName || "tool";
         queueTask(ev.toolCallId, `Using ${name}`, ev.error ? "error" : "complete");
-        statusLine = "";
         status("");
         flushDue = true;
         break;
@@ -397,7 +396,6 @@ export async function renderSlackStream(
           ...threadArgs,
           blocks: errorBlocks(errorMessage),
           text: notificationText(errorMessage),
-          ...(opts.identity ?? {}),
         });
         return { text, errorMessage, ts: r.ts, mode: "none" };
       }
@@ -408,7 +406,13 @@ export async function renderSlackStream(
   }
 
   if (modeNow() === "fallback") {
-    await flushFallback(true);
+    // Honor a stop that landed while nothing was rendering.
+    if (opts.shouldStop && (await opts.shouldStop())) {
+      const res: SlackStreamResult = { text, mode, stopped: true };
+      if (errorMessage !== undefined) res.errorMessage = errorMessage;
+      return res;
+    }
+    await postFallbackFinal();
     const res: SlackStreamResult = { text, mode };
     if (ts !== undefined) res.ts = ts;
     if (errorMessage !== undefined) res.errorMessage = errorMessage;
@@ -463,7 +467,6 @@ export async function renderSlackStream(
         ...threadArgs,
         blocks: [...(tail ? markdownBlocks(tail) : []), ...finalBlocks],
         text: notificationText(tail || errorMessage || "Answer"),
-        ...(opts.identity ?? {}),
       })
       .catch((e) => console.error("[slack] tail recovery post failed:", e));
   }
@@ -483,7 +486,6 @@ export async function renderSlackStream(
       ...threadArgs,
       blocks: capped,
       text: notificationText(overflow),
-      ...(opts.identity ?? {}),
     });
     overflowTs.push(r.ts);
   }
