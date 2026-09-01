@@ -36,6 +36,24 @@ const readJsonOutput = <T>(output: unknown, context: string): T | undefined => {
   return undefined
 }
 
+/**
+ * Same read, but SILENT: label generators only glance at the output for a
+ * detail (a search query), and most tools return plain text that isn't JSON —
+ * logging that raw (bash output, fetched pages) would spill user data and
+ * secrets into the browser console on every step.
+ */
+const peekJsonOutput = (output: unknown): unknown => {
+  if (output && typeof output === "object") return output
+  if (typeof output === "string") {
+    try {
+      return JSON.parse(output) as unknown
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
 // ---------------------------------------------------------------------------
 // Ask-user
 // ---------------------------------------------------------------------------
@@ -165,7 +183,7 @@ export const getToolCallInfo = (
         ? labelConfig.active(input)
         : labelConfig.complete(
             input,
-            isComplete ? readJsonOutput(part.output, name) : undefined
+            isComplete ? peekJsonOutput(part.output) : undefined
           )
       : isActive
         ? `Running ${name}`
