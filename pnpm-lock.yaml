@@ -148,9 +148,6 @@ importers:
       '@daytonaio/sdk':
         specifier: ^0.189.0
         version: 0.189.0(ws@8.21.0)
-      '@fontsource-variable/inter':
-        specifier: ^5.2.8
-        version: 5.2.8
       '@intentface/chat':
         specifier: ^0.1.2
         version: 0.1.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -238,6 +235,9 @@ importers:
       croner:
         specifier: ^10.0.1
         version: 10.0.1
+      cronstrue:
+        specifier: ^3.24.0
+        version: 3.24.0
       drizzle-orm:
         specifier: ^0.45.0
         version: 0.45.2(@electric-sql/pglite@0.2.17)(@libsql/client@0.15.15)(@opentelemetry/api@1.9.1)(@prisma/client@5.22.0)(@types/better-sqlite3@9.6.0)(@types/pg@8.20.0)(better-sqlite3@12.11.1)(kysely@0.29.2)(pg@8.22.0)(sql.js@1.14.1)
@@ -277,6 +277,9 @@ importers:
       shadcn:
         specifier: ^4.11.0
         version: 4.11.0(typescript@6.0.3)
+      shadow-plugin:
+        specifier: ^2.1.0
+        version: 2.1.0
       sonner:
         specifier: ^2.0.7
         version: 2.0.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -1716,9 +1719,6 @@ packages:
 
   '@floating-ui/utils@0.2.11':
     resolution: {integrity: sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg==}
-
-  '@fontsource-variable/inter@5.2.8':
-    resolution: {integrity: sha512-kOfP2D+ykbcX/P3IFnokOhVRNoTozo5/JxhAIVYLpea/UBmCQ/YWPBfWIDuBImXX/15KH+eKh4xpEUyS2sQQGQ==}
 
   '@fuma-translate/react@1.0.2':
     resolution: {integrity: sha512-uOiOtBx3nRXR8Nu1GzBf1tApgF1FErDBTHxRIAQeyQdyOoZbrNRN6H4kDCWObY4qyGeGbHydG0DHzgeUgFDMIw==}
@@ -5056,6 +5056,10 @@ packages:
     resolution: {integrity: sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g==}
     engines: {node: '>=18.0'}
 
+  cronstrue@3.24.0:
+    resolution: {integrity: sha512-t/Ji3Ur2c/pzhIAWNwC0ftl3JAE4dLfCjAdZoTZXmPDZwcispnS1PaMcMS4OmIIXyIVouAz+yw+mfQiE3hz5OQ==}
+    hasBin: true
+
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
     engines: {node: '>= 8'}
@@ -7949,6 +7953,9 @@ packages:
     resolution: {integrity: sha512-UV0cchFea9hO7poV1CuEP0wvmYjpAqcxCKdy23bndl2Du2ARtDs8A4xdzfhUjDBeOW1nNpJ6lXmsEpsply2SfQ==}
     hasBin: true
 
+  shadow-plugin@2.1.0:
+    resolution: {integrity: sha512-LPzD22Hsa5+DPIc4iOZAswuTDzgs8Ypy6GS2kf+nh7FvADa4Yq5WtRBkdAuIomVljRxluhgdMuOWcckuoBALKQ==}
+
   sharp@0.34.5:
     resolution: {integrity: sha512-Ou9I5Ft9WNcCbXrU9cMgPBcCK8LiwLqcbywW3t4oDV37n1pzpuNLsYiAV8eODnjbtQlSDwZ2cUEeQz4E54Hltg==}
     engines: {node: ^18.17.0 || ^20.3.0 || >=21.0.0}
@@ -10208,8 +10215,6 @@ snapshots:
 
   '@floating-ui/utils@0.2.11': {}
 
-  '@fontsource-variable/inter@5.2.8': {}
-
   '@fuma-translate/react@1.0.2(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       react: 19.2.7
@@ -12424,7 +12429,7 @@ snapshots:
 
   '@types/better-sqlite3@9.6.0':
     dependencies:
-      '@types/node': 25.9.3
+      '@types/node': 22.19.21
 
   '@types/chai@5.2.3':
     dependencies:
@@ -13433,6 +13438,8 @@ snapshots:
   crelt@1.0.7: {}
 
   croner@10.0.1: {}
+
+  cronstrue@3.24.0: {}
 
   cross-spawn@7.0.6:
     dependencies:
@@ -16096,7 +16103,7 @@ snapshots:
 
   postcss@8.4.31:
     dependencies:
-      nanoid: 3.3.13
+      nanoid: 3.3.18
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
@@ -16619,6 +16626,8 @@ snapshots:
       - babel-plugin-macros
       - supports-color
       - typescript
+
+  shadow-plugin@2.1.0: {}
 
   sharp@0.34.5:
     dependencies:

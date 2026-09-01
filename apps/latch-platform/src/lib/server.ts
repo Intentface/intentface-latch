@@ -897,26 +897,61 @@ export const deleteAgentFn = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+/** What the Schedules page knows about one schedule. */
+export interface ScheduleSummary {
+  id: string;
+  agent: string;
+  cron: string | null;
+  timezone: string | null;
+  prompt: string;
+  nextRunAt: number;
+  lastRunAt: number | null;
+  /** The newest fired conversation — "Open latest run". */
+  lastChatId: string | null;
+  enabled: boolean;
+  onParked: "skip" | "fire";
+  /** Full target (IDs only, no secrets) so the edit dialog can preselect it. */
+  delivery: ScheduleDelivery | null;
+  /** The last fire's chat stopped awaiting a human (approval / question). */
+  parked: boolean;
+}
+
 /** The caller's scheduled agents, for the Schedules page. */
-export const listSchedulesFn = createServerFn({ method: "GET" }).handler(async () => {
-  const principal = await getPrincipal();
-  if (!principal) return [];
-  const { runtime } = await getLatch();
-  const schedules = await runtime.listSchedules({ principal });
-  return schedules.map((s) => {
-    const delivery = parseScheduleDelivery(s.delivery);
-    return {
-      id: s.id,
-      agent: s.agent,
-      cron: s.cron,
-      prompt: s.prompt,
-      nextRunAt: s.nextRunAt,
-      lastRunAt: s.lastRunAt ?? null,
-      enabled: s.enabled,
-      delivery: delivery ? { kind: delivery.kind } : null,
-    };
-  });
-});
+export const listSchedulesFn = createServerFn({ method: "GET" }).handler(
+  async (): Promise<ScheduleSummary[]> => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const { runtime } = await getLatch();
+    const [schedules, chats] = await Promise.all([
+      runtime.listSchedules({ principal }),
+      // lastRunStatus only comes from listChats (getChat never derives it), so
+      // widen the window well past the schedule count. A lastChatId older than
+      // the newest 1000 chats reports parked=false — accepted residual.
+      runtime.listChats({ principal, limit: 1000 }),
+    ]);
+    // "waiting on you" is chat state, not schedule state: the fired chat's
+    // last run stopped on an approval or a question nobody has answered.
+    const statusOf = new Map(chats.map((c) => [c.id, c.lastRunStatus ?? null]));
+    return schedules.map((s) => {
+      const delivery = parseScheduleDelivery(s.delivery);
+      const lastChatId = s.lastChatId ?? null;
+      return {
+        id: s.id,
+        agent: s.agent,
+        cron: s.cron,
+        timezone: s.timezone ?? null,
+        prompt: s.prompt,
+        nextRunAt: s.nextRunAt,
+        lastRunAt: s.lastRunAt ?? null,
+        lastChatId,
+        enabled: s.enabled,
+        onParked: s.onParked ?? "skip",
+        delivery: delivery ?? null,
+        parked: lastChatId ? statusOf.get(lastChatId) === "awaiting_input" : false,
+      };
+    });
+  },
+);
 
 /** The delivery targets the caller may point a schedule for `agent` at. */
 export const listAgentChannelsFn = createServerFn({ method: "GET" })
@@ -944,6 +979,7 @@ export const createScheduleFn = createServerFn({ method: "POST" })
       timezone?: string;
       prompt: string;
       delivery?: unknown;
+      onParked?: "skip" | "fire";
     }) => data,
   )
   .handler(async ({ data }) => {
@@ -972,6 +1008,7 @@ export const createScheduleFn = createServerFn({ method: "POST" })
         timezone: data.timezone,
         prompt: data.prompt,
         delivery,
+        onParked: data.onParked,
       });
       return { ok: true as const };
     } catch (e) {
@@ -979,6 +1016,82 @@ export const createScheduleFn = createServerFn({ method: "POST" })
         ok: false as const,
         error: e instanceof Error ? e.message : "Failed to create schedule",
       };
+    }
+  });
+
+/**
+ * Save changes to a schedule. The runtime has no in-place update, so this is
+ * create-new-then-unschedule-old: the id changes and the fired-chat pointer
+ * resets. Create runs first — a failure between the two steps leaves a
+ * duplicate to delete, never a silently missing schedule.
+ */
+export const updateScheduleFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      id: string;
+      agent: string;
+      cron: string | null;
+      timezone?: string;
+      prompt: string;
+      delivery?: unknown;
+      onParked?: "skip" | "fire";
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    let delivery: ScheduleDelivery | undefined;
+    if (data.delivery) {
+      const parsed = parseScheduleDelivery(data.delivery);
+      if (!parsed) return { ok: false as const, error: "Unrecognized delivery target." };
+      try {
+        await resolveDelivery(principal, data.agent, parsed);
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof DeliveryError ? e.message : "Delivery target rejected.",
+        };
+      }
+      delivery = parsed;
+    }
+    const { runtime } = await getLatch();
+    let replacement;
+    try {
+      replacement = await runtime.schedule({
+        principal,
+        agent: data.agent,
+        cron: data.cron,
+        timezone: data.timezone,
+        prompt: data.prompt,
+        delivery,
+        onParked: data.onParked,
+      });
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : "Failed to save schedule",
+      };
+    }
+    try {
+      await runtime.unschedule({ principal, id: data.id });
+      return { ok: true as const };
+    } catch {
+      // The replacement exists but the old schedule survived. Roll the
+      // replacement back so a retry can't stack duplicates; if even that
+      // fails, say exactly what state the user is in.
+      try {
+        await runtime.unschedule({ principal, id: replacement.id });
+        return {
+          ok: false as const,
+          error: "Couldn't replace the schedule — nothing was changed. Try again.",
+        };
+      } catch {
+        return {
+          ok: false as const,
+          error:
+            "The updated schedule was created but the old one couldn't be removed — delete the duplicate by hand.",
+        };
+      }
     }
   });
 

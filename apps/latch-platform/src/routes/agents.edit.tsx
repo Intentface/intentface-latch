@@ -34,6 +34,7 @@ import {
   listTelegramBotsFn,
   listWhatsappBotsFn,
   registerTelegramWebhookFn,
+  deleteAgentFn,
   saveAgentFn,
   saveTelegramTokenFn,
   saveWhatsappCredentialsFn,
@@ -533,7 +534,7 @@ function AgentEditor() {
                   return (
                     <div
                       key={a.name}
-                      className="border-primary-border flex items-center gap-3 rounded-lg border p-3"
+                      className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg flex items-center gap-3 rounded-lg p-3"
                     >
                       <Switch
                         checked={on}
@@ -576,7 +577,7 @@ function AgentEditor() {
           </label>
         </div>
 
-        <div className="border-primary-border space-y-3 rounded-lg border p-3">
+        <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-3">
           <FieldLabel>Capabilities</FieldLabel>
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={sandbox} onCheckedChange={() => setSandbox((v) => !v)} />
@@ -700,7 +701,7 @@ function AgentEditor() {
           )}
         </div>
 
-        <div className="border-primary-border space-y-3 rounded-lg border p-3">
+        <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-3">
           <FieldLabel>Memory</FieldLabel>
           <label className="flex items-center gap-2 text-xs">
             <Switch
@@ -815,12 +816,39 @@ function AgentEditor() {
         </div>
 
         {error && <p className="text-destructive text-sm">{error}</p>}
-        <div className="flex gap-2">
-          <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
-            {editing ? "Update agent" : "Create agent"}
-          </Button>
+        <div className="border-primary-border flex items-center gap-2 border-t pt-4">
+          {editing && (
+            <Button
+              type="button"
+              variant="destructive"
+              className="mr-auto"
+              disabled={busy}
+              onClick={async () => {
+                if (!confirm(`Delete agent "${initial?.title ?? name}"? This cannot be undone.`)) {
+                  return;
+                }
+                setBusy(true);
+                try {
+                  const res = await deleteAgentFn({ data: { name, scope } });
+                  if (!res.ok) {
+                    setError("Couldn't delete the agent.");
+                    return;
+                  }
+                  await router.invalidate();
+                  await navigate({ to: "/agents", search: {} });
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Delete agent
+            </Button>
+          )}
           <Button type="button" variant="ghost" render={<Link to="/agents" />}>
             Cancel
+          </Button>
+          <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
+            {editing ? "Update agent" : "Create agent"}
           </Button>
         </div>
       </form>
@@ -1132,7 +1160,7 @@ function SlackSection({ agent }: { agent: string }) {
   }
 
   return (
-    <section className="border-primary-border space-y-3 rounded-lg border p-4">
+    <section className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-4">
       <div className="flex items-center gap-2">
         <Hash className="text-ink-secondary size-4" />
         <h2 className="text-ink-primary text-sm font-semibold">Slack</h2>
@@ -1609,7 +1637,7 @@ function ConnectionRow({
 }) {
   const needsAuth = on && status?.oauth && !status.authorized && tools.length === 0;
   return (
-    <div className="border-primary-border overflow-hidden rounded-lg border">
+    <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg overflow-hidden rounded-lg">
       <div className="flex items-center gap-3 p-3">
         <Switch checked={on} onCheckedChange={onToggleOn} aria-label={`Use ${name}`} />
         <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
@@ -1837,7 +1865,7 @@ function TelegramSection({ agent }: { agent: string }) {
   }
 
   return (
-    <section className="border-primary-border space-y-3 rounded-lg border p-4">
+    <section className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-4">
       <div className="flex items-center gap-2">
         <Send className="text-ink-secondary size-4" />
         <h2 className="text-ink-primary text-sm font-semibold">Telegram</h2>
@@ -2071,7 +2099,7 @@ function WhatsappSection({ agent }: { agent: string }) {
   }
 
   return (
-    <section className="border-primary-border space-y-3 rounded-lg border p-4">
+    <section className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-4">
       <div className="flex items-center gap-2">
         <MessageCircle className="text-ink-secondary size-4" />
         <h2 className="text-ink-primary text-sm font-semibold">WhatsApp</h2>

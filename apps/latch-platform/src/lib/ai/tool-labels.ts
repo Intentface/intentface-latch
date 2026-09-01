@@ -14,9 +14,31 @@ export type ToolLabels = Record<
   string,
   {
     active: (input: Record<string, unknown>) => string
-    complete: (input: Record<string, unknown>) => string
+    /** `output` is only present once the call finished (parsed if it was JSON). */
+    complete: (input: Record<string, unknown>, output?: unknown) => string
   }
 >
+
+/**
+ * The query of a search call, wherever the provider put it. Our own tool and
+ * Anthropic's native search carry `input.query`; OpenAI's native search has an
+ * EMPTY input — the query only appears in the OUTPUT as `action.query` (or
+ * `action.queries`); Google's grounding has no per-call query at all.
+ */
+const searchQuery = (
+  input: Record<string, unknown>,
+  output?: unknown
+): string | undefined => {
+  if (typeof input.query === "string" && input.query) return input.query
+  const action = (
+    output as { action?: { query?: unknown; queries?: unknown } } | undefined
+  )?.action
+  if (typeof action?.query === "string" && action.query) return action.query
+  if (Array.isArray(action?.queries) && action.queries.length > 0) {
+    return action.queries.filter((q) => typeof q === "string").join("', '")
+  }
+  return undefined
+}
 
 /** Hostname of a URL-ish input, for the fetch tools' labels. */
 const host = (value: unknown): string => {
@@ -39,8 +61,14 @@ export const DEFAULT_TOOL_LABELS: ToolLabels = {
     complete: (i) => `Rendered ${host(i.url)}`,
   },
   web_search: {
-    active: (i) => `Searching for '${i.query ?? ""}'`,
-    complete: (i) => `Searched for '${i.query ?? ""}'`,
+    active: (i) => {
+      const q = searchQuery(i)
+      return q ? `Searching for '${q}'` : "Searching the web"
+    },
+    complete: (i, o) => {
+      const q = searchQuery(i, o)
+      return q ? `Searched for '${q}'` : "Searched the web"
+    },
   },
 
   // Memory

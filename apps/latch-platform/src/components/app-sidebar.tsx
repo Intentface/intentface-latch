@@ -20,7 +20,8 @@ import {
 import { DisplaySettingsPanel } from "@/components/display-settings";
 import { Dialog } from "@/components/ui/dialog";
 import { Sidebar } from "@/components/ui/sidebar";
-import { recentChatsFn } from "@/lib/server";
+import { listAgentsFn, recentChatsFn } from "@/lib/server";
+import { AgentPickerDialog, type PickableAgent } from "@/components/agent-picker-dialog";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
 import { LatchLogo } from "@/components/latch-logo";
 import { Button } from "@/components/ui/button";
@@ -56,6 +57,18 @@ export function AppSidebar() {
     { id: string; title: string | null; agent: string; lastRunStatus?: string | null }[]
   >([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // New Chat opens the searchable agent palette; the list is fetched on first
+  // open (the sidebar renders on every page — don't load 25 agents up front).
+  const [pickerAgents, setPickerAgents] = useState<PickableAgent[] | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const openPicker = () => {
+    setPickerOpen(true);
+    if (pickerAgents === null) {
+      listAgentsFn()
+        .then((agents) => setPickerAgents(agents))
+        .catch(() => setPickerAgents([]));
+    }
+  };
   const [inviteOpen, setInviteOpen] = useState(false);
 
   // Recent threads. The list only changes while in the chat area (new chats,
@@ -98,13 +111,11 @@ export function AppSidebar() {
               <Sidebar.MenuItem>
                 <Sidebar.MenuButton
                   isActive={pathname === "/chat"}
-                  render={
-                    <Link to="/chat">
-                      <Plus />
-                      <span>New Chat</span>
-                    </Link>
-                  }
-                />
+                  onClick={openPicker}
+                >
+                  <Plus />
+                  <span>New Chat</span>
+                </Sidebar.MenuButton>
               </Sidebar.MenuItem>
             </Sidebar.Menu>
           </Sidebar.Group>
@@ -168,6 +179,10 @@ export function AppSidebar() {
           </Sidebar.Group>
         )}
       </Sidebar.Content>
+
+      {pickerOpen && pickerAgents !== null && (
+        <AgentPickerDialog agents={pickerAgents} onClose={() => setPickerOpen(false)} />
+      )}
 
       <Sidebar.Footer>
         {isPending ? null : session ? (

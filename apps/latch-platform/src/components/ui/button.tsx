@@ -22,7 +22,7 @@ const buttonVariants = cva(
     variants: {
       variant: {
         primary:
-          "border-primary-border bg-primary-bg text-ink-primary hover:border-primary-border-hover hover:bg-primary-bg-hover",
+          "smooth-shadow-ring-xs smooth-ring-primary-border hover:smooth-ring-primary-border-hover border-primary-border bg-primary-bg text-ink-primary hover:bg-primary-bg-hover",
         secondary:
           "border-secondary-border bg-secondary-bg text-ink-primary hover:bg-secondary-bg-hover",
         tertiary:

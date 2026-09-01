@@ -485,7 +485,7 @@ const SidebarGroupLabel = ({
       "data-slot": "sidebar-group-label",
       ...props,
       className: cn(
-        "flex shrink-0 items-center rounded-md px-2 py-1.5 text-sm font-medium text-ink-tertiary outline-hidden focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0",
+        "flex shrink-0 items-center rounded-md px-2 py-1.5 text-sm font-normal text-ink-tertiary outline-hidden focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0",
         className
       ),
     },
@@ -542,7 +542,7 @@ const SidebarMenuItem = ({ className, ...props }: ComponentProps<"li">) => (
 const sidebarMenuButtonVariants = cva(
   [
     "peer/menu-button flex w-full cursor-pointer items-center gap-2",
-    "h-8 overflow-hidden rounded-md px-2 text-left text-md/none font-medium text-ink-secondary outline-hidden",
+    "h-8 overflow-hidden rounded-md px-2 text-left text-md/none font-normal text-ink-secondary outline-hidden",
     "focus-visible:ring-1",
     "hover:bg-base-bg-hover hover:text-ink-primary data-active:bg-base-bg-hover data-active:text-ink-primary",
     "disabled:pointer-events-none disabled:opacity-50",
@@ -648,7 +648,7 @@ const SidebarMenuBadge = ({ className, ...props }: ComponentProps<"div">) => (
   <div
     data-slot="sidebar-menu-badge"
     className={cn(
-      "pointer-events-none absolute right-1 flex h-5 min-w-5 items-center justify-center rounded-md px-1 text-xs font-medium text-sidebar-foreground tabular-nums select-none",
+      "pointer-events-none absolute right-1 flex h-5 min-w-5 items-center justify-center rounded-md px-1 text-xs font-normal text-sidebar-foreground tabular-nums select-none",
       "peer-hover/menu-button:text-sidebar-accent-foreground peer-data-[active=true]/menu-button:text-sidebar-accent-foreground",
       className
     )}
