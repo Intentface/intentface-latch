@@ -163,7 +163,10 @@ export const getToolCallInfo = (
     : labelConfig
       ? isActive
         ? labelConfig.active(input)
-        : labelConfig.complete(input)
+        : labelConfig.complete(
+            input,
+            isComplete ? readJsonOutput(part.output, name) : undefined
+          )
       : isActive
         ? `Running ${name}`
         : `Ran ${name}`
