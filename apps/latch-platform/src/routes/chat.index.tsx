@@ -1,12 +1,8 @@
-import { createFileRoute, Link, useLoaderData, useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
+import { createFileRoute, Link, useLoaderData } from "@tanstack/react-router";
 import { Bot, MessageSquare, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { AgentPickerDialog } from "@/components/agent-picker-dialog";
 
 export const Route = createFileRoute("/chat/")({
   component: ChatIndex,
@@ -35,15 +31,8 @@ function fmtCost(n: number): string {
 
 function ChatIndex() {
   const { chats, agents } = useLoaderData({ from: "/chat" });
-  const navigate = useNavigate();
+  const [picking, setPicking] = useState(false);
   const total = chats.reduce((s, c) => s + (c.cost ?? 0), 0);
-
-  const newChat = (agent: string) =>
-    navigate({
-      to: "/chat/$chatId",
-      params: { chatId: crypto.randomUUID() },
-      search: { agent },
-    });
 
   return (
     <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto px-6 py-8">
@@ -55,24 +44,12 @@ function ChatIndex() {
             {total > 0 && <> · {fmtCost(total)} total</>}.
           </p>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger render={<Button size="sm" className="gap-1.5" />}>
-            <Plus className="size-4" /> New chat
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56">
-            {agents.map((a) => (
-              <DropdownMenuItem key={a.name} onClick={() => newChat(a.name)}>
-                <div className="flex flex-col">
-                  <span className="text-sm">{a.title ?? a.name}</span>
-                  {a.description && (
-                    <span className="text-ink-tertiary text-xs">{a.description}</span>
-                  )}
-                </div>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <Button size="sm" className="gap-1.5" onClick={() => setPicking(true)}>
+          <Plus className="size-4" /> New chat
+        </Button>
       </div>
+
+      {picking && <AgentPickerDialog agents={agents} onClose={() => setPicking(false)} />}
 
       {chats.length === 0 ? (
         <div className="border-primary-border text-ink-tertiary flex flex-col items-center gap-3 rounded-xl border border-dashed py-16 text-center">

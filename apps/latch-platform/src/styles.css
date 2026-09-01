@@ -15,13 +15,23 @@
  */
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "shadow-plugin";
 @import "streamdown/styles.css";
-@import "@fontsource-variable/inter";
 
 /* Tailwind v4 must scan streamdown's markup for the classes it emits. */
 @source "../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
+
+/* The house typeface (matches intentface-agents). Self-hosted variable font;
+   preloaded from __root.tsx so text never flashes a fallback. */
+@font-face {
+  font-family: "TASA Orbiter";
+  src: url("/fonts/TASAOrbiterVF.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   font-feature-settings:
@@ -164,7 +174,8 @@
 }
 
 @theme inline {
-  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "TASA Orbiter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-sans);
   --font-heading: var(--font-sans);
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 

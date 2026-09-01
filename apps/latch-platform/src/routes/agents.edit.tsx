@@ -34,6 +34,7 @@ import {
   listTelegramBotsFn,
   listWhatsappBotsFn,
   registerTelegramWebhookFn,
+  deleteAgentFn,
   saveAgentFn,
   saveTelegramTokenFn,
   saveWhatsappCredentialsFn,
@@ -815,12 +816,35 @@ function AgentEditor() {
         </div>
 
         {error && <p className="text-destructive text-sm">{error}</p>}
-        <div className="flex gap-2">
-          <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
-            {editing ? "Update agent" : "Create agent"}
-          </Button>
+        <div className="border-primary-border flex items-center gap-2 border-t pt-4">
+          {editing && (
+            <Button
+              type="button"
+              variant="destructive"
+              className="mr-auto"
+              disabled={busy}
+              onClick={async () => {
+                if (!confirm(`Delete agent "${initial?.title ?? name}"? This cannot be undone.`)) {
+                  return;
+                }
+                setBusy(true);
+                try {
+                  await deleteAgentFn({ data: { name, scope } });
+                  await router.invalidate();
+                  await navigate({ to: "/agents", search: {} });
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Delete agent
+            </Button>
+          )}
           <Button type="button" variant="ghost" render={<Link to="/agents" />}>
             Cancel
+          </Button>
+          <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
+            {editing ? "Update agent" : "Create agent"}
           </Button>
         </div>
       </form>
