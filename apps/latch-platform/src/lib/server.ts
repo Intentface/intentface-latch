@@ -910,7 +910,8 @@ export interface ScheduleSummary {
   lastChatId: string | null;
   enabled: boolean;
   onParked: "skip" | "fire";
-  delivery: { kind: string } | null;
+  /** Full target (IDs only, no secrets) so the edit dialog can preselect it. */
+  delivery: ScheduleDelivery | null;
   /** The last fire's chat stopped awaiting a human (approval / question). */
   parked: boolean;
 }
@@ -923,7 +924,10 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(
     const { runtime } = await getLatch();
     const [schedules, chats] = await Promise.all([
       runtime.listSchedules({ principal }),
-      runtime.listChats({ principal }),
+      // lastRunStatus only comes from listChats (getChat never derives it), so
+      // widen the window well past the schedule count. A lastChatId older than
+      // the newest 1000 chats reports parked=false — accepted residual.
+      runtime.listChats({ principal, limit: 1000 }),
     ]);
     // "waiting on you" is chat state, not schedule state: the fired chat's
     // last run stopped on an approval or a question nobody has answered.
@@ -942,7 +946,7 @@ export const listSchedulesFn = createServerFn({ method: "GET" }).handler(
         lastChatId,
         enabled: s.enabled,
         onParked: s.onParked ?? "skip",
-        delivery: delivery ? { kind: delivery.kind } : null,
+        delivery: delivery ?? null,
         parked: lastChatId ? statusOf.get(lastChatId) === "awaiting_input" : false,
       };
     });
@@ -1051,8 +1055,9 @@ export const updateScheduleFn = createServerFn({ method: "POST" })
       delivery = parsed;
     }
     const { runtime } = await getLatch();
+    let replacement;
     try {
-      await runtime.schedule({
+      replacement = await runtime.schedule({
         principal,
         agent: data.agent,
         cron: data.cron,
@@ -1061,13 +1066,32 @@ export const updateScheduleFn = createServerFn({ method: "POST" })
         delivery,
         onParked: data.onParked,
       });
-      await runtime.unschedule({ principal, id: data.id });
-      return { ok: true as const };
     } catch (e) {
       return {
         ok: false as const,
         error: e instanceof Error ? e.message : "Failed to save schedule",
       };
+    }
+    try {
+      await runtime.unschedule({ principal, id: data.id });
+      return { ok: true as const };
+    } catch {
+      // The replacement exists but the old schedule survived. Roll the
+      // replacement back so a retry can't stack duplicates; if even that
+      // fails, say exactly what state the user is in.
+      try {
+        await runtime.unschedule({ principal, id: replacement.id });
+        return {
+          ok: false as const,
+          error: "Couldn't replace the schedule — nothing was changed. Try again.",
+        };
+      } catch {
+        return {
+          ok: false as const,
+          error:
+            "The updated schedule was created but the old one couldn't be removed — delete the duplicate by hand.",
+        };
+      }
     }
   });
 

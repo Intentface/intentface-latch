@@ -125,6 +125,8 @@ function ScheduleRow({
       if (res.ok) toast.success("Armed — it fires within the minute");
       else toast.error(res.error);
       await router.invalidate();
+    } catch {
+      toast.error("Couldn't arm the schedule");
     } finally {
       setBusy(false);
     }

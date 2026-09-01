@@ -829,7 +829,11 @@ function AgentEditor() {
                 }
                 setBusy(true);
                 try {
-                  await deleteAgentFn({ data: { name, scope } });
+                  const res = await deleteAgentFn({ data: { name, scope } });
+                  if (!res.ok) {
+                    setError("Couldn't delete the agent.");
+                    return;
+                  }
                   await router.invalidate();
                   await navigate({ to: "/agents", search: {} });
                 } finally {

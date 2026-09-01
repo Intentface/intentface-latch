@@ -101,7 +101,7 @@ export const fromCron = (expression: string | null): Repeat => {
     if (m !== null && h !== null && month === "*") {
       const time = `${pad(h)}:${pad(m)}`;
       if (dayOfMonth === "*" && dayOfWeek === "*") return { kind: "daily", time };
-      if (dayOfMonth === "*" && /^\d(,\d)*$/.test(dayOfWeek)) {
+      if (dayOfMonth === "*" && /^[0-6](,[0-6])*$/.test(dayOfWeek)) {
         return { kind: "weekly", days: dayOfWeek.split(",").map(Number), time };
       }
       const day = num(dayOfMonth, 31);

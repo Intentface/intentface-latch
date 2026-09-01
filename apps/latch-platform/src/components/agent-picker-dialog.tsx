@@ -46,6 +46,9 @@ export function AgentPickerDialog({
       params: { chatId: crypto.randomUUID() },
       search: { agent },
     });
+    // Programmatic close never fires onOpenChange — reset the parent's state
+    // too, or the palette can never be reopened.
+    onClose();
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -65,8 +68,8 @@ export function AgentPickerDialog({
   return (
     <Dialog
       open={open}
-      onOpenChange={(o) => {
-        setOpen(o);
+      onOpenChange={setOpen}
+      onOpenChangeComplete={(o) => {
         if (!o) onClose();
       }}
     >

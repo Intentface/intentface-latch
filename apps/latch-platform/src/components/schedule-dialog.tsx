@@ -40,6 +40,14 @@ interface DeliveryOption {
   delivery: unknown;
 }
 
+/** The option `value` a stored delivery target corresponds to. */
+const deliveryValueOf = (d: ScheduleSummary["delivery"]): string | undefined => {
+  if (!d) return undefined;
+  if (d.kind === "telegram") return `telegram:${d.botId}`;
+  if (d.kind === "slack") return `slack:${d.appId}:${d.channel}`;
+  return undefined;
+};
+
 const REPEAT_KINDS: { value: Repeat["kind"]; label: string }[] = [
   { value: "once", label: "Doesn't repeat" },
   { value: "hourly", label: "Every hour" },
@@ -126,6 +134,13 @@ export function ScheduleDialog({
           }
         }
         setDeliveries(options);
+        // Editing: preselect the saved target once the options exist. A target
+        // that's no longer offered (entitlement lapsed) stays unselected —
+        // saving then matches what fire time would do anyway.
+        if (schedule && agent === schedule.agent) {
+          const want = deliveryValueOf(schedule.delivery);
+          if (want && options.some((o) => o.value === want)) setDeliverTo(want);
+        }
       })
       .catch(() => {});
     return () => {
@@ -179,8 +194,8 @@ export function ScheduleDialog({
   return (
     <Dialog
       open={open}
-      onOpenChange={(o) => {
-        setOpen(o);
+      onOpenChange={setOpen}
+      onOpenChangeComplete={(o) => {
         if (!o) onClose();
       }}
     >
