@@ -39,6 +39,20 @@ describe("AgentRecordSchema — shape", () => {
     expect(issues({ ...BASE, name: "!!!" })).toContain("invalid name");
   });
 
+  it("rejects the retired top-level effort/authoredTools instead of silently dropping them", () => {
+    expect(issues({ ...BASE, effort: "high" })).not.toEqual([]);
+    expect(issues({ ...BASE, authoredTools: ["t1"] })).not.toEqual([]);
+    expect(issues({ ...BASE, capabilities: { sandbox: true } })).not.toEqual([]);
+    // The nested forms are the supported ones.
+    const rec = AgentRecordSchema.parse({ ...BASE, exec: { effort: "high", authoredTools: ["t1"] } });
+    expect(rec.exec).toEqual({ effort: "high", authoredTools: ["t1"] });
+  });
+
+  it("a retired exec flag on a stored row still loads (exec is not strict)", () => {
+    const rec = AgentRecordSchema.parse({ ...BASE, exec: { sandbox: true, codeMode: {} } });
+    expect(rec.exec).toEqual({ sandbox: true });
+  });
+
   it("rejects an empty memory connection name", () => {
     expect(issues({ ...BASE, exec: { memory: { scope: "agent-user", connection: "" } } })).not.toEqual([]);
   });
@@ -77,6 +91,10 @@ describe("AgentRecordSchema — memory invariants (host-independent)", () => {
     });
     expect(issues({ ...base, ...mem({ user: "## Facts" }) })).not.toEqual([]);
     expect(issues({ ...base, ...mem({ "agent-user": "no heading here" }) }).join()).toMatch(/## Section/);
+    // `##Facts` / `##\nFacts` are not level-2 headings (CommonMark needs the space).
+    expect(issues({ ...base, ...mem({ "agent-user": "##Facts" }) }).join()).toMatch(/## Section/);
+    expect(issues({ ...base, ...mem({ "agent-user": "##\nFacts" }) }).join()).toMatch(/## Section/);
+    expect(issues({ ...base, ...mem({ "agent-user": "  ## Facts\n- x" }) })).toEqual([]);
     expect(issues({ ...base, ...mem({ "agent-user": `## A\n${"x".repeat(4000)}` }) }).join()).toMatch(
       /too long/,
     );

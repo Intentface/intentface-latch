@@ -28,8 +28,11 @@ export const MemoryScopeSchema = z.enum(["agent-user", "agent-org", "user"]);
 const MEMORY_LEVEL_DESCRIPTION =
   "'agent-user' = this agent's memory of each user (default choice); 'agent-org' = one shared memory for the whole org (requires the agent itself to have scope 'org'); 'user' = shared across all the user's agents.";
 
-/** Markdown index-schema outline: at least one `## Section` heading, or blank (dropped on normalize). */
-const isOutline = (s: string) => !s.trim() || /^\s*##(?!#)\s*\S/m.test(s);
+/**
+ * Markdown index-schema outline: at least one real level-2 heading (`## ` +
+ * text, CommonMark requires the space), or blank (dropped on normalize).
+ */
+const isOutline = (s: string) => !s.trim() || /^[ \t]*##(?!#)[ \t]+\S/m.test(s);
 
 const MemorySchemaText = z
   .string()
@@ -125,8 +128,14 @@ export const AgentExecSchema = z.object({
   ),
 });
 
+// `strictObject`, not `object`: the pre-schema builder took `effort` and
+// `authoredTools` at the TOP level. Zod strips unknown keys by default, so a
+// writer still emitting that shape would save an agent silently missing its
+// configuration. Rejecting is the honest outcome. (`exec` itself stays
+// non-strict so a stored row carrying a retired flag such as `codeMode` still
+// loads and re-saves.)
 export const AgentRecordSchema = z
-  .object({
+  .strictObject({
     name: z.string().min(1).describe("Unique kebab-case id. Reusing an existing name UPDATES that agent."),
     title: z.string().optional().describe("Short human label for the picker."),
     description: z.string().optional().describe("One line on what the agent does."),

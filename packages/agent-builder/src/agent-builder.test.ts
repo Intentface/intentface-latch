@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createAgentBuilder } from "./agent-builder";
 import type { AgentBuilderDeps } from "./agent-builder";
 import type { AgentBuilderExtension } from "./extension";
-import { normalizeAgentName } from "./store";
+import { normalizeAgentName, parseAgentRef } from "./store";
 import type { AgentRecord } from "./store";
 
 type P = { orgId: string; userId: string };
@@ -58,9 +58,13 @@ function makeDeps(): AgentBuilderDeps<P> & {
       resolve: async () => undefined,
       list: async () => records.map((r) => ({ name: r.name })),
       listRecords: async () => records,
-      getRecord: async (_p, name) => {
+      getRecord: async (_p, ref) => {
+        // Same contract as the drizzle store: honour an org:/user: pin,
+        // otherwise personal wins over org on a name clash.
+        const { name, scope } = parseAgentRef(ref);
         const target = normalizeAgentName(name);
-        return records.find((r) => r.name === target && r.scope === "user") ?? records.find((r) => r.name === target);
+        const matches = records.filter((r) => r.name === target && (!scope || r.scope === scope));
+        return scope ? matches[0] : (matches.find((r) => r.scope === "user") ?? matches[0]);
       },
       listMemoryEnabledNames: async () => records.filter((r) => r.exec?.memory).map((r) => r.name),
       upsert: async (_p, rec) => {
@@ -167,6 +171,25 @@ describe("builder with zero extensions", () => {
     expect(await err({ modelId: "nope" })).toMatch(/Unknown modelId/);
     expect(await err({ connections: ["nope"] })).toMatch(/Unknown connection/);
     expect(await err({ subagents: ["nope"] })).toMatch(/Unknown subagent/);
+  });
+
+  it("get_agent honours the scope pin when user and org records share a name", async () => {
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute({ ...SAVE, name: "dup", instructions: "personal" });
+    await tools.save_agent!.execute({ ...SAVE, name: "dup", instructions: "shared", scope: "org" });
+    const bare = (await tools.get_agent!.execute({ name: "dup" })) as AgentRecord;
+    const org = (await tools.get_agent!.execute({ name: "org:dup" })) as AgentRecord;
+    const user = (await tools.get_agent!.execute({ name: "user:dup" })) as AgentRecord;
+    expect(bare.instructions).toBe("personal");
+    expect(org.instructions).toBe("shared");
+    expect(user.instructions).toBe("personal");
+  });
+
+  it("rejects the retired top-level effort/authoredTools as a tool error", async () => {
+    const { tools } = await openTools(makeDeps());
+    const res = (await tools.save_agent!.execute({ ...SAVE, effort: "high" })) as { error?: string };
+    expect(res.error).toMatch(/Invalid agent/);
   });
 
   it("rejects authoredTools with a clear error (never silently ignores)", async () => {
