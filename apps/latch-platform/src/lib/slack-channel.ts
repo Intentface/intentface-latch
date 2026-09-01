@@ -40,7 +40,6 @@ export async function getSlackChannelForApp(appId: string) {
     agent: app.agentScope ? `${app.agentScope}:${app.agent}` : app.agent,
     appId,
     principal,
-    botName: app.botName,
     botToken: async () => (await credentials.get(principal, keys.botToken, "org")) ?? "",
     signingSecret: async () => (await credentials.get(principal, keys.signingSecret, "org")) ?? "",
     botUserId: app.botUserId,
@@ -165,9 +164,9 @@ export async function getSlackChannelForApp(appId: string) {
       console.warn(`[slack] binding ${appId} disabled (${type})`);
     },
 
-    // Streaming health: the card's health row shows WHY a bot is in
-    // edited-message fallback (throttled: only writes on change is overkill —
-    // one small UPDATE per turn is fine at this scale).
+    // Streaming health: the card's health row shows WHY a bot degraded to
+    // the post-at-finish fallback (also reported when a live stream dies
+    // mid-turn — the row reflects the engine that finished the turn).
     onStreamMode: async ({ mode, code, detail }) => {
       const value =
         mode === "stream" ? null : `${code ?? "unknown"}${detail ? `: ${detail}` : ""}`.slice(0, 300);

@@ -22,8 +22,8 @@ function fakeApi(overrides: Partial<SlackStreamOptions["api"]> = {}) {
       calls.push({ method: "postMessage", args });
       return { ts: "200.1", channel: args.channel };
     },
-    async update(args) {
-      calls.push({ method: "update", args });
+    async deleteMessage(args) {
+      calls.push({ method: "deleteMessage", args });
     },
     ...overrides,
   };
@@ -43,7 +43,6 @@ function opts(api: SlackStreamOptions["api"], extra: Partial<SlackStreamOptions>
     threadTs: "1.0",
     recipientTeamId: "T1",
     flushIntervalMs: 0,
-    fallbackUpdateIntervalMs: 0,
     sleep: noSleep,
     ...extra,
   };
@@ -303,7 +302,7 @@ describe("renderSlackStream — mode telemetry + status box", () => {
 });
 
 describe("renderSlackStream — resilience (text must never vanish)", () => {
-  it("flips to post+update mid-turn when the stream expires, delivering the full text", async () => {
+  it("recovers a mid-turn stream death: delete the corpse, post the full text once at finish", async () => {
     let appends = 0;
     const { api, calls } = fakeApi({
       async appendStream() {
@@ -311,19 +310,27 @@ describe("renderSlackStream — resilience (text must never vanish)", () => {
         throw new SlackApiError("chat.appendStream", 200, "message_not_in_streaming_state");
       },
     });
+    const modes: { mode: string; code?: string }[] = [];
     const r = await renderSlackStream(
       gen(
         { type: "text-delta", text: "the answer " },
         { type: "text-delta", text: "in full" },
         { type: "finish" },
       ),
-      opts(api),
+      opts(api, { onStreamMode: (i) => void modes.push(i) }),
     );
     expect(r.mode).toBe("fallback");
     expect(appends).toBe(1); // no retrying into a corpse
-    // The full text arrived on a FRESH regular message.
-    const post = calls.filter((c) => c.method === "postMessage").pop()!;
-    expect(JSON.stringify(post.args.blocks)).toContain("the answer in full");
+    // The dead streamed message is removed — no stranded ⚠️ ghost, no
+    // duplicated prefix above the final post.
+    const del = calls.find((c) => c.method === "deleteMessage")!;
+    expect(del.args.ts).toBe("100.1");
+    // The engine change is reported so binding health reflects the truth.
+    expect(modes.map((m) => m.mode)).toEqual(["stream", "fallback"]);
+    // The full text arrived as EXACTLY ONE fresh regular message, at finish.
+    const posts = calls.filter((c) => c.method === "postMessage");
+    expect(posts.length).toBe(1);
+    expect(JSON.stringify(posts[0]!.args.blocks)).toContain("the answer in full");
     expect(calls.filter((c) => c.method === "stopStream")).toEqual([]);
   });
 
@@ -402,7 +409,7 @@ describe("renderSlackStream — resilience (text must never vanish)", () => {
 });
 
 describe("renderSlackStream — fallback + edge modes", () => {
-  it("falls back to post+update when startStream is unavailable", async () => {
+  it("posts the finished answer ONCE when startStream is unavailable — never edit-to-mimic", async () => {
     const { api, calls } = fakeApi({
       async startStream() {
         throw new SlackApiError("chat.startStream", 200, "feature_disabled");
@@ -419,13 +426,53 @@ describe("renderSlackStream — fallback + edge modes", () => {
     );
     expect(r.mode).toBe("fallback");
     expect(calls.filter((c) => c.method === "appendStream")).toEqual([]);
-    const post = calls.find((c) => c.method === "postMessage")!;
-    expect((post.args.blocks as { type: string }[])[0]!.type).toBe("markdown");
-    const finalUpdate = calls.filter((c) => c.method === "update").pop()!;
-    const blocks = finalUpdate.args.blocks as { type: string; text?: string }[];
+    // Exactly one message, at finish, holding the complete answer + feedback.
+    const posts = calls.filter((c) => c.method === "postMessage");
+    expect(posts.length).toBe(1);
+    const blocks = posts[0]!.args.blocks as { type: string; text?: string }[];
+    expect(blocks[0]!.type).toBe("markdown");
+    expect(JSON.stringify(blocks)).toContain("Hello world");
     expect(blocks.some((b) => b.type === "context_actions")).toBe(true);
-    // Status line is working-state only — the final render drops it.
+    // No progressive rendering artifacts: no interim posts, no status lines.
     expect(JSON.stringify(blocks)).not.toContain("Running web_search");
+    expect(JSON.stringify(blocks)).not.toContain("⏳");
+  });
+
+  it("posts nothing mid-turn in fallback mode even across many events", async () => {
+    const { api, calls } = fakeApi({
+      async startStream() {
+        throw new SlackApiError("chat.startStream", 200, "feature_disabled");
+      },
+    });
+    let t = 0;
+    await renderSlackStream(
+      gen(
+        { type: "text-delta", text: "part one. " },
+        { type: "tool-start", toolCallId: "t1", toolName: "web_search", input: {} },
+        { type: "tool-end", toolCallId: "t1", toolName: "web_search", output: {} },
+        { type: "text-delta", text: "part two." },
+        { type: "finish" },
+      ),
+      // Zero flush interval: every event is flush-due, yet nothing may post.
+      opts(api, { now: () => (t += 1000) }),
+    );
+    const posts = calls.filter((c) => c.method === "postMessage");
+    expect(posts.length).toBe(1);
+    expect(JSON.stringify(posts[0]!.args.blocks)).toContain("part one. part two.");
+  });
+
+  it("suppresses the fallback final post when the viewer stopped the turn", async () => {
+    const { api, calls } = fakeApi({
+      async startStream() {
+        throw new SlackApiError("chat.startStream", 200, "feature_disabled");
+      },
+    });
+    const r = await renderSlackStream(
+      gen({ type: "text-delta", text: "half an answer" }, { type: "finish" }),
+      opts(api, { shouldStop: async () => true }),
+    );
+    expect(r.stopped).toBe(true);
+    expect(calls.filter((c) => c.method === "postMessage")).toEqual([]);
   });
 
   it("posts only an error card when the run produced nothing else", async () => {

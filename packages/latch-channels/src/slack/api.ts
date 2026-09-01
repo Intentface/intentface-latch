@@ -196,6 +196,11 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       await call("chat.update", input);
     },
 
+    /** Delete one of the bot's own messages (dead-stream cleanup). */
+    async deleteMessage(input: { channel: string; ts: string }): Promise<void> {
+      await call("chat.delete", input);
+    },
+
     /** Post a message only the given user sees (sign-in links, refusals). */
     async postEphemeral(input: {
       channel: string;
