@@ -58,6 +58,11 @@ function makeDeps(): AgentBuilderDeps<P> & {
       resolve: async () => undefined,
       list: async () => records.map((r) => ({ name: r.name })),
       listRecords: async () => records,
+      getRecord: async (_p, name) => {
+        const target = normalizeAgentName(name);
+        return records.find((r) => r.name === target && r.scope === "user") ?? records.find((r) => r.name === target);
+      },
+      listMemoryEnabledNames: async () => records.filter((r) => r.exec?.memory).map((r) => r.name),
       upsert: async (_p, rec) => {
         const i = records.findIndex((r) => r.name === rec.name && r.scope === rec.scope);
         if (i >= 0) records[i] = rec;
@@ -166,7 +171,7 @@ describe("builder with zero extensions", () => {
 
   it("rejects authoredTools with a clear error (never silently ignores)", async () => {
     const { tools } = await openTools(makeDeps());
-    const res = (await tools.save_agent!.execute({ ...SAVE, authoredTools: ["t1"] })) as {
+    const res = (await tools.save_agent!.execute({ ...SAVE, exec: { authoredTools: ["t1"] } })) as {
       error?: string;
     };
     expect(res.error).toMatch(/Tool authoring is not available/);
@@ -182,7 +187,7 @@ describe("builder with a stub extension", () => {
     reservedNames: ["stub-helper"],
     toolApproval: { stub_tool: "user-approval" },
     handlesAuthoredTools: true,
-    validateSave: (_p, input) => (input.authoredTools?.includes("forbidden") ? "forbidden tool" : undefined),
+    validateSave: (_p, record) => (record.exec?.authoredTools?.includes("forbidden") ? "forbidden tool" : undefined),
     decorateSaveResult: async (_p, name, result) => ({ ...result, note: `${result.note} [stub:${name}]` }),
     decorateTestResult: async (_p, _name, result) => ({ ...result, stubbed: true }),
   };
@@ -201,11 +206,11 @@ describe("builder with a stub extension", () => {
 
   it("allows authoredTools when handled, applies validateSave veto and decorators", async () => {
     const { tools } = await openTools(makeDeps(), [extension]);
-    const vetoed = (await tools.save_agent!.execute({ ...SAVE, authoredTools: ["forbidden"] })) as {
+    const vetoed = (await tools.save_agent!.execute({ ...SAVE, exec: { authoredTools: ["forbidden"] } })) as {
       error?: string;
     };
     expect(vetoed.error).toBe("forbidden tool");
-    const ok = (await tools.save_agent!.execute({ ...SAVE, authoredTools: ["t1"] })) as Record<
+    const ok = (await tools.save_agent!.execute({ ...SAVE, exec: { authoredTools: ["t1"] } })) as Record<
       string,
       unknown
     >;
@@ -220,7 +225,7 @@ describe("builder with a stub extension", () => {
 });
 
 describe("capability support (truthful prompt + save rejection)", () => {
-  const NONE = { sandbox: false, codeMode: false, providerWebTools: false, defaultTools: false };
+  const NONE = { sandbox: false, providerWebTools: false, renderTools: false, defaultTools: false };
 
   it("rejects capability flags the host never wired", async () => {
     const { tools } = await openTools(makeDeps(), undefined, undefined, {
@@ -228,21 +233,21 @@ describe("capability support (truthful prompt + save rejection)", () => {
     });
     const res = (await tools.save_agent!.execute({
       ...SAVE,
-      capabilities: { sandbox: true, codeMode: true },
+      exec: { sandbox: true, providerWebTools: true },
     })) as { error?: string };
-    expect(res.error).toMatch(/Not available in this host: codeMode, sandbox/);
+    expect(res.error).toMatch(/Not available in this host: sandbox, providerWebTools/);
   });
 
   it("prompt only offers supported capabilities, with the host's defaultTools description", async () => {
     const { cfg } = await openTools(makeDeps(), undefined, undefined, {
       capabilities: {
         sandbox: false,
-        codeMode: false,
         providerWebTools: false,
+        renderTools: false,
         defaultTools: { description: "workspace write access (every write needs approval)" },
       },
     });
-    expect(cfg.instructions).not.toMatch(/sandbox \(|codeMode \(|providerWebTools \(/);
+    expect(cfg.instructions).not.toMatch(/sandbox \(|renderTools \(|providerWebTools \(/);
     expect(cfg.instructions).toContain("workspace write access (every write needs approval)");
     // The no-background-loops rule is always present.
     expect(cfg.instructions).toContain("No background loops");
@@ -253,7 +258,7 @@ describe("capability support (truthful prompt + save rejection)", () => {
     const { tools } = await openTools(makeDeps());
     const res = (await tools.save_agent!.execute({
       ...SAVE,
-      capabilities: { defaultTools: true, preApprovedWrites: true },
+      exec: { defaultTools: true, preApprovedWrites: true },
     })) as { error?: string };
     expect(res.error).toMatch(/Not available in this host: preApprovedWrites/);
 
@@ -265,7 +270,7 @@ describe("capability support (truthful prompt + save rejection)", () => {
     expect(cfg.instructions).toContain("writes run unattended after the save approval");
     const ok = (await tools2.save_agent!.execute({
       ...SAVE,
-      capabilities: { defaultTools: true, preApprovedWrites: true },
+      exec: { defaultTools: true, preApprovedWrites: true },
     })) as { saved?: boolean };
     expect(ok.saved).toBe(true);
     expect(deps.records[0]!.exec?.preApprovedWrites).toBe(true);
@@ -277,9 +282,9 @@ describe("capability support (truthful prompt + save rejection)", () => {
     });
     const res = (await tools.save_agent!.execute({
       ...SAVE,
-      capabilities: { preApprovedWrites: true },
+      exec: { preApprovedWrites: true },
     })) as { error?: string };
-    expect(res.error).toMatch(/requires defaultTools/);
+    expect(res.error).toMatch(/requires exec.defaultTools/);
   });
 
   it("default (undeclared) support keeps everything offered and saveable", async () => {
@@ -287,9 +292,33 @@ describe("capability support (truthful prompt + save rejection)", () => {
     expect(cfg.instructions).toMatch(/sandbox \(workspace \+ file\/shell tools\)/);
     const res = (await tools.save_agent!.execute({
       ...SAVE,
-      capabilities: { sandbox: true },
+      exec: { sandbox: true },
     })) as { saved?: boolean };
     expect(res.saved).toBe(true);
+  });
+
+  it("memory is opt-in: rejected unless the host composes a memory provider", async () => {
+    const memory = { scope: "agent-user", connection: "github" };
+    const { tools } = await openTools(makeDeps());
+    const res = (await tools.save_agent!.execute({
+      ...SAVE,
+      connections: ["github"],
+      exec: { memory },
+    })) as { error?: string };
+    expect(res.error).toMatch(/Not available in this host: memory/);
+
+    const deps = makeDeps();
+    const { tools: tools2, cfg } = await openTools(deps, undefined, undefined, {
+      capabilities: { memory: { description: "remembers each user across chats" } },
+    });
+    expect(cfg.instructions).toContain("remembers each user across chats");
+    const ok = (await tools2.save_agent!.execute({
+      ...SAVE,
+      connections: ["github"],
+      exec: { memory },
+    })) as { saved?: boolean };
+    expect(ok.saved).toBe(true);
+    expect(deps.records[0]!.exec?.memory).toEqual(memory);
   });
 });
 
@@ -379,10 +408,10 @@ describe("review-hardening regressions", () => {
     const res = (await tools.save_agent!.execute({
       ...SAVE,
       modelId: "m-flat",
-      effort: "high",
+      exec: { effort: "high" },
     })) as { error?: string };
     expect(res.error).toMatch(/not reasoning-capable/);
-    const ok = (await tools.save_agent!.execute({ ...SAVE, effort: "high" })) as {
+    const ok = (await tools.save_agent!.execute({ ...SAVE, exec: { effort: "high" } })) as {
       saved?: boolean;
     };
     expect(ok.saved).toBe(true);

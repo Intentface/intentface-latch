@@ -1,7 +1,7 @@
 {
   "name": "@intentface/latch-agent-builder",
   "version": "0.8.1",
-  "description": "Latch agent builder — the meta-agent that designs, creates, and updates agents from a conversation. Host-agnostic core with an extension seam (evals, tool authoring) so hosts plug in what they support.",
+  "description": "Latch agent builder \u2014 the meta-agent that designs, creates, and updates agents from a conversation. Host-agnostic core with an extension seam (evals, tool authoring) so hosts plug in what they support.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,6 +12,11 @@
       "development": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./record": {
+      "development": "./src/record.ts",
+      "types": "./dist/record.d.ts",
+      "import": "./dist/record.js"
     }
   },
   "files": [
@@ -25,6 +30,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "import": "./dist/index.js"
+      },
+      "./record": {
+        "types": "./dist/record.d.ts",
+        "import": "./dist/record.js"
       }
     }
   },

@@ -27,8 +27,9 @@ async function main() {
     instructions: "help",
     connections: ["github"],
     maxSteps: "unlimited",
-    exec: { sandbox: true, effort: "low" },
+    exec: { sandbox: true, effort: "low", memory: { scope: "agent-user", connection: "github" } },
     subagents: ["assistant"],
+    attachedEvals: [{ name: "on-topic", prompt: "Stays on topic.", scale: "binary", enabled: true }],
     scope: "user",
   });
   await store.upsert(p, {
@@ -50,10 +51,22 @@ async function main() {
   assert(helper.maxSteps === "unlimited", "maxSteps unlimited round-trips");
   assert(helper.exec?.sandbox === true && helper.exec?.effort === "low", "exec round-trips");
   assert(Array.isArray(helper.connections) && helper.connections[0] === "github", "connections round-trip");
+  assert(helper.attachedEvals?.[0]?.name === "on-topic", "attachedEvals round-trip");
+  assert(helper.exec?.memory?.connection === "github", "exec.memory round-trips");
+
+  // getRecord: bare name (personal wins), org: pin, user: pin miss
+  assert((await store.getRecord(p, "helper"))?.modelId === "m-1", "getRecord bare name");
+  assert((await store.getRecord(p2, "org:shared"))?.name === "shared", "getRecord org: pin");
+  assert(!(await store.getRecord(p2, "user:shared")), "getRecord user: pin misses org record");
+
+  // listMemoryEnabledNames: cross-tenant prefilter by exec JSON
+  const memNames = await store.listMemoryEnabledNames();
+  assert(memNames.includes("helper") && !memNames.includes("shared"), "listMemoryEnabledNames prefilter");
 
   // resolve builds AgentConfig; scope pinning works
   const cfg = await store.resolve("helper", p);
   assert(cfg && cfg.instructions === "help" && cfg.maxSteps === "unlimited", "resolve builds config");
+  assert(cfg!.memory?.scope === "agent-user", "resolve carries exec.memory");
   assert((cfg!.model as { modelId: string }).modelId === "m-1", "modelFor applied");
   assert(cfg!.subagents?.[0] === "assistant", "subagents resolve");
   assert(await store.resolve("org:shared", p2), "org: pin resolves");

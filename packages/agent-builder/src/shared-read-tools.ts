@@ -1,6 +1,5 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { normalizeAgentName } from "./store";
 import type { AgentBuilderStore } from "./store";
 
 /**
@@ -18,15 +17,13 @@ export interface SharedReadDeps<P> {
 export function sharedReadTools<P>(principal: P, deps: SharedReadDeps<P>): Record<string, unknown> {
   return {
     get_agent: tool({
-      description: "Get the full config of one of the user's agents (instructions, connections, capabilities).",
+      description: "Get the full config of one of the user's agents (instructions, connections, exec capabilities).",
       inputSchema: z.object({ name: z.string() }),
       execute: async ({ name }) => {
-        // Stored names are normalized (save_agent does it) — normalize the
-        // lookup too so casing/spacing variants still resolve.
-        const target = normalizeAgentName(name);
-        const records = await deps.store.listRecords(principal);
-        const rec = records.find((r) => r.name === target);
-        if (!rec) return { error: `No editable agent named "${target}".` };
+        // `getRecord` normalizes casing/spacing variants and honours an
+        // `org:`/`user:` pin; personal wins over org on a bare name.
+        const rec = await deps.store.getRecord(principal, name);
+        if (!rec) return { error: `No editable agent named "${name}".` };
         return rec;
       },
     }),

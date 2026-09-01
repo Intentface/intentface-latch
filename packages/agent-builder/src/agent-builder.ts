@@ -3,9 +3,10 @@ import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
 import type { AgentFactory, AgentMeta, Runtime, TurnWriter } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
-import type { AgentBuilderExtension, SaveAgentInput } from "./extension";
-import { normalizeAgentName } from "./store";
-import type { AgentBuilderStore, AgentRecord } from "./store";
+import type { AgentBuilderExtension } from "./extension";
+import { AgentRecordSchema, AgentScopeSchema, normalizeAgentName, normalizeAgentRecord } from "./record";
+import type { AgentRecord } from "./record";
+import type { AgentBuilderStore } from "./store";
 import { sharedReadTools } from "./shared-read-tools";
 
 /**
@@ -23,43 +24,15 @@ import { sharedReadTools } from "./shared-read-tools";
  * tool authoring) arrive as `extensions`.
  */
 
-const SCOPE = z.enum(["user", "org"]);
+const SCOPE = AgentScopeSchema;
 
-const CAPABILITIES = z
-  .object({
-    codeMode: z.boolean().optional().describe("Agent writes/runs a JS program over its tools (multi-step orchestration)."),
-    sandbox: z.boolean().optional().describe("Per-session workspace + file/shell tools (bash, read_file, …)."),
-    providerWebTools: z.boolean().optional().describe("Native provider web search/fetch (Anthropic/OpenAI)."),
-    defaultTools: z.boolean().optional().describe("App harness tools: web_fetch + askUser."),
-    preApprovedWrites: z
-      .boolean()
-      .optional()
-      .describe(
-        "Waive the per-call approval pause on this agent's WRITE tools — the save approval is the consent. ONLY for agents that must run unattended (schedules); requires defaultTools. Spell the tradeoff out to the user before saving.",
-      ),
-  })
-  .optional();
-
-const SAVE_INPUT = z.object({
-  name: z.string().describe("Unique kebab-case id. Reusing an existing name UPDATES that agent."),
-  title: z.string().optional().describe("Short human label for the picker."),
-  description: z.string().optional().describe("One line on what the agent does."),
-  modelId: z.string().describe("Must be an id returned by list_models."),
-  instructions: z.string().describe("The system prompt — the heart of the agent. Be specific."),
-  connections: z.array(z.string()).optional().describe("Connection names from list_connections."),
-  capabilities: CAPABILITIES,
-  authoredTools: z
-    .array(z.string())
-    .optional()
-    .describe("Names of authored tools to attach — ONLY when this host offers tool authoring (a BUILDING TOOLS section in your instructions). Omit otherwise."),
-  subagents: z.array(z.string()).optional().describe("Names of agents this one may delegate to."),
-  maxSteps: z.union([z.number(), z.literal("unlimited")]).optional(),
-  effort: z
-    .enum(["minimal", "low", "medium", "high"])
-    .optional()
-    .describe("Reasoning/thinking effort. Only set for a model where list_models shows reasoning=true."),
-  scope: SCOPE.describe("'user' (personal) or 'org' (shared). Ask the user — never guess."),
-});
+/**
+ * save_agent's input IS the record schema (`./record`) — the model, a host
+ * editor, and a host validator all speak one shape. Capability flags live
+ * under `exec.*`; host-only rules (reserved names, which flags exist here) are
+ * checked in the tool below.
+ */
+const SAVE_INPUT = AgentRecordSchema;
 
 /** A model the builder may assign to an agent (from the host's catalog). */
 export interface ModelChoice {
@@ -101,8 +74,8 @@ export interface AgentBuilderDeps<P> {
  */
 export interface CapabilitySupport {
   sandbox?: boolean;
-  codeMode?: boolean;
   providerWebTools?: boolean;
+  renderTools?: boolean;
   defaultTools?: boolean | { description: string };
   /**
    * Whether the host honors the save-time write-approval waiver
@@ -111,6 +84,12 @@ export interface CapabilitySupport {
    * saved as a no-op.
    */
   preApprovedWrites?: boolean | { description: string };
+  /**
+   * Whether this host composes a memory provider (`exec.memory`). Opt-IN like
+   * `preApprovedWrites`: a host without memory must not let the builder save a
+   * memory config nothing will ever read.
+   */
+  memory?: boolean | { description: string };
 }
 
 export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
@@ -147,15 +126,12 @@ export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
   meta?: AgentMeta;
 }
 
-/** The capabilities bullet, built from what the host actually supports. */
+/** The `exec` bullet, built from what the host actually supports. */
 function capabilitiesBullet(support: CapabilitySupport): string {
   const offered: string[] = [];
-  if (support.codeMode !== false)
-    offered.push("codeMode (writes/runs JS over its tools — multi-step orchestration)");
-  if (support.sandbox !== false)
-    offered.push("sandbox (workspace + file/shell tools)");
-  if (support.providerWebTools !== false)
-    offered.push("providerWebTools (native web search/fetch)");
+  if (support.sandbox !== false) offered.push("sandbox (workspace + file/shell tools)");
+  if (support.providerWebTools !== false) offered.push("providerWebTools (native web search/fetch)");
+  if (support.renderTools !== false) offered.push("renderTools (headless-browser page render/fetch)");
   const dt = support.defaultTools;
   if (dt !== false) {
     offered.push(
@@ -172,9 +148,20 @@ function capabilitiesBullet(support: CapabilitySupport): string {
         : "preApprovedWrites (writes skip the per-call approval pause — the save approval is the consent; only for unattended/scheduled agents, requires defaultTools)",
     );
   }
+  // Opt-in too: needs a memory provider composed into the host runtime.
+  const mem = support.memory;
+  if (mem) {
+    offered.push(
+      typeof mem === "object"
+        ? `memory (${mem.description})`
+        : "memory ({ scope, connection, extractTo?, schemas? } — persistent cross-session memory in one of the agent's connections; 'agent-org' needs an org-scoped agent)",
+    );
+  }
+  const effort =
+    "effort (\"minimal\" | \"low\" | \"medium\" | \"high\" — ONLY for a model where list_models shows reasoning=true; lower = faster/cheaper, higher = deeper; omit for the provider default)";
   return offered.length
-    ? `- capabilities: ${offered.join(", ")}. These are the ONLY capabilities that exist here — never promise behavior outside them (agents run as request-scoped turns; there are no persistent/background processes).`
-    : "- capabilities: none available in this host — always leave unset.";
+    ? `- exec: capability flags, all optional — ${offered.join(", ")}, ${effort}. These are the ONLY capabilities that exist here — never promise behavior outside them (agents run as request-scoped turns; there are no persistent/background processes).`
+    : `- exec: only ${effort}. No other capabilities exist in this host — never promise behavior outside the fields above.`;
 }
 
 const SCHEDULING_PROMPT = `SCHEDULING (schedule_agent / list_schedules / unschedule_agent):
@@ -190,7 +177,6 @@ WHAT AN AGENT IS — the fields you set with save_agent:
 - name: unique kebab-case id (e.g. "support-triage"). Reusing a name UPDATES that agent.
 - title / description: short labels for the picker.
 - modelId: MUST be one returned by list_models — never invent one.
-- effort: reasoning/thinking level ("minimal" | "low" | "medium" | "high"). ONLY set it when list_models shows reasoning=true for the chosen model; lower effort = faster + cheaper (good for simple/throughput agents), higher = deeper reasoning. Omit to use the provider default. For a model with reasoning=false, leave effort unset (it would be a no-op).
 - instructions: the system prompt, the heart of the agent. Spend most of your effort here: role, scope, tone, which tools to use and when, and edge cases. A great agent is mostly a great prompt.
 - connections: integration names from list_connections. Only wire ones that exist; prefer authorized ones. Use list_connection_tools to see what a connection offers.
 ${capabilitiesBullet(support)}
@@ -260,41 +246,17 @@ async function builderTools<P>(
   const authoredToolsSupported = extensions.some((e) => e.handlesAuthoredTools);
 
   /** Reject capability flags this host never wired (silent no-ops otherwise). */
-  const unsupportedCapabilities = (c: z.infer<typeof CAPABILITIES>): string[] => {
-    const asked: [string, boolean | undefined, boolean][] = [
-      ["codeMode", c?.codeMode, support.codeMode !== false],
-      ["sandbox", c?.sandbox, support.sandbox !== false],
-      ["providerWebTools", c?.providerWebTools, support.providerWebTools !== false],
-      ["defaultTools", c?.defaultTools, support.defaultTools !== false],
+  const unsupportedCapabilities = (exec: AgentRecord["exec"]): string[] => {
+    const asked: [string, unknown, boolean][] = [
+      ["sandbox", exec?.sandbox, support.sandbox !== false],
+      ["providerWebTools", exec?.providerWebTools, support.providerWebTools !== false],
+      ["renderTools", exec?.renderTools, support.renderTools !== false],
+      ["defaultTools", exec?.defaultTools, support.defaultTools !== false],
       // Opt-in (see capabilitiesBullet): unsupported unless declared.
-      ["preApprovedWrites", c?.preApprovedWrites, !!support.preApprovedWrites],
+      ["preApprovedWrites", exec?.preApprovedWrites, !!support.preApprovedWrites],
+      ["memory", exec?.memory, !!support.memory],
     ];
     return asked.filter(([, on, ok]) => on && !ok).map(([name]) => name);
-  };
-
-  const capsToExec = (
-    c: z.infer<typeof CAPABILITIES>,
-    authored?: string[],
-    effort?: "minimal" | "low" | "medium" | "high",
-  ): AgentRecord["exec"] | undefined => {
-    const exec: AgentRecord["exec"] = {
-      sandbox: c?.sandbox || undefined,
-      defaultTools: c?.defaultTools || undefined,
-      providerWebTools: c?.providerWebTools || undefined,
-      preApprovedWrites: c?.preApprovedWrites || undefined,
-      codeMode: c?.codeMode ? {} : undefined,
-      authoredTools: authored?.length ? authored : undefined,
-      effort,
-    };
-    const hasAny =
-      !!c?.sandbox ||
-      !!c?.defaultTools ||
-      !!c?.providerWebTools ||
-      !!c?.preApprovedWrites ||
-      !!c?.codeMode ||
-      !!authored?.length ||
-      effort !== undefined;
-    return hasAny ? exec : undefined;
   };
 
   const extensionTools: Record<string, unknown> = {};
@@ -321,7 +283,7 @@ async function builderTools<P>(
             description: r.description,
             modelId: r.modelId,
             connections: r.connections,
-            capabilities: r.exec ?? undefined,
+            exec: r.exec,
           })),
           allAgentNames: all.map((a) => a.name),
           note: "Only 'yourAgents' can be edited. Other names are built-in, read-only references.",
@@ -374,41 +336,54 @@ async function builderTools<P>(
       description:
         "Create a new agent or update an existing one (upsert by name). Pauses for the user's approval.",
       inputSchema: SAVE_INPUT,
-      execute: async (input) => {
-        const name = normalizeAgentName(input.name);
+      execute: async (raw) => {
+        // Re-validate here as well as at the SDK boundary: it applies the
+        // schema's defaults and the host-independent invariants (memory
+        // connection wired, agent-org ⇒ org scope, index outlines) even when a
+        // host calls the tool directly, and reports violations as a tool
+        // error the model can act on instead of a thrown ZodError.
+        const parsed = SAVE_INPUT.safeParse(raw);
+        if (!parsed.success) {
+          return {
+            error: `Invalid agent: ${parsed.error.issues.map((i) => `${i.path.join(".") || "record"}: ${i.message}`).join("; ")}`,
+          };
+        }
+        // Canonicalize, then apply THIS host's policy.
+        const rec = normalizeAgentRecord(parsed.data);
+        const name = rec.name;
         if (!name) return { error: "invalid name" };
         if (reserved.has(name)) {
           return { error: `"${name}" is a built-in agent and can't be overwritten — pick another name.` };
         }
-        if (!models.some((m) => m.id === input.modelId)) {
-          return { error: `Unknown modelId "${input.modelId}". Call list_models and use one of those.` };
+        if (!models.some((m) => m.id === rec.modelId)) {
+          return { error: `Unknown modelId "${rec.modelId}". Call list_models and use one of those.` };
         }
         // `effort` is a no-op on non-reasoning models — reject like the
         // capability flags instead of persisting a setting that does nothing.
-        if (input.effort && !models.find((m) => m.id === input.modelId)?.reasoning) {
+        if (rec.exec?.effort && !models.find((m) => m.id === rec.modelId)?.reasoning) {
           return {
-            error: `Model "${input.modelId}" is not reasoning-capable (list_models shows reasoning=false) — omit effort or pick a reasoning model.`,
+            error: `Model "${rec.modelId}" is not reasoning-capable (list_models shows reasoning=false) — omit exec.effort or pick a reasoning model.`,
           };
         }
         // Reject hallucinated references — only names the discovery tools return.
         const knownConnections = new Set((await listConnections(principal)).map((c) => c.name));
-        const badConn = (input.connections ?? []).filter((n) => !knownConnections.has(n));
+        const badConn = rec.connections.filter((n) => !knownConnections.has(n));
         if (badConn.length) {
           return { error: `Unknown connection(s): ${badConn.join(", ")}. Use list_connections.` };
         }
         const knownAgents = new Set((await runtime.listAgents(principal)).map((a) => a.name));
-        const badSub = (input.subagents ?? []).filter((n) => !knownAgents.has(n) && n !== name);
+        const badSub = (rec.subagents ?? []).filter((n) => !knownAgents.has(n) && n !== name);
         if (badSub.length) {
           return { error: `Unknown subagent(s): ${badSub.join(", ")}. Use list_agents.` };
         }
         // Authored tools only exist where an extension provides them — a clear
         // rejection beats silently dropping a capability the model asked for.
-        if (input.authoredTools?.length && !authoredToolsSupported) {
-          return { error: "Tool authoring is not available here — omit authoredTools." };
+        if (rec.exec?.authoredTools?.length && !authoredToolsSupported) {
+          return { error: "Tool authoring is not available here — omit exec.authoredTools." };
         }
         // Same for capability flags the host never wired: rejecting beats
         // persisting a silent no-op the user believes in.
-        const unsupported = unsupportedCapabilities(input.capabilities);
+        const unsupported = unsupportedCapabilities(rec.exec);
         if (unsupported.length) {
           return {
             error: `Not available in this host: ${unsupported.join(", ")}. Omit ${unsupported.length > 1 ? "them" : "it"} — and don't promise the user that behavior.`,
@@ -416,41 +391,21 @@ async function builderTools<P>(
         }
         // The write waiver without write tools is meaningless — likely a
         // misunderstanding worth surfacing rather than persisting.
-        if (input.capabilities?.preApprovedWrites && !input.capabilities?.defaultTools) {
+        if (rec.exec?.preApprovedWrites && !rec.exec?.defaultTools) {
           return {
-            error: "preApprovedWrites requires defaultTools (the write capability) — there are no writes to waive without it.",
+            error: "exec.preApprovedWrites requires exec.defaultTools (the write capability) — there are no writes to waive without it.",
           };
         }
-        const rec: AgentRecord = {
-          name,
-          title: input.title,
-          description: input.description,
-          modelId: input.modelId,
-          instructions: input.instructions,
-          connections: input.connections ?? [],
-          maxSteps: input.maxSteps,
-          exec: capsToExec(input.capabilities, input.authoredTools, input.effort),
-          subagents: input.subagents?.length ? input.subagents : undefined,
-          scope: input.scope,
-        };
         // Extension vetoes (e.g. tool-authoring existence + org-scope rules).
-        const saveInput: SaveAgentInput = {
-          name,
-          scope: input.scope,
-          authoredTools: input.authoredTools,
-          connections: input.connections,
-          subagents: input.subagents,
-          modelId: input.modelId,
-        };
         for (const ext of extensions) {
-          const veto = await ext.validateSave?.(principal, saveInput, rec);
+          const veto = await ext.validateSave?.(principal, rec);
           if (veto) return { error: veto };
         }
         await store.upsert(principal, rec);
         return decorate(extensions, "decorateSaveResult", principal, name, {
           saved: true,
           name,
-          scope: input.scope,
+          scope: rec.scope,
           note: "Available now in the agent picker.",
         });
       },

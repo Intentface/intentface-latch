@@ -150,6 +150,8 @@ export const agents = sqliteTable(
     exec: text("exec", { mode: "json" }),
     /** string[] — delegate agent names. */
     subagents: text("subagents", { mode: "json" }),
+    /** AgentRecord["attachedEvals"] — online judge rubrics (host eval feature). */
+    attachedEvals: text("attached_evals", { mode: "json" }),
     /** NULL=default, 0=unlimited, N=cap (AgentRecord["maxSteps"]). */
     maxSteps: integer("max_steps"),
     scope: text("scope").notNull(),

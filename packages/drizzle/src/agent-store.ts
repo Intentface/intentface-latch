@@ -1,8 +1,9 @@
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { PgDatabase } from "drizzle-orm/pg-core";
-import { desc, eq, inArray, and } from "drizzle-orm";
+import { desc, eq, inArray, and, like, sql } from "drizzle-orm";
 import type { LanguageModel } from "ai";
 import type { AgentConfig, AgentInfo } from "@intentface/latch-core";
+import { parseAgentRef } from "@intentface/latch-agent-builder";
 import type { AgentBuilderStore, AgentRecord, AgentScope } from "@intentface/latch-agent-builder";
 import * as sqliteSchema from "./schema.js";
 import * as pgSchema from "./schema.pg.js";
@@ -62,13 +63,17 @@ interface AgentRow {
   tools: unknown;
   exec: unknown;
   subagents: unknown;
+  attachedEvals: unknown;
   maxSteps: number | null;
   scope: string;
 }
 
-/** The dialect seam: three queries + one upsert. */
+/** The dialect seam: a few queries + one upsert. */
 interface AgentQueries {
-  byOwners(owners: string[]): Promise<AgentRow[]>;
+  /** Rows for these owners, optionally one name only (filtered at the query, not in memory). */
+  byOwners(owners: string[], name?: string): Promise<AgentRow[]>;
+  /** Distinct names whose `exec` JSON mentions memory — cross-tenant prefilter. */
+  memoryEnabledNames(): Promise<string[]>;
   upsert(row: {
     id: string;
     owner: string;
@@ -101,6 +106,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
     tools: (row.tools ?? undefined) as AgentRecord["tools"],
     exec: (row.exec ?? undefined) as AgentRecord["exec"],
     subagents: (row.subagents ?? undefined) as string[] | undefined,
+    attachedEvals: (row.attachedEvals ?? undefined) as AgentRecord["attachedEvals"],
     scope: row.scope as AgentScope,
   });
 
@@ -112,7 +118,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
         : scope === "user"
           ? [ownerKey(p, "user")]
           : [ownerKey(p, "user"), ownerKey(p, "org")];
-    const rows = (await queries.byOwners(owners)).filter((r) => r.name === name);
+    const rows = await queries.byOwners(owners, name);
     const personal = rows.find((r) => r.owner === ownerKey(p, "user"));
     const row = personal ?? rows[0];
     return row ? recordOf(row) : undefined;
@@ -124,10 +130,8 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
       // prefix (stored names never contain `:` — normalizeAgentName strips
       // it), so a same-named record in the OTHER scope can never shadow the
       // agent the binding was created for.
-      const pin = /^(org|user):(.+)$/.exec(name);
-      const rec = pin
-        ? await find(principal, pin[2]!, pin[1] as AgentScope)
-        : await find(principal, name);
+      const ref = parseAgentRef(name);
+      const rec = await find(principal, ref.name, ref.scope);
       if (!rec) return undefined;
       const decorate = opts.decorateResolve ?? ((cfg: AgentConfig<P>) => cfg);
       const sel = rec.tools;
@@ -181,10 +185,11 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
           sandboxProvider: rec.exec?.provider,
           defaultTools: rec.exec?.defaultTools,
           disableTools: rec.exec?.disableTools,
-          codeMode: rec.exec?.codeMode,
           providerWebTools: rec.exec?.providerWebTools || undefined,
           renderTools: rec.exec?.renderTools || undefined,
           effort: rec.exec?.effort,
+          // Persistent cross-session memory (needs a MemoryProvider on the runtime).
+          memory: rec.exec?.memory,
           smoothStream: true,
         },
         rec,
@@ -204,6 +209,17 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
     async listRecords(principal) {
       const rows = await queries.byOwners([ownerKey(principal, "user"), ownerKey(principal, "org")]);
       return rows.map(recordOf);
+    },
+
+    async getRecord(principal, name) {
+      // Pin-aware like `resolve`: run records and channel bindings carry the
+      // `org:`/`user:` prefix, and hosts look rubrics/memory up by it.
+      const ref = parseAgentRef(name);
+      return find(principal, ref.name, ref.scope);
+    },
+
+    async listMemoryEnabledNames() {
+      return queries.memoryEnabledNames();
     },
 
     async upsert(principal, rec) {
@@ -238,6 +254,7 @@ function upsertValues(row: { id: string; owner: string; rec: AgentRecord; maxSte
       tools: rec.tools ?? null,
       exec: rec.exec ?? null,
       subagents: rec.subagents?.length ? rec.subagents : null,
+      attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : null,
       maxSteps,
       scope: rec.scope,
       createdAt: now,
@@ -252,6 +269,7 @@ function upsertValues(row: { id: string; owner: string; rec: AgentRecord; maxSte
       tools: rec.tools ?? null,
       exec: rec.exec ?? null,
       subagents: rec.subagents?.length ? rec.subagents : null,
+      attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : null,
       maxSteps,
       scope: rec.scope,
       updatedAt: now,
@@ -267,12 +285,18 @@ export function createSqliteAgentBuilderStore<P>(
   const t = sqliteSchema.agents;
   return createStore<P>(
     {
-      async byOwners(owners) {
-        return (await db
-          .select()
+      async byOwners(owners, name) {
+        const where = name ? and(inArray(t.owner, owners), eq(t.name, name)) : inArray(t.owner, owners);
+        return (await db.select().from(t).where(where).orderBy(desc(t.createdAt))) as AgentRow[];
+      },
+      async memoryEnabledNames() {
+        // The JSON column is text in both dialects' storage; a LIKE prefilter
+        // is what the sweep wants (cheap, tolerant of false positives).
+        const rows = (await db
+          .selectDistinct({ name: t.name })
           .from(t)
-          .where(inArray(t.owner, owners))
-          .orderBy(desc(t.createdAt))) as AgentRow[];
+          .where(like(sql`CAST(${t.exec} AS TEXT)`, '%"memory"%'))) as { name: string }[];
+        return rows.map((r) => r.name);
       },
       async upsert(row) {
         const { insert, update } = upsertValues(row);
@@ -294,12 +318,18 @@ export function createPostgresAgentBuilderStore<P>(
   const t = pgSchema.agents;
   return createStore<P>(
     {
-      async byOwners(owners) {
-        return (await db
-          .select()
+      async byOwners(owners, name) {
+        const where = name ? and(inArray(t.owner, owners), eq(t.name, name)) : inArray(t.owner, owners);
+        return (await db.select().from(t).where(where).orderBy(desc(t.createdAt))) as AgentRow[];
+      },
+      async memoryEnabledNames() {
+        // The JSON column is text in both dialects' storage; a LIKE prefilter
+        // is what the sweep wants (cheap, tolerant of false positives).
+        const rows = (await db
+          .selectDistinct({ name: t.name })
           .from(t)
-          .where(inArray(t.owner, owners))
-          .orderBy(desc(t.createdAt))) as AgentRow[];
+          .where(like(sql`CAST(${t.exec} AS TEXT)`, '%"memory"%'))) as { name: string }[];
+        return rows.map((r) => r.name);
       },
       async upsert(row) {
         const { insert, update } = upsertValues(row);
