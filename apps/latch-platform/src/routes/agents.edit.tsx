@@ -25,19 +25,16 @@ import {
   createSlackAppFn,
   generateMemorySchemaFn,
   getMemoryStatusFn,
-  createTelegramBotFn,
-  createWhatsappBotFn,
-  deleteTelegramBotFn,
-  deleteWhatsappBotFn,
+  channelWebhookInfoFn,
+  createChannelBotFn,
+  deleteChannelBotFn,
   installSlackAppFn,
   listSlackAppsFn,
-  listTelegramBotsFn,
-  listWhatsappBotsFn,
-  registerTelegramWebhookFn,
+  listChannelBotsFn,
+  registerChannelWebhookFn,
   deleteAgentFn,
   saveAgentFn,
-  saveTelegramTokenFn,
-  saveWhatsappCredentialsFn,
+  saveChannelBotCredentialsFn,
   setSlackConfigTokenFn,
   slackAppChannelsFn,
   slackAppHealthFn,
@@ -45,10 +42,10 @@ import {
   slackManifestFn,
   migrateSlackAppFn,
   updateSlackAppSettingsFn,
-  telegramWebhookStatusFn,
   unbindSlackAppFn,
-  whatsappWebhookInfoFn,
 } from "@/lib/server";
+import { CHANNEL_KIND_UI } from "@/lib/channel-kinds-ui";
+import type { DmChannelKind } from "@/lib/channel-kinds-ui";
 import { AgentRecordSchema } from "@intentface/latch-agent-builder/record";
 import { authorizeUrl } from "@/lib/latch-client";
 import {
@@ -735,8 +732,8 @@ function AgentEditor() {
       </form>
 
       {editing && <SlackSection agent={rec.name} />}
-      {editing && <TelegramSection agent={rec.name} />}
-      {editing && <WhatsappSection agent={rec.name} />}
+      {editing && <ChannelSection kind="telegram" agent={rec.name} />}
+      {editing && <ChannelSection kind="whatsapp" agent={rec.name} />}
     </div>
   );
 }
@@ -1682,38 +1679,38 @@ function CopyRow({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * Turn this agent into its own Telegram bot: create the bot in BotFather,
- * paste the token here (validated via `getMe`), then register the webhook.
- * Users DM the bot; unlinked users get a signed account-link first.
+ * One DM channel's bots for this agent — Telegram, WhatsApp, the next one. The
+ * flow is the same everywhere: create a bot row, paste credentials (validated
+ * against the platform, stored in the Vault), hook up the webhook (a button, or
+ * values for the platform's dashboard), watch status, delete. What differs per
+ * kind is data (`CHANNEL_KIND_UI`) and server-side behaviour (`channel-kinds.ts`).
  */
-function TelegramSection({ agent }: { agent: string }) {
-  type TgBot = {
+function ChannelSection({ kind, agent }: { kind: DmChannelKind; agent: string }) {
+  const ui = CHANNEL_KIND_UI[kind];
+  const Icon = kind === "telegram" ? Send : MessageCircle;
+  type Bot = {
     id: string;
     agent: string;
     handle: string;
     displayName?: string;
-    botUsername?: string;
+    externalHandle?: string;
     webhookRegisteredAt?: number;
     eventsUrl: string;
   };
-  const [bots, setBots] = useState<TgBot[]>([]);
+  type WebhookField = { label: string; value: string; copy?: boolean; error?: boolean };
+  const [bots, setBots] = useState<Bot[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [handle, setHandle] = useState("");
-  const [tokenFor, setTokenFor] = useState<string | null>(null);
-  const [token, setToken] = useState("");
-  const [status, setStatus] = useState<{
-    botId: string;
-    url: string;
-    pendingUpdateCount: number;
-    lastErrorMessage?: string;
-  } | null>(null);
+  const [credsFor, setCredsFor] = useState<string | null>(null);
+  const [creds, setCreds] = useState<Record<string, string>>({});
+  const [webhook, setWebhook] = useState<{ botId: string; fields: WebhookField[] } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const all = await listTelegramBotsFn();
+    const all = await listChannelBotsFn({ data: kind });
     setBots(all.filter((b) => b.agent === agent));
-  }, [agent]);
+  }, [kind, agent]);
 
   useEffect(() => {
     void load();
@@ -1724,325 +1721,116 @@ function TelegramSection({ agent }: { agent: string }) {
     if (!handle.trim() || busy) return;
     setBusy(true);
     setError(null);
-    const res = await createTelegramBotFn({ data: { agent, handle: handle.trim() } });
+    const res = await createChannelBotFn({ data: { kind, agent, handle: handle.trim() } });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "Couldn't create the bot.");
+      setError(res.error);
       return;
     }
     setHandle("");
     setCreateOpen(false);
-    setTokenFor(res.botId); // next step: paste the BotFather token
+    setCredsFor(res.botId); // next step: paste the credentials
     await load();
   }
 
-  async function saveToken(e: React.FormEvent) {
+  const credsComplete = ui.credentials.fields.every((f) => (creds[f.key] ?? "").trim());
+
+  async function saveCreds(e: React.FormEvent) {
     e.preventDefault();
-    if (!tokenFor || !token.trim() || busy) return;
+    if (!credsFor || !credsComplete || busy) return;
     setBusy(true);
     setError(null);
-    const res = await saveTelegramTokenFn({ data: { botId: tokenFor, botToken: token.trim() } });
+    const res = await saveChannelBotCredentialsFn({ data: { kind, botId: credsFor, credentials: creds } });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "Couldn't save the token.");
+      setError(res.error);
       return;
     }
-    setToken("");
-    setTokenFor(null);
-    await load();
+    const botId = credsFor;
+    setCreds({});
+    setCredsFor(null);
+    // Manual-webhook kinds: show the dashboard values right away — that's the next step.
+    await Promise.all([load(), ui.webhook.mode === "manual" ? showWebhook(botId) : Promise.resolve()]);
   }
 
   async function registerWebhook(botId: string) {
     setBusy(true);
     setError(null);
-    const res = await registerTelegramWebhookFn({ data: botId });
+    const res = await registerChannelWebhookFn({ data: { kind, botId } });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "Couldn't register the webhook.");
+      setError(res.error);
       return;
     }
-    await Promise.all([load(), checkStatus(botId)]);
-  }
-
-  async function checkStatus(botId: string) {
-    const info = await telegramWebhookStatusFn({ data: botId });
-    setStatus(info ? { botId, ...info } : null);
-    if (!info) setError("Couldn't fetch the webhook status — is the token saved?");
-  }
-
-  async function remove(botId: string) {
-    await deleteTelegramBotFn({ data: botId });
-    if (status?.botId === botId) setStatus(null);
-    await load();
-  }
-
-  return (
-    <section className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-4">
-      <div className="flex items-center gap-2">
-        <Send className="text-ink-secondary size-4" />
-        <h2 className="text-ink-primary text-sm font-semibold">Telegram</h2>
-      </div>
-      <p className="text-ink-tertiary text-xs">
-        Give this agent its own Telegram bot. Users DM it and it answers as this agent — the reply
-        arrives when the turn finishes, and tool approvals show up as inline buttons.
-      </p>
-
-      {bots.map((b) => (
-        <div key={b.id} className="border-primary-border space-y-2 rounded-lg border p-3">
-          <div className="flex items-center gap-3">
-            <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
-              <Send className="size-3.5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-ink-primary truncate text-sm font-medium">
-                {b.displayName ?? b.handle}
-                {b.botUsername && (
-                  <a
-                    href={`https://t.me/${b.botUsername}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-accent ml-2 text-xs hover:underline"
-                  >
-                    @{b.botUsername}
-                  </a>
-                )}
-              </div>
-              <p className="text-ink-tertiary truncate font-mono text-xs">
-                {b.botUsername
-                  ? b.webhookRegisteredAt
-                    ? "webhook registered"
-                    : "webhook NOT registered"
-                  : "token not saved yet"}
-              </p>
-            </div>
-            <Button type="button" variant="ghost" size="sm" onClick={() => setTokenFor(b.id)}>
-              {b.botUsername ? "Replace token" : "Save token"}
-            </Button>
-            {b.botUsername && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={busy}
-                onClick={() => registerWebhook(b.id)}
-              >
-                <RefreshCw className="size-3.5" /> Register webhook
-              </Button>
-            )}
-            {b.botUsername && (
-              <Button type="button" variant="ghost" size="sm" onClick={() => checkStatus(b.id)}>
-                Status
-              </Button>
-            )}
-            <Button type="button" variant="ghost" size="sm" onClick={() => remove(b.id)}>
-              <Trash2 className="size-3.5" />
-            </Button>
-          </div>
-
-          {tokenFor === b.id && (
-            <form className="space-y-2" onSubmit={saveToken}>
-              <FieldLabel>Paste the BotFather token</FieldLabel>
-              <p className="text-ink-tertiary text-xs">
-                In Telegram, message{" "}
-                <a
-                  href="https://t.me/BotFather"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-accent hover:underline"
-                >
-                  @BotFather
-                </a>{" "}
-                → <span className="font-mono">/newbot</span> → copy the token it prints. Saving
-                validates it and generates a fresh webhook secret — register the webhook after.
-              </p>
-              <Input
-                placeholder="1234567890:AAF…"
-                type="password"
-                autoComplete="off"
-                autoCorrect="off"
-                spellCheck={false}
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-              />
-              <div className="flex gap-2">
-                <Button type="submit" size="sm" disabled={busy}>
-                  {busy ? "Validating…" : "Save token"}
-                </Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => setTokenFor(null)}>
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
-
-          {status?.botId === b.id && (
-            <div className="bg-tertiary space-y-1 rounded-md p-2 text-xs">
-              <p className="text-ink-secondary truncate font-mono">
-                url: {status.url || "(not set)"}
-              </p>
-              <p className="text-ink-secondary font-mono">
-                pending updates: {status.pendingUpdateCount}
-              </p>
-              {status.lastErrorMessage && (
-                <p className="text-destructive font-mono">last error: {status.lastErrorMessage}</p>
-              )}
-            </div>
-          )}
-        </div>
-      ))}
-
-      {createOpen ? (
-        <form className="space-y-2" onSubmit={createBot}>
-          <Input
-            placeholder="Handle (e.g. support-bot)"
-            value={handle}
-            onChange={(e) => setHandle(e.target.value)}
-          />
-          <div className="flex gap-2">
-            <Button type="submit" size="sm" disabled={busy || !handle.trim()}>
-              Create bot
-            </Button>
-            <Button type="button" variant="ghost" size="sm" onClick={() => setCreateOpen(false)}>
-              Cancel
-            </Button>
-          </div>
-        </form>
-      ) : (
-        <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
-          {bots.length ? "Add another Telegram bot" : "Create Telegram bot"}
-        </Button>
-      )}
-      {error && <p className="text-destructive text-xs">{error}</p>}
-    </section>
-  );
-}
-
-/**
- * Connect this agent to a WhatsApp business number (Meta Cloud API): paste the
- * Meta app credentials, then copy the callback URL + verify token into the
- * Meta dashboard's webhook configuration.
- */
-function WhatsappSection({ agent }: { agent: string }) {
-  type WaBot = {
-    id: string;
-    agent: string;
-    handle: string;
-    displayName?: string;
-    phoneNumberId?: string;
-    callbackUrl: string;
-  };
-  const [bots, setBots] = useState<WaBot[]>([]);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [handle, setHandle] = useState("");
-  const [credsFor, setCredsFor] = useState<string | null>(null);
-  const [accessToken, setAccessToken] = useState("");
-  const [phoneNumberId, setPhoneNumberId] = useState("");
-  const [appSecret, setAppSecret] = useState("");
-  const [webhook, setWebhook] = useState<{
-    botId: string;
-    callbackUrl: string;
-    verifyToken: string | null;
-  } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    const all = await listWhatsappBotsFn();
-    setBots(all.filter((b) => b.agent === agent));
-  }, [agent]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function createBot(e: React.FormEvent) {
-    e.preventDefault();
-    if (!handle.trim() || busy) return;
-    setBusy(true);
-    setError(null);
-    const res = await createWhatsappBotFn({ data: { agent, handle: handle.trim() } });
-    setBusy(false);
-    if (!res.ok) {
-      setError(res.error ?? "Couldn't create the bot.");
-      return;
-    }
-    setHandle("");
-    setCreateOpen(false);
-    setCredsFor(res.botId); // next step: paste the Meta credentials
-    await load();
-  }
-
-  async function saveCreds(e: React.FormEvent) {
-    e.preventDefault();
-    if (!credsFor || !accessToken.trim() || !phoneNumberId.trim() || !appSecret.trim() || busy)
-      return;
-    setBusy(true);
-    setError(null);
-    const res = await saveWhatsappCredentialsFn({
-      data: {
-        botId: credsFor,
-        accessToken: accessToken.trim(),
-        phoneNumberId: phoneNumberId.trim(),
-        appSecret: appSecret.trim(),
-      },
-    });
-    setBusy(false);
-    if (!res.ok) {
-      setError(res.error ?? "Meta rejected the credentials.");
-      return;
-    }
-    setAccessToken("");
-    setPhoneNumberId("");
-    setAppSecret("");
-    const botId = credsFor;
-    setCredsFor(null);
     await Promise.all([load(), showWebhook(botId)]);
   }
 
   async function showWebhook(botId: string) {
-    const info = await whatsappWebhookInfoFn({ data: botId });
-    setWebhook(info ? { botId, ...info } : null);
+    const fields = await channelWebhookInfoFn({ data: { kind, botId } });
+    setWebhook(fields ? { botId, fields } : null);
+    if (!fields) setError("Couldn't fetch the webhook status — are the credentials saved?");
   }
 
   async function remove(botId: string) {
-    await deleteWhatsappBotFn({ data: botId });
+    setError(null);
+    const res = await deleteChannelBotFn({ data: { kind, botId } });
+    if (!res.ok) setError(`Couldn't delete the bot: ${res.error}`);
     if (webhook?.botId === botId) setWebhook(null);
     await load();
   }
 
+  const statusOf = (b: Bot) =>
+    !b.externalHandle
+      ? "credentials not saved yet"
+      : ui.webhook.mode === "register"
+        ? b.webhookRegisteredAt
+          ? ui.webhook.statusRegistered
+          : ui.webhook.statusMissing
+        : ui.externalHandle.kind === "text"
+          ? `${ui.externalHandle.label}: ${b.externalHandle}`
+          : "";
+
   return (
     <section className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-4">
       <div className="flex items-center gap-2">
-        <MessageCircle className="text-ink-secondary size-4" />
-        <h2 className="text-ink-primary text-sm font-semibold">WhatsApp</h2>
+        <Icon className="text-ink-secondary size-4" />
+        <h2 className="text-ink-primary text-sm font-semibold">{ui.label}</h2>
       </div>
-      <p className="text-ink-tertiary text-xs">
-        Connect this agent to a WhatsApp business number via the Meta Cloud API. Users message the
-        number and it answers as this agent; the reply arrives when the turn finishes.
-      </p>
+      <p className="text-ink-tertiary text-xs">{ui.blurb}</p>
 
       {bots.map((b) => (
         <div key={b.id} className="border-primary-border space-y-2 rounded-lg border p-3">
           <div className="flex items-center gap-3">
             <div className="bg-tertiary text-ink-secondary grid size-7 shrink-0 place-items-center rounded-md">
-              <MessageCircle className="size-3.5" />
+              <Icon className="size-3.5" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-ink-primary truncate text-sm font-medium">
                 {b.displayName ?? b.handle}
+                {b.externalHandle && ui.externalHandle.kind === "link" && (
+                  <a
+                    href={ui.externalHandle.href(b.externalHandle)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-accent ml-2 text-xs hover:underline"
+                  >
+                    {ui.externalHandle.text(b.externalHandle)}
+                  </a>
+                )}
               </div>
-              <p className="text-ink-tertiary truncate font-mono text-xs">
-                {b.phoneNumberId
-                  ? `phone number id: ${b.phoneNumberId}`
-                  : "credentials not saved yet"}
-              </p>
+              <p className="text-ink-tertiary truncate font-mono text-xs">{statusOf(b)}</p>
             </div>
             <Button type="button" variant="ghost" size="sm" onClick={() => setCredsFor(b.id)}>
-              {b.phoneNumberId ? "Replace credentials" : "Save credentials"}
+              {b.externalHandle ? ui.credentials.replaceLabel : ui.credentials.saveLabel}
             </Button>
-            {b.phoneNumberId && (
+            {b.externalHandle && ui.webhook.mode === "register" && (
+              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => registerWebhook(b.id)}>
+                <RefreshCw className="size-3.5" /> Register webhook
+              </Button>
+            )}
+            {b.externalHandle && (
               <Button type="button" variant="ghost" size="sm" onClick={() => showWebhook(b.id)}>
-                Webhook config
+                {ui.webhook.mode === "register" ? "Status" : ui.webhook.buttonLabel}
               </Button>
             )}
             <Button type="button" variant="ghost" size="sm" onClick={() => remove(b.id)}>
@@ -2052,49 +1840,44 @@ function WhatsappSection({ agent }: { agent: string }) {
 
           {credsFor === b.id && (
             <form className="space-y-2" onSubmit={saveCreds}>
-              <FieldLabel>Paste the Meta app credentials</FieldLabel>
+              <FieldLabel>{ui.credentials.title}</FieldLabel>
               <p className="text-ink-tertiary text-xs">
-                From the{" "}
+                From{" "}
                 <a
-                  href="https://developers.facebook.com/apps/"
+                  href={ui.credentials.link.href}
                   target="_blank"
                   rel="noreferrer"
                   className="text-accent hover:underline"
                 >
-                  Meta App Dashboard
+                  {ui.credentials.link.label}
                 </a>
-                : a long-lived <b>System User access token</b> (the dashboard's temporary token
-                dies in 24h), the <b>Phone number ID</b> (WhatsApp → API Setup), and the{" "}
-                <b>App secret</b> (App Settings → Basic).
+                {ui.credentials.help}
               </p>
-              <Input
-                placeholder="Access token (EAAG…)"
-                type="password"
-                autoComplete="off"
-                autoCorrect="off"
-                spellCheck={false}
-                value={accessToken}
-                onChange={(e) => setAccessToken(e.target.value)}
-              />
-              <Input
-                placeholder="Phone number ID (numeric)"
-                value={phoneNumberId}
-                onChange={(e) => setPhoneNumberId(e.target.value)}
-              />
-              <Input
-                placeholder="App secret"
-                type="password"
-                autoComplete="off"
-                autoCorrect="off"
-                spellCheck={false}
-                value={appSecret}
-                onChange={(e) => setAppSecret(e.target.value)}
-              />
+              {ui.credentials.fields.map((f) => (
+                <Input
+                  key={f.key}
+                  placeholder={f.placeholder}
+                  type={f.secret ? "password" : "text"}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={creds[f.key] ?? ""}
+                  onChange={(e) => setCreds((c) => ({ ...c, [f.key]: e.target.value }))}
+                />
+              ))}
               <div className="flex gap-2">
-                <Button type="submit" size="sm" disabled={busy}>
-                  {busy ? "Validating…" : "Save credentials"}
+                <Button type="submit" size="sm" disabled={busy || !credsComplete}>
+                  {busy ? "Validating…" : ui.credentials.saveLabel}
                 </Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => setCredsFor(null)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setCredsFor(null);
+                    setCreds({});
+                  }}
+                >
                   Cancel
                 </Button>
               </div>
@@ -2103,13 +1886,19 @@ function WhatsappSection({ agent }: { agent: string }) {
 
           {webhook?.botId === b.id && (
             <div className="space-y-1.5">
-              <p className="text-ink-tertiary text-xs">
-                In the Meta dashboard (WhatsApp → Configuration → Webhook) paste both values, save
-                (the deployment must be live — Meta verifies immediately), and subscribe to the{" "}
-                <span className="font-mono">messages</span> field.
-              </p>
-              <CopyRow label="Callback URL" value={webhook.callbackUrl} />
-              <CopyRow label="Verify token" value={webhook.verifyToken ?? "(save credentials first)"} />
+              {ui.webhook.mode === "manual" && <p className="text-ink-tertiary text-xs">{ui.webhook.help}</p>}
+              {webhook.fields.map((f) =>
+                f.copy ? (
+                  <CopyRow key={f.label} label={f.label} value={f.value} />
+                ) : (
+                  <p
+                    key={f.label}
+                    className={`${f.error ? "text-destructive" : "text-ink-secondary"} bg-tertiary truncate rounded-md px-2 py-1 font-mono text-xs`}
+                  >
+                    {f.label}: {f.value}
+                  </p>
+                ),
+              )}
             </div>
           )}
         </div>
@@ -2117,11 +1906,7 @@ function WhatsappSection({ agent }: { agent: string }) {
 
       {createOpen ? (
         <form className="space-y-2" onSubmit={createBot}>
-          <Input
-            placeholder="Handle (e.g. support-whatsapp)"
-            value={handle}
-            onChange={(e) => setHandle(e.target.value)}
-          />
+          <Input placeholder={ui.handlePlaceholder} value={handle} onChange={(e) => setHandle(e.target.value)} />
           <div className="flex gap-2">
             <Button type="submit" size="sm" disabled={busy || !handle.trim()}>
               Create bot
@@ -2133,7 +1918,7 @@ function WhatsappSection({ agent }: { agent: string }) {
         </form>
       ) : (
         <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
-          {bots.length ? "Add another WhatsApp bot" : "Connect WhatsApp"}
+          {bots.length ? ui.addAnotherLabel : ui.createLabel}
         </Button>
       )}
       {error && <p className="text-destructive text-xs">{error}</p>}

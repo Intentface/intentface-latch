@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import type { AppMessage } from "@intentface/latch-core";
@@ -13,9 +12,6 @@ import {
   listAdministeredTraces,
   postScore,
 } from "@intentface/latch-langfuse";
-import { telegramCommandMenu } from "@intentface/latch-channels";
-import { telegramApi } from "@intentface/latch-channels/telegram";
-import { whatsappApi } from "@intentface/latch-channels/whatsapp";
 import {
   DEFAULT_MEMORY_SCHEMAS,
   MEMORY_POLICY_FLOOR,
@@ -43,7 +39,8 @@ import {
 } from "./slack-store";
 import { buildOauthState } from "./slack-oauth-state";
 import { createAppFromManifest, updateAppManifest, authTest } from "./slack-admin";
-import { telegramVaultKeys, whatsappVaultKeys } from "./channel-store";
+import { CHANNEL_KINDS, isDmChannelKind } from "./channel-kinds";
+import type { DmChannelKind, KindCtx } from "./channel-kinds";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
 import { upsertConnection } from "./connection-upsert";
@@ -1958,28 +1955,49 @@ const boundAgentRecord = async (
   };
 };
 
-/** The caller's Telegram bots (for the editor's status view). */
-export const listTelegramBotsFn = createServerFn({ method: "GET" }).handler(async () => {
-  const principal = await getPrincipal();
-  if (!principal) return [];
-  const { channelStore } = await getLatch();
-  const bots = await channelStore.listBots("telegram", principal.orgId);
-  return bots
-    .filter((b) => canManageBot(b, principal))
-    .map((b) => ({ ...b, botUsername: b.externalHandle, eventsUrl: `${baseUrl()}/api/telegram/${b.id}/events` }));
-});
+// ── DM channels: per-agent bot onboarding, one set of functions for every kind ─
+// (`channel-kinds.ts` holds what differs: credential validation, Vault keys,
+// webhook hookup.) The editor's `ChannelSection` is the only caller.
 
-/** Create a Telegram bot row for an agent (token pasted in a second step). */
-export const createTelegramBotFn = createServerFn({ method: "POST" })
-  .validator((data: { agent: string; handle: string; displayName?: string }) => data)
+/** A DM bot with its webhook URL; `canManageBot`-filtered to the caller's own. */
+async function manageableBot(kind: DmChannelKind, botId: string) {
+  const principal = await getPrincipal();
+  if (!principal) return null;
+  const { channelStore, credentials } = await getLatch();
+  const bot = await channelStore.getBot(kind, botId);
+  if (!bot || !canManageBot(bot, principal)) return null;
+  const def = CHANNEL_KINDS[kind];
+  const ctx: KindCtx = { principal, credentials, botId, eventsUrl: `${baseUrl()}${def.eventsPath(botId)}` };
+  return { bot, def, ctx, channelStore };
+}
+
+const fail = (e: unknown) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) });
+
+/** The caller's bots of one kind (for the editor's status view). */
+export const listChannelBotsFn = createServerFn({ method: "GET" })
+  .validator((kind: DmChannelKind) => kind)
+  .handler(async ({ data: kind }) => {
+    const principal = await getPrincipal();
+    if (!principal || !isDmChannelKind(kind)) return [];
+    const { channelStore } = await getLatch();
+    const bots = await channelStore.listBots(kind, principal.orgId);
+    return bots
+      .filter((b) => canManageBot(b, principal))
+      .map((b) => ({ ...b, eventsUrl: `${baseUrl()}${CHANNEL_KINDS[kind].eventsPath(b.id)}` }));
+  });
+
+/** Create a bot row for an agent (credentials are pasted in a second step). */
+export const createChannelBotFn = createServerFn({ method: "POST" })
+  .validator((data: { kind: DmChannelKind; agent: string; handle: string; displayName?: string }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (!isDmChannelKind(data.kind)) return { ok: false as const, error: "unknown channel" };
     const { channelStore, agentStore } = await getLatch();
     const id = crypto.randomUUID();
     try {
       await channelStore.createBot({
-        kind: "telegram",
+        kind: data.kind,
         id,
         agent: data.agent,
         agentScope: (await boundAgentRecord(agentStore, principal, data.agent)).scope,
@@ -1990,238 +2008,89 @@ export const createTelegramBotFn = createServerFn({ method: "POST" })
       });
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      return {
-        ok: false as const,
-        error: m.includes("UNIQUE") ? "handle already taken" : m,
-      };
+      return { ok: false as const, error: m.includes("UNIQUE") ? "handle already taken" : m };
     }
     return { ok: true as const, botId: id };
   });
 
 /**
- * Save a BotFather token: validate it against Telegram's `getMe`, store it in
- * the Vault along with a fresh server-generated webhook secret (a token save
- * always requires a webhook re-register — the secret rotated).
+ * Save pasted credentials: validate them against the platform, store them in
+ * the Vault (plus any server-generated secrets), record the platform handle.
  */
-export const saveTelegramTokenFn = createServerFn({ method: "POST" })
-  .validator((data: { botId: string; botToken: string }) => data)
+export const saveChannelBotCredentialsFn = createServerFn({ method: "POST" })
+  .validator((data: { kind: DmChannelKind; botId: string; credentials: Record<string, string> }) => data)
   .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("telegram", data.botId);
-    if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
-
-    const newToken = data.botToken.trim();
-    let me: { username: string };
+    if (!isDmChannelKind(data.kind)) return { ok: false as const, error: "unknown channel" };
+    const m = await manageableBot(data.kind, data.botId);
+    if (!m) return { ok: false as const, error: "not found" };
+    let externalHandle: string;
     try {
-      me = await telegramApi(newToken).getMe();
+      ({ externalHandle } = await m.def.validate(data.credentials));
+      await m.def.saveCredentials(m.ctx, data.credentials);
     } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+      return fail(e);
     }
-
-    const keys = telegramVaultKeys(data.botId);
-    // "Replace token" flow: the OLD bot account may still have its webhook
-    // pointed at this endpoint — once its token is overwritten it can never be
-    // cleaned up (it would just collect 401s), so best-effort remove it first.
-    const oldToken = await credentials.get(principal, keys.botToken, "org");
-    if (oldToken && oldToken !== newToken) {
-      await telegramApi(oldToken).deleteWebhook().catch(() => {});
-    }
-    await credentials.set(principal, keys.botToken, "org", newToken);
-    await credentials.set(principal, keys.webhookSecret, "org", randomBytes(24).toString("base64url"));
-    await channelStore.setExternalHandle("telegram", data.botId, me.username, { resetWebhook: true });
-    return { ok: true as const, botUsername: me.username };
+    // A credential save on a register-mode kind rotates the webhook secret, so the
+    // registration mark is reset — the operator must register again.
+    await m.channelStore.setExternalHandle(data.kind, data.botId, externalHandle, {
+      resetWebhook: m.def.webhook === "register",
+    });
+    return { ok: true as const, externalHandle };
   });
 
-/** Register (or re-register) the bot's webhook with Telegram. */
-export const registerTelegramWebhookFn = createServerFn({ method: "POST" })
-  .validator((botId: string) => botId)
-  .handler(async ({ data: botId }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("telegram", botId);
-    if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
-
-    const keys = telegramVaultKeys(botId);
-    const token = await credentials.get(principal, keys.botToken, "org");
-    const secret = await credentials.get(principal, keys.webhookSecret, "org");
-    if (!token || !secret) return { ok: false as const, error: "save the bot token first" };
-
+/** Register (or re-register) the bot's webhook with the platform (register-mode kinds). */
+export const registerChannelWebhookFn = createServerFn({ method: "POST" })
+  .validator((data: { kind: DmChannelKind; botId: string }) => data)
+  .handler(async ({ data }) => {
+    if (!isDmChannelKind(data.kind)) return { ok: false as const, error: "unknown channel" };
+    const m = await manageableBot(data.kind, data.botId);
+    if (!m) return { ok: false as const, error: "not found" };
+    if (!m.def.registerWebhook) return { ok: false as const, error: "this channel's webhook is configured in its dashboard" };
     try {
-      await telegramApi(token).setWebhook({
-        url: `${baseUrl()}/api/telegram/${botId}/events`,
-        secretToken: secret,
-      });
-      // Publish the "/" menu too — the commands work regardless, but nothing else
-      // makes them discoverable. Cosmetic, so a failure must not fail the hookup.
-      await telegramApi(token)
-        .setMyCommands(telegramCommandMenu())
-        .catch((e) => console.error("[telegram] setMyCommands failed:", e));
+      await m.def.registerWebhook(m.ctx);
     } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+      return fail(e);
     }
-    await channelStore.markWebhookRegistered("telegram", botId);
+    await m.channelStore.markWebhookRegistered(data.kind, data.botId);
     return { ok: true as const };
   });
 
-/** Telegram's view of the bot's webhook (URL, backlog, last error). */
-export const telegramWebhookStatusFn = createServerFn({ method: "GET" })
-  .validator((botId: string) => botId)
-  .handler(async ({ data: botId }) => {
-    const principal = await getPrincipal();
-    if (!principal) return null;
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("telegram", botId);
-    if (!bot || !canManageBot(bot, principal)) return null;
-    const token = await credentials.get(principal, telegramVaultKeys(botId).botToken, "org");
-    if (!token) return null;
+/** The webhook panel: platform-side status, or the values a dashboard needs. */
+export const channelWebhookInfoFn = createServerFn({ method: "GET" })
+  .validator((data: { kind: DmChannelKind; botId: string }) => data)
+  .handler(async ({ data }) => {
+    if (!isDmChannelKind(data.kind)) return null;
+    const m = await manageableBot(data.kind, data.botId);
+    if (!m) return null;
     try {
-      return await telegramApi(token).getWebhookInfo();
+      return await m.def.webhookInfo(m.ctx);
     } catch {
       return null;
     }
   });
 
-/** Delete a Telegram bot binding (best-effort webhook removal first). */
-export const deleteTelegramBotFn = createServerFn({ method: "POST" })
-  .validator((botId: string) => botId)
-  .handler(async ({ data: botId }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false };
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("telegram", botId);
-    if (!bot || !canManageBot(bot, principal)) return { ok: false };
-    const keys = telegramVaultKeys(botId);
-    const token = await credentials.get(principal, keys.botToken, "org");
-    if (token) await telegramApi(token).deleteWebhook().catch(() => {});
-    // The binding's Vault secrets go with it — deleting a bot must not leave
-    // its token/webhook secret stored indefinitely.
-    for (const key of Object.values(keys)) await credentials.remove(principal, key, "org");
-    await channelStore.removeBot("telegram", botId);
-    return { ok: true };
-  });
-
-// ── WhatsApp channel: per-agent business-number onboarding ───────────────────
-
-/** The caller's WhatsApp bots (for the editor's status view). */
-export const listWhatsappBotsFn = createServerFn({ method: "GET" }).handler(async () => {
-  const principal = await getPrincipal();
-  if (!principal) return [];
-  const { channelStore } = await getLatch();
-  const bots = await channelStore.listBots("whatsapp", principal.orgId);
-  return bots
-    .filter((b) => canManageBot(b, principal))
-    .map((b) => ({ ...b, phoneNumberId: b.externalHandle, callbackUrl: `${baseUrl()}/api/whatsapp/${b.id}/events` }));
-});
-
-/** Create a WhatsApp bot row for an agent (credentials pasted in a second step). */
-export const createWhatsappBotFn = createServerFn({ method: "POST" })
-  .validator((data: { agent: string; handle: string; displayName?: string }) => data)
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { channelStore, agentStore } = await getLatch();
-    const id = crypto.randomUUID();
-    try {
-      await channelStore.createBot({
-        kind: "whatsapp",
-        id,
-        agent: data.agent,
-        agentScope: (await boundAgentRecord(agentStore, principal, data.agent)).scope,
-        orgId: principal.orgId,
-        userId: principal.userId,
-        handle: data.handle.trim(),
-        displayName: data.displayName?.trim() || undefined,
-      });
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
-      return {
-        ok: false as const,
-        error: m.includes("UNIQUE") ? "handle already taken" : m,
-      };
-    }
-    return { ok: true as const, botId: id };
-  });
-
 /**
- * Save the Meta credentials: validate against the Graph API (fetch the phone
- * number object), store them in the Vault, and generate a webhook verify token
- * if the bot doesn't have one yet (kept stable across saves — the Meta
- * dashboard config keeps working after a token rotation).
+ * Delete a bot binding: platform cleanup, then its Vault secrets, then the
+ * rows. The first two are best-effort — a Vault or platform hiccup must not
+ * leave the bot half-deleted with no way to retry from the editor; the row
+ * deletion is always reached, and anything left behind is logged.
  */
-export const saveWhatsappCredentialsFn = createServerFn({ method: "POST" })
-  .validator(
-    (data: { botId: string; accessToken: string; phoneNumberId: string; appSecret: string }) =>
-      data,
-  )
+export const deleteChannelBotFn = createServerFn({ method: "POST" })
+  .validator((data: { kind: DmChannelKind; botId: string }) => data)
   .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("whatsapp", data.botId);
-    if (!bot || !canManageBot(bot, principal)) return { ok: false as const, error: "not found" };
-
-    const accessToken = data.accessToken.trim();
-    const phoneNumberId = data.phoneNumberId.trim();
-    const appSecret = data.appSecret.trim();
-    // The Graph API check below only exercises the token + phone-number id; an
-    // empty app secret would silently key webhook HMAC verification to "".
-    if (!accessToken || !phoneNumberId || !appSecret) {
-      return { ok: false as const, error: "all three credentials are required" };
+    if (!isDmChannelKind(data.kind)) return { ok: false as const, error: "unknown channel" };
+    const m = await manageableBot(data.kind, data.botId);
+    if (!m) return { ok: false as const, error: "not found" };
+    await m.def.beforeDelete?.(m.ctx).catch((e) => {
+      console.error(`[${data.kind}] pre-delete cleanup failed for ${data.botId}:`, e);
+    });
+    // The binding's Vault secrets go with it — deleting a bot must not leave
+    // its tokens stored indefinitely.
+    for (const key of Object.values(m.def.vaultKeys(data.botId))) {
+      await m.ctx.credentials.remove(m.ctx.principal, key, "org").catch((e) => {
+        console.error(`[${data.kind}] could not remove Vault key ${key}:`, e);
+      });
     }
-    let check: { displayPhoneNumber?: string };
-    try {
-      check = await whatsappApi({ accessToken, phoneNumberId }).checkCredentials();
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
-    }
-
-    const keys = whatsappVaultKeys(data.botId);
-    await credentials.set(principal, keys.accessToken, "org", accessToken);
-    await credentials.set(principal, keys.phoneNumberId, "org", phoneNumberId);
-    await credentials.set(principal, keys.appSecret, "org", appSecret);
-    if (!(await credentials.has(principal, keys.verifyToken, "org"))) {
-      await credentials.set(principal, keys.verifyToken, "org", randomBytes(24).toString("base64url"));
-    }
-    await channelStore.setExternalHandle("whatsapp", data.botId, phoneNumberId);
-    return { ok: true as const, displayPhoneNumber: check.displayPhoneNumber ?? null };
-  });
-
-/** What the Meta dashboard needs: the callback URL + verify token pair. */
-export const whatsappWebhookInfoFn = createServerFn({ method: "GET" })
-  .validator((botId: string) => botId)
-  .handler(async ({ data: botId }) => {
-    const principal = await getPrincipal();
-    if (!principal) return null;
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("whatsapp", botId);
-    if (!bot || !canManageBot(bot, principal)) return null;
-    const verifyToken = await credentials.get(
-      principal,
-      whatsappVaultKeys(botId).verifyToken,
-      "org",
-    );
-    return {
-      callbackUrl: `${baseUrl()}/api/whatsapp/${botId}/events`,
-      verifyToken: verifyToken ?? null,
-    };
-  });
-
-/** Delete a WhatsApp bot binding (the Meta app itself is untouched). */
-export const deleteWhatsappBotFn = createServerFn({ method: "POST" })
-  .validator((botId: string) => botId)
-  .handler(async ({ data: botId }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false };
-    const { channelStore, credentials } = await getLatch();
-    const bot = await channelStore.getBot("whatsapp", botId);
-    if (!bot || !canManageBot(bot, principal)) return { ok: false };
-    // The binding's Vault secrets go with it — the Meta access token, app
-    // secret etc. must not outlive the deletion request.
-    for (const key of Object.values(whatsappVaultKeys(botId)))
-      await credentials.remove(principal, key, "org");
-    await channelStore.removeBot("whatsapp", botId);
-    return { ok: true };
+    await m.channelStore.removeBot(data.kind, data.botId);
+    return { ok: true as const };
   });
