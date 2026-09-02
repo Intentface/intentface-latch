@@ -887,7 +887,18 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         });
       } catch (e) {
         if (isChatBusyError(e)) {
+          // Tell the person, not just the log: their connect finished but the
+          // thread is mid-turn — the card stays, they press again.
           await busy();
+          const threadTs = threadTsOf(parsed.root) ?? ctx.anchorTs;
+          await api
+            .postEphemeral({
+              channel: parsed.channel,
+              user: ctx.userId,
+              ...(threadTs ? { thread_ts: threadTs } : {}),
+              text: MID_TURN_NOTICE,
+            })
+            .catch(() => {});
           await setSession(parsed.channel, parsed.root, "active");
           return;
         }
