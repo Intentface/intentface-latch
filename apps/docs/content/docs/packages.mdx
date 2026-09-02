@@ -33,7 +33,21 @@ import { createRuntime, defineAgent, defineContext, createVault } from "@intentf
 
 Key exports: `createRuntime` · `defineAgent` · `defineContext` · `createVault` · `mergeConnections` · `mergeToolSources` · `toModelMessages` / `toClientMessages` · `staticPricing` / `computeCost` · `createIntervalScheduler`.
 
-There is also `@intentface/latch-core/node` for the Node-only key derivation (`deriveMasterKey`).
+There is also `@intentface/latch-core/node` for the Node-only key derivation (`deriveMasterKey`), and **`@intentface/latch-core/models`** — the model side of a host, so you don't hand-write it: a models.dev-backed catalog (ids, labels, pricing, reasoning capability, max output — filtered to the providers whose SDK is installed and API key is set), provider inference from a model id, and the four `RuntimeConfig` hooks that depend on the provider.
+
+```ts
+import { loadModelCatalog, providerDefaults } from "@intentface/latch-core/models";
+
+const catalog = await loadModelCatalog();
+createRuntime({
+  storage,
+  context,
+  agents: { assistant: defineAgent({ model: catalog.modelFor("claude-sonnet-4-6"), instructions: "…" }) },
+  ...providerDefaults(catalog, { principalKey: (p) => p.orgId }),
+});
+```
+
+`providerDefaults` supplies `pricing`, `resolveProviderTools`, `resolveReasoningOptions` and `resolvePromptCaching`; list any of them after the spread to override it. The provider SDKs (`@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`) are *optional* peers, imported lazily per provider — a host with one API key never loads the other two, and the core root imports none of them.
 
 → [Runtime](/docs/runtime) · [Seams](/docs/seams)
 

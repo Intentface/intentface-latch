@@ -60,16 +60,13 @@ import type { UserProfile } from "./observability/runners";
 import { createAuthoredTools  } from "./tools";
 import type {AuthoredToolsApi} from "./tools";
 import { baseUrl } from "./base-url";
-import { loadModelCatalog  } from "./models";
-import type {ModelInfo} from "./models";
+import { loadModelCatalog, providerDefaults } from "@intentface/latch-core/models";
+import type { ModelInfo } from "@intentface/latch-core/models";
 import { createSandboxResolver, harnessTools } from "./sandbox";
 import {
   createGoogleWorkspaceConnection,
   createGoogleWorkspaceWriteConnection,
 } from "./google-workspace";
-import { resolveProviderTools } from "./provider-tools";
-import { makeResolveReasoningOptions } from "./reasoning";
-import { makeResolvePromptCaching } from "./prompt-caching";
 import { createCachingStats } from "./caching-stats";
 
 /** Our typed runtime context (built per turn from the principal). */
@@ -468,8 +465,6 @@ export async function getLatch(): Promise<{
         return true; // handled → fire suppressed, occurrence already consumed
       return sd.runScheduledDelivery(input);
     },
-    // Rates (USD per 1M tokens) from models.dev.
-    pricing: catalog.pricing,
     // Per-session sandbox (one per chat) + the default harness tools. just-bash
     // is the zero-infra default; Daytona (opt-in) needs DAYTONA_API_KEY; mirage
     // (opt-in) mounts the agent's Slack app read-only when one is bound.
@@ -488,21 +483,15 @@ export async function getLatch(): Promise<{
         (await googleWorkspace?.mountCredsFor(principal)) ?? null,
     }),
     harnessTools,
-    // Native provider web tools (search/fetch) for agents that opt in.
-    resolveProviderTools,
-    // Per-agent reasoning effort → provider options (gated to reasoning models).
-    resolveReasoningOptions: makeResolveReasoningOptions(catalog.models),
-    // Prompt caching: explicit breakpoints for Anthropic, a cache routing key
-    // for OpenAI (see lib/prompt-caching.ts). LATCH_PROMPT_CACHING=0 disables
-    // it platform-wide (the control arm of a before/after comparison).
-    ...(process.env.LATCH_PROMPT_CACHING !== "0"
-      ? {
-          resolvePromptCaching: makeResolvePromptCaching<Principal>(
-            catalog.models,
-            ownerKeyStr,
-          ),
-        }
-      : {}),
+    // The provider-specific hooks, from the catalog: pricing (USD/1M from
+    // models.dev), native provider web tools, reasoning effort → provider
+    // options, and prompt caching (Anthropic breakpoints, OpenAI routing key
+    // scoped per principal for memory-enabled agents). LATCH_PROMPT_CACHING=0
+    // turns caching off platform-wide (the control arm of an A/B).
+    ...providerDefaults<Principal, Ctx>(catalog, {
+      principalKey: ownerKeyStr,
+      promptCaching: process.env.LATCH_PROMPT_CACHING !== "0",
+    }),
     // Langfuse observability (opt-in via LANGFUSE_* env): every run becomes a
     // trace tagged owner/agent/run; attached-eval judges + user feedback land
     // on it as scores. Absent keys → undefined → zero behavior change.

@@ -1,11 +1,11 @@
-import type { ModelInfo } from "./models";
+import type { ModelInfo } from "./catalog.js";
 
 /**
  * Per-agent reasoning effort. Providers don't share one knob — OpenAI takes an
  * effort enum, Anthropic/Google take a thinking-token budget — so a single
- * `effort` level is mapped to each provider's shape here (the platform owns the
- * provider specifics, like `resolveProviderTools`). Gated to reasoning-capable
- * models so a non-thinking model is a no-op rather than an API error.
+ * `effort` level is mapped to each provider's shape here. Gated to
+ * reasoning-capable models so a non-thinking model is a no-op rather than an
+ * API error.
  */
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
 
@@ -30,13 +30,11 @@ export interface ReasoningResolution {
  * for the token-budget providers (the budget must stay under the model's max
  * output, and the answer needs room after thinking).
  */
-export function makeResolveReasoningOptions(models: ModelInfo[]) {
+export function makeResolveReasoningOptions(models: readonly ModelInfo[]) {
   const byId = new Map(models.map((m) => [m.id, m]));
   return (modelId: string, effort: string): ReasoningResolution | undefined => {
     const info = byId.get(modelId);
-    const eff = EFFORTS.includes(effort as ReasoningEffort)
-      ? (effort as ReasoningEffort)
-      : undefined;
+    const eff = EFFORTS.includes(effort as ReasoningEffort) ? (effort as ReasoningEffort) : undefined;
     // No (valid) effort, or a model not known to support reasoning: don't
     // touch thinking config — but still lift the SDK's tiny Anthropic/Google
     // default max_tokens (4096). Models that think by DEFAULT (e.g.
