@@ -1,5 +1,18 @@
 # @intentface/latch-memory
 
+## 0.9.0
+
+### Patch Changes
+
+- Updated dependencies [ebc0afd]
+- Updated dependencies [d062dd2]
+- Updated dependencies [8745142]
+- Updated dependencies [cbbd775]
+- Updated dependencies [78a40e3]
+- Updated dependencies [7d3c553]
+- Updated dependencies [b22b3cf]
+  - @intentface/latch-core@0.9.0
+
 ## 0.8.1
 
 ### Patch Changes

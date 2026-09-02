@@ -1,5 +1,127 @@
 # @intentface/latch-core
 
+## 0.9.0
+
+### Minor Changes
+
+- ebc0afd: One active run per chat, enforced in storage. `createRun` / `claimRun` throw
+  `ChatBusyError` (code `chat_busy`, `retryAfterMs`) when the chat already has a
+  live active run; the drizzle adapters back it with a partial unique index on
+  `latch_runs (chat_id) WHERE status = 'active'` (both dialects; existing
+  duplicates are marked `superseded` on migrate), and supersede an active run
+  whose lease — or, for non-durable runs, a 10-minute stale window — has expired
+  before opening the next, bumping its fencing token so the old worker's late
+  writes are refused. `reclaimRun` returns null for a crashed run whose chat has
+  since moved on. New optional `StorageAdapter.openTurn` opens the run and
+  appends the user message in one transaction (the shipped adapters implement it;
+  the SQLite adapter now uses real transactions on async drivers such as libsql),
+  so a refused message leaves no trace and a crash can't leave a run without its
+  message; the HTTP handler maps the refusal to 409 with
+  `Retry-After`; the channel kernel renders it as "still working". Two tabs, a
+  webhook retry racing a reply, or a schedule firing mid-conversation can no
+  longer interleave one history — on every surface, not only in channels.
+- d062dd2: One cron entry point and one non-streaming turn path.
+  
+  - `runtime.cron({ now?, maxAttempts? })` fires due schedules (`runDue`), then —
+    with durability on — reaps lease-expired runs and resumes them (`sweep`).
+    The phases are isolated: a failure in one lands in `errors` and the other
+    still runs. Point every cron at this and nothing else. `tick()` is removed
+    (it was `storage.reapExpiredRuns` behind a method); `runDue`, `sweep` and
+    `resume` stay for callers that want the halves. `POST cron/run` on the
+    handler now returns `cron()`'s result (`{ due, reaped, resumed, errors }`)
+    instead of `runDue()`'s.
+  - `runAgent`, `spawn_agent` and scheduled fires now share one internal
+    `runToCompletion` path (previously three near-copies), so approval
+    semantics, telemetry linkage and the "did it park?" verdict can't drift.
+    Behaviour is unchanged; `runAgent`'s result shape is unchanged.
+  - `runTurnStream` (the ephemeral, persist-nothing turn) is removed along with
+    the `ephemeral` / `responseFormat: "text"` / `onComplete` branches inside the
+    turn builder. Its only consumer was a smoke test. If you need a non-persisted
+    turn, that belongs as an option on `handleChat`, not a second entry point.
+  - Every tool's `options.context` now also carries `runtime` (the `Runtime`
+    itself), so harness tools can schedule, list chats or spawn runs without a
+    host-global.
+- 8745142: Remove configuration the runtime never read. `RuntimeConfig.secrets` (the
+  vault resolver belongs on `createMcpConnections`, and tools resolve secrets
+  from `options.context.principal`), `RuntimeConfig.codeModeWrap` and
+  `AgentConfig.codeMode` (never executed), `ContextDefinition.toolsContext`
+  (the runtime already hands every tool `{ ...runtimeContext, principal, run,
+  writer }` as `options.context`), and the deprecated `runtime` alias on the
+  agent factory argument (use `context`). Agent-builder's `model` factory
+  receives `{ context, principal }` instead of `{ runtime, principal }`.
+  
+  Drizzle: the unused message-persistence override is gone — the `messages`
+  option on both `createSqliteAdapter` and `createPostgresAdapter`, and the
+  `MessageStore` type export from the package barrel.
+- cbbd775: `@intentface/latch-core/models`: the model side of a host, so no host
+  hand-writes it. `loadModelCatalog()` (models.dev-backed: ids, labels, pricing
+  incl. the long-context tier, reasoning capability, max output; filtered to
+  providers whose SDK is installed and API key is set; static fallback offline),
+  `providerOf(modelId)` (one id → provider heuristic, catalog first), and
+  `providerDefaults(catalog)` — the `pricing` / `resolveProviderTools` /
+  `resolveReasoningOptions` / `resolvePromptCaching` hooks to spread into
+  `createRuntime`. The provider SDKs (`@ai-sdk/anthropic`, `@ai-sdk/openai`,
+  `@ai-sdk/google`) become OPTIONAL peer dependencies of core, imported lazily per
+  provider only when usable — the core root still imports none of them. Lifted
+  from latch-platform's `models.ts` / `reasoning.ts` / `provider-tools.ts` /
+  `prompt-caching.ts`, which duplicated the provider-prefix inference three times.
+- 78a40e3: One observation seam, and a callback that always identifies itself.
+  
+  - `RuntimeConfig.observability` (`onStep` / `onFinish` / `onError`) is folded
+    into `LatchTelemetry`: `TelemetryRunMeta` gains `trigger` (what started the
+    turn — `chat` / `decision` / `programmatic` / `schedule` / `resume`), and
+    `LatchTelemetry` gains an optional `onStep(run, step)`. `onRunFinished`
+    already covered `onFinish` and `onError` (status `"errored"` + the message).
+    The two seams fired near-identical payloads at the same points; hosts now
+    wire one object, and a tracer and plain callbacks compose instead of living
+    in parallel. `TurnTrigger` moved to `telemetry.ts` (still exported from the
+    package root).
+  - Handler: `stateParams` and the legacy no-pin callback fallback are removed,
+    and `resolveContext` loses its `extra` argument. Every flow the handler
+    starts pins the resolved principal into the state; a callback without a pin
+    is now rejected as `flow_expired` instead of asking the live session to
+    stand in — the exact failure that once stored an org's tokens under a
+    personal owner.
+  - Fix: a turn whose model stream errored used to be settled as `completed`
+    (the SDK still runs `onFinish` after `onError`) and reported to telemetry
+    three times (`errored`, `errored`, `completed`). The first error now wins:
+    one `errored` report, and the run row says `errored` with the message.
+- 7d3c553: The last two pieces every host used to hand-write.
+  
+  - `@intentface/latch-core/harness`: the default harness tools — sandbox
+    `bash`/`read_file`/`write_file`/`glob`/`grep` over the `sandbox` seam,
+    `web_fetch` (clean markdown/text, images and PDFs as viewable media,
+    SSRF-gated and DNS-pinned), `askUser` (client-handled pause), and
+    `list_schedules`/`cancel_schedule` over `options.context.runtime`. Pass
+    `harnessTools: defaultHarnessTools()`. `web_fetch`'s `turndown` and
+    `@intentface/latch-net` are OPTIONAL peers of core, imported on first call.
+    Lifted from latch-platform's sandbox/tools.ts + web-fetch.ts; the platform
+    keeps only its policy (render_fetch, delivery-aware create_schedule, Slack
+    tools).
+  - `createLatchApp({ storage, agents, resolveContext })` in latch-server (and
+    `createLatchHonoApp` on the hono subpath): the composition root with the
+    defaults wired — durability on, croner cron evaluator, the models.dev
+    catalog with pricing / reasoning / web-tool / prompt-caching hooks, the
+    harness tools, the handler mounted, and an in-process `runtime.cron()`
+    driver on long-running hosts (off on serverless). `agents` may be a
+    function of the loaded catalog. Every default is overridable via
+    `runtime` / `handler`. The example server is now ~30 lines of wiring.
+- b22b3cf: Limits — per org / user / agent budgets on turns, tokens and cost.
+  `createRuntime({ limits })` takes a `LatchLimits` seam: `limitsFor({ principal,
+  agent, trigger })` names the counters a turn counts against and their caps
+  (fixed, epoch-aligned windows), and a `LimitStore` holds the counters. The
+  runtime refuses at admission with `LimitExceededError` (stable code
+  `limit_exceeded`, `retryAfterMs`; the HTTP handler maps it to 429 with
+  `Retry-After`), stops the tool loop once this turn's tokens reach the tightest
+  remaining token budget, and settles tokens + cost on finish — resumes and
+  subagent turns included. `runtime.cron()` prunes dead windows.
+  `@intentface/latch-drizzle` adds `latch_limit_counters` (both dialects) and
+  `createSqliteLimitStore` / `createPostgresLimitStore`.
+
+### Patch Changes
+
+- @intentface/latch-net@0.9.0
+
 ## 0.8.1
 
 ### Patch Changes
