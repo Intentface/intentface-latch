@@ -327,6 +327,15 @@ describe("slackChannel v2 — admission", () => {
     expect(eph[0]!.body.text).toContain("Still working");
   });
 
+  it("renders core's own busy refusal (chat_busy) as the quiet notice, not the generic error", async () => {
+    const h = harness();
+    h.runtime.handleChat.mockRejectedValueOnce(Object.assign(new Error("busy"), { code: "chat_busy", retryAfterMs: 4000 }));
+    await h.channel.handleRequest(signedRequest(eventBody(mention())));
+    await h.flush();
+    expect(h.of("chat.postEphemeral").map((c) => c.body.text)).toEqual([expect.stringMatching(/Still working/)]);
+    expect(h.of("chat.postMessage").some((c) => /Something went wrong/.test(c.body.text))).toBe(false);
+  });
+
   it("releases the lease after a turn so the next message runs", async () => {
     const h = harness();
     await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0" }))));

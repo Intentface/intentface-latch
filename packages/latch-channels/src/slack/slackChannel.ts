@@ -1,6 +1,6 @@
 import type { AppMessage } from "@intentface/latch-core";
 import type { AuthResult, ChannelRunOps } from "../types.js";
-import { consumeRun, pendingApprovals } from "../render.js";
+import { consumeRun, isChatBusyError, pendingApprovals } from "../render.js";
 import { withTurnLease } from "../kernel.js";
 import { slackApi, type SlackApiOptions, type SlackToken } from "./api.js";
 import { verifySlackSignature } from "./verify.js";
@@ -28,8 +28,9 @@ import { renderSlackStream } from "./stream.js";
  *    workers. (The v1 pre-ACK chain caused the 3s timeouts whose retries the
  *    dedupe layers then had to absorb.)
  *  - **Admission is atomic.** One `claimOnce` primitive (TTL'd test-and-set)
- *    dedupes deliveries, messages and interactions; one `claimTurn` lease
- *    (the kernel's `withTurnLease`) guarantees a single live run per chat. No
+ *    dedupes deliveries, messages and interactions. One live run per chat is
+ *    core's storage invariant (`ChatBusyError`), rendered here as the busy
+ *    notice; a host on an adapter without it may still wire `claimTurn`. No
  *    read-then-act preflights.
  *  - **Threads are initiator-owned.** The first user to engage a chat owns
  *    it; everyone else gets ONE quiet notice. Nobody ever acts with another
@@ -97,9 +98,14 @@ export interface SlackChannelConfig<P> {
    * interaction redeliveries (`act:`) and once-ever notices (`note:`).
    */
   claimOnce: (key: string, ttlMs: number) => Promise<boolean>;
-  /** One live run per chat: lease with a fencing token, `null` = busy. */
-  claimTurn: (chatId: string) => Promise<string | null>;
-  releaseTurn: (chatId: string, token: string) => Promise<void>;
+  /**
+   * Optional host-side one-turn-per-chat lease (`null` = busy). Core's storage
+   * adapter already refuses a second live run per chat (`ChatBusyError`, shown
+   * as the busy notice), so this is only for hosts on an adapter without that
+   * invariant.
+   */
+  claimTurn?: (chatId: string) => Promise<string | null>;
+  releaseTurn?: (chatId: string, token: string) => Promise<void>;
   /** Thread ownership + stop flag. */
   threads: SlackThreadStore;
 
@@ -181,6 +187,8 @@ const ACT_TTL = 15 * 60_000;
 const NOTE_TTL = 7 * 24 * 3600_000;
 
 const GENERIC_ERROR = ":warning: Something went wrong running the agent — the details are in Latch.";
+const BUSY_NOTICE = "Still working on the previous message here — send that again when I've answered.";
+const MID_TURN_NOTICE = "The agent is mid-turn here — try again in a moment.";
 
 function newId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `m_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
@@ -368,6 +376,19 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       });
       await renderTurn(res, { ...ctx, turnStartedAt });
     } catch (e) {
+      // Core's one-turn-per-chat refusal: the same quiet notice the lease gives.
+      if (isChatBusyError(e)) {
+        await api
+          .postEphemeral({
+            channel: ctx.channel,
+            user: ctx.userId,
+            ...(threadTsOf(ctx.root) ?? ctx.anchorTs ? { thread_ts: threadTsOf(ctx.root) ?? ctx.anchorTs } : {}),
+            text: BUSY_NOTICE,
+          })
+          .catch(() => {});
+        await setSession(ctx.channel, ctx.root, "active");
+        return;
+      }
       // Never post raw internals into the channel: masked stream errors render
       // through the renderer; a pre-stream throw gets the generic line.
       console.error("[slack] turn failed:", e);
@@ -505,7 +526,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         channel: channel,
         user: userId,
         ...(threadTs ? { thread_ts: threadTs } : {}),
-        text: "Still working on the previous message here — send that again when I've answered.",
+        text: BUSY_NOTICE,
       });
     await withTurnLease(config, chatId, busy, async () => {
       // 9. Ownership record (inside the lease → no create race).
@@ -653,7 +674,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     }
 
     // An approval resume IS a turn — same lease as a message.
-    const busy = () => ephemeral("The agent is mid-turn here — try again in a moment.");
+    const busy = () => ephemeral(MID_TURN_NOTICE);
     await withTurnLease(config, decoded.chatId, busy, async () => {
       const turnStartedAt = Date.now();
       try {
@@ -687,6 +708,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           turnStartedAt,
         });
       } catch (e) {
+        if (isChatBusyError(e)) return void (await ephemeral(MID_TURN_NOTICE));
         console.error("[slack] approval resume failed:", e);
         await ephemeral(GENERIC_ERROR);
       }
@@ -856,11 +878,32 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     await withTurnLease(config, ctx.chatId, busy, async () => {
       const turnStartedAt = Date.now();
       await setSession(parsed.channel, parsed.root, "processing");
-      const res = await config.runtime.applyApproval({
-        chatId: ctx.chatId,
-        principal,
-        decisions: [{ approvalId: ctx.approvalId, approved: true }],
-      });
+      let res: Response;
+      try {
+        res = await config.runtime.applyApproval({
+          chatId: ctx.chatId,
+          principal,
+          decisions: [{ approvalId: ctx.approvalId, approved: true }],
+        });
+      } catch (e) {
+        if (isChatBusyError(e)) {
+          // Tell the person, not just the log: their connect finished but the
+          // thread is mid-turn — the card stays, they press again.
+          await busy();
+          const threadTs = threadTsOf(parsed.root) ?? ctx.anchorTs;
+          await api
+            .postEphemeral({
+              channel: parsed.channel,
+              user: ctx.userId,
+              ...(threadTs ? { thread_ts: threadTs } : {}),
+              text: MID_TURN_NOTICE,
+            })
+            .catch(() => {});
+          await setSession(parsed.channel, parsed.root, "active");
+          return;
+        }
+        throw e;
+      }
       await renderTurn(res, {
         chatId: ctx.chatId,
         channel: parsed.channel,

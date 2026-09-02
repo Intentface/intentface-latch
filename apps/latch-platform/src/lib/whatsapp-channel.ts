@@ -54,8 +54,6 @@ export async function getWhatsappChannelForBot(botId: string) {
     },
     waitUntil: (p) => waitUntil(p),
     seen: (key) => channelStore.seen("whatsapp", key),
-    claimTurn: (chatId) => channelStore.claimTurn(chatId),
-    releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
     authorizeUser: ({ waId }) => gate(waId),
     stashPending: (input) =>
       channelStore.setPending("whatsapp", botId, input.waId, {

@@ -128,7 +128,7 @@ Key exports: `createMemoryProvider` · `createLoredexStore` · `scopeRefOf` · t
 
 ## latch-channels
 
-**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, and runs the turn in the background. Approvals render as native platform UI. Per adapter: Slack uses native message streaming with tool calls as task cards, the Agents-pane surface, initiator-owned threads and signed approval buttons. Telegram and WhatsApp are two `Surface`s over one **turn kernel** (`createTurnKernel` in the package root): dedupe, the identity gate with post-link replay, the one-turn-per-chat lease, media folding, the answer posted once at finish (split past the platform cap, with a typing hint meanwhile), approvals, questionnaires and the `/new` `/compact` `/cancel` `/status` commands are written once — a new DM platform is a webhook parser plus a Surface.
+**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, and runs the turn in the background. Approvals render as native platform UI. Per adapter: Slack uses native message streaming with tool calls as task cards, the Agents-pane surface, initiator-owned threads and signed approval buttons. Telegram and WhatsApp are two `Surface`s over one **turn kernel** (`createTurnKernel` in the package root): dedupe, the identity gate with post-link replay, media folding, the answer posted once at finish (split past the platform cap, with a typing hint meanwhile), approvals, questionnaires and the `/new` `/compact` `/cancel` `/status` commands are written once — a new DM platform is a webhook parser plus a Surface.
 
 ```ts
 import { slackChannel } from "@intentface/latch-channels/slack";
@@ -138,7 +138,7 @@ import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
 
 A channel is just another caller of the runtime — the same `handleChat`, the same storage, the same approvals as your web app. Only the rendering differs.
 
-You supply the persistence: which agent a bot serves, the identity links, held messages, delivery dedup, and the per-chat turn lease.
+You supply the persistence: which agent a bot serves, the identity links, held messages, and delivery dedup. One turn per chat is guarded by core when your storage adapter has the one-active-run-per-chat invariant (the shipped drizzle adapters do): a second live run is refused and the channels render that as "still working". On a custom adapter without it, wire the optional `claimTurn` / `releaseTurn` lease — it is then your only turn serialisation.
 
 <Callout type="warn" title="Resolve the human, not the installer">
 Decide deliberately whether a turn runs as the *person messaging* or as the

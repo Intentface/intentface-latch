@@ -141,8 +141,10 @@ export interface KernelConfig<P, User, Ref> {
   /** Persistent dedupe: true if this delivery key was already handled. */
   seen?: (deliveryKey: string) => Promise<boolean>;
   /**
-   * Host-backed one-turn-per-chat lease: a claimant token, or null when a turn
-   * is already running (→ "still working"). The token fences the release.
+   * Optional host-backed one-turn-per-chat lease: a claimant token, or null
+   * when a turn is already running (→ "still working"). Core's storage adapter
+   * already refuses a second live run per chat (`ChatBusyError`, rendered the
+   * same way), so this is only for hosts on an adapter without that invariant.
    */
   claimTurn?: (chatId: string) => Promise<string | null>;
   releaseTurn?: (chatId: string, token: string) => Promise<void>;
