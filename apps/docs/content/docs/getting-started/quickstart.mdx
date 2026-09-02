@@ -3,7 +3,7 @@ title: Your first agent in ten minutes
 description: One file on createLatchHonoApp — a chat that streams, an agent that asks before acting, and a run that survives a restart.
 ---
 
-`createLatchApp` is the whole backend in one call: durability on, an in-process cron, the models.dev catalog with pricing and prompt caching, the harness tools, and the HTTP handler. `createLatchHonoApp` is the same call with a Hono app already mounted, which is what this page uses. It gets the backend answering, then adds the two things that make it more than a demo: an approval gate and a crash you can walk away from.
+`createLatchApp` is the whole backend in one call: durability on, an in-process cron on a long-running process (on serverless it is switched off and a platform cron calls `POST /cron/run` instead — see step 4), the models.dev catalog with pricing and prompt caching, the harness tools, and the HTTP handler. `createLatchHonoApp` is the same call with a Hono app already mounted, which is what this page uses. It gets the backend answering, then adds the two things that make it more than a demo: an approval gate and a crash you can walk away from.
 
 ## 1. Install
 
