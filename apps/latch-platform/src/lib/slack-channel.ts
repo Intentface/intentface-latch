@@ -3,7 +3,7 @@ import { slackChannel } from "@intentface/latch-channels/slack";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
 import { slackVaultKeys } from "./slack-store";
-import { buildLinkUrl } from "./slack-link";
+import { buildChannelLinkUrl } from "./channel-link";
 import { baseUrl } from "./base-url";
 import type { Principal } from "./session";
 
@@ -21,7 +21,7 @@ const lastTouch = new Map<string, number>();
 
 // Claim TTLs owned here (policy), passed through the adapter's claimOnce.
 export async function getSlackChannelForApp(appId: string) {
-  const { runtime, slackStore, credentials } = await getLatch();
+  const { runtime, slackStore, channelStore, credentials } = await getLatch();
   const app = await slackStore.resolve(appId);
   if (!app) return null;
   if (!app.botUserId || !app.teamId) {
@@ -60,9 +60,9 @@ export async function getSlackChannelForApp(appId: string) {
     },
 
     // ── Admission (all atomic, all in the store) ──────────────────────────────
-    claimOnce: (key, ttlMs) => slackStore.claimOnce(`${appId}:${key}`, ttlMs),
-    claimTurn: (chatId) => slackStore.claimTurn(chatId),
-    releaseTurn: (chatId, token) => slackStore.releaseTurn(chatId, token),
+    claimOnce: (key, ttlMs) => channelStore.claimOnce(`slack:${appId}:${key}`, ttlMs),
+    claimTurn: (chatId) => channelStore.claimTurn(chatId),
+    releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
     threads: {
       claim: async (chatId, meta) => {
         const row = await slackStore.claimThread({
@@ -97,7 +97,7 @@ export async function getSlackChannelForApp(appId: string) {
       // still deliver queued events for a while.
       if (disabled) return { allowed: false, silent: true };
       const team = teamId || app.teamId || "";
-      const identity = await slackStore.resolveIdentity(team, userId);
+      const identity = await channelStore.resolveIdentity("slack", team, userId);
       if (identity) {
         // The identity table is keyed by (team, slack user) ALONE — a link
         // recorded from any org would otherwise satisfy this gate and drive
@@ -138,10 +138,9 @@ export async function getSlackChannelForApp(appId: string) {
           principal: { orgId: app.orgId, userId: app.userId, actorUserId: identity.userId },
         };
       }
-      await slackStore.setPending({
-        appId,
-        teamId: team,
-        slackUserId: userId,
+      // Held per APP (two apps in one workspace hold pendings independently),
+      // identity per workspace — hence app id as the link's ref, team as meta.
+      await channelStore.setPending("slack", appId, `${team}:${userId}`, {
         channel: channelId,
         threadRoot,
         ...(anchorTs ? { anchorTs } : {}),
@@ -150,7 +149,7 @@ export async function getSlackChannelForApp(appId: string) {
       return {
         allowed: false,
         message: "You need a Latch account to use this agent.",
-        linkUrl: buildLinkUrl(baseUrl(), appId, team, userId),
+        linkUrl: buildChannelLinkUrl(baseUrl(), { kind: "slack", botRef: appId, externalId: userId, meta: team }),
       };
     },
 

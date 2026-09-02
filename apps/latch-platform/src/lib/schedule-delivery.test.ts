@@ -1,7 +1,7 @@
 import { createClient } from "@libsql/client";
 import type { Client } from "@libsql/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTelegramStore, migrateTelegram } from "./telegram-store";
+import { createChannelStore, migrateChannels } from "./channel-store";
 import { createSlackStore, migrateSlack } from "./slack-store";
 import type { Principal } from "./session";
 
@@ -17,12 +17,12 @@ vi.mock("./auth", () => ({
 }));
 
 let client: Client;
-let telegramStore: ReturnType<typeof createTelegramStore>;
+let channelStore: ReturnType<typeof createChannelStore>;
 let slackStore: ReturnType<typeof createSlackStore>;
 
 vi.mock("./latch", () => ({
   getLatch: async () => ({
-    telegramStore,
+    channelStore,
     slackStore,
     // Only reached by listAgentChannels' Slack branch.
     credentials: { get: async () => undefined },
@@ -40,13 +40,13 @@ const {
 } = await import("./schedule-delivery");
 
 const owner: Principal = { orgId: "org1", userId: "u1" };
-const bot = { id: "b1", agent: "todo", orgId: "org1", handle: "todo-bot" };
+const bot = { kind: "telegram" as const, id: "b1", agent: "todo", orgId: "org1", handle: "todo-bot" };
 
 beforeEach(async () => {
   client = createClient({ url: ":memory:" });
-  await migrateTelegram(client);
   await migrateSlack(client);
-  telegramStore = createTelegramStore(client);
+  await migrateChannels(client);
+  channelStore = createChannelStore(client);
   slackStore = createSlackStore(client);
   members.clear();
   members.add("u1@org1");
@@ -59,13 +59,8 @@ afterEach(() => {
 
 /** The happy path everything else is a deviation from. */
 async function linkedBot() {
-  await telegramStore.create(bot);
-  await telegramStore.linkIdentity({
-    botId: "b1",
-    telegramUserId: "555",
-    userId: "u1",
-    orgId: "org1",
-  });
+  await channelStore.createBot(bot);
+  await channelStore.linkIdentity({ kind: "telegram", botRef: "b1", externalId: "555", userId: "u1", orgId: "org1" });
 }
 
 describe("parseScheduleDelivery", () => {
@@ -102,7 +97,7 @@ describe("resolveDelivery: telegram", () => {
   });
 
   it("refuses an unlinked user — there is no DM to push into", async () => {
-    await telegramStore.create(bot);
+    await channelStore.createBot(bot);
     await expect(
       resolveDelivery(owner, "todo", { kind: "telegram", botId: "b1" }),
     ).rejects.toThrow(/haven't linked/i);
@@ -133,20 +128,15 @@ describe("resolveDelivery: telegram", () => {
 
   it("refuses a disabled bot", async () => {
     await linkedBot();
-    await telegramStore.setStatus("b1", "disabled");
+    await channelStore.setBotStatus("telegram", "b1", "disabled");
     await expect(
       resolveDelivery(owner, "todo", { kind: "telegram", botId: "b1" }),
     ).rejects.toThrow(/isn't active/i);
   });
 
   it("refuses a personal-agent bot for anyone but its owner", async () => {
-    await telegramStore.create({ ...bot, agentScope: "user", userId: "u1" });
-    await telegramStore.linkIdentity({
-      botId: "b1",
-      telegramUserId: "777",
-      userId: "u2",
-      orgId: "org1",
-    });
+    await channelStore.createBot({ ...bot, agentScope: "user", userId: "u1" });
+    await channelStore.linkIdentity({ kind: "telegram", botRef: "b1", externalId: "777", userId: "u2", orgId: "org1" });
     members.add("u2@org1");
     await expect(
       resolveDelivery({ orgId: "org1", userId: "u2" }, "todo", { kind: "telegram", botId: "b1" }),
@@ -216,15 +206,10 @@ describe("listAgentChannels", () => {
   it("offers only linked bots for the right agent", async () => {
     await linkedBot();
     // Same org + agent, but never linked → not offerable.
-    await telegramStore.create({ ...bot, id: "b2", handle: "other-bot" });
+    await channelStore.createBot({ ...bot, id: "b2", handle: "other-bot" });
     // Linked, but a different agent.
-    await telegramStore.create({ ...bot, id: "b3", agent: "weekly", handle: "weekly-bot" });
-    await telegramStore.linkIdentity({
-      botId: "b3",
-      telegramUserId: "555",
-      userId: "u1",
-      orgId: "org1",
-    });
+    await channelStore.createBot({ ...bot, id: "b3", agent: "weekly", handle: "weekly-bot" });
+    await channelStore.linkIdentity({ kind: "telegram", botRef: "b3", externalId: "555", userId: "u1", orgId: "org1" });
 
     const channels = await listAgentChannels(owner, "todo");
     expect(channels).toEqual([{ kind: "telegram", ref: "b1", label: "todo-bot" }]);
@@ -280,7 +265,7 @@ describe("resolveOfferedDelivery", () => {
   });
 
   it("returns null for a real bot the caller hasn't linked", async () => {
-    await telegramStore.create(bot);
+    await channelStore.createBot(bot);
     expect(await resolveOfferedDelivery(owner, "todo", { kind: "telegram", ref: "b1" })).toBeNull();
   });
 

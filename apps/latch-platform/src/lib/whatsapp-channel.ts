@@ -2,8 +2,8 @@ import { waitUntil } from "@vercel/functions";
 import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
-import { whatsappVaultKeys } from "./whatsapp-store";
-import { buildWhatsappLinkUrl } from "./whatsapp-link";
+import { whatsappVaultKeys } from "./channel-store";
+import { buildChannelLinkUrl } from "./channel-link";
 import { baseUrl } from "./base-url";
 import type { Principal } from "./session";
 
@@ -13,8 +13,8 @@ import type { Principal } from "./session";
  * linked user. Returns null if the bot isn't registered or is disabled.
  */
 export async function getWhatsappChannelForBot(botId: string) {
-  const { runtime, whatsappStore, credentials } = await getLatch();
-  const bot = await whatsappStore.get(botId);
+  const { runtime, channelStore, credentials } = await getLatch();
+  const bot = await channelStore.getBot("whatsapp", botId);
   if (!bot || bot.status !== "active") return null;
 
   const owner: Principal = { orgId: bot.orgId, userId: bot.userId };
@@ -39,19 +39,24 @@ export async function getWhatsappChannelForBot(botId: string) {
     },
     // Holds the answers collected so far while a questionnaire is on screen.
     askState: {
-      get: (chatId) => whatsappStore.getAsk(chatId),
-      begin: (chatId, session) => whatsappStore.beginAsk(chatId, session),
+      get: (chatId) => channelStore.getAsk(chatId),
+      begin: (chatId, session) => channelStore.beginAsk(chatId, session),
       update: (chatId, toolCallId, rev, patch) =>
-        whatsappStore.updateAsk(chatId, toolCallId, rev, patch),
-      finish: (chatId, toolCallId, rev) => whatsappStore.finishAsk(chatId, toolCallId, rev),
-      clear: (chatId) => whatsappStore.clearAsk(chatId),
+        channelStore.updateAsk(chatId, toolCallId, rev, patch),
+      finish: (chatId, toolCallId, rev) => channelStore.finishAsk(chatId, toolCallId, rev),
+      clear: (chatId) => channelStore.clearAsk(chatId),
+    },
+    // Which conversation this thread is writing to — what makes `/new` possible.
+    thread: {
+      current: (key) => channelStore.currentThread(key),
+      rotate: (key) => channelStore.rotateThread(key),
     },
     waitUntil: (p) => waitUntil(p),
-    seen: (key) => whatsappStore.seenDelivery(key),
-    claimTurn: (chatId) => whatsappStore.claimTurn(chatId),
-    releaseTurn: (chatId, token) => whatsappStore.releaseTurn(chatId, token),
+    seen: (key) => channelStore.seen("whatsapp", key),
+    claimTurn: (chatId) => channelStore.claimTurn(chatId),
+    releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
     authorizeUser: async ({ waId }) => {
-      const identity = await whatsappStore.resolveIdentity(botId, waId);
+      const identity = await channelStore.resolveIdentity("whatsapp", botId, waId);
       if (identity) {
         // Identity rows outlive org membership — revalidate before minting a
         // principal, or a removed member keeps channel access to org agents.
@@ -74,13 +79,11 @@ export async function getWhatsappChannelForBot(botId: string) {
       return {
         allowed: false,
         message: "You need a Latch account to use this agent.",
-        linkUrl: buildWhatsappLinkUrl(baseUrl(), botId, waId),
+        linkUrl: buildChannelLinkUrl(baseUrl(), { kind: "whatsapp", botRef: botId, externalId: waId }),
       };
     },
     stashPending: (input) =>
-      whatsappStore.setPending({
-        botId,
-        waId: input.waId,
+      channelStore.setPending("whatsapp", botId, input.waId, {
         profileName: input.profileName,
         text: input.text,
         media: input.media,

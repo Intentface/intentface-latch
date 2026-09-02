@@ -1,7 +1,7 @@
 import { createClient } from "@libsql/client";
 import type { Client } from "@libsql/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTelegramStore, migrateTelegram } from "@/lib/telegram-store";
+import { createChannelStore, migrateChannels } from "@/lib/channel-store";
 import { createSlackStore, migrateSlack } from "@/lib/slack-store";
 import type { Principal } from "@/lib/session";
 
@@ -21,7 +21,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 let client: Client;
-let telegramStore: ReturnType<typeof createTelegramStore>;
+let channelStore: ReturnType<typeof createChannelStore>;
 let slackStore: ReturnType<typeof createSlackStore>;
 let created: Record<string, unknown>[] = [];
 
@@ -36,7 +36,7 @@ const runtime = {
 vi.mock("@/lib/latch", () => ({
   getLatch: async () => ({
     runtime,
-    telegramStore,
+    channelStore,
     slackStore,
     credentials: { get: async () => undefined },
   }),
@@ -51,7 +51,7 @@ const list_delivery_channels = appTools.list_delivery_channels as {
 };
 
 const principal: Principal = { orgId: "org1", userId: "u1" };
-const bot = { id: "b1", agent: "todo", orgId: "org1", handle: "todo-bot" };
+const bot = { kind: "telegram" as const, id: "b1", agent: "todo", orgId: "org1", handle: "todo-bot" };
 /** A turn in the web app: no channel, so nothing to derive a target from. */
 const webRun = { id: "r1", chatId: "chat_abc", agent: "todo" };
 // The runtime rides on the tool context now (what the real runtime supplies
@@ -60,9 +60,9 @@ const ctx = (run: typeof webRun) => ({ context: { principal, run, runtime } });
 
 beforeEach(async () => {
   client = createClient({ url: ":memory:" });
-  await migrateTelegram(client);
   await migrateSlack(client);
-  telegramStore = createTelegramStore(client);
+  await migrateChannels(client);
+  channelStore = createChannelStore(client);
   slackStore = createSlackStore(client);
   members.clear();
   members.add("u1@org1");
@@ -75,13 +75,8 @@ afterEach(() => {
 });
 
 async function linkedBot() {
-  await telegramStore.create(bot);
-  await telegramStore.linkIdentity({
-    botId: "b1",
-    telegramUserId: "555",
-    userId: "u1",
-    orgId: "org1",
-  });
+  await channelStore.createBot(bot);
+  await channelStore.linkIdentity({ kind: "telegram", botRef: "b1", externalId: "555", userId: "u1", orgId: "org1" });
 }
 
 const spec = { cron: "0 9 * * *", timezone: "Europe/Helsinki", prompt: "Morning brief" };
@@ -126,7 +121,7 @@ describe("create_schedule from a web chat", () => {
   });
 
   it("refuses an unoffered target instead of quietly downgrading to app-only", async () => {
-    await telegramStore.create(bot); // exists, never linked → not offerable
+    await channelStore.createBot(bot); // exists, never linked → not offerable
     const out = await create_schedule.execute(
       { ...spec, deliver_to: { kind: "telegram", ref: "b1" } },
       ctx(webRun),
