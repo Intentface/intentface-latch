@@ -102,12 +102,18 @@ const ALTERS = [
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];
 
-/** "Column already exists", wherever a driver put the message (top level or `cause` chain). */
+/**
+ * "Column already exists", wherever a driver put the message (top level or the
+ * `cause` chain). Matches only the duplicate-COLUMN forms — sqlite/libsql
+ * "duplicate column name", Postgres `column "x" of relation "y" already exists`
+ * — so an unrelated schema failure that merely says "already exists" is still
+ * propagated.
+ */
 function isColumnExists(error: unknown): boolean {
   let e: unknown = error;
   for (let depth = 0; e && depth < 5; depth++) {
     const message = e instanceof Error ? e.message : String(e);
-    if (/duplicate column|already exists/i.test(message)) return true;
+    if (/duplicate column|column .*already exists/i.test(message)) return true;
     e = e instanceof Error ? e.cause : undefined;
   }
   return false;
