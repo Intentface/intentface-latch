@@ -176,6 +176,37 @@ describe("runAgent (autonomous)", () => {
     expect(blank.threadId).toMatch(/^sub_/);
   });
 
+  it("a thread parked on an undecided approval is un-wedged: the stale gate is declined, this turn answers", async () => {
+    const mem = memoryStorage();
+    const rt = runtimeWith(mem, model("fresh answer"));
+    // A previous turn ended awaiting a decision nobody gave (same shape handleChat guards against).
+    const chat = await mem.storage.createChat(principal, { id: "sub_wedged", agent: "writer", kind: "internal" });
+    await mem.storage.appendMessages(chat.id, [
+      { id: "u1", role: "user", parts: [{ type: "text", text: "earlier" }], metadata: { visibility: "user" } },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-write_thing",
+            toolCallId: "call_old",
+            state: "approval-requested",
+            input: { what: "old" },
+            approval: { id: "apv_old" },
+          } as never,
+        ],
+        metadata: { visibility: "user" },
+      } as AppMessage,
+    ]);
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "move on", threadId: chat.id });
+    expect(res.answer).toBe("fresh answer");
+    const stored = mem.messages.get(chat.id)!;
+    const oldPart = stored.find((m) => m.id === "a1")!.parts[0] as { state: string; approval: { approved?: boolean } };
+    expect(oldPart.state).toBe("approval-responded");
+    expect(oldPart.approval.approved).toBe(false);
+    expect(stored.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+
   it("blockGated (default) stubs the gated tool so a test run has no side effects", async () => {
     const mem = memoryStorage();
     const rt = runtimeWith(mem, model("did it.", { name: "write_thing", input: '{"what":"x"}' }));

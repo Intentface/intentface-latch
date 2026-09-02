@@ -2723,6 +2723,15 @@ export function createRuntime<P, RC = unknown>(
       });
     }
     const prior = await storage.loadMessages(o.principal, chatId);
+    // Same rule as handleChat: a new message while the thread is parked on an
+    // approval IS the decision — close the stale gate as declined (persisted)
+    // and carry on. Otherwise a continued thread (`runAgent({ threadId })`,
+    // `spawn_agent({ threadId })`) would run with an undecided gate in history
+    // and this turn's verdict below would re-report that stale approval.
+    if (hasPendingApproval(prior)) {
+      const declined = declinePendingApprovals(prior);
+      if (declined.length > 0) await storage.appendMessages(chatId, declined);
+    }
     await storage.appendMessages(chatId, [o.message]);
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
@@ -2774,8 +2783,11 @@ export function createRuntime<P, RC = unknown>(
     await res.text();
 
     const after = await storage.loadMessages(o.principal, chatId);
-    const pending = collectPendingApprovals(after);
+    // The verdict is about THIS turn, so read the FINAL message only (the same
+    // rule hasPendingApproval applies): an undecided gate in an older message
+    // is an abandoned turn, not this one's pause point.
     const last = after[after.length - 1];
+    const pending = last?.role === "assistant" ? collectPendingApprovals([last]) : [];
     const parked =
       pending.length > 0 ||
       hasPendingApproval(after) ||
