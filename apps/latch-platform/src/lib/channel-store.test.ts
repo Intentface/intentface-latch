@@ -30,6 +30,15 @@ describe("channel store: bots", () => {
     expect(await store.listBots("telegram", "other")).toHaveLength(0);
   });
 
+  it("bot identity is (kind, id): the same id on two kinds is two bots", async () => {
+    await store.createBot(bot);
+    await store.createBot({ ...bot, kind: "whatsapp", handle: "wa" });
+    expect((await store.getBot("telegram", "b1"))!.kind).toBe("telegram");
+    expect((await store.getBot("whatsapp", "b1"))!.kind).toBe("whatsapp");
+    await store.removeBot("whatsapp", "b1");
+    expect(await store.getBot("telegram", "b1")).not.toBeNull();
+  });
+
   it("enforces unique handles within a kind", async () => {
     await store.createBot(bot);
     await expect(store.createBot({ ...bot, id: "b2" })).rejects.toThrow(/UNIQUE/i);
@@ -117,6 +126,15 @@ describe("channel store: held messages", () => {
     await store.setPending("telegram", "b1", "5", { text: "second", media: [{ name: "a.png" }] });
     expect(await store.takePending<{ text: string }>("telegram", "b1", "5")).toMatchObject({ text: "second" });
     expect(await store.takePending("telegram", "b1", "5")).toBeNull();
+  });
+
+  it("two concurrent takes hand the payload to exactly one caller", async () => {
+    await store.setPending("telegram", "b1", "5", { text: "once" });
+    const results = await Promise.all([
+      store.takePending("telegram", "b1", "5"),
+      store.takePending("telegram", "b1", "5"),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
   });
 
   it("an expired pending reads as absent", async () => {

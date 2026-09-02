@@ -120,7 +120,7 @@ async function carryOver(client: Client, legacy: string, copy: string[]): Promis
 export async function migrateChannels(client: Client): Promise<void> {
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_channel_bot (
     kind TEXT NOT NULL,
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     agent TEXT NOT NULL,
     agent_scope TEXT,
     org_id TEXT NOT NULL,
@@ -132,6 +132,7 @@ export async function migrateChannels(client: Client): Promise<void> {
     webhook_registered_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, id),
     UNIQUE (kind, handle)
   )`);
   await client.execute(
@@ -490,20 +491,20 @@ export function createChannelStore(client: Client) {
       });
     },
 
-    /** Fetch and clear a held message (replay-once); expired or corrupt rows read as absent. */
+    /**
+     * Fetch and clear a held message — replay-once, atomically: one statement
+     * consumes the row, so two concurrent link confirmations can't both replay
+     * it. Expired or corrupt rows read as absent (and are gone either way).
+     */
     async takePending<T>(kind: ChannelKind, botRef: string, externalId: string): Promise<T | null> {
-      const now = Date.now();
       const res = await client.execute({
-        sql: `SELECT payload FROM latch_channel_pending
-              WHERE kind = ? AND bot_ref = ? AND external_id = ? AND expires_at >= ? LIMIT 1`,
-        args: [kind, botRef, externalId, now],
-      });
-      const r = res.rows[0] as Record<string, unknown> | undefined;
-      await client.execute({
-        sql: `DELETE FROM latch_channel_pending WHERE kind = ? AND bot_ref = ? AND external_id = ?`,
+        sql: `DELETE FROM latch_channel_pending
+              WHERE kind = ? AND bot_ref = ? AND external_id = ?
+              RETURNING payload, expires_at`,
         args: [kind, botRef, externalId],
       });
-      if (!r) return null;
+      const r = res.rows[0] as Record<string, unknown> | undefined;
+      if (!r || Number(r.expires_at) < Date.now()) return null;
       try {
         return JSON.parse(String(r.payload)) as T;
       } catch {

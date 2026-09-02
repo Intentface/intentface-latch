@@ -136,4 +136,5 @@ export const LINK_KINDS: Record<ChannelKind, LinkKind> = {
   },
 };
 
-export const isChannelKind = (s: string): s is ChannelKind => s in LINK_KINDS;
+/** `hasOwn`, not `in`: `/link/toString` must 404, not resolve Object.prototype as an adapter. */
+export const isChannelKind = (s: string): s is ChannelKind => Object.hasOwn(LINK_KINDS, s);
