@@ -39,8 +39,8 @@ export const schedulesExtension: AgentBuilderExtension<Principal> = {
     return {
       list_agent_channels: tool({
         description:
-          "The channels a scheduled run of this agent could be delivered to — the Telegram bots " +
-          "the user has linked and the Slack apps they own, with each app's channels. Call this " +
+          "The channels a scheduled run of this agent could be delivered to — the Telegram and " +
+          "WhatsApp bots the user has linked and the Slack apps they own, with each app's channels. Call this " +
           "before create_agent_schedule; deliverTo values not listed here are rejected.",
         inputSchema: z.object({ agent: z.string().describe("Agent name from list_agents.") }),
         execute: async ({ agent }) => {
@@ -74,7 +74,7 @@ export const schedulesExtension: AgentBuilderExtension<Principal> = {
           prompt: z.string().describe("The message the agent receives on each fire."),
           deliverTo: z
             .object({
-              kind: z.enum(["telegram", "slack"]),
+              kind: z.enum(["telegram", "whatsapp", "slack"]),
               ref: z.string().describe("The `ref` from list_agent_channels (bot id / Slack app id)."),
               channel: z.string().optional().describe("Slack only: the channel id from list_agent_channels."),
             })

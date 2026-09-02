@@ -1,10 +1,12 @@
 import { slackApi } from "@intentface/latch-channels/slack";
-import { telegramChatId } from "@intentface/latch-channels/telegram";
 import type { ScheduleRecord } from "@intentface/latch-core";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
 import { parseAgentRef } from "./agent-store";
+import { refusalForLinkedUser } from "./channel-auth";
+import type { DmChannelKind } from "./channel-kinds";
 import { getTelegramChannelForBot } from "./telegram-channel";
+import { getWhatsappChannelForBot } from "./whatsapp-channel";
 import { getSlackChannelForApp } from "./slack-channel";
 import { slackVaultKeys } from "./slack-store";
 import type { Principal } from "./session";
@@ -21,6 +23,11 @@ import type { Principal } from "./session";
  * Core knows none of this: `ScheduleRecord.delivery` is opaque there, and this
  * module is wired in as `createRuntime({ runSchedule })`.
  *
+ * Two shapes of target. A DM bot (Telegram, WhatsApp) delivers into the user's
+ * own conversation with that bot — the DM is derived from their identity row,
+ * never stored. A Slack app delivers into a channel, each fire as its own
+ * thread.
+ *
  * ── The authorization rule ────────────────────────────────────────────────
  * `resolveDelivery` is the single gate, called at BOTH ends:
  *   • create time, so a bad target fails immediately with a clear message;
@@ -31,8 +38,11 @@ import type { Principal } from "./session";
  * to a conversation the principal no longer owns.
  */
 export type ScheduleDelivery =
-  | { kind: "telegram"; botId: string }
+  | { kind: DmChannelKind; botId: string }
   | { kind: "slack"; appId: string; channel: string };
+
+const DM_KINDS: readonly DmChannelKind[] = ["telegram", "whatsapp"];
+const isDmKind = (k: unknown): k is DmChannelKind => DM_KINDS.includes(k as DmChannelKind);
 
 /** A delivery target offered to a picker (UI select, builder discovery tool). */
 export interface AgentChannel {
@@ -47,7 +57,7 @@ export interface AgentChannel {
 
 /**
  * One postable target, as a model or a select sees it: a Slack app fans out into
- * a row per channel, a Telegram bot is one row (the DM is implied and derived).
+ * a row per channel, a DM bot is one row (the DM is implied and derived).
  */
 export interface DeliveryOption {
   kind: ScheduleDelivery["kind"];
@@ -60,7 +70,7 @@ export interface DeliveryOption {
 /** What a discovery tool hands the model, and what a target is matched against. */
 export function deliveryOptions(available: AgentChannel[]): DeliveryOption[] {
   return available.flatMap<DeliveryOption>((c) =>
-    c.kind === "telegram"
+    c.kind !== "slack"
       ? [{ kind: c.kind, ref: c.ref, label: c.label }]
       : (c.channels ?? []).map((ch) => ({
           kind: c.kind,
@@ -77,9 +87,7 @@ export class DeliveryError extends Error {}
 export function parseScheduleDelivery(value: unknown): ScheduleDelivery | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
-  if (v.kind === "telegram" && typeof v.botId === "string") {
-    return { kind: "telegram", botId: v.botId };
-  }
+  if (isDmKind(v.kind) && typeof v.botId === "string") return { kind: v.kind, botId: v.botId };
   if (v.kind === "slack" && typeof v.appId === "string" && typeof v.channel === "string") {
     return { kind: "slack", appId: v.appId, channel: v.channel };
   }
@@ -89,7 +97,7 @@ export function parseScheduleDelivery(value: unknown): ScheduleDelivery | null {
 /**
  * The delivery targets `principal` may point a schedule for `agent` at.
  *
- * Telegram: the org's active bots bound to this agent that the caller has
+ * DM bots: the org's active bots bound to this agent that the caller has
  * personally linked — an unlinked bot has no DM to push into, and offering it
  * would only produce a create-time error. Slack: apps bound to this agent that
  * the caller OWNS (see the principal note in `runSlackDelivery`), each with its
@@ -105,16 +113,21 @@ export async function listAgentChannels(
   // (that's what `latch_runs.agent` holds).
   const agent = parseAgentRef(agentRef).name;
 
-  for (const bot of await channelStore.botsForAgent("telegram", principal.orgId, agent)) {
-    if (bot.agentScope === "user" && bot.userId !== principal.userId) continue;
-    if (!principal.userId) continue;
-    const identity = await channelStore.identityForUser("telegram", bot.id, principal.userId);
-    if (!identity) continue;
-    out.push({
-      kind: "telegram",
-      ref: bot.id,
-      label: bot.externalHandle ? `@${bot.externalHandle}` : (bot.displayName ?? bot.handle),
-    });
+  for (const kind of DM_KINDS) {
+    for (const bot of await channelStore.botsForAgent(kind, principal.orgId, agent)) {
+      if (bot.agentScope === "user" && bot.userId !== principal.userId) continue;
+      if (!principal.userId) continue;
+      const identity = await channelStore.identityForUser(kind, bot.id, principal.userId);
+      if (!identity) continue;
+      out.push({
+        kind,
+        ref: bot.id,
+        label:
+          kind === "telegram" && bot.externalHandle
+            ? `@${bot.externalHandle}`
+            : (bot.displayName ?? bot.handle),
+      });
+    }
   }
 
   for (const app of await slackStore.appsForAgent(principal.orgId, agent)) {
@@ -163,8 +176,8 @@ export async function resolveOfferedDelivery(
   want: { kind: string; ref: string; channel?: string },
 ): Promise<{ delivery: ScheduleDelivery; label: string } | null> {
   const offered = deliveryOptions(await listAgentChannels(principal, agentRef)).find(
-    // A stray `channel` on a Telegram target is ignored rather than fatal: the
-    // DM is derived from the identity row, so there is nothing for it to select.
+    // A stray `channel` on a DM target is ignored rather than fatal: the DM is
+    // derived from the identity row, so there is nothing for it to select.
     (o) =>
       o.kind === want.kind &&
       o.ref === want.ref &&
@@ -172,18 +185,18 @@ export async function resolveOfferedDelivery(
   );
   if (!offered) return null;
   const delivery: ScheduleDelivery =
-    offered.kind === "telegram"
-      ? { kind: "telegram", botId: offered.ref }
+    offered.kind !== "slack"
+      ? { kind: offered.kind, botId: offered.ref }
       : { kind: "slack", appId: offered.ref, channel: offered.channel! };
   await resolveDelivery(principal, agentRef, delivery);
   return { delivery, label: offered.label };
 }
 
-/** A validated Telegram target: the bot plus the DM it resolves to. */
-interface TelegramTarget {
-  kind: "telegram";
+/** A validated DM target: the bot plus the platform user whose DM it resolves to. */
+interface DmTarget {
+  kind: DmChannelKind;
   botId: string;
-  telegramUserId: string;
+  externalId: string;
 }
 
 interface SlackTarget {
@@ -197,15 +210,15 @@ interface SlackTarget {
 /**
  * Validate a delivery target for (principal, agent), or throw `DeliveryError`.
  *
- * Every check that inbound webhook turns make is repeated here in the same
- * order (`telegram-channel.ts` `authorizeUser`), because this path mints a
- * conversation from our side with no user action to imply consent.
+ * Every check that inbound webhook turns make is repeated here (the shared
+ * `refusalForLinkedUser` rule), because this path mints a conversation from our
+ * side with no user action to imply consent.
  */
 export async function resolveDelivery(
   principal: Principal,
   agentRef: string,
   delivery: ScheduleDelivery,
-): Promise<TelegramTarget | SlackTarget> {
+): Promise<DmTarget | SlackTarget> {
   const { channelStore, slackStore } = await getLatch();
   if (!principal.userId) {
     throw new DeliveryError("Channel delivery needs a user-scoped principal.");
@@ -213,8 +226,8 @@ export async function resolveDelivery(
   // Bindings store the bare name; schedules and runs may carry a scope pin.
   const agent = parseAgentRef(agentRef).name;
 
-  if (delivery.kind === "telegram") {
-    const bot = await channelStore.getBot("telegram", delivery.botId);
+  if (delivery.kind !== "slack") {
+    const bot = await channelStore.getBot(delivery.kind, delivery.botId);
     if (!bot || bot.status !== "active") throw new DeliveryError("That bot isn't active.");
     if (bot.orgId !== principal.orgId) throw new DeliveryError("That bot isn't in your org.");
     // A bot serves exactly one agent, and `latch_chats` rows carry an agent —
@@ -223,19 +236,13 @@ export async function resolveDelivery(
     if (bot.agent !== agent) {
       throw new DeliveryError(`That bot serves "${bot.agent}", not "${agent}".`);
     }
-    if (bot.agentScope === "user" && bot.userId !== principal.userId) {
-      throw new DeliveryError("That bot serves a personal agent — only its owner can use it.");
-    }
-    const identity = await channelStore.identityForUser("telegram", bot.id, principal.userId);
-    if (!identity) throw new DeliveryError("You haven't linked your Telegram account to that bot.");
-    // Identity rows outlive org membership — revalidate, or a removed member
-    // keeps receiving the org's agent output.
-    if (!(await isOrgMember(principal.userId, bot.orgId))) {
-      throw new DeliveryError("You're no longer a member of that agent's organization.");
-    }
+    const identity = await channelStore.identityForUser(delivery.kind, bot.id, principal.userId);
+    const refusal = await refusalForLinkedUser(bot, principal.userId);
+    if (refusal) throw new DeliveryError(refusal);
+    if (!identity) throw new DeliveryError("You haven't linked your account to that bot.");
     // The DM is derived from the identity row, never from the schedule — a
     // stored chat id would be a confused-deputy waiting to happen.
-    return { kind: "telegram", botId: bot.id, telegramUserId: identity.externalId };
+    return { kind: delivery.kind, botId: bot.id, externalId: identity.externalId };
   }
 
   const app = await slackStore.resolve(delivery.appId);
@@ -307,7 +314,7 @@ export async function runScheduledDelivery(input: {
   const delivery = parseScheduleDelivery(schedule.delivery);
   if (!delivery) return false;
 
-  let target: TelegramTarget | SlackTarget;
+  let target: DmTarget | SlackTarget;
   try {
     target = await resolveDelivery(principal, schedule.agent, delivery);
   } catch (e) {
@@ -321,64 +328,58 @@ export async function runScheduledDelivery(input: {
     return false;
   }
 
-  return target.kind === "telegram"
-    ? runTelegramDelivery(schedule, principal, target)
-    : runSlackDelivery(schedule, principal, target);
+  return target.kind === "slack"
+    ? runSlackDelivery(schedule, principal, target)
+    : runDmDelivery(schedule, principal, target);
 }
 
 /**
- * Telegram: run the schedule's prompt in the user's REAL DM thread, so the
- * report arrives in the conversation they reply into and a follow-up has the
- * brief in context. `runMessage` streams it in and renders any approvals or
- * questionnaires the turn parks on — a cron fire becomes as interactive as a
- * typed message.
+ * How to push into each DM channel: build the channel for the bot and replay
+ * one message as that user. `replayMessage` is the kernel's post-link entry —
+ * it resolves the user's current thread (`/new`), takes the one-turn-per-chat
+ * lease, renders the answer and whatever the turn parks on. A held lease means
+ * the person is mid-conversation right now; the kernel tells them it's still
+ * working and this occurrence is skipped (`runDue` advanced `nextRunAt` already).
  */
-async function runTelegramDelivery(
+const DM_DELIVERY: Record<
+  DmChannelKind,
+  (botId: string, externalId: string, text: string, principal: Principal) => Promise<boolean>
+> = {
+  telegram: async (botId, telegramUserId, text, principal) => {
+    const resolved = await getTelegramChannelForBot(botId);
+    if (!resolved) return false;
+    // In a private chat Telegram's chat_id IS the user id.
+    await resolved.channel.replayMessage({ telegramUserId, telegramChatId: telegramUserId, text, principal });
+    return true;
+  },
+  whatsapp: async (botId, waId, text, principal) => {
+    const resolved = await getWhatsappChannelForBot(botId);
+    if (!resolved) return false;
+    await resolved.channel.replayMessage({ waId, text, principal });
+    return true;
+  },
+};
+
+/**
+ * DM bots: run the schedule's prompt in the user's REAL conversation with the
+ * bot, so the report arrives where they reply and a follow-up has the brief in
+ * context. Approvals and questionnaires the turn parks on render too — a cron
+ * fire is as interactive as a typed message.
+ */
+async function runDmDelivery(
   schedule: ScheduleRecord,
   principal: Principal,
-  target: TelegramTarget,
+  target: DmTarget,
 ): Promise<boolean> {
-  const { channelStore } = await getLatch();
-  const resolved = await getTelegramChannelForBot(target.botId);
-  if (!resolved) return false;
-
-  // The thread the DM is currently on (`/new` bumps the epoch). The id format
-  // is the adapter's, so build it with the adapter's helper rather than
-  // restating it here. A store failure propagates instead of falling back to
-  // epoch 0 — that would write into the conversation the user just left behind.
-  const base = telegramChatId(target.botId, target.telegramUserId);
-  const epoch = await channelStore.currentThread(base);
-  const chatId = telegramChatId(target.botId, target.telegramUserId, epoch);
-
-  // One turn per chat. A held lease means the person is mid-conversation right
-  // now; skip this occurrence rather than interleaving two runs on one history
-  // (`runDue` advances `nextRunAt` regardless, so the schedule stays healthy).
-  const token = await channelStore.claimTurn(chatId);
-  if (!token) {
-    console.warn(`[schedule] ${schedule.id}: telegram DM busy — skipping this fire`);
-    return true;
-  }
-  try {
-    await resolved.channel.runMessage({
-      chatId,
-      principal,
-      // In a private chat Telegram's chat_id IS the user id.
-      telegramChatId: target.telegramUserId,
-      telegramUserId: target.telegramUserId,
-      text: schedule.prompt,
-    });
-    return true;
-  } finally {
-    await channelStore.releaseTurn(chatId, token).catch(() => {});
-  }
+  return DM_DELIVERY[target.kind](target.botId, target.externalId, schedule.prompt, principal);
 }
 
 /**
  * Slack: post an anchor message, then run the turn threaded under it. A Latch
  * chat is anchored to a thread root, so there is no standing conversation to
- * continue the way a Telegram DM is — every fire gets its own thread, which is
- * also the Slack-native shape for a recurring brief (and means no turn lease is
- * needed: two fires can never share a history).
+ * continue the way a DM is — every fire gets its own thread, which is also the
+ * Slack-native shape for a recurring brief (and means no turn lease is needed:
+ * two fires can never share a history).
  */
 async function runSlackDelivery(
   schedule: ScheduleRecord,

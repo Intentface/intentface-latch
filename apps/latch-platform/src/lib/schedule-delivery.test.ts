@@ -74,6 +74,7 @@ describe("parseScheduleDelivery", () => {
       appId: "A1",
       channel: "C1",
     });
+    expect(parseScheduleDelivery({ kind: "whatsapp", botId: "w1" })).toEqual({ kind: "whatsapp", botId: "w1" });
     expect(parseScheduleDelivery(null)).toBeNull();
     expect(parseScheduleDelivery({ kind: "telegram" })).toBeNull(); // no botId
     expect(parseScheduleDelivery({ kind: "slack", appId: "A1" })).toBeNull(); // no channel
@@ -86,14 +87,14 @@ describe("resolveDelivery: telegram", () => {
     await linkedBot();
     await expect(
       resolveDelivery(owner, "todo", { kind: "telegram", botId: "b1" }),
-    ).resolves.toEqual({ kind: "telegram", botId: "b1", telegramUserId: "555" });
+    ).resolves.toEqual({ kind: "telegram", botId: "b1", externalId: "555" });
   });
 
   it("accepts a scope-pinned agent ref (what a run carries)", async () => {
     await linkedBot();
     await expect(
       resolveDelivery(owner, "user:todo", { kind: "telegram", botId: "b1" }),
-    ).resolves.toMatchObject({ telegramUserId: "555" });
+    ).resolves.toMatchObject({ externalId: "555" });
   });
 
   it("refuses an unlinked user — there is no DM to push into", async () => {
@@ -155,6 +156,39 @@ describe("resolveDelivery: telegram", () => {
     await expect(
       resolveDelivery(owner, "todo", { kind: "telegram", botId: "nope" }),
     ).rejects.toThrow(DeliveryError);
+  });
+});
+
+describe("resolveDelivery: whatsapp (the same DM rule, second kind)", () => {
+  const wa = { kind: "whatsapp" as const, id: "w1", agent: "todo", orgId: "org1", handle: "todo-wa" };
+
+  it("resolves the DM from the identity row", async () => {
+    await channelStore.createBot(wa);
+    await channelStore.linkIdentity({ kind: "whatsapp", botRef: "w1", externalId: "35840", userId: "u1", orgId: "org1" });
+    await expect(
+      resolveDelivery(owner, "todo", { kind: "whatsapp", botId: "w1" }),
+    ).resolves.toEqual({ kind: "whatsapp", botId: "w1", externalId: "35840" });
+  });
+
+  it("does not mix kinds: a Telegram link never satisfies a WhatsApp target", async () => {
+    await linkedBot(); // telegram b1 linked
+    await channelStore.createBot({ ...wa, id: "b1", handle: "same-id-other-kind" });
+    await expect(
+      resolveDelivery(owner, "todo", { kind: "whatsapp", botId: "b1" }),
+    ).rejects.toThrow(/haven't linked/i);
+  });
+
+  it("is offered by discovery once linked, as one row", async () => {
+    await linkedBot();
+    await channelStore.createBot(wa);
+    await channelStore.linkIdentity({ kind: "whatsapp", botRef: "w1", externalId: "35840", userId: "u1", orgId: "org1" });
+    expect(await listAgentChannels(owner, "todo")).toEqual([
+      { kind: "telegram", ref: "b1", label: "todo-bot" },
+      { kind: "whatsapp", ref: "w1", label: "todo-wa" },
+    ]);
+    await expect(
+      resolveOfferedDelivery(owner, "todo", { kind: "whatsapp", ref: "w1" }),
+    ).resolves.toEqual({ delivery: { kind: "whatsapp", botId: "w1" }, label: "todo-wa" });
   });
 });
 

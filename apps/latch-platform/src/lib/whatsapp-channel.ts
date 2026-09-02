@@ -1,9 +1,8 @@
 import { waitUntil } from "@vercel/functions";
 import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
 import { getLatch } from "./latch";
-import { isOrgMember } from "./auth";
 import { whatsappVaultKeys } from "./channel-store";
-import { buildChannelLinkUrl } from "./channel-link";
+import { dmIdentityGate } from "./channel-auth";
 import { baseUrl } from "./base-url";
 import type { Principal } from "./session";
 
@@ -21,6 +20,8 @@ export async function getWhatsappChannelForBot(botId: string) {
   const keys = whatsappVaultKeys(botId);
   const cred = (key: string) => async () =>
     (await credentials.get(owner, key, "org")) ?? "";
+
+  const gate = dmIdentityGate({ kind: "whatsapp", bot, channelStore });
 
   const channel = whatsappChannel<Principal>({
     // Scope-pinned agent ref — see telegram-channel.ts.
@@ -55,33 +56,7 @@ export async function getWhatsappChannelForBot(botId: string) {
     seen: (key) => channelStore.seen("whatsapp", key),
     claimTurn: (chatId) => channelStore.claimTurn(chatId),
     releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
-    authorizeUser: async ({ waId }) => {
-      const identity = await channelStore.resolveIdentity("whatsapp", botId, waId);
-      if (identity) {
-        // Identity rows outlive org membership — revalidate before minting a
-        // principal, or a removed member keeps channel access to org agents.
-        if (!(await isOrgMember(identity.userId, bot.orgId))) {
-          return {
-            allowed: false,
-            message: "Your Latch account is no longer a member of this agent's organization.",
-          };
-        }
-        // A personal-agent binding resolves the CREATOR's record; any other
-        // member would resolve their own same-named agent (or nothing).
-        if (bot.agentScope === "user" && identity.userId !== bot.userId) {
-          return {
-            allowed: false,
-            message: "This bot serves a personal agent — only its owner can use it.",
-          };
-        }
-        return { allowed: true, principal: { orgId: bot.orgId, userId: identity.userId } };
-      }
-      return {
-        allowed: false,
-        message: "You need a Latch account to use this agent.",
-        linkUrl: buildChannelLinkUrl(baseUrl(), { kind: "whatsapp", botRef: botId, externalId: waId }),
-      };
-    },
+    authorizeUser: ({ waId }) => gate(waId),
     stashPending: (input) =>
       channelStore.setPending("whatsapp", botId, input.waId, {
         profileName: input.profileName,
