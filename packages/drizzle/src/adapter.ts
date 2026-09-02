@@ -25,10 +25,20 @@ export function createSqliteAdapter<P>(
 ): StorageAdapter<P> {
   return makeStorageAdapter<P>(db, schema, {
     owner: opts.owner,
-    // No explicit transaction: this adapter also serves synchronous drivers
-    // (better-sqlite3), whose native transaction API rejects the async
-    // callback async drivers (libsql) need. Each INSERT computes its own seq
+    // No interactive transaction: this adapter also serves synchronous drivers
+    // (better-sqlite3), whose transaction API rejects an async callback — and
+    // libsql opens a transaction on a NEW connection, which for an in-memory
+    // database is a new, empty database. Each INSERT computes its own seq
     // atomically and the UNIQUE (chat_id, seq) index backstops a true race.
     withTx: (fn) => fn(db),
+    // Atomicity where it matters (`openTurn`): drizzle's `batch` runs a list of
+    // independent statements in one transaction on libsql/Turso (local, memory
+    // and remote alike). better-sqlite3 has no batch → sequential fallback.
+    ...(typeof (db as unknown as { batch?: unknown }).batch === "function"
+      ? {
+          batch: (stmts: unknown[]) =>
+            (db as unknown as { batch: (s: never) => Promise<unknown[]> }).batch(stmts as never),
+        }
+      : {}),
   });
 }

@@ -13,8 +13,11 @@ duplicates are marked `superseded` on migrate), and supersede an active run
 whose lease — or, for non-durable runs, a 10-minute stale window — has expired
 before opening the next, bumping its fencing token so the old worker's late
 writes are refused. `reclaimRun` returns null for a crashed run whose chat has
-since moved on. The runtime opens the run before persisting the message, so a
-refused message leaves no trace; the HTTP handler maps the refusal to 409 with
+since moved on. New optional `StorageAdapter.openTurn` opens the run and
+appends the user message in one transaction (the shipped adapters implement it;
+the SQLite adapter now uses real transactions on async drivers such as libsql),
+so a refused message leaves no trace and a crash can't leave a run without its
+message; the HTTP handler maps the refusal to 409 with
 `Retry-After`; the channel kernel renders it as "still working". Two tabs, a
 webhook retry racing a reply, or a schedule firing mid-conversation can no
 longer interleave one history — on every surface, not only in channels.

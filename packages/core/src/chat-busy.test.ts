@@ -81,6 +81,12 @@ function busyAwareStorage() {
       return runs.get(id) ?? null;
     },
     async recordUsage() {},
+    // The atomic path the shipped adapters offer: nothing persists on refusal.
+    async openTurn(p, input) {
+      const run = await impl.createRun!(p, { chatId: input.chatId, agent: input.agent });
+      await impl.appendMessages!(input.chatId, [input.message]);
+      return run;
+    },
   };
   return { storage: impl as StorageAdapter<P>, messages };
 }

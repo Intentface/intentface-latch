@@ -2065,6 +2065,36 @@ export function createRuntime<P, RC = unknown>(
       .catch((e) => console.error("[limits] settlement failed:", e));
   }
 
+  /**
+   * Open a turn: the run (one active per chat — `ChatBusyError` if not ours to
+   * run) and the user message that starts it. Atomic when the adapter offers
+   * `openTurn`; otherwise the run first, then the message, so a refusal still
+   * persists nothing (the crash window between the two writes is the trade-off
+   * an adapter without `openTurn` accepts).
+   */
+  async function openTurn(
+    principal: P,
+    chatId: string,
+    agentName: string,
+    message: AppMessage,
+  ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
+    if (storage.openTurn) {
+      const run = await storage.openTurn(principal, {
+        chatId,
+        agent: agentName,
+        message,
+        ...(dur.enabled ? { lease: { owner: dur.instanceId, ttlMs: dur.leaseTtlMs } } : {}),
+      });
+      return {
+        run,
+        lease: dur.enabled ? { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } : undefined,
+      };
+    }
+    const opened = await openRun(principal, chatId, agentName);
+    await storage.appendMessages(chatId, [message]);
+    return opened;
+  }
+
   async function openRun(
     principal: P,
     chatId: string,
@@ -2129,11 +2159,10 @@ export function createRuntime<P, RC = unknown>(
     // Limits gate BEFORE anything is persisted: a refused turn leaves no
     // trace (the client gets 429 and can retry when the window turns over).
     const admitted = await admitTurn(principal, agentName, "chat");
-    // Open the run BEFORE persisting the message: the adapter refuses
-    // (`ChatBusyError` → 409) when a turn is already live in this chat, and a
-    // refused message must not linger in history — the client retries it.
-    const { run, lease } = await openRun(principal, resolvedChatId, agentName);
-    await storage.appendMessages(resolvedChatId, [message]);
+    // Run + message open together (atomically where the adapter can): a chat
+    // with a live turn refuses (`ChatBusyError` → 409) and the message never
+    // lands in history — the client retries it.
+    const { run, lease } = await openTurn(principal, resolvedChatId, agentName, message);
 
     return buildTurn({
       resolvedChatId,
@@ -2750,8 +2779,7 @@ export function createRuntime<P, RC = unknown>(
       undefined,
       o.turnContext,
     );
-    const { run, lease } = await openRun(o.principal, chatId, o.agent);
-    await storage.appendMessages(chatId, [o.message]);
+    const { run, lease } = await openTurn(o.principal, chatId, o.agent, o.message);
     const onProgress = o.onProgress;
     const res = await buildTurn({
       resolvedChatId: chatId,

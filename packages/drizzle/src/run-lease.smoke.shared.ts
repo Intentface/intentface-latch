@@ -47,6 +47,29 @@ export async function runLeaseSmoke<P>(args: {
   assert((await store.reclaimRun(crashed.id, "n3", 60_000)) === null, "run lease: superseded run is not reclaimable");
   await store.updateRun(fresh.id, { status: "completed", endedAt: Date.now() });
 
+  // openTurn: run + message together; a refused turn persists NOTHING.
+  const msg = (id: string): import("@intentface/latch-core").AppMessage => ({
+    id,
+    role: "user",
+    parts: [{ type: "text", text: id }],
+    metadata: { visibility: "user", createdAt: Date.now() },
+  });
+  const t = await store.createChat(me, { agent: "lease" });
+  const opened = await store.openTurn!(me, { chatId: t.id, agent: "lease", message: msg("u1"), lease: { owner: "n1", ttlMs: 60_000 } });
+  assert(opened.status === "active" && opened.leaseOwner === "n1", "openTurn: opens a leased run");
+  const refused = await busy(() => store.openTurn!(me, { chatId: t.id, agent: "lease", message: msg("u2") }));
+  assert(refused !== null && refused > 0, "openTurn: busy chat refused with retryAfterMs");
+  const ids = (await store.loadMessages(me, t.id)).map((m) => m.id);
+  assert(ids.length === 1 && ids[0] === "u1", `openTurn: refused message not persisted (${ids.join(",")})`);
+  // Racing openTurns: exactly one wins, exactly one message lands.
+  const t2 = await store.createChat(me, { agent: "lease" });
+  const race = await Promise.allSettled(
+    ["a", "b", "c"].map((id) => store.openTurn!(me, { chatId: t2.id, agent: "lease", message: msg(id) })),
+  );
+  const won = race.filter((r) => r.status === "fulfilled").length;
+  const persisted = (await store.loadMessages(me, t2.id)).length;
+  assert(won === 1 && persisted === 1, `openTurn: one of three racing turns wins, one message persisted (${won}/${persisted})`);
+
   // Another chat is unaffected.
   const other = await store.createChat(me, { agent: "lease" });
   assert((await busy(() => store.createRun(me, { chatId: other.id, agent: "lease" }))) === null, "run lease: other chats unaffected");

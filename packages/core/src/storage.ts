@@ -275,6 +275,23 @@ export interface StorageAdapter<P> {
     owner: string;
     ttlMs: number;
   }): Promise<RunRecord>;
+  /**
+   * Open a turn ATOMICALLY: the run row (the one-active-run-per-chat check) and
+   * the user message in one transaction, so a refused turn persists nothing and
+   * a crash can never leave a run without its message (or vice versa). With
+   * `lease`, the run is claimed durably like `claimRun`; without, like
+   * `createRun`. Optional: the runtime falls back to the two separate calls
+   * when an adapter doesn't implement it. The shipped adapters do.
+   */
+  openTurn?(
+    principal: P,
+    input: {
+      chatId: string;
+      agent: string;
+      message: AppMessage;
+      lease?: { owner: string; ttlMs: number };
+    },
+  ): Promise<RunRecord>;
   // ↑ Same one-active-run-per-chat rule as `createRun`: a live lease on another
   //   run of this chat → `ChatBusyError`; an EXPIRED lease is superseded (the
   //   new message moves the conversation on — the same rule as a new message
