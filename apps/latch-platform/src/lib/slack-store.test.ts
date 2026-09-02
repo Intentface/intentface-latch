@@ -62,44 +62,6 @@ describe("slack store: app bindings", () => {
   });
 });
 
-describe("slack store: identities", () => {
-  it("records the linking user's org so the channel can match it", async () => {
-    await store.linkIdentity({ teamId: "T1", slackUserId: "U1", userId: "u1", orgId: "org1" });
-    expect(await store.resolveIdentity("T1", "U1")).toEqual({ userId: "u1", orgId: "org1" });
-    expect(await store.resolveIdentity("T1", "U2")).toBeNull();
-  });
-});
-
-describe("slack store: claimOnce", () => {
-  it("claims a key exactly once within its TTL", async () => {
-    expect(await store.claimOnce("A1:evt:E1", 60_000)).toBe(true);
-    expect(await store.claimOnce("A1:evt:E1", 60_000)).toBe(false);
-  });
-
-  it("keeps key kinds and apps from colliding", async () => {
-    expect(await store.claimOnce("A1:evt:X", 60_000)).toBe(true);
-    expect(await store.claimOnce("A1:act:X", 60_000)).toBe(true);
-    expect(await store.claimOnce("A2:evt:X", 60_000)).toBe(true);
-  });
-
-  it("reclaims an expired key (TTL pruning)", async () => {
-    expect(await store.claimOnce("A1:evt:E2", -1)).toBe(true); // already expired
-    expect(await store.claimOnce("A1:evt:E2", 60_000)).toBe(true);
-  });
-});
-
-describe("slack store: turn lease", () => {
-  it("grants one lease per chat and fences the release on the token", async () => {
-    const t1 = await store.claimTurn("slack2_A1_C1_1.0");
-    expect(t1).not.toBeNull();
-    expect(await store.claimTurn("slack2_A1_C1_1.0")).toBeNull();
-    await store.releaseTurn("slack2_A1_C1_1.0", "wrong-token");
-    expect(await store.claimTurn("slack2_A1_C1_1.0")).toBeNull(); // still held
-    await store.releaseTurn("slack2_A1_C1_1.0", t1!);
-    expect(await store.claimTurn("slack2_A1_C1_1.0")).not.toBeNull();
-  });
-});
-
 describe("slack store: thread ownership", () => {
   it("first writer wins; later claims return the owning row", async () => {
     const first = await store.claimThread({
@@ -131,30 +93,6 @@ describe("slack store: thread ownership", () => {
   });
 });
 
-describe("slack store: pending replays (app-keyed)", () => {
-  const pending = (appId: string) => ({
-    appId,
-    teamId: "T1",
-    slackUserId: "U1",
-    channel: "C1",
-    threadRoot: "1.0",
-    prompt: `held for ${appId}`,
-  });
-
-  it("holds one pending message PER APP for the same Slack user", async () => {
-    await store.setPending(pending("A1"));
-    await store.setPending(pending("A2"));
-    expect((await store.takePending("A1", "T1", "U1"))?.prompt).toBe("held for A1");
-    expect((await store.takePending("A2", "T1", "U1"))?.prompt).toBe("held for A2");
-  });
-
-  it("replays once", async () => {
-    await store.setPending(pending("A1"));
-    expect(await store.takePending("A1", "T1", "U1")).not.toBeNull();
-    expect(await store.takePending("A1", "T1", "U1")).toBeNull();
-  });
-});
-
 describe("slack store: lifecycle & health", () => {
   it("disables and revives a binding", async () => {
     await store.bind({ ...app, teamId: "T1" });
@@ -177,15 +115,7 @@ describe("slack store: lifecycle & health", () => {
     expect((await store.resolve("A1"))!.unattendedChannels).toEqual(["C9"]);
   });
 
-  it("reverse-resolves a Latch user's Slack identity in a workspace", async () => {
-    await store.linkIdentity({ teamId: "T1", slackUserId: "U7", userId: "u7", orgId: "org1" });
-    expect(await store.slackUserFor("T1", "u7")).toBe("U7");
-    expect(await store.slackUserFor("T2", "u7")).toBeNull();
-  });
-
-  it("migrate + prune run twice without error", async () => {
+  it("migrate runs twice without error", async () => {
     await migrateSlack(client);
-    await store.pruneExpired();
-    await store.pruneExpired();
   });
 });

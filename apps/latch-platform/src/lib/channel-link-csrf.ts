@@ -2,8 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { secretEnv } from "./env";
 
 /**
- * CSRF token for the channel-link confirmation form
- * (`/telegram/link`, `/slack/link`, `/whatsapp/link`).
+ * CSRF token for the channel-link confirmation form (`/link/<kind>`).
  *
  * Why this exists even though the confirmation page already fixed the bug:
  * moving the write from GET to POST stops a link being *followed* into a

@@ -1,5 +1,5 @@
 /**
- * Confirmation page for channel account-linking (`/telegram/link` & friends).
+ * Confirmation page for channel account-linking (`/link/<kind>`).
  *
  * Linking is a confused-deputy hazard: the signed URL identifies the CHANNEL
  * user (who received it in a DM), but the account it links to comes from the

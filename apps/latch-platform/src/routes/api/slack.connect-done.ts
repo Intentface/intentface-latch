@@ -63,7 +63,7 @@ async function handleConnectDone(request: Request): Promise<Response> {
   const session = await getPrincipalFromHeaders(request.headers);
   if (!session?.userId) return page("Not signed in", "Sign in to Latch, then use the card in Slack again.", 401);
 
-  const { slackStore } = await getLatch();
+  const { slackStore, channelStore } = await getLatch();
   const app = await slackStore.resolve(appId);
   if (!app) return page("Unknown app", "This Slack app is no longer bound.", 404);
   // `app` and `chatId` arrive as independent query params — bind them to each
@@ -95,7 +95,8 @@ async function handleConnectDone(request: Request): Promise<Response> {
     if (!thread || thread.appId !== appId) {
       return page("Unknown conversation", "This conversation no longer exists.", 404);
     }
-    const initiator = await slackStore.resolveIdentity(
+    const initiator = await channelStore.resolveIdentity(
+      "slack",
       app.teamId ?? "",
       thread.initiatorSlackUserId,
     );

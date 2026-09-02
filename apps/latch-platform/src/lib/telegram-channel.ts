@@ -2,8 +2,8 @@ import { waitUntil } from "@vercel/functions";
 import { telegramChannel } from "@intentface/latch-channels/telegram";
 import { getLatch } from "./latch";
 import { isOrgMember } from "./auth";
-import { telegramVaultKeys } from "./telegram-store";
-import { buildTelegramLinkUrl } from "./telegram-link";
+import { telegramVaultKeys } from "./channel-store";
+import { buildChannelLinkUrl } from "./channel-link";
 import { baseUrl } from "./base-url";
 import { transcribeAudio } from "./transcribe";
 import type { Principal } from "./session";
@@ -19,8 +19,8 @@ import type { Principal } from "./session";
  * `{ orgId: bot.orgId, userId }`, so isolation is per (org, user).
  */
 export async function getTelegramChannelForBot(botId: string) {
-  const { runtime, telegramStore, credentials } = await getLatch();
-  const bot = await telegramStore.get(botId);
+  const { runtime, channelStore, credentials } = await getLatch();
+  const bot = await channelStore.getBot("telegram", botId);
   if (!bot || bot.status !== "active") return null;
 
   // Org-scope vault reads use the owner principal (userId stripped by scope).
@@ -48,30 +48,30 @@ export async function getTelegramChannelForBot(botId: string) {
     },
     // Holds the answers collected so far while a questionnaire is on screen.
     askState: {
-      get: (chatId) => telegramStore.getAsk(chatId),
-      begin: (chatId, session) => telegramStore.beginAsk(chatId, session),
+      get: (chatId) => channelStore.getAsk(chatId),
+      begin: (chatId, session) => channelStore.beginAsk(chatId, session),
       update: (chatId, toolCallId, rev, patch) =>
-        telegramStore.updateAsk(chatId, toolCallId, rev, patch),
-      finish: (chatId, toolCallId, rev) => telegramStore.finishAsk(chatId, toolCallId, rev),
-      clear: (chatId) => telegramStore.clearAsk(chatId),
+        channelStore.updateAsk(chatId, toolCallId, rev, patch),
+      finish: (chatId, toolCallId, rev) => channelStore.finishAsk(chatId, toolCallId, rev),
+      clear: (chatId) => channelStore.clearAsk(chatId),
     },
     // Which conversation this DM is writing to — what makes `/new` possible.
     thread: {
-      current: (key) => telegramStore.currentThread(key),
-      rotate: (key) => telegramStore.rotateThread(key),
+      current: (key) => channelStore.currentThread(key),
+      rotate: (key) => channelStore.rotateThread(key),
     },
     waitUntil: (p) => waitUntil(p),
     // Voice/audio messages reach the agent as transcribed text (ElevenLabs).
     transcribe: ({ bytes, mediaType, filename }) =>
       // fresh copy pins the buffer type to ArrayBuffer (BlobPart rejects ArrayBufferLike)
       transcribeAudio({ audio: new Blob([new Uint8Array(bytes)], { type: mediaType }), filename }),
-    seen: (key) => telegramStore.seenDelivery(key),
-    claimTurn: (chatId) => telegramStore.claimTurn(chatId),
-    releaseTurn: (chatId, token) => telegramStore.releaseTurn(chatId, token),
+    seen: (key) => channelStore.seen("telegram", key),
+    claimTurn: (chatId) => channelStore.claimTurn(chatId),
+    releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
     // Only linked platform users may drive the agent; refusals get a signed
     // link, and the triggering message is stashed for post-link replay.
     authorizeUser: async ({ telegramUserId, username }) => {
-      const identity = await telegramStore.resolveIdentity(botId, telegramUserId);
+      const identity = await channelStore.resolveIdentity("telegram", botId, telegramUserId);
       if (identity) {
         // Identity rows outlive org membership — revalidate before minting a
         // principal, or a removed member keeps channel access to org agents.
@@ -94,13 +94,16 @@ export async function getTelegramChannelForBot(botId: string) {
       return {
         allowed: false,
         message: "You need a Latch account to use this agent.",
-        linkUrl: buildTelegramLinkUrl(baseUrl(), botId, telegramUserId, username),
+        linkUrl: buildChannelLinkUrl(baseUrl(), {
+          kind: "telegram",
+          botRef: botId,
+          externalId: telegramUserId,
+          ...(username ? { meta: username } : {}),
+        }),
       };
     },
     stashPending: (input) =>
-      telegramStore.setPending({
-        botId,
-        telegramUserId: input.telegramUserId,
+      channelStore.setPending("telegram", botId, input.telegramUserId, {
         telegramChatId: input.telegramChatId,
         username: input.username,
         text: input.text,

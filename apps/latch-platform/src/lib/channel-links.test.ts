@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildTelegramLinkUrl, verifyTelegramLink } from "./telegram-link";
-import { buildWhatsappLinkUrl, verifyWhatsappLink } from "./whatsapp-link";
-import { buildLinkUrl, verifyLink } from "./slack-link";
+import { buildChannelLinkUrl, verifyChannelLink, type ChannelLinkRef } from "./channel-link";
 import { renderLinkConfirmPage } from "./channel-link-confirm";
 import {
   channelLinkCsrfToken,
@@ -13,72 +11,79 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** Pull the signed fields back out of a link URL. */
 function parts(url: string) {
   const u = new URL(url);
   return {
     path: u.pathname,
-    bot: u.searchParams.get("bot")!,
+    ref: u.searchParams.get("ref")!,
     user: u.searchParams.get("user")!,
+    meta: u.searchParams.get("meta") ?? "",
     exp: Number(u.searchParams.get("exp")),
     sig: u.searchParams.get("sig")!,
   };
 }
+const tg: ChannelLinkRef = { kind: "telegram", botRef: "b1", externalId: "5" };
+const wa: ChannelLinkRef = { kind: "whatsapp", botRef: "w1", externalId: "35840123" };
+const sl: ChannelLinkRef = { kind: "slack", botRef: "A1", externalId: "U1", meta: "T1" };
 
-/** Slack links carry (team, user) rather than (bot, user). */
-function slackParts(url: string) {
-  const u = new URL(url);
-  return {
-    path: u.pathname,
-    app: u.searchParams.get("app")!,
-    team: u.searchParams.get("team")!,
-    user: u.searchParams.get("user")!,
-    exp: Number(u.searchParams.get("exp")),
-    sig: u.searchParams.get("sig")!,
-  };
-}
-
-describe("telegram link tokens", () => {
-  it("round-trips a signed link", () => {
-    const p = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
-    expect(p.path).toBe("/telegram/link");
-    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig)).toBe(true);
+describe("channel link tokens", () => {
+  it("round-trips a signed link per kind, on the shared /link/<kind> route", () => {
+    for (const ref of [tg, wa, sl]) {
+      const p = parts(buildChannelLinkUrl("https://x.example", ref));
+      expect(p.path).toBe(`/link/${ref.kind}`);
+      expect(p.ref).toBe(ref.botRef);
+      expect(p.user).toBe(ref.externalId);
+      expect(verifyChannelLink({ ...ref, ...(p.meta ? { meta: p.meta } : {}) }, p.exp, p.sig)).toBe(true);
+    }
   });
 
-  it("rejects tampered identities", () => {
-    const p = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
-    expect(verifyTelegramLink(p.bot, "6", p.exp, p.sig)).toBe(false);
-    expect(verifyTelegramLink("b2", p.user, p.exp, p.sig)).toBe(false);
-    expect(verifyTelegramLink(p.bot, p.user, p.exp + 1, p.sig)).toBe(false);
+  it("rejects tampered identities, expiries and signatures", () => {
+    const p = parts(buildChannelLinkUrl("https://x.example", tg));
+    expect(verifyChannelLink({ ...tg, externalId: "6" }, p.exp, p.sig)).toBe(false);
+    expect(verifyChannelLink({ ...tg, botRef: "b2" }, p.exp, p.sig)).toBe(false);
+    expect(verifyChannelLink(tg, p.exp + 1, p.sig)).toBe(false);
+    expect(verifyChannelLink(tg, p.exp, "0".repeat(p.sig.length))).toBe(false);
   });
 
-  it("expires after 10 minutes", () => {
-    const p = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
+  it("expires: 10 minutes for DM links, 30 for Slack", () => {
+    const t = parts(buildChannelLinkUrl("https://x.example", tg));
+    const s = parts(buildChannelLinkUrl("https://x.example", sl));
+    expect(t.exp - Date.now()).toBeLessThanOrEqual(10 * 60_000);
+    expect(s.exp - Date.now()).toBeGreaterThan(20 * 60_000);
     vi.useFakeTimers();
-    vi.setSystemTime(p.exp + 1);
-    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig)).toBe(false);
+    vi.setSystemTime(t.exp + 1);
+    expect(verifyChannelLink(tg, t.exp, t.sig)).toBe(false);
   });
 
-  it("is not interchangeable with a WhatsApp token for the same ids", () => {
-    // Domain-separated signatures: same (bot, user) must not verify cross-channel.
-    const p = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
-    expect(verifyWhatsappLink(p.bot, p.user, p.exp, p.sig)).toBe(false);
+  it("is not interchangeable across kinds for the same ids", () => {
+    // Domain-separated signatures: all kinds share the signing key, so a token
+    // for (ref, user) on one channel must not verify on another.
+    const p = parts(buildChannelLinkUrl("https://x.example", tg));
+    expect(verifyChannelLink({ ...tg, kind: "whatsapp" }, p.exp, p.sig)).toBe(false);
+    expect(verifyChannelLink({ ...tg, kind: "slack", meta: "" }, p.exp, p.sig)).toBe(false);
   });
 
-  it("binds the display username into the signature", () => {
-    // The username exists only so the confirm page can show "@who" — but it
-    // must be HMAC-covered, or a phisher could relabel their own link with
-    // the victim's handle.
-    const url = buildTelegramLinkUrl("https://x.example", "b1", "5", "klaus");
-    const u = new URL(url);
-    expect(u.searchParams.get("un")).toBe("klaus");
+  it("binds the meta into the signature (a Telegram @username, a Slack team id)", () => {
+    // The username exists only so the confirm page can show "@who" — but it must
+    // be HMAC-covered, or a phisher could relabel their own link with the
+    // victim's handle. For Slack the team id is the identity key itself.
+    const url = buildChannelLinkUrl("https://x.example", { ...tg, meta: "klaus" });
     const p = parts(url);
-    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig, "klaus")).toBe(true);
-    // Stripping or swapping the username invalidates the link.
-    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig)).toBe(false);
-    expect(verifyTelegramLink(p.bot, p.user, p.exp, p.sig, "aleksi")).toBe(false);
-    // And a username-less link stays verifiable without one (back-compat shape).
-    const bare = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
-    expect(verifyTelegramLink(bare.bot, bare.user, bare.exp, bare.sig)).toBe(true);
+    expect(p.meta).toBe("klaus");
+    expect(verifyChannelLink({ ...tg, meta: "klaus" }, p.exp, p.sig)).toBe(true);
+    expect(verifyChannelLink(tg, p.exp, p.sig)).toBe(false);
+    expect(verifyChannelLink({ ...tg, meta: "aleksi" }, p.exp, p.sig)).toBe(false);
+    const s = parts(buildChannelLinkUrl("https://x.example", sl));
+    expect(verifyChannelLink({ ...sl, meta: "T2" }, s.exp, s.sig)).toBe(false);
+    expect(verifyChannelLink({ ...sl, botRef: "A2" }, s.exp, s.sig)).toBe(false);
+  });
+
+  it("cannot be forged by shifting field boundaries with a colon", () => {
+    const exp = Date.now() + 60_000;
+    const a = parts(buildChannelLinkUrl("https://x.example", { ...tg, botRef: "b", externalId: "1:x" }));
+    expect(verifyChannelLink({ ...tg, botRef: "b:1", externalId: "x" }, a.exp, a.sig)).toBe(false);
+    void exp;
   });
 });
 
@@ -86,71 +91,20 @@ describe("link token signing secret", () => {
   it("fails closed in production when BETTER_AUTH_SECRET is unset", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("BETTER_AUTH_SECRET", "");
-    expect(() => buildTelegramLinkUrl("https://x.example", "b1", "5")).toThrow(
-      /BETTER_AUTH_SECRET/,
-    );
-    expect(() => buildWhatsappLinkUrl("https://x.example", "w1", "35840123")).toThrow(
-      /BETTER_AUTH_SECRET/,
-    );
-    // Slack must not fall back to a committed default: with a known secret,
-    // anyone could forge a link for an arbitrary Slack identity.
-    expect(() => buildLinkUrl("https://x.example", "A1", "T1", "U1")).toThrow(/BETTER_AUTH_SECRET/);
+    // Never fall back to a committed default: with a known secret, anyone could
+    // forge a link for an arbitrary platform identity.
+    for (const ref of [tg, wa, sl]) {
+      expect(() => buildChannelLinkUrl("https://x.example", ref)).toThrow(/BETTER_AUTH_SECRET/);
+    }
   });
 
   it("refuses (not throws) verification of inbound links without the secret", () => {
-    // The link routes call verify directly — a misconfigured production must
+    // The link route calls verify directly — a misconfigured production must
     // refuse the link (302 to link_error), never 500.
-    const t = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
-    const w = parts(buildWhatsappLinkUrl("https://x.example", "w1", "35840123"));
-    const s = slackParts(buildLinkUrl("https://x.example", "A1", "T1", "U1"));
+    const p = parts(buildChannelLinkUrl("https://x.example", tg));
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("BETTER_AUTH_SECRET", "");
-    expect(verifyTelegramLink(t.bot, t.user, t.exp, t.sig)).toBe(false);
-    expect(verifyWhatsappLink(w.bot, w.user, w.exp, w.sig)).toBe(false);
-    expect(verifyLink(s.app, s.team, s.user, s.exp, s.sig)).toBe(false);
-  });
-});
-
-describe("slack link tokens", () => {
-  it("round-trips a signed link", () => {
-    const p = slackParts(buildLinkUrl("https://x.example", "A1", "T1", "U1"));
-    expect(p.path).toBe("/slack/link");
-    expect(verifyLink(p.app, p.team, p.user, p.exp, p.sig)).toBe(true);
-  });
-
-  it("rejects tampered identities and expiries", () => {
-    const p = slackParts(buildLinkUrl("https://x.example", "A1", "T1", "U1"));
-    expect(verifyLink(p.app, p.team, "U2", p.exp, p.sig)).toBe(false);
-    expect(verifyLink(p.app, "T2", p.user, p.exp, p.sig)).toBe(false);
-    expect(verifyLink(p.app, p.team, p.user, p.exp + 1, p.sig)).toBe(false);
-  });
-
-  it("expires", () => {
-    const p = slackParts(buildLinkUrl("https://x.example", "A1", "T1", "U1"));
-    vi.useFakeTimers();
-    vi.setSystemTime(p.exp + 1);
-    expect(verifyLink(p.app, p.team, p.user, p.exp, p.sig)).toBe(false);
-  });
-
-  it("binds the app id, since team_id is not unique across orgs", () => {
-    // `latch_slack_app` is keyed on app_id and two orgs can each bind an app in
-    // the same workspace. Without the app in the payload the link route cannot
-    // tell which org owns the binding, so any logged-in user could claim the
-    // identity into their own tenant.
-    const p = slackParts(buildLinkUrl("https://x.example", "A1", "T1", "U1"));
-    expect(p.app).toBe("A1");
-    expect(verifyLink("A2", p.team, p.user, p.exp, p.sig)).toBe(false);
-    expect(verifyLink("", p.team, p.user, p.exp, p.sig)).toBe(false);
-  });
-
-  it("is not interchangeable with the other channels' tokens for the same ids", () => {
-    // Domain-separated signatures: all three share the signing key, so a token
-    // for (id, id) on one channel must not verify on another.
-    const s = slackParts(buildLinkUrl("https://x.example", "A1", "b1", "5"));
-    expect(verifyTelegramLink("b1", "5", s.exp, s.sig)).toBe(false);
-    expect(verifyWhatsappLink("b1", "5", s.exp, s.sig)).toBe(false);
-    const t = parts(buildTelegramLinkUrl("https://x.example", "b1", "5"));
-    expect(verifyLink("A1", "b1", "5", t.exp, t.sig)).toBe(false);
+    expect(verifyChannelLink(tg, p.exp, p.sig)).toBe(false);
   });
 });
 
@@ -226,19 +180,6 @@ describe("link confirmation page", () => {
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).not.toContain(`"><img src=x>`);
-  });
-});
-
-describe("whatsapp link tokens", () => {
-  it("round-trips a signed link", () => {
-    const p = parts(buildWhatsappLinkUrl("https://x.example", "w1", "35840123"));
-    expect(p.path).toBe("/whatsapp/link");
-    expect(verifyWhatsappLink(p.bot, p.user, p.exp, p.sig)).toBe(true);
-  });
-
-  it("rejects a wrong signature", () => {
-    const p = parts(buildWhatsappLinkUrl("https://x.example", "w1", "35840123"));
-    expect(verifyWhatsappLink(p.bot, p.user, p.exp, "0".repeat(p.sig.length))).toBe(false);
   });
 });
 

@@ -12,6 +12,7 @@ import { createClient } from "@libsql/client";
 import { migrate } from "@intentface/latch-drizzle";
 import { getMigrations } from "better-auth/db/migration";
 import { migrateSlack } from "../lib/slack-store";
+import { migrateChannels } from "../lib/channel-store";
 import { auth } from "../lib/auth";
 
 async function main() {
@@ -21,8 +22,11 @@ async function main() {
 
   // Latch tables (chats / messages / runs / usage / secrets / schedules / agents)…
   await migrate(client);
-  // …Slack channel (app bindings + event dedupe)…
+  // …Slack-only state (app bindings, thread ownership)…
   await migrateSlack(client);
+  // …the shared channel tables, carrying the legacy per-channel tables over
+  // (copy, then drop). Point DATABASE_URL at a COPY first to rehearse it.
+  await migrateChannels(client);
   console.log("[migrate] latch tables ✓");
 
   // …and better-auth tables (user / session / account / organization / member).

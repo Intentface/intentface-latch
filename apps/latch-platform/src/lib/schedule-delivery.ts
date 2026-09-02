@@ -99,21 +99,21 @@ export async function listAgentChannels(
   principal: Principal,
   agentRef: string,
 ): Promise<AgentChannel[]> {
-  const { telegramStore, slackStore, credentials } = await getLatch();
+  const { channelStore, slackStore, credentials } = await getLatch();
   const out: AgentChannel[] = [];
   // Bindings store the bare agent name; a caller may hand us a scope-pinned ref
   // (that's what `latch_runs.agent` holds).
   const agent = parseAgentRef(agentRef).name;
 
-  for (const bot of await telegramStore.botsForAgent(principal.orgId, agent)) {
+  for (const bot of await channelStore.botsForAgent("telegram", principal.orgId, agent)) {
     if (bot.agentScope === "user" && bot.userId !== principal.userId) continue;
     if (!principal.userId) continue;
-    const identity = await telegramStore.identityForUser(bot.id, principal.userId);
+    const identity = await channelStore.identityForUser("telegram", bot.id, principal.userId);
     if (!identity) continue;
     out.push({
       kind: "telegram",
       ref: bot.id,
-      label: bot.botUsername ? `@${bot.botUsername}` : (bot.displayName ?? bot.handle),
+      label: bot.externalHandle ? `@${bot.externalHandle}` : (bot.displayName ?? bot.handle),
     });
   }
 
@@ -206,7 +206,7 @@ export async function resolveDelivery(
   agentRef: string,
   delivery: ScheduleDelivery,
 ): Promise<TelegramTarget | SlackTarget> {
-  const { telegramStore, slackStore } = await getLatch();
+  const { channelStore, slackStore } = await getLatch();
   if (!principal.userId) {
     throw new DeliveryError("Channel delivery needs a user-scoped principal.");
   }
@@ -214,7 +214,7 @@ export async function resolveDelivery(
   const agent = parseAgentRef(agentRef).name;
 
   if (delivery.kind === "telegram") {
-    const bot = await telegramStore.get(delivery.botId);
+    const bot = await channelStore.getBot("telegram", delivery.botId);
     if (!bot || bot.status !== "active") throw new DeliveryError("That bot isn't active.");
     if (bot.orgId !== principal.orgId) throw new DeliveryError("That bot isn't in your org.");
     // A bot serves exactly one agent, and `latch_chats` rows carry an agent —
@@ -226,7 +226,7 @@ export async function resolveDelivery(
     if (bot.agentScope === "user" && bot.userId !== principal.userId) {
       throw new DeliveryError("That bot serves a personal agent — only its owner can use it.");
     }
-    const identity = await telegramStore.identityForUser(bot.id, principal.userId);
+    const identity = await channelStore.identityForUser("telegram", bot.id, principal.userId);
     if (!identity) throw new DeliveryError("You haven't linked your Telegram account to that bot.");
     // Identity rows outlive org membership — revalidate, or a removed member
     // keeps receiving the org's agent output.
@@ -235,7 +235,7 @@ export async function resolveDelivery(
     }
     // The DM is derived from the identity row, never from the schedule — a
     // stored chat id would be a confused-deputy waiting to happen.
-    return { kind: "telegram", botId: bot.id, telegramUserId: identity.telegramUserId };
+    return { kind: "telegram", botId: bot.id, telegramUserId: identity.externalId };
   }
 
   const app = await slackStore.resolve(delivery.appId);
@@ -338,7 +338,7 @@ async function runTelegramDelivery(
   principal: Principal,
   target: TelegramTarget,
 ): Promise<boolean> {
-  const { telegramStore } = await getLatch();
+  const { channelStore } = await getLatch();
   const resolved = await getTelegramChannelForBot(target.botId);
   if (!resolved) return false;
 
@@ -347,13 +347,13 @@ async function runTelegramDelivery(
   // restating it here. A store failure propagates instead of falling back to
   // epoch 0 — that would write into the conversation the user just left behind.
   const base = telegramChatId(target.botId, target.telegramUserId);
-  const epoch = await telegramStore.currentThread(base);
+  const epoch = await channelStore.currentThread(base);
   const chatId = telegramChatId(target.botId, target.telegramUserId, epoch);
 
   // One turn per chat. A held lease means the person is mid-conversation right
   // now; skip this occurrence rather than interleaving two runs on one history
   // (`runDue` advances `nextRunAt` regardless, so the schedule stays healthy).
-  const token = await telegramStore.claimTurn(chatId);
+  const token = await channelStore.claimTurn(chatId);
   if (!token) {
     console.warn(`[schedule] ${schedule.id}: telegram DM busy — skipping this fire`);
     return true;
@@ -369,7 +369,7 @@ async function runTelegramDelivery(
     });
     return true;
   } finally {
-    await telegramStore.releaseTurn(chatId, token).catch(() => {});
+    await channelStore.releaseTurn(chatId, token).catch(() => {});
   }
 }
 
@@ -385,7 +385,7 @@ async function runSlackDelivery(
   principal: Principal,
   target: SlackTarget,
 ): Promise<boolean> {
-  const { credentials, slackStore } = await getLatch();
+  const { credentials, channelStore } = await getLatch();
   const resolved = await getSlackChannelForApp(target.appId);
   if (!resolved) return false;
   if (resolved.app.status === "disabled") {
@@ -416,7 +416,7 @@ async function runSlackDelivery(
   // interactive follow-ups start working the moment they link.
   const ownerSlackId =
     (resolved.app.teamId
-      ? await slackStore.slackUserFor(resolved.app.teamId, target.ownerUserId)
+      ? (await channelStore.identityForUser("slack", resolved.app.teamId, target.ownerUserId))?.externalId
       : null) ?? target.ownerUserId;
 
   try {

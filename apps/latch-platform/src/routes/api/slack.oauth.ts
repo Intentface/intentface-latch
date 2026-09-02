@@ -34,10 +34,10 @@ async function handleOauth(request: Request): Promise<Response> {
   const session = await getPrincipalFromHeaders(request.headers);
   if (!session?.userId || session.userId !== state.userId) return back("error");
 
-  const { slackStore, credentials } = await getLatch();
+  const { slackStore, channelStore, credentials } = await getLatch();
   // Single-use: consume the state before honoring it, so a completed install
   // URL can't be replayed within its 30-minute window.
-  if (!(await slackStore.claimOnce(`oauthstate:${state.sig}`, 30 * 60_000))) {
+  if (!(await channelStore.claimOnce(`slack:oauthstate:${state.sig}`, 30 * 60_000))) {
     return back("error");
   }
   const app = await slackStore.resolve(appId);
@@ -70,13 +70,13 @@ async function handleOauth(request: Request): Promise<Response> {
         botUserId: res.botUserId,
       });
       // Auto-link the installer (the owner) so they can use the bot right away.
+      // Last-wins here: the installer proved both sides (Slack's authed user +
+      // the platform session that started the install).
       if (res.authedUserId && app.userId) {
-        await slackStore.linkIdentity({
-          teamId: res.teamId,
-          slackUserId: res.authedUserId,
-          userId: app.userId,
-          orgId: app.orgId,
-        });
+        await channelStore.linkIdentity(
+          { kind: "slack", botRef: res.teamId, externalId: res.authedUserId, userId: app.userId, orgId: app.orgId },
+          { onConflict: "replace" },
+        );
       }
       // A reinstall revives a binding disabled by uninstall/revocation.
       if (app.status === "disabled") await slackStore.setStatus(appId, "active");
