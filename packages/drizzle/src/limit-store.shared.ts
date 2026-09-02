@@ -36,13 +36,17 @@ export function makeLimitStore(db: any, s: LimitSchema): LimitStore {
       return out;
     },
 
-    async add(entries: (LimitWindowRef & { usage: Partial<LimitUsage> })[]): Promise<void> {
+    async add(entries: (LimitWindowRef & { usage: Partial<LimitUsage> })[]): Promise<Record<string, LimitUsage>> {
       const now = Date.now();
+      const out: Record<string, LimitUsage> = {};
       for (const e of entries) {
         const turns = e.usage.turns ?? 0;
         const tokens = e.usage.tokens ?? 0;
         const cost = e.usage.cost ?? 0;
-        await db
+        // One statement: upsert + RETURNING the post-increment row, so a
+        // reservation reads its own count and concurrent reservers get
+        // distinct, ordered counts.
+        const rows: any[] = await db
           .insert(t)
           .values({ key: e.key, windowStart: e.windowStart, windowMs: e.windowMs, turns, tokens, cost, updatedAt: now })
           .onConflictDoUpdate({
@@ -53,8 +57,16 @@ export function makeLimitStore(db: any, s: LimitSchema): LimitStore {
               cost: sql`${t.cost} + ${cost}`,
               updatedAt: now,
             },
-          });
+          })
+          .returning();
+        const r = rows[0];
+        out[usageKey(e)] = {
+          turns: Number(r?.turns ?? turns),
+          tokens: Number(r?.tokens ?? tokens),
+          cost: Number(r?.cost ?? cost),
+        };
       }
+      return out;
     },
 
     async prune(before: number): Promise<void> {

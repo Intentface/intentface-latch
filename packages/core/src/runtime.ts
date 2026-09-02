@@ -1995,9 +1995,12 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /**
-   * The admission gate. Reads every policy's current window; the first exhausted
-   * one refuses the turn (`LimitExceededError`) and counts the turn itself —
-   * that is a FRESH turn (chat, schedule, subagent spawn, runAgent).
+   * The admission gate. A FRESH turn (chat, schedule, subagent spawn, runAgent)
+   * is RESERVED: one atomic increment of every policy's turn counter, which
+   * returns the new counts; the first policy now over its cap refuses the turn
+   * (`LimitExceededError`) and the reservation is released. Increment-then-
+   * check is what makes a one-turn cap admit exactly one of N concurrent
+   * requests — a read-then-write check would let them all through.
    *
    * A CONTINUATION is the second half of an already-admitted turn: a crash
    * resume, an approval or tool-result decision, a subagent's decided gate. It
@@ -2019,10 +2022,21 @@ export function createRuntime<P, RC = unknown>(
     if (policies.length === 0) return undefined;
     const now = Date.now();
     const refs = policies.map((p) => windowRef(p, now));
-    const usage = await limits.store.read(refs);
+    // Reserve (fresh turn) or just look (continuation). Either way `usage` is
+    // the state this turn is judged against, reservation included.
+    const usage = opts.countTurn
+      ? await limits.store.add(refs.map((ref) => ({ ...ref, usage: { turns: 1 } })))
+      : await limits.store.read(refs);
     if (opts.refuse) {
-      const over = exceededPolicy(policies, usage, now, { nextTurn: opts.countTurn });
+      const over = exceededPolicy(policies, usage, now, { nextTurn: false });
       if (over) {
+        // Release the reservation: the window should count admitted turns, not
+        // refused attempts. Best-effort — a failed release only over-counts.
+        if (opts.countTurn) {
+          await limits.store
+            .add(refs.map((ref) => ({ ...ref, usage: { turns: -1 } })))
+            .catch((e) => console.error("[limits] reservation release failed:", e));
+        }
         // A host hook must never turn a refusal into a 500: isolate sync throws too.
         try {
           await limits.onRefused?.({ principal, agent, trigger, ...over });
@@ -2031,9 +2045,6 @@ export function createRuntime<P, RC = unknown>(
         }
         throw new LimitExceededError(over.policy, over.usage, over.retryAfterMs);
       }
-    }
-    if (opts.countTurn) {
-      await limits.store.add(refs.map((ref) => ({ ...ref, usage: { turns: 1 } })));
     }
     return { policies, remainingTokens: remainingTokens(policies, usage, now) };
   }

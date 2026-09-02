@@ -9,11 +9,17 @@ import type { TurnTrigger } from "./telemetry.js";
  * (`LimitStore`, a table the drizzle package implements). The RUNTIME counts
  * and enforces:
  *
- *   • admission — before a turn opens, every policy is read for its current
- *     window; the first exhausted one refuses the turn with
- *     {@link LimitExceededError} (the HTTP handler maps it to 429 + Retry-After).
- *     The turn itself is counted at admission, so concurrent turns can't all
- *     squeeze through a nearly-full window.
+ *   • admission — before a turn opens, the turn is RESERVED: one atomic
+ *     increment of every policy's turn counter that returns the new count. The
+ *     first policy whose count is now over its cap refuses the turn with
+ *     {@link LimitExceededError} (the HTTP handler maps it to 429 +
+ *     Retry-After) and the reservation is released. Increment-then-check means
+ *     N concurrent requests against a one-turn cap get counts 1..N and exactly
+ *     one is admitted — there is no read-then-write window to race through.
+ *     Token and cost caps are checked against usage already settled; an
+ *     in-flight turn's spend lands at settlement, so those caps can be
+ *     overshot by at most the concurrent in-flight turns (bounded further by
+ *     the mid-turn stop).
  *   • mid-turn — the tool loop stops once this turn's tokens reach the
  *     tightest remaining token budget (the model's last text is kept; no
  *     further steps run). Without this a single long agentic turn could blow
@@ -66,8 +72,14 @@ export interface LimitWindowRef {
 export interface LimitStore {
   /** Current usage for each window ref; absent rows read as zero. */
   read(refs: LimitWindowRef[]): Promise<Record<string, LimitUsage>>;
-  /** Add usage to each window (creating the row). Partial usage: omitted fields add 0. */
-  add(entries: (LimitWindowRef & { usage: Partial<LimitUsage> })[]): Promise<void>;
+  /**
+   * Add usage to each window (creating the row) and return each window's usage
+   * AFTER the add, keyed by `usageKey`. Atomic per row and the returned value
+   * must be the row's post-increment state (`INSERT … ON CONFLICT DO UPDATE …
+   * RETURNING`): admission reserves a turn with it. Partial usage: omitted
+   * fields add 0; negative values release a reservation.
+   */
+  add(entries: (LimitWindowRef & { usage: Partial<LimitUsage> })[]): Promise<Record<string, LimitUsage>>;
   /** Drop windows that ended before `before` (retention; called by `runtime.cron()`). */
   prune?(before: number): Promise<void>;
 }
@@ -144,9 +156,10 @@ export function isLimitExceededError(e: unknown): e is LimitExceededError {
 }
 
 /**
- * Admission decision. `nextTurn` = the turn being admitted counts as one more
- * (`false` for a resume, which was admitted when it first ran). Returns the
- * first exhausted policy, or null when every budget has room.
+ * Admission decision over usage that ALREADY includes this turn's reservation
+ * (`nextTurn: false`), or over settled usage when the turn is to be counted on
+ * top (`nextTurn: true`). Returns the first exhausted policy, or null when every
+ * budget has room.
  */
 export function exceededPolicy(
   policies: LimitPolicy[],

@@ -13,7 +13,11 @@ export async function limitStoreSmoke(args: {
   const other = { key: "org:org_a", windowStart: 0, windowMs: 24 * 3_600_000 };
 
   assert(Object.keys(await limits.read([ref])).length === 0, "limits: absent row reads as nothing");
-  await limits.add([{ ...ref, usage: { turns: 1 } }]);
+  const first = await limits.add([{ ...ref, usage: { turns: 1 } }]);
+  assert(first[usageKey(ref)]?.turns === 1, "limits: add returns the post-increment row (fresh)");
+  const again = await limits.add([{ ...ref, usage: { turns: 1 } }]);
+  assert(again[usageKey(ref)]?.turns === 2, "limits: add returns the post-increment row (existing)");
+  await limits.add([{ ...ref, usage: { turns: -1 } }]); // a refused reservation released
   await limits.add([{ ...ref, usage: { tokens: 120, cost: 0.5 } }, { ...other, usage: { turns: 1, tokens: 120, cost: 0.5 } }]);
   await limits.add([{ ...ref, usage: { tokens: 30, cost: 0.25 } }]);
   const usage = await limits.read([ref, other]);

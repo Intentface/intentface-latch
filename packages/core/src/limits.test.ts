@@ -122,15 +122,22 @@ function memoryLimitStore(): LimitStore & { rows: Map<string, LimitUsage>; adds:
     },
     async add(entries: (LimitWindowRef & { usage: Partial<LimitUsage> })[]) {
       store.adds++;
+      // Yield first, like a real round trip — so concurrent admissions interleave
+      // and only the atomic increment-and-return keeps them apart.
+      await new Promise((r) => setTimeout(r, 1));
+      const out: Record<string, LimitUsage> = {};
       for (const e of entries) {
         const k = usageKey(e);
         const u = rows.get(k) ?? { turns: 0, tokens: 0, cost: 0 };
-        rows.set(k, {
+        const next = {
           turns: u.turns + (e.usage.turns ?? 0),
           tokens: u.tokens + (e.usage.tokens ?? 0),
           cost: u.cost + (e.usage.cost ?? 0),
-        });
+        };
+        rows.set(k, next);
+        out[k] = next;
       }
+      return out;
     },
   };
   return store;
@@ -221,6 +228,21 @@ describe("limits — in the runtime", () => {
     await settled();
     await expect(rt.runAgent({ principal, agent: "echo", prompt: "three" })).rejects.toThrow(/Limit reached/);
     expect([...store.rows.values()][0]!.turns).toBe(2);
+  });
+
+  it("admits exactly one of N concurrent turns against a one-turn cap, and the losers release their reservation", async () => {
+    const policy: LimitPolicy = { key: "user:u1", windowMs: MINUTE_MS, max: { turns: 1 } };
+    const { rt, store } = build([policy]);
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, (_, i) => rt.runAgent({ principal, agent: "echo", prompt: `p${i}` })),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const r of results.filter((r) => r.status === "rejected")) {
+      expect(isLimitExceededError((r as PromiseRejectedResult).reason)).toBe(true);
+    }
+    await settled();
+    // The window counts admitted turns only: the four refused reservations were released.
+    expect(store.rows.get(usageKey(windowRef(policy, Date.now())))!.turns).toBe(1);
   });
 
   it("with no matching policies nothing is counted", async () => {
