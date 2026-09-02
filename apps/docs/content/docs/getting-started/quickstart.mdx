@@ -12,7 +12,7 @@ pnpm add @intentface/latch-core @intentface/latch-drizzle @intentface/latch-serv
 export ANTHROPIC_API_KEY=sk-ant-…
 ```
 
-The packages publish to GitHub Packages; [Install](/docs/install) has the two-line registry config.
+The packages publish to GitHub Packages; [Install](/docs/getting-started/install) has the two-line registry config.
 
 ## 2. One file
 
@@ -95,7 +95,7 @@ curl -X POST http://localhost:8787/agents/assistant/chat-1/approvals \
   -d '{"decisions":[{"approvalId":"<the id>","approved":true}]}'
 ```
 
-The tool executes and the turn continues as a stream. Nothing was held open in between: stop the server after the first request, start it again, and the decision still works, because the pending approval is part of the conversation. [Guide: an agent that asks before acting](/docs/guides/approvals) covers denial, subagents, OAuth connects and the client side.
+The tool executes and the turn continues as a stream. Nothing was held open in between: stop the server after the first request, start it again, and the decision still works, because the pending approval is part of the conversation. [Guide: an agent that asks before acting](/docs/cookbook/approvals) covers denial, subagents, OAuth connects and the client side.
 
 ## 4. Kill it mid-answer
 
@@ -113,7 +113,7 @@ Persisted conversations, priced runs, approvals as a run state, durability, and 
 
 ## Next
 
-- [Guide: an agent that asks before acting](/docs/guides/approvals)
-- [Guide: a scheduled brief delivered to a channel](/docs/guides/scheduled-brief)
-- [Principals](/docs/principals) — turn `x-org` into your real tenancy model
-- [Packages](/docs/packages) — what to add next, and when
+- [Guide: an agent that asks before acting](/docs/cookbook/approvals)
+- [Guide: a scheduled brief delivered to a channel](/docs/cookbook/scheduled-brief)
+- [Principals](/docs/foundations/principals) — turn `x-org` into your real tenancy model
+- [Packages](/docs/reference/packages) — what to add next, and when

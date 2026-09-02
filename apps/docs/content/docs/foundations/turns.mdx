@@ -33,7 +33,7 @@ If the value your owner key derives from can change mid-session — an "active o
 
 ## Context — the world the agent runs in
 
-`defineContext` declares the shape once and builds it per turn. Every tool receives it — plus `principal`, the current `run`, and the `writer` — as `options.context`, so anything a tool needs per tenant (endpoint, plan tier, feature flags) goes in here, and a secret is resolved by the tool from the principal (see [how a principal reaches a tool](/docs/principals#how-a-principal-reaches-a-tool)).
+`defineContext` declares the shape once and builds it per turn. Every tool receives it — plus `principal`, the current `run`, and the `writer` — as `options.context`, so anything a tool needs per tenant (endpoint, plan tier, feature flags) goes in here, and a secret is resolved by the tool from the principal (see [how a principal reaches a tool](/docs/foundations/principals#how-a-principal-reaches-a-tool)).
 
 ```ts
 import { defineContext } from "@intentface/latch-core";

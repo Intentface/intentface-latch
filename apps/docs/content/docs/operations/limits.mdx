@@ -1,0 +1,42 @@
+---
+title: Limits
+description: Budgets on turns, tokens and cost — per team, member, agent or plan; refused at the cap, stopped mid-turn, settled on finish.
+---
+
+Limits put a ceiling on what a tenant, a user or an agent may spend. They exist so an agent can sit in front of paying customers without an open-ended bill, and so one runaway agentic turn cannot consume a day's budget after being admitted at ninety-nine percent.
+
+**What it makes possible.** Per-plan quotas, per-team budgets, a per-agent cap on a scheduled digest, a fair per-minute rate limit per member, and a runaway turn stopped at its remaining tokens.
+
+## How it works
+
+The host names the counters a turn counts against and their caps; the runtime counts and enforces. Keys are plain strings derived from **your** principal — Latch has no notion of an org, team or plan; whatever your principal carries is what you key on. Three enforcement points: **admission** (before a turn opens it is *reserved*: one atomic increment of each turn counter that returns the new count, so N concurrent requests against a one-turn cap get counts 1…N and exactly one is admitted; the first budget now over its cap refuses with `LimitExceededError`, mapped by the HTTP handler to `429` + `Retry-After`, and the reservation is released), **mid-turn** (the tool loop stops once this turn's tokens reach the tightest remaining token budget), and **settlement** (tokens and cost are added when the turn finishes — resumes and subagent turns included).
+
+```ts
+import { DAY_MS, MINUTE_MS } from "@intentface/latch-core";
+import { createSqliteLimitStore } from "@intentface/latch-drizzle";
+
+createRuntime({
+  // …
+  limits: {
+    store: createSqliteLimitStore(db), // latch_limit_counters: one row per (key, window)
+    // Your principal, your keys: a team, a workspace, an API key, a plan tier…
+    limitsFor: ({ principal, agent }) => [
+      { key: `team:${principal.teamId}`, windowMs: DAY_MS, max: { tokens: 5_000_000 }, label: "your team's daily budget" },
+      // Only when a human is behind the turn — a shared/system principal has no member.
+      ...(principal.memberId ? [{ key: `member:${principal.memberId}`, windowMs: MINUTE_MS, max: { turns: 10 } }] : []),
+      { key: `agent:${principal.teamId}:${agent}`, windowMs: DAY_MS, max: { cost: 20 } },
+    ],
+  },
+});
+```
+
+Windows are fixed and epoch-aligned (what "per day" means to people, and one row per key per window). `limitsFor` runs per turn, so it may read a policy table — keep it cheap. `runtime.cron()` prunes counters whose window ended more than a day ago.
+
+<Callout title="Where the policy lives">
+Latch has no opinion on tenants, plans or tiers: `limitsFor` is where a host turns "the Pro plan gets 2M tokens a day" into policies, and a single-tenant app can key everything on one constant. The platform's own default reads five `LATCH_LIMIT_*` env vars and keys them at three scopes: the org (`org:<orgId>` — tokens and cost per day), the acting member (`user:<orgId>:<userId>` — tokens per day, turns per minute) and the agent within the org (`agent:<orgId>:<agent>` — turns per hour, shared by everyone using that agent).
+</Callout>
+
+## Next
+
+- [Reference: errors](/docs/reference/errors) — `limit_exceeded` as the client sees it
+- [Reference: packages — latch-drizzle](/docs/reference/packages#latch-drizzle) — the counter store

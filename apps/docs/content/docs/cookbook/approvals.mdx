@@ -1,0 +1,132 @@
+---
+title: Gate a tool behind human approval
+description: Pause a run at a risky tool call, decide from any device or after a deploy, and resume — with no connection held open while waiting.
+---
+
+## Background
+
+An agent that can act needs a way to *not* act until a human agrees. In the AI SDK a tool marked `needsApproval` pauses the loop, but the pending approval lives in the process that is waiting — a websocket, a held request, a function that must not time out. Latch stores the pending approval as a part of the conversation instead. Nothing is held open; the decision can arrive tomorrow, from another device, after a deploy, and the run resumes from history.
+
+This recipe gates one tool, decides it both ways, and shows the pause surviving a restart.
+
+## Mark the tool
+
+```ts
+import { defineAgent } from "@intentface/latch-core";
+import { tool } from "ai";
+import { z } from "zod";
+
+const support = defineAgent<Principal>({
+  model,
+  instructions: "You help with refunds. Confirm the amount before refunding.",
+  tools: {
+    refund: tool({
+      description: "Refund a customer.",
+      inputSchema: z.object({ customerId: z.string(), amountCents: z.number() }),
+      execute: async (input) => payments.refund(input),
+    }),
+  },
+  toolApproval: { refund: "user-approval" },
+});
+```
+
+Ask it to refund someone. The stream ends with an assistant message whose last part is in `state: "approval-requested"`, carrying `approval.id`. The tool has **not** run; the run's status is `awaiting_input`.
+
+## Render the card and decide
+
+Your client renders that part as an approve/deny card and posts the decision:
+
+```ts
+// POST /agents/support/:chatId/approvals   — or runtime.applyApproval(...)
+{ "decisions": [{ "approvalId": "<approval.id>", "approved": true }] }
+```
+
+The response is a **continuation stream** of the same turn: it reuses the assistant message's id and streams only the new parts, so seed your reader with a clone of that message first ([The client side](/docs/hosting/client#the-continuation-protocol)). The tool executes now and the agent finishes its answer.
+
+## Deny it
+
+Send `approved: false`. The tool never runs; the model is told and says what it will do instead. A denial is an answer, not a cancel — the conversation keeps going.
+
+## Restart between the pause and the decision
+
+Stop the server after the first request. Start it again. Post the decision. It works, because the pending approval is a row, not a waiting process. This is the whole reason for the design.
+
+## Let the user walk away from it
+
+If they type a new message instead of deciding, that message *is* the decision: the gate closes as declined and the new message proceeds. Stop rendering the card as live once they send something.
+
+## Full example
+
+```ts
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { tool } from "ai";
+import { z } from "zod";
+
+interface Principal { orgId: string; userId?: string }
+
+const client = createClient({ url: "file:./latch.db" });
+await migrate(client);
+const storage = createSqliteAdapter<Principal>(drizzle(client, { schema }), {
+  owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
+});
+
+const runtime = createRuntime<Principal, { orgId: string }>({
+  storage,
+  context: defineContext({ build: ({ principal }) => ({ orgId: principal.orgId }) }),
+  agents: {
+    support: defineAgent({
+      model,
+      instructions: "You help with refunds. Confirm the amount before refunding.",
+      tools: {
+        refund: tool({
+          description: "Refund a customer.",
+          inputSchema: z.object({ customerId: z.string(), amountCents: z.number() }),
+          execute: async (input) => payments.refund(input),
+        }),
+      },
+      toolApproval: { refund: "user-approval" },
+    }),
+  },
+});
+
+// Turn 1: the model proposes `refund`; the stream ends awaiting a decision.
+const first = await runtime.handleChat({ agent: "support", chatId: "c1", principal, message: userMessage });
+// … render the approval-requested part …
+
+// Turn 2 (any time later, any process): decide. The tool runs, the turn continues.
+const continuation = await runtime.applyApproval({
+  chatId: "c1",
+  principal,
+  decisions: [{ approvalId, approved: true }],
+});
+```
+
+## Pitfalls already handled
+
+- **The card is stale** (answered in another tab, or the turn moved on) — a tapped approval is checked against fresh history and a card for a vanished approval is retired, never pushed through.
+- **Two gated calls in one step** — the first decision returns an empty `200`; the other card stays live for its own decision.
+- **Who may click** — in a shared Slack thread only the person whose turn raised the gate, because the tool runs with their credentials; buttons are signed and bound to that actor.
+- **A gate three subagents deep** — bubbles up to the human at the top as a part on the parent's message, and the decision routes back down.
+- **Nobody is there** — a scheduled run reaching a gate parks: `status: "awaiting_input"`, `trigger: "schedule"`. `runAgent` defaults to `blockGated: true`, stubbing gated tools so an unattended test has no side effects.
+- **Which tools need a gate** — MCP tools marked destructive or non-read-only arrive gated from their own annotations.
+- **OAuth connects** — a `connect_<name>` call is an approval whose resolution is a redirect, with the principal pinned when the flow starts.
+- **Two clicks on one card** — the second meets the one-active-run-per-chat rule and is told the chat is busy.
+
+## Run it
+
+```bash
+pnpm --filter @intentface/latch-example smoke:approval            # gate → await → approve runs / deny blocks
+pnpm --filter @intentface/latch-example smoke:subagent-approval   # a sub gate bubbles to the parent
+pnpm --filter @intentface/latch-example smoke:oauth               # connect_<name> through the OAuth flow
+```
+
+Mock model, no API key; sources in `apps/example/src`.
+
+## Next
+
+- [The client side](/docs/hosting/client) — the continuation protocol your UI has to follow
+- [Operations: human-in-the-loop](/docs/operations#human-in-the-loop) — `blockGated`, parked schedules, subagents
+- [Agents: control](/docs/agents#control) — `toolApproval` as a function, with reasons

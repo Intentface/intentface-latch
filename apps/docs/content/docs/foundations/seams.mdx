@@ -1,0 +1,21 @@
+---
+title: Seams
+description: Everything past storage, context and agents is an interface you may or may not supply — why Latch is built that way.
+---
+
+A seam is an optional interface on `createRuntime`. Supply it and a capability exists; omit it and it doesn't — no stubs, no errors, no "not configured" branches in your code. Connections, vault, memory, pricing, prompt caching, telemetry, limits, sandbox, harness tools and provider tools are all seams.
+
+## Why seams
+
+- **Core stays installable anywhere.** It carries no provider SDK, no sandbox backend, no OpenTelemetry, no cron library. Anything that would drag one in is a function you pass.
+- **Tiers are additive.** Tier 0 is storage, context and agents. Every step up is one more seam; nothing already written changes.
+- **The platform is a host, not the framework.** `apps/latch-platform` supplies its seams the same way a customer does. When something proved useful there — the models catalog, the harness tools, limits — it moved *down* into a package with a default, not *up* into core as a hard dependency.
+
+## Defaults where they help
+
+`createLatchApp` fills the seams every host wants: durability, a cron evaluator, the models.dev catalog (pricing, reasoning, provider web tools, prompt caching), the harness tools and the HTTP handler. Each is still overridable through `runtime` and `handler`.
+
+## Next
+
+- [Reference: seams](/docs/reference/seams) — the interfaces
+- [Runtime: configuration](/docs/runtime#configuration) — what happens when each is omitted

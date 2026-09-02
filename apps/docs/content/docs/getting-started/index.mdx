@@ -1,0 +1,18 @@
+---
+title: Getting Started
+description: Two paths to a running agent — everything in one call, or the pieces by hand — and the three adoption tiers behind them.
+---
+
+Latch runs at three tiers. Each is additive: moving up adds a seam and changes nothing you already wrote.
+
+| Tier | Add | Infrastructure | You get |
+| --- | --- | --- | --- |
+| **0 — Stateless** | `latch-core` + an in-memory SQLite | none | `defineAgent` + context + tools + streaming, in any serverless function |
+| **1 — Persistence** | a database file or Postgres | a DB | Conversations, runs, usage and cost persisted; run-to-completion in one invocation |
+| **2 — Durability** | `durability: { enabled: true }` + a cron | the DB + a scheduled tick | Runs survive a crash: lease, heartbeat, reaper, resume-from-history |
+
+<Cards>
+  <Card href="/docs/getting-started/quickstart" title="Quickstart" description="createLatchApp: tier 2 with every default filled in, in one file. Start here." />
+  <Card href="/docs/getting-started/by-hand" title="By hand" description="createRuntime piece by piece — when you want a different framework, no HTTP, or to see what the defaults are." />
+  <Card href="/docs/getting-started/install" title="Install" description="Registry access and which packages add what." />
+</Cards>

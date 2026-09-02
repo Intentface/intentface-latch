@@ -1,24 +1,17 @@
 {
   "title": "Latch",
   "pages": [
-    "---Start---",
     "index",
-    "quickstart",
-    "install",
-    "---Guides---",
-    "guides/approvals",
-    "guides/scheduled-brief",
-    "---Concepts---",
+    "foundations",
+    "getting-started",
     "runtime",
     "agents",
-    "turn-inputs",
-    "principals",
     "operations",
-    "client",
-    "---Reference---",
-    "packages",
+    "channels",
+    "connections",
+    "memory",
     "hosting",
-    "storage",
-    "seams"
+    "reference",
+    "cookbook"
   ]
 }

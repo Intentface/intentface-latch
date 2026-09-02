@@ -10,7 +10,7 @@ import { DOCS_BASE_URL, source } from "@/lib/source";
 const SUMMARY = [
   "This is the documentation for `@intentface/latch-*` — Latch, a reusable backend for building, persisting and operating AI agents on the Vercel AI SDK.",
   "It embeds into an existing backend (or runs standalone): the agent loop, an append-only run log, message projections, human-in-the-loop approvals, durability, schedules, memory, MCP/OpenAPI tools, and per-run cost accounting — all behind swappable seams.",
-  "Every page below is markdown: append `.md` to any docs URL to fetch the same content as plain text.",
+  "Every page below is markdown: append `.md` to any docs URL to fetch the same content as plain text. `/llms-full.txt` is every page concatenated.",
 ].join("\n");
 
 // Page-tree names are ReactNode; ours come from frontmatter, so they're strings.
@@ -78,8 +78,7 @@ export function GET(request: Request): Response {
     "",
     SUMMARY,
     "",
-    "## Pages",
-    "",
+
     ...walk(tree.children, site),
     "",
   ].join("\n");

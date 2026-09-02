@@ -19,8 +19,8 @@ Both type parameters are yours: `Principal` is your identity type, `RuntimeConte
 
 | Field | What it does |
 | --- | --- |
-| `storage` | The `StorageAdapter` — chats, messages, runs, usage, schedules. See [Storage](/docs/storage). |
-| `context` | A `defineContext` definition: builds `RuntimeContext` per turn from the principal. See [Turn inputs](/docs/turn-inputs). |
+| `storage` | The `StorageAdapter` — chats, messages, runs, usage, schedules. See [Storage](/docs/reference/storage). |
+| `context` | A `defineContext` definition: builds `RuntimeContext` per turn from the principal. See [Turn inputs](/docs/foundations/turns). |
 | `agents` | The registry: `Record<string, AgentFactory>`. See [Agents](/docs/agents). |
 
 ### Optional
@@ -40,7 +40,7 @@ Every field below is a seam. Omit it and the corresponding capability simply doe
 | `harnessTools` | No default/sandbox/render tools are available to attach. |
 | `resolveProviderTools` | `providerWebTools` is a no-op. |
 | `resolveReasoningOptions` | `effort` falls back to the provider default. |
-| `resolvePromptCaching` | Caching still defaults **on** for first-party Anthropic/OpenAI models (derived from the model's `provider`) — worth ~6× on MCP-heavy agents. Supply the hook to use your own model catalog or per-principal cache keys; `() => undefined` turns caching off. See [Prompt caching](/docs/seams#prompt-caching--the-6-default). |
+| `resolvePromptCaching` | Caching still defaults **on** for first-party Anthropic/OpenAI models (derived from the model's `provider`) — worth ~6× on MCP-heavy agents. Supply the hook to use your own model catalog or per-principal cache keys; `() => undefined` turns caching off. See [Prompt caching](/docs/reference/seams#prompt-caching--the-6-default). |
 | `telemetry` | Nothing is traced; no step/finish hooks fire. |
 | `limits` | Nothing is limited — no turn, token or cost budgets. |
 | `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is. |
