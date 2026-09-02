@@ -1772,7 +1772,9 @@ function ChannelSection({ kind, agent }: { kind: DmChannelKind; agent: string })
   }
 
   async function remove(botId: string) {
-    await deleteChannelBotFn({ data: { kind, botId } });
+    setError(null);
+    const res = await deleteChannelBotFn({ data: { kind, botId } });
+    if (!res.ok) setError(`Couldn't delete the bot: ${res.error}`);
     if (webhook?.botId === botId) setWebhook(null);
     await load();
   }

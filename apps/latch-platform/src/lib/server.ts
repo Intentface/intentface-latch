@@ -2069,19 +2069,28 @@ export const channelWebhookInfoFn = createServerFn({ method: "GET" })
     }
   });
 
-/** Delete a bot binding: platform cleanup, then its Vault secrets, then the rows. */
+/**
+ * Delete a bot binding: platform cleanup, then its Vault secrets, then the
+ * rows. The first two are best-effort — a Vault or platform hiccup must not
+ * leave the bot half-deleted with no way to retry from the editor; the row
+ * deletion is always reached, and anything left behind is logged.
+ */
 export const deleteChannelBotFn = createServerFn({ method: "POST" })
   .validator((data: { kind: DmChannelKind; botId: string }) => data)
   .handler(async ({ data }) => {
-    if (!isDmChannelKind(data.kind)) return { ok: false };
+    if (!isDmChannelKind(data.kind)) return { ok: false as const, error: "unknown channel" };
     const m = await manageableBot(data.kind, data.botId);
-    if (!m) return { ok: false };
-    await m.def.beforeDelete?.(m.ctx);
+    if (!m) return { ok: false as const, error: "not found" };
+    await m.def.beforeDelete?.(m.ctx).catch((e) => {
+      console.error(`[${data.kind}] pre-delete cleanup failed for ${data.botId}:`, e);
+    });
     // The binding's Vault secrets go with it — deleting a bot must not leave
     // its tokens stored indefinitely.
     for (const key of Object.values(m.def.vaultKeys(data.botId))) {
-      await m.ctx.credentials.remove(m.ctx.principal, key, "org");
+      await m.ctx.credentials.remove(m.ctx.principal, key, "org").catch((e) => {
+        console.error(`[${data.kind}] could not remove Vault key ${key}:`, e);
+      });
     }
     await m.channelStore.removeBot(data.kind, data.botId);
-    return { ok: true };
+    return { ok: true as const };
   });
