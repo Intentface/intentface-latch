@@ -3,6 +3,10 @@ title: Hosting
 description: One Web-standard handler, mounted in Hono, Express, Fastify, NestJS, or any framework that speaks Request and Response.
 ---
 
+<Callout title="Shortest path">
+`createLatchApp({ storage, agents, resolveContext })` (or `createLatchHonoApp`) wires the runtime with every default — durability, cron, model catalog, harness tools — and returns the handler below already mounted over it. The rest of this page is for when you want to assemble the pieces yourself.
+</Callout>
+
 `@intentface/latch-server` gives you the whole runtime as **one handler**:
 
 ```ts

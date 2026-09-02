@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { createLatchHandler } from "./handler.js";
 import type { LatchHandlerConfig } from "./handler.js";
+import { createLatchApp } from "./app.js";
+import type { LatchApp, LatchAppConfig } from "./app.js";
 
 /**
  * A mountable Hono app over the framework-agnostic `createLatchHandler`. Mount
@@ -13,7 +15,22 @@ export type LatchServerConfig<P> = LatchHandlerConfig<P>;
 
 export function createLatchHono<P>(config: LatchServerConfig<P>): Hono {
   const handler = createLatchHandler(config);
+  return honoOver(handler);
+}
+
+function honoOver(handler: (req: Request) => Promise<Response | undefined>): Hono {
   const app = new Hono();
   app.all("*", async (c) => (await handler(c.req.raw)) ?? c.notFound());
   return app;
+}
+
+/**
+ * `createLatchApp` + a mounted Hono app in one call: the whole backend, ready
+ * to `serve({ fetch: app.fetch })` or `app.route("/api/latch", …)` into yours.
+ */
+export async function createLatchHonoApp<P, RC = unknown>(
+  config: LatchAppConfig<P, RC>,
+): Promise<LatchApp<P> & { app: Hono }> {
+  const latch = await createLatchApp<P, RC>(config);
+  return { ...latch, app: honoOver(latch.handler) };
 }

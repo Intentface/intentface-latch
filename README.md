@@ -42,44 +42,36 @@ MCP, vault, approvals, scheduling, and rate-limiting are independent opt-ins at 
 ## Quick taste
 
 ```ts
-import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
-import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
-import { createLatchHandler } from "@intentface/latch-server";
-import { anthropic } from "@ai-sdk/anthropic";
+import { defineAgent } from "@intentface/latch-core";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
+import { createLatchHonoApp } from "@intentface/latch-server/hono";
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { serve } from "@hono/node-server";
 
 const client = createClient({ url: "file:./latch.db" });
 await migrate(client);
 
-const runtime = createRuntime({
-  storage: createSqliteAdapter(client),
-  context: defineContext({ build: ({ principal }) => ({ orgId: principal.orgId }) }),
-  agents: {
-    assistant: defineAgent(() => ({
-      model: anthropic("claude-sonnet-4-6"),
+const { app } = await createLatchHonoApp({
+  storage: createSqliteAdapter(drizzle(client, { schema }), { owner: (p) => [p.orgId] }),
+  // BYO auth: request → your Principal (null → 401).
+  resolveContext: (req) => ({ orgId: req.headers.get("x-org") ?? "demo" }),
+  // Agents pick their model from the models.dev catalog (whatever you have keys for).
+  agents: (models) => ({
+    assistant: defineAgent({
+      model: models.modelFor("claude-sonnet-4-6"),
       instructions: "You are a concise, helpful assistant.",
-    })),
-  },
-  // durability: { enabled: true },   // ← tier 2, when you want resume-after-crash
+      defaultTools: true, // web_fetch, askUser, schedule tools
+    }),
+  }),
 });
-
-// One framework-agnostic Web handler — mount it at a single route in any host
-// (TanStack Start, Next, Bun, Deno, serverless). Auth is BYO via resolveContext.
-const handler = createLatchHandler({
-  runtime,
-  basePath: "/api/latch",
-  resolveContext: (req) => ({ orgId: req.headers.get("x-org") ?? "demo", userId: "u1" }),
-  // connections,  // ← pass an MCP connection registry to get OAuth routes too
-});
-// e.g. Bun/Deno:  export default { fetch: (req) => handler(req) ?? new Response("Not found", { status: 404 }) }
-// Hono adapter:   import { createLatchHono } from "@intentface/latch-server/hono"
-
-// Serves: POST agents/:agent/:id (chat) + /approvals, GET chats[/:id], GET runs,
-//         and the generic connection OAuth (authorize/callback/status/test).
+serve({ fetch: app.fetch, port: 8787 });
 ```
 
+That's the whole backend: durability (resume-after-crash), an in-process cron (or `POST /cron/run` on serverless), pricing + reasoning + prompt-caching hooks from the catalog, the harness tools, and the HTTP surface — every default overridable via `runtime` / `handler`. Prefer to mount into your own framework? `createLatchApp()` returns the bare Web `handler`; `createLatchHandler()` / `createRuntime()` are still there when you want to wire pieces yourself.
+
 ```bash
-curl -N http://localhost:8787/api/latch/agents/assistant/chat-1 \
+curl -N http://localhost:8787/agents/assistant/chat-1 \
   -H 'content-type: application/json' -H 'x-org: org_a' \
   -d '{"text":"In one sentence, what is Latch?"}'
 ```

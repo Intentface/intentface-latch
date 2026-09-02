@@ -54,7 +54,9 @@ const principal: Principal = { orgId: "org1", userId: "u1" };
 const bot = { id: "b1", agent: "todo", orgId: "org1", handle: "todo-bot" };
 /** A turn in the web app: no channel, so nothing to derive a target from. */
 const webRun = { id: "r1", chatId: "chat_abc", agent: "todo" };
-const ctx = (run: typeof webRun) => ({ context: { principal, run } });
+// The runtime rides on the tool context now (what the real runtime supplies
+// as `options.context.runtime`), not on a host-global.
+const ctx = (run: typeof webRun) => ({ context: { principal, run, runtime } });
 
 beforeEach(async () => {
   client = createClient({ url: ":memory:" });
