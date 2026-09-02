@@ -47,17 +47,13 @@ export interface LatchHandlerConfig<P> {
   /**
    * Map a request to a Principal (your existing auth). Null → 401.
    *
-   * NOT consulted for identity on the OAuth callback when the flow carries a
-   * pinned principal (every flow started by this handler does): the callback
-   * rebuilds identity from the flow state via `reconstructPrincipal` instead,
-   * so a degraded session at redirect time can never change where credentials
-   * land. `extra.oauthState` (the decoded state) is still passed on legacy
-   * callbacks whose state predates pinning — deprecated, remove-later.
+   * NEVER consulted for identity on the OAuth callback: every flow this
+   * handler starts pins the resolved principal into the flow state, and the
+   * callback rebuilds identity from that pin via `reconstructPrincipal`, so a
+   * degraded session at redirect time can never change where credentials land.
+   * A callback whose state carries no pin is rejected as expired.
    */
-  resolveContext: (
-    request: Request,
-    extra?: { oauthState?: Record<string, unknown> },
-  ) => P | null | Promise<P | null>;
+  resolveContext: (request: Request) => P | null | Promise<P | null>;
   /**
    * Rebuild a Principal from the identity pinned into the OAuth flow state at
    * `authorize` time (the mirror of the runtime's `reconstructPrincipal` for
@@ -97,18 +93,6 @@ export interface LatchHandlerConfig<P> {
   connectedParam?: string;
   /** Path prefix the handler is mounted under (e.g. "/api/latch"). Default "/". */
   basePath?: string;
-  /**
-   * Extra query-param names on `connections/:name/authorize` to fold verbatim
-   * into the OAuth `state` (alongside the built-in chatId/approvalId/returnTo/
-   * scope). Default: none.
-   *
-   * @deprecated for identity: the resolved principal is now pinned into the
-   * flow state automatically and rebuilt on the callback via
-   * `reconstructPrincipal` — threading tenant ids through `stateParams` +
-   * `extra.oauthState` for that purpose is no longer needed. Still fine for
-   * non-identity context a host wants echoed back.
-   */
-  stateParams?: string[];
   /**
    * Shared secret guarding `POST /cron/run` (the system-wide schedule tick).
    * When set, the request must send it as `x-latch-cron-secret`. That route is
@@ -242,18 +226,25 @@ export function createLatchHandler<P>(
       // pin is tamper-evident: the full state string is exact-matched against
       // the copy stored (owner-keyed) at authorize time, so a forged payload
       // never survives the exchange.
-      const callbackState =
-        name && action === "callback" && method === "GET"
-          ? (decodeOAuthState(url.searchParams.get("state")) ?? undefined)
-          : undefined;
+      const isCallback = !!name && action === "callback" && method === "GET";
+      const callbackState = isCallback
+        ? (decodeOAuthState(url.searchParams.get("state")) ?? undefined)
+        : undefined;
 
-      const pinned = callbackState?.__latch as
-        | { p?: unknown; iat?: number }
-        | undefined;
       let principal: P | null;
-      if (pinned && pinned.p !== undefined && typeof pinned.iat === "number") {
+      if (isCallback) {
+        // A callback ALWAYS identifies itself by its pin. No state, an
+        // undecodable state, or a state without a pin (a flow started before
+        // pinning existed, or a hand-built one) is treated like a stale pin:
+        // the flow can't be trusted, so it is expired — the live session is
+        // never asked to stand in for it.
+        const pinned = callbackState?.__latch as
+          | { p?: unknown; iat?: number }
+          | undefined;
         const maxAge = config.oauthFlowMaxAgeMs ?? 30 * 60_000;
-        if (Date.now() - pinned.iat > maxAge) {
+        const valid =
+          !!pinned && pinned.p !== undefined && typeof pinned.iat === "number";
+        if (!valid || Date.now() - pinned.iat! > maxAge) {
           return redirectTo((callbackState?.returnTo as string) ?? "/", {
             error: "flow_expired",
           });
@@ -263,12 +254,7 @@ export function createLatchHandler<P>(
           request,
         );
       } else {
-        // Non-callback routes, and legacy callbacks whose state predates
-        // pinning (deprecated fallback — remove once in-flight flows drain).
-        principal = await resolveContext(
-          request,
-          callbackState ? { oauthState: callbackState } : undefined,
-        );
+        principal = await resolveContext(request);
       }
       if (!principal) return json({ error: "unauthorized" }, 401);
 
@@ -289,22 +275,15 @@ export function createLatchHandler<P>(
         const approvalId = url.searchParams.get("approvalId") ?? undefined;
         const returnTo = url.searchParams.get("returnTo") ?? undefined;
         // Optional caller-supplied context folded into the OAuth state so the
-        // callback (which may lack a session) can rebuild it — e.g. a
-        // credential-scope selector, plus any consumer-declared `stateParams`
-        // (e.g. a tenant id).
+        // callback (which may lack a session) can rebuild it — a credential-
+        // scope selector.
         const scope = url.searchParams.get("scope") ?? undefined;
-        const extraState: Record<string, string> = {};
-        for (const key of config.stateParams ?? []) {
-          const value = url.searchParams.get(key);
-          if (value !== null) extraState[key] = value;
-        }
         // Pin the resolved principal (+ issue time) into the flow state. The
         // callback rebuilds identity from this pin via `reconstructPrincipal`
         // — the live session at redirect time never decides where credentials
         // land. Principals are IDs-only by contract, so the payload is small
         // and non-sensitive; integrity comes from the stored-state exact match.
         const state = {
-          ...extraState,
           chatId,
           approvalId,
           returnTo,

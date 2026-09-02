@@ -48,7 +48,7 @@ let client: Client;
  * 1.1's remaining half: the turn "completed" as far as the stream is
  * concerned, but no answer was produced and nobody is there to approve.
  */
-function buildParking(observability?: Record<string, unknown>) {
+function buildParking(telemetry?: Record<string, unknown>) {
   const gateStream = () =>
     new ReadableStream({
       start(c) {
@@ -89,7 +89,7 @@ function buildParking(observability?: Record<string, unknown>) {
       }),
     },
     cron: (_expr, afterMs) => afterMs + 15 * 60 * 1000,
-    observability: observability as never,
+    telemetry: telemetry as never,
   });
 }
 
@@ -144,19 +144,19 @@ describe("runDue reports a fire that parked on a human", () => {
   });
 });
 
-describe("observability marks WHO set the turn off", () => {
+describe("telemetry marks WHO set the turn off", () => {
   it('stamps trigger: "schedule" on a fire, so a park is distinguishable from an interactive one', async () => {
     const finished: { status: string; trigger: string; chatId: string }[] = [];
     const runtime = buildParking({
-      onFinish: (e: { status: string; trigger: string; chatId: string }) => {
-        finished.push({ status: e.status, trigger: e.trigger, chatId: e.chatId });
+      onRunFinished: (run: { trigger: string; chatId: string }, outcome: { status: string }) => {
+        finished.push({ status: outcome.status, trigger: run.trigger, chatId: run.chatId });
       },
     });
     vi.spyOn(console, "warn").mockImplementation(() => {});
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "how many?" });
     await runtime.runDue();
 
-    // The hook already carries principal/chatId/runId/cost — `trigger` is what
+    // The run meta already carries principal/chatId/runId — `trigger` is what
     // makes it actionable: awaiting_input + schedule = nobody can answer this,
     // push it. The same status under "chat" is a gate in front of a live user.
     expect(finished).toHaveLength(1);
@@ -167,7 +167,7 @@ describe("observability marks WHO set the turn off", () => {
   it('stamps trigger: "chat" on a user-driven turn — same agent, same gate', async () => {
     const triggers: string[] = [];
     const runtime = buildParking({
-      onFinish: (e: { trigger: string }) => triggers.push(e.trigger),
+      onRunFinished: (run: { trigger: string }) => void triggers.push(run.trigger),
     });
     const res = await runtime.handleChat({
       principal,

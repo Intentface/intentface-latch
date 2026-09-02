@@ -561,27 +561,18 @@ export async function getLatch(): Promise<{
   // land under the principal the SLACK TURN checks — the app binding's — not
   // the browser session's, or signing in never satisfies the card that asked
   // for it (the tokens and the flow's code verifier both live per-owner-key).
-  // Scoped HARD to the authorize/callback routes: anywhere else a `?slackApp=`
-  // param must not let a member read another principal's chats. Membership in
-  // the binding's org is required — the same gate that lets them drive the bot.
-  // On the callback (no query params of ours survive the IdP round-trip) the
-  // appId comes back via OAuth state; forging state there buys nothing, because
-  // `finish()` validates it against the state `start()` stored under this same
-  // principal, and `start()` sits behind this membership check.
-  const CONNECT_OAUTH_ROUTE = /^\/api\/latch\/connections\/[^/]+\/(authorize|callback)$/;
-  const resolveContext = async (
-    request: Request,
-    extra?: { oauthState?: Record<string, unknown> },
-  ): Promise<Principal | null> => {
+  // Scoped HARD to the authorize route: anywhere else a `?slackApp=` param
+  // must not let a member read another principal's chats. Membership in the
+  // binding's org is required — the same gate that lets them drive the bot.
+  // The binding principal produced here is what the handler PINS into the
+  // flow state; the callback rebuilds it from that pin (reconstructOAuth-
+  // Principal below) and never consults the session again.
+  const CONNECT_AUTHORIZE_ROUTE = /^\/api\/latch\/connections\/[^/]+\/authorize$/;
+  const resolveContext = async (request: Request): Promise<Principal | null> => {
     const session = await getPrincipalFromHeaders(request.headers);
     const url = new URL(request.url);
-    const m = url.pathname.match(CONNECT_OAUTH_ROUTE);
-    const slackApp = m
-      ? m[1] === "authorize"
-        ? url.searchParams.get("slackApp")
-        : typeof extra?.oauthState?.slackApp === "string"
-          ? extra.oauthState.slackApp
-          : null
+    const slackApp = CONNECT_AUTHORIZE_ROUTE.test(url.pathname)
+      ? url.searchParams.get("slackApp")
       : null;
     if (!slackApp) return session;
     if (!session?.userId) return null;
@@ -637,13 +628,6 @@ export async function getLatch(): Promise<{
     basePath: "/api/latch",
     resolveContext,
     reconstructPrincipal: reconstructOAuthPrincipal,
-    // LEGACY: only read by the deprecated no-pin callback fallback now that
-    // the authorize route pins the full resolved principal into the state.
-    // The authorize-leg `?slackApp=` handling in resolveContext above is what
-    // still matters — it PRODUCES the binding principal that gets pinned.
-    // TODO(remove): drop this + resolveContext's callback-leg slackApp branch
-    // once in-flight pre-pin flows have drained.
-    stateParams: ["slackApp"],
     // Guards POST /api/latch/cron/run for an external cron in prod. That route is
     // NOT user-authed and fires every tenant's due schedules, so in production an
     // unset secret must leave this undefined — the handler then 404s the route

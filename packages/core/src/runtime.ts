@@ -39,7 +39,7 @@ import {
   toolsetHash,
   type PromptCachingPlan,
 } from "./prompt-caching.js";
-import type { LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
+import type { TurnTrigger, LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import type {
   ChatRecord,
   RunLease,
@@ -256,114 +256,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     args: { agent: string; memoryScoped: boolean; principal: P },
   ) => PromptCachingPlan | undefined;
   /**
-   * Tracing seam (kept out of core — no OTEL/vendor dep). Supplies per-run AI
-   * SDK telemetry options, an optional trace wrapper around the model call, and
-   * a post-turn hook (e.g. `@intentface/latch-langfuse`). This is the OTEL/span
-   * plumbing — the `observability` seam below is for plain event callbacks.
-   * Optional — without it, nothing is traced and behavior is unchanged.
+   * The observation seam (kept out of core — no OTEL/vendor dep): per-run AI
+   * SDK telemetry options, an optional trace wrapper around the model call, a
+   * per-step hook and a post-turn hook. A full tracer
+   * (`@intentface/latch-langfuse`) or just the callbacks a host wants (usage
+   * rollups, per-tool analytics, "a scheduled fire parked — notify someone").
+   * Fires for subagent turns too — distinguish via `depth` and `trigger`.
+   * Optional — without it, nothing is observed and behavior is unchanged.
    */
   telemetry?: LatchTelemetry<P>;
-  /**
-   * Optional observability seam — consumer telemetry (usage rollups, per-tool
-   * analytics, tracing) attached WITHOUT wrapping `handleChat`. Complements the
-   * built-in `recordUsage` (billing rollup): this is where an app emits its own
-   * events. Fires for subagent turns too — distinguish via `depth` (0 =
-   * top-level). All hooks are fire-and-forget: a thrown/rejected hook is
-   * swallowed so telemetry never breaks a turn. Without it, zero behavior change.
-   */
-  observability?: ObservabilityHooks<P>;
-}
-
-/** Fields common to every observability event. */
-/**
- * What started this turn — and, in practice, whether a human is at the other
- * end of it:
- *
- * - `"chat"` — a user message (`handleChat`). Someone is
- *   watching the stream.
- * - `"decision"` — a human answered a pending request: an approval decision or
- *   a client-handled tool result. Someone is watching.
- * - `"schedule"` — a cron/one-shot fire (`runDue`). NOBODY is watching.
- * - `"programmatic"` — the host called `runAgent` directly (a background job, a
- *   webhook handler, a test run). There is no client stream, and only the host
- *   knows whether a person is waiting on the result — so `runAgent` takes a
- *   `trigger` to say when it does.
- * - `"resume"` — the durability sweep recovered a crashed run and drove it to
- *   completion server-side. Nobody is watching.
- *
- * That distinction is what makes the observability hooks usable as an
- * operational notification channel and not just an analytics feed: a turn that
- * finishes `awaiting_input` under `"schedule"` or `"resume"` is a person who
- * needs to be told, while the same status under `"chat"` or `"decision"` is
- * just a gate rendering in front of someone who can answer it.
- *
- * A subagent turn inherits its parent's trigger (like `rootChatId`), so a
- * whole delegation tree is attributable to what set it off.
- */
-export type TurnTrigger = "chat" | "decision" | "programmatic" | "schedule" | "resume";
-
-export interface ObservabilityEventBase<P> {
-  principal: P;
-  chatId: string;
-  runId: string;
-  /** The agent (registry key) running this turn. */
-  agent: string;
-  /** Resolved model id for this turn. */
-  modelId: string;
-  /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
-  depth: number;
-  /** What started this turn — see {@link TurnTrigger}. */
-  trigger: TurnTrigger;
-}
-
-/** One completed generation step (model call + any tool calls made in it). */
-export interface ObservabilityStepEvent<P> extends ObservabilityEventBase<P> {
-  step: {
-    text?: string;
-    finishReason?: string;
-    usage?: {
-      inputTokens?: number;
-      outputTokens?: number;
-      cacheReadTokens?: number;
-      cacheWriteTokens?: number;
-    };
-    toolCalls?: Array<{
-      toolCallId: string;
-      toolName: string;
-      input?: unknown;
-    }>;
-    toolResults?: Array<{
-      toolCallId: string;
-      toolName: string;
-      output?: unknown;
-    }>;
-  };
-}
-
-/** The turn settled. `usage`/`cost` are the turn totals also written to the run. */
-export interface ObservabilityFinishEvent<P> extends ObservabilityEventBase<P> {
-  status: "completed" | "awaiting_input" | "errored";
-  usage: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheWriteTokens: number;
-  };
-  cost: number;
-  messages: AppMessage[];
-}
-
-export interface ObservabilityErrorEvent<P> extends ObservabilityEventBase<P> {
-  error: unknown;
-}
-
-export interface ObservabilityHooks<P> {
-  /** After each generation step (model output + the step's tool calls/results). */
-  onStep?: (event: ObservabilityStepEvent<P>) => void | Promise<void>;
-  /** After the turn settles (completed / awaiting_input / errored-on-abort). */
-  onFinish?: (event: ObservabilityFinishEvent<P>) => void | Promise<void>;
-  /** When the turn errors. */
-  onError?: (event: ObservabilityErrorEvent<P>) => void | Promise<void>;
 }
 
 export interface HandleChatInput<P> {
@@ -417,7 +318,7 @@ export interface Runtime<P> {
      */
     promptCaching?: boolean;
     /**
-     * How to classify this run on the observability events (see `TurnTrigger`).
+     * How to classify this run on the telemetry run meta (see `TurnTrigger`).
      * Defaults to `"programmatic"` — there is no client stream here, so the
      * safe assumption is that nobody is watching, and a host that knows better
      * (a webhook with a user waiting) says so by passing `"chat"`.
@@ -1104,15 +1005,12 @@ function recordToolResult(
   return touched ? [last] : [];
 }
 
-/** Invoke an observability hook fire-and-forget — a thrown/rejected hook is
- * swallowed so telemetry never breaks a turn. */
-function fireObs<E>(
-  hook: ((event: E) => void | Promise<void>) | undefined,
-  event: E,
-): void {
-  if (!hook) return;
+/** Run a hook fire-and-forget — a thrown/rejected hook is swallowed so
+ * telemetry never breaks a turn. */
+function fireAndForget(fn: (() => void | Promise<void>) | undefined): void {
+  if (!fn) return;
   try {
-    void Promise.resolve(hook(event)).catch(() => {});
+    void Promise.resolve(fn()).catch(() => {});
   } catch {
     // synchronous throw from the hook — ignore
   }
@@ -1228,7 +1126,7 @@ export function createRuntime<P, RC = unknown>(
     depth?: number;
     /**
      * What started this turn (see `TurnTrigger`). Stamped on every
-     * observability event so a host can tell an unattended park — nobody to
+     * telemetry run meta so a host can tell an unattended park — nobody to
      * answer the gate — from an interactive one. Defaults to `"chat"`.
      */
     trigger?: TurnTrigger;
@@ -1679,6 +1577,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
       startedAt: run.startedAt,
       depth,
+      trigger,
       parentRunId: args.parentRunId,
       // Top-level turns are their own root; subagent turns inherit the root the
       // spawn threaded down, so a whole delegation tree shares one session id.
@@ -1728,6 +1627,12 @@ export function createRuntime<P, RC = unknown>(
     let outputTokens = 0;
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
+    // Set by the FIRST onError, consumed by onFinish (which the SDK still runs
+    // after a stream error, and may precede with more than one onError). It is
+    // what keeps the turn's terminal state single and ordered: the run row is
+    // settled as errored FIRST, and exactly one errored report follows — only
+    // from the writer whose fenced update applied.
+    let failed: string | undefined;
 
     // Post-turn telemetry: fired after persistence on every terminal path
     // (completed / awaiting_input / errored). Must never fail the turn.
@@ -1847,27 +1752,23 @@ export function createRuntime<P, RC = unknown>(
             outputTokens += step.usage?.outputTokens ?? 0;
             cacheReadTokens += step.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
             cacheWriteTokens += step.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
-            fireObs(config.observability?.onStep, {
-              principal,
-              chatId: resolvedChatId,
-              runId: run.id,
-              agent: run.agent,
-              modelId,
-              depth,
-              trigger,
-              step: {
-                text: step.text,
-                finishReason: step.finishReason,
-                usage: {
-                  inputTokens: step.usage?.inputTokens,
-                  outputTokens: step.usage?.outputTokens,
-                  cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
-                  cacheWriteTokens: step.usage?.inputTokenDetails?.cacheWriteTokens,
-                },
-                toolCalls: step.toolCalls,
-                toolResults: step.toolResults,
-              },
-            });
+            if (telemetryOn && config.telemetry?.onStep) {
+              const onStep = config.telemetry.onStep.bind(config.telemetry);
+              fireAndForget(() =>
+                onStep(telemetryMeta, {
+                  text: step.text,
+                  finishReason: step.finishReason,
+                  usage: {
+                    inputTokens: step.usage?.inputTokens,
+                    outputTokens: step.usage?.outputTokens,
+                    cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
+                    cacheWriteTokens: step.usage?.inputTokenDetails?.cacheWriteTokens,
+                  },
+                  toolCalls: step.toolCalls,
+                  toolResults: step.toolResults,
+                }),
+              );
+            }
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
         const result =
@@ -1952,30 +1853,21 @@ export function createRuntime<P, RC = unknown>(
             cost,
           };
         }
-        // Aborted (lease lost): don't claim completion, and DON'T persist the
-        // partial messages/usage — the run may already be reaped and re-claimed
+        // Errored (the stream failed — onError already reported it) or aborted
+        // (lease lost): don't claim completion, and DON'T persist the partial
+        // messages/usage — an aborted run may already be reaped and re-claimed
         // by another node whose writes must win. The guarded update no-ops if
-        // the run was reassigned.
-        if (isAborted) {
-          await storage.updateRun(
+        // the run was reassigned. Exactly one terminal report either way.
+        if (failed !== undefined || isAborted) {
+          const settled = await storage.updateRun(
             run.id,
-            { status: "errored", error: "aborted", endedAt: Date.now() },
+            { status: "errored", error: failed ?? "aborted", endedAt: Date.now() },
             lease,
           );
-          fireObs(config.observability?.onFinish, {
-            principal,
-            chatId: resolvedChatId,
-            runId: run.id,
-            agent: run.agent,
-            modelId,
-            depth,
-            trigger,
-            status: "errored",
-            usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
-            cost,
-            messages,
-          });
-          await reportRunFinished("errored", messages, "aborted");
+          // Only the winning writer reports (same rule as the completion
+          // path): a stale worker whose fenced update did not apply is not
+          // the one that ended this run.
+          if (settled) await reportRunFinished("errored", messages, failed ?? "aborted");
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
@@ -2011,19 +1903,6 @@ export function createRuntime<P, RC = unknown>(
             cost,
           });
         }
-        fireObs(config.observability?.onFinish, {
-          principal,
-          chatId: resolvedChatId,
-          runId: run.id,
-          agent: run.agent,
-          modelId,
-          depth,
-          trigger,
-          status: paused ? "awaiting_input" : "completed",
-          usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
-          cost,
-          messages,
-        });
         // Only the winning writer reports terminal telemetry. If our lease was
         // reaped and the run re-claimed elsewhere (`!applied`), that node will
         // finish it — a stale writer must not re-run the judge or emit a
@@ -2035,21 +1914,12 @@ export function createRuntime<P, RC = unknown>(
         stopHeartbeat();
         void closeSources();
         const message = clientErrorMessage(error);
-        fireObs(config.observability?.onError, {
-          principal,
-          chatId: resolvedChatId,
-          runId: run.id,
-          agent: run.agent,
-          modelId,
-          depth,
-          trigger,
-          error,
-        });
-        // The AI SDK's onError must return the client string synchronously, so
-        // the terminal telemetry can't be awaited here. A serverless-safe impl
-        // keeps its own flush alive (e.g. via waitUntil) so the errored trace
-        // still lands; failures are swallowed inside reportRunFinished.
-        void reportRunFinished("errored", [], message);
+        // Record only — the first error wins; later onError calls for the same
+        // stream are noise. The SDK's onError must return the client string
+        // synchronously and still runs onFinish afterwards, so that is where
+        // the run row is settled as errored and the single terminal report is
+        // made (after, and only if, the fenced update applied).
+        if (failed === undefined) failed = message;
         return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);

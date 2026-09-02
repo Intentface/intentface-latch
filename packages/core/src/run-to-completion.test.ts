@@ -19,14 +19,18 @@ import type { ChatRecord, RunRecord, StorageAdapter } from "./storage.js";
 type P = { orgId: string };
 const principal: P = { orgId: "org_a" };
 
-/** A mock model that streams `text` (or a tool call first, then `text`). */
+/**
+ * A mock model that streams `text` (or a tool call first, then `text`). Streams
+ * are built PER CALL — a ReadableStream is single-use, so a model reused across
+ * runs must not hand out the same instance twice.
+ */
 function model(text: string, toolCall?: { name: string; input: string }) {
   const finish = (reason: string) => ({
     type: "finish",
     finishReason: reason,
     usage: { inputTokens: { total: 5 }, outputTokens: { total: 3 } },
   });
-  const textStep = {
+  const textStep = () => ({
     stream: simulateReadableStream({
       initialDelayInMs: 0,
       chunkDelayInMs: 0,
@@ -38,9 +42,9 @@ function model(text: string, toolCall?: { name: string; input: string }) {
         finish("stop"),
       ],
     }),
-  };
-  if (!toolCall) return new MockLanguageModelV4({ modelId: "mock", doStream: textStep as never });
-  const callStep = {
+  });
+  if (!toolCall) return new MockLanguageModelV4({ modelId: "mock", doStream: (async () => textStep()) as never });
+  const callStep = () => ({
     stream: simulateReadableStream({
       initialDelayInMs: 0,
       chunkDelayInMs: 0,
@@ -53,8 +57,13 @@ function model(text: string, toolCall?: { name: string; input: string }) {
         finish("tool-calls"),
       ],
     }),
-  };
-  return new MockLanguageModelV4({ modelId: "mock-tools", doStream: [callStep, textStep] as never });
+  });
+  // Tool-call step, then the answer — per RUN (two calls each), repeatable.
+  let n = 0;
+  return new MockLanguageModelV4({
+    modelId: "mock-tools",
+    doStream: (async () => (n++ % 2 === 0 ? callStep() : textStep())) as never,
+  });
 }
 
 /**
@@ -141,8 +150,8 @@ function runtimeWith(mem: ReturnType<typeof memoryStorage>, agentModel: MockLang
         toolApproval: { write_thing: "user-approval" },
       }),
     },
-    // The trigger stamp is observable on the finish event.
-    observability: { onFinish: (e) => void triggers.push(e.trigger) },
+    // The trigger stamp rides on the telemetry run meta.
+    telemetry: { onRunFinished: (run) => void triggers.push(run.trigger) },
   });
 }
 
