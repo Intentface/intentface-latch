@@ -49,8 +49,19 @@ import {
   unbindSlackAppFn,
   whatsappWebhookInfoFn,
 } from "@/lib/server";
+import { AgentRecordSchema } from "@intentface/latch-agent-builder/record";
 import { authorizeUrl } from "@/lib/latch-client";
-import { buildDefaultTools, hasDefaultTool, SCHEDULE_TOOLS, SLACK_TOOLS } from "@/lib/default-tools";
+import {
+  MEMORY_LEVELS,
+  coerceRecord,
+  expandDefaultTools,
+  groupOn,
+  loadAgentRecord,
+  newAgentRecord,
+  toSavePayload,
+  toggleGroup,
+} from "@/lib/agent-form";
+import type { AgentRecord, MemoryLevel } from "@/lib/agent-form";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,7 +70,7 @@ import { RichSelect } from "@/components/ui/rich-select";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { CodeEditor } from "@/components/code-editor";
-import type { AgentRec, ToolInfo } from "./agents";
+import type { ToolInfo } from "./agents";
 
 export const Route = createFileRoute("/agents/edit")({
   validateSearch: (s: Record<string, unknown>) => ({
@@ -95,118 +106,60 @@ function AgentEditor() {
 
   const initial =
     editName != null
-      ? ((records as AgentRec[]).find((a) => a.name === editName && a.scope === editScope) ?? null)
+      ? (records.find((a) => a.name === editName && a.scope === editScope) ?? null)
       : null;
   const editing = !!initial;
 
-  const [name, setName] = useState(initial?.name ?? "");
-  const [title, setTitle] = useState(initial?.title ?? "");
-  const [description, setDescription] = useState(initial?.description ?? "");
-  const [modelId, setModelId] = useState(initial?.modelId ?? defaultModelId(models));
-  const [instructions, setInstructions] = useState(initial?.instructions ?? "");
-  const [picked, setPicked] = useState<string[]>(initial?.connections ?? []);
-  const [scope, setScope] = useState<"user" | "org">(initial?.scope ?? "user");
-  const [maxSteps, setMaxSteps] = useState(
-    typeof initial?.maxSteps === "number" ? String(initial.maxSteps) : "20",
+  // THE record is the form state (editor-state conventions: see lib/agent-form).
+  // Every edit goes through `patch`, which re-runs the coherence rules, so no
+  // combination the server would reject can be assembled in the UI.
+  const [rec, setRec] = useState<AgentRecord>(() =>
+    initial ? loadAgentRecord(initial) : newAgentRecord(defaultModelId(models)),
   );
-  const [unlimited, setUnlimited] = useState(initial?.maxSteps === "unlimited");
-  const [sandbox, setSandbox] = useState(initial?.exec?.sandbox ?? false);
-  const [provider, setProvider] = useState(initial?.exec?.provider ?? "just-bash");
-  // Default (app-runtime) tools, toggled per capability. `defaultTools: true`
-  // grants the whole set, an array grants the named ones.
-  const prevDefaultTools = initial?.exec?.defaultTools;
-  const [webTools, setWebTools] = useState(hasDefaultTool(prevDefaultTools, "web_fetch"));
-  const [askUserTool, setAskUserTool] = useState(hasDefaultTool(prevDefaultTools, "askUser"));
-  // The schedule tools travel as one capability; "on" if the agent has any of
-  // them. A stored PARTIAL subset is preserved on save unless the user touches
-  // the toggle (see buildDefaultTools), so an unchanged save never expands it.
-  const [scheduleTools, setScheduleTools] = useState(
-    SCHEDULE_TOOLS.some((n) => hasDefaultTool(prevDefaultTools, n)),
+  const patch = useCallback(
+    (fn: (r: AgentRecord) => AgentRecord) =>
+      setRec((r) => {
+        const next = fn(r);
+        const reasoning = !!models.find((m) => m.id === next.modelId)?.reasoning;
+        return coerceRecord(next, { modelSupportsReasoning: reasoning });
+      }),
+    [models],
   );
-  const [scheduleTouched, setScheduleTouched] = useState(false);
-  // Slack conversation tools travel as one capability, same rules as schedules.
-  const [slackToolsOn, setSlackToolsOn] = useState(
-    SLACK_TOOLS.some((n) => hasDefaultTool(prevDefaultTools, n)),
-  );
-  const [slackTouched, setSlackTouched] = useState(false);
-  // render_fetch is its own capability flag (like sandbox), not a defaultTools
-  // member — so `defaultTools: true` never implies it.
-  const [renderTool, setRenderTool] = useState(initial?.exec?.renderTools ?? false);
-  const [providerWebTools, setProviderWebTools] = useState(
-    initial?.exec?.providerWebTools ?? false,
-  );
-  const [authoredSel, setAuthoredSel] = useState<string[]>(initial?.exec?.authoredTools ?? []);
-  const toggleAuthored = (n: string) =>
-    setAuthoredSel((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
-  const [effort, setEffort] = useState<string>(initial?.exec?.effort ?? "");
-  const modelSupportsReasoning = !!models.find((m) => m.id === modelId)?.reasoning;
-  // Memory: persistent cross-session memory in one of the agent's connections.
-  const [memoryOn, setMemoryOn] = useState(!!initial?.exec?.memory);
-  const [memoryScope, setMemoryScope] = useState<"agent-user" | "agent-org" | "user">(
-    initial?.exec?.memory?.scope ?? "agent-user",
-  );
-  const [memoryConnection, setMemoryConnection] = useState(
-    initial?.exec?.memory?.connection ?? "",
-  );
-  // Extra levels the background sweep also extracts into (the primary scope is
-  // always implicit), and the per-level index-schema outlines.
-  const [memoryExtractTo, setMemoryExtractTo] = useState<MemoryLevel[]>(
-    (initial?.exec?.memory?.extractTo ?? []).filter((l) => l !== initial?.exec?.memory?.scope),
-  );
-  const [memorySchemas, setMemorySchemas] = useState<{
-    "agent-user"?: string;
-    "agent-org"?: string;
-  }>(initial?.exec?.memory?.schemas ?? {});
+  const setField = <TKey extends keyof AgentRecord>(key: TKey, value: AgentRecord[TKey]) =>
+    patch((r) => ({ ...r, [key]: value }));
+  type Exec = NonNullable<AgentRecord["exec"]>;
+  const exec: Exec = rec.exec ?? {};
+  const setExec = (fn: (e: Exec) => Exec) => patch((r) => ({ ...r, exec: fn(r.exec ?? {}) }));
+  const memory = exec.memory;
+  const setMemory = (fn: (m: NonNullable<Exec["memory"]>) => NonNullable<Exec["memory"]>) =>
+    setExec((e) => (e.memory ? { ...e, memory: fn(e.memory) } : e));
+
+  const picked = rec.connections;
+  const modelSupportsReasoning = !!models.find((m) => m.id === rec.modelId)?.reasoning;
+  const defaults = expandDefaultTools(exec.defaultTools);
+  const setGroup = (group: Parameters<typeof toggleGroup>[1], on: boolean) =>
+    setExec((e) => ({ ...e, defaultTools: toggleGroup(expandDefaultTools(e.defaultTools), group, on) }));
+  const toggleIn = (list: readonly string[] | undefined, n: string) =>
+    (list ?? []).includes(n) ? (list ?? []).filter((x) => x !== n) : [...(list ?? []), n];
+  const toggleConnection = (c: string) => setField("connections", toggleIn(picked, c));
+  const toggleAuthored = (n: string) => setExec((e) => ({ ...e, authoredTools: toggleIn(e.authoredTools, n) }));
+  const toggleSubagent = (n: string) => setField("subagents", toggleIn(rec.subagents, n));
   const toggleMemoryLevel = (level: MemoryLevel) =>
-    setMemoryExtractTo((p) => (p.includes(level) ? p.filter((l) => l !== level) : [...p, level]));
-  // Keep the memory picks coherent with the rest of the form: re-pick the
-  // connection if its checkbox is later un-ticked (otherwise the save path
-  // would silently drop memory), and fall back from org-shared scope when the
-  // agent stops being org-visible (the server rejects that combination).
-  useEffect(() => {
-    if (memoryOn && memoryConnection && !picked.includes(memoryConnection)) {
-      setMemoryConnection(picked.includes("loredex") ? "loredex" : (picked[0] ?? ""));
-    }
-  }, [picked, memoryOn, memoryConnection]);
-  useEffect(() => {
-    if (memoryOn && memoryScope === "agent-org" && scope !== "org") {
-      setMemoryScope("agent-user");
-    }
-    // The org level is only valid on org-visible agents — as extraction level too.
-    if (memoryOn && scope !== "org" && memoryExtractTo.includes("agent-org")) {
-      setMemoryExtractTo((p) => p.filter((l) => l !== "agent-org"));
-    }
-  }, [scope, memoryOn, memoryScope, memoryExtractTo]);
-  // The primary scope never appears in the extras list.
-  useEffect(() => {
-    if (memoryExtractTo.includes(memoryScope)) {
-      setMemoryExtractTo((p) => p.filter((l) => l !== memoryScope));
-    }
-  }, [memoryScope, memoryExtractTo]);
+    setMemory((m) => ({ ...m, extractTo: toggleIn(m.extractTo, level) as MemoryLevel[] }));
+
   // Org agents may only attach org-scoped tools (a personal tool wouldn't resolve
   // for other members); personal agents see all (dedup by name, personal wins).
   const visibleAuthored =
-    scope === "org"
+    rec.scope === "org"
       ? authoredTools.filter((t) => t.scope === "org")
       : [...new Map(authoredTools.map((t) => [t.name, t])).values()];
-  const validAuthoredSel = authoredSel.filter((n) => visibleAuthored.some((t) => t.name === n));
-  const [subagents, setSubagents] = useState<string[]>(initial?.subagents ?? []);
-  const toggleSubagent = (n: string) =>
-    setSubagents((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
+
+  // UI-only state: the listed tools, disclosure, and request status.
   const [toolList, setToolList] = useState<ToolInfo[]>([]);
-  const [enabled, setEnabled] = useState<Set<string>>(new Set());
-  const [approval, setApproval] = useState<Record<string, boolean>>({});
-  // Per-tool description overrides (only the ones the user actually customized).
-  const [descriptions, setDescriptions] = useState<Record<string, string>>(
-    initial?.tools?.descriptions ?? {},
-  );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const toggle = (c: string) =>
-    setPicked((p) => (p.includes(c) ? p.filter((x) => x !== c) : [...p, c]));
   const toggleExpand = (c: string) =>
     setExpanded((p) => {
       const n = new Set(p);
@@ -215,29 +168,40 @@ function AgentEditor() {
       return n;
     });
 
-  // Fetch the picked connections' tools; seed enable/approval from the agent's
-  // stored selection (editing) or defaults (all enabled, approval = the tool's).
+  /**
+   * Take a fresh tool listing: tools already listed keep the user's current
+   * enable/approval choices; newly listed ones are seeded from the stored
+   * selection (editing) or the tool's defaults (all enabled, approval = the
+   * tool's own). `enabled` in editor state is always the explicit set — the
+   * "[] = all" wire form is produced by toSavePayload.
+   */
+  const applyToolList = (tools: ToolInfo[], previouslyListed: ReadonlySet<string>) => {
+    setToolList(tools);
+    setRec((r) => {
+      const enabled = new Set(r.tools?.enabled ?? []);
+      const approval = { ...(r.tools?.approval ?? {}) };
+      const stored = initial?.tools;
+      for (const t of tools) {
+        if (previouslyListed.has(t.name)) continue;
+        const on = stored?.enabled.length ? stored.enabled.includes(t.name) : true;
+        if (on) enabled.add(t.name);
+        else enabled.delete(t.name);
+        approval[t.name] = stored?.approval[t.name] ?? t.defaultApproval;
+      }
+      return { ...r, tools: { enabled: [...enabled], approval, descriptions: r.tools?.descriptions } };
+    });
+  };
+
+  // Fetch the picked connections' tools whenever the pick changes.
   useEffect(() => {
     let cancelled = false;
     if (picked.length === 0) {
       setToolList([]);
-      setEnabled(new Set());
-      setApproval({});
       return;
     }
+    const listed = new Set(toolList.map((t) => t.name));
     void connectionToolsFn({ data: picked }).then((tools) => {
-      if (cancelled) return;
-      setToolList(tools);
-      const initEnabled = initial?.tools?.enabled;
-      const en = new Set<string>();
-      const ap: Record<string, boolean> = {};
-      for (const t of tools) {
-        const on = initEnabled && initEnabled.length ? initEnabled.includes(t.name) : true;
-        if (on) en.add(t.name);
-        ap[t.name] = initial?.tools?.approval?.[t.name] ?? t.defaultApproval;
-      }
-      setEnabled(en);
-      setApproval(ap);
+      if (!cancelled) applyToolList(tools, listed);
     });
     return () => {
       cancelled = true;
@@ -245,123 +209,41 @@ function AgentEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picked.join(",")]);
 
-  // Re-list after authorizing / when the provider's tools change. Preserves the
-  // current toggles and adds any newly-listable tools enabled-by-default.
+  // Re-list after authorizing / when the provider's tools change.
   async function refreshTools() {
     if (picked.length === 0) return;
     setRefreshing(true);
     try {
-      const tools = await connectionToolsFn({ data: picked });
-      const known = new Set(toolList.map((t) => t.name));
-      setEnabled((prev) => {
-        const en = new Set(prev);
-        for (const t of tools) if (!known.has(t.name)) en.add(t.name);
-        return en;
-      });
-      setApproval((prev) => {
-        const ap = { ...prev };
-        for (const t of tools)
-          if (!known.has(t.name))
-            ap[t.name] = initial?.tools?.approval?.[t.name] ?? t.defaultApproval;
-        return ap;
-      });
-      setToolList(tools);
+      applyToolList(await connectionToolsFn({ data: picked }), new Set(toolList.map((t) => t.name)));
     } finally {
       setRefreshing(false);
     }
   }
 
-  const toggleEnabled = (n: string) =>
-    setEnabled((p) => {
-      const s = new Set(p);
-      if (s.has(n)) s.delete(n);
-      else s.add(n);
-      return s;
-    });
+  const enabledSet = new Set(rec.tools?.enabled ?? []);
+  const setTools = (fn: (t: NonNullable<AgentRecord["tools"]>) => NonNullable<AgentRecord["tools"]>) =>
+    patch((r) => ({ ...r, tools: fn(r.tools ?? { enabled: [], approval: {} }) }));
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !instructions.trim() || busy) return;
+    if (!rec.name.trim() || !rec.instructions.trim() || busy) return;
+    const payload = toSavePayload(rec, {
+      modelSupportsReasoning,
+      visibleAuthored: visibleAuthored.map((t) => t.name),
+      toolList,
+    });
+    // The same schema the server (and the Agent Builder) validate with — so a
+    // rejection shows up inline, before the round-trip.
+    const check = AgentRecordSchema.safeParse(payload);
+    if (!check.success) {
+      const first = check.error.issues[0];
+      setError(`${first.path.join(".") || "agent"}: ${first.message}`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const allOn = toolList.length > 0 && toolList.every((t) => enabled.has(t.name));
-      // Keep only overrides that differ from the tool's own description.
-      const descOverrides: Record<string, string> = {};
-      for (const t of toolList) {
-        const v = descriptions[t.name];
-        if (v != null && v.trim() && v.trim() !== (t.description ?? "").trim()) {
-          descOverrides[t.name] = v.trim();
-        }
-      }
-      const tools =
-        toolList.length > 0
-          ? {
-              enabled: allOn ? [] : [...enabled],
-              approval,
-              descriptions: Object.keys(descOverrides).length ? descOverrides : undefined,
-            }
-          : undefined;
-      const useEffort = effort && modelSupportsReasoning ? effort : undefined;
-      // Explicit defaultTools name list (never bare `true`), least-privilege:
-      // unknown names are preserved, a partial schedule subset survives an
-      // untouched save, and render_fetch stays a separate capability
-      // (`renderTools` below). Rules live in buildDefaultTools + its tests.
-      const defaultTools = buildDefaultTools({
-        webTools,
-        askUser: askUserTool,
-        schedules: scheduleTools,
-        schedulesTouched: scheduleTouched,
-        slackTools: slackToolsOn,
-        slackTouched,
-        prev: prevDefaultTools,
-      });
-      // Memory only saves with a valid connection pick (the picker defaults to
-      // loredex when the agent declares it). Schemas save only for levels the
-      // agent actually participates in, and only when non-blank.
-      const activeLevels = [memoryScope, ...memoryExtractTo];
-      const schemas: { "agent-user"?: string; "agent-org"?: string } = {};
-      for (const level of ["agent-user", "agent-org"] as const) {
-        const text = memorySchemas[level];
-        if (activeLevels.includes(level) && text?.trim()) schemas[level] = text;
-      }
-      const memory =
-        memoryOn && memoryConnection && picked.includes(memoryConnection)
-          ? {
-              scope: memoryScope,
-              connection: memoryConnection,
-              extractTo: memoryExtractTo.length ? activeLevels : undefined,
-              schemas: Object.keys(schemas).length ? schemas : undefined,
-            }
-          : undefined;
-      const exec =
-        sandbox || defaultTools || renderTool || providerWebTools || validAuthoredSel.length || useEffort || memory
-          ? {
-              sandbox: sandbox || undefined,
-              provider: sandbox ? provider : undefined,
-              defaultTools,
-              renderTools: renderTool || undefined,
-              providerWebTools: providerWebTools || undefined,
-              authoredTools: validAuthoredSel.length ? validAuthoredSel : undefined,
-              effort: useEffort as "minimal" | "low" | "medium" | "high" | undefined,
-              memory,
-            }
-          : undefined;
-      const res = await saveAgentFn({
-        data: {
-          name,
-          title: title || undefined,
-          description: description || undefined,
-          modelId,
-          instructions,
-          connections: picked,
-          maxSteps: unlimited ? "unlimited" : Number(maxSteps) || undefined,
-          tools,
-          exec,
-          subagents: subagents.length ? subagents : undefined,
-          scope,
-        },
-      });
+      const res = await saveAgentFn({ data: payload });
       if (!res.ok) {
         setError(res.error ?? "Failed to save");
         return;
@@ -399,23 +281,27 @@ function AgentEditor() {
           <div className="space-y-1.5">
             <FieldLabel>Name</FieldLabel>
             <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              value={rec.name}
+              onChange={(e) => setField("name", e.target.value)}
               placeholder="researcher"
               disabled={editing}
             />
           </div>
           <div className="space-y-1.5">
             <FieldLabel>Title (optional)</FieldLabel>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Researcher" />
+            <Input
+              value={rec.title ?? ""}
+              onChange={(e) => setField("title", e.target.value)}
+              placeholder="Researcher"
+            />
           </div>
         </div>
 
         <div className="space-y-1.5">
           <FieldLabel>Description (optional)</FieldLabel>
           <Input
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            value={rec.description ?? ""}
+            onChange={(e) => setField("description", e.target.value)}
             placeholder="One line shown in the chat picker"
           />
         </div>
@@ -423,7 +309,11 @@ function AgentEditor() {
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
             <FieldLabel>Model</FieldLabel>
-            <Select className="w-full" value={modelId} onChange={(e) => setModelId(e.target.value)}>
+            <Select
+              className="w-full"
+              value={rec.modelId}
+              onChange={(e) => setField("modelId", e.target.value)}
+            >
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.label}
@@ -435,8 +325,8 @@ function AgentEditor() {
             <FieldLabel>Scope</FieldLabel>
             <RichSelect
               className="w-full"
-              value={scope}
-              onValueChange={(v) => setScope(v as "user" | "org")}
+              value={rec.scope}
+              onValueChange={(v) => setField("scope", v as AgentRecord["scope"])}
               disabled={editing}
               options={[
                 { value: "user", label: "Personal", description: "Only you can run it" },
@@ -451,8 +341,10 @@ function AgentEditor() {
             <FieldLabel>Reasoning effort</FieldLabel>
             <RichSelect
               className="w-full"
-              value={effort}
-              onValueChange={setEffort}
+              value={exec.effort ?? ""}
+              onValueChange={(v) =>
+                setExec((e) => ({ ...e, effort: (v || undefined) as Exec["effort"] }))
+              }
               options={[
                 { value: "", label: "Default", description: "Let the provider decide" },
                 { value: "minimal", label: "Minimal", description: "Fastest, least thinking" },
@@ -468,8 +360,8 @@ function AgentEditor() {
           <FieldLabel>System prompt</FieldLabel>
           <Textarea
             className="min-h-64 font-mono text-[13px] leading-relaxed"
-            value={instructions}
-            onChange={(e) => setInstructions(e.target.value)}
+            value={rec.instructions}
+            onChange={(e) => setField("instructions", e.target.value)}
             placeholder="You are a helpful assistant…"
           />
         </div>
@@ -497,21 +389,25 @@ function AgentEditor() {
                   open={expanded.has(c)}
                   status={status[c]}
                   tools={toolList.filter((t) => t.connection === c)}
-                  enabled={enabled}
-                  approval={approval}
-                  descriptions={descriptions}
-                  onToggleOn={() => toggle(c)}
+                  enabled={enabledSet}
+                  approval={rec.tools?.approval ?? {}}
+                  descriptions={rec.tools?.descriptions ?? {}}
+                  onToggleOn={() => toggleConnection(c)}
                   onToggleOpen={() => toggleExpand(c)}
-                  onToggleTool={toggleEnabled}
-                  onToggleApproval={(n) => setApproval((p) => ({ ...p, [n]: !p[n] }))}
-                  onDescribe={(n, v) => setDescriptions((p) => ({ ...p, [n]: v }))}
+                  onToggleTool={(n) => setTools((t) => ({ ...t, enabled: toggleIn(t.enabled, n) }))}
+                  onToggleApproval={(n) =>
+                    setTools((t) => ({ ...t, approval: { ...t.approval, [n]: !t.approval[n] } }))
+                  }
+                  onDescribe={(n, v) =>
+                    setTools((t) => ({ ...t, descriptions: { ...(t.descriptions ?? {}), [n]: v } }))
+                  }
                 />
               ))}
             </div>
           </div>
         )}
 
-        {allAgents.filter((a) => a.name !== name).length > 0 && (
+        {allAgents.filter((a) => a.name !== rec.name).length > 0 && (
           <div className="space-y-2">
             <FieldLabel>Subagents</FieldLabel>
             <p className="text-ink-tertiary text-xs">
@@ -528,9 +424,9 @@ function AgentEditor() {
             </div>
             <div className="space-y-2">
               {allAgents
-                .filter((a) => a.name !== name)
+                .filter((a) => a.name !== rec.name)
                 .map((a) => {
-                  const on = subagents.includes(a.name);
+                  const on = (rec.subagents ?? []).includes(a.name);
                   return (
                     <div
                       key={a.name}
@@ -566,13 +462,20 @@ function AgentEditor() {
               className="h-8 w-20"
               type="number"
               min={1}
-              value={maxSteps}
-              disabled={unlimited}
-              onChange={(e) => setMaxSteps(e.target.value)}
+              placeholder="default"
+              value={typeof rec.maxSteps === "number" ? rec.maxSteps : ""}
+              disabled={rec.maxSteps === "unlimited"}
+              onChange={(e) => {
+                const n = Math.floor(Number(e.target.value));
+                setField("maxSteps", n >= 1 ? n : undefined);
+              }}
             />
           </label>
           <label className="text-ink-secondary flex items-center gap-2 text-xs">
-            <Switch checked={unlimited} onCheckedChange={() => setUnlimited((v) => !v)} />
+            <Switch
+              checked={rec.maxSteps === "unlimited"}
+              onCheckedChange={(on) => setField("maxSteps", on ? "unlimited" : 20)}
+            />
             Run until it stops
           </label>
         </div>
@@ -580,74 +483,46 @@ function AgentEditor() {
         <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-3">
           <FieldLabel>Capabilities</FieldLabel>
           <label className="flex items-center gap-2 text-xs">
-            <Switch checked={sandbox} onCheckedChange={() => setSandbox((v) => !v)} />
+            <Switch
+              checked={!!exec.sandbox}
+              onCheckedChange={(on) =>
+                setExec((e) => ({ ...e, sandbox: on, provider: e.provider ?? "just-bash" }))
+              }
+            />
             <span>
               Sandbox — a per-chat workspace with{" "}
               <span className="font-mono">bash / read_file / write_file / glob / grep</span>
             </span>
           </label>
-          {sandbox && (
+          {exec.sandbox && (
             <label className="text-ink-secondary ml-12 flex items-center gap-2 text-xs">
               Backend
-              <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
+              <Select
+                value={exec.provider ?? "just-bash"}
+                onChange={(e) => setExec((x) => ({ ...x, provider: e.target.value }))}
+              >
                 <option value="just-bash">just-bash (in-process)</option>
                 <option value="daytona">Daytona (VM — needs API key)</option>
                 <option value="mirage">Mirage (VFS — workspace + read-only Slack/Google)</option>
               </Select>
             </label>
           )}
-          <label className="flex items-center gap-2 text-xs">
-            <Switch checked={webTools} onCheckedChange={() => setWebTools((v) => !v)} />
-            <span>
-              Web tools — <span className="font-mono">web_fetch</span>: fetches public pages as
-              clean markdown (built-in, any model)
-            </span>
-          </label>
-          <label className="flex items-center gap-2 text-xs">
-            <Switch checked={askUserTool} onCheckedChange={() => setAskUserTool((v) => !v)} />
-            <span>
-              Ask user — <span className="font-mono">askUser</span>: pauses the run to ask the
-              user multiple-choice questions instead of guessing
-            </span>
-          </label>
+          {DEFAULT_TOOL_TOGGLES.map((t) => (
+            <label key={t.group} className="flex items-center gap-2 text-xs">
+              <Switch
+                checked={groupOn(defaults, t.group)}
+                onCheckedChange={(on) => setGroup(t.group, on)}
+              />
+              <span>
+                {t.label} — <span className="font-mono">{t.tools}</span>: {t.help}
+              </span>
+            </label>
+          ))}
           <label className="flex items-center gap-2 text-xs">
             <Switch
-              checked={scheduleTools}
-              onCheckedChange={() => {
-                setScheduleTouched(true);
-                setScheduleTools((v) => !v);
-              }}
+              checked={!!exec.renderTools}
+              onCheckedChange={(on) => setExec((e) => ({ ...e, renderTools: on }))}
             />
-            <span>
-              Schedules —{" "}
-              <span className="font-mono">
-                create_schedule / list_schedules / cancel_schedule / list_delivery_channels
-              </span>
-              : the agent can set up its own recurring runs (“brief me every weekday at 8”) and
-              deliver them to a linked Telegram/Slack channel. Creating one asks the user for
-              approval first; runs fire at most every 15 minutes.
-            </span>
-          </label>
-          <label className="flex items-center gap-2 text-xs">
-            <Switch
-              checked={slackToolsOn}
-              onCheckedChange={() => {
-                setSlackTouched(true);
-                setSlackToolsOn((v) => !v);
-              }}
-            />
-            <span>
-              Slack tools —{" "}
-              <span className="font-mono">
-                slack_read_thread / slack_read_channel / slack_list_channels / post_to_channel
-              </span>
-              : in Slack conversations the agent can read threads/channels the requesting user is
-              a member of (checked live, fails closed) and post to other channels behind an
-              approval card. Outside Slack these tools refuse themselves — safe to leave on.
-            </span>
-          </label>
-          <label className="flex items-center gap-2 text-xs">
-            <Switch checked={renderTool} onCheckedChange={() => setRenderTool((v) => !v)} />
             <span>
               Render tool — <span className="font-mono">render_fetch</span>: fetches JS-rendered
               pages in a headless browser (rendered text + schema.org JSON-LD). Active when the
@@ -656,8 +531,8 @@ function AgentEditor() {
           </label>
           <label className="flex items-center gap-2 text-xs">
             <Switch
-              checked={providerWebTools}
-              onCheckedChange={() => setProviderWebTools((v) => !v)}
+              checked={!!exec.providerWebTools}
+              onCheckedChange={(on) => setExec((e) => ({ ...e, providerWebTools: on }))}
             />
             <span>
               Provider web tools — native <span className="font-mono">web_search</span> /{" "}
@@ -671,12 +546,12 @@ function AgentEditor() {
                 Authored tools{" "}
                 <span className="text-ink-tertiary font-normal">
                   — sandboxed tools (from the Tools page) this agent can call
-                  {scope === "org" ? " (org-shared only)" : ""}
+                  {rec.scope === "org" ? " (org-shared only)" : ""}
                 </span>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {visibleAuthored.map((t) => {
-                  const on = authoredSel.includes(t.name);
+                  const on = (exec.authoredTools ?? []).includes(t.name);
                   return (
                     <button
                       key={t.scope + t.name}
@@ -705,18 +580,21 @@ function AgentEditor() {
           <FieldLabel>Memory</FieldLabel>
           <label className="flex items-center gap-2 text-xs">
             <Switch
-              checked={memoryOn}
-              onCheckedChange={() => {
-                const next = !memoryOn;
-                // Sensible default pick on first enable: loredex when declared.
-                // (Outside the updater — updaters must stay pure.)
-                if (next && !memoryConnection) {
-                  setMemoryConnection(
-                    picked.includes("loredex") ? "loredex" : (picked[0] ?? ""),
-                  );
-                }
-                setMemoryOn(next);
-              }}
+              checked={!!memory}
+              onCheckedChange={(on) =>
+                setExec((e) => ({
+                  ...e,
+                  memory: on
+                    ? {
+                        // Sensible default pick on enable: loredex when declared.
+                        scope: "agent-user",
+                        connection: picked.includes("loredex") ? "loredex" : (picked[0] ?? ""),
+                        extractTo: [],
+                        schemas: {},
+                      }
+                    : undefined,
+                }))
+              }
             />
             <span>
               Persistent memory — the platform archives durable facts from idle chats, keeps a
@@ -724,24 +602,22 @@ function AgentEditor() {
               <span className="font-mono">memory_search / memory_save</span>
             </span>
           </label>
-          {memoryOn && (picked.length === 0 || !picked.includes(memoryConnection)) && (
+          {memory && (picked.length === 0 || !picked.includes(memory.connection)) && (
             <p className="text-destructive text-xs">
               Memory needs a valid connection — add or re-select one above (memory files live in
               its workspace). Saving without one drops the memory setting.
             </p>
           )}
-          {memoryOn && picked.length > 0 && (
+          {memory && picked.length > 0 && (
             <div className="ml-12 space-y-2">
               <label className="text-ink-secondary flex items-center gap-2 text-xs">
                 Scope
                 <Select
-                  value={memoryScope}
-                  onChange={(e) =>
-                    setMemoryScope(e.target.value as "agent-user" | "agent-org" | "user")
-                  }
+                  value={memory.scope}
+                  onChange={(e) => setMemory((m) => ({ ...m, scope: e.target.value as MemoryLevel }))}
                 >
                   <option value="agent-user">Per user — this agent’s memory of each user</option>
-                  <option value="agent-org" disabled={scope !== "org"}>
+                  <option value="agent-org" disabled={rec.scope !== "org"}>
                     Org-shared — one memory for the whole org (org-visible agents only)
                   </option>
                   <option value="user">User-wide — shared with the user’s other agents</option>
@@ -750,8 +626,8 @@ function AgentEditor() {
               <label className="text-ink-secondary flex items-center gap-2 text-xs">
                 Connection
                 <Select
-                  value={memoryConnection}
-                  onChange={(e) => setMemoryConnection(e.target.value)}
+                  value={memory.connection}
+                  onChange={(e) => setMemory((m) => ({ ...m, connection: e.target.value }))}
                 >
                   {picked.map((n) => (
                     <option key={n} value={n}>
@@ -763,7 +639,7 @@ function AgentEditor() {
                   files land under <span className="font-mono">_memory/</span> in its workspace
                 </span>
               </label>
-              {memoryScope !== "agent-org" && (
+              {memory.scope !== "agent-org" && (
                 <p className="text-ink-tertiary text-xs">
                   Note: on an org-shared connection, per-user separation is a folder convention —
                   anyone with workspace access can read the files.
@@ -774,34 +650,39 @@ function AgentEditor() {
                   Also extract to — the background archivist files level-appropriate facts from
                   the same conversations into these stores too:
                 </p>
-                {MEMORY_LEVELS.filter((l) => l !== memoryScope).map((level) => (
-                  <label key={level} className="flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={memoryExtractTo.includes(level)}
-                      disabled={level === "agent-org" && scope !== "org"}
-                      onChange={() => toggleMemoryLevel(level)}
-                    />
-                    <span className={level === "agent-org" && scope !== "org" ? "text-ink-tertiary" : ""}>
-                      {MEMORY_LEVEL_LABELS[level]}
-                      {level === "agent-org" && scope !== "org" && " (org-visible agents only)"}
-                    </span>
-                  </label>
-                ))}
+                {MEMORY_LEVELS.filter((l) => l !== memory.scope).map((level) => {
+                  const orgOnly = level === "agent-org" && rec.scope !== "org";
+                  return (
+                    <label key={level} className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={(memory.extractTo ?? []).includes(level)}
+                        disabled={orgOnly}
+                        onChange={() => toggleMemoryLevel(level)}
+                      />
+                      <span className={orgOnly ? "text-ink-tertiary" : ""}>
+                        {MEMORY_LEVEL_LABELS[level]}
+                        {orgOnly && " (org-visible agents only)"}
+                      </span>
+                    </label>
+                  );
+                })}
               </div>
               {(["agent-user", "agent-org"] as const)
-                .filter((l) => l === memoryScope || memoryExtractTo.includes(l))
+                .filter((l) => l === memory.scope || (memory.extractTo ?? []).includes(l))
                 .map((level) => (
                   <MemorySchemaEditor
                     key={level}
                     level={level}
-                    agentName={name}
-                    instructions={instructions}
-                    value={memorySchemas[level] ?? ""}
-                    onChange={(v) => setMemorySchemas((p) => ({ ...p, [level]: v }))}
+                    agentName={rec.name}
+                    instructions={rec.instructions}
+                    value={memory.schemas?.[level] ?? ""}
+                    onChange={(v) =>
+                      setMemory((m) => ({ ...m, schemas: { ...(m.schemas ?? {}), [level]: v } }))
+                    }
                   />
                 ))}
-              {(memoryScope === "user" || memoryExtractTo.includes("user")) && (
+              {(memory.scope === "user" || (memory.extractTo ?? []).includes("user")) && (
                 <p className="text-ink-tertiary text-xs">
                   The user-wide level’s schema is shared by ALL agents — edit it on the{" "}
                   <Link to="/connections" className="text-ink-secondary underline">
@@ -810,7 +691,7 @@ function AgentEditor() {
                   .
                 </p>
               )}
-              {editing && <MemoryStatus agent={name} />}
+              {editing && <MemoryStatus agent={rec.name} />}
             </div>
           )}
         </div>
@@ -824,12 +705,12 @@ function AgentEditor() {
               className="mr-auto"
               disabled={busy}
               onClick={async () => {
-                if (!confirm(`Delete agent "${initial?.title ?? name}"? This cannot be undone.`)) {
+                if (!confirm(`Delete agent "${initial.title ?? rec.name}"? This cannot be undone.`)) {
                   return;
                 }
                 setBusy(true);
                 try {
-                  const res = await deleteAgentFn({ data: { name, scope } });
+                  const res = await deleteAgentFn({ data: { name: rec.name, scope: rec.scope } });
                   if (!res.ok) {
                     setError("Couldn't delete the agent.");
                     return;
@@ -847,22 +728,53 @@ function AgentEditor() {
           <Button type="button" variant="ghost" render={<Link to="/agents" />}>
             Cancel
           </Button>
-          <Button type="submit" disabled={busy || !name.trim() || !instructions.trim()}>
+          <Button type="submit" disabled={busy || !rec.name.trim() || !rec.instructions.trim()}>
             {editing ? "Update agent" : "Create agent"}
           </Button>
         </div>
       </form>
 
-      {editing && <SlackSection agent={name} />}
-      {editing && <TelegramSection agent={name} />}
-      {editing && <WhatsappSection agent={name} />}
+      {editing && <SlackSection agent={rec.name} />}
+      {editing && <TelegramSection agent={rec.name} />}
+      {editing && <WhatsappSection agent={rec.name} />}
     </div>
   );
 }
 
-type MemoryLevel = "agent-user" | "agent-org" | "user";
-
-const MEMORY_LEVELS: MemoryLevel[] = ["agent-user", "agent-org", "user"];
+/** The capability toggles that grant `defaultTools` groups — data, rendered in a loop. */
+const DEFAULT_TOOL_TOGGLES: {
+  group: Parameters<typeof toggleGroup>[1];
+  label: string;
+  tools: string;
+  help: string;
+}[] = [
+  {
+    group: "web",
+    label: "Web tools",
+    tools: "web_fetch",
+    help: "fetches public pages as clean markdown (built-in, any model)",
+  },
+  {
+    group: "askUser",
+    label: "Ask user",
+    tools: "askUser",
+    help: "pauses the run to ask the user multiple-choice questions instead of guessing",
+  },
+  {
+    group: "schedules",
+    label: "Schedules",
+    tools: "create_schedule / list_schedules / cancel_schedule / list_delivery_channels",
+    help:
+      "the agent can set up its own recurring runs (“brief me every weekday at 8”) and deliver them to a linked Telegram/Slack channel. Creating one asks the user for approval first; runs fire at most every 15 minutes.",
+  },
+  {
+    group: "slack",
+    label: "Slack tools",
+    tools: "slack_read_thread / slack_read_channel / slack_list_channels / post_to_channel",
+    help:
+      "in Slack conversations the agent can read threads/channels the requesting user is a member of (checked live, fails closed) and post to other channels behind an approval card. Outside Slack these tools refuse themselves — safe to leave on.",
+  },
+];
 
 const MEMORY_LEVEL_LABELS: Record<MemoryLevel, string> = {
   "agent-user": "Per user — this agent’s memory of each user",

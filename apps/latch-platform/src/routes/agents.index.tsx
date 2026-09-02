@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Settings } from "@/components/ui/settings";
-import type { AgentRec } from "./agents";
 
 export const Route = createFileRoute("/agents/")({
   // Slack link/install flows redirect back here with ?slack=… to toast.
@@ -36,7 +35,7 @@ function AgentsList() {
     void navigate({ to: "/agents", search: {}, replace: true });
   }, [slack, navigate]);
 
-  const agents = records as AgentRec[];
+  const agents = records;
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 p-6">

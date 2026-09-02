@@ -10,39 +10,8 @@ import {
   listAuthoredToolNamesFn,
 } from "@/lib/server";
 
-export interface AgentRec {
-  name: string;
-  title?: string;
-  description?: string;
-  modelId: string;
-  instructions: string;
-  connections: string[];
-  maxSteps?: number | "unlimited";
-  tools?: {
-    enabled: string[];
-    approval: Record<string, boolean>;
-    descriptions?: Record<string, string>;
-  };
-  exec?: {
-    sandbox?: boolean;
-    provider?: string;
-    defaultTools?: boolean | string[];
-    disableTools?: string[];
-    codeMode?: { tools?: string[] };
-    providerWebTools?: boolean;
-    renderTools?: boolean;
-    authoredTools?: string[];
-    effort?: "minimal" | "low" | "medium" | "high";
-    memory?: {
-      scope: "agent-user" | "agent-org" | "user";
-      connection: string;
-      extractTo?: Array<"agent-user" | "agent-org" | "user">;
-      schemas?: { "agent-user"?: string; "agent-org"?: string };
-    };
-  };
-  subagents?: string[];
-  scope: "user" | "org";
-}
+// The agent record type comes from the framework (`@intentface/latch-agent-builder`);
+// the loader's `records` carry it (minus attachedEvals) via listAgentRecordsFn.
 
 export interface ToolInfo {
   name: string;
