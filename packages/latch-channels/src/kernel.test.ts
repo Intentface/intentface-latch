@@ -170,6 +170,13 @@ describe("kernel — a message becomes one turn", () => {
     err.mockRestore();
   });
 
+  it("core's own busy refusal (chat_busy) reads as 'still working', not as an error", async () => {
+    const h = harness();
+    h.runtime.handleChat.mockRejectedValue(Object.assign(new Error("busy"), { code: "chat_busy", retryAfterMs: 5000 }));
+    await h.message("hi");
+    expect(h.texts()).toEqual(["I am still working on the previous message in this chat."]);
+  });
+
   it("drops a delivery the host has already seen", async () => {
     const h = harness({ cfg: { seen: async () => true } });
     await h.message("hi");
@@ -339,6 +346,28 @@ describe("kernel — questionnaires", () => {
     });
     expect(ask.rows.size).toBe(0);
     expect(h.texts().at(-1)).toBe("Thanks!");
+  });
+
+  it("a final tap refused by core (chat_busy) keeps the questionnaire, answers included, for a retry", async () => {
+    const ask = fakeAskState();
+    const h = harness({ cfg: { askState: ask.store } });
+    h.runtime.loadHistory.mockResolvedValueOnce(askHistory("call1", questions));
+    await h.message("plan");
+    const data = h.of("question")[0]!.args[2] as { pick(i: number): string; done: string };
+    await h.action(data.pick(1), { card: "1", ackId: "k1" }); // Q1 answered → Q2 on screen
+    h.runtime.applyToolResult.mockRejectedValueOnce(Object.assign(new Error("busy"), { code: "chat_busy", retryAfterMs: 1000 }));
+    const data2 = h.of("question").at(-1)!.args[2] as { pick(i: number): string; done: string };
+    await h.action(data2.pick(0), { card: "2", ackId: "k2" });
+    await h.action(data2.done, { card: "2", ackId: "k3" }); // final submit → refused
+    expect(h.texts().at(-1)).toMatch(/still working/);
+    const kept = ask.rows.get("fake_b1_7")!;
+    expect(kept).toMatchObject({ toolCallId: "call1", cursor: 1, answers: { "Goal?": "Distance" }, selected: [0] });
+    // Chat free again: the same Done tap submits the full map.
+    await h.action(data2.done, { card: "2", ackId: "k4" });
+    expect(h.runtime.applyToolResult).toHaveBeenLastCalledWith(
+      expect.objectContaining({ output: { "Goal?": "Distance", "Days?": "Mon" } }),
+    );
+    expect(ask.rows.size).toBe(0);
   });
 
   it("a typed reply answers the question on screen instead of starting a turn", async () => {

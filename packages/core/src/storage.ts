@@ -42,6 +42,30 @@ export class ChatConflictError extends Error {
   }
 }
 
+/**
+ * Thrown by `createRun` / `claimRun` when the chat already has a LIVE active
+ * run — one turn per conversation is a storage-level invariant (a partial
+ * unique index in the shipped adapters), so two tabs, a webhook retry racing a
+ * reply, or a schedule firing mid-conversation can never interleave one
+ * history. `retryAfterMs` is the live run's remaining lease (or the stale
+ * timeout for a non-durable run). Stable `code` → the server maps it to 409.
+ */
+export class ChatBusyError extends Error {
+  readonly code = "chat_busy";
+  constructor(
+    readonly chatId: string,
+    /** Milliseconds until the live run's lease expires — when a retry can succeed at the latest. */
+    readonly retryAfterMs: number,
+  ) {
+    super(`A turn is already running in this chat; try again in ${Math.ceil(retryAfterMs / 1000)}s.`);
+    this.name = "ChatBusyError";
+  }
+}
+
+export function isChatBusyError(e: unknown): e is ChatBusyError {
+  return (e as { code?: string } | null)?.code === "chat_busy";
+}
+
 export interface ChatRecord {
   id: string;
   /** Opaque ownership key the adapter scoped this row by (e.g. `tenant/user`). */
@@ -229,6 +253,12 @@ export interface StorageAdapter<P> {
 
   // runs (per-turn execution record)
   /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */
+  /**
+   * Open a non-durable run. ONE ACTIVE RUN PER CHAT: throws `ChatBusyError` if
+   * the chat already has a live active run. An active run with no lease that is
+   * older than the adapter's stale timeout is superseded (marked errored) first,
+   * so a crashed non-durable turn can't block its chat forever.
+   */
   createRun(
     principal: P,
     input: { chatId: string; agent: string; kind?: string },
@@ -245,6 +275,32 @@ export interface StorageAdapter<P> {
     owner: string;
     ttlMs: number;
   }): Promise<RunRecord>;
+  /**
+   * Open a turn ATOMICALLY: the run row (the one-active-run-per-chat check) and
+   * the messages that start it — a fresh user message, or the assistant message
+   * a decision / tool result just changed — in one transaction, so a refused
+   * turn persists nothing and a crash can never leave a run without its
+   * messages (or vice versa). Messages upsert by (chat, id) like `appendMessages`. With
+   * `lease`, the run is claimed durably like `claimRun`; without, like
+   * `createRun`. Optional for compatibility: the runtime falls back to run-
+   * then-message when an adapter doesn't implement it — but that fallback has a
+   * crash window (a run without its message), so a DURABLE adapter should
+   * implement `openTurn` atomically. The shipped adapters do, in every driver.
+   */
+  openTurn?(
+    principal: P,
+    input: {
+      chatId: string;
+      agent: string;
+      messages: AppMessage[];
+      lease?: { owner: string; ttlMs: number };
+    },
+  ): Promise<RunRecord>;
+  // ↑ Same one-active-run-per-chat rule as `createRun`: a live lease on another
+  //   run of this chat → `ChatBusyError`; an EXPIRED lease is superseded (the
+  //   new message moves the conversation on — the same rule as a new message
+  //   closing a pending approval) and the fencing token bumped so the old
+  //   worker's late writes are refused.
   /**
    * Extend our lease by `ttlMs`. Fenced: the extension only applies while
    * `(owner, fencingToken)` still match the row, so a stale holder whose run was
@@ -271,6 +327,8 @@ export interface StorageAdapter<P> {
     owner: string,
     ttlMs: number,
   ): Promise<RunRecord | null>;
+  // ↑ Also null when the chat has since started a NEWER active run (the crashed
+  //   turn was superseded by a fresh message) — resuming it would interleave.
   /**
    * Patch a run. With `guard`, the write only applies while `(leaseOwner,
    * fencingToken)` still match — stale-writer protection (fencing). Without it,

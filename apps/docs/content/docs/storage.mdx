@@ -86,6 +86,8 @@ try {
 
 `appendMessages` is the write path. Approval decisions, tool results and compaction boundaries are all recorded as appended message state — the log is the source of truth, and history is not rewritten in place.
 
+**One active run per chat.** `createRun` and `claimRun` throw `ChatBusyError` (code `chat_busy`) when the chat already has a live active run — a lease that hasn't expired, or for non-durable runs an active row younger than the adapter's stale timeout. An expired one is superseded first (marked errored, fencing token bumped), so a crashed turn never blocks its chat. The shipped adapters enforce this with a partial unique index on `(chat_id) WHERE status = 'active'`, so it holds under concurrency, not just in the happy path. `reclaimRun` returns null for a run whose chat has since started a newer active run. `openTurn` (optional, implemented by the shipped adapters) opens the run and appends the user message in one transaction, so a refused turn persists nothing and a crash can't leave a run without its message. This is what keeps two tabs, a webhook retry racing a reply, or a schedule firing mid-conversation from interleaving one history.
+
 ## Using the shipped adapter
 
 ```ts

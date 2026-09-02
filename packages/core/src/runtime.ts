@@ -48,6 +48,7 @@ import {
   type LatchLimits,
   type LimitPolicy,
   type LimitUsage,
+  type LimitWindowRef,
 } from "./limits.js";
 import type {
   ChatRecord,
@@ -1991,7 +1992,11 @@ export function createRuntime<P, RC = unknown>(
   /** What a turn was admitted under: its policies and the token room it started with. */
   interface Admitted {
     policies: LimitPolicy[];
+    /** The windows the reservation landed in — released against THESE, not re-derived (a window may have turned over since). */
+    refs: LimitWindowRef[];
     remainingTokens: number | undefined;
+    /** True when this admission reserved a turn — released if the turn never opens. */
+    counted: boolean;
   }
 
   /**
@@ -2046,7 +2051,29 @@ export function createRuntime<P, RC = unknown>(
         throw new LimitExceededError(over.policy, over.usage, over.retryAfterMs);
       }
     }
-    return { policies, remainingTokens: remainingTokens(policies, usage, now) };
+    return { policies, refs, remainingTokens: remainingTokens(policies, usage, now), counted: opts.countTurn };
+  }
+
+  /**
+   * Give a reserved turn back when the turn never opened (busy chat, agent
+   * resolution or run creation failed): the window counts turns that RAN, or a
+   * user retrying into a busy chat would exhaust their own turn cap.
+   */
+  async function releaseReservation(admitted: Admitted | undefined): Promise<void> {
+    if (!admitted?.counted || !config.limits) return;
+    await config.limits.store
+      .add(admitted.refs.map((ref) => ({ ...ref, usage: { turns: -1 } })))
+      .catch((e) => console.error("[limits] reservation release failed:", e));
+  }
+
+  /** Run `open` for a freshly admitted turn; on failure the reservation is released and the error rethrown. */
+  async function withReservation<T>(admitted: Admitted | undefined, open: () => Promise<T>): Promise<T> {
+    try {
+      return await open();
+    } catch (e) {
+      await releaseReservation(admitted);
+      throw e;
+    }
   }
 
   /** `admitTurn` for continuations (see above). */
@@ -2063,6 +2090,36 @@ export function createRuntime<P, RC = unknown>(
     await config.limits.store
       .add(admitted.policies.map((p) => ({ ...windowRef(p, now), usage })))
       .catch((e) => console.error("[limits] settlement failed:", e));
+  }
+
+  /**
+   * Open a turn: the run (one active per chat — `ChatBusyError` if not ours to
+   * run) and the user message that starts it. Atomic when the adapter offers
+   * `openTurn`; otherwise the run first, then the message, so a refusal still
+   * persists nothing (the crash window between the two writes is the trade-off
+   * an adapter without `openTurn` accepts).
+   */
+  async function openTurn(
+    principal: P,
+    chatId: string,
+    agentName: string,
+    messages: AppMessage[],
+  ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
+    if (storage.openTurn) {
+      const run = await storage.openTurn(principal, {
+        chatId,
+        agent: agentName,
+        messages,
+        ...(dur.enabled ? { lease: { owner: dur.instanceId, ttlMs: dur.leaseTtlMs } } : {}),
+      });
+      return {
+        run,
+        lease: dur.enabled ? { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } : undefined,
+      };
+    }
+    const opened = await openRun(principal, chatId, agentName);
+    if (messages.length > 0) await storage.appendMessages(chatId, messages);
+    return opened;
   }
 
   async function openRun(
@@ -2129,9 +2186,12 @@ export function createRuntime<P, RC = unknown>(
     // Limits gate BEFORE anything is persisted: a refused turn leaves no
     // trace (the client gets 429 and can retry when the window turns over).
     const admitted = await admitTurn(principal, agentName, "chat");
-    // persist the user message up front (crash-safe), then open the run
-    await storage.appendMessages(resolvedChatId, [message]);
-    const { run, lease } = await openRun(principal, resolvedChatId, agentName);
+    // Run + message open together (atomically where the adapter can): a chat
+    // with a live turn refuses (`ChatBusyError` → 409) and the message never
+    // lands in history — the client retries it (with its turn reservation released).
+    const { run, lease } = await withReservation(admitted, () =>
+      openTurn(principal, resolvedChatId, agentName, [message]),
+    );
 
     return buildTurn({
       resolvedChatId,
@@ -2389,14 +2449,14 @@ export function createRuntime<P, RC = unknown>(
     // submit (double-tapped button, redelivered webhook) a no-op instead of a
     // spurious extra turn.
     if (changed.length === 0) return new Response(null, { status: 200 });
-    await storage.appendMessages(chatId, changed);
 
     // Another client tool call in the SAME step may still be awaiting a result;
-    // re-running now would throw MissingToolResultsError. Wait for the rest.
-    // Scope this to the messages we just touched: a call abandoned turns ago is
-    // still `input-available` in stored history, and counting it would park
-    // every future resume in this chat forever.
+    // re-running now would throw MissingToolResultsError. Record this one and
+    // wait for the rest. Scope this to the messages we just touched: a call
+    // abandoned turns ago is still `input-available` in stored history, and
+    // counting it would park every future resume in this chat forever.
     if (hasPendingToolResult(changed)) {
+      await storage.appendMessages(chatId, changed);
       return new Response(null, { status: 200 });
     }
 
@@ -2407,7 +2467,11 @@ export function createRuntime<P, RC = unknown>(
       turnContext,
     );
     const admitted = await admitContinuation(principal, chat.agent, "decision");
-    const { run, lease } = await openRun(principal, chatId, chat.agent);
+    // The result is persisted WITH the run (atomically where the adapter can):
+    // a busy chat refuses before anything is recorded, so the retry finds the
+    // call still unanswered and resumes it — persisting first would make the
+    // retry a "duplicate submit" no-op and lose the answer.
+    const { run, lease } = await openTurn(principal, chatId, chat.agent, changed);
 
     return buildTurn({
       resolvedChatId: chatId,
@@ -2739,17 +2803,14 @@ export function createRuntime<P, RC = unknown>(
       if (declined.length > 0) await storage.appendMessages(chatId, declined);
     }
     // Gate before the message persists — a refused schedule/subagent turn
-    // leaves nothing behind, same as handleChat.
+    // leaves nothing behind, same as handleChat. Same for a busy chat: open
+    // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
-    await storage.appendMessages(chatId, [o.message]);
-
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
-      o.agent,
-      o.principal,
-      undefined,
-      o.turnContext,
-    );
-    const { run, lease } = await openRun(o.principal, chatId, o.agent);
+    const { cfg, modelId, runtimeCtx, run, lease } = await withReservation(admitted, async () => {
+      const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext);
+      const opened = await openTurn(o.principal, chatId, o.agent, [o.message]);
+      return { ...resolved, ...opened };
+    });
     const onProgress = o.onProgress;
     const res = await buildTurn({
       resolvedChatId: chatId,

@@ -9,7 +9,7 @@ import type {
   Question,
   TranscribeAudio,
 } from "./types.js";
-import { consumeRun, isPendingApprovalError, pendingApprovals, pendingQuestion } from "./render.js";
+import { consumeRun, isChatBusyError, isPendingApprovalError, pendingApprovals, pendingQuestion } from "./render.js";
 import { nextAskStep, type AskEvent } from "./ask.js";
 import {
   CHANNEL_COMMANDS,
@@ -606,11 +606,34 @@ export function createTurnKernel<P, User, Ref>(
         });
         await renderRun(res, ctx);
       } catch (e) {
+        if (isChatBusyError(e)) {
+          // Core refused the resume (a turn is live in the chat): the session
+          // was already consumed to fence the submit — put it back, answers
+          // included, so the same tap works once the chat is free.
+          await restoreSession(ctx.chatId, session).catch((err) =>
+            console.error(`${tag} could not restore questionnaire after busy refusal:`, err),
+          );
+          return void (await say(user, STILL_WORKING_MESSAGE));
+        }
         console.error(`${tag} applyToolResult failed:`, e);
         await say(user, `⚠️ ${errorText(e).slice(0, 3000)}`);
       }
     });
     return { acked };
+  }
+
+  /** Re-create a finished session with its progress (`begin` starts at cursor 0; the fenced update fills it in). */
+  async function restoreSession(chatId: string, session: AskSession): Promise<void> {
+    const store = cfg.askState;
+    if (!store) return;
+    const { rev: _rev, promptRef, cursor, answers, selected, ...base } = session;
+    await store.begin(chatId, { ...base, cursor: 0, answers: {}, selected: [], ...(promptRef ? { promptRef } : {}) });
+    await store.update(chatId, session.toolCallId, 0, {
+      cursor,
+      answers,
+      selected,
+      ...(promptRef ? { promptRef } : {}),
+    });
   }
 
   // ── Inbound message → one agent turn ───────────────────────────────────────
@@ -792,6 +815,8 @@ export function createTurnKernel<P, User, Ref>(
       });
       await renderRun(res, rctx);
     } catch (e) {
+      // Core's own one-turn-per-chat rule refused: same answer as our lease.
+      if (isChatBusyError(e)) return void (await say(user, STILL_WORKING_MESSAGE));
       console.error(`${tag} runMessage failed:`, e);
       await say(user, `⚠️ ${errorText(e).slice(0, 3000)}`);
       // The turn was refused because a decision is still outstanding — re-post
@@ -880,6 +905,7 @@ export function createTurnKernel<P, User, Ref>(
         // a questionnaire the resumed turn went on to ask).
         await renderRun(res, ctx);
       } catch (e) {
+        if (isChatBusyError(e)) return void (await say(user, STILL_WORKING_MESSAGE));
         console.error(`${tag} applyApproval failed:`, e);
         await say(user, `⚠️ ${errorText(e).slice(0, 3000)}`);
       }

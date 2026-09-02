@@ -183,6 +183,42 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
   };
 }
 
+/**
+ * The runtime's typed refusals → HTTP. Every run-producing route (a message, an
+ * approval decision, a client-tool result) can meet any of these, so they all
+ * map through here instead of surfacing as a host 500:
+ *
+ *   pending_approval  409  a decision is outstanding — resolve it first
+ *   chat_busy         409  a turn is live in this chat — retry after `Retry-After`
+ *   chat_conflict     409  the client-chosen chat id exists and isn't yours
+ *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
+ */
+function refusalResponse(e: unknown): Response | undefined {
+  const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
+  const message = (fallback: string) => (e instanceof Error ? e.message : fallback);
+  const retryAfterMs = Number((e as { retryAfterMs?: unknown } | null)?.retryAfterMs ?? 0);
+  const withRetry = (body: Record<string, unknown>, status: number) =>
+    new Response(JSON.stringify({ ...body, retryAfterMs }), {
+      status,
+      headers: {
+        "content-type": "application/json",
+        "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+      },
+    });
+  switch (code) {
+    case "pending_approval":
+      return json({ error: message("awaiting approval decision"), code }, 409);
+    case "chat_busy":
+      return withRetry({ error: message("a turn is already running in this chat"), code }, 409);
+    case "chat_conflict":
+      return json({ error: message("chat id is not available"), code }, 409);
+    case "limit_exceeded":
+      return withRetry({ error: message("limit exceeded"), code }, 429);
+    default:
+      return undefined;
+  }
+}
+
 export function createLatchHandler<P>(
   config: LatchHandlerConfig<P>,
 ): LatchHandler {
@@ -391,15 +427,23 @@ export function createLatchHandler<P>(
         const body = (await request.json().catch(() => ({}))) as {
           decisions?: ApprovalDecision[];
         };
-        return rt.applyApproval({
-          chatId,
-          principal,
-          decisions: Array.isArray(body.decisions) ? body.decisions : [],
-          request,
-          // The body was consumed above — hand the parsed payload on so
-          // context.build never needs to re-read the spent Request.
-          turnContext: body,
-        });
+        try {
+          return await rt.applyApproval({
+            chatId,
+            principal,
+            decisions: Array.isArray(body.decisions) ? body.decisions : [],
+            request,
+            // The body was consumed above — hand the parsed payload on so
+            // context.build never needs to re-read the spent Request.
+            turnContext: body,
+          });
+        } catch (e) {
+          // A decision is a turn too: it can meet a busy chat (two clicks) or a
+          // spent budget, and must answer 409/429 like a message does.
+          const refused = refusalResponse(e);
+          if (refused) return refused;
+          throw e;
+        }
       }
 
       // POST agents/:agent/:id/tool-result  (client-handled tool, e.g. askUser)
@@ -409,15 +453,21 @@ export function createLatchHandler<P>(
           output?: unknown;
         };
         if (!body.toolCallId) return json({ error: "toolCallId is required" }, 400);
-        return rt.applyToolResult({
-          chatId,
-          principal,
-          toolCallId: body.toolCallId,
-          output: body.output,
-          request,
-          // See the approvals route: the parsed body doubles as turnContext.
-          turnContext: body,
-        });
+        try {
+          return await rt.applyToolResult({
+            chatId,
+            principal,
+            toolCallId: body.toolCallId,
+            output: body.output,
+            request,
+            // See the approvals route: the parsed body doubles as turnContext.
+            turnContext: body,
+          });
+        } catch (e) {
+          const refused = refusalResponse(e);
+          if (refused) return refused;
+          throw e;
+        }
       }
 
       // POST agents/:agent/:id
@@ -439,61 +489,8 @@ export function createLatchHandler<P>(
             turnContext: body,
           });
         } catch (e) {
-          // A new message arrived while the previous turn is still awaiting an
-          // approval decision. PendingApprovalError carries a stable `code` so
-          // we map it to 409 (the client should resolve the pending approval
-          // first) instead of letting it bubble to the host as a 500.
-          if (
-            e &&
-            typeof e === "object" &&
-            (e as { code?: unknown }).code === "pending_approval"
-          ) {
-            return json(
-              {
-                error:
-                  e instanceof Error ? e.message : "awaiting approval decision",
-                code: "pending_approval",
-              },
-              409,
-            );
-          }
-          // A budget is spent (the runtime's limits seam). 429 with Retry-After
-          // = when the window turns over, so a well-behaved client waits.
-          if (e && typeof e === "object" && (e as { code?: unknown }).code === "limit_exceeded") {
-            const retryAfterMs = Number((e as { retryAfterMs?: unknown }).retryAfterMs ?? 0);
-            return new Response(
-              JSON.stringify({
-                error: e instanceof Error ? e.message : "limit exceeded",
-                code: "limit_exceeded",
-                retryAfterMs,
-              }),
-              {
-                status: 429,
-                headers: {
-                  "content-type": "application/json",
-                  "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
-                },
-              },
-            );
-          }
-          // A client-supplied chat id collided with an existing (typically
-          // foreign-owned) chat: the scoped getChat missed, createChat hit the
-          // PK. ChatConflictError carries a stable `code` — map it to 409 so
-          // the client can pick a different id, instead of a 500.
-          if (
-            e &&
-            typeof e === "object" &&
-            (e as { code?: unknown }).code === "chat_conflict"
-          ) {
-            return json(
-              {
-                error:
-                  e instanceof Error ? e.message : "chat id is not available",
-                code: "chat_conflict",
-              },
-              409,
-            );
-          }
+          const refused = refusalResponse(e);
+          if (refused) return refused;
           throw e;
         }
       }

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   text,
@@ -85,6 +86,8 @@ export const runs = pgTable(
   (t) => [
     index("latch_runs_chat_idx").on(t.chatId),
     index("latch_runs_reaper_idx").on(t.status, t.leaseExpiresAt),
+    // One ACTIVE run per chat — the concurrency invariant (see ChatBusyError).
+    uniqueIndex("latch_runs_one_active_per_chat").on(t.chatId).where(sql`status = 'active'`),
   ],
 );
 

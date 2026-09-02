@@ -13,6 +13,7 @@ import {
   sql,
 } from "drizzle-orm";
 import {
+  ChatBusyError,
   ChatConflictError,
   type AppMessage,
   type ChatRecord,
@@ -54,19 +55,44 @@ export interface SharedAdapterOptions<P> {
    * callback).
    */
   withTx: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
+  /**
+   * Run independent statements in ONE transaction, returning each statement's
+   * result in order (drizzle `db.batch`). Preferred by `openTurn` where the
+   * dialect offers it and `withTx` isn't a real transaction (libsql).
+   */
+  batch?: (stmts: any[]) => Promise<any[]>;
+  /** A synchronous transaction (sync SQLite drivers): the builders' `.run()`/`.get()` inside it are atomic. */
+  syncTx?: <T>(fn: (tx: any) => T) => T;
 }
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
-/** True if a driver error is a primary-key / unique-constraint violation. */
+/**
+ * True if a driver error is a primary-key / unique-constraint violation. Walks
+ * the cause chain: drizzle wraps driver errors in a "Failed query: …" error and
+ * the constraint code lives on the cause (libsql `SQLITE_CONSTRAINT_UNIQUE`, pg
+ * `23505`), two levels down for libsql.
+ */
 export function isUniqueViolation(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /unique constraint|primary key|duplicate key|sqlite_constraint/i.test(
-    message,
-  );
+  let e: unknown = error;
+  for (let depth = 0; e && depth < 5; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && (/^SQLITE_CONSTRAINT/i.test(code) || code === "23505")) return true;
+    const message = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+    if (/unique constraint|primary key|duplicate key|sqlite_constraint/i.test(message)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }
+
+/**
+ * How long a NON-durable (T1) active run may stay active before a new turn in
+ * its chat supersedes it. T1 has no heartbeat, so without this a crashed T1
+ * turn would block its chat forever. Durable runs use their lease instead.
+ */
+export const STALE_RUN_MS = 10 * 60_000;
 
 /** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
 function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
@@ -138,6 +164,121 @@ export function makeStorageAdapter<P>(
       .from(s.chats)
       .where(and(eq(s.chats.id, id), eq(s.chats.owner, ownerKey(principal))));
     return rows[0] ? rowToChat(rows[0]) : null;
+  }
+
+  /** The instant a live active run stops counting as live (lease, or T1 stale timeout). */
+  const liveUntil = sql`coalesce(${s.runs.leaseExpiresAt}, ${s.runs.startedAt} + ${STALE_RUN_MS})`;
+
+  /**
+   * One active run per chat, self-healing: an active run whose lease (or T1
+   * stale window) has expired is superseded — marked errored, fencing token
+   * bumped so its worker's late writes are refused — before a new run opens.
+   * A crashed turn therefore never blocks its chat; the next message moves the
+   * conversation on, the same rule as a new message closing a pending approval.
+   */
+  const supersedeStaleQuery = (chatId: string, now: number, exec: any = db) =>
+    exec
+      .update(s.runs)
+      .set({
+        status: "errored" as RunStatus,
+        error: "superseded: lease expired",
+        endedAt: now,
+        leaseOwner: null,
+        fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
+      })
+      .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active"), lt(liveUntil, now)));
+  async function supersedeStale(exec: any, chatId: string, now: number): Promise<void> {
+    await supersedeStaleQuery(chatId, now, exec);
+  }
+
+  /** One message upsert (seq computed in-statement) as a query, for batching. */
+  const messageInsert = (chatId: string, m: AppMessage, exec: any = db) =>
+    exec
+      .insert(s.messages)
+      .values({
+        id: m.id,
+        chatId,
+        runId: null,
+        seq: sql`(select coalesce(max(${s.messages.seq}), -1) + 1 from ${s.messages} where ${s.messages.chatId} = ${chatId})` as unknown as number,
+        role: m.role,
+        parts: m.parts,
+        metadata: m.metadata ?? null,
+        createdAt: m.metadata?.createdAt ?? Date.now(),
+      })
+      // Existing message (same chat + id) → update content only; seq is
+      // preserved. Conflict target is the composite PK — a same-id row in
+      // ANOTHER chat is a different row, never overwritten from here.
+      .onConflictDoUpdate({
+        target: [s.messages.chatId, s.messages.id],
+        set: { parts: m.parts, metadata: m.metadata ?? null },
+      });
+
+  /**
+   * Insert a run row. A LIVE active run in the chat trips the partial unique
+   * index → a placeholder `ChatBusyError` (retryAfterMs 0). The caller fills
+   * in the lease's remaining time OUTSIDE the transaction, because on Postgres
+   * a failed statement aborts the transaction and nothing can be read in it.
+   */
+  async function insertRun(exec: any, row: Record<string, unknown>): Promise<any> {
+    try {
+      const got = await exec.insert(s.runs).values(row).returning();
+      return got[0]!;
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      throw new ChatBusyError(String(row.chatId), 0);
+    }
+  }
+
+  /** The busy refusal with the live run's remaining time, computed on the main connection. */
+  async function busyError(chatId: string, now: number): Promise<ChatBusyError> {
+    const live: any[] = await db
+      .select({ until: liveUntil })
+      .from(s.runs)
+      .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active")))
+      .limit(1);
+    const until = live[0] ? Number(live[0].until) : now;
+    return new ChatBusyError(chatId, Math.max(1, until - now));
+  }
+
+  /** `insertRun` for the non-transactional entry points: turn the placeholder into the real refusal. */
+  async function openRunRow(row: Record<string, unknown>, chatId: string, now: number): Promise<any> {
+    await supersedeStale(db, chatId, now);
+    try {
+      return await insertRun(db, row);
+    } catch (error) {
+      if (error instanceof ChatBusyError) throw await busyError(chatId, now);
+      throw error;
+    }
+  }
+
+  const runRow = (
+    principal: P,
+    input: { chatId: string; agent: string; kind?: string; lease?: { owner: string; ttlMs: number } },
+    now: number,
+  ): Record<string, unknown> => ({
+    id: newId("run"),
+    chatId: input.chatId,
+    agent: input.agent,
+    status: "active" as RunStatus,
+    identity: principal,
+    kind: input.kind,
+    startedAt: now,
+    ...(input.lease
+      ? {
+          leaseOwner: input.lease.owner,
+          leaseExpiresAt: now + input.lease.ttlMs,
+          fencingToken: 1,
+          heartbeatAt: now,
+          attempt: 1,
+        }
+      : {}),
+  });
+
+  /** Append messages on `exec` (db or tx): seq computed inside each INSERT, upsert by (chat, id), touch the chat. */
+  async function appendMessagesWith(exec: any, chatId: string, msgs: AppMessage[]): Promise<void> {
+    for (const m of msgs) await messageInsert(chatId, m, exec);
+    // Chat activity: keep `updatedAt` fresh so `listChats` orders by it.
+    await exec.update(s.chats).set({ updatedAt: Date.now() }).where(eq(s.chats.id, chatId));
   }
 
   return {
@@ -222,72 +363,69 @@ export function makeStorageAdapter<P>(
       // The next seq is computed INSIDE each INSERT (a single statement), so
       // two concurrent appenders can't both read the same max(seq) and then
       // write colliding rows — the statement is atomic, and the UNIQUE
-      // (chat_id, seq) index backstops it. `withTx` is the dialect's choice of
-      // batch boundary: Postgres wraps the batch in one transaction (a crash
-      // mid-batch can't leave a partial write); SQLite runs it sequentially,
-      // because this adapter also serves synchronous drivers (better-sqlite3)
-      // whose native transaction API rejects the async callback that async
-      // drivers (libsql) require.
-      await opts.withTx(async (tx) => {
-        const nextSeq = sql`(select coalesce(max(${s.messages.seq}), -1) + 1 from ${s.messages} where ${s.messages.chatId} = ${chatId})`;
-        for (const m of msgs) {
-          await tx
-            .insert(s.messages)
-            .values({
-              id: m.id,
-              chatId,
-              runId: null,
-              seq: nextSeq as unknown as number,
-              role: m.role,
-              parts: m.parts,
-              metadata: m.metadata ?? null,
-              createdAt: m.metadata?.createdAt ?? Date.now(),
-            })
-            // Existing message (same chat + id) → update content only; seq is
-            // preserved. Conflict target is the composite PK — a same-id row in
-            // ANOTHER chat is a different row, never overwritten from here.
-            .onConflictDoUpdate({
-              target: [s.messages.chatId, s.messages.id],
-              set: { parts: m.parts, metadata: m.metadata ?? null },
-            });
+      // (chat_id, seq) index backstops it. `withTx` is the dialect's batch
+      // boundary: a real transaction where the driver is async (Postgres,
+      // libsql), sequential statements on synchronous better-sqlite3.
+      await opts.withTx((tx) => appendMessagesWith(tx, chatId, msgs));
+    },
+
+    /**
+     * Run + first message in ONE transaction: a busy chat persists nothing, and
+     * a crash can't leave a run without its message. The busy placeholder from
+     * `insertRun` rolls the transaction back; the real refusal (with the live
+     * lease's remaining time) is built on the main connection afterwards.
+     */
+    async openTurn(principal, input) {
+      const now = Date.now();
+      const row = runRow(principal, input, now);
+      try {
+        if (opts.batch) {
+          // The statements are independent (the run id is minted here), so a
+          // batch is a transaction without an interactive connection.
+          const results = await opts.batch([
+            supersedeStaleQuery(input.chatId, now),
+            db.insert(s.runs).values(row).returning(),
+            ...input.messages.map((m) => messageInsert(input.chatId, m)),
+            db.update(s.chats).set({ updatedAt: now }).where(eq(s.chats.id, input.chatId)),
+          ]);
+          return rowToRun((results[1] as any[])[0]);
         }
-        // Chat activity: keep `updatedAt` fresh so `listChats` orders by it.
-        await tx.update(s.chats).set({ updatedAt: Date.now() }).where(eq(s.chats.id, chatId));
-      });
+        if (opts.syncTx) {
+          const got = opts.syncTx((tx) => {
+            supersedeStaleQuery(input.chatId, now, tx).run();
+            const inserted = tx.insert(s.runs).values(row).returning().get();
+            for (const m of input.messages) messageInsert(input.chatId, m, tx).run();
+            tx.update(s.chats).set({ updatedAt: now }).where(eq(s.chats.id, input.chatId)).run();
+            return inserted;
+          });
+          return rowToRun(got);
+        }
+        // Real transaction (Postgres). An adapter that is neither batch- nor
+        // sync-capable falls through to `withTx`, whose atomicity is its own.
+        const inserted = await opts.withTx(async (tx) => {
+          await supersedeStale(tx, input.chatId, now);
+          const got = await insertRun(tx, row);
+          await appendMessagesWith(tx, input.chatId, input.messages);
+          return got;
+        });
+        return rowToRun(inserted);
+      } catch (error) {
+        if (error instanceof ChatBusyError || isUniqueViolation(error)) {
+          throw await busyError(input.chatId, now);
+        }
+        throw error;
+      }
     },
 
     async createRun(principal, input) {
       const now = Date.now();
-      const row = {
-        id: newId("run"),
-        chatId: input.chatId,
-        agent: input.agent,
-        status: "active" as RunStatus,
-        identity: principal,
-        kind: input.kind,
-        startedAt: now,
-      };
-      const got = await db.insert(s.runs).values(row).returning();
-      return rowToRun(got[0]!);
+      return rowToRun(await openRunRow(runRow(principal, input, now), input.chatId, now));
     },
 
     async claimRun(input) {
       const now = Date.now();
-      const row = {
-        id: newId("run"),
-        chatId: input.chatId,
-        agent: input.agent,
-        status: "active" as RunStatus,
-        identity: input.principal,
-        leaseOwner: input.owner,
-        leaseExpiresAt: now + input.ttlMs,
-        fencingToken: 1,
-        heartbeatAt: now,
-        attempt: 1,
-        startedAt: now,
-      };
-      const got = await db.insert(s.runs).values(row).returning();
-      return rowToRun(got[0]!);
+      const row = runRow(input.principal, { chatId: input.chatId, agent: input.agent, lease: { owner: input.owner, ttlMs: input.ttlMs } }, now);
+      return rowToRun(await openRunRow(row, input.chatId, now));
     },
 
     async heartbeatRun(id, owner, ttlMs, fencingToken) {
@@ -311,7 +449,9 @@ export function makeStorageAdapter<P>(
 
     async reclaimRun(id, owner, ttlMs) {
       const now = Date.now();
-      const updated = await db
+      let updated: any[];
+      try {
+        updated = await db
         .update(s.runs)
         .set({
           status: "active" as RunStatus,
@@ -336,6 +476,13 @@ export function makeStorageAdapter<P>(
           ),
         )
         .returning();
+      } catch (error) {
+        // The chat moved on: a fresh message superseded this crashed turn and
+        // opened a newer active run (one active per chat). Resuming the old one
+        // would interleave — it stays errored, and nobody owns it.
+        if (isUniqueViolation(error)) return null;
+        throw error;
+      }
       return updated[0] ? rowToRun(updated[0]) : null;
     },
 

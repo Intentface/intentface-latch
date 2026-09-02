@@ -7,6 +7,7 @@ import { createPostgresMemoryJobStore } from "./memory-job-store.pg.js";
 import { memoryJobStoreSmoke } from "./memory-job-store.smoke.shared.js";
 import { scheduleSmoke } from "./schedule.smoke.shared.js";
 import { limitStoreSmoke } from "./limit-store.smoke.shared.js";
+import { runLeaseSmoke } from "./run-lease.smoke.shared.js";
 import { createPostgresLimitStore } from "./limit-store.pg.js";
 import * as schema from "./schema.pg.js";
 
@@ -112,6 +113,7 @@ async function main() {
   await scheduleSmoke({ store, me, other: { org: "org_b", user: "user_2" }, assert });
 
   // Memory job store: extraction/consolidation state machine + usage.
+  await runLeaseSmoke({ store, principal: me, assert });
   await limitStoreSmoke({ limits: createPostgresLimitStore(db), assert });
   await memoryJobStoreSmoke({
     jobs: createPostgresMemoryJobStore(db),
