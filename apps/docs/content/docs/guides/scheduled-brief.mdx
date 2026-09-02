@@ -1,0 +1,84 @@
+---
+title: A scheduled brief delivered to a channel
+description: Cron-driven agent runs, claimed exactly once across nodes, delivered into the conversation the user actually reads.
+---
+
+A schedule runs an agent on a cron expression, or once at a time, under the principal that created it. What makes it a product feature rather than a background job is *delivery*: the fire can run inside the user's own Telegram or WhatsApp conversation, or a Slack thread, so the brief lands where they will read it and they can reply to it.
+
+**What it gives you.** Daily briefs, weekly reports, monitors that only speak when something changed; agents that schedule themselves from a conversation ("remind me Friday"); delivery into the thread the person already talks in; and a schedule that removes itself when its owner leaves the org.
+
+## The shortest working version
+
+```ts
+await runtime.schedule({
+  principal,
+  agent: "reporter",
+  cron: "0 8 * * 1-5",          // null = one-shot, fired on the next tick
+  timezone: "Europe/Helsinki",  // "8am" means the user's 8am
+  prompt: "Summarise yesterday's signups and anything unusual.",
+  delivery: { kind: "telegram", botId: "b1" }, // opaque to core — the host reads it
+});
+```
+
+Something has to make time pass. On a long-lived process `createLatchApp` runs an in-process cron; on serverless, point a platform cron at one route:
+
+```ts
+export async function POST(request: Request) {
+  assertCronSecret(request); // yours — this route is system-wide
+  return Response.json(await runtime.cron()); // fires due schedules, then reaps + resumes crashed runs
+}
+```
+
+Core needs a cron evaluator and deliberately ships none. `createLatchApp` supplies one (croner); with `createRuntime` you pass `cron: (expr, afterMs, timezone) => nextRunMs`.
+
+## Delivering into a conversation
+
+By default a fire runs in a fresh chat and the answer appears in the web chat list. To deliver it somewhere, supply `runSchedule` and own the fire:
+
+```ts
+createRuntime({
+  // …
+  runSchedule: async ({ schedule, principal }) => {
+    const target = parseDelivery(schedule.delivery); // yours; core never reads it
+    if (!target) return false;                        // fall through to the default
+    const { chatId, parked } = await deliver({ schedule, principal, target });
+    return { handled: true, chatId, parked };
+  },
+});
+```
+
+The platform's implementation (`apps/latch-platform/src/lib/schedule-delivery.ts`) is the reference: a Telegram or WhatsApp target replays the prompt into the user's current conversation with that bot through the channel kernel; a Slack target posts an anchor message and runs the turn threaded under it. Return `true` only when you ran *and* delivered; anything else falls back to a fresh chat so a stale target never loses the fire.
+
+Agents can schedule themselves. The harness tools `create_schedule` and `list_delivery_channels` let an agent, asked in a Telegram DM, create a recurring brief delivered back into that same DM — the target is derived from the conversation the request came from, never named by the model.
+
+## What happens underneath
+
+1. `runtime.cron()` claims every due schedule across all tenants, each exactly once (an atomic row transition), and advances `nextRunAt` whatever happens next.
+2. For each, the stored identity blob is rebuilt into a principal (`reconstructPrincipal`), and the fire runs as that principal — the one who created the schedule.
+3. With a delivery target, the host's `runSchedule` re-validates the target *now*, runs the turn in the delivery conversation, and reports where it ran.
+4. The run is a normal turn: priced, persisted, subject to approvals and limits. Telemetry tags it `trigger: "schedule"`.
+
+## Where this gets hard
+
+- **Time zones.** "Every day at 8" is meaningless without one. Schedules carry an IANA zone and the evaluator interprets the cron in it; UTC only when none is set.
+- **Many nodes, one fire.** Claiming a due schedule is a single-row transition, so every node can run `cron()` at once and each schedule still fires once.
+- **The fire meets an approval.** A gated tool in an unattended run *parks*: tokens spent, no answer, nobody to decide. `runDue` counts these in `parked` and logs them on the tick they happen. `onParked` decides what the next occurrence does while the previous one waits — `"skip"` by default, so a recurring schedule can't mint a new parked chat every tick.
+- **The owner left the org.** A schedule's principal is a snapshot. Every fire re-checks membership; a departed member's schedule deletes itself instead of running forever under a stale identity. Channel targets re-check bot status, identity link and personal-agent ownership too.
+- **Where the DM is.** The delivery target is derived from the user's identity row at fire time, never stored on the schedule — a stored chat id would be a confused deputy waiting to happen.
+- **The user is mid-conversation when the brief arrives.** One turn per conversation is a storage rule; the fire is refused and the user is told it is still working. The occurrence is consumed, so nothing hot-loops.
+- **A run that keeps dying.** `maxAttempts` caps resume attempts; a poison run stops being retried instead of looping.
+- **"Run now" that drifts from cron.** `runScheduleNow` makes the schedule due and lets it fire through the same path — there is no second code path to diverge.
+
+## See it running
+
+```bash
+pnpm --filter @intentface/latch-example smoke:scheduler   # an interval sweep reaps + resumes a stuck run
+pnpm --filter latch-platform exec vitest run schedule-delivery   # the delivery gate: every refusal has a case
+```
+
+## Next
+
+- [Operations: schedules](/docs/operations#schedules) — `onParked`, `parked`, `runSchedule`'s return shape
+- [Guide: an agent that asks before acting](/docs/guides/approvals) — what a parked fire is waiting on
+- [Packages: latch-channels](/docs/packages#latch-channels) — the kernel a DM delivery replays through
+- [Hosting: the cron route](/docs/hosting#the-cron-route) — guarding the system-wide entry point

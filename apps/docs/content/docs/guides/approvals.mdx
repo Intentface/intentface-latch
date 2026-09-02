@@ -1,0 +1,78 @@
+---
+title: An agent that asks before acting
+description: Gate a tool, render the approval, resume from any device — with no connection held open while the human decides.
+---
+
+An approval pauses a run at a tool call with consequences and waits for a human. What is unusual about Latch's version is *where* the pause lives: the pending approval is a message part in the conversation, not an open request, a websocket or a queue item. So the answer can come tomorrow, from another device, after a deploy, and the run resumes exactly where it paused.
+
+**What it gives you.** Agents that can refund, send, delete and pay without being trusted blindly; approvals that survive connections and deploys; the same gate for a subagent three levels deep and for a scheduled run nobody is watching.
+
+## The shortest working version
+
+```ts
+import { defineAgent } from "@intentface/latch-core";
+import { tool } from "ai";
+import { z } from "zod";
+
+const support = defineAgent<Principal>({
+  model,
+  instructions: "You help with refunds. Confirm the amount before refunding.",
+  tools: {
+    refund: tool({
+      description: "Refund a customer.",
+      inputSchema: z.object({ customerId: z.string(), amountCents: z.number() }),
+      execute: async (input) => payments.refund(input),
+    }),
+  },
+  // The gate. A call to `refund` ends the turn and waits.
+  toolApproval: { refund: "user-approval" },
+});
+```
+
+Deciding is an ordinary request:
+
+```ts
+// POST /agents/support/:chatId/approvals   (or runtime.applyApproval)
+{ "decisions": [{ "approvalId": "<from the approval-requested part>", "approved": true }] }
+```
+
+Approved: the tool executes and the turn continues, streamed back as the continuation of the same assistant message. Denied: the tool never runs, the model is told, and it says what it will do instead. A denial is an answer, not a cancel.
+
+## What happens underneath
+
+1. The model calls `refund`. The tool loop stops instead of executing it.
+2. The assistant message is persisted with a part in `state: "approval-requested"` carrying `approval.id`. The run's status becomes `awaiting_input`. That is all the state there is — no process is waiting.
+3. Your client renders that part as a card. [The client side](/docs/client) lists what it owes: mirror the decision locally, seed the continuation reader with the message id, check the response is a stream.
+4. A decision arrives. The runtime records it on the part, opens a new run in the chat, and re-runs the agent from history. The approved tool runs now.
+5. Telemetry sees a run that finished as `awaiting_input`, with the `trigger` that started it — `chat`, `schedule`, `subagent` — so "a scheduled fire parked and nobody is there" is a plain hook.
+
+## Where this gets hard
+
+Each of these is a decision Latch has already made; you inherit it by using the gate.
+
+- **The user ignores the card and types something else.** The new message *is* the decision: the gate closes as declined and the message proceeds. Refusing the message until they click is what wedges chats whose gate could never be satisfied.
+- **The card is stale.** Answered in another tab, or superseded by a later turn. A tapped approval is checked against fresh history before it is applied; a card for an approval that no longer exists is retired, never pushed through to a raw "unknown chat" error.
+- **Two gated calls in one step.** The turn cannot resume until both are decided. The first decision returns an empty `200`; the remaining card stays live for its own decision.
+- **Who may click.** In a shared Slack thread only the person whose turn raised the gate may decide, because the tool runs with the requester's credentials. Slack buttons are signed and bound to that actor.
+- **A gated tool inside a subagent.** The approval bubbles up to the human at the top as a part on the parent's message; the decision routes back down and the subagent's answer is folded into the parent's tool result. Delegation never creates an approval the user cannot see.
+- **Nobody is there.** A scheduled or programmatic run reaching a gate *parks*: tokens spent, no answer, `status: "awaiting_input"` with `trigger: "schedule"`. `runAgent` defaults to `blockGated: true`, stubbing gated tools so an unattended test run has no side effects; set it `false` deliberately when a scheduled report must actually send.
+- **Which tools need a gate.** Connection tools bring their own answer: an MCP tool marked destructive or non-read-only arrives gated from its annotations. You never enumerate them.
+- **OAuth connects are approvals too.** An agent needing a connection the user has not authorised calls a synthetic `connect_<name>` tool, which parks like any gate. The user authorises in the browser; the principal is pinned into the flow when it starts and never read back from the redirect, so the grant cannot land on whoever completes the callback.
+- **Two clicks on the same card.** The resume is a turn; a second one meets the one-active-run-per-chat rule and is told the chat is busy rather than running twice.
+
+## See it running
+
+```bash
+pnpm --filter @intentface/latch-example smoke:approval           # gate → await → approve runs / deny blocks
+pnpm --filter @intentface/latch-example smoke:subagent-approval  # a sub gate bubbles to the parent
+pnpm --filter @intentface/latch-example smoke:oauth              # connect_<name> through the OAuth flow
+```
+
+All three run on a mock model with no API key; the sources are in `apps/example/src`.
+
+## Next
+
+- [The client side](/docs/client) — the continuation protocol your UI has to follow
+- [Operations](/docs/operations#human-in-the-loop) — the run-state view, `blockGated`, parked schedules
+- [Agents](/docs/agents#control) — `toolApproval` as a function, reasons, and per-tool policy
+- [Seams: connections](/docs/seams#connections--mcp-and-openapi-tools) — annotation-driven gating for MCP tools
