@@ -111,8 +111,13 @@ export const windowRef = (policy: LimitPolicy, now: number): LimitWindowRef => (
   windowMs: policy.windowMs,
 });
 
-/** Storage key for a (key, window) pair in `LimitStore.read`'s result. */
-export const usageKey = (ref: LimitWindowRef): string => `${ref.key}@${ref.windowStart}`;
+/**
+ * Map key for one window in `LimitStore.read`'s result. The window LENGTH is
+ * part of it: the same counter key may carry a per-hour and a per-day policy,
+ * and their aligned windows share a start on the hour.
+ */
+export const usageKey = (ref: LimitWindowRef): string =>
+  `${ref.key}@${ref.windowStart}/${ref.windowMs}`;
 
 const ZERO: LimitUsage = { turns: 0, tokens: 0, cost: 0 };
 

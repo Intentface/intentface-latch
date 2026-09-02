@@ -3,7 +3,8 @@ import type { LimitStore, LimitUsage, LimitWindowRef } from "@intentface/latch-c
 import { usageKey } from "@intentface/latch-core";
 
 /**
- * Dialect-shared `LimitStore`: one row per (key, window). `add` is a single
+ * Dialect-shared `LimitStore`: one row per (key, windowStart, windowMs) — the
+ * same key may carry several window lengths whose starts coincide. `add` is a single
  * upsert per entry with `SET n = n + excluded.n`, so concurrent turns settling
  * into the same window never lose an increment. Both dialects support the
  * query-builder surface used here.
@@ -21,7 +22,9 @@ export function makeLimitStore(db: any, s: LimitSchema): LimitStore {
       const rows: any[] = await db
         .select()
         .from(t)
-        .where(or(...refs.map((r) => and(eq(t.key, r.key), eq(t.windowStart, r.windowStart)))));
+        .where(
+          or(...refs.map((r) => and(eq(t.key, r.key), eq(t.windowStart, r.windowStart), eq(t.windowMs, r.windowMs)))),
+        );
       const out: Record<string, LimitUsage> = {};
       for (const r of rows) {
         out[usageKey({ key: r.key, windowStart: Number(r.windowStart), windowMs: Number(r.windowMs) })] = {
@@ -43,7 +46,7 @@ export function makeLimitStore(db: any, s: LimitSchema): LimitStore {
           .insert(t)
           .values({ key: e.key, windowStart: e.windowStart, windowMs: e.windowMs, turns, tokens, cost, updatedAt: now })
           .onConflictDoUpdate({
-            target: [t.key, t.windowStart],
+            target: [t.key, t.windowStart, t.windowMs],
             set: {
               turns: sql`${t.turns} + ${turns}`,
               tokens: sql`${t.tokens} + ${tokens}`,

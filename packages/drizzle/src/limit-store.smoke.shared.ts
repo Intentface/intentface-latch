@@ -21,6 +21,13 @@ export async function limitStoreSmoke(args: {
   assert(u?.turns === 1 && u.tokens === 150 && Math.abs(u.cost - 0.75) < 1e-9, `limits: additive upsert (${JSON.stringify(u)})`);
   assert(usage[usageKey(other)]?.tokens === 120, "limits: second key kept apart");
 
+  // Same key, two window lengths whose starts coincide (0): separate counters.
+  const dayRef = { key: "org:org_a", windowStart: 0, windowMs: 24 * 3_600_000 };
+  const hourRef = { key: "org:org_a", windowStart: 0, windowMs: 3_600_000 };
+  await limits.add([{ ...hourRef, usage: { tokens: 7 } }]);
+  const both = await limits.read([dayRef, hourRef]);
+  assert(both[usageKey(dayRef)]?.tokens === 120 && both[usageKey(hourRef)]?.tokens === 7, "limits: windowMs is part of the identity");
+
   // A window that ended before `before` is pruned; a live one stays.
   await limits.prune!(now + 2 * MINUTE);
   const after = await limits.read([ref, other]);

@@ -225,7 +225,7 @@ export const limitCounters = pgTable(
     cost: doublePrecision("cost").notNull().default(0),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.key, t.windowStart] })],
+  (t) => [primaryKey({ columns: [t.key, t.windowStart, t.windowMs] })],
 );
 
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */

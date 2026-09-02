@@ -192,7 +192,8 @@ createRuntime({
     // Your principal, your keys: a team, a workspace, an API key, a plan tier…
     limitsFor: ({ principal, agent }) => [
       { key: `team:${principal.teamId}`, windowMs: DAY_MS, max: { tokens: 5_000_000 }, label: "your team's daily budget" },
-      { key: `member:${principal.memberId}`, windowMs: MINUTE_MS, max: { turns: 10 } },
+      // Only when a human is behind the turn — a shared/system principal has no member.
+      ...(principal.memberId ? [{ key: `member:${principal.memberId}`, windowMs: MINUTE_MS, max: { turns: 10 } }] : []),
       { key: `agent:${principal.teamId}:${agent}`, windowMs: DAY_MS, max: { cost: 20 } },
     ],
   },

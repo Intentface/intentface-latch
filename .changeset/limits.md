@@ -5,8 +5,8 @@
 ---
 
 Limits — per org / user / agent budgets on turns, tokens and cost.
-`createRuntime({ limits })` takes a `LatchLimits` seam: `limitsFor(principal,
-agent, trigger)` names the counters a turn counts against and their caps
+`createRuntime({ limits })` takes a `LatchLimits` seam: `limitsFor({ principal,
+agent, trigger })` names the counters a turn counts against and their caps
 (fixed, epoch-aligned windows), and a `LimitStore` holds the counters. The
 runtime refuses at admission with `LimitExceededError` (stable code
 `limit_exceeded`, `retryAfterMs`; the HTTP handler maps it to 429 with

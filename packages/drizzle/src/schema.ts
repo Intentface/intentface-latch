@@ -248,7 +248,9 @@ export const limitCounters = sqliteTable(
     cost: real("cost").notNull().default(0),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.key, t.windowStart] })],
+  // `windowMs` is part of the identity: the same key may carry a per-minute and
+  // a per-day policy, whose aligned windows share a start on the hour.
+  (t) => [primaryKey({ columns: [t.key, t.windowStart, t.windowMs] })],
 );
 
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */

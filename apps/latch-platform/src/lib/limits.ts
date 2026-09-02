@@ -72,8 +72,9 @@ export function platformLimits(db: Parameters<typeof createSqliteLimitStore>[0])
       }
       return policies;
     },
-    onRefused: ({ principal, agent, trigger, policy }) => {
-      console.warn(`[limits] refused ${trigger} turn of ${agent} for ${principal.orgId}: ${policy.key}`);
+    // Scope name only — the key carries org/user ids, which don't belong in logs.
+    onRefused: ({ agent, trigger, policy }) => {
+      console.warn(`[limits] refused ${trigger} turn of ${agent}: ${policy.label ?? policy.key.split(":")[0]}`);
     },
   };
 }

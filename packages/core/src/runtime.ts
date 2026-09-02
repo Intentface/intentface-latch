@@ -1898,8 +1898,13 @@ export function createRuntime<P, RC = unknown>(
           );
           // Only the winning writer reports (same rule as the completion
           // path): a stale worker whose fenced update did not apply is not
-          // the one that ended this run.
-          if (settled) await reportRunFinished("errored", messages, failed ?? "aborted");
+          // the one that ended this run. The tokens WERE spent, though — a
+          // failing turn settles against its budgets like any other, or a
+          // token-only cap would never bound a run that keeps erroring.
+          if (settled) {
+            await settleLimits(admitted, { tokens: inputTokens + outputTokens, cost });
+            await reportRunFinished("errored", messages, failed ?? "aborted");
+          }
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
@@ -1991,15 +1996,22 @@ export function createRuntime<P, RC = unknown>(
 
   /**
    * The admission gate. Reads every policy's current window; the first exhausted
-   * one refuses the turn (`LimitExceededError`). Counts the turn itself unless
-   * `countTurn: false` (a resume — admitted when it first ran; its tokens still
-   * settle). Undefined when no limits are configured or none apply.
+   * one refuses the turn (`LimitExceededError`) and counts the turn itself —
+   * that is a FRESH turn (chat, schedule, subagent spawn, runAgent).
+   *
+   * A CONTINUATION is the second half of an already-admitted turn: a crash
+   * resume, an approval or tool-result decision, a subagent's decided gate. It
+   * passes `{ countTurn: false, refuse: false }`: never counted twice, never
+   * refused (the persisted decision would strand until the window turned
+   * over), but its tokens still settle and the mid-turn stop still applies —
+   * with an exhausted budget it gets one step and stops. Undefined when no
+   * limits are configured or none apply.
    */
   async function admitTurn(
     principal: P,
     agent: string,
     trigger: TurnTrigger,
-    opts: { countTurn: boolean } = { countTurn: true },
+    opts: { countTurn: boolean; refuse: boolean } = { countTurn: true, refuse: true },
   ): Promise<Admitted | undefined> {
     const limits = config.limits;
     if (!limits) return undefined;
@@ -2008,18 +2020,27 @@ export function createRuntime<P, RC = unknown>(
     const now = Date.now();
     const refs = policies.map((p) => windowRef(p, now));
     const usage = await limits.store.read(refs);
-    const over = exceededPolicy(policies, usage, now, { nextTurn: opts.countTurn });
-    if (over) {
-      await Promise.resolve(
-        limits.onRefused?.({ principal, agent, trigger, ...over }),
-      ).catch((e) => console.error("[limits] onRefused failed:", e));
-      throw new LimitExceededError(over.policy, over.usage, over.retryAfterMs);
+    if (opts.refuse) {
+      const over = exceededPolicy(policies, usage, now, { nextTurn: opts.countTurn });
+      if (over) {
+        // A host hook must never turn a refusal into a 500: isolate sync throws too.
+        try {
+          await limits.onRefused?.({ principal, agent, trigger, ...over });
+        } catch (e) {
+          console.error("[limits] onRefused failed:", e);
+        }
+        throw new LimitExceededError(over.policy, over.usage, over.retryAfterMs);
+      }
     }
     if (opts.countTurn) {
       await limits.store.add(refs.map((ref) => ({ ...ref, usage: { turns: 1 } })));
     }
     return { policies, remainingTokens: remainingTokens(policies, usage, now) };
   }
+
+  /** `admitTurn` for continuations (see above). */
+  const admitContinuation = (principal: P, agent: string, trigger: TurnTrigger) =>
+    admitTurn(principal, agent, trigger, { countTurn: false, refuse: false });
 
   /** Settlement: add this turn's tokens and cost to every policy it was admitted under. */
   async function settleLimits(
@@ -2135,9 +2156,7 @@ export function createRuntime<P, RC = unknown>(
     // A resume was admitted when the turn first ran — never refuse it (the
     // half-done work would strand), but its tokens still settle against the
     // same counters, and the mid-turn stop still applies.
-    const admitted = await admitTurn(principal, run.agent, "resume", { countTurn: false }).catch(
-      (e) => (e instanceof LimitExceededError ? undefined : Promise.reject(e)),
-    );
+    const admitted = await admitContinuation(principal, run.agent, "resume");
     // Re-run from persisted history and drive to completion server-side
     // (there's no client to consume the stream).
     const res = await buildTurn({
@@ -2306,7 +2325,7 @@ export function createRuntime<P, RC = unknown>(
       request,
       turnContext,
     );
-    const admitted = await admitTurn(principal, chat.agent, "decision");
+    const admitted = await admitContinuation(principal, chat.agent, "decision");
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -2376,7 +2395,7 @@ export function createRuntime<P, RC = unknown>(
       request,
       turnContext,
     );
-    const admitted = await admitTurn(principal, chat.agent, "decision");
+    const admitted = await admitContinuation(principal, chat.agent, "decision");
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -2809,7 +2828,7 @@ export function createRuntime<P, RC = unknown>(
       subChat.agent,
       principal,
     );
-    const admitted = await admitTurn(principal, subChat.agent, "decision");
+    const admitted = await admitContinuation(principal, subChat.agent, "decision");
     const { run, lease } = await openRun(principal, subChatId, subChat.agent);
     const res = await buildTurn({
       resolvedChatId: subChatId,

@@ -85,7 +85,9 @@ const DDL = [
      key TEXT NOT NULL, window_start INTEGER NOT NULL, window_ms INTEGER NOT NULL,
      turns INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0,
      updated_at INTEGER NOT NULL,
-     PRIMARY KEY (key, window_start))`,
+     PRIMARY KEY (key, window_start, window_ms))`,
+  // The prune predicate (`window_start + window_ms < ?`) as an expression index.
+  `CREATE INDEX IF NOT EXISTS idx_limit_counters_end ON latch_limit_counters (window_start + window_ms)`,
 ];
 
 /** Idempotent column adds for DBs created before a column existed. */
