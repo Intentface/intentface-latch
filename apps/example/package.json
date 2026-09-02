@@ -21,7 +21,6 @@
     "smoke:subagent-approval": "tsx --conditions development src/subagent-approval.smoke.ts",
     "smoke:writer": "tsx --conditions development src/writer.smoke.ts",
     "smoke:cost": "tsx --conditions development src/cost.smoke.ts",
-    "smoke:observability": "tsx --conditions development src/observability.smoke.ts",
     "smoke:projections": "tsx --conditions development src/projections.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },

@@ -8,8 +8,8 @@ import { createLatchHandler } from "./handler.js";
  * - `callback` rebuilds identity from the pin via `reconstructPrincipal` and
  *   never consults the live session — a degraded session at redirect time
  *   must not decide where credentials land.
- * - Stale pins are rejected (`flow_expired`); pre-pin legacy states fall back
- *   to `resolveContext(request, { oauthState })`.
+ * - Stale pins are rejected (`flow_expired`), and so is a callback with no pin
+ *   at all — the live session is never asked to stand in for a flow.
  */
 
 interface P {
@@ -27,7 +27,7 @@ function encodeState(payload: unknown): string {
 }
 
 function build(opts?: {
-  resolveContext?: (req: Request, extra?: { oauthState?: Record<string, unknown> }) => P | null;
+  resolveContext?: (req: Request) => P | null;
   reconstructPrincipal?: (identity: unknown, req: Request) => P | null | Promise<P | null>;
   oauthFlowMaxAgeMs?: number;
 }) {
@@ -127,19 +127,20 @@ describe("callback with a pinned principal", () => {
   });
 });
 
-describe("callback without a pin (legacy)", () => {
-  it("falls back to resolveContext with the decoded state", async () => {
-    const extras: unknown[] = [];
-    const { handler, finish } = build({
-      resolveContext: (_req, extra) => {
-        extras.push(extra);
-        return { orgId: "org_session", userId: "u1" };
+describe("callback without a pin", () => {
+  it("is rejected as expired — the session is never a stand-in for a flow", async () => {
+    const { handler, finish, resolveContext } = build({
+      resolveContext: () => {
+        throw new Error("resolveContext must not run on any callback");
       },
     });
     const res = await handler(callback(encodeState({ returnTo: "/x" })));
     expect(res?.status).toBe(302);
-    expect(extras).toEqual([{ oauthState: { returnTo: "/x" } }]);
-    expect(finish.mock.calls[0]![0]).toEqual({ orgId: "org_session", userId: "u1" });
+    const loc = res?.headers.get("location") ?? "";
+    expect(loc.startsWith("/x")).toBe(true);
+    expect(loc).toContain("error=flow_expired");
+    expect(resolveContext).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
   });
 });
 

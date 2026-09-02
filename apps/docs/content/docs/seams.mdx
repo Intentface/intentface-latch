@@ -143,40 +143,39 @@ createRuntime({
 
 The seam supplies per-run AI SDK telemetry options, an optional trace wrapper around the model call, and a post-turn hook. `latch-langfuse` implements it over a standard OpenTelemetry provider: one trace per run, its id derived deterministically from the run id, tagged by owner and agent. Omit the seam and nothing is traced, at zero cost.
 
-## Observability — plain event callbacks
+## Telemetry hooks — usage, analytics, and "someone needs to be told"
 
-Distinct from `telemetry` (which is the OTel/span plumbing). These are plain callbacks for analytics **and for operational notification** — they are the seam that tells you a turn needs a human:
+You don't need a tracer to use the seam. `LatchTelemetry` is also the place for plain callbacks: `onStep` after each generation step, `onRunFinished` after the turn is persisted. Every hook is guarded — a thrown or rejected hook is swallowed, so telemetry can never break a turn.
 
 ```ts
 createRuntime({
   // …
-  observability: {
-    onStep: (event) => metrics.increment("agent.step", { agent: event.agent }),
-    onFinish: (event) => analytics.track("turn_finished", event),
-    onError: (event) => log.error(event),
+  telemetry: {
+    onStep: (run, step) => metrics.increment("agent.step", { agent: run.agent }),
+    onRunFinished: (run, outcome) => analytics.track("turn_finished", { ...run, ...outcome }),
   },
 });
 ```
 
-Every event carries `principal`, `chatId`, `runId`, `agent`, `modelId`, `depth` and `trigger`; `onFinish` adds `status`, `usage`, `cost` and the turn's messages. Two fields make the hook actionable rather than merely statistical:
+`run` carries `principal`, `chatId`, `runId`, `agent`, `modelId`, `startedAt`, `depth`, `trigger`, and the subagent linkage (`parentRunId`, `rootChatId`); `outcome` adds `status`, `usage`, `cost`, the error message when it errored, and the turn's messages. Two fields make the hook actionable rather than merely statistical:
 
 - **`depth`** — `0` = top-level turn, `>0` = a subagent turn.
-- **`trigger`** — what started the turn, and so whether anyone is watching it: `"chat"` (a user message), `"decision"` (a human answered an approval or a client-handled tool), `"schedule"` (a cron/one-shot fire), `"resume"` (the durability sweep recovering a crashed run). A subagent inherits its parent's trigger, so a whole delegation tree stays attributable to what set it off.
+- **`trigger`** — what started the turn, and so whether anyone is watching it: `"chat"` (a user message), `"decision"` (a human answered an approval or a client-handled tool), `"schedule"` (a cron/one-shot fire), `"programmatic"` (`runAgent`), `"resume"` (the durability sweep recovering a crashed run). A subagent inherits its parent's trigger, so a whole delegation tree stays attributable to what set it off.
 
 That combination is how you push a notification exactly when one is warranted — a turn that finishes `awaiting_input` is a person who must be told when the trigger is `"schedule"` or `"resume"`, and just a gate rendering in front of someone who can answer it when it's `"chat"` or `"decision"`:
 
 ```ts
-observability: {
-  onFinish: async (event) => {
-    if (event.status !== "awaiting_input") return;
-    if (event.trigger !== "schedule" && event.trigger !== "resume") return;
+telemetry: {
+  onRunFinished: async (run, outcome) => {
+    if (outcome.status !== "awaiting_input") return;
+    if (run.trigger !== "schedule" && run.trigger !== "resume") return;
     // Nobody is at the other end of this turn — go tell its owner.
-    await notify(event.principal, { chatId: event.chatId, cost: event.cost });
+    await notify(run.principal, { chatId: run.chatId, cost: outcome.cost });
   },
 },
 ```
 
-All hooks are fire-and-forget: a thrown or rejected hook is swallowed, so telemetry can never break a turn.
+A tracer and these callbacks are one object: `langfuseTelemetry({...})` implements `telemetryFor`/`withRunSpan`/`onRunFinished`; add your own `onStep` alongside by wrapping or composing. An impl whose `telemetryFor` returns `undefined` for a run opts that run out of every hook.
 
 ## Sandbox — a workspace for the agent
 

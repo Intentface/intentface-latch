@@ -206,6 +206,7 @@ const liveArgs = (runId: string, depth: number, messages: unknown[]) => ({
     principal: PRINCIPAL,
     startedAt: 1_000,
     depth,
+    trigger: "chat" as const,
   },
   outcome: {
     status: "completed" as const,
