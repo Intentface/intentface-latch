@@ -457,6 +457,25 @@ export function createLatchHandler<P>(
               409,
             );
           }
+          // A budget is spent (the runtime's limits seam). 429 with Retry-After
+          // = when the window turns over, so a well-behaved client waits.
+          if (e && typeof e === "object" && (e as { code?: unknown }).code === "limit_exceeded") {
+            const retryAfterMs = Number((e as { retryAfterMs?: unknown }).retryAfterMs ?? 0);
+            return new Response(
+              JSON.stringify({
+                error: e instanceof Error ? e.message : "limit exceeded",
+                code: "limit_exceeded",
+                retryAfterMs,
+              }),
+              {
+                status: 429,
+                headers: {
+                  "content-type": "application/json",
+                  "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+                },
+              },
+            );
+          }
           // A client-supplied chat id collided with an existing (typically
           // foreign-owned) chat: the scoped getChat missed, createChat hit the
           // PK. ChatConflictError carries a stable `code` — map it to 409 so

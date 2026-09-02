@@ -236,6 +236,23 @@ export const memoryUsage = sqliteTable(
   (t) => [primaryKey({ columns: [t.scopeKey, t.memoryId] })],
 );
 
+/** Limit counters: one row per (key, fixed window) — see `limits.ts` in core. */
+export const limitCounters = sqliteTable(
+  "latch_limit_counters",
+  {
+    key: text("key").notNull(),
+    windowStart: integer("window_start").notNull(),
+    windowMs: integer("window_ms").notNull(),
+    turns: integer("turns").notNull().default(0),
+    tokens: integer("tokens").notNull().default(0),
+    cost: real("cost").notNull().default(0),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  // `windowMs` is part of the identity: the same key may carry a per-minute and
+  // a per-day policy, whose aligned windows share a start on the hour.
+  (t) => [primaryKey({ columns: [t.key, t.windowStart, t.windowMs] })],
+);
+
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
 export const schedules = sqliteTable(
   "latch_schedules",

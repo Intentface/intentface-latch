@@ -81,6 +81,13 @@ const DDL = [
      scope_key TEXT NOT NULL, memory_id TEXT NOT NULL,
      usage_count INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER, created_at INTEGER NOT NULL,
      PRIMARY KEY (scope_key, memory_id))`,
+  `CREATE TABLE IF NOT EXISTS latch_limit_counters (
+     key TEXT NOT NULL, window_start INTEGER NOT NULL, window_ms INTEGER NOT NULL,
+     turns INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (key, window_start, window_ms))`,
+  // The prune predicate (`window_start + window_ms < ?`) as an expression index.
+  `CREATE INDEX IF NOT EXISTS idx_limit_counters_end ON latch_limit_counters (window_start + window_ms)`,
 ];
 
 /** Idempotent column adds for DBs created before a column existed. */

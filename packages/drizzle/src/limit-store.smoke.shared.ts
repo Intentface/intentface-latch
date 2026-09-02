@@ -1,0 +1,40 @@
+import type { LimitStore } from "@intentface/latch-core";
+import { usageKey } from "@intentface/latch-core";
+
+/** Dialect-shared smoke for the LimitStore: additive upserts, zero reads, prune. */
+export async function limitStoreSmoke(args: {
+  limits: LimitStore;
+  assert: (cond: boolean, msg: string) => void;
+}): Promise<void> {
+  const { limits, assert } = args;
+  const MINUTE = 60_000;
+  const now = 10 * MINUTE + 5_000;
+  const ref = { key: "user:org_a:u1", windowStart: 10 * MINUTE, windowMs: MINUTE };
+  const other = { key: "org:org_a", windowStart: 0, windowMs: 24 * 3_600_000 };
+
+  assert(Object.keys(await limits.read([ref])).length === 0, "limits: absent row reads as nothing");
+  const first = await limits.add([{ ...ref, usage: { turns: 1 } }]);
+  assert(first[usageKey(ref)]?.turns === 1, "limits: add returns the post-increment row (fresh)");
+  const again = await limits.add([{ ...ref, usage: { turns: 1 } }]);
+  assert(again[usageKey(ref)]?.turns === 2, "limits: add returns the post-increment row (existing)");
+  await limits.add([{ ...ref, usage: { turns: -1 } }]); // a refused reservation released
+  await limits.add([{ ...ref, usage: { tokens: 120, cost: 0.5 } }, { ...other, usage: { turns: 1, tokens: 120, cost: 0.5 } }]);
+  await limits.add([{ ...ref, usage: { tokens: 30, cost: 0.25 } }]);
+  const usage = await limits.read([ref, other]);
+  const u = usage[usageKey(ref)];
+  assert(u?.turns === 1 && u.tokens === 150 && Math.abs(u.cost - 0.75) < 1e-9, `limits: additive upsert (${JSON.stringify(u)})`);
+  assert(usage[usageKey(other)]?.tokens === 120, "limits: second key kept apart");
+
+  // Same key, two window lengths whose starts coincide (0): separate counters.
+  const dayRef = { key: "org:org_a", windowStart: 0, windowMs: 24 * 3_600_000 };
+  const hourRef = { key: "org:org_a", windowStart: 0, windowMs: 3_600_000 };
+  await limits.add([{ ...hourRef, usage: { tokens: 7 } }]);
+  const both = await limits.read([dayRef, hourRef]);
+  assert(both[usageKey(dayRef)]?.tokens === 120 && both[usageKey(hourRef)]?.tokens === 7, "limits: windowMs is part of the identity");
+
+  // A window that ended before `before` is pruned; a live one stays.
+  await limits.prune!(now + 2 * MINUTE);
+  const after = await limits.read([ref, other]);
+  assert(after[usageKey(ref)] === undefined, "limits: ended window pruned");
+  assert(after[usageKey(other)] !== undefined, "limits: live window kept");
+}

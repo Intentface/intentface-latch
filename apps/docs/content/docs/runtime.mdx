@@ -42,6 +42,7 @@ Every field below is a seam. Omit it and the corresponding capability simply doe
 | `resolveReasoningOptions` | `effort` falls back to the provider default. |
 | `resolvePromptCaching` | Caching still defaults **on** for first-party Anthropic/OpenAI models (derived from the model's `provider`) — worth ~6× on MCP-heavy agents. Supply the hook to use your own model catalog or per-principal cache keys; `() => undefined` turns caching off. See [Prompt caching](/docs/seams#prompt-caching--the-6-default). |
 | `telemetry` | Nothing is traced; no step/finish hooks fire. |
+| `limits` | Nothing is limited — no turn, token or cost budgets. |
 | `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is. |
 
 <Callout title="Why so many seams are functions">

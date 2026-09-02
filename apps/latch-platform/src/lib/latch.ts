@@ -47,6 +47,7 @@ import { isOrgMember } from "./auth";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
 import type {SlackStore} from "./slack-store";
 import { createChannelStore, migrateChannels } from "./channel-store";
+import { platformLimits } from "./limits";
 import type { ChannelStore } from "./channel-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
@@ -486,6 +487,9 @@ export async function getLatch(): Promise<{
       principalKey: ownerKeyStr,
       promptCaching: process.env.LATCH_PROMPT_CACHING !== "0",
     }),
+    // Per org / user / agent budgets (opt-in via LATCH_LIMIT_* env, see
+    // lib/limits.ts): 429 at admission, tool loop stopped at the token budget.
+    limits: platformLimits(db),
     // Langfuse observability (opt-in via LANGFUSE_* env): every run becomes a
     // trace tagged owner/agent/run; attached-eval judges + user feedback land
     // on it as scores. Absent keys → undefined → zero behavior change.
