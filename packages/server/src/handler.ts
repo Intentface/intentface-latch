@@ -226,30 +226,31 @@ export function createLatchHandler<P>(
       // pin is tamper-evident: the full state string is exact-matched against
       // the copy stored (owner-keyed) at authorize time, so a forged payload
       // never survives the exchange.
-      const callbackState =
-        name && action === "callback" && method === "GET"
-          ? (decodeOAuthState(url.searchParams.get("state")) ?? undefined)
-          : undefined;
+      const isCallback = !!name && action === "callback" && method === "GET";
+      const callbackState = isCallback
+        ? (decodeOAuthState(url.searchParams.get("state")) ?? undefined)
+        : undefined;
 
-      const pinned = callbackState?.__latch as
-        | { p?: unknown; iat?: number }
-        | undefined;
       let principal: P | null;
-      if (callbackState) {
-        // A callback ALWAYS identifies itself by its pin. No pin (a flow
-        // started before pinning existed, or a hand-built state) is treated
-        // like a stale one: the flow can't be trusted, so it is expired — the
-        // live session is never asked to stand in for it.
+      if (isCallback) {
+        // A callback ALWAYS identifies itself by its pin. No state, an
+        // undecodable state, or a state without a pin (a flow started before
+        // pinning existed, or a hand-built one) is treated like a stale pin:
+        // the flow can't be trusted, so it is expired — the live session is
+        // never asked to stand in for it.
+        const pinned = callbackState?.__latch as
+          | { p?: unknown; iat?: number }
+          | undefined;
         const maxAge = config.oauthFlowMaxAgeMs ?? 30 * 60_000;
         const valid =
-          pinned && pinned.p !== undefined && typeof pinned.iat === "number";
-        if (!valid || Date.now() - pinned!.iat! > maxAge) {
-          return redirectTo((callbackState.returnTo as string) ?? "/", {
+          !!pinned && pinned.p !== undefined && typeof pinned.iat === "number";
+        if (!valid || Date.now() - pinned.iat! > maxAge) {
+          return redirectTo((callbackState?.returnTo as string) ?? "/", {
             error: "flow_expired",
           });
         }
         principal = await (config.reconstructPrincipal ?? ((id) => id as P))(
-          pinned!.p,
+          pinned.p,
           request,
         );
       } else {

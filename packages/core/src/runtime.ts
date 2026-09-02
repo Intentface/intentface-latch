@@ -1627,10 +1627,11 @@ export function createRuntime<P, RC = unknown>(
     let outputTokens = 0;
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
-    // Set by the FIRST onError. The SDK still runs onFinish after a stream
-    // error (and may call onError more than once), so this is what keeps the
-    // turn's terminal state single: one errored report, and a run row that
-    // says errored instead of completed.
+    // Set by the FIRST onError, consumed by onFinish (which the SDK still runs
+    // after a stream error, and may precede with more than one onError). It is
+    // what keeps the turn's terminal state single and ordered: the run row is
+    // settled as errored FIRST, and exactly one errored report follows — only
+    // from the writer whose fenced update applied.
     let failed: string | undefined;
 
     // Post-turn telemetry: fired after persistence on every terminal path
@@ -1858,12 +1859,15 @@ export function createRuntime<P, RC = unknown>(
         // by another node whose writes must win. The guarded update no-ops if
         // the run was reassigned. Exactly one terminal report either way.
         if (failed !== undefined || isAborted) {
-          await storage.updateRun(
+          const settled = await storage.updateRun(
             run.id,
             { status: "errored", error: failed ?? "aborted", endedAt: Date.now() },
             lease,
           );
-          if (failed === undefined) await reportRunFinished("errored", messages, "aborted");
+          // Only the winning writer reports (same rule as the completion
+          // path): a stale worker whose fenced update did not apply is not
+          // the one that ended this run.
+          if (settled) await reportRunFinished("errored", messages, failed ?? "aborted");
           return;
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
@@ -1910,17 +1914,12 @@ export function createRuntime<P, RC = unknown>(
         stopHeartbeat();
         void closeSources();
         const message = clientErrorMessage(error);
-        // First error wins; later onError calls for the same stream are noise.
-        // The AI SDK's onError must return the client string synchronously, so
-        // the terminal telemetry can't be awaited here. A serverless-safe impl
-        // keeps its own flush alive (e.g. via waitUntil) so the errored trace
-        // still lands; failures are swallowed inside reportRunFinished.
-        // onFinish (which the SDK still runs) sees `failed` and settles the run
-        // row as errored without reporting again.
-        if (failed === undefined) {
-          failed = message;
-          void reportRunFinished("errored", [], message);
-        }
+        // Record only — the first error wins; later onError calls for the same
+        // stream are noise. The SDK's onError must return the client string
+        // synchronously and still runs onFinish afterwards, so that is where
+        // the run row is settled as errored and the single terminal report is
+        // made (after, and only if, the fenced update applied).
+        if (failed === undefined) failed = message;
         return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);

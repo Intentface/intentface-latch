@@ -128,6 +128,24 @@ describe("callback with a pinned principal", () => {
 });
 
 describe("callback without a pin", () => {
+  it.each([
+    ["no state param", "https://app.example/api/latch/connections/loredex/callback?code=abc"],
+    ["malformed state", "https://app.example/api/latch/connections/loredex/callback?code=abc&state=not-a-state"],
+  ])("%s is rejected as expired and never reaches the session", async (_label, href) => {
+    const { handler, finish, resolveContext } = build({
+      resolveContext: () => {
+        throw new Error("resolveContext must not run on any callback");
+      },
+    });
+    const res = await handler(new Request(href));
+    expect(res?.status).toBe(302);
+    const loc = res?.headers.get("location") ?? "";
+    expect(loc.startsWith("/")).toBe(true);
+    expect(loc).toContain("error=flow_expired");
+    expect(resolveContext).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+  });
+
   it("is rejected as expired — the session is never a stand-in for a flow", async () => {
     const { handler, finish, resolveContext } = build({
       resolveContext: () => {
