@@ -441,7 +441,14 @@ async function builderTools<P>(
         // collect and report partial failures instead.
         let removedSchedules = 0;
         const scheduleCleanupFailures: string[] = [];
-        const mine = (await runtime.listSchedules({ principal })).filter((s) => s.agent === target);
+        let mine: { id: string }[] = [];
+        let listFailed = false;
+        try {
+          mine = (await runtime.listSchedules({ principal })).filter((s) => s.agent === target);
+        } catch (error) {
+          listFailed = true;
+          console.warn(`agent-builder: delete_agent could not list schedules for ${target}:`, error);
+        }
         for (const s of mine) {
           try {
             await runtime.unschedule({ principal, id: s.id });
@@ -455,6 +462,12 @@ async function builderTools<P>(
           deleted: target,
           scope,
           removedSchedules,
+          ...(listFailed
+            ? {
+                warning:
+                  "The agent is deleted, but its schedules could not be listed — check list_schedules and remove any that still name it.",
+              }
+            : {}),
           ...(scheduleCleanupFailures.length
             ? {
                 scheduleCleanupFailures,

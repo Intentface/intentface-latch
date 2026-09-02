@@ -554,7 +554,15 @@ export const saveAgentFn = createServerFn({ method: "POST" })
     if (rec.name.startsWith("memory-")) {
       return { ok: false, error: `"${rec.name}" is reserved (memory-* are platform system agents).` };
     }
-    const { agentStore, authoredTools } = await getLatch();
+    const { agentStore, authoredTools, models } = await getLatch();
+    // The record schema keeps a rubric's `trigger` opaque; if the caller
+    // supplies rubrics, run the platform's real validation (trigger AST, judge
+    // model in the catalog) — the same gate attach_evals and the drawer use.
+    if (rec.attachedEvals) {
+      const valid = validateRubrics(rubricsOf(rec), (id) => models.some((m) => m.id === id));
+      if (!valid.ok) return { ok: false, error: valid.error };
+      rec.attachedEvals = valid.rubrics;
+    }
     // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
     // resolve for other members. Validate before persisting.
     const attached = rec.exec?.authoredTools ?? [];

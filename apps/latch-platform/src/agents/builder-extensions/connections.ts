@@ -53,7 +53,10 @@ const REQUEST_SECRET_INPUT = z.object({
  * here: the input is echoed verbatim on the approval card and into the model's
  * own context.
  */
-const CREATE_CONNECTION_INPUT = z.object({
+// strictObject: an undeclared `token` / `clientSecret` must FAIL validation.
+// A plain z.object would strip them silently, and the raw-secret guard in
+// `execute` could never fire — the model would learn nothing.
+const CREATE_CONNECTION_INPUT = z.strictObject({
   name: z.string().min(1).describe('Connection id, kebab/snake case (e.g. "strava").'),
   kind: z.enum(["mcp", "openapi"]),
   scope: SCOPE.describe("'user' (personal) or 'org' (shared). Never guess — ask."),

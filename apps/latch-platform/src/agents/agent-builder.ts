@@ -2,6 +2,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { createAgentBuilder } from "@intentface/latch-agent-builder";
 import type { AgentBuilderDeps } from "@intentface/latch-agent-builder";
 import type { Principal } from "@/lib/session";
+import { renderFetchConfigured } from "@/lib/render-fetch";
 import { listConnectionTools } from "./shared-read-tools";
 import { connectionsExtension } from "./builder-extensions/connections";
 import { memoryExtension } from "./builder-extensions/memory";
@@ -52,6 +53,9 @@ export const agentBuilder = createAgentBuilder<Principal, { orgId: string }>({
   // package's plain ones would be a confusing duplicate.
   scheduling: false,
   capabilities: {
+    // Only offer render tools where the render service is configured —
+    // otherwise `exec.renderTools` would persist as a silent no-op.
+    renderTools: renderFetchConfigured(),
     defaultTools: {
       description: "web_fetch, askUser, and self-scheduling (create/list/cancel_schedule)",
     },

@@ -517,6 +517,18 @@ describe("review-hardening regressions", () => {
     expect(String(res.warning)).toMatch(/could not be removed/);
   });
 
+  it("delete_agent survives a failing listSchedules (agent already deleted)", async () => {
+    const deps = makeDeps();
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute(SAVE);
+    ;(deps.runtime.listSchedules as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("db down"));
+    const res = (await tools.delete_agent!.execute({ name: "my-agent", scope: "user" })) as Record<string, unknown>;
+    expect(res.deleted).toBe("my-agent");
+    expect(res.removedSchedules).toBe(0);
+    expect(String(res.warning)).toMatch(/could not be listed/);
+    expect(deps.records).toHaveLength(0);
+  });
+
   it("unschedule_agent is truthful about unknown ids", async () => {
     const { tools } = await openTools(makeDeps());
     const res = (await tools.unschedule_agent!.execute({ id: "sch_ghost" })) as {
