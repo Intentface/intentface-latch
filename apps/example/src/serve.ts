@@ -1,10 +1,9 @@
 import { serve } from "@hono/node-server";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { createVault, defineAgent } from "@intentface/latch-core";
-import { createSqliteAdapter, createSqliteSecretStore, migrate, schema } from "@intentface/latch-drizzle";
+import { defineAgent } from "@intentface/latch-core";
+import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { createLatchHonoApp } from "@intentface/latch-server/hono";
-import { createMcpOAuth } from "@intentface/latch-mcp";
 import { tools } from "./tools.js";
 
 /**
@@ -28,8 +27,9 @@ export interface Principal {
 }
 const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
 
-// BYO-auth: the only glue a customer writes. Here we trust a header for the demo;
-// a real app derives the Principal from its session.
+// BYO-auth: the only glue a customer writes. LOCAL DEMO ONLY — this trusts a
+// caller-supplied header, which is impersonation by construction. A real app
+// derives the Principal from its session and returns null (→ 401) otherwise.
 const resolveContext = (req: Request): Principal => ({
   orgId: req.headers.get("x-org") ?? "org_a",
   userId: req.headers.get("x-user") ?? "user_1",
@@ -59,47 +59,11 @@ const { app, runtime, stop } = await createLatchHonoApp<Principal>({
 });
 void runtime;
 
-// --- MCP OAuth connection routes (optional demo) ------------------------------
-// Env-gated: set MCP_OAUTH_SERVER_URL to a real OAuth-protected MCP server and
-// LATCH_VAULT_KEY (base64 of 32 bytes) for the token vault. The browser flow:
-// UI links to /authorize → IdP consent → /callback (token exchange → Vault,
-// under the authenticated Principal) → success page.
-const mcpOAuthServer = process.env.MCP_OAUTH_SERVER_URL;
-if (mcpOAuthServer) {
-  const masterKey = process.env.LATCH_VAULT_KEY;
-  if (!masterKey) throw new Error("LATCH_VAULT_KEY is required for the OAuth demo (base64 of 32 bytes).");
-  const vault = createVault<Principal>({
-    store: createSqliteSecretStore<Principal>(db, { owner }),
-    masterKey,
-  });
-  const base = process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 8787}`;
-  const successUrl = process.env.OAUTH_SUCCESS_URL ?? `${base}/connections/connected`;
-  const oauth = createMcpOAuth<Principal>({
-    vault,
-    config: {
-      name: "demo",
-      serverUrl: mcpOAuthServer,
-      redirectUrl: `${base}/connections/demo/callback`,
-      clientMetadata: {
-        redirect_uris: [`${base}/connections/demo/callback`],
-        client_name: "Latch Example",
-      },
-      allowedAuthorizationServers: process.env.MCP_OAUTH_AUTH_SERVERS?.split(","),
-    },
-  });
-  app.get("/connections/demo/authorize", async (c) => {
-    const res = await oauth.start(resolveContext(c.req.raw));
-    return c.redirect(res.status === "redirect" ? res.authorizationUrl : successUrl);
-  });
-  app.get("/connections/demo/callback", async (c) => {
-    const code = c.req.query("code");
-    if (!code) return c.text("missing code", 400);
-    await oauth.finish(resolveContext(c.req.raw), { code, state: c.req.query("state") });
-    return c.redirect(successUrl);
-  });
-  app.get("/connections/connected", (c) => c.text("✅ Connected. You can close this tab."));
-  console.log("   MCP OAuth: GET /connections/demo/authorize  (→ IdP → /callback)");
-}
+// Connections with OAuth: pass a connection registry to the handler
+// (`handler: { connections: createMcpConnections({...}) }`) and the mounted
+// routes `connections/:name/authorize` + `/callback` run the flow with the
+// principal PINNED into the state at authorize time — never re-resolved from
+// the redirect request. See the oauth smoke + the platform for a full wiring.
 
 const port = Number(process.env.PORT ?? 8787);
 serve({ fetch: app.fetch, port });

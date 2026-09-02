@@ -236,7 +236,7 @@ const web_fetch = tool({
         enum: ["markdown", "text", "html"],
         description: 'Output format; HTML is converted to it. Defaults to "markdown".',
       },
-      timeout: { type: "number", description: "Timeout in seconds (default 30, max 120)." },
+      timeout: { type: "number", minimum: 0, description: "Timeout in seconds (default 30, max 120)." },
     },
     required: ["url"],
     additionalProperties: false,

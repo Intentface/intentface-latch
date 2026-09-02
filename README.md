@@ -54,8 +54,12 @@ await migrate(client);
 
 const { app } = await createLatchHonoApp({
   storage: createSqliteAdapter(drizzle(client, { schema }), { owner: (p) => [p.orgId] }),
-  // BYO auth: request → your Principal (null → 401).
-  resolveContext: (req) => ({ orgId: req.headers.get("x-org") ?? "demo" }),
+  // BYO auth: request → your Principal, null → 401. Replace the header lookup
+  // with your session — trusting a caller-supplied header is for local demos only.
+  resolveContext: async (req) => {
+    const org = req.headers.get("x-org");
+    return org ? { orgId: org } : null;
+  },
   // Agents pick their model from the models.dev catalog (whatever you have keys for).
   agents: (models) => ({
     assistant: defineAgent({
@@ -68,7 +72,7 @@ const { app } = await createLatchHonoApp({
 serve({ fetch: app.fetch, port: 8787 });
 ```
 
-That's the whole backend: durability (resume-after-crash), an in-process cron (or `POST /cron/run` on serverless), pricing + reasoning + prompt-caching hooks from the catalog, the harness tools, and the HTTP surface — every default overridable via `runtime` / `handler`. Prefer to mount into your own framework? `createLatchApp()` returns the bare Web `handler`; `createLatchHandler()` / `createRuntime()` are still there when you want to wire pieces yourself.
+That's the whole backend: durability (resume-after-crash), an in-process cron (or `POST /cron/run` on serverless), pricing + reasoning + prompt-caching hooks from the catalog, the harness tools, and the HTTP surface. App-level options (`models`, `principalKey`, `cronIntervalMs`) sit on the config itself; every runtime and handler default is overridable via `runtime` / `handler`. Prefer to mount into your own framework? `const { handler, runtime, models, stop } = await createLatchApp({...})` gives you the bare Web `handler`; `createLatchHandler()` / `createRuntime()` are still there when you want to wire pieces yourself.
 
 ```bash
 curl -N http://localhost:8787/agents/assistant/chat-1 \

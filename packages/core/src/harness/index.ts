@@ -13,5 +13,7 @@
  */
 export { defaultHarnessTools, sandboxTools, appTools, webFetchToModelOutput, harnessContextOf, tail } from "./tools.js";
 export type { HarnessToolContext, WebFetchToolOutput } from "./tools.js";
-export { webFetch, detectMedia, convertHtmlToMarkdown, extractTextFromHtml } from "./web-fetch.js";
+// Types only: a runtime re-export of ./web-fetch.js would load the optional
+// peers (turndown, latch-net) the moment this subpath is imported. The
+// implementation is reached lazily by the web_fetch tool itself.
 export type { WebFetchFormat, WebFetchResult, SupportedMediaType } from "./web-fetch.js";
