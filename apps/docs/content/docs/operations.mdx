@@ -23,17 +23,17 @@ What happens:
 1. **Claim** — the run is claimed with a lease (`owner`, `fencingToken`, expiry).
 2. **Heartbeat** — the holder extends the lease while it works.
 3. **Die** — the process is killed mid-turn. Nothing is lost: every step so far is already in the log.
-4. **Reap** — a later `tick()`/`sweep()` finds runs whose lease has expired, marks them `errored`, clears the owner and bumps the fencing token (invalidating any zombie holder).
+4. **Reap** — a later `sweep()` (or `cron()`) finds runs whose lease has expired, marks them `errored`, clears the owner and bumps the fencing token (invalidating any zombie holder).
 5. **Resume** — `resume(runId)` reclaims the run under a fresh lease and re-runs it from persisted history, completing server-side.
 
-Point any cron at `sweep()` — it reaps and resumes in one call:
+Point any cron at `cron()` — it fires due schedules, then reaps and resumes in one call:
 
-```ts title="The whole durability wiring"
-await runtime.sweep({ maxAttempts: 5 });
-// → { reaped: RunRecord[], resumed: RunOutcome[] }
+```ts title="The whole operational wiring"
+await runtime.cron({ maxAttempts: 5 });
+// → { due: {…}, reaped: RunRecord[], resumed: RunOutcome[], errors: string[] }
 ```
 
-`maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `tick()` and `resume(runId)` are the same machinery split apart — `tick()` reaps expired leases, `resume(runId)` reclaims and re-runs one run — for when you want the two halves separately.
+`maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `sweep()` is the reap-and-resume half on its own, and `resume(runId)` reclaims and re-runs one run — for when you want the pieces separately.
 
 On a long-lived Node process, use the in-process scheduler instead of an external cron:
 
@@ -42,7 +42,7 @@ import { createIntervalScheduler } from "@intentface/latch-core";
 
 const scheduler = createIntervalScheduler({
   intervalMs: 30_000,
-  onTick: () => runtime.sweep(),
+  onTick: () => runtime.cron(),
   onError: (error) => log.warn({ error }, "sweep failed"),
 });
 scheduler.start();

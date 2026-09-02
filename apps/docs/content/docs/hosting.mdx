@@ -277,7 +277,7 @@ All paths are relative to `basePath`.
 | `GET` | `connections` | connection status for the caller |
 | `GET` | `connections/:name/authorize` · `callback` | the OAuth dance |
 | `POST` | `connections/:name/disconnect` · `test` | revoke, or check liveness |
-| `POST` | `cron/run` | fire all tenants' due schedules |
+| `POST` | `cron/run` | `runtime.cron()`: fire all tenants' due schedules, reap + resume stalled runs |
 
 The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messages }` array and takes the last one — so an AI SDK client works without a translation layer.
 
@@ -325,9 +325,7 @@ createLatchHandler({
   // No principal exists on cron/run, so supply the system-wide tick yourself.
   cronRun: async () => {
     for (const tenant of await listTenants()) {
-      const rt = await runtimeFor(tenant);
-      await rt.runDue();
-      await rt.sweep();
+      await (await runtimeFor(tenant)).cron();
     }
   },
 });

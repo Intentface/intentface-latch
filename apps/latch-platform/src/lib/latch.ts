@@ -1,6 +1,7 @@
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import {
+  createIntervalScheduler,
   createRuntime,
   createVault,
   defineContext,
@@ -654,27 +655,32 @@ export async function getLatch(): Promise<{
       (process.env.NODE_ENV === "production" ? undefined : "dev-cron-secret"),
   });
 
-  // Dev only: no long-running process, so tick due schedules in-process every
-  // 30s. In prod (Vercel), the platform cron hits `/api/cron` instead (which
-  // also sweeps crashed runs), so skip this — serverless wouldn't run it
-  // reliably anyway. Errors are swallowed — a bad tick never crashes dev.
+  // Dev only: no long-running process, so run the cron in-process every 30s
+  // — the same `runtime.cron()` the prod `/api/cron` route calls (due
+  // schedules fired; lease-expired runs from a dev-server restart mid-turn
+  // reaped and resumed, so a chat never shows an eternal "Generating…"). In
+  // prod (Vercel) the platform cron hits the route instead; serverless
+  // wouldn't run an interval reliably anyway. The interval scheduler never
+  // overlaps ticks and unrefs its timer; a failing tick never crashes dev.
   if (!process.env.VERCEL) {
-    const tick = setInterval(() => {
-      void runtime.runDue().catch((e) => console.warn("runDue failed:", e));
-      // Reap lease-expired (crashed) runs — without this a dev-server restart
-      // mid-turn leaves the run "running" forever and its chat shows an eternal
-      // "Generating…" (reap only; no auto-resume in dev).
-      void runtime.tick().catch((e) => console.warn("tick failed:", e));
-    }, 30_000);
-    (tick as { unref?: () => void }).unref?.();
+    createIntervalScheduler({
+      intervalMs: 30_000,
+      onTick: async () => {
+        const r = await runtime.cron();
+        if (r.errors.length) console.warn("cron phase failed:", r.errors);
+      },
+      onError: (e) => console.warn("cron failed:", e),
+    }).start();
     // Memory sweep on a slower cadence (extraction is idle-gated anyway).
     // Lazy import — sweep.ts imports this module back.
-    const memTick = setInterval(() => {
-      void import("./memory/sweep")
-        .then((m) => m.memorySweep())
-        .catch((e) => console.warn("memory sweep failed:", e));
-    }, 5 * 60_000);
-    (memTick as { unref?: () => void }).unref?.();
+    createIntervalScheduler({
+      intervalMs: 5 * 60_000,
+      onTick: async () => {
+        const m = await import("./memory/sweep");
+        await m.memorySweep();
+      },
+      onError: (e) => console.warn("memory sweep failed:", e),
+    }).start();
   }
 
   cached = {

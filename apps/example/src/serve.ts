@@ -27,8 +27,9 @@ const resolveContext = (req: Request): Principal => ({
 const app = createLatchHono<Principal>({ runtime, resolveContext });
 
 // Serverless cron entry point: point a platform scheduler (Vercel Cron, etc.)
-// at this route. It does the same reap+resume as the in-process loop below.
-app.post("/cron/sweep", async (c) => c.json(await runtime.sweep()));
+// at this route. One call = due schedules fired + stalled runs reaped and
+// resumed — the same thing the in-process loop below does.
+app.post("/cron/run", async (c) => c.json(await runtime.cron()));
 
 // --- MCP OAuth connection routes (the redirect pages live HERE, in the API) ---
 // Env-gated: set MCP_OAUTH_SERVER_URL to a real OAuth-protected MCP server.
@@ -70,29 +71,32 @@ if (mcpOAuthServer) {
   console.log("   MCP OAuth: GET /connections/demo/authorize  (→ IdP → /callback)");
 }
 
-// Long-running node: drive the reaper in-process. Reaps lease-expired runs and
-// resumes them. Safe to also run on other nodes — reclaim is exactly-once.
+// Long-running node: drive the cron in-process. Fires due schedules, reaps
+// lease-expired runs and resumes them. Safe to also run on other nodes —
+// claims are exactly-once.
 const reaper = createIntervalScheduler({
   intervalMs: 10_000,
   onTick: async () => {
-    const { reaped, resumed } = await runtime.sweep();
+    const { due, reaped, resumed, errors } = await runtime.cron();
+    if (due.fired) console.log(`⏰ fired ${due.fired} due schedule(s)`);
     if (reaped.length) {
       console.log(`🧹 swept ${reaped.length} stalled run(s), resumed ${resumed.length}`);
     }
+    for (const e of errors) console.error("cron phase failed:", e);
   },
-  onError: (e) => console.error("sweep failed:", e),
+  onError: (e) => console.error("cron failed:", e),
 });
 reaper.start();
 
 const port = Number(process.env.PORT ?? 8787);
 serve({ fetch: app.fetch, port });
-console.log(`🔓 Latch listening on http://localhost:${port} (durable; reaper every 10s)`);
+console.log(`🔓 Latch listening on http://localhost:${port} (durable; cron every 10s)`);
 console.log(
   `   curl -N http://localhost:${port}/agents/assistant/chat-1 ` +
     `-H 'content-type: application/json' -H 'x-org: org_a' ` +
     `-d '{"text":"In one sentence, what is Latch?"}'`,
 );
-console.log(`   reaper (serverless cron): curl -X POST http://localhost:${port}/cron/sweep`);
+console.log(`   cron (serverless entry): curl -X POST http://localhost:${port}/cron/run`);
 
 // Stop the reaper cleanly on shutdown.
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
