@@ -93,6 +93,13 @@ const LOADERS: Record<ProviderId, () => Promise<ProviderFactory>> = {
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const MODELS_DEV_URL = "https://models.dev/api.json";
 
+/** Each provider's well-known key env var — models.dev tells us online; this is the offline copy. */
+const KEY_ENV: Record<ProviderId, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_GENERATIVE_AI_API_KEY",
+};
+
 /** Load the SDKs for `providers` that are installed; missing ones are skipped (warned once). */
 async function loadFactories(providers: readonly ProviderId[]): Promise<Map<ProviderId, ProviderFactory>> {
   const loaded = new Map<ProviderId, ProviderFactory>();
@@ -109,6 +116,19 @@ async function loadFactories(providers: readonly ProviderId[]): Promise<Map<Prov
     }),
   );
   return loaded;
+}
+
+/**
+ * The implicit default: the canonical Sonnet when Anthropic is runnable here,
+ * else the first listed model of a provider that is — so an OpenAI- or
+ * Google-only host never gets a default its SDK can't build.
+ */
+function pickDefaultModel(
+  factories: ReadonlyMap<ProviderId, ProviderFactory>,
+  models: readonly ModelInfo[],
+): string {
+  if (factories.has("anthropic")) return DEFAULT_MODEL;
+  return models.find((m) => factories.has(m.provider as ProviderId))?.id ?? DEFAULT_MODEL;
 }
 
 function buildResolvers(
@@ -138,23 +158,37 @@ function buildResolvers(
   };
 }
 
-/** Offline fallback: a small, known-good list over whatever SDKs are installed. */
-function fallbackCatalog(factories: ReadonlyMap<ProviderId, ProviderFactory>, defaultModel: string): ModelCatalog {
+/**
+ * Offline fallback: one known-good model per provider, restricted (like the
+ * online path) to providers that are keyed AND installed. Same eligibility
+ * rule, so an unconfigured SDK never yields a model that can't run.
+ */
+function fallbackCatalog(
+  factories: ReadonlyMap<ProviderId, ProviderFactory>,
+  defaultModel: string | undefined,
+): ModelCatalog {
   const all: ModelInfo[] = [
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "anthropic", reasoning: true, maxOutput: 64000 },
     { id: "gpt-4o", label: "GPT-4o", provider: "openai", reasoning: false, maxOutput: 16384 },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "google", reasoning: true, maxOutput: 65536 },
   ];
   const models = all.filter((m) => factories.has(m.provider as ProviderId));
+  const chosenDefault = defaultModel ?? pickDefaultModel(factories, models);
   return {
     models,
     pricing: staticPricing({
       "claude-sonnet-4-6": { inputPer1M: 3, outputPer1M: 15 },
       "gpt-4o": { inputPer1M: 2.5, outputPer1M: 10 },
+      "gemini-2.5-pro": { inputPer1M: 1.25, outputPer1M: 10 },
     }),
-    ...buildResolvers(factories, new Map(models.map((m) => [m.id, m.provider as ProviderId])), defaultModel),
-    defaultModel,
+    ...buildResolvers(factories, new Map(models.map((m) => [m.id, m.provider as ProviderId])), chosenDefault),
+    defaultModel: chosenDefault,
   };
 }
+
+/** Providers whose key env is set (offline eligibility rule). */
+const keyedProviders = (providers: readonly ProviderId[]): ProviderId[] =>
+  providers.filter((p) => !!process.env[KEY_ENV[p]]);
 
 interface MdCost {
   input?: number;
@@ -175,19 +209,32 @@ interface MdProvider {
   >;
 }
 
-const cache = new Map<string, Promise<ModelCatalog>>();
+// Memo per (fetch implementation, option set): an injected fetch (tests,
+// mirrors) gets its own cache, so it can never serve a catalog to callers
+// using a different one.
+const caches = new WeakMap<object, Map<string, Promise<ModelCatalog>>>();
+const cacheFor = (fetchImpl: object): Map<string, Promise<ModelCatalog>> => {
+  let m = caches.get(fetchImpl);
+  if (!m) caches.set(fetchImpl, (m = new Map()));
+  return m;
+};
 
-/** Load (and memoize per option set) the model catalog from models.dev, across runnable providers. */
+/**
+ * Load (and memoize per option set) the model catalog from models.dev, across
+ * runnable providers. Rejects — never returns a half-usable catalog — when an
+ * explicit `defaultModel` names a provider that isn't runnable here.
+ */
 export function loadModelCatalog(options: ModelCatalogOptions = {}): Promise<ModelCatalog> {
   const providers = options.providers ?? PROVIDER_IDS;
-  const defaultModel = options.defaultModel ?? DEFAULT_MODEL;
   const url = options.url ?? MODELS_DEV_URL;
-  const key = JSON.stringify([providers, defaultModel, url]);
+  const doFetch = options.fetch ?? fetch;
+  const cache = cacheFor(doFetch);
+  const key = JSON.stringify([providers, options.defaultModel ?? null, url]);
   const hit = cache.get(key);
   if (hit) return hit;
-  const doFetch = options.fetch ?? fetch;
   const loading = (async () => {
     let factories: Map<ProviderId, ProviderFactory> | undefined;
+    let catalog: ModelCatalog;
     try {
       const res = await doFetch(url, { redirect: "error" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -235,7 +282,8 @@ export function loadModelCatalog(options: ModelCatalogOptions = {}): Promise<Mod
       if (list.length === 0) throw new Error("no runnable providers (no API keys, or SDKs not installed?)");
       list.sort((a, b) => a.label.localeCompare(b.label));
 
-      return {
+      const defaultModel = options.defaultModel ?? pickDefaultModel(factories, list);
+      catalog = {
         models: list,
         pricing: staticPricing(rates),
         ...buildResolvers(factories, idToProvider, defaultModel),
@@ -243,12 +291,26 @@ export function loadModelCatalog(options: ModelCatalogOptions = {}): Promise<Mod
       };
     } catch (e) {
       console.warn("models.dev unavailable, using fallback list:", e instanceof Error ? e.message : e);
-      // Offline: load whatever of the fallback list's providers is installed.
-      factories ??= await loadFactories(providers.filter((p) => p === "anthropic" || p === "openai"));
-      if (factories.size === 0) factories = await loadFactories(["anthropic", "openai"]);
-      return fallbackCatalog(factories, defaultModel);
+      // Offline: the same eligibility rule (keyed + installed) over the
+      // fallback list's providers, from the well-known key env names.
+      factories ??= await loadFactories(keyedProviders(providers));
+      catalog = fallbackCatalog(factories, options.defaultModel);
     }
+    // An explicit default that this deployment can't build is a configuration
+    // error — say so now, not on the first turn that falls back to it.
+    const dp = providerFromId(catalog.defaultModel) ?? providerOfListed(catalog.models, catalog.defaultModel);
+    if (!dp || !factories.has(dp)) {
+      cache.delete(key);
+      throw new Error(
+        `[latch-core/models] default model "${catalog.defaultModel}" is not runnable here — ` +
+          `its provider${dp ? ` (@ai-sdk/${dp})` : ""} is not installed or has no API key set`,
+      );
+    }
+    return catalog;
   })();
   cache.set(key, loading);
   return loading;
 }
+
+const providerOfListed = (models: readonly ModelInfo[], id: string): ProviderId | undefined =>
+  models.find((m) => m.id === id)?.provider as ProviderId | undefined;

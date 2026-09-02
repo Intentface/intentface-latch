@@ -43,7 +43,7 @@ createRuntime({
   storage,
   context,
   agents: { assistant: defineAgent({ model: catalog.modelFor("claude-sonnet-4-6"), instructions: "…" }) },
-  ...providerDefaults(catalog, { principalKey: (p) => p.orgId }),
+  ...providerDefaults<Principal>(catalog, { principalKey: (p) => p.orgId }),
 });
 ```
 

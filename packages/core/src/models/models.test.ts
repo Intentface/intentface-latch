@@ -141,9 +141,13 @@ describe("loadModelCatalog", () => {
     expect(catalog.defaultModel).toBe("claude-sonnet-4-6");
   });
 
-  it("falls back to the static list when models.dev is unavailable", async () => {
+  it("falls back to the static list when models.dev is unavailable — same keyed+installed rule", async () => {
+    process.env.ANTHROPIC_API_KEY = "x";
+    process.env.OPENAI_API_KEY = "x";
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     const fetchFail = (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
     const catalog = await loadModelCatalog({ url: "https://test/b", fetch: fetchFail, defaultModel: "gpt-4o" });
+    // Google is installed but not keyed → excluded, like online.
     expect(catalog.models.map((m) => m.id).sort()).toEqual(["claude-sonnet-4-6", "gpt-4o"]);
     expect(catalog.pricing("gpt-4o")).toEqual({ inputPer1M: 2.5, outputPer1M: 10 });
     expect(catalog.defaultModel).toBe("gpt-4o");
@@ -157,17 +161,52 @@ describe("loadModelCatalog", () => {
     expect((catalog.modelFor("nope") as { modelId: string }).modelId).toBe("gpt-4o");
   });
 
-  it("memoizes per option set", async () => {
+  it("memoizes per option set AND per fetch implementation", async () => {
     process.env.TEST_ANTHROPIC_KEY = "x";
     const a = loadModelCatalog({ url: "https://test/c", fetch: fetchOk });
     const b = loadModelCatalog({ url: "https://test/c", fetch: fetchOk });
     expect(a).toBe(b);
-    expect(loadModelCatalog({ url: "https://test/c", fetch: fetchOk, defaultModel: "other" })).not.toBe(a);
+    expect(loadModelCatalog({ url: "https://test/c", fetch: fetchOk, defaultModel: "claude-sonnet-4-6" })).not.toBe(a);
+    const otherFetch = (async () => new Response(JSON.stringify(modelsDev))) as unknown as typeof fetch;
+    expect(loadModelCatalog({ url: "https://test/c", fetch: otherFetch })).not.toBe(a);
+  });
+
+  it("picks a RUNNABLE implicit default: Sonnet when Anthropic is keyed, else the first listed model", async () => {
+    delete process.env.TEST_ANTHROPIC_KEY;
+    process.env.TEST_OPENAI_KEY = "x";
+    const catalog = await loadModelCatalog({ url: "https://test/e", fetch: fetchOk });
+    expect(catalog.models.map((m) => m.id)).toEqual(["gpt-5.1"]);
+    expect(catalog.defaultModel).toBe("gpt-5.1");
+    expect((catalog.modelFor("unknown-id") as { modelId: string }).modelId).toBe("gpt-5.1");
+    // Offline, Google-only: the fallback still has a runnable default.
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY = "x";
+    const fetchFail = (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+    const g = await loadModelCatalog({ url: "https://test/f", fetch: fetchFail });
+    expect(g.models.map((m) => m.id)).toEqual(["gemini-2.5-pro"]);
+    expect(g.defaultModel).toBe("gemini-2.5-pro");
+    expect(Object.keys(g.providerTools("gemini-2.5-pro")).sort()).toEqual(["web_fetch", "web_search"]);
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  });
+
+  it("rejects an explicit default whose provider is not runnable here", async () => {
+    delete process.env.TEST_ANTHROPIC_KEY;
+    process.env.TEST_OPENAI_KEY = "x";
+    await expect(
+      loadModelCatalog({ url: "https://test/g", fetch: fetchOk, defaultModel: "claude-sonnet-4-6" }),
+    ).rejects.toThrow(/default model "claude-sonnet-4-6" is not runnable/);
+    // …and the failure isn't memoized: fixing the env makes the next call succeed.
+    process.env.TEST_ANTHROPIC_KEY = "x";
+    const ok = await loadModelCatalog({ url: "https://test/g", fetch: fetchOk, defaultModel: "claude-sonnet-4-6" });
+    expect(ok.defaultModel).toBe("claude-sonnet-4-6");
   });
 });
 
 describe("providerDefaults", () => {
   it("bundles the four hooks; promptCaching:false turns caching off", async () => {
+    process.env.ANTHROPIC_API_KEY = "x";
+    process.env.OPENAI_API_KEY = "x";
     const catalog = await loadModelCatalog({
       url: "https://test/d",
       fetch: (async () => new Response("x", { status: 500 })) as unknown as typeof fetch,
