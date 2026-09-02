@@ -593,6 +593,16 @@ describe("whatsappChannel questionnaires (askUser)", () => {
     expect(h.sends().some((b) => (b as { type?: string }).type === "interactive")).toBe(false);
   });
 
+  it("a video's caption reaches the agent as text", async () => {
+    const h = harness();
+    await h.channel.handleRequest(
+      signedPost(inbound({ type: "video", video: { id: "v1", mime_type: "video/mp4", caption: "watch this" } })),
+    );
+    await h.flush();
+    const msg = (h.runtime.handleChat.mock.calls[0]![0] as { message: AppMessage }).message;
+    expect((msg.parts.find((p) => p.type === "text") as { text: string }).text).toContain("watch this");
+  });
+
   it("a captioned image is NOT an answer — it runs a turn so the file reaches the agent", async () => {
     const h = askHarness([two]);
     await h.channel.handleRequest(signedPost(inbound({ text: { body: "moi" } })));

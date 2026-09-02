@@ -282,7 +282,7 @@ export function whatsappChannel<P>(config: WhatsappChannelConfig<P>) {
     return {
       kind: "message",
       user,
-      text: (msg.text?.body ?? msg.image?.caption ?? msg.document?.caption ?? "").trim(),
+      text: (msg.text?.body ?? msg.image?.caption ?? msg.document?.caption ?? msg.video?.caption ?? "").trim(),
       media: mediaRefs(msg),
       deliveryKey,
     };

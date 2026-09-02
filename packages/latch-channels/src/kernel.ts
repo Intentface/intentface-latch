@@ -1122,13 +1122,22 @@ export function createTurnKernel<P, User, Ref>(
 
   // ── Entry ──────────────────────────────────────────────────────────────────
 
+  /**
+   * The error boundary: callers run this detached (under `waitUntil`, or as a
+   * dropped promise), so a rejection here would be an unhandled one. Every
+   * user-visible failure is already reported inside; whatever escapes is logged.
+   */
   async function handleInbound(ev: Inbound<User, Ref>): Promise<void> {
-    if (cfg.seen && (await cfg.seen(ev.deliveryKey))) {
-      console.log(`${tag} duplicate delivery ${ev.deliveryKey} — dropped`);
-      return;
+    try {
+      if (cfg.seen && (await cfg.seen(ev.deliveryKey))) {
+        console.log(`${tag} duplicate delivery ${ev.deliveryKey} — dropped`);
+        return;
+      }
+      if (ev.kind === "action") await handleAction(ev);
+      else await handleMessage(ev);
+    } catch (e) {
+      console.error(`${tag} inbound handling failed:`, e);
     }
-    if (ev.kind === "action") return handleAction(ev);
-    return handleMessage(ev);
   }
 
   return { handleInbound, runMessage, replayMessage };

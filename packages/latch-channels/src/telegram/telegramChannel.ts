@@ -387,6 +387,9 @@ export function telegramChannel<P>(config: TelegramChannelConfig<P>) {
   function parse(update: TgUpdate): Inbound<TelegramUser, TgFileRef> | null {
     const cb = update.callback_query;
     if (cb) {
+      // Same DM-only rule as messages: a tap on a card that somehow lives in a
+      // group would otherwise route every reply to that group's chat id.
+      if (cb.message && cb.message.chat.type !== "private") return null;
       return {
         kind: "action",
         user: userOf(cb.from, cb.message?.chat.id ?? cb.from.id),

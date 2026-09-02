@@ -211,8 +211,22 @@ describe("telegramChannel.handleRequest", () => {
       webhookRequest(dm("hi", { chat: { id: -100, type: "group" } })),
     );
     await h.channel.handleRequest(webhookRequest(dm("")));
+    // A tap on a card that lives in a group: same DM-only rule, or its replies
+    // would be routed to the group's chat id.
+    await h.channel.handleRequest(
+      webhookRequest({
+        update_id: 9,
+        callback_query: {
+          id: "cbg",
+          from: { id: 5 },
+          message: { message_id: 1, chat: { id: -100, type: "group" } },
+          data: "lta:1|ap1",
+        },
+      }),
+    );
     await h.flush();
     expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
     expect(h.calls).toHaveLength(0); // silent — no reply spam in groups
   });
 

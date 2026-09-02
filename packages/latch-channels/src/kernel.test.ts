@@ -162,6 +162,14 @@ describe("kernel — a message becomes one turn", () => {
     expect(h.texts()).toEqual(["one one one one", "two two two two", "three"]);
   });
 
+  it("never rejects: a throwing store is logged, not surfaced to the caller", async () => {
+    const h = harness({ cfg: { claimTurn: async () => { throw new Error("db down"); } } });
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(h.message("hi")).resolves.toBeUndefined();
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("inbound handling failed"), expect.any(Error));
+    err.mockRestore();
+  });
+
   it("drops a delivery the host has already seen", async () => {
     const h = harness({ cfg: { seen: async () => true } });
     await h.message("hi");
