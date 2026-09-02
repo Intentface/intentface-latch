@@ -151,7 +151,7 @@ describe("create_schedule from a channel chat", () => {
   it("keeps deriving the target from the chat when deliver_to is omitted", async () => {
     await linkedBot();
     const out = await create_schedule.execute(spec, {
-      context: { principal, run: { ...webRun, chatId: "telegram_b1_555" } },
+      context: { principal, run: { ...webRun, chatId: "telegram_b1_555" }, runtime },
     });
     expect(created[0]).toMatchObject({ delivery: { kind: "telegram", botId: "b1" } });
     expect(out.deliversTo).toBe("telegram");
