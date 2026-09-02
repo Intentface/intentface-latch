@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { webFetchToModelOutput } from "@/lib/sandbox/tools";
+import { webFetchToModelOutput } from "./tools.js";
 
 describe("webFetchToModelOutput", () => {
   it("turns fetched media into a file block the model can see, with a text anchor", () => {

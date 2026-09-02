@@ -29,7 +29,7 @@ vi.mock("@intentface/latch-net/pinned", () => ({
     ),
 }));
 
-const { webFetch, detectMedia } = await import("./web-fetch");
+const { webFetch, detectMedia } = await import("./web-fetch.js");
 
 /** A redirect response; `fetch` is called with `redirect: "manual"` so we see these. */
 const redirectTo = (location: string) =>

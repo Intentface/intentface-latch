@@ -188,10 +188,10 @@ export async function webFetch(args: {
   } catch {
     return { ok: false, error: "Invalid URL." };
   }
-  const timeoutMs = Math.min(
-    args.timeout != null ? args.timeout * 1000 : DEFAULT_TIMEOUT_MS,
-    MAX_TIMEOUT_MS,
-  );
+  // Non-positive / NaN timeouts fall back to the default rather than reaching
+  // AbortSignal.timeout(), which throws a RangeError outside our error result.
+  const requested = args.timeout != null && Number.isFinite(args.timeout) && args.timeout > 0 ? args.timeout * 1000 : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = Math.min(requested, MAX_TIMEOUT_MS);
   const signal = AbortSignal.timeout(timeoutMs);
   const headers = buildHeaders(format);
 

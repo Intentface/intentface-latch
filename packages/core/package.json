@@ -1,7 +1,7 @@
 {
   "name": "@intentface/latch-core",
   "version": "0.8.1",
-  "description": "Latch core \u2014 runtime, types, and seams for building agents on the AI SDK. `@intentface/latch-core/models`: models.dev catalog + provider hooks (optional provider-SDK peers, loaded lazily).",
+  "description": "Latch core \u2014 runtime, types, and seams for building agents on the AI SDK. Subpaths: /models (models.dev catalog + provider hooks) and /harness (default sandbox/app tools); their extra deps are optional peers, loaded lazily.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,6 +22,11 @@
       "development": "./src/models/index.ts",
       "types": "./dist/models/index.d.ts",
       "import": "./dist/models/index.js"
+    },
+    "./harness": {
+      "development": "./src/harness/index.ts",
+      "types": "./dist/harness/index.d.ts",
+      "import": "./dist/harness/index.js"
     }
   },
   "files": [
@@ -43,6 +48,10 @@
       "./models": {
         "types": "./dist/models/index.d.ts",
         "import": "./dist/models/index.js"
+      },
+      "./harness": {
+        "types": "./dist/harness/index.d.ts",
+        "import": "./dist/harness/index.js"
       }
     }
   },
@@ -58,14 +67,19 @@
     "ai": ">=7.0.0",
     "@ai-sdk/anthropic": ">=4.0.0",
     "@ai-sdk/google": ">=4.0.0",
-    "@ai-sdk/openai": ">=4.0.0"
+    "@ai-sdk/openai": ">=4.0.0",
+    "turndown": ">=7.0.0",
+    "@intentface/latch-net": "workspace:^"
   },
   "devDependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
     "@ai-sdk/google": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
+    "@intentface/latch-net": "workspace:^",
     "@types/node": "^22",
+    "@types/turndown": "^5.0.6",
     "ai": "^7.0.2",
+    "turndown": "^7.2.4",
     "typescript": "^5.7.0",
     "vitest": "^4"
   },
@@ -82,6 +96,12 @@
       "optional": true
     },
     "@ai-sdk/openai": {
+      "optional": true
+    },
+    "turndown": {
+      "optional": true
+    },
+    "@intentface/latch-net": {
       "optional": true
     }
   }
