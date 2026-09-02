@@ -278,25 +278,6 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       await call("agents.sessions.setStatus", input);
     },
 
-    /** Rename a session (1–200 chars) in the sidebar. */
-    async sessionsRename(input: {
-      channel_id: string;
-      title: string;
-      thread_ts?: string;
-    }): Promise<void> {
-      await call("agents.sessions.rename", input);
-    },
-
-    /** Pin up to 4 suggested prompts at the top of the app's Messages tab. */
-    async setSuggestedPrompts(input: {
-      channel_id: string;
-      thread_ts?: string;
-      prompts: { title: string; message: string }[];
-      title?: string;
-    }): Promise<void> {
-      await call("assistant.threads.setSuggestedPrompts", input);
-    },
-
     // ── Conversations ────────────────────────────────────────────────────────
 
     /** Fetch a thread's messages (oldest first) — for seeding prior context. */
@@ -359,20 +340,6 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       throw new SlackApiError("conversations.members", 200, "member_list_truncated");
     },
 
-    /** Basic conversation facts (existence, name, privacy). */
-    async conversationsInfo(
-      channel: string,
-    ): Promise<{ id: string; name?: string; isPrivate: boolean; isIm: boolean }> {
-      const r = await call("conversations.info", { channel });
-      const c = (r.channel as Record<string, unknown> | undefined) ?? {};
-      return {
-        id: String(c.id ?? channel),
-        name: c.name ? String(c.name) : undefined,
-        isPrivate: Boolean(c.is_private),
-        isIm: Boolean(c.is_im),
-      };
-    },
-
     /** Open (or fetch) a DM channel with a user; returns the IM channel id. */
     async openDm(user: string): Promise<string> {
       const r = await call("conversations.open", { users: user });
@@ -394,18 +361,6 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       });
       const channels = (r.channels as Record<string, unknown>[] | undefined) ?? [];
       return channels.map((c) => ({ id: String(c.id), name: String(c.name ?? c.id) }));
-    },
-
-    // ── Identity ─────────────────────────────────────────────────────────────
-
-    /** Who am I? Captures `botUserId`/`teamId` at install time. */
-    async authTest(): Promise<{ botUserId: string; teamId: string; botId?: string }> {
-      const r = await call("auth.test", {});
-      return {
-        botUserId: String(r.user_id ?? ""),
-        teamId: String(r.team_id ?? ""),
-        botId: r.bot_id ? String(r.bot_id) : undefined,
-      };
     },
 
     /**

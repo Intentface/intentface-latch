@@ -1783,8 +1783,8 @@ function TelegramSection({ agent }: { agent: string }) {
         <h2 className="text-ink-primary text-sm font-semibold">Telegram</h2>
       </div>
       <p className="text-ink-tertiary text-xs">
-        Give this agent its own Telegram bot. Users DM it and it answers as this agent — replies
-        stream as live message edits, and tool approvals show up as inline buttons.
+        Give this agent its own Telegram bot. Users DM it and it answers as this agent — the reply
+        arrives when the turn finishes, and tool approvals show up as inline buttons.
       </p>
 
       {bots.map((b) => (

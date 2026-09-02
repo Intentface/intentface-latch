@@ -1,7 +1,8 @@
 import type { AppMessage } from "@intentface/latch-core";
-import type { ChannelRunOps } from "../types.js";
+import type { AuthResult, ChannelRunOps } from "../types.js";
 import { consumeRun, pendingApprovals } from "../render.js";
-import { slackApi, type SlackApiOptions, type SlackClient, type SlackToken } from "./api.js";
+import { withTurnLease } from "../kernel.js";
+import { slackApi, type SlackApiOptions, type SlackToken } from "./api.js";
 import { verifySlackSignature } from "./verify.js";
 import { DM_ROOT, parseSlackChatId, slackChatId } from "./ids.js";
 import { isRenderableUserMessage, normalizeSlackText } from "./normalize.js";
@@ -9,7 +10,6 @@ import { decodeAction, encodeAction } from "./payloads.js";
 import {
   APPROVE_ACTION,
   DENY_ACTION,
-  FEEDBACK_ACTION,
   approvalBlocksV2,
   approvalResolvedBlocks,
   connectBlocks,
@@ -29,7 +29,8 @@ import { renderSlackStream } from "./stream.js";
  *    dedupe layers then had to absorb.)
  *  - **Admission is atomic.** One `claimOnce` primitive (TTL'd test-and-set)
  *    dedupes deliveries, messages and interactions; one `claimTurn` lease
- *    guarantees a single live run per chat. No read-then-act preflights.
+ *    (the kernel's `withTurnLease`) guarantees a single live run per chat. No
+ *    read-then-act preflights.
  *  - **Threads are initiator-owned.** The first user to engage a chat owns
  *    it; everyone else gets ONE quiet notice. Nobody ever acts with another
  *    user's credentials — approvals are actor-bound in a signed payload.
@@ -61,8 +62,13 @@ export interface SlackThreadStore {
   stoppedSince(chatId: string, sinceMs: number): Promise<boolean>;
 }
 
-/** The per-tenant state a turn runs against. */
-export interface SlackTenant<P> {
+export interface SlackChannelConfig<P> {
+  /** The agent this app serves (own-app-per-agent). */
+  agent: string;
+  /** The Slack app id — the chat-id namespace. Required: no unscoped chats. */
+  appId: string;
+
+  /** The binding's owner — the principal a turn runs as unless `authorizeUser` says otherwise. */
   principal: P;
   /** The workspace's bot token (vault-backed in practice). */
   botToken: SlackToken;
@@ -75,32 +81,6 @@ export interface SlackTenant<P> {
   botUserId: string;
   /** The installed workspace — `chat.startStream` needs it in channels. */
   teamId: string;
-}
-
-/** Routing fields lifted from the already-verified payload, for `resolve`. */
-export interface SlackPeek {
-  kind: "event" | "interaction";
-  type?: string;
-  eventType?: string;
-  teamId?: string;
-  userId?: string;
-  payload: unknown;
-}
-
-export interface SlackChannelConfig<P> {
-  /** The agent this app serves (own-app-per-agent). */
-  agent: string;
-  /** The Slack app id — the chat-id namespace. Required: no unscoped chats. */
-  appId: string;
-
-  /** Static tenant (single-tenant construction) … */
-  principal?: P;
-  botToken?: SlackToken;
-  runtime?: ChannelRunOps<P>;
-  botUserId?: string;
-  teamId?: string;
-  /** … or resolve the tenant per payload (multi-tenant seam). */
-  resolve?: (peek: SlackPeek) => SlackTenant<P> | null | Promise<SlackTenant<P> | null>;
 
   signingSecret: string | (() => string | Promise<string>);
   /**
@@ -138,13 +118,7 @@ export interface SlackChannelConfig<P> {
      *  replay keep it so the replay can thread where the question was. */
     anchorTs?: string;
     prompt: string;
-  }) => Promise<{
-    allowed: boolean;
-    silent?: boolean;
-    linkUrl?: string;
-    message?: string;
-    principal?: P;
-  }>;
+  }) => Promise<AuthResult<P>>;
 
   /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
   authorizeUrl?: (
@@ -177,23 +151,6 @@ export interface SlackChannelConfig<P> {
     detail?: string;
   }) => Promise<void>;
 
-  /** Native 👍/👎 on final answers. */
-  feedback?: boolean;
-  onFeedback?: (f: {
-    userId: string;
-    channelId: string;
-    messageTs?: string;
-    sentiment: "positive" | "negative";
-  }) => Promise<void>;
-
-  /** Up to 4 prompts pinned in the app's Messages tab. */
-  suggestedPrompts?:
-    | { title: string; message: string }[]
-    | ((ctx: {
-        userId: string;
-        teamId: string;
-      }) => Promise<{ title: string; message: string }[]>);
-
   /** Test seam for the Slack Web API client. */
   apiOptions?: SlackApiOptions;
 }
@@ -210,7 +167,6 @@ type SlackEvent = {
   thread_ts?: string;
   bot_id?: string;
   subtype?: string;
-  tab?: string;
   streaming_message_ts?: string[];
 };
 
@@ -230,48 +186,11 @@ function newId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `m_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
 }
 
-/** A tenant plus its bound Slack API client. */
-interface Bound<P> {
-  tenant: SlackTenant<P>;
-  api: SlackClient;
-}
-
 /** thread_ts for posting into a chat — the `_dm` chat posts un-threaded. */
 const threadTsOf = (root: string): string | undefined => (root === DM_ROOT ? undefined : root);
 
 export function slackChannel<P>(config: SlackChannelConfig<P>) {
-  const staticTenant: SlackTenant<P> | undefined =
-    config.principal !== undefined &&
-    config.botToken !== undefined &&
-    config.runtime &&
-    config.botUserId &&
-    config.teamId
-      ? {
-          principal: config.principal,
-          botToken: config.botToken,
-          runtime: config.runtime,
-          botUserId: config.botUserId,
-          teamId: config.teamId,
-        }
-      : undefined;
-  if (!staticTenant && !config.resolve) {
-    throw new Error(
-      "slackChannel: supply either a full static tenant (principal/botToken/runtime/botUserId/teamId) or a resolve() seam",
-    );
-  }
-  const boundOf = (tenant: SlackTenant<P>): Bound<P> => ({
-    tenant,
-    api: slackApi(tenant.botToken, config.apiOptions),
-  });
-  const staticBound = staticTenant ? boundOf(staticTenant) : undefined;
-
-  async function resolveBound(peek: SlackPeek): Promise<Bound<P> | null> {
-    if (config.resolve) {
-      const tenant = await config.resolve(peek);
-      return tenant ? boundOf(tenant) : null;
-    }
-    return staticBound ?? null;
-  }
+  const api = slackApi(config.botToken, config.apiOptions);
 
   const resolveSigningSecret = async (): Promise<string> =>
     typeof config.signingSecret === "function" ? config.signingSecret() : config.signingSecret;
@@ -284,7 +203,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
 
   /** Session-surface status; a no-op outside the bot's DM channel. */
   async function setSession(
-    api: SlackClient,
     channel: string,
     root: string,
     status: "active" | "processing" | "suspended" | "closed",
@@ -305,7 +223,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
   // ── Turn rendering (shared by messages, resumes, replays) ─────────────────
 
   async function renderTurn(
-    b: Bound<P>,
     res: Response,
     ctx: {
       chatId: string;
@@ -328,13 +245,12 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
   ): Promise<void> {
     const threadTs = threadTsOf(ctx.root) ?? ctx.anchorTs;
     const result = await renderSlackStream(consumeRun(res), {
-      api: b.api,
+      api,
       channel: ctx.channel,
       ...(threadTs ? { threadTs } : {}),
-      recipientTeamId: b.tenant.teamId,
+      recipientTeamId: config.teamId,
       recipientUserId: ctx.userId,
       shouldStop: () => config.threads.stoppedSince(ctx.chatId, ctx.turnStartedAt),
-      feedback: config.feedback ?? false,
       ...(ctx.resumedToolName ? { resumedToolName: ctx.resumedToolName } : {}),
       ...(config.onStreamMode
         ? {
@@ -350,25 +266,25 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       ...(threadTs
         ? {
             setStatus: (text: string) =>
-              b.api.setStatus({ channel_id: ctx.channel, thread_ts: threadTs, status: text }),
+              api.setStatus({ channel_id: ctx.channel, thread_ts: threadTs, status: text }),
           }
         : {}),
     });
     if (result.stopped) {
-      await setSession(b.api, ctx.channel, ctx.root, "active");
+      await setSession(ctx.channel, ctx.root, "active");
       return;
     }
     if (result.errorMessage) {
       // The stream's own error surface already rendered; don't hunt approvals
       // on a failed turn.
-      await setSession(b.api, ctx.channel, ctx.root, "active");
+      await setSession(ctx.channel, ctx.root, "active");
       return;
     }
 
     // Approvals are message state, not stream chunks — check fresh history.
     let hasPending = false;
     try {
-      const history = await b.tenant.runtime.loadHistory({
+      const history = await config.runtime.loadHistory({
         chatId: ctx.chatId,
         principal: ctx.principal,
       });
@@ -385,7 +301,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
             userId: ctx.userId,
             approvalId: pa.approvalId,
           });
-          await b.api.postEphemeral({
+          await api.postEphemeral({
             channel: ctx.channel,
             user: ctx.userId,
             ...(threadTs ? { thread_ts: threadTs } : {}),
@@ -403,7 +319,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
             },
             secret,
           );
-          await b.api.postMessage({
+          await api.postMessage({
             channel: ctx.channel,
             ...(threadTs ? { thread_ts: threadTs } : {}),
             blocks: approvalBlocksV2(value, pa.toolName, pa.input),
@@ -414,12 +330,11 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     } catch (e) {
       console.error("[slack] approval rendering failed:", e);
     }
-    await setSession(b.api, ctx.channel, ctx.root, hasPending ? "suspended" : "active");
+    await setSession(ctx.channel, ctx.root, hasPending ? "suspended" : "active");
   }
 
   /** Run one gated message inside the chat's turn lease. */
   async function runLeasedMessage(
-    b: Bound<P>,
     ctx: {
       chatId: string;
       channel: string;
@@ -432,7 +347,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     },
   ): Promise<void> {
     const turnStartedAt = Date.now();
-    await setSession(b.api, ctx.channel, ctx.root, "processing");
+    await setSession(ctx.channel, ctx.root, "processing");
 
     const text = ctx.context
       ? `${ctx.context}\n\nThe message addressed to you:\n${ctx.prompt}`
@@ -445,25 +360,25 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     };
 
     try {
-      const res = await b.tenant.runtime.handleChat({
+      const res = await config.runtime.handleChat({
         agent: config.agent,
         chatId: ctx.chatId,
         principal: ctx.principal,
         message,
       });
-      await renderTurn(b, res, { ...ctx, turnStartedAt });
+      await renderTurn(res, { ...ctx, turnStartedAt });
     } catch (e) {
       // Never post raw internals into the channel: masked stream errors render
       // through the renderer; a pre-stream throw gets the generic line.
       console.error("[slack] turn failed:", e);
-      await b.api
+      await api
         .postMessage({
           channel: ctx.channel,
           thread_ts: threadTsOf(ctx.root) ?? ctx.anchorTs,
           text: GENERIC_ERROR,
         })
         .catch(() => {});
-      await setSession(b.api, ctx.channel, ctx.root, "active");
+      await setSession(ctx.channel, ctx.root, "active");
     }
   }
 
@@ -476,37 +391,28 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     const ev = body.event;
     const teamId = body.team_id ?? "";
     if (!ev.channel || !ev.ts) return;
+    // Narrowed copy: the lease body below is a closure, where TS forgets the guard.
+    const channel = ev.channel;
 
     // 1. Delivery dedupe — Slack retries reuse the event_id.
     if (body.event_id && !(await config.claimOnce(`evt:${body.event_id}`, EVT_TTL))) return;
 
-    // 2. Tenant (post-ACK — this may hit DB/Vault).
-    const b = await resolveBound({
-      kind: "event",
-      type: "event_callback",
-      eventType: ev.type,
-      teamId,
-      userId: ev.user,
-      payload: body,
-    });
-    if (!b) return;
-
-    // 3. Shape check — humans only, allowlisted subtypes, never the bot itself.
-    if (!isRenderableUserMessage(ev, b.tenant.botUserId)) return;
+    // 2. Shape check — humans only, allowlisted subtypes, never the bot itself.
+    if (!isRenderableUserMessage(ev, config.botUserId)) return;
     const userId = ev.user!;
 
-    // 4. Message identity claim — one message arrives as several event shapes
+    // 3. Message identity claim — one message arrives as several event shapes
     //    (a channel mention fires BOTH app_mention and message.channels).
     //    Claimed before any user-visible side effect so even a refusal notice
     //    posts exactly once.
-    if (!(await config.claimOnce(`msg:${teamId}:${ev.channel}:${ev.ts}`, MSG_TTL))) return;
+    if (!(await config.claimOnce(`msg:${teamId}:${channel}:${ev.ts}`, MSG_TTL))) return;
 
-    // 5. The chat this message belongs to. Un-threaded messages in a DM
+    // 4. The chat this message belongs to. Un-threaded messages in a DM
     //    channel always land on the `_dm` chat REGARDLESS of event shape —
     //    a DM mention can arrive as app_mention too, and both shapes must
     //    resolve to the same chat.
-    const root = ev.thread_ts ?? (ev.channel.startsWith("D") ? DM_ROOT : ev.ts);
-    const chatId = slackChatId(config.appId, ev.channel, root);
+    const root = ev.thread_ts ?? (channel.startsWith("D") ? DM_ROOT : ev.ts);
+    const chatId = slackChatId(config.appId, channel, root);
     // For `_dm` chats the asking message anchors everything this turn posts
     // (streams need a thread there; notices stay next to what they answer).
     const anchorTs = ev.thread_ts ?? ev.ts;
@@ -515,12 +421,12 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     const existing = await config.threads.get(chatId);
     if (mode === "thread-follow" && !existing) return; // not our thread
 
-    // 6. Initiator ownership — one quiet notice, then silence.
+    // 5. Initiator ownership — one quiet notice, then silence.
     if (existing && existing.initiatorUserId !== userId) {
       if (await config.claimOnce(`note:${chatId}:${userId}`, NOTE_TTL)) {
-        await b.api
+        await api
           .postEphemeral({
-            channel: ev.channel,
+            channel: channel,
             user: userId,
             ...(threadTs ? { thread_ts: threadTs } : {}),
             text: `This is <@${existing.initiatorUserId}>'s conversation with the agent. Mention me in a new thread (or DM me) to start your own.`,
@@ -530,19 +436,19 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       return;
     }
 
-    // 7. The prompt.
-    const prompt = normalizeSlackText(ev.text ?? "", b.tenant.botUserId);
+    // 6. The prompt.
+    const prompt = normalizeSlackText(ev.text ?? "", config.botUserId);
     if (!prompt) return;
 
-    // 8. Identity gate.
-    let principal = b.tenant.principal;
+    // 7. Identity gate.
+    let principal = config.principal;
     if (config.authorizeUser) {
-      let auth: Awaited<ReturnType<NonNullable<SlackChannelConfig<P>["authorizeUser"]>>>;
+      let auth: AuthResult<P>;
       try {
         auth = await config.authorizeUser({
           teamId,
           userId,
-          channelId: ev.channel,
+          channelId: channel,
           threadRoot: root,
           anchorTs,
           prompt,
@@ -558,16 +464,16 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         const ephemeralThread = ev.thread_ts ? { thread_ts: ev.thread_ts } : {};
         try {
           if (auth.linkUrl) {
-            await b.api.postEphemeral({
-              channel: ev.channel,
+            await api.postEphemeral({
+              channel: channel,
               user: userId,
               ...ephemeralThread,
               blocks: signInCard(auth.linkUrl, auth.message),
               text: auth.message ?? "Sign in to Latch to use this agent.",
             });
           } else {
-            await b.api.postEphemeral({
-              channel: ev.channel,
+            await api.postEphemeral({
+              channel: channel,
               user: userId,
               ...ephemeralThread,
               text: auth.message ?? "You don't have access to this agent.",
@@ -576,9 +482,9 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         } catch (e) {
           console.error("[slack] ephemeral refused-notice failed, trying DM:", e);
           try {
-            const dm = await b.api.openDm(userId);
+            const dm = await api.openDm(userId);
             if (dm) {
-              await b.api.postMessage({
+              await api.postMessage({
                 channel: dm,
                 ...(auth.linkUrl ? { blocks: signInCard(auth.linkUrl, auth.message) } : {}),
                 text: auth.message ?? "Sign in to Latch to use this agent.",
@@ -593,22 +499,16 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       if (auth.principal !== undefined) principal = auth.principal;
     }
 
-    // 9. Turn lease — ONE live run per chat.
-    const token = await config.claimTurn(chatId);
-    if (!token) {
-      await b.api
-        .postEphemeral({
-          channel: ev.channel,
-          user: userId,
-          ...(threadTs ? { thread_ts: threadTs } : {}),
-          text: "Still working on the previous message here — send that again when I've answered.",
-        })
-        .catch(() => {});
-      return;
-    }
-
-    try {
-      // 10. Ownership record (inside the lease → no create race).
+    // 8. Turn lease — ONE live run per chat.
+    const busy = () =>
+      api.postEphemeral({
+        channel: channel,
+        user: userId,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        text: "Still working on the previous message here — send that again when I've answered.",
+      });
+    await withTurnLease(config, chatId, busy, async () => {
+      // 9. Ownership record (inside the lease → no create race).
       if (!existing) {
         const owner = await config.threads.claim(chatId, {
           initiatorUserId: userId,
@@ -618,13 +518,13 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         if (owner.initiatorUserId !== userId) return; // lost an unlikely race
       }
 
-      // 11. First engagement of a pre-existing human thread: seed context.
+      // 10. First engagement of a pre-existing human thread: seed context.
       let context: string | undefined;
       if (mode === "mention" && ev.thread_ts && !existing) {
         try {
-          const history = await b.tenant.runtime.loadHistory({ chatId, principal });
+          const history = await config.runtime.loadHistory({ chatId, principal });
           if (history.length === 0) {
-            const replies = await b.api.threadReplies(ev.channel, ev.thread_ts);
+            const replies = await api.threadReplies(channel, ev.thread_ts);
             const prior = replies
               .filter((m) => m.ts !== ev.ts && !m.isBot && m.text.trim())
               .slice(-30);
@@ -632,7 +532,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
               const lines = prior
                 .map(
                   (m) =>
-                    `${m.userId ? `@${m.userId}` : "user"}: ${normalizeSlackText(m.text, b.tenant.botUserId)}`,
+                    `${m.userId ? `@${m.userId}` : "user"}: ${normalizeSlackText(m.text, config.botUserId)}`,
                 )
                 .join("\n");
               context = `Earlier messages in this Slack thread (for context):\n${lines}`;
@@ -643,9 +543,9 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         }
       }
 
-      await runLeasedMessage(b, {
+      await runLeasedMessage({
         chatId,
-        channel: ev.channel,
+        channel: channel,
         root,
         anchorTs,
         userId,
@@ -653,9 +553,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         ...(context !== undefined ? { context } : {}),
         principal,
       });
-    } finally {
-      await config.releaseTurn(chatId, token).catch(() => {});
-    }
+    });
   }
 
   async function handleSessionStop(body: {
@@ -672,56 +570,14 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       console.error("[slack] markStopped failed:", e);
     });
 
-    const b = await resolveBound({
-      kind: "event",
-      type: "event_callback",
-      eventType: ev.type,
-      teamId: body.team_id,
-      userId: ev.user,
-      payload: body,
-    });
-    if (!b) return;
     // Belt and braces: close any stream Slack says was live, and clear the
     // status — it does NOT auto-clear on stop.
     for (const streamTs of ev.streaming_message_ts ?? []) {
-      await b.api
+      await api
         .stopStream({ channel: ev.channel, ts: streamTs, markdown_text: "\n\n_Stopped._" })
         .catch(() => {});
     }
-    await setSession(b.api, ev.channel, root, "active");
-  }
-
-  async function handleHomeOpened(body: {
-    event_id?: string;
-    team_id?: string;
-    event: SlackEvent;
-  }): Promise<void> {
-    const ev = body.event;
-    if (ev.tab !== "messages" || !ev.channel || !config.suggestedPrompts) return;
-    if (body.event_id && !(await config.claimOnce(`evt:${body.event_id}`, EVT_TTL))) return;
-    const b = await resolveBound({
-      kind: "event",
-      type: "event_callback",
-      eventType: ev.type,
-      teamId: body.team_id,
-      userId: ev.user,
-      payload: body,
-    });
-    if (!b) return;
-    try {
-      const prompts =
-        typeof config.suggestedPrompts === "function"
-          ? await config.suggestedPrompts({ userId: ev.user ?? "", teamId: body.team_id ?? "" })
-          : config.suggestedPrompts;
-      if (prompts.length) {
-        await b.api.setSuggestedPrompts({
-          channel_id: ev.channel,
-          prompts: prompts.slice(0, 4),
-        });
-      }
-    } catch (e) {
-      console.error("[slack] suggested prompts failed:", e);
-    }
+    await setSession(ev.channel, root, "active");
   }
 
   async function handleInteraction(payload: {
@@ -742,35 +598,12 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       return;
     }
 
-    const b = await resolveBound({
-      kind: "interaction",
-      type: "block_actions",
-      teamId: payload.team?.id ?? payload.user?.team_id,
-      userId: clicker,
-      payload,
-    });
-    if (!b) return;
-
-    if (action.action_id === FEEDBACK_ACTION) {
-      if (config.onFeedback) {
-        const sentiment = action.value === "negative" ? "negative" : "positive";
-        await config
-          .onFeedback({
-            userId: clicker,
-            channelId: channel,
-            messageTs: payload.message?.ts,
-            sentiment,
-          })
-          .catch((e) => console.error("[slack] feedback hook failed:", e));
-      }
-      return;
-    }
     if (action.action_id !== APPROVE_ACTION && action.action_id !== DENY_ACTION) return;
 
     const secret = await resolveSigningSecret();
     const decoded = action.value ? decodeAction(action.value, secret) : null;
     const ephemeral = (text: string) =>
-      b.api
+      api
         .postEphemeral({
           channel,
           user: clicker,
@@ -795,9 +628,9 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     const approved = action.action_id === APPROVE_ACTION;
 
     // Gate the clicker like a message author — the resume is a real turn.
-    let principal = b.tenant.principal;
+    let principal = config.principal;
     if (config.authorizeUser) {
-      let auth: Awaited<ReturnType<NonNullable<SlackChannelConfig<P>["authorizeUser"]>>>;
+      let auth: AuthResult<P>;
       try {
         auth = await config.authorizeUser({
           teamId: payload.team?.id ?? payload.user?.team_id ?? "",
@@ -820,48 +653,44 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     }
 
     // An approval resume IS a turn — same lease as a message.
-    const token = await config.claimTurn(decoded.chatId);
-    if (!token) {
-      await ephemeral("The agent is mid-turn here — try again in a moment.");
-      return;
-    }
-    const turnStartedAt = Date.now();
-    try {
-      const res = await b.tenant.runtime.applyApproval({
-        chatId: decoded.chatId,
-        principal,
-        decisions: [{ approvalId: decoded.approvalId, approved }],
-      });
-      if (payload.message?.ts) {
-        await b.api
-          .update({
+    const busy = () => ephemeral("The agent is mid-turn here — try again in a moment.");
+    await withTurnLease(config, decoded.chatId, busy, async () => {
+      const turnStartedAt = Date.now();
+      try {
+        const res = await config.runtime.applyApproval({
+          chatId: decoded.chatId,
+          principal,
+          decisions: [{ approvalId: decoded.approvalId, approved }],
+        });
+        if (payload.message?.ts) {
+          await api
+            .update({
             channel,
             ts: payload.message.ts,
             blocks: approvalResolvedBlocks(decoded.tool ?? "tool", approved),
-            text: approved ? "Approved" : "Denied",
-          })
-          .catch((e) => console.error("[slack] card settle failed:", e));
+              text: approved ? "Approved" : "Denied",
+            })
+            .catch((e) => console.error("[slack] card settle failed:", e));
+        }
+        await renderTurn(res, {
+          chatId: decoded.chatId,
+          channel: parsed.channel,
+          root: parsed.root,
+          // The card lives where the turn rendered — its thread anchors the
+          // resume for `_dm` chats (whose id carries no root).
+          ...(payload.message?.thread_ts || payload.message?.ts
+            ? { anchorTs: payload.message.thread_ts ?? payload.message.ts }
+            : {}),
+          userId: clicker,
+          ...(decoded.tool ? { resumedToolName: decoded.tool } : {}),
+          principal,
+          turnStartedAt,
+        });
+      } catch (e) {
+        console.error("[slack] approval resume failed:", e);
+        await ephemeral(GENERIC_ERROR);
       }
-      await renderTurn(b, res, {
-        chatId: decoded.chatId,
-        channel: parsed.channel,
-        root: parsed.root,
-        // The card lives where the turn rendered — its thread anchors the
-        // resume for `_dm` chats (whose id carries no root).
-        ...(payload.message?.thread_ts || payload.message?.ts
-          ? { anchorTs: payload.message.thread_ts ?? payload.message.ts }
-          : {}),
-        userId: clicker,
-        ...(decoded.tool ? { resumedToolName: decoded.tool } : {}),
-        principal,
-        turnStartedAt,
-      });
-    } catch (e) {
-      console.error("[slack] approval resume failed:", e);
-      await ephemeral(GENERIC_ERROR);
-    } finally {
-      await config.releaseTurn(decoded.chatId, token).catch(() => {});
-    }
+    });
   }
 
   async function handleLifecycle(body: {
@@ -946,9 +775,6 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
           defer(handleUserMessage(withEvent, "thread-follow"));
         }
         break;
-      case "app_home_opened":
-        defer(handleHomeOpened(withEvent));
-        break;
       case "agent_session_stopped":
         defer(handleSessionStop(withEvent));
         break;
@@ -957,8 +783,8 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         defer(handleLifecycle(withEvent));
         break;
       default:
-        // agent_session_title_changed, app_context_changed (v2.1), everything
-        // else: acknowledged and dropped.
+        // app_home_opened, agent_session_title_changed, app_context_changed
+        // (v2.1), everything else: acknowledged and dropped.
         break;
     }
     return ok();
@@ -981,26 +807,17 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     prompt: string;
     context?: string;
     principal?: P;
-    tenant?: SlackTenant<P>;
   }): Promise<void> {
-    const b = ctx.tenant ? boundOf(ctx.tenant) : staticBound;
-    if (!b) {
-      throw new Error("slackChannel.runMessage: pass `tenant` when the channel uses resolve()");
-    }
     const chatId = slackChatId(config.appId, ctx.channel, ctx.root);
-    const principal = ctx.principal ?? b.tenant.principal;
-    const token = await config.claimTurn(chatId);
-    if (!token) {
-      console.warn(`[slack] runMessage: chat ${chatId} busy — replay dropped`);
-      return;
-    }
-    try {
+    const principal = ctx.principal ?? config.principal;
+    const busy = async () => console.warn(`[slack] runMessage: chat ${chatId} busy — replay dropped`);
+    await withTurnLease(config, chatId, busy, async () => {
       await config.threads.claim(chatId, {
         initiatorUserId: ctx.userId,
-        teamId: b.tenant.teamId,
+        teamId: config.teamId,
         createdAt: Date.now(),
       });
-      await runLeasedMessage(b, {
+      await runLeasedMessage({
         chatId,
         channel: ctx.channel,
         root: ctx.root,
@@ -1010,9 +827,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         ...(ctx.context !== undefined ? { context: ctx.context } : {}),
         principal,
       });
-    } finally {
-      await config.releaseTurn(chatId, token).catch(() => {});
-    }
+    });
   }
 
   /**
@@ -1027,34 +842,26 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     /** For `_dm` chats: the thread the connect card lives in. */
     anchorTs?: string;
     principal?: P;
-    tenant?: SlackTenant<P>;
   }): Promise<void> {
-    const b = ctx.tenant ? boundOf(ctx.tenant) : staticBound;
-    if (!b) {
-      throw new Error("slackChannel.resumeApproval: pass `tenant` when the channel uses resolve()");
-    }
     const parsed = parseSlackChatId(ctx.chatId);
     if (!parsed || parsed.app !== config.appId) return;
-    const principal = ctx.principal ?? b.tenant.principal;
+    const principal = ctx.principal ?? config.principal;
 
-    const history = await b.tenant.runtime.loadHistory({ chatId: ctx.chatId, principal });
+    const history = await config.runtime.loadHistory({ chatId: ctx.chatId, principal });
     const pending = pendingApprovals(history).find((pa) => pa.approvalId === ctx.approvalId);
     if (!pending?.isConnect) return;
 
-    const token = await config.claimTurn(ctx.chatId);
-    if (!token) {
+    const busy = async () =>
       console.warn(`[slack] resumeApproval: chat ${ctx.chatId} busy — resume dropped`);
-      return;
-    }
-    const turnStartedAt = Date.now();
-    try {
-      await setSession(b.api, parsed.channel, parsed.root, "processing");
-      const res = await b.tenant.runtime.applyApproval({
+    await withTurnLease(config, ctx.chatId, busy, async () => {
+      const turnStartedAt = Date.now();
+      await setSession(parsed.channel, parsed.root, "processing");
+      const res = await config.runtime.applyApproval({
         chatId: ctx.chatId,
         principal,
         decisions: [{ approvalId: ctx.approvalId, approved: true }],
       });
-      await renderTurn(b, res, {
+      await renderTurn(res, {
         chatId: ctx.chatId,
         channel: parsed.channel,
         root: parsed.root,
@@ -1064,9 +871,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         principal,
         turnStartedAt,
       });
-    } finally {
-      await config.releaseTurn(ctx.chatId, token).catch(() => {});
-    }
+    });
   }
 
   return { handleRequest, runMessage, resumeApproval };

@@ -172,7 +172,7 @@ export function telegramApi(token: TelegramToken, opts: TelegramApiOptions = {})
       };
     },
 
-    /** Send a message; returns the new message id (needed for streaming edits). */
+    /** Send a message; returns the new message id (cards are edited later by it). */
     async sendMessage(input: SendMessageInput): Promise<{ messageId: number }> {
       const r = asObject(await call("sendMessage", { ...input }));
       return { messageId: typeof r.message_id === "number" ? r.message_id : 0 };

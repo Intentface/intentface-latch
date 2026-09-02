@@ -232,8 +232,15 @@ describe("telegramChannel.handleRequest", () => {
       telegramChatId: "5",
       text: "do the thing",
     });
-    const notice = h.of("sendMessage")[0]!.body;
-    expect(String(notice.text)).toContain("https://x/telegram/link?s=1");
+    const notice = h.of("sendMessage")[0]!.body as {
+      text: string;
+      reply_markup: { inline_keyboard: { text: string; url: string }[][] };
+    };
+    expect(notice.text).toContain("You need a Latch account");
+    expect(notice.reply_markup.inline_keyboard[0]![0]).toEqual({
+      text: "Link your Latch account",
+      url: "https://x/telegram/link?s=1",
+    });
   });
 
   it("replies 'still working' when the chat's turn is already claimed", async () => {
@@ -1058,7 +1065,10 @@ describe("telegramChannel commands", () => {
     await h.flush();
     // Otherwise linking would replay "/new" to the agent as a message.
     expect(stashPending).not.toHaveBeenCalled();
-    expect(texts(h).at(-1)!).toContain("Link your Latch account");
+    const notice = h.of("sendMessage").at(-1)!.body as {
+      reply_markup: { inline_keyboard: { text: string; url: string }[][] };
+    };
+    expect(notice.reply_markup.inline_keyboard[0]![0]!.url).toBe("https://latch/link");
   });
 
   describe("/new", () => {

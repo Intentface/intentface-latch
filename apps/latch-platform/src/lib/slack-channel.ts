@@ -173,13 +173,6 @@ export async function getSlackChannelForApp(appId: string) {
       await slackStore.setStreamError(appId, value).catch(() => {});
     },
 
-    onFeedback: async (f) => {
-      // Recorded for now; a Langfuse score is the natural next step.
-      console.log(
-        `[slack] feedback app=${appId} user=${f.userId} channel=${f.channelId} sentiment=${f.sentiment}`,
-      );
-    },
-
     authorizeUrl: (name, ctx) => {
       // `slackApp` makes the generic authorize/callback run under the APP
       // BINDING's principal (see resolveContext in latch.ts) — the grant must
