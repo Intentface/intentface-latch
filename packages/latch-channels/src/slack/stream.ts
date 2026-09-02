@@ -6,8 +6,8 @@
  *   `recipient_team_id`); text buffers and flushes as `appendStream` every
  *   ~500ms; tool-start/end and reasoning become `task_update` chunks (reasoning
  *   is ONE collapsed "Thinking" task — never streamed as raw text);
- *   finish → `stopStream` with any trailing text, an error section if the run
- *   failed, and an optional feedback row.
+ *   finish → `stopStream` with any trailing text and an error section if the
+ *   run failed.
  *
  * Stop is two signals, either wins: `appendStream` throwing `stopped_by_user`
  * (the viewer pressed Slack's native Stop button on THIS message) and the
@@ -30,7 +30,7 @@
 
 import type { RenderEvent } from "../types.js";
 import { SlackApiError, type SlackClient, type StreamChunk } from "./api.js";
-import { errorBlocks, feedbackActions, markdownBlocks, notificationText } from "./blocks.js";
+import { errorBlocks, markdownBlocks, notificationText } from "./blocks.js";
 
 export interface SlackStreamOptions {
   api: Pick<
@@ -70,8 +70,6 @@ export interface SlackStreamOptions {
    * agents.sessions equivalent) — revisit before Slack's Feb 2027 sunset.
    */
   setStatus?: (text: string) => void | Promise<void>;
-  /** Append the native 👍/👎 row to the final message. */
-  feedback?: boolean;
   flushIntervalMs?: number;
   /** Text budget of the streamed message itself; the rest overflows. */
   maxStreamedChars?: number;
@@ -286,7 +284,6 @@ export async function renderSlackStream(
       });
     }
     if (errorMessage) blocks.push(...errorBlocks(errorMessage));
-    if (opts.feedback) blocks.push(feedbackActions());
     const r = await opts.api.postMessage({
       channel: opts.channel,
       ...threadArgs,
@@ -419,13 +416,12 @@ export async function renderSlackStream(
     return res;
   }
 
-  // Streamed mode: close with trailing text (within budget), error, feedback.
+  // Streamed mode: close with trailing text (within budget) and error.
   const room = Math.max(0, maxStreamed - streamedChars);
   const tail = pendingText.slice(0, Math.min(room, MAX_APPEND_CHARS));
   const overflow = pendingText.slice(tail.length);
   const finalBlocks: unknown[] = [];
   if (errorMessage) finalBlocks.push(...errorBlocks(errorMessage));
-  if (opts.feedback) finalBlocks.push(feedbackActions());
 
   const stopArgs = {
     channel: opts.channel,

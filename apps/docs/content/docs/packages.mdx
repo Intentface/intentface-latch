@@ -128,7 +128,7 @@ Key exports: `createMemoryProvider` · `createLoredexStore` · `scopeRefOf` · t
 
 ## latch-channels
 
-**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, and runs the turn in the background. Approvals render as native platform UI. Per adapter: Slack uses native message streaming with tool calls as task cards, the Agents-pane surface, initiator-owned threads and signed approval buttons; Telegram streams via progressive message edits; WhatsApp posts the completed answer (its messages can't be edited). Telegram and WhatsApp add questionnaires plus `/new` and `/compact` commands.
+**Slack, Telegram and WhatsApp.** Each adapter verifies the webhook, acknowledges fast, and runs the turn in the background. Approvals render as native platform UI. Per adapter: Slack uses native message streaming with tool calls as task cards, the Agents-pane surface, initiator-owned threads and signed approval buttons. Telegram and WhatsApp are two `Surface`s over one **turn kernel** (`createTurnKernel` in the package root): dedupe, the identity gate with post-link replay, the one-turn-per-chat lease, media folding, the answer posted once at finish (split past the platform cap, with a typing hint meanwhile), approvals, questionnaires and the `/new` `/compact` `/cancel` `/status` commands are written once — a new DM platform is a webhook parser plus a Surface.
 
 ```ts
 import { slackChannel } from "@intentface/latch-channels/slack";

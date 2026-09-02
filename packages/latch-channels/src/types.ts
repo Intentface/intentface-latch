@@ -155,6 +155,21 @@ export interface ChannelThreadStore {
 }
 
 /**
+ * The identity gate's verdict for one inbound platform user. `principal` is the
+ * principal the turn runs as (required when `allowed`); `linkUrl` is the signed
+ * account-link URL to send on refusal; `silent` suppresses the refusal notice
+ * (a disabled binding shouldn't reply at all).
+ */
+export interface AuthResult<P> {
+  allowed: boolean;
+  principal?: P;
+  linkUrl?: string;
+  /** Override the refusal message. */
+  message?: string;
+  silent?: boolean;
+}
+
+/**
  * The subset of the Latch runtime a channel drives. Structural so the package
  * stays decoupled from the concrete app (and could even target a remote Latch).
  */

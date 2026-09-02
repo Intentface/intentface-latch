@@ -579,20 +579,6 @@ describe("slackChannel v2 — sessions & lifecycle", () => {
     expect(status[status.length - 1]!.body.status).toBe("active");
   });
 
-  it("pins suggested prompts on app_home_opened (messages tab only)", async () => {
-    const h = harness({ suggestedPrompts: [{ title: "Hi", message: "Say hi" }] });
-    await h.channel.handleRequest(
-      signedRequest(eventBody({ type: "app_home_opened", tab: "home", channel: "D1", user: "U1" })),
-    );
-    await h.channel.handleRequest(
-      signedRequest(
-        eventBody({ type: "app_home_opened", tab: "messages", channel: "D1", user: "U1" }),
-      ),
-    );
-    await h.flush();
-    expect(h.of("assistant.threads.setSuggestedPrompts").length).toBe(1);
-  });
-
   it("routes tokens_revoked / app_uninstalled to the lifecycle hook", async () => {
     const onLifecycle = vi.fn(async (_i: { type: string; teamId: string }) => {});
     const h = harness({ onLifecycle });
@@ -603,30 +589,6 @@ describe("slackChannel v2 — sessions & lifecycle", () => {
       "tokens_revoked",
       "app_uninstalled",
     ]);
-  });
-
-  it("feedback clicks hit the hook and never touch the runtime", async () => {
-    const onFeedback = vi.fn(async () => {});
-    const h = harness({ onFeedback });
-    await h.channel.handleRequest(
-      signedRequest(
-        interactionBody({
-          type: "block_actions",
-          trigger_id: "trigFb",
-          team: { id: TEAM },
-          user: { id: "U1" },
-          channel: { id: "C1" },
-          message: { ts: "200.1" },
-          actions: [{ action_id: "latch_feedback", value: "negative" }],
-        }),
-        true,
-      ),
-    );
-    await h.flush();
-    expect(onFeedback).toHaveBeenCalledWith(
-      expect.objectContaining({ sentiment: "negative", userId: "U1" }),
-    );
-    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
   });
 });
 

@@ -165,29 +165,3 @@ export function errorBlocks(message: string): unknown[] {
     },
   ];
 }
-
-export const FEEDBACK_ACTION = "latch_feedback";
-
-/** Native 👍/👎 feedback row (`context_actions` + `feedback_buttons`). */
-export function feedbackActions(): unknown {
-  return {
-    type: "context_actions",
-    elements: [
-      {
-        type: "feedback_buttons",
-        action_id: FEEDBACK_ACTION,
-        positive_button: {
-          text: { type: "plain_text", text: "Good response" },
-          accessibility_label: "Mark this response as good",
-          value: "positive",
-        },
-        negative_button: {
-          text: { type: "plain_text", text: "Bad response" },
-          accessibility_label: "Mark this response as bad",
-          value: "negative",
-        },
-      },
-    ],
-  };
-}
-

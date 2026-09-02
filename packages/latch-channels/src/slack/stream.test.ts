@@ -205,7 +205,7 @@ describe("renderSlackStream — streaming mode", () => {
     expect(blocks[0]).toEqual({ type: "markdown", text: "ccccc" });
   });
 
-  it("appends error and feedback blocks on close", async () => {
+  it("appends the error block on close", async () => {
     const { api, calls } = fakeApi();
     const r = await renderSlackStream(
       gen(
@@ -213,13 +213,12 @@ describe("renderSlackStream — streaming mode", () => {
         { type: "error", message: "boom" },
         { type: "finish" },
       ),
-      opts(api, { feedback: true }),
+      opts(api),
     );
     expect(r.errorMessage).toBe("boom");
     const stop = calls.find((c) => c.method === "stopStream")!;
     const blocks = stop.args.blocks as { type: string }[];
     expect(blocks.some((b) => b.type === "section")).toBe(true); // error surface
-    expect(blocks.some((b) => b.type === "context_actions")).toBe(true); // feedback
   });
 });
 
@@ -422,17 +421,16 @@ describe("renderSlackStream — fallback + edge modes", () => {
         { type: "text-delta", text: "world" },
         { type: "finish" },
       ),
-      opts(api, { feedback: true }),
+      opts(api),
     );
     expect(r.mode).toBe("fallback");
     expect(calls.filter((c) => c.method === "appendStream")).toEqual([]);
-    // Exactly one message, at finish, holding the complete answer + feedback.
+    // Exactly one message, at finish, holding the complete answer.
     const posts = calls.filter((c) => c.method === "postMessage");
     expect(posts.length).toBe(1);
     const blocks = posts[0]!.args.blocks as { type: string; text?: string }[];
     expect(blocks[0]!.type).toBe("markdown");
     expect(JSON.stringify(blocks)).toContain("Hello world");
-    expect(blocks.some((b) => b.type === "context_actions")).toBe(true);
     // No progressive rendering artifacts: no interim posts, no status lines.
     expect(JSON.stringify(blocks)).not.toContain("Running web_search");
     expect(JSON.stringify(blocks)).not.toContain("⏳");

@@ -7,13 +7,7 @@
  * no Chat SDK runtime dependency.
  */
 export { slackChannel } from "./slackChannel.js";
-export type {
-  SlackChannelConfig,
-  SlackChatMeta,
-  SlackTenant,
-  SlackThreadStore,
-  SlackPeek,
-} from "./slackChannel.js";
+export type { SlackChannelConfig, SlackChatMeta, SlackThreadStore } from "./slackChannel.js";
 export { slackChatId, parseSlackChatId, DM_ROOT } from "./ids.js";
 export type { SlackChatRef } from "./ids.js";
 export { normalizeSlackText, isRenderableUserMessage } from "./normalize.js";
@@ -34,8 +28,6 @@ export {
   connectBlocks,
   signInCard,
   errorBlocks,
-  feedbackActions,
   APPROVE_ACTION,
   DENY_ACTION,
-  FEEDBACK_ACTION,
 } from "./blocks.js";

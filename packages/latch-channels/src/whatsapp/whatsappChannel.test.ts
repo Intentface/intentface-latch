@@ -19,6 +19,19 @@ function sseResponse(chunks: unknown[]): Response {
 
 const textRun = (text: string) => sseResponse([{ type: "text-delta", id: "1", delta: text }]);
 
+/** A history message parked on an approval-requested tool part. */
+function approvalHistory(approvalId: string, toolName = "web_search"): AppMessage[] {
+  return [
+    {
+      id: "m1",
+      role: "assistant",
+      parts: [
+        { type: `tool-${toolName}`, state: "approval-requested", input: { q: "x" }, approval: { id: approvalId } },
+      ],
+    } as unknown as AppMessage,
+  ];
+}
+
 function harness(overrides: Partial<WhatsappChannelConfig<{ userId: string }>> = {}) {
   const calls: { path: string; body: Record<string, unknown> }[] = [];
   const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -227,6 +240,7 @@ describe("whatsappChannel.handleRequest", () => {
     const claimTurn = vi.fn(async () => "lease-4");
     const releaseTurn = vi.fn(async () => {});
     const h = harness({ claimTurn, releaseTurn });
+    h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
     await h.channel.handleRequest(
       signedPost(
         inbound({
@@ -243,6 +257,7 @@ describe("whatsappChannel.handleRequest", () => {
 
   it("approval replies back off with 'still working' when the turn is claimed", async () => {
     const h = harness({ claimTurn: async () => null });
+    h.runtime.loadHistory.mockResolvedValue(approvalHistory("ap1"));
     await h.channel.handleRequest(
       signedPost(
         inbound({
@@ -258,6 +273,8 @@ describe("whatsappChannel.handleRequest", () => {
 
   it("resolves an approval button reply via applyApproval", async () => {
     const h = harness();
+    // Live before the decision; nothing pending after the resume.
+    h.runtime.loadHistory.mockResolvedValueOnce(approvalHistory("ap1"));
     await h.channel.handleRequest(
       signedPost(
         inbound({
@@ -273,6 +290,21 @@ describe("whatsappChannel.handleRequest", () => {
       decisions: [{ approvalId: "ap1", approved: true }],
     });
     expect((h.sends().at(-1)!.text as { body: string }).body).toBe("Resumed.");
+  });
+
+  it("a tap on an approval that is gone from fresh history says so and runs nothing", async () => {
+    const h = harness(); // loadHistory → [] : answered in the web app, or a previous thread's card
+    await h.channel.handleRequest(
+      signedPost(
+        inbound({
+          type: "interactive",
+          interactive: { type: "button_reply", button_reply: { id: "lta:1|ap1" } },
+        }),
+      ),
+    );
+    await h.flush();
+    expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+    expect((h.sends()[0]!.text as { body: string }).body).toMatch(/no longer active/);
   });
 });
 
@@ -559,6 +591,16 @@ describe("whatsappChannel questionnaires (askUser)", () => {
     await h.flush();
 
     expect(h.sends().some((b) => (b as { type?: string }).type === "interactive")).toBe(false);
+  });
+
+  it("a video's caption reaches the agent as text", async () => {
+    const h = harness();
+    await h.channel.handleRequest(
+      signedPost(inbound({ type: "video", video: { id: "v1", mime_type: "video/mp4", caption: "watch this" } })),
+    );
+    await h.flush();
+    const msg = (h.runtime.handleChat.mock.calls[0]![0] as { message: AppMessage }).message;
+    expect((msg.parts.find((p) => p.type === "text") as { text: string }).text).toContain("watch this");
   });
 
   it("a captioned image is NOT an answer — it runs a turn so the file reaches the agent", async () => {
