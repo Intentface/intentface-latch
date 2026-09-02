@@ -1,6 +1,7 @@
 import { tool, jsonSchema } from "ai";
 import { appTools as coreAppTools, harnessContextOf, sandboxTools } from "@intentface/latch-core/harness";
 import { parseTelegramChatId } from "@intentface/latch-channels/telegram";
+import { parseWhatsappChatId } from "@intentface/latch-channels/whatsapp";
 import { parseSlackChatId } from "@intentface/latch-channels/slack";
 import { slackTools, slackToolsApproval } from "./slack-tools";
 import { renderFetch, renderFetchConfigured } from "@/lib/render-fetch";
@@ -119,6 +120,8 @@ async function deliveryForChat(
 ): Promise<ScheduleDelivery | undefined> {
   const tg = parseTelegramChatId(chatId);
   if (tg) return { kind: "telegram", botId: tg.botRef };
+  const wa = parseWhatsappChatId(chatId);
+  if (wa) return { kind: "whatsapp", botId: wa.botRef };
 
   // v2 Slack chat ids name their app outright — no guessing, and it works for
   // an agent with several bots. v1 ids no longer parse (clean break): a chat

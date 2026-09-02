@@ -43,8 +43,8 @@ interface DeliveryOption {
 /** The option `value` a stored delivery target corresponds to. */
 const deliveryValueOf = (d: ScheduleSummary["delivery"]): string | undefined => {
   if (!d) return undefined;
-  if (d.kind === "telegram") return `telegram:${d.botId}`;
   if (d.kind === "slack") return `slack:${d.appId}:${d.channel}`;
+  if (typeof d.botId === "string") return `${d.kind}:${d.botId}`;
   return undefined;
 };
 
@@ -117,13 +117,13 @@ export function ScheduleDialog({
         if (!alive) return;
         const options: DeliveryOption[] = [];
         for (const c of channels) {
-          if (c.kind === "telegram") {
+          if (c.kind !== "slack") {
             options.push({
-              value: `telegram:${c.ref}`,
-              label: `Telegram · ${c.label}`,
-              delivery: { kind: "telegram", botId: c.ref },
+              value: `${c.kind}:${c.ref}`,
+              label: `${c.kind === "telegram" ? "Telegram" : "WhatsApp"} · ${c.label}`,
+              delivery: { kind: c.kind, botId: c.ref },
             });
-          } else if (c.kind === "slack") {
+          } else {
             for (const ch of c.channels ?? []) {
               options.push({
                 value: `slack:${c.ref}:${ch.id}`,

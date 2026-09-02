@@ -1,9 +1,8 @@
 import { waitUntil } from "@vercel/functions";
 import { telegramChannel } from "@intentface/latch-channels/telegram";
 import { getLatch } from "./latch";
-import { isOrgMember } from "./auth";
 import { telegramVaultKeys } from "./channel-store";
-import { buildChannelLinkUrl } from "./channel-link";
+import { dmIdentityGate } from "./channel-auth";
 import { baseUrl } from "./base-url";
 import { transcribeAudio } from "./transcribe";
 import type { Principal } from "./session";
@@ -26,6 +25,8 @@ export async function getTelegramChannelForBot(botId: string) {
   // Org-scope vault reads use the owner principal (userId stripped by scope).
   const owner: Principal = { orgId: bot.orgId, userId: bot.userId };
   const keys = telegramVaultKeys(botId);
+
+  const gate = dmIdentityGate({ kind: "telegram", bot, channelStore });
 
   const channel = telegramChannel<Principal>({
     // Scope-pinned agent ref (agent-store.ts): the binding runs the record it
@@ -68,40 +69,10 @@ export async function getTelegramChannelForBot(botId: string) {
     seen: (key) => channelStore.seen("telegram", key),
     claimTurn: (chatId) => channelStore.claimTurn(chatId),
     releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
-    // Only linked platform users may drive the agent; refusals get a signed
-    // link, and the triggering message is stashed for post-link replay.
-    authorizeUser: async ({ telegramUserId, username }) => {
-      const identity = await channelStore.resolveIdentity("telegram", botId, telegramUserId);
-      if (identity) {
-        // Identity rows outlive org membership — revalidate before minting a
-        // principal, or a removed member keeps channel access to org agents.
-        if (!(await isOrgMember(identity.userId, bot.orgId))) {
-          return {
-            allowed: false,
-            message: "Your Latch account is no longer a member of this agent's organization.",
-          };
-        }
-        // A personal-agent binding resolves the CREATOR's record; any other
-        // member would resolve their own same-named agent (or nothing).
-        if (bot.agentScope === "user" && identity.userId !== bot.userId) {
-          return {
-            allowed: false,
-            message: "This bot serves a personal agent — only its owner can use it.",
-          };
-        }
-        return { allowed: true, principal: { orgId: bot.orgId, userId: identity.userId } };
-      }
-      return {
-        allowed: false,
-        message: "You need a Latch account to use this agent.",
-        linkUrl: buildChannelLinkUrl(baseUrl(), {
-          kind: "telegram",
-          botRef: botId,
-          externalId: telegramUserId,
-          ...(username ? { meta: username } : {}),
-        }),
-      };
-    },
+    // Only linked platform users may drive the agent (channel-auth.ts, the same
+    // rule scheduled delivery applies); refusals get a signed link, and the
+    // triggering message is stashed for post-link replay.
+    authorizeUser: ({ telegramUserId, username }) => gate(telegramUserId, username),
     stashPending: (input) =>
       channelStore.setPending("telegram", botId, input.telegramUserId, {
         telegramChatId: input.telegramChatId,
