@@ -39,10 +39,10 @@ import { createVault } from "@intentface/latch-core";
 
 const vault = createVault<Principal>({ store, masterKey });
 
-createRuntime({ secrets: vault.resolver /* … */ });
+createMcpConnections({ vault, secrets: vault.resolver /* … */ });
 ```
 
-`Vault` is `set`/`get`/`has`/`delete`/`list` plus a `resolver` — the read-side `SecretResolver` you hand to `context.toolsContext`, so a tool receives a resolved credential while the model receives nothing. `list` returns **keys only, never values**, by contract.
+`Vault` is `set`/`get`/`has`/`delete`/`list` plus a `resolver` — the read-side `SecretResolver`. Hand it to `createMcpConnections` (connection auth is brokered through it) and call it from your own tools with the `principal` they receive in `options.context`, so a tool gets a resolved credential while the model receives nothing. `list` returns **keys only, never values**, by contract.
 
 `SecretStore` is the storage half (envelope-encrypted rows by default; swap for KMS/Vault/Doppler). `@intentface/latch-core/node` exports `deriveMasterKey` for the Node key derivation.
 
@@ -226,10 +226,3 @@ resolveReasoningOptions: (modelId, effort) =>
 
 Both exist so core carries no provider SDK. Keep the tool keys consistent across providers (`web_search`, `web_fetch`) and your prompts and rendering stay provider-agnostic.
 
-## Code mode
-
-```ts
-codeModeWrap: (tools, { agent }) => createCodeModeTool(tools, { agent });
-```
-
-Wraps a tool set into a single tool the model drives by writing JS — one program instead of N round-trips, which matters for fan-out and multi-step composition. The runtime calls it when an agent sets `codeMode`. Core needs no QuickJS dependency because of this seam.

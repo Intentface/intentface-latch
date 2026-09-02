@@ -6,7 +6,7 @@
  * Postgres (node-postgres / postgres-js / PGlite).
  */
 export { createSqliteAdapter, isUniqueViolation } from "./adapter.js";
-export type { SqliteAdapterOptions, MessageStore } from "./adapter.js";
+export type { SqliteAdapterOptions } from "./adapter.js";
 export { createSqliteSecretStore } from "./secret-store.js";
 export type { SqliteSecretStoreOptions } from "./secret-store.js";
 export { createSqliteAgentBuilderStore, createPostgresAgentBuilderStore } from "./agent-store.js";

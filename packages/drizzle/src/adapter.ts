@@ -41,21 +41,6 @@ function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
   return owner(principal).map(encodeURIComponent).join("/");
 }
 
-/**
- * Optional override for message persistence — a seam any consumer can supply to
- * route a chat's messages somewhere other than the `latch_messages` table (e.g.
- * bridge a user-facing chat to files it already owns). Both methods receive the
- * resolved `ChatRecord` so the consumer can decide per chat.
- *
- * `loadMessages` returns the messages to use, or `null` to defer to the default
- * table read. `appendMessages` returns `true` if it handled the write, or
- * `false` to defer to the default table write.
- */
-export interface MessageStore<P> {
-  loadMessages(principal: P, chat: ChatRecord): Promise<AppMessage[] | null>;
-  appendMessages(chat: ChatRecord, msgs: AppMessage[]): Promise<boolean>;
-}
-
 export interface SqliteAdapterOptions<P> {
   /**
    * Derive the ownership key for a principal — the isolation boundary. Coarser
@@ -63,12 +48,6 @@ export interface SqliteAdapterOptions<P> {
    * server-derived from the authenticated principal, never client input.
    */
   owner: (principal: P) => string[];
-  /**
-   * Optional message-persistence override (see `MessageStore`). When present,
-   * it's consulted first on load/append; if it declines (null / false) the
-   * default `latch_messages` behaviour applies.
-   */
-  messages?: MessageStore<P>;
 }
 
 /**
@@ -206,10 +185,6 @@ export function createSqliteAdapter<P>(
       // Scope check first — a chat the caller doesn't own returns nothing.
       const chat = await getChat(principal, chatId);
       if (!chat) return [];
-      if (opts.messages) {
-        const overridden = await opts.messages.loadMessages(principal, chat);
-        if (overridden !== null) return overridden;
-      }
       const rows = await db
         .select()
         .from(schema.messages)
@@ -232,16 +207,6 @@ export function createSqliteAdapter<P>(
           .update(schema.chats)
           .set({ updatedAt: Date.now() })
           .where(eq(schema.chats.id, chatId));
-      if (opts.messages) {
-        const [c] = await db
-          .select()
-          .from(schema.chats)
-          .where(eq(schema.chats.id, chatId));
-        if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
-          if (msgs.length > 0) await touchChat();
-          return;
-        }
-      }
       if (msgs.length === 0) return;
       // The next seq is computed INSIDE each INSERT (a single statement), so
       // two concurrent appenders can't both read the same max(seq) and then

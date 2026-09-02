@@ -7,7 +7,7 @@ describe("evalAuthor config", () => {
     // this allowlist (sandbox, defaultTools, renderTools, connections,
     // subagents, static tools, codeMode, providerWebTools, …) would ship
     // side effects with no human in the loop. Extend deliberately or not at all.
-    const config = await evalAuthor({ context: { orgId: "test" }, runtime: { orgId: "test" }, principal: {} as never });
+    const config = await evalAuthor({ context: { orgId: "test" }, principal: {} as never });
     const allowed = new Set(["model", "instructions", "toolSources", "smoothStream"]);
     expect(Object.keys(config).filter((k) => !allowed.has(k))).toEqual([]);
     expect(config.toolSources).toHaveLength(1);

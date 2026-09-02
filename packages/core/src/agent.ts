@@ -132,13 +132,6 @@ export interface AgentConfig<P> {
   /** Names of harness/default tools to drop for this agent (eve-style opt-out). */
   disableTools?: string[];
   /**
-   * Run the agent in code-mode: the model writes JS that calls the selected
-   * tools as functions (one program instead of many round-trips). `tools` names
-   * which connection tools to expose inside code-mode (omitted → all ungated);
-   * the runtime wraps them via `RuntimeConfig.codeModeWrap`.
-   */
-  codeMode?: { tools?: string[] };
-  /**
    * Use the model provider's NATIVE web tools (server-side web search/fetch)
    * when available, supplied by `RuntimeConfig.resolveProviderTools(modelId)`.
    * Provider-specific: e.g. Anthropic exposes web_search + web_fetch, OpenAI
@@ -192,15 +185,9 @@ export interface AgentInfo extends AgentMeta {
 export type AgentFactory<P, RuntimeContext = unknown> = ((ctx: {
   /**
    * The runtime CONTEXT built by `context.build` for this turn (org name, plan,
-   * feature flags — see `ContextDefinition`). Prefer this name.
+   * feature flags — see `ContextDefinition`).
    */
   context: RuntimeContext;
-  /**
-   * @deprecated Alias of `context`. The name collides with the composition
-   * root `createRuntime` returns — two different things called "runtime" made
-   * every example ambiguous. Kept for factories already written against it.
-   */
-  runtime: RuntimeContext;
   principal: P;
   /**
    * The per-turn request payload (see `ContextDefinition.build`). Ephemeral —

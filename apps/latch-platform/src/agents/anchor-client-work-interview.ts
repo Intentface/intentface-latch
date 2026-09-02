@@ -29,7 +29,7 @@ export const clientWorkInterview = defineAgent<
   Principal,
   { orgId: string; user?: { name?: string; email?: string } }
 >(
-  ({ runtime }) => {
+  ({ context: runtime }) => {
     const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
     // The platform resolves the logged-in user (= the expert) into the runtime
     // context; absent (evals, org-only principals) the prompt asks as before.

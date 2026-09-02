@@ -68,7 +68,7 @@ vi.mock("@/lib/auth", () => ({ isOrgAdmin: async () => true }));
 const { agentBuilder } = await import("./agent-builder");
 
 async function openTools() {
-  const cfg = await agentBuilder({ context: { orgId: "org1" }, runtime: { orgId: "org1" }, principal });
+  const cfg = await agentBuilder({ context: { orgId: "org1" }, principal });
   const opened = await cfg.toolSources![0]!.open(principal);
   return {
     cfg,

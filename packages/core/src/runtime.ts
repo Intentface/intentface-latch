@@ -14,7 +14,7 @@ import {
 import type { Experimental_SandboxSession, LanguageModel } from "ai";
 import type { AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
-import type { ContextDefinition, SecretResolver } from "./context.js";
+import type { ContextDefinition } from "./context.js";
 import type {
   AgentConfig,
   AgentFactory,
@@ -106,7 +106,6 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   context: ContextDefinition<P, RuntimeContext>;
   /** The agent registry: name → factory (file-based or DB-driven upstream). */
   agents: Record<string, AgentFactory<P, RuntimeContext>>;
-  secrets?: SecretResolver<P>;
   durability?: DurabilityConfig;
   /** Optional cost calculation. Without it, recorded cost is 0. */
   pricing?: Pricing;
@@ -185,8 +184,8 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * The default harness tools, supplied by the platform (kept out of core so we
    * carry no sandbox/QuickJS deps). `sandbox` tools (bash/read_file/write_file/
    * glob/grep) operate on the resolved `experimental_sandbox`; `app` tools
-   * (web_fetch/todo/ask_question) run in the app process. Merged into an agent's
-   * toolset per its `sandbox`/`defaultTools` flags.
+   * (web_fetch, askUser, scheduling, …) run in the app process. Merged into an
+   * agent's toolset per its `sandbox`/`defaultTools` flags.
    */
   harnessTools?: {
     sandbox?: Record<string, unknown>;
@@ -256,16 +255,6 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     modelId: string,
     args: { agent: string; memoryScoped: boolean; principal: P },
   ) => PromptCachingPlan | undefined;
-  /**
-   * Wrap a set of tools into a single code-mode tool (the model writes JS that
-   * calls them as functions). Supplied by the platform (e.g. via
-   * `experimental-ai-sdk-code-mode`), so core needs no QuickJS dep. Used when an
-   * agent sets `codeMode`.
-   */
-  codeModeWrap?: (
-    tools: Record<string, unknown>,
-    opts?: { agent: string },
-  ) => unknown;
   /**
    * Tracing seam (kept out of core — no OTEL/vendor dep). Supplies per-run AI
    * SDK telemetry options, an optional trace wrapper around the model call, and
@@ -1210,7 +1199,7 @@ export function createRuntime<P, RC = unknown>(
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
     const cfg = factory
-      ? await factory({ context: runtimeCtx, runtime: runtimeCtx, principal, turnContext })
+      ? await factory({ context: runtimeCtx, principal, turnContext })
       : await config.dynamicAgents?.resolve(agentName, principal);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =

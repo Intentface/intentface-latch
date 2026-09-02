@@ -29,7 +29,6 @@ Every field below is a seam. Omit it and the corresponding capability simply doe
 
 | Field | Effect when omitted |
 | --- | --- |
-| `secrets` | Tools get no secret resolver. |
 | `durability` | Runs complete in-invocation only; no leases, no resume. |
 | `pricing` | Recorded cost is `0`. |
 | `connections` | An agent's `connections: [...]` is ignored. |
@@ -42,7 +41,6 @@ Every field below is a seam. Omit it and the corresponding capability simply doe
 | `resolveProviderTools` | `providerWebTools` is a no-op. |
 | `resolveReasoningOptions` | `effort` falls back to the provider default. |
 | `resolvePromptCaching` | Caching still defaults **on** for first-party Anthropic/OpenAI models (derived from the model's `provider`) — worth ~6× on MCP-heavy agents. Supply the hook to use your own model catalog or per-principal cache keys; `() => undefined` turns caching off. See [Prompt caching](/docs/seams#prompt-caching--the-6-default). |
-| `codeModeWrap` | `codeMode` is a no-op. |
 | `telemetry` | Nothing is traced. |
 | `observability` | No event callbacks fire. |
 | `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is. |
@@ -129,11 +127,11 @@ export async function POST(request: Request) {
 
 The order matters when you're debugging a seam.
 
-1. **Context** — `context.build({ principal, request, turnContext })` produces `RuntimeContext`; `context.toolsContext` resolves per-tool context (secrets).
+1. **Context** — `context.build({ principal, request, turnContext })` produces `RuntimeContext`; every tool later receives it (plus `principal`, `run`, `writer`) as `options.context`.
 2. **Agent** — the factory runs, returning an `AgentConfig`. Dynamic agents resolve here.
 3. **Tools** — static `tools`, plus each `ToolSource` opened for this turn (connections/MCP), plus harness, sandbox, render and memory tools per the agent's flags. Sources are closed when the turn ends.
 4. **Instructions** — the agent's `instructions`, plus the memory provider's compiled index block, plus the current date line.
-5. **Model** — one `ToolLoopAgent` stream. `smoothStream`, `maxSteps`, `enabledTools`, reasoning options and code-mode wrapping all apply here.
+5. **Model** — one `ToolLoopAgent` stream. `smoothStream`, `maxSteps`, `enabledTools` and reasoning options all apply here.
 6. **Persist** — the user and assistant messages, the run row, and a usage row carrying the priced cost.
 
 A gated tool call ends step 5 early with an `approval-requested` part; the run goes `awaiting_input` and waits for `applyApproval`.

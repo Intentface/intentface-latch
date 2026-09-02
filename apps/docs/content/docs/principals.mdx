@@ -196,7 +196,7 @@ Two properties worth keeping: the authorization check happens before the princip
 
 Isolating rows is half the job. The other half is making sure tenant A's tool call carries tenant A's credentials — and that the model never sees either.
 
-`defineContext` has two halves. `build` makes the per-turn world; `toolsContext` resolves what tools receive:
+Every tool the runtime attaches receives one context object as its second argument (`options.context`): the `RuntimeContext` your `build` produced, plus `principal`, the current `run` (`{ id, chatId, agent }`) and the `writer`. So `build` makes the per-turn world, and a tool resolves what it needs from the principal it was handed — the credential included:
 
 ```ts
 import { createVault, defineContext } from "@intentface/latch-core";
@@ -205,34 +205,26 @@ const vault = createVault<Principal>({ store, masterKey });
 
 const context = defineContext<Principal, Ctx>({
   build: async ({ principal }) => ({
-    // `toolsContext` receives the built context and the resolver — not the
-    // principal. Carry it through here or a secret can't be scoped.
-    principal,
     orgId: principal.orgId,
     plan: await lookupPlan(principal.orgId),
   }),
-  // `secrets` is the read-side resolver. Called per turn, per principal.
-  toolsContext: async (ctx, secrets) => ({
-    crm: {
-      baseUrl: ctx.plan === "enterprise" ? EU_ENDPOINT : US_ENDPOINT,
-      apiKey: await secrets(ctx.principal, "crm_api_key"),
-    },
-  }),
 });
-
-createRuntime({ storage, context, agents, secrets: vault.resolver });
 ```
 
-Then a tool reads it from context, never from an argument:
+Then a tool reads the context, never an argument — and asks the vault for the secret, scoped by the principal:
 
 ```ts
+type ToolCtx = Ctx & { principal: Principal };
+
 const lookupCustomer = tool({
   description: "Look up a customer in the CRM.",
   inputSchema: z.object({ email: z.string() }),
-  execute: async ({ email }, { experimental_context }) => {
-    const { crm } = experimental_context as ToolsContext;
-    const res = await fetch(`${crm.baseUrl}/customers?email=${encodeURIComponent(email)}`, {
-      headers: { authorization: `Bearer ${crm.apiKey}` },
+  execute: async ({ email }, { context }) => {
+    const { principal, plan } = context as ToolCtx;
+    const apiKey = await vault.resolver(principal, "crm_api_key");
+    const baseUrl = plan === "enterprise" ? EU_ENDPOINT : US_ENDPOINT;
+    const res = await fetch(`${baseUrl}/customers?email=${encodeURIComponent(email)}`, {
+      headers: { authorization: `Bearer ${apiKey}` },
     });
     return res.json();
   },
@@ -246,7 +238,7 @@ What this buys you, in order of importance:
 - **Rotation is a vault write.** Replace the secret and every agent and connection built on it picks up the new value; delete it and they all revoke.
 - **Tools can be tenant-aware without being tenant-specific.** Endpoint, plan tier, feature flags all come through `build`, so behaviour can differ per customer while the code stays single.
 
-The same resolver backs connections: `latch-mcp` brokers MCP server auth through the vault, so an agent's config names a connection and never carries its token.
+The same resolver backs connections: hand it to `createMcpConnections({ secrets: vault.resolver })` and `latch-mcp` brokers MCP server auth through the vault, so an agent's config names a connection and never carries its token.
 
 ## Two failure modes worth internalising
 
