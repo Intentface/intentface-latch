@@ -18,12 +18,15 @@ import { createChannelThreadStore, migrateChannelThread } from "./channel-thread
  *    replayed once after they do. The payload is the channel's own JSON.
  *  - `latch_channel_dedupe`   — TTL'd test-and-set keys: webhook redeliveries,
  *    Slack's event/message/interaction claims, single-use OAuth states.
- *  - `latch_channel_turn`     — one-turn-per-chat leases.
  *  - `latch_channel_ask`      — the in-flight `askUser` questionnaire per chat.
  *  - `latch_channel_thread`   — which conversation a DM is writing to (`/new`).
  *
  * Chat ids are channel-prefixed (`telegram_<bot>_<user>`, `slack2_<app>_…`), so
  * the per-chat tables can't collide across kinds.
+ *
+ * One turn per chat is NOT here any more: core's storage adapter enforces one
+ * active run per chat (`ChatBusyError`), and the channel kernel renders that
+ * refusal as "still working". The old `latch_channel_turn` lease table is dropped.
  *
  * `migrateChannels` also carries the legacy per-channel tables over — copy
  * then drop, in one batch per table so a failed copy leaves the legacy data
@@ -33,7 +36,6 @@ import { createChannelThreadStore, migrateChannelThread } from "./channel-thread
 export type ChannelKind = "telegram" | "whatsapp" | "slack";
 
 const DELIVERY_TTL_MS = 10 * 60 * 1000;
-const TURN_LEASE_MS = 5 * 60 * 1000;
 /** Pendings outlive the longest link URL (Slack's 30 min); stale ones are never replayed. */
 const PENDING_TTL_MS = 30 * 60 * 1000;
 
@@ -167,16 +169,9 @@ export async function migrateChannels(client: Client): Promise<void> {
   await client.execute(
     `CREATE INDEX IF NOT EXISTS idx_channel_dedupe_exp ON latch_channel_dedupe(expires_at)`,
   );
-  await client.execute(`CREATE TABLE IF NOT EXISTS latch_channel_turn (
-    chat_id TEXT PRIMARY KEY,
-    token TEXT NOT NULL DEFAULT '',
-    expires_at INTEGER NOT NULL
-  )`);
-  try {
-    await client.execute(`ALTER TABLE latch_channel_turn ADD COLUMN token TEXT NOT NULL DEFAULT ''`);
-  } catch {
-    /* column already exists */
-  }
+  // The per-chat turn lease moved into core (one active run per chat, a
+  // storage invariant) — the host-side table is obsolete.
+  await client.execute(`DROP TABLE IF EXISTS latch_channel_turn`);
   await migrateChannelAsk(client);
   await migrateChannelThread(client);
 
@@ -375,7 +370,6 @@ export function createChannelStore(client: Client) {
           { sql: `DELETE FROM latch_channel_pending WHERE kind = ? AND bot_ref = ?`, args: [kind, id] },
           { sql: `DELETE FROM latch_channel_thread WHERE substr(chat_key, 1, ?) = ?`, args: [prefix.length, prefix] },
           { sql: `DELETE FROM latch_channel_ask WHERE substr(chat_id, 1, ?) = ?`, args: [prefix.length, prefix] },
-          { sql: `DELETE FROM latch_channel_turn WHERE substr(chat_id, 1, ?) = ?`, args: [prefix.length, prefix] },
         ],
         "write",
       );
@@ -521,34 +515,6 @@ export function createChannelStore(client: Client) {
       return !(await claimOnce(`${kind}:${key}`, DELIVERY_TTL_MS));
     },
 
-    /**
-     * One-turn-per-chat lease; expired leases are reclaimed (crash safety).
-     * Returns a claimant token, or null when the chat's turn is taken. The
-     * release is fenced on the token: a turn that outlives its 5-min lease
-     * can't delete the lease a NEWER turn now holds.
-     */
-    async claimTurn(chatId: string): Promise<string | null> {
-      const now = Date.now();
-      await client.execute({
-        sql: `DELETE FROM latch_channel_turn WHERE expires_at < ?`,
-        args: [now],
-      });
-      const token = crypto.randomUUID();
-      const res = await client.execute({
-        sql: `INSERT INTO latch_channel_turn (chat_id, token, expires_at) VALUES (?, ?, ?)
-              ON CONFLICT(chat_id) DO NOTHING`,
-        args: [chatId, token, now + TURN_LEASE_MS],
-      });
-      return res.rowsAffected === 1 ? token : null;
-    },
-
-    async releaseTurn(chatId: string, token: string): Promise<void> {
-      await client.execute({
-        sql: `DELETE FROM latch_channel_turn WHERE chat_id = ? AND token = ?`,
-        args: [chatId, token],
-      });
-    },
-
     ...createChannelAskStore(client),
     ...createChannelThreadStore(client),
 
@@ -559,7 +525,6 @@ export function createChannelStore(client: Client) {
         [
           { sql: `DELETE FROM latch_channel_dedupe WHERE expires_at < ?`, args: [now] },
           { sql: `DELETE FROM latch_channel_pending WHERE expires_at < ?`, args: [now] },
-          { sql: `DELETE FROM latch_channel_turn WHERE expires_at < ?`, args: [now] },
         ],
         "write",
       );

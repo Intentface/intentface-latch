@@ -67,8 +67,6 @@ export async function getTelegramChannelForBot(botId: string) {
       // fresh copy pins the buffer type to ArrayBuffer (BlobPart rejects ArrayBufferLike)
       transcribeAudio({ audio: new Blob([new Uint8Array(bytes)], { type: mediaType }), filename }),
     seen: (key) => channelStore.seen("telegram", key),
-    claimTurn: (chatId) => channelStore.claimTurn(chatId),
-    releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
     // Only linked platform users may drive the agent (channel-auth.ts, the same
     // rule scheduled delivery applies); refusals get a signed link, and the
     // triggering message is stashed for post-link replay.

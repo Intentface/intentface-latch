@@ -59,10 +59,10 @@ export async function getSlackChannelForApp(appId: string) {
       }
     },
 
-    // ── Admission (all atomic, all in the store) ──────────────────────────────
+    // ── Admission ─────────────────────────────────────────────────────────────
+    // Dedupe claims live here; one-turn-per-chat is core's storage invariant
+    // (a busy chat surfaces as ChatBusyError → the adapter's busy notice).
     claimOnce: (key, ttlMs) => channelStore.claimOnce(`slack:${appId}:${key}`, ttlMs),
-    claimTurn: (chatId) => channelStore.claimTurn(chatId),
-    releaseTurn: (chatId, token) => channelStore.releaseTurn(chatId, token),
     threads: {
       claim: async (chatId, meta) => {
         const row = await slackStore.claimThread({

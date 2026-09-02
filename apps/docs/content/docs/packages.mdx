@@ -138,7 +138,7 @@ import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
 
 A channel is just another caller of the runtime — the same `handleChat`, the same storage, the same approvals as your web app. Only the rendering differs.
 
-You supply the persistence: which agent a bot serves, the identity links, held messages, delivery dedup, and the per-chat turn lease.
+You supply the persistence: which agent a bot serves, the identity links, held messages, and delivery dedup. One turn per chat is not yours to guard — core's storage adapter refuses a second live run and the channels render that as "still working".
 
 <Callout type="warn" title="Resolve the human, not the installer">
 Decide deliberately whether a turn runs as the *person messaging* or as the

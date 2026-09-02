@@ -70,13 +70,11 @@ describe("channel store: bots", () => {
     await store.setPending("telegram", "b1", "5", { text: "held" });
     await store.rotateThread("telegram_b1_5");
     await store.rotateThread("telegram_b10_5");
-    expect(await store.claimTurn("telegram_b1_5")).not.toBeNull();
     await store.removeBot("telegram", "b1");
     expect(await store.getBot("telegram", "b1")).toBeNull();
     expect(await store.resolveIdentity("telegram", "b1", "5")).toBeNull();
     expect(await store.takePending("telegram", "b1", "5")).toBeNull();
     expect(await store.currentThread("telegram_b1_5")).toBe(0);
-    expect(await store.claimTurn("telegram_b1_5")).not.toBeNull(); // lease row gone
     // `b1_` is a prefix of nothing else: b10's rows survive.
     expect(await store.resolveIdentity("telegram", "b10", "5")).toEqual({ userId: "u1", orgId: "org1" });
     expect(await store.currentThread("telegram_b10_5")).toBe(1);
@@ -155,16 +153,6 @@ describe("channel store: admission", () => {
     expect(await store.claimOnce("slack:A1:evt:E1", 60_000)).toBe(false);
     expect(await store.claimOnce("slack:A1:evt:E2", -1)).toBe(true); // already expired
     expect(await store.claimOnce("slack:A1:evt:E2", 60_000)).toBe(true);
-  });
-
-  it("grants one turn lease per chat and fences the release on the token", async () => {
-    const t1 = await store.claimTurn("telegram_b1_5");
-    expect(t1).not.toBeNull();
-    expect(await store.claimTurn("telegram_b1_5")).toBeNull();
-    await store.releaseTurn("telegram_b1_5", "wrong-token");
-    expect(await store.claimTurn("telegram_b1_5")).toBeNull(); // still held
-    await store.releaseTurn("telegram_b1_5", t1!);
-    expect(await store.claimTurn("telegram_b1_5")).not.toBeNull();
   });
 
   it("migrate + prune run twice without error", async () => {
