@@ -1,12 +1,9 @@
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { LanguageModel } from "ai";
-import {
-  createAgentStore,
-  evalOwnerKeysOf,
-  evalOwnerOfRecord,
-  migrateAgents,
-} from "./agent-store";
+import { createSqliteAgentBuilderStore, migrate } from "@intentface/latch-drizzle";
+import { agentOwnerSegments, evalOwnerKeysOf, evalOwnerOfRecord, rubricsOf } from "./agent-store";
 import type { AgentRecord, AgentStore } from "./agent-store";
 import type { Principal } from "./session";
 
@@ -58,13 +55,27 @@ describe("evalOwnerKeysOf", () => {
   });
 });
 
-describe("agent store ownership + scope-pinned lookup (in-memory libsql)", () => {
+describe("rubricsOf", () => {
+  it("narrows a stored record's rubrics and tolerates absence", () => {
+    expect(rubricsOf(undefined)).toEqual([]);
+    expect(rubricsOf({ attachedEvals: undefined })).toEqual([]);
+    const rubric = { name: "a", prompt: "p", scale: "binary" as const, enabled: true };
+    expect(rubricsOf({ attachedEvals: [rubric] })).toEqual([rubric]);
+  });
+});
+
+describe("agent store ownership + scope-pinned lookup (drizzle store, in-memory libsql)", () => {
+  // The platform hands the framework store ITS owner policy; these tests pin
+  // that `evalOwnerOfRecord` (derived) and the store's real owner column agree.
   let store: AgentStore;
 
   beforeEach(async () => {
     const client = createClient({ url: ":memory:" });
-    await migrateAgents(client);
-    store = createAgentStore(client, (() => ({})) as unknown as (id: string) => LanguageModel);
+    await migrate(client);
+    store = createSqliteAgentBuilderStore<Principal>(drizzle(client), {
+      owner: agentOwnerSegments,
+      modelFor: (() => ({})) as unknown as (id: string) => LanguageModel,
+    });
   });
 
   /** The eval owner of the record `ref` resolves to for `p`. */
@@ -115,5 +126,18 @@ describe("agent store ownership + scope-pinned lookup (in-memory libsql)", () =>
     await store.upsert(ME, record("shared", "org"));
     expect(await ownerOf(COLLEAGUE, "shared")).toBe("org1");
     expect(await store.getRecord(OUTSIDER, "shared")).toBeUndefined();
+  });
+
+  it("round-trips exec.memory and attached evals, and lists memory-enabled names", async () => {
+    await store.upsert(ME, {
+      ...record("coach", "user"),
+      connections: ["loredex"],
+      exec: { memory: { scope: "agent-user", connection: "loredex" } },
+      attachedEvals: [{ name: "on-topic", prompt: "Stays on topic.", scale: "binary", enabled: true }],
+    });
+    const rec = await store.getRecord(ME, "coach");
+    expect(rec?.exec?.memory?.connection).toBe("loredex");
+    expect(rubricsOf(rec)[0]?.name).toBe("on-topic");
+    expect(await store.listMemoryEnabledNames()).toEqual(["coach"]);
   });
 });

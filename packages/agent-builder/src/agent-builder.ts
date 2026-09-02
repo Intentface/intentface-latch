@@ -109,8 +109,9 @@ export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
   /**
    * Offer schedule tools (schedule_agent / list_schedules / unschedule_agent)
    * so the builder can put agents on a cron cadence. Default true — the
-   * runtime always has the schedule API; disable only if the host runs no
-   * cron driver (nothing would ever fire).
+   * runtime always has the schedule API; disable if the host runs no cron
+   * driver (nothing would ever fire) or supplies richer schedule tools of its
+   * own via an extension. delete_agent's schedule cascade runs either way.
    */
   scheduling?: boolean;
   /** Optional feature sets: evals, tool authoring, … */
@@ -396,12 +397,24 @@ async function builderTools<P>(
             error: "exec.preApprovedWrites requires exec.defaultTools (the write capability) — there are no writes to waive without it.",
           };
         }
+        // The builder speaks the record's model-facing fields. Per-tool
+        // selections (`tools`) and attached evals are managed by other
+        // surfaces (an editor, an evals feature) — carry them over when the
+        // input doesn't mention them, so a save never silently detaches them.
+        // Pinned to the record's own scope: a same-named agent in the other
+        // scope must not donate its state.
+        const existing = await store.getRecord(principal, `${rec.scope}:${name}`);
+        const merged: AgentRecord = {
+          ...rec,
+          tools: rec.tools ?? existing?.tools,
+          attachedEvals: rec.attachedEvals ?? existing?.attachedEvals,
+        };
         // Extension vetoes (e.g. tool-authoring existence + org-scope rules).
         for (const ext of extensions) {
-          const veto = await ext.validateSave?.(principal, rec);
+          const veto = await ext.validateSave?.(principal, merged);
           if (veto) return { error: veto };
         }
-        await store.upsert(principal, rec);
+        await store.upsert(principal, merged);
         return decorate(extensions, "decorateSaveResult", principal, name, {
           saved: true,
           name,
@@ -418,32 +431,43 @@ async function builderTools<P>(
       execute: async ({ name, scope }) => {
         const target = normalizeAgentName(name);
         await store.remove(principal, scope, target);
-        // Cascade: the CALLER's schedules for this agent. Schedules are
-        // per-principal, so an org-shared agent may still have other
-        // members' schedules — surface that instead of pretending. The agent
-        // is already deleted at this point, so a failing unschedule must not
-        // reject the tool (the model would report a failed delete) — collect
-        // and report partial failures instead.
+        // Cascade: the CALLER's schedules for this agent — regardless of
+        // whether THIS builder offers schedule tools (`scheduling`): schedules
+        // can exist from other surfaces, and an orphan errors on every tick.
+        // Schedules are per-principal, so an org-shared agent may still have
+        // other members' schedules — surface that instead of pretending. The
+        // agent is already deleted at this point, so a failing unschedule must
+        // not reject the tool (the model would report a failed delete) —
+        // collect and report partial failures instead.
         let removedSchedules = 0;
         const scheduleCleanupFailures: string[] = [];
-        if (scheduling) {
-          const mine = (await runtime.listSchedules({ principal })).filter(
-            (s) => s.agent === target,
-          );
-          for (const s of mine) {
-            try {
-              await runtime.unschedule({ principal, id: s.id });
-              removedSchedules++;
-            } catch (error) {
-              scheduleCleanupFailures.push(s.id);
-              console.warn(`agent-builder: delete_agent cascade failed to unschedule ${s.id}:`, error);
-            }
+        let mine: { id: string }[] = [];
+        let listFailed = false;
+        try {
+          mine = (await runtime.listSchedules({ principal })).filter((s) => s.agent === target);
+        } catch (error) {
+          listFailed = true;
+          console.warn(`agent-builder: delete_agent could not list schedules for ${target}:`, error);
+        }
+        for (const s of mine) {
+          try {
+            await runtime.unschedule({ principal, id: s.id });
+            removedSchedules++;
+          } catch (error) {
+            scheduleCleanupFailures.push(s.id);
+            console.warn(`agent-builder: delete_agent cascade failed to unschedule ${s.id}:`, error);
           }
         }
         return {
           deleted: target,
           scope,
           removedSchedules,
+          ...(listFailed
+            ? {
+                warning:
+                  "The agent is deleted, but its schedules could not be listed — check list_schedules and remove any that still name it.",
+              }
+            : {}),
           ...(scheduleCleanupFailures.length
             ? {
                 scheduleCleanupFailures,

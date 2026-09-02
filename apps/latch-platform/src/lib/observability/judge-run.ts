@@ -5,6 +5,7 @@ import type {
 import { postScore } from "@intentface/latch-langfuse";
 import type { LanguageModel } from "ai";
 import type { Principal } from "../session";
+import { rubricsOf } from "../agent-store";
 import type { AttachedEval } from "../agent-store";
 import { evalOwnerOfRecord } from "../agent-store";
 import type { CredentialScope } from "../credentials";
@@ -209,7 +210,9 @@ export async function judgeLiveRun({
     // File the verdicts under the AGENT's owner, not the runner's — a colleague's
     // run on my agent is graded against MY rubrics, so the result is mine to see.
     evalOwner = evalOwnerFor(meta.principal, rec, runOwner);
-    const evals = rec?.attachedEvals?.filter((e) => e.enabled) ?? [];
+    // `rubricsOf` narrows the record's host-opaque `trigger` to the platform type
+    // (every write path validated it via validateRubrics).
+    const evals = rubricsOf(rec).filter((e) => e.enabled);
     if (evals.length === 0) return;
 
     const view = extractRunView(outcome.messages);
