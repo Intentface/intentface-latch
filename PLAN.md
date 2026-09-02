@@ -107,13 +107,13 @@ runtime.resumeStream(runId, off)   // reconnect by offset
 - `latch-server` wraps it in Hono routes; the cron endpoint = `runtime.tick()`; CLI/tests build their own. (Proven shape: Eve's "runtime", Flue's `@flue/runtime`.)
 
 ### Agents — file-based + lazy factory (ours)
-`agents/support.ts` default-exports `defineAgent((c) => config)`; filename = id. Factory resolved **per request** with `c.runtime` (typed) + workspace injected. DB-driven configs = optional later source. Serverless: **build-time manifest** (codegen) since no runtime fs.
+`agents/support.ts` default-exports `defineAgent((c) => config)`; filename = id. Factory resolved **per request** with `c.context` (typed) + workspace injected. DB-driven configs = optional later source. Serverless: **build-time manifest** (codegen) since no runtime fs.
 
 ### Context — defineContext (ours; sugar over native params)
-v7 only has raw per-call `runtimeContext`/`toolsContext` (+ tool `contextSchema`). `defineContext` lets a project declare the **typed shape once**, **build** it per request from `Principal`, and **resolve `toolsContext`** (secrets). Type flows into `defineAgent`/`prepareStep`/hooks/tools. Compiles to stock `agent.stream({ runtimeContext, toolsContext })`.
+v7 only has raw per-call `runtimeContext`/`toolsContext` (+ tool `contextSchema`). `defineContext` lets a project declare the **typed shape once** and **build** it per request from `Principal`; the runtime hands every tool the built context + `principal` + `run` + `writer` as its `toolsContext` (read as `options.context`), so tools resolve secrets themselves via the vault resolver. Type flows into `defineAgent`/`prepareStep`/hooks/tools. Compiles to stock `agent.stream({ runtimeContext, toolsContext })`.
 ```
 ContextResolver(req) → Principal → context.build(Principal) → RuntimeContext
-                                  → context.toolsContext(runtime, secrets) → per-tool context
+                                  → { ...runtimeContext, principal, run, writer } → per-tool context (options.context)
 ```
 **Per-turn `turnContext`** (shipped): a host-shaped request payload threaded into `context.build` **separately from the durable `Principal`**, so ephemeral fields (active document, editor selection, block config) are never persisted into `runs.identity` or replayed on resume/cron.
 
@@ -152,7 +152,7 @@ Secure per-tenant/per-user credential store + integration registry, so secrets n
 - **OAuth flow manager** (clients won't build this): initiate → callback → store → **auto-refresh** → revoke; tokens encrypted in the Vault, scoped to `(org, user?, server)`. Connect-mid-run → the run **parks** (OAuth→park/resume). The server handler takes `connections` as a **per-`principal` resolver** (multi-tenant hosts resolve a per-workspace registry, not one static value), and the sessionless callback carries **host-named state seams** (`stateParams` / `oauthState` → `resolveContext` / `connectedParam`) so latch stays host-agnostic.
 - **Injection, two levels:** default = server-side resolution into the MCP `authProvider` / `toolsContext` (model never sees it); hardened = **egress proxy / opaque placeholder** substituted at the network boundary (Claude-style) so the secret never enters the agent process — optional.
 - **Safety:** per-`Principal` scoping (no cross-tenant), encryption at rest, audit log, rotation, revocation, never in context/logs/telemetry, SSRF allowlist for MCP/auth servers.
-- Storage+lifecycle layer; `defineContext.toolsContext` / `SecretResolver` is the read-side. Package: `@intentface/latch-vault`.
+- Storage+lifecycle layer; `SecretResolver` (`vault.resolver`, called by tools and `latch-mcp`) is the read-side. Package: `@intentface/latch-vault`.
 
 ### Memory — `MemoryProvider` seam (ours)
 Persistent recall **across** conversations/sessions — distinct from history (messages/log), compaction (within-convo, a ContextExtension), and self-evolving prompts (offline instruction tuning). Exposed to the agent as tools (add/search/recall), wired via context. Scope mirrors workspaces (`shared|org|user|agent`) resolved from RuntimeContext. AI SDK v7 offers three approaches; we wrap them behind one seam:

@@ -24,7 +24,7 @@ export const anchorOrient = defineAgent<
   Principal,
   { orgId: string; user?: { name?: string; email?: string } }
 >(
-  ({ runtime }) => {
+  ({ context: runtime }) => {
     const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
     // The platform resolves the logged-in user into the runtime context; the
     // interviewee IS the logged-in user, so identification starts here. Absent

@@ -168,10 +168,6 @@ export function createPostgresAdapter<P>(
       // Scope check first — a chat the caller doesn't own returns nothing.
       const chat = await getChat(principal, chatId);
       if (!chat) return [];
-      if (opts.messages) {
-        const overridden = await opts.messages.loadMessages(principal, chat);
-        if (overridden !== null) return overridden;
-      }
       const rows = await db
         .select()
         .from(schema.messages)
@@ -194,16 +190,6 @@ export function createPostgresAdapter<P>(
           .update(schema.chats)
           .set({ updatedAt: Date.now() })
           .where(eq(schema.chats.id, chatId));
-      if (opts.messages) {
-        const [c] = await db
-          .select()
-          .from(schema.chats)
-          .where(eq(schema.chats.id, chatId));
-        if (c && (await opts.messages.appendMessages(rowToChat(c), msgs))) {
-          if (msgs.length > 0) await touchChat();
-          return;
-        }
-      }
       if (msgs.length === 0) return;
       // One transaction per batch: the max(seq) read and the inserts commit (or
       // roll back) together, so a crash mid-batch can't leave a partial write

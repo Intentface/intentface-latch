@@ -101,7 +101,7 @@ async function openTools(
     extensions,
     ...configExtras,
   });
-  const cfg = await factory({ context: undefined, runtime: undefined, principal });
+  const cfg = await factory({ context: undefined, principal });
   const opened = await cfg.toolSources![0]!.open(principal);
   return { cfg, tools: opened.tools as Record<string, { execute: (input: unknown, opts?: unknown) => Promise<unknown> }> };
 }
@@ -558,7 +558,7 @@ describe("test_agent heartbeat + truthful errors", () => {
       deps: async () => deps,
       testHeartbeatMs: 20,
     });
-    const cfg = await factory({ context: undefined, runtime: undefined, principal });
+    const cfg = await factory({ context: undefined, principal });
     const opened = await cfg.toolSources![0]!.open(principal);
     const tools = opened.tools as Record<string, { execute: (i: unknown, o?: unknown) => Promise<unknown> }>;
 
@@ -613,7 +613,7 @@ describe("testHeartbeatMs guard", () => {
       deps: async () => deps,
       testHeartbeatMs: 0, // would spin the writer without the guard
     });
-    const cfg = await factory({ context: undefined, runtime: undefined, principal });
+    const cfg = await factory({ context: undefined, principal });
     const opened = await cfg.toolSources![0]!.open(principal);
     const tools = opened.tools as Record<string, { execute: (i: unknown, o?: unknown) => Promise<unknown> }>;
     const written: unknown[] = [];

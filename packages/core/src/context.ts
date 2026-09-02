@@ -3,9 +3,15 @@
  *
  * The AI SDK only has raw per-call `runtimeContext` / `toolsContext`. `defineContext`
  * is thin sugar (OURS, not an SDK API): a project declares its `RuntimeContext`
- * shape once, builds it per request from the (opaque, customer-typed) `Principal`,
- * and resolves per-tool secrets. The type then flows through `defineAgent`,
- * prepareStep, hooks, tools.
+ * shape once and builds it per request from the (opaque, customer-typed)
+ * `Principal`. The type then flows through `defineAgent`, prepareStep, hooks,
+ * and tools.
+ *
+ * Tools receive the built context automatically: the runtime hands every tool
+ * `{ ...runtimeContext, principal, run, writer }` as its `options.context`, so a
+ * tool that needs a credential resolves it itself, scoped by the principal
+ * (e.g. `vault.resolver(ctx.principal, "crm_api_key")`) — the model never sees
+ * the value.
  *
  * Derive runtime context from DURABLE identity (look things up by ids on the
  * principal), so a resumed run or a scheduled trigger — which has no request —
@@ -33,13 +39,6 @@ export interface ContextDefinition<P, RuntimeContext> {
     request?: Request;
     turnContext?: unknown;
   }) => RuntimeContext | Promise<RuntimeContext>;
-  /** Optional: map runtime context → per-tool context (secrets resolved here). */
-  toolsContext?: (
-    runtime: RuntimeContext,
-    secrets: SecretResolver<P>,
-  ) =>
-    | Record<string, Record<string, unknown>>
-    | Promise<Record<string, Record<string, unknown>>>;
 }
 
 export function defineContext<P, RuntimeContext>(

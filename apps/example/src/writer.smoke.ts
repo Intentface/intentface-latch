@@ -12,8 +12,8 @@ import { createSqliteAdapter, migrate } from "@intentface/latch-drizzle";
 import { assert, latchDb, owner, type Principal } from "./setup.js";
 
 /**
- * The writer is exposed to tools via `toolsContext` → a tool reads
- * `context.writer` and streams custom data parts. Persistent parts land on the
+ * The writer is exposed to tools via the per-tool context → a tool reads
+ * `options.context.writer` and streams custom data parts. Persistent parts land on the
  * assistant message (and would render on reload); transient parts reach the
  * client live but are NOT persisted.
  */

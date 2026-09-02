@@ -96,7 +96,7 @@ export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
   /** The builder's own model — a value, or a per-request factory (e.g. per-tenant catalogs). */
   model:
     | LanguageModel
-    | ((ctx: { runtime: RuntimeContext; principal: P }) => LanguageModel | Promise<LanguageModel>);
+    | ((ctx: { context: RuntimeContext; principal: P }) => LanguageModel | Promise<LanguageModel>);
   /**
    * Lazy host services, resolved per turn. Lazy so the host's composition
    * root can import this package without a static import cycle.
@@ -674,10 +674,10 @@ export function createAgentBuilder<P, RuntimeContext = unknown>(
   for (const ext of extensions) Object.assign(toolApproval, ext.toolApproval ?? {});
 
   return defineAgent<P, RuntimeContext>(
-    async ({ runtime, principal }) => ({
+    async ({ context, principal }) => ({
       model:
         typeof config.model === "function"
-          ? await config.model({ runtime, principal })
+          ? await config.model({ context, principal })
           : config.model,
       instructions,
       ...(subagents.length ? { subagents } : {}),
