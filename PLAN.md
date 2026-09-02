@@ -107,7 +107,7 @@ runtime.resumeStream(runId, off)   // reconnect by offset
 - `latch-server` wraps it in Hono routes; the cron endpoint = `runtime.tick()`; CLI/tests build their own. (Proven shape: Eve's "runtime", Flue's `@flue/runtime`.)
 
 ### Agents — file-based + lazy factory (ours)
-`agents/support.ts` default-exports `defineAgent((c) => config)`; filename = id. Factory resolved **per request** with `c.runtime` (typed) + workspace injected. DB-driven configs = optional later source. Serverless: **build-time manifest** (codegen) since no runtime fs.
+`agents/support.ts` default-exports `defineAgent((c) => config)`; filename = id. Factory resolved **per request** with `c.context` (typed) + workspace injected. DB-driven configs = optional later source. Serverless: **build-time manifest** (codegen) since no runtime fs.
 
 ### Context — defineContext (ours; sugar over native params)
 v7 only has raw per-call `runtimeContext`/`toolsContext` (+ tool `contextSchema`). `defineContext` lets a project declare the **typed shape once** and **build** it per request from `Principal`; the runtime hands every tool the built context + `principal` + `run` + `writer` as its `toolsContext` (read as `options.context`), so tools resolve secrets themselves via the vault resolver. Type flows into `defineAgent`/`prepareStep`/hooks/tools. Compiles to stock `agent.stream({ runtimeContext, toolsContext })`.
