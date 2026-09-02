@@ -203,7 +203,7 @@ createRuntime({
 Windows are fixed and epoch-aligned (what "per day" means to people, and one row per key per window). `limitsFor` runs per turn, so it may read a policy table — keep it cheap. `runtime.cron()` prunes counters whose window ended more than a day ago.
 
 <Callout title="Where the policy lives">
-Latch has no opinion on tenants, plans or tiers: `limitsFor` is where a host turns "the Pro plan gets 2M tokens a day" into policies, and a single-tenant app can key everything on one constant. The platform's own default reads five `LATCH_LIMIT_*` env vars keyed on its org/user principal.
+Latch has no opinion on tenants, plans or tiers: `limitsFor` is where a host turns "the Pro plan gets 2M tokens a day" into policies, and a single-tenant app can key everything on one constant. The platform's own default reads five `LATCH_LIMIT_*` env vars and keys them at three scopes: the org (`org:<orgId>` — tokens and cost per day), the acting member (`user:<orgId>:<userId>` — tokens per day, turns per minute) and the agent within the org (`agent:<orgId>:<agent>` — turns per hour, shared by everyone using that agent).
 </Callout>
 
 ## Sandbox — a workspace for the agent
