@@ -29,7 +29,9 @@ import { getPrincipal } from "./session";
 import type { Principal } from "./session";
 import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
-import { normalizeAgentName, evalOwnerKeysOf } from "./agent-store";
+import { AgentRecordSchema, normalizeAgentRecord } from "@intentface/latch-agent-builder";
+import type { AgentRecordInput } from "@intentface/latch-agent-builder";
+import { normalizeAgentName, evalOwnerKeysOf, rubricsOf } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
 import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
@@ -474,12 +476,16 @@ export const listModelsFn = createServerFn({ method: "GET" }).handler(async () =
   return models;
 });
 
-/** Full UI-created agent records (org + personal), for the editor. */
+/**
+ * Full UI-created agent records (org + personal), for the editor. Attached
+ * evals are stripped: the editor doesn't manage them (saveAgentFn carries them
+ * over), and their host-defined `trigger` is opaque to the wire type.
+ */
 export const listAgentRecordsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
   const { agentStore } = await getLatch();
-  return agentStore.listRecords(principal);
+  return (await agentStore.listRecords(principal)).map(({ attachedEvals: _evals, ...rec }) => rec);
 });
 
 /** Connection names an agent can reference (code-declared + the caller's). */
@@ -522,59 +528,37 @@ export const connectionToolsFn = createServerFn({ method: "GET" })
     }
   });
 
-/** Create or update a UI agent at its scope. */
+/**
+ * Create or update a UI agent at its scope. The record schema owns the shape
+ * and the host-independent invariants (memory connection wired, org-shared
+ * memory needs an org agent, index schemas are outlines); what stays here is
+ * platform policy — the reserved `memory-*` prefix and the org-tools rule.
+ */
 export const saveAgentFn = createServerFn({ method: "POST" })
-  .validator(
-    (data: {
-      name: string;
-      title?: string;
-      description?: string;
-      modelId: string;
-      instructions: string;
-      connections: string[];
-      maxSteps?: number | "unlimited";
-      tools?: {
-        enabled: string[];
-        approval: Record<string, boolean>;
-        descriptions?: Record<string, string>;
-      };
-      exec?: {
-        sandbox?: boolean;
-        provider?: string;
-        defaultTools?: boolean | string[];
-        disableTools?: string[];
-        codeMode?: { tools?: string[] };
-        providerWebTools?: boolean;
-        authoredTools?: string[];
-        effort?: "minimal" | "low" | "medium" | "high";
-        memory?: {
-          scope: "agent-user" | "agent-org" | "user";
-          connection: string;
-          extractTo?: Array<"agent-user" | "agent-org" | "user">;
-          schemas?: { "agent-user"?: string; "agent-org"?: string };
-        };
-      };
-      subagents?: string[];
-      scope: "user" | "org";
-    }) => data,
-  )
+  .validator((data: AgentRecordInput) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false, error: "unauthorized" };
-    const name = normalizeAgentName(data.name);
-    if (!name) return { ok: false, error: "name required" };
+    const parsed = AgentRecordSchema.safeParse(data);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      return {
+        ok: false,
+        error: first ? `${first.path.join(".") || "agent"}: ${first.message}` : "invalid agent",
+      };
+    }
+    const rec = normalizeAgentRecord(parsed.data);
     // `memory-*` is reserved for the platform's memory system agents —
     // listAgentsFn hides the whole prefix, so a user agent named this way
     // would save fine and then vanish from every picker.
-    if (name.startsWith("memory-")) {
-      return { ok: false, error: `"${name}" is reserved (memory-* are platform system agents).` };
+    if (rec.name.startsWith("memory-")) {
+      return { ok: false, error: `"${rec.name}" is reserved (memory-* are platform system agents).` };
     }
-    if (!data.instructions.trim()) return { ok: false, error: "instructions required" };
     const { agentStore, authoredTools } = await getLatch();
     // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
     // resolve for other members. Validate before persisting.
-    const attached = data.exec?.authoredTools ?? [];
-    if (data.scope === "org" && attached.length) {
+    const attached = rec.exec?.authoredTools ?? [];
+    if (rec.scope === "org" && attached.length) {
       const orgTools = new Set(
         (await authoredTools.listFor(principal)).filter((t) => t.scope === "org").map((t) => t.name),
       );
@@ -586,83 +570,13 @@ export const saveAgentFn = createServerFn({ method: "POST" })
         };
       }
     }
-    // Memory must point at a connection the agent itself declares — the memory
-    // files live in that workspace, and a dangling name would silently disable
-    // recall while looking configured.
-    const mem = data.exec?.memory;
-    if (mem) {
-      if (!["agent-user", "agent-org", "user"].includes(mem.scope)) {
-        return { ok: false, error: `Unknown memory scope: ${mem.scope}` };
-      }
-      if (!data.connections.includes(mem.connection)) {
-        return {
-          ok: false,
-          error: `Memory connection "${mem.connection}" must be one of the agent's connections.`,
-        };
-      }
-      // `agent-org` memory is keyed by agent name alone (`__shared_root/_memory/<agent>/org`)
-      // — on a personal agent, two users' same-named agents on a shared
-      // connection would silently share one memory folder. Applies to the
-      // primary scope AND any extraction level.
-      const levels = Array.from(new Set([mem.scope, ...(mem.extractTo ?? [])]));
-      for (const level of levels) {
-        if (!["agent-user", "agent-org", "user"].includes(level)) {
-          return { ok: false, error: `Unknown memory level: ${level}` };
-        }
-      }
-      if (levels.includes("agent-org") && data.scope !== "org") {
-        return {
-          ok: false,
-          error: "Org-shared memory requires an org-visible agent (set the agent's scope to org).",
-        };
-      }
-      // Normalize extractTo before persisting: dedup'd, primary first —
-      // readers (extractionLevelsOf) tolerate denormalized configs, but the
-      // stored record should be canonical.
-      mem.extractTo = levels.length > 1 ? (levels as Array<"agent-user" | "agent-org" | "user">) : undefined;
-      // Index schemas: markdown outlines for the agent-held levels only (the
-      // shared `user` level's schema is a workspace file, not agent config).
-      if (mem.schemas) {
-        for (const [level, schema] of Object.entries(mem.schemas)) {
-          if (!["agent-user", "agent-org"].includes(level)) {
-            return {
-              ok: false,
-              error: `Memory schemas are configured per agent-held level (agent-user, agent-org) — not "${level}".`,
-            };
-          }
-          if (schema == null || !schema.trim()) {
-            delete mem.schemas[level as "agent-user" | "agent-org"];
-            continue;
-          }
-          if (schema.length > 4000) {
-            return { ok: false, error: `Memory schema for ${level} is too long (max 4000 chars).` };
-          }
-          if (schemaSections(schema).length === 0) {
-            return {
-              ok: false,
-              error: `Memory schema for ${level} needs at least one "## Section" heading — it is the index outline.`,
-            };
-          }
-        }
-        if (Object.keys(mem.schemas).length === 0) mem.schemas = undefined;
-      }
-    }
     // The editor doesn't manage attached evals — carry them over so a save
-    // never silently wipes the agent's online-eval rubrics.
-    const existing = await agentStore.getRecord(principal, name);
+    // never silently wipes the agent's online-eval rubrics. Pinned to the
+    // record's scope: a same-named agent in the other scope must not donate.
+    const existing = await agentStore.getRecord(principal, `${rec.scope}:${rec.name}`);
     await agentStore.upsert(principal, {
-      name,
-      title: data.title?.trim() || undefined,
-      description: data.description?.trim() || undefined,
-      modelId: data.modelId,
-      instructions: data.instructions,
-      connections: data.connections,
-      maxSteps: data.maxSteps,
-      tools: data.tools,
-      exec: data.exec,
-      subagents: data.subagents,
-      attachedEvals: existing?.attachedEvals,
-      scope: data.scope,
+      ...rec,
+      attachedEvals: rec.attachedEvals ?? existing?.attachedEvals,
     });
     return { ok: true };
   });
@@ -1306,7 +1220,7 @@ export const getAgentEvalsFn = createServerFn({ method: "GET" })
     const { agentStore } = await getLatch();
     // Only the user's own (editable) agents resolve here; built-ins/others → null.
     const rec = await agentStore.getRecord(principal, normalizeAgentName(agent));
-    return { editable: !!rec, evals: rec?.attachedEvals ?? [] };
+    return { editable: !!rec, evals: rubricsOf(rec) };
   });
 
 /** Persist the drawer's rubric set to the agent (the explicit "Save to agent"). */

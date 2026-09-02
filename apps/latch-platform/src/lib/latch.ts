@@ -12,6 +12,7 @@ import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createMemoryJobStore,
   createSqliteAdapter,
+  createSqliteAgentBuilderStore,
   createSqliteSecretStore,
   migrate,
   schema,
@@ -38,8 +39,8 @@ import { createConnectionStore  } from "./connection-store";
 import type {ConnectionStore} from "./connection-store";
 import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
-import { createAgentStore, evalOwnerOfRecord, migrateAgents  } from "./agent-store";
-import type {AgentStore} from "./agent-store";
+import { agentOwnerSegments, evalOwnerOfRecord } from "./agent-store";
+import type { AgentStore } from "./agent-store";
 import { memoryAgentOf } from "./memory/agent-identity";
 import { isOrgMember } from "./auth";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
@@ -157,8 +158,7 @@ export async function getLatch(): Promise<{
     url: process.env.DATABASE_URL ?? "file:./latch.db",
     authToken: process.env.TURSO_AUTH_TOKEN,
   });
-  await migrate(client); // creates latch_* tables alongside the auth tables
-  await migrateAgents(client); // latch_agents (UI-created agents)
+  await migrate(client); // creates latch_* tables (incl. latch_agents) alongside the auth tables
   await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
   await migrateTelegram(client); // latch_telegram_* (Telegram channel)
   await migrateWhatsapp(client); // latch_whatsapp_* (WhatsApp channel)
@@ -200,12 +200,16 @@ export async function getLatch(): Promise<{
       return parts.map(encodeURIComponent).join("/");
     },
   });
-  // UI-created agents (latch_agents table, org/personal) — may attach authored
-  // tools, resolved per caller at turn time. An org agent resolves only org
-  // tools (so every member gets them); a personal agent merges org + personal.
-  const agentStore = createAgentStore(client, catalog.modelFor, (p, names, scope) =>
-    authoredTools.executableTools(p, names, scope),
-  );
+  // UI-created agents (latch_agents, org/personal) — the framework's record +
+  // drizzle store; the platform supplies only its owner-key policy. Agents may
+  // attach authored tools, resolved per caller at turn time: an org agent
+  // resolves only org tools (so every member gets them); a personal agent
+  // merges org + personal.
+  const agentStore: AgentStore = createSqliteAgentBuilderStore<Principal>(db, {
+    owner: agentOwnerSegments,
+    modelFor: catalog.modelFor,
+    loadAuthoredTools: (p, names, scope) => authoredTools.executableTools(p, names, scope),
+  });
   const slackStore = createSlackStore(client);
   const telegramStore = createTelegramStore(client);
   const whatsappStore = createWhatsappStore(client);

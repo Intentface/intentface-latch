@@ -1,141 +1,66 @@
-import type { Client } from "@libsql/client";
-import type { LanguageModel } from "ai";
 import type {
-  AgentConfig,
-  AgentInfo,
-  DynamicAgentStore,
-  MemoryConfig,
-} from "@intentface/latch-core";
+  AgentBuilderStore,
+  AgentRecord as PkgAgentRecord,
+  AttachedEval as PkgAttachedEval,
+} from "@intentface/latch-agent-builder";
 import type { Principal } from "./session";
 import type { CredentialScope } from "./credentials";
-import type { EvalContextScope, EvalTrigger } from "./observability/trigger";
+import type { EvalTrigger } from "./observability/trigger";
 
 /**
- * UI-created agents, stored in a `latch_agents` table (config isn't secret).
- * Owner-keyed for org/personal scope, same as everything else. `resolve` builds
- * the same `AgentConfig` a code agent would (model from the allow-list,
- * instructions, connection names); the `tools` column is reserved for code-mode.
+ * UI-created agents live in `latch_agents`, owned by the framework:
+ * `@intentface/latch-agent-builder` defines the record (one zod schema →
+ * type, validator, builder input, editor form) and `@intentface/latch-drizzle`
+ * stores it. What stays here is the platform's OWNER-KEY policy — how a
+ * Principal + scope maps to the row's `owner` column — because that key
+ * doubles as the eval-visibility boundary.
  */
-export interface AgentRecord {
-  name: string;
-  title?: string;
-  description?: string;
-  modelId: string;
-  instructions: string;
-  connections: string[];
-  /** Tool-loop ceiling: a number caps steps; "unlimited" runs until done; undefined → default. */
-  maxSteps?: number | "unlimited";
-  /**
-   * Per-tool selection over the connections' tools. `enabled` = the namespaced
-   * tool names the model may call (empty → all). `approval` = per-tool override:
-   * true → require approval, false → waive it (overrides the connection default).
-   */
-  tools?: {
-    enabled: string[];
-    approval: Record<string, boolean>;
-    /** Per-tool description overrides (by namespaced tool name). */
-    descriptions?: Record<string, string>;
-  };
-  /**
-   * Code-execution capabilities (eve-style harness). `sandbox` gives a
-   * per-session workspace + the filesystem/shell tools; `provider` picks the
-   * backend ("just-bash" default | "daytona"); `defaultTools` adds the
-   * app-runtime defaults (web_fetch, …); `disableTools` opts specific defaults
-   * out; `codeMode` runs tools via a written-JS program (Phase 2).
-   */
-  exec?: {
-    sandbox?: boolean;
-    provider?: string;
-    defaultTools?: boolean | string[];
-    disableTools?: string[];
-    codeMode?: { tools?: string[] };
-    /** Use the model provider's native web search/fetch tools. */
-    providerWebTools?: boolean;
-    /** Give the agent the render tool(s) (headless-browser fetch); separate capability. */
-    renderTools?: boolean;
-    /** Names of authored tools (latch_tools) attached to this agent. */
-    authoredTools?: string[];
-    /** Reasoning/thinking effort (gated to reasoning-capable models). */
-    effort?: "minimal" | "low" | "medium" | "high";
-    /**
-     * Persistent cross-session memory (see `@intentface/latch-memory`): scope
-     * (`agent-user` | `agent-org` | `user`) + the connection whose workspace
-     * holds the memory files. The background sweep discovers memory-enabled
-     * agents by this field (`listMemoryEnabledNames`).
-     */
-    memory?: MemoryConfig;
-  };
-  /** Agents this one may delegate to via the `spawn_agent` tool. */
-  subagents?: string[];
-  /**
-   * Online evals attached to this agent: LLM-judge rubrics run against
-   * completed live runs (each rubric's `trigger` decides which turns), with
-   * verdicts pushed to Langfuse as scores (the score name is the rubric name).
-   * Authored via the eval-author / attach_evals.
-   */
-  attachedEvals?: AttachedEval[];
-  scope: CredentialScope;
-}
 
-/** One judge rubric attached to an agent (see AgentRecord.attachedEvals). */
-export interface AttachedEval {
-  /** Kebab-case identifier — becomes the Langfuse score name. */
-  name: string;
-  /** The judging instructions: one observable quality of a good response. */
-  prompt: string;
-  /** Judge model override (default: the platform judge model). */
-  judgeModelId?: string;
-  /** binary → pass/fail (1/0, BOOLEAN); score → graded 0–1 (NUMERIC). */
-  scale: "binary" | "score";
-  enabled: boolean;
-  /**
-   * When the judge runs (structural predicate — see observability/trigger.ts).
-   * Absent → every completed turn. Either way, subagent (depth>0) turns are
-   * skipped unless the trigger itself mentions depth.
-   */
-  trigger?: EvalTrigger;
-  /**
-   * What the judge sees: "turn" (last user msg + final answer + tool summary,
-   * the default), "chat" (plus the conversation so far), or "loop" (this
-   * turn full-fidelity: all assistant text + tool calls WITH outputs).
-   */
-  context?: EvalContextScope;
-}
+export { normalizeAgentName, parseAgentRef } from "@intentface/latch-agent-builder";
+export type { AgentRecord, AgentScope } from "@intentface/latch-agent-builder";
 
-/** Column value (INTEGER) ↔ AgentConfig.maxSteps: NULL=default, 0=unlimited, N=cap. */
-const maxStepsToCol = (m: AgentRecord["maxSteps"]): number | null =>
-  m === "unlimited" ? 0 : typeof m === "number" ? m : null;
-const maxStepsFromCol = (v: unknown): AgentRecord["maxSteps"] =>
-  v == null ? undefined : Number(v) === 0 ? "unlimited" : Number(v);
+/** The store the runtime and every server fn use (drizzle-backed, see lib/latch.ts). */
+export type AgentStore = AgentBuilderStore<Principal>;
+
+/**
+ * The platform's rubric: the package keeps `trigger` opaque (a host-defined
+ * predicate); here it is the observability layer's `EvalTrigger`. Every write
+ * path runs `validateRubrics` (observability/rubrics.ts), which validates the
+ * trigger AST — so narrowing a stored record's rubrics is safe.
+ */
+export type AttachedEval = Omit<PkgAttachedEval, "trigger"> & { trigger?: EvalTrigger };
+
+/** A stored record's rubrics, narrowed to the platform type (see `AttachedEval`). */
+export const rubricsOf = (rec: Pick<PkgAgentRecord, "attachedEvals"> | undefined): AttachedEval[] =>
+  (rec?.attachedEvals ?? []) as AttachedEval[];
 
 /**
  * The `latch_agents.owner` key for a principal at a given scope: `org` → the org
- * alone (shared with every member), `user` → the (org, user) pair. Exported as
- * `agentOwnerKey` because it doubles as the eval-visibility boundary — see
- * `evalOwnerKeysOf`.
+ * alone (shared with every member), `user` → the (org, user) pair. The same
+ * derivation is handed to the drizzle store as its `owner` option (as
+ * segments), so this function and the store can never disagree.
  */
+export const agentOwnerSegments = (p: Principal, scope: CredentialScope): string[] =>
+  scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""];
+
 const ownerKey = (p: Principal, scope: CredentialScope): string =>
-  (scope === "org" ? [p.orgId] : [p.orgId, p.userId ?? ""])
-    .map(encodeURIComponent)
-    .join("/");
+  agentOwnerSegments(p, scope).map(encodeURIComponent).join("/");
 
 export { ownerKey as agentOwnerKey };
 
 /**
  * The eval owner of an agent a caller resolved: the `owner` column of that row.
  *
- * Derived rather than read back, and safely so — `find` only ever matches rows
- * whose owner is one of the caller's OWN keys, and `upsert` always writes
+ * Derived rather than read back, and safely so — the store only ever matches
+ * rows whose owner is one of the caller's OWN keys, and `upsert` always writes
  * `owner = ownerKey(principal, scope)`. So for any record this caller could
  * resolve, the row's owner and `ownerKey(caller, record.scope)` are the same
  * string by construction. Deriving keeps the owner key off `AgentRecord`, which
  * is passed wholesale to the model by `get_agent` and to the browser by
  * `listAgentRecordsFn`.
  */
-export const evalOwnerOfRecord = (
-  p: Principal,
-  rec: { scope: CredentialScope },
-): string => ownerKey(p, rec.scope);
+export const evalOwnerOfRecord = (p: Principal, rec: { scope: CredentialScope }): string =>
+  ownerKey(p, rec.scope);
 
 /**
  * The owner keys whose agents this principal may administer, i.e. the eval
@@ -144,270 +69,6 @@ export const evalOwnerOfRecord = (
  * these two is exactly "the evals of agents I could edit" — a user who merely
  * *runs* someone else's agent matches neither and sees nothing.
  *
- * Ordered personal-first to mirror `find`'s personal-wins-over-org precedence.
+ * Ordered personal-first to mirror the store's personal-wins-over-org precedence.
  */
-export const evalOwnerKeysOf = (p: Principal): string[] => [
-  ownerKey(p, "user"),
-  ownerKey(p, "org"),
-];
-
-const newId = () => `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
-
-/**
- * Canonical agent-name normalization — used by BOTH writers (the editor's
- * saveAgentFn and the Agent Builder's save_agent) so the same intended name
- * always maps to one record. Lowercased kebab, underscores allowed.
- */
-export const normalizeAgentName = (s: string): string =>
-  s.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
-
-/**
- * Split a possibly scope-pinned agent ref into (name, scope). Channel bindings
- * store `org:name` / `user:name` so a binding always runs the record it was
- * created for (stored names never contain `:` — normalizeAgentName strips it),
- * and `latch_runs.agent` keeps that pin verbatim. Every lookup that can be
- * handed a run's agent name must therefore parse it, not just `resolve`.
- */
-export function parseAgentRef(ref: string): { name: string; scope?: CredentialScope } {
-  const pin = /^(org|user):(.+)$/.exec(ref);
-  return pin ? { name: pin[2]!, scope: pin[1] as CredentialScope } : { name: ref };
-}
-
-export async function migrateAgents(client: Client): Promise<void> {
-  await client.execute(`CREATE TABLE IF NOT EXISTS latch_agents (
-    id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
-    title TEXT, description TEXT, model_id TEXT NOT NULL, instructions TEXT NOT NULL,
-    connections TEXT NOT NULL, tools TEXT, scope TEXT NOT NULL,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
-  await client.execute(
-    `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
-  );
-  // Idempotent adds for existing dev DBs (sqlite has no ADD COLUMN IF NOT EXISTS).
-  for (const col of ["max_steps INTEGER", "exec TEXT", "subagents TEXT", "attached_evals TEXT"]) {
-    try {
-      await client.execute(`ALTER TABLE latch_agents ADD COLUMN ${col}`);
-    } catch {
-      /* column already exists */
-    }
-  }
-}
-
-export interface AgentStore extends DynamicAgentStore<Principal> {
-  /** Full records visible to the caller (org + personal), for the editor. */
-  listRecords: (p: Principal) => Promise<(AgentRecord & { scope: CredentialScope })[]>;
-  /** One record by name (personal wins over org) — e.g. for the online judge. */
-  getRecord: (p: Principal, name: string) => Promise<AgentRecord | undefined>;
-  upsert: (p: Principal, rec: AgentRecord) => Promise<void>;
-  remove: (p: Principal, scope: CredentialScope, name: string) => Promise<void>;
-  /**
-   * SYSTEM op (principal-free, cross-tenant): distinct names of UI agents that
-   * look memory-enabled — a cheap LIKE prefilter for the background memory
-   * sweep. The sweep re-checks each candidate authoritatively (via `getRecord`
-   * under the chat's own reconstructed principal), so false positives here are
-   * harmless; results must never feed anything but that per-principal check.
-   */
-  listMemoryEnabledNames: () => Promise<string[]>;
-}
-
-export function createAgentStore(
-  client: Client,
-  modelFor: (id: string) => LanguageModel,
-  /**
-   * Resolve the named authored tools (latch_tools) into executable tools for a
-   * caller — supplied by the composition root (which owns the tool store). When
-   * omitted, an agent's `authoredTools` are simply not attached.
-   */
-  loadAuthoredTools?: (
-    principal: Principal,
-    names: string[],
-    agentScope: CredentialScope,
-  ) => Promise<Record<string, unknown>>,
-): AgentStore {
-  const recordOf = (row: Record<string, unknown>): AgentRecord => ({
-    name: String(row.name),
-    title: (row.title as string) ?? undefined,
-    description: (row.description as string) ?? undefined,
-    modelId: String(row.model_id),
-    instructions: String(row.instructions),
-    connections: JSON.parse(String(row.connections)) as string[],
-    maxSteps: maxStepsFromCol(row.max_steps),
-    tools: row.tools
-      ? (JSON.parse(String(row.tools)) as AgentRecord["tools"])
-      : undefined,
-    exec: row.exec ? (JSON.parse(String(row.exec)) as AgentRecord["exec"]) : undefined,
-    subagents: row.subagents ? (JSON.parse(String(row.subagents)) as string[]) : undefined,
-    attachedEvals: row.attached_evals
-      ? (JSON.parse(String(row.attached_evals)) as AttachedEval[])
-      : undefined,
-    scope: String(row.scope) as CredentialScope,
-  });
-
-  const parseRef = parseAgentRef;
-
-  async function find(
-    p: Principal,
-    name: string,
-    scope?: CredentialScope,
-  ): Promise<AgentRecord | undefined> {
-    // Personal wins over org on a name clash — unless pinned to one scope.
-    const owners =
-      scope === "org"
-        ? [ownerKey(p, "org")]
-        : scope === "user"
-          ? [ownerKey(p, "user")]
-          : [ownerKey(p, "user"), ownerKey(p, "org")];
-    const res = await client.execute({
-      sql: `SELECT * FROM latch_agents WHERE name = ? AND owner IN (${owners.map(() => "?").join(", ")})`,
-      args: [name, ...owners],
-    });
-    const rows = res.rows as unknown as Record<string, unknown>[];
-    const personal = rows.find((r) => r.owner === ownerKey(p, "user"));
-    const row = personal ?? rows[0];
-    return row ? recordOf(row) : undefined;
-  }
-
-  return {
-    async resolve(name, principal): Promise<AgentConfig<Principal> | undefined> {
-      // Channel bindings pin resolution to one scope, so a same-named record in
-      // the OTHER scope can never shadow the agent the binding was created for.
-      const { name: bare, scope: pinned } = parseRef(name);
-      const rec = await find(principal, bare, pinned);
-      if (!rec) return undefined;
-      const sel = rec.tools;
-      const approvalEntries = Object.entries(sel?.approval ?? {});
-      // Authored tools (latch_tools) attached to this agent, resolved per caller
-      // into a tool source. Marked alwaysActive so an `enabledTools` restriction
-      // on connection tools never hides them (they're capabilities, not picks).
-      const authored = rec.exec?.authoredTools?.length ? rec.exec.authoredTools : undefined;
-      const toolSources =
-        authored && loadAuthoredTools
-          ? [
-              {
-                async open(p: Principal) {
-                  // Never let attached-tool resolution fail the whole turn.
-                  try {
-                    // Resolve under the AGENT's scope: an org agent gets org
-                    // tools (shared with every member), not the caller's personal.
-                    const tools = await loadAuthoredTools(p, authored, rec.scope);
-                    return { tools, alwaysActive: Object.keys(tools), close: async () => {} };
-                  } catch (e) {
-                    console.warn("Authored-tools attach failed; running without them:", e);
-                    return { tools: {}, close: async () => {} };
-                  }
-                },
-              },
-            ]
-          : undefined;
-      return {
-        model: modelFor(rec.modelId),
-        instructions: rec.instructions,
-        connections: rec.connections,
-        toolSources,
-        maxSteps: rec.maxSteps,
-        // Restrict callable tools (empty/undefined → all).
-        enabledTools: sel?.enabled?.length ? sel.enabled : undefined,
-        // Per-tool description overrides → applied to the resolved tools.
-        toolDescriptions:
-          sel?.descriptions && Object.keys(sel.descriptions).length ? sel.descriptions : undefined,
-        // Agents this one may delegate to (→ the runtime's spawn_agent tool).
-        subagents: rec.subagents?.length ? rec.subagents : undefined,
-        // Per-tool approval override (agent wins): on → require, off → waive.
-        toolApproval: approvalEntries.length
-          ? Object.fromEntries(
-              approvalEntries.map(([n, req]) => [n, req ? "user-approval" : "not-applicable"]),
-            )
-          : undefined,
-        // Code-execution capabilities (sandbox + default harness tools).
-        sandbox: rec.exec?.sandbox || undefined,
-        sandboxProvider: rec.exec?.provider,
-        defaultTools: rec.exec?.defaultTools,
-        disableTools: rec.exec?.disableTools,
-        codeMode: rec.exec?.codeMode,
-        providerWebTools: rec.exec?.providerWebTools || undefined,
-        renderTools: rec.exec?.renderTools || undefined,
-        effort: rec.exec?.effort,
-        memory: rec.exec?.memory,
-        smoothStream: true,
-      };
-    },
-
-    async list(principal): Promise<AgentInfo[]> {
-      const res = await client.execute({
-        sql: "SELECT name, title, description FROM latch_agents WHERE owner IN (?, ?) ORDER BY created_at DESC",
-        args: [ownerKey(principal, "user"), ownerKey(principal, "org")],
-      });
-      return (res.rows as unknown as Record<string, unknown>[]).map((r) => ({
-        name: String(r.name),
-        title: (r.title as string) ?? undefined,
-        description: (r.description as string) ?? undefined,
-      }));
-    },
-
-    async getRecord(principal, name) {
-      // Pin-aware, like `resolve`: `latch_runs.agent` carries the channel's
-      // `org:`/`user:` prefix, and the online judge looks rubrics up by it. Without
-      // this, attached evals silently never fire for channel-bound agents.
-      const { name: bare, scope } = parseRef(name);
-      return find(principal, bare, scope);
-    },
-
-    async listMemoryEnabledNames() {
-      const res = await client.execute(
-        `SELECT DISTINCT name FROM latch_agents WHERE exec LIKE '%"memory"%'`,
-      );
-      return (res.rows as unknown as Record<string, unknown>[]).map((r) => String(r.name));
-    },
-
-    async listRecords(principal) {
-      const res = await client.execute({
-        sql: "SELECT * FROM latch_agents WHERE owner IN (?, ?) ORDER BY created_at DESC",
-        args: [ownerKey(principal, "user"), ownerKey(principal, "org")],
-      });
-      return (res.rows as unknown as Record<string, unknown>[]).map((r) => ({
-        ...recordOf(r),
-        scope: String(r.scope) as CredentialScope,
-      }));
-    },
-
-    async upsert(principal, rec) {
-      const now = Date.now();
-      await client.execute({
-        sql: `INSERT INTO latch_agents
-          (id, owner, name, title, description, model_id, instructions, connections, tools, exec, subagents, attached_evals, max_steps, scope, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(owner, name) DO UPDATE SET
-            title=excluded.title, description=excluded.description, model_id=excluded.model_id,
-            instructions=excluded.instructions, connections=excluded.connections,
-            tools=excluded.tools, exec=excluded.exec, subagents=excluded.subagents,
-            attached_evals=excluded.attached_evals,
-            max_steps=excluded.max_steps, scope=excluded.scope,
-            updated_at=excluded.updated_at`,
-        args: [
-          newId(),
-          ownerKey(principal, rec.scope),
-          rec.name,
-          rec.title ?? null,
-          rec.description ?? null,
-          rec.modelId,
-          rec.instructions,
-          JSON.stringify(rec.connections),
-          rec.tools ? JSON.stringify(rec.tools) : null,
-          rec.exec ? JSON.stringify(rec.exec) : null,
-          rec.subagents?.length ? JSON.stringify(rec.subagents) : null,
-          rec.attachedEvals?.length ? JSON.stringify(rec.attachedEvals) : null,
-          maxStepsToCol(rec.maxSteps),
-          rec.scope,
-          now,
-          now,
-        ],
-      });
-    },
-
-    async remove(principal, scope, name) {
-      await client.execute({
-        sql: "DELETE FROM latch_agents WHERE owner = ? AND name = ?",
-        args: [ownerKey(principal, scope), name],
-      });
-    },
-  };
-}
+export const evalOwnerKeysOf = (p: Principal): string[] => [ownerKey(p, "user"), ownerKey(p, "org")];

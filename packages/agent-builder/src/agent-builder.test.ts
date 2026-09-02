@@ -384,13 +384,57 @@ describe("scheduling tools", () => {
     expect(err.error).toMatch(/Unknown agent/);
   });
 
-  it("scheduling: false removes the tools and the prompt section", async () => {
-    const { cfg, tools } = await openTools(makeDeps(), undefined, undefined, {
-      scheduling: false,
-    });
+  it("scheduling: false removes the tools and the prompt section, but delete still cascades", async () => {
+    const deps = makeDeps();
+    const { cfg, tools } = await openTools(deps, undefined, undefined, { scheduling: false });
     expect(tools.schedule_agent).toBeUndefined();
     expect(cfg.instructions).not.toContain("SCHEDULING");
     expect((cfg.toolApproval as Record<string, unknown>).schedule_agent).toBeUndefined();
+    await tools.save_agent!.execute(SAVE);
+    await deps.runtime.schedule({ principal, agent: "my-agent", prompt: "go", cron: null });
+    const res = (await tools.delete_agent!.execute({ name: "my-agent", scope: "user" })) as Record<string, unknown>;
+    expect(res.removedSchedules).toBe(1);
+    expect(deps.schedules).toHaveLength(0);
+  });
+});
+
+describe("save_agent carry-over", () => {
+  it("keeps editor-managed tools and attached evals when the input omits them", async () => {
+    const deps = makeDeps();
+    deps.records.push({
+      name: "my-agent",
+      modelId: "m-1",
+      instructions: "v1",
+      connections: [],
+      tools: { enabled: ["github_search"], approval: { github_search: true } },
+      attachedEvals: [{ name: "on-topic", prompt: "Stays on topic.", scale: "binary", enabled: true }],
+      scope: "user",
+    });
+    const { tools } = await openTools(deps);
+    const res = (await tools.save_agent!.execute({ ...SAVE, instructions: "v2" })) as { saved?: boolean };
+    expect(res.saved).toBe(true);
+    expect(deps.records[0]!.instructions).toBe("v2");
+    expect(deps.records[0]!.tools?.enabled).toEqual(["github_search"]);
+    expect(deps.records[0]!.attachedEvals?.[0]?.name).toBe("on-topic");
+    // Explicit input still wins.
+    await tools.save_agent!.execute({ ...SAVE, tools: { enabled: [], approval: {} } });
+    expect(deps.records[0]!.tools).toEqual({ enabled: [], approval: {} });
+  });
+
+  it("never borrows state from a same-named agent in the other scope", async () => {
+    const deps = makeDeps();
+    deps.records.push({
+      name: "my-agent",
+      modelId: "m-1",
+      instructions: "org one",
+      connections: [],
+      attachedEvals: [{ name: "org-only", prompt: "x", scale: "binary", enabled: true }],
+      scope: "org",
+    });
+    const { tools } = await openTools(deps);
+    await tools.save_agent!.execute(SAVE); // scope: user
+    const personal = deps.records.find((r) => r.scope === "user")!;
+    expect(personal.attachedEvals).toBeUndefined();
   });
 });
 
