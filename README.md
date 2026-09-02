@@ -102,6 +102,8 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 ```
 @intentface/latch-core       runtime, AppMessage + projections, durability, vault,
                              scheduler, pricing, the seams.   deps: ai, zod
+                             /models: models.dev catalog + provider hooks
+                             (optional @ai-sdk/* peers, loaded lazily)
 @intentface/latch-drizzle    StorageAdapter + SecretStore (SQLite & Postgres) + migrations
 @intentface/latch-server     one mountable Web handler (chat, approvals, lists,
                              connection OAuth) — framework-agnostic; Hono in /hono

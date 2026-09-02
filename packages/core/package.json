@@ -1,7 +1,7 @@
 {
   "name": "@intentface/latch-core",
   "version": "0.8.1",
-  "description": "Latch core — runtime, types, and seams for building agents on the AI SDK.",
+  "description": "Latch core \u2014 runtime, types, and seams for building agents on the AI SDK. `@intentface/latch-core/models`: models.dev catalog + provider hooks (optional provider-SDK peers, loaded lazily).",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,6 +17,11 @@
       "development": "./src/vault-node.ts",
       "types": "./dist/vault-node.d.ts",
       "import": "./dist/vault-node.js"
+    },
+    "./models": {
+      "development": "./src/models/index.ts",
+      "types": "./dist/models/index.d.ts",
+      "import": "./dist/models/index.js"
     }
   },
   "files": [
@@ -34,6 +39,10 @@
       "./node": {
         "types": "./dist/vault-node.d.ts",
         "import": "./dist/vault-node.js"
+      },
+      "./models": {
+        "types": "./dist/models/index.d.ts",
+        "import": "./dist/models/index.js"
       }
     }
   },
@@ -46,9 +55,15 @@
     "zod": "^4.0.0"
   },
   "peerDependencies": {
-    "ai": ">=7.0.0"
+    "ai": ">=7.0.0",
+    "@ai-sdk/anthropic": ">=4.0.0",
+    "@ai-sdk/google": ">=4.0.0",
+    "@ai-sdk/openai": ">=4.0.0"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/google": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
     "@types/node": "^22",
     "ai": "^7.0.2",
     "typescript": "^5.7.0",
@@ -58,5 +73,16 @@
     "type": "git",
     "url": "git+https://github.com/Intentface/intentface-latch.git",
     "directory": "packages/core"
+  },
+  "peerDependenciesMeta": {
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/google": {
+      "optional": true
+    },
+    "@ai-sdk/openai": {
+      "optional": true
+    }
   }
 }

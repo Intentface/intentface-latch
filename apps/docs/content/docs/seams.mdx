@@ -223,5 +223,5 @@ resolveReasoningOptions: (modelId, effort) =>
     : undefined;
 ```
 
-Both exist so core carries no provider SDK. Keep the tool keys consistent across providers (`web_search`, `web_fetch`) and your prompts and rendering stay provider-agnostic.
+Both exist so core carries no provider SDK. You don't have to write them: [`@intentface/latch-core/models`](/docs/packages#latch-core) ships `providerDefaults(catalog)`, which supplies these two plus `pricing` and `resolvePromptCaching` from one models.dev-backed catalog. Keep the tool keys consistent across providers (`web_search`, `web_fetch`) and your prompts and rendering stay provider-agnostic.
 
