@@ -102,6 +102,17 @@ const ALTERS = [
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];
 
+/** "Column already exists", wherever a driver put the message (top level or `cause` chain). */
+function isColumnExists(error: unknown): boolean {
+  let e: unknown = error;
+  for (let depth = 0; e && depth < 5; depth++) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/duplicate column|already exists/i.test(message)) return true;
+    e = e instanceof Error ? e.cause : undefined;
+  }
+  return false;
+}
+
 /**
  * Run the schema against any executor — a driver-agnostic seam so a consumer on
  * a non-libsql driver (e.g. better-sqlite3's `db.run`) can create the tables
@@ -118,10 +129,11 @@ export async function migrateWith(
     } catch (error) {
       // Idempotency only: swallow "column already exists" (sqlite/libsql say
       // "duplicate column name"), propagate everything else (locked DB, failed
-      // write) so callers don't proceed against an outdated schema.
-      const message =
-        error instanceof Error ? error.message : String(error);
-      if (!/duplicate column|already exists/i.test(message)) throw error;
+      // write) so callers don't proceed against an outdated schema. Some
+      // drivers surface the message on a wrapped cause (drizzle's better-sqlite3
+      // binding throws a DrizzleError whose `cause` is the SqliteError), so
+      // look down the cause chain, not just at the top-level message.
+      if (!isColumnExists(error)) throw error;
     }
   }
 }

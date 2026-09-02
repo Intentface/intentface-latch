@@ -10,3 +10,9 @@ transaction; the same for the two secret stores. Both now delegate to
 with the transaction choice as a `withTx` seam: Postgres wraps the batch,
 SQLite stays sequential for synchronous drivers. Public names and behaviour are
 unchanged.
+
+Also: `createRun`, `claimRun` and `createSchedule` read the inserted row back
+with `.returning()` instead of a second SELECT; and `migrateWith` recognises
+"column already exists" when a driver wraps it (drizzle's better-sqlite3
+binding throws a `DrizzleError` with the SqliteError as `cause`), so its
+idempotent ALTERs no longer fail on a re-run against that driver.

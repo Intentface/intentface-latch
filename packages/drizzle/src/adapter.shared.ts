@@ -267,11 +267,7 @@ export function makeStorageAdapter<P>(
         kind: input.kind,
         startedAt: now,
       };
-      await db.insert(s.runs).values(row);
-      const got = await db
-        .select()
-        .from(s.runs)
-        .where(eq(s.runs.id, row.id));
+      const got = await db.insert(s.runs).values(row).returning();
       return rowToRun(got[0]!);
     },
 
@@ -290,11 +286,7 @@ export function makeStorageAdapter<P>(
         attempt: 1,
         startedAt: now,
       };
-      await db.insert(s.runs).values(row);
-      const got = await db
-        .select()
-        .from(s.runs)
-        .where(eq(s.runs.id, row.id));
+      const got = await db.insert(s.runs).values(row).returning();
       return rowToRun(got[0]!);
     },
 
@@ -441,11 +433,7 @@ export function makeStorageAdapter<P>(
         leaseExpiresAt: null,
         createdAt: now,
       };
-      await db.insert(s.schedules).values(row);
-      const got = await db
-        .select()
-        .from(s.schedules)
-        .where(eq(s.schedules.id, row.id));
+      const got = await db.insert(s.schedules).values(row).returning();
       return rowToSchedule(got[0]!);
     },
 
