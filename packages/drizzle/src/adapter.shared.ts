@@ -380,23 +380,21 @@ export function makeStorageAdapter<P>(
       const row = runRow(principal, input, now);
       try {
         if (opts.batch) {
-          // The four statements are independent (the run id is minted here),
-          // so a batch is a transaction without an interactive connection.
-          const m = input.message;
+          // The statements are independent (the run id is minted here), so a
+          // batch is a transaction without an interactive connection.
           const results = await opts.batch([
             supersedeStaleQuery(input.chatId, now),
             db.insert(s.runs).values(row).returning(),
-            messageInsert(input.chatId, m),
+            ...input.messages.map((m) => messageInsert(input.chatId, m)),
             db.update(s.chats).set({ updatedAt: now }).where(eq(s.chats.id, input.chatId)),
           ]);
           return rowToRun((results[1] as any[])[0]);
         }
         if (opts.syncTx) {
-          const m = input.message;
           const got = opts.syncTx((tx) => {
             supersedeStaleQuery(input.chatId, now, tx).run();
             const inserted = tx.insert(s.runs).values(row).returning().get();
-            messageInsert(input.chatId, m, tx).run();
+            for (const m of input.messages) messageInsert(input.chatId, m, tx).run();
             tx.update(s.chats).set({ updatedAt: now }).where(eq(s.chats.id, input.chatId)).run();
             return inserted;
           });
@@ -407,7 +405,7 @@ export function makeStorageAdapter<P>(
         const inserted = await opts.withTx(async (tx) => {
           await supersedeStale(tx, input.chatId, now);
           const got = await insertRun(tx, row);
-          await appendMessagesWith(tx, input.chatId, [input.message]);
+          await appendMessagesWith(tx, input.chatId, input.messages);
           return got;
         });
         return rowToRun(inserted);

@@ -52,15 +52,17 @@ function busyAwareStorage() {
     async getChat(_p, id) {
       return chats.get(id) ?? null;
     },
+    // Round-trip like a database would: callers get copies, and only
+    // appendMessages changes what is stored.
     async loadMessages(_p, chatId) {
-      return [...(messages.get(chatId) ?? [])];
+      return structuredClone(messages.get(chatId) ?? []);
     },
     async appendMessages(chatId, msgs) {
       const list = [...(messages.get(chatId) ?? [])];
       for (const m of msgs) {
         const i = list.findIndex((x) => x.id === m.id);
-        if (i >= 0) list[i] = m;
-        else list.push(m);
+        if (i >= 0) list[i] = structuredClone(m);
+        else list.push(structuredClone(m));
       }
       messages.set(chatId, list);
     },
@@ -84,7 +86,7 @@ function busyAwareStorage() {
     // The atomic path the shipped adapters offer: nothing persists on refusal.
     async openTurn(p, input) {
       const run = await impl.createRun!(p, { chatId: input.chatId, agent: input.agent });
-      await impl.appendMessages!(input.chatId, [input.message]);
+      await impl.appendMessages!(input.chatId, input.messages);
       return run;
     },
   };
@@ -98,7 +100,40 @@ const userMessage = (id: string): AppMessage => ({
   metadata: { visibility: "user", createdAt: Date.now() },
 });
 
+const askParked = (toolCallId: string): AppMessage =>
+  ({
+    id: "asst_parked",
+    role: "assistant",
+    parts: [{ type: "tool-askUser", toolCallId, state: "input-available", input: { questions: [{ question: "Q?", options: [{ label: "A", description: "" }] }] } }],
+    metadata: { visibility: "user", createdAt: Date.now() },
+  }) as unknown as AppMessage;
+
 describe("one active run per chat", () => {
+  it("a tool-result submit into a busy chat records nothing, so the retry still resumes the call", async () => {
+    const { storage, messages } = busyAwareStorage();
+    const rt = createRuntime<P>({
+      storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: { echo: defineAgent({ model: slowModel(), instructions: "hi" }) },
+    });
+    await storage.createChat(principal, { id: "c2", agent: "echo" });
+    await storage.appendMessages("c2", [userMessage("u0"), askParked("call1")]);
+    // Someone else's turn is live in the chat.
+    const live = await storage.createRun(principal, { chatId: "c2", agent: "echo" });
+
+    const err = await rt.applyToolResult({ chatId: "c2", principal, toolCallId: "call1", output: { "Q?": "A" } }).catch((e) => e);
+    expect(isChatBusyError(err)).toBe(true);
+    const parked = messages.get("c2")!.find((m) => m.id === "asst_parked")!;
+    expect((parked.parts[0] as { state: string }).state).toBe("input-available"); // NOT recorded
+
+    await storage.updateRun(live.id, { status: "completed" });
+    const res = await rt.applyToolResult({ chatId: "c2", principal, toolCallId: "call1", output: { "Q?": "A" } });
+    expect(res).toBeInstanceOf(Response);
+    await res.text();
+    const after = messages.get("c2")!.find((m) => m.id === "asst_parked")!;
+    expect((after.parts[0] as { state: string }).state).toBe("output-available");
+  });
+
   it("a second message while a turn is live is refused with chat_busy and never persisted", async () => {
     const { storage, messages } = busyAwareStorage();
     const rt = createRuntime<P>({

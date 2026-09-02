@@ -65,10 +65,10 @@ async function main() {
   // never lands.
   const busyChat = await storage.createChat(principal, { agent: "echo" });
   const msg = (id: string): AppMessage => ({ id, role: "user", parts: [{ type: "text", text: id }], metadata: { visibility: "user", createdAt: Date.now() } });
-  await storage.openTurn!(principal, { chatId: busyChat.id, agent: "echo", message: msg("first") });
+  await storage.openTurn!(principal, { chatId: busyChat.id, agent: "echo", messages: [msg("first")] });
   let refused = false;
   try {
-    await storage.openTurn!(principal, { chatId: busyChat.id, agent: "echo", message: msg("second") });
+    await storage.openTurn!(principal, { chatId: busyChat.id, agent: "echo", messages: [msg("second")] });
   } catch (e) {
     refused = isChatBusyError(e);
   }

@@ -55,16 +55,16 @@ export async function runLeaseSmoke<P>(args: {
     metadata: { visibility: "user", createdAt: Date.now() },
   });
   const t = await store.createChat(me, { agent: "lease" });
-  const opened = await store.openTurn!(me, { chatId: t.id, agent: "lease", message: msg("u1"), lease: { owner: "n1", ttlMs: 60_000 } });
+  const opened = await store.openTurn!(me, { chatId: t.id, agent: "lease", messages: [msg("u1")], lease: { owner: "n1", ttlMs: 60_000 } });
   assert(opened.status === "active" && opened.leaseOwner === "n1", "openTurn: opens a leased run");
-  const refused = await busy(() => store.openTurn!(me, { chatId: t.id, agent: "lease", message: msg("u2") }));
+  const refused = await busy(() => store.openTurn!(me, { chatId: t.id, agent: "lease", messages: [msg("u2")] }));
   assert(refused !== null && refused > 0, "openTurn: busy chat refused with retryAfterMs");
   const ids = (await store.loadMessages(me, t.id)).map((m) => m.id);
   assert(ids.length === 1 && ids[0] === "u1", `openTurn: refused message not persisted (${ids.join(",")})`);
   // Racing openTurns: exactly one wins, exactly one message lands.
   const t2 = await store.createChat(me, { agent: "lease" });
   const race = await Promise.allSettled(
-    ["a", "b", "c"].map((id) => store.openTurn!(me, { chatId: t2.id, agent: "lease", message: msg(id) })),
+    ["a", "b", "c"].map((id) => store.openTurn!(me, { chatId: t2.id, agent: "lease", messages: [msg(id)] })),
   );
   const won = race.filter((r) => r.status === "fulfilled").length;
   const persisted = (await store.loadMessages(me, t2.id)).length;

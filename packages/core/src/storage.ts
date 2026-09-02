@@ -277,8 +277,10 @@ export interface StorageAdapter<P> {
   }): Promise<RunRecord>;
   /**
    * Open a turn ATOMICALLY: the run row (the one-active-run-per-chat check) and
-   * the user message in one transaction, so a refused turn persists nothing and
-   * a crash can never leave a run without its message (or vice versa). With
+   * the messages that start it — a fresh user message, or the assistant message
+   * a decision / tool result just changed — in one transaction, so a refused
+   * turn persists nothing and a crash can never leave a run without its
+   * messages (or vice versa). Messages upsert by (chat, id) like `appendMessages`. With
    * `lease`, the run is claimed durably like `claimRun`; without, like
    * `createRun`. Optional for compatibility: the runtime falls back to run-
    * then-message when an adapter doesn't implement it — but that fallback has a
@@ -290,7 +292,7 @@ export interface StorageAdapter<P> {
     input: {
       chatId: string;
       agent: string;
-      message: AppMessage;
+      messages: AppMessage[];
       lease?: { owner: string; ttlMs: number };
     },
   ): Promise<RunRecord>;
