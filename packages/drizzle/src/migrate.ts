@@ -45,7 +45,8 @@ const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_agents (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
      title TEXT, description TEXT, model_id TEXT NOT NULL, instructions TEXT NOT NULL,
-     connections TEXT NOT NULL, tools TEXT, exec TEXT, subagents TEXT, max_steps INTEGER,
+     connections TEXT NOT NULL, tools TEXT, exec TEXT, subagents TEXT, attached_evals TEXT,
+     max_steps INTEGER,
      scope TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
   `CREATE TABLE IF NOT EXISTS latch_schedules (
@@ -96,6 +97,7 @@ const ALTERS = [
   `ALTER TABLE latch_usage ADD COLUMN cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`,
   `ALTER TABLE latch_memory_chat_state ADD COLUMN last_extracted_key TEXT`,
+  `ALTER TABLE latch_agents ADD COLUMN attached_evals TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];

@@ -1,12 +1,13 @@
-import type { AgentRecord } from "./store";
+import type { AgentRecord } from "./record";
 
 /**
  * The extension seam.
  *
  * The builder core is agent CRUD + discovery + test_agent. Anything beyond
- * that — evals, tool authoring, whatever a host grows next — plugs in here
- * instead of being compiled into the core, so hosts without the feature get a
- * builder that simply never mentions it. An extension contributes:
+ * that — evals, tool authoring, connections, memory schemas, whatever a host
+ * grows next — plugs in here instead of being compiled into the core, so hosts
+ * without the feature get a builder that simply never mentions it. An
+ * extension contributes:
  *
  *  - tools:            merged into the builder's toolset (name-collision =
  *                      extension wins; keep names distinct).
@@ -18,23 +19,13 @@ import type { AgentRecord } from "./store";
  *                      the builder where user approval gates them.
  *  - reservedNames:    agent names save_agent must refuse to overwrite.
  *  - toolApproval:     HITL policy for the extension's own tools.
- *  - validateSave:     veto a save_agent input (return an error string).
+ *  - validateSave:     veto a save_agent record (return an error string).
  *  - decorate*Result:  append guidance to save_agent / test_agent results —
  *                      the model acts on tool results far more reliably than
  *                      on distant prompt instructions (e.g. eval nudges).
  */
 
 type MaybePromise<T> = T | Promise<T>;
-
-/** The save_agent input slice extensions may validate (post-normalization). */
-export interface SaveAgentInput {
-  name: string;
-  scope: AgentRecord["scope"];
-  authoredTools?: string[];
-  connections?: string[];
-  subagents?: string[];
-  modelId: string;
-}
 
 export interface AgentBuilderExtension<P> {
   /** Short id for diagnostics (e.g. "evals", "tool-authoring"). */
@@ -50,16 +41,17 @@ export interface AgentBuilderExtension<P> {
   /** Per-tool approval policy for the extension's tools (merged into the builder's). */
   toolApproval?: Record<string, unknown>;
   /**
-   * Declares that this extension understands `save_agent`'s `authoredTools`
-   * field. Without any such extension the core REJECTS a non-empty
-   * `authoredTools` (a clear error beats silently dropping capabilities).
+   * Declares that this extension understands `exec.authoredTools`. Without
+   * any such extension the core REJECTS a non-empty `authoredTools` (a clear
+   * error beats silently dropping capabilities).
    */
   handlesAuthoredTools?: boolean;
   /**
    * Veto a save: return an error string to reject (surfaced as the tool
-   * result), or undefined to pass. Runs after the core validations.
+   * result), or undefined to pass. Receives the NORMALIZED record about to be
+   * persisted; runs after the core validations.
    */
-  validateSave?: (principal: P, input: SaveAgentInput, record: AgentRecord) => MaybePromise<string | undefined>;
+  validateSave?: (principal: P, record: AgentRecord) => MaybePromise<string | undefined>;
   /** Amend the save_agent success result (e.g. append an eval nudge to `note`). */
   decorateSaveResult?: (
     principal: P,
