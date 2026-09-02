@@ -36,16 +36,14 @@ const context = defineContext<Principal, { orgId: string }>({
   build: async ({ principal }) => ({ orgId: principal.orgId }),
 });
 
-export const runtime = createRuntime<Principal, { orgId: string }>({
-  storage,
-  context,
-  agents: {
-    assistant: defineAgent<Principal>(() => ({
-      model: anthropic("claude-sonnet-4-6"),
-      instructions: "You are a concise, helpful assistant.",
-    })),
-  },
-});
+const agents = {
+  assistant: defineAgent<Principal>(() => ({
+    model: anthropic("claude-sonnet-4-6"),
+    instructions: "You are a concise, helpful assistant.",
+  })),
+};
+
+export const runtime = createRuntime<Principal, { orgId: string }>({ storage, context, agents });
 ```
 
 Run a turn:
@@ -72,6 +70,8 @@ Tables are prefixed `latch_*`. Consume the package's migrations rather than hand
 One seam and one route. The runtime gets `durability`, and something has to tick:
 
 ```ts
+import { Cron } from "croner";
+
 export const runtime = createRuntime<Principal, { orgId: string }>({
   storage,
   context,
@@ -97,7 +97,7 @@ The same code with `createClient({ url: ":memory:" })`: a fresh database per pro
 
 ## Mount it
 
-`createLatchHandler(runtime, { resolveContext })` gives you the Web-standard handler; [Hosting](/docs/hosting) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
+`createLatchHandler({ runtime, resolveContext })` gives you the Web-standard handler; [Hosting](/docs/hosting) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
 
 ## Next
 

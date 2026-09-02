@@ -22,7 +22,7 @@ const support = defineAgent<Principal>({
   tools: {
     refund: tool({
       description: "Refund a customer.",
-      inputSchema: z.object({ customerId: z.string(), amountCents: z.number() }),
+      inputSchema: z.object({ customerId: z.string(), amountCents: z.number().int().positive() }),
       execute: async (input) => payments.refund(input),
     }),
   },
@@ -83,7 +83,7 @@ const runtime = createRuntime<Principal, { orgId: string }>({
       tools: {
         refund: tool({
           description: "Refund a customer.",
-          inputSchema: z.object({ customerId: z.string(), amountCents: z.number() }),
+          inputSchema: z.object({ customerId: z.string(), amountCents: z.number().int().positive() }),
           execute: async (input) => payments.refund(input),
         }),
       },

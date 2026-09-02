@@ -7,7 +7,7 @@ Latch runs at three tiers. Each is additive: moving up adds a seam and changes n
 
 | Tier | Add | Infrastructure | You get |
 | --- | --- | --- | --- |
-| **0 — Stateless** | `latch-core` + an in-memory SQLite | none | `defineAgent` + context + tools + streaming, in any serverless function |
+| **0 — Stateless** | `latch-core` + `latch-drizzle` with an in-memory SQLite (`@libsql/client`) | none | `defineAgent` + context + tools + streaming, in any serverless function |
 | **1 — Persistence** | a database file or Postgres | a DB | Conversations, runs, usage and cost persisted; run-to-completion in one invocation |
 | **2 — Durability** | `durability: { enabled: true }` + a cron | the DB + a scheduled tick | Runs survive a crash: lease, heartbeat, reaper, resume-from-history |
 

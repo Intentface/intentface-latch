@@ -1,9 +1,9 @@
 ---
 title: Your first agent in ten minutes
-description: One file on createLatchApp — a chat that streams, an agent that asks before acting, and a run that survives a restart.
+description: One file on createLatchHonoApp — a chat that streams, an agent that asks before acting, and a run that survives a restart.
 ---
 
-`createLatchApp` is the whole backend in one call: durability on, an in-process cron, the models.dev catalog with pricing and prompt caching, the harness tools, and the HTTP handler. This page gets it answering, then adds the two things that make it more than a demo: an approval gate and a crash you can walk away from.
+`createLatchApp` is the whole backend in one call: durability on, an in-process cron, the models.dev catalog with pricing and prompt caching, the harness tools, and the HTTP handler. `createLatchHonoApp` is the same call with a Hono app already mounted, which is what this page uses. It gets the backend answering, then adds the two things that make it more than a demo: an approval gate and a crash you can walk away from.
 
 ## 1. Install
 
@@ -79,7 +79,7 @@ assistant: defineAgent<Principal>({
   tools: {
     refund: tool({
       description: "Refund a customer.",
-      inputSchema: z.object({ customerId: z.string(), amountCents: z.number() }),
+      inputSchema: z.object({ customerId: z.string(), amountCents: z.number().int().positive() }),
       execute: async ({ customerId, amountCents }) => ({ ok: true, customerId, amountCents }),
     }),
   },

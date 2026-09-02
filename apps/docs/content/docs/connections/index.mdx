@@ -50,7 +50,7 @@ createMcpConnections({ vault, secrets: vault.resolver /* … */ });
 
 ## OAuth, end to end
 
-1. The agent calls a tool from a connection the user hasn't authorised → the runtime substitutes a `connect_<name>` call, which parks the turn like an approval ([Operations](/docs/operations#human-in-the-loop)).
+1. A connection the user hasn't authorised exposes none of its tools yet — only a gated `connect_<name>` tool. When the agent calls it, the turn parks like an approval ([Operations](/docs/operations#human-in-the-loop)).
 2. The client sends the user to `GET /connections/:name/authorize`. The **principal is pinned into the flow state here** — never re-resolved from the callback request, so the grant cannot land on whoever completes the redirect.
 3. The provider redirects to the callback; it finishes the exchange, stores the token in the vault under that principal, and redirects to `returnTo`.
 4. The client approves the parked `connect_<name>` and the turn continues with the tools available. [The client side](/docs/hosting/client#oauth-the-callback-redirects--resuming-is-yours) has the exact steps.
