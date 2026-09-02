@@ -9,7 +9,7 @@ import type {
   Question,
   TranscribeAudio,
 } from "./types.js";
-import { consumeRun, isPendingApprovalError, pendingApprovals, pendingQuestion } from "./render.js";
+import { consumeRun, isChatBusyError, isPendingApprovalError, pendingApprovals, pendingQuestion } from "./render.js";
 import { nextAskStep, type AskEvent } from "./ask.js";
 import {
   CHANNEL_COMMANDS,
@@ -606,6 +606,7 @@ export function createTurnKernel<P, User, Ref>(
         });
         await renderRun(res, ctx);
       } catch (e) {
+        if (isChatBusyError(e)) return void (await say(user, STILL_WORKING_MESSAGE));
         console.error(`${tag} applyToolResult failed:`, e);
         await say(user, `⚠️ ${errorText(e).slice(0, 3000)}`);
       }
@@ -792,6 +793,8 @@ export function createTurnKernel<P, User, Ref>(
       });
       await renderRun(res, rctx);
     } catch (e) {
+      // Core's own one-turn-per-chat rule refused: same answer as our lease.
+      if (isChatBusyError(e)) return void (await say(user, STILL_WORKING_MESSAGE));
       console.error(`${tag} runMessage failed:`, e);
       await say(user, `⚠️ ${errorText(e).slice(0, 3000)}`);
       // The turn was refused because a decision is still outstanding — re-post
@@ -880,6 +883,7 @@ export function createTurnKernel<P, User, Ref>(
         // a questionnaire the resumed turn went on to ask).
         await renderRun(res, ctx);
       } catch (e) {
+        if (isChatBusyError(e)) return void (await say(user, STILL_WORKING_MESSAGE));
         console.error(`${tag} applyApproval failed:`, e);
         await say(user, `⚠️ ${errorText(e).slice(0, 3000)}`);
       }

@@ -170,6 +170,13 @@ describe("kernel — a message becomes one turn", () => {
     err.mockRestore();
   });
 
+  it("core's own busy refusal (chat_busy) reads as 'still working', not as an error", async () => {
+    const h = harness();
+    h.runtime.handleChat.mockRejectedValue(Object.assign(new Error("busy"), { code: "chat_busy", retryAfterMs: 5000 }));
+    await h.message("hi");
+    expect(h.texts()).toEqual(["I am still working on the previous message in this chat."]);
+  });
+
   it("drops a delivery the host has already seen", async () => {
     const h = harness({ cfg: { seen: async () => true } });
     await h.message("hi");

@@ -197,3 +197,12 @@ export function pendingQuestion(messages: AppMessage[]): PendingQuestion | null 
 export function isPendingApprovalError(e: unknown): boolean {
   return (e as { code?: string } | null)?.code === "pending_approval";
 }
+
+/**
+ * True for the runtime's refusal when a turn is already live in the chat
+ * (`ChatBusyError`, code `chat_busy`) — the storage-level one-active-run-per-
+ * chat rule. A channel renders it as "still working", not as an error.
+ */
+export function isChatBusyError(e: unknown): boolean {
+  return (e as { code?: string } | null)?.code === "chat_busy";
+}

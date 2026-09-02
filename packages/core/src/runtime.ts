@@ -2129,9 +2129,11 @@ export function createRuntime<P, RC = unknown>(
     // Limits gate BEFORE anything is persisted: a refused turn leaves no
     // trace (the client gets 429 and can retry when the window turns over).
     const admitted = await admitTurn(principal, agentName, "chat");
-    // persist the user message up front (crash-safe), then open the run
-    await storage.appendMessages(resolvedChatId, [message]);
+    // Open the run BEFORE persisting the message: the adapter refuses
+    // (`ChatBusyError` → 409) when a turn is already live in this chat, and a
+    // refused message must not linger in history — the client retries it.
     const { run, lease } = await openRun(principal, resolvedChatId, agentName);
+    await storage.appendMessages(resolvedChatId, [message]);
 
     return buildTurn({
       resolvedChatId,
@@ -2739,10 +2741,9 @@ export function createRuntime<P, RC = unknown>(
       if (declined.length > 0) await storage.appendMessages(chatId, declined);
     }
     // Gate before the message persists — a refused schedule/subagent turn
-    // leaves nothing behind, same as handleChat.
+    // leaves nothing behind, same as handleChat. Same for a busy chat: open
+    // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
-    await storage.appendMessages(chatId, [o.message]);
-
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
       o.agent,
       o.principal,
@@ -2750,6 +2751,7 @@ export function createRuntime<P, RC = unknown>(
       o.turnContext,
     );
     const { run, lease } = await openRun(o.principal, chatId, o.agent);
+    await storage.appendMessages(chatId, [o.message]);
     const onProgress = o.onProgress;
     const res = await buildTurn({
       resolvedChatId: chatId,

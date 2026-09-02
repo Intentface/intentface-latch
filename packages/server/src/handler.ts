@@ -457,6 +457,26 @@ export function createLatchHandler<P>(
               409,
             );
           }
+          // A turn is already live in this chat (one active run per chat): 409
+          // with the live lease's remaining time — the client retries the same
+          // message, nothing was persisted.
+          if (e && typeof e === "object" && (e as { code?: unknown }).code === "chat_busy") {
+            const retryAfterMs = Number((e as { retryAfterMs?: unknown }).retryAfterMs ?? 0);
+            return new Response(
+              JSON.stringify({
+                error: e instanceof Error ? e.message : "a turn is already running in this chat",
+                code: "chat_busy",
+                retryAfterMs,
+              }),
+              {
+                status: 409,
+                headers: {
+                  "content-type": "application/json",
+                  "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+                },
+              },
+            );
+          }
           // A budget is spent (the runtime's limits seam). 429 with Retry-After
           // = when the window turns over, so a well-behaved client waits.
           if (e && typeof e === "object" && (e as { code?: unknown }).code === "limit_exceeded") {

@@ -29,6 +29,16 @@ const DDL = [
      started_at INTEGER NOT NULL, ended_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS latch_runs_chat_idx ON latch_runs (chat_id)`,
   `CREATE INDEX IF NOT EXISTS latch_runs_reaper_idx ON latch_runs (status, lease_expires_at)`,
+  // One active run per chat (see ChatBusyError). Existing DBs may hold several
+  // active rows for one chat (pre-invariant concurrent turns, never-reaped T1
+  // crashes): keep the newest, mark the rest errored — then the index can exist.
+  `UPDATE latch_runs SET status = 'errored', error = 'superseded: duplicate active run'
+   WHERE status = 'active' AND EXISTS (
+     SELECT 1 FROM latch_runs n
+     WHERE n.chat_id = latch_runs.chat_id AND n.status = 'active'
+       AND (n.started_at > latch_runs.started_at
+            OR (n.started_at = latch_runs.started_at AND n.id > latch_runs.id)))`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS latch_runs_one_active_per_chat ON latch_runs (chat_id) WHERE status = 'active'`,
   `CREATE TABLE IF NOT EXISTS latch_usage (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL,
      model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,

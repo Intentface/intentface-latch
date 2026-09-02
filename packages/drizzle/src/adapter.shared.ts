@@ -13,6 +13,7 @@ import {
   sql,
 } from "drizzle-orm";
 import {
+  ChatBusyError,
   ChatConflictError,
   type AppMessage,
   type ChatRecord,
@@ -60,13 +61,30 @@ function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
-/** True if a driver error is a primary-key / unique-constraint violation. */
+/**
+ * True if a driver error is a primary-key / unique-constraint violation. Walks
+ * the cause chain: drizzle wraps driver errors in a "Failed query: …" error and
+ * the constraint code lives on the cause (libsql `SQLITE_CONSTRAINT_UNIQUE`, pg
+ * `23505`), two levels down for libsql.
+ */
 export function isUniqueViolation(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /unique constraint|primary key|duplicate key|sqlite_constraint/i.test(
-    message,
-  );
+  let e: unknown = error;
+  for (let depth = 0; e && depth < 5; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && (/^SQLITE_CONSTRAINT/i.test(code) || code === "23505")) return true;
+    const message = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+    if (/unique constraint|primary key|duplicate key|sqlite_constraint/i.test(message)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }
+
+/**
+ * How long a NON-durable (T1) active run may stay active before a new turn in
+ * its chat supersedes it. T1 has no heartbeat, so without this a crashed T1
+ * turn would block its chat forever. Durable runs use their lease instead.
+ */
+export const STALE_RUN_MS = 10 * 60_000;
 
 /** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
 function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
@@ -138,6 +156,46 @@ export function makeStorageAdapter<P>(
       .from(s.chats)
       .where(and(eq(s.chats.id, id), eq(s.chats.owner, ownerKey(principal))));
     return rows[0] ? rowToChat(rows[0]) : null;
+  }
+
+  /** The instant a live active run stops counting as live (lease, or T1 stale timeout). */
+  const liveUntil = sql`coalesce(${s.runs.leaseExpiresAt}, ${s.runs.startedAt} + ${STALE_RUN_MS})`;
+
+  /**
+   * One active run per chat, self-healing: an active run whose lease (or T1
+   * stale window) has expired is superseded — marked errored, fencing token
+   * bumped so its worker's late writes are refused — before a new run opens.
+   * A crashed turn therefore never blocks its chat; the next message moves the
+   * conversation on, the same rule as a new message closing a pending approval.
+   */
+  async function supersedeStale(chatId: string, now: number): Promise<void> {
+    await db
+      .update(s.runs)
+      .set({
+        status: "errored" as RunStatus,
+        error: "superseded: lease expired",
+        endedAt: now,
+        leaseOwner: null,
+        fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
+      })
+      .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active"), lt(liveUntil, now)));
+  }
+
+  /** Insert a run row; a LIVE active run in the chat (the partial unique index) → ChatBusyError. */
+  async function insertRun(row: Record<string, unknown>, chatId: string, now: number): Promise<any> {
+    try {
+      const got = await db.insert(s.runs).values(row).returning();
+      return got[0]!;
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const live: any[] = await db
+        .select({ until: liveUntil })
+        .from(s.runs)
+        .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active")))
+        .limit(1);
+      const until = live[0] ? Number(live[0].until) : now;
+      throw new ChatBusyError(chatId, Math.max(1, until - now));
+    }
   }
 
   return {
@@ -258,6 +316,7 @@ export function makeStorageAdapter<P>(
 
     async createRun(principal, input) {
       const now = Date.now();
+      await supersedeStale(input.chatId, now);
       const row = {
         id: newId("run"),
         chatId: input.chatId,
@@ -267,12 +326,12 @@ export function makeStorageAdapter<P>(
         kind: input.kind,
         startedAt: now,
       };
-      const got = await db.insert(s.runs).values(row).returning();
-      return rowToRun(got[0]!);
+      return rowToRun(await insertRun(row, input.chatId, now));
     },
 
     async claimRun(input) {
       const now = Date.now();
+      await supersedeStale(input.chatId, now);
       const row = {
         id: newId("run"),
         chatId: input.chatId,
@@ -286,8 +345,7 @@ export function makeStorageAdapter<P>(
         attempt: 1,
         startedAt: now,
       };
-      const got = await db.insert(s.runs).values(row).returning();
-      return rowToRun(got[0]!);
+      return rowToRun(await insertRun(row, input.chatId, now));
     },
 
     async heartbeatRun(id, owner, ttlMs, fencingToken) {
@@ -311,7 +369,9 @@ export function makeStorageAdapter<P>(
 
     async reclaimRun(id, owner, ttlMs) {
       const now = Date.now();
-      const updated = await db
+      let updated: any[];
+      try {
+        updated = await db
         .update(s.runs)
         .set({
           status: "active" as RunStatus,
@@ -336,6 +396,13 @@ export function makeStorageAdapter<P>(
           ),
         )
         .returning();
+      } catch (error) {
+        // The chat moved on: a fresh message superseded this crashed turn and
+        // opened a newer active run (one active per chat). Resuming the old one
+        // would interleave — it stays errored, and nobody owns it.
+        if (isUniqueViolation(error)) return null;
+        throw error;
+      }
       return updated[0] ? rowToRun(updated[0]) : null;
     },
 

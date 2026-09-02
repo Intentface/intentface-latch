@@ -285,6 +285,15 @@ All paths are relative to `basePath`.
 
 The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messages }` array and takes the last one — so an AI SDK client works without a translation layer.
 
+### Refusals a client should expect
+
+| Status | `code` | Meaning | What the client does |
+| --- | --- | --- | --- |
+| `409` | `pending_approval` | A decision is outstanding on this chat. | Render the approval; resolve it first. |
+| `409` | `chat_busy` | A turn is already running in this chat (two tabs, a retry racing a reply). Nothing was persisted. | Wait `Retry-After` (also `retryAfterMs` in the body) and resend the same message. |
+| `409` | `chat_conflict` | The client-chosen chat id exists and isn't yours. | Pick another id. |
+| `429` | `limit_exceeded` | A turn, token or cost budget is spent. | Wait `Retry-After`; tell the user which budget. |
+
 ## The cron route
 
 `POST cron/run` is the only route that isn't user-authenticated: it fires **every** tenant's due schedules, so there's no principal to check. Guard it with a shared secret, sent as `x-latch-cron-secret`:
