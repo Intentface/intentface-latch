@@ -132,8 +132,9 @@ export const AgentExecSchema = z.object({
 // `authoredTools` at the TOP level. Zod strips unknown keys by default, so a
 // writer still emitting that shape would save an agent silently missing its
 // configuration. Rejecting is the honest outcome. (`exec` itself stays
-// non-strict so a stored row carrying a retired flag such as `codeMode` still
-// loads and re-saves.)
+// non-strict: a stored row carrying a retired flag such as `codeMode` is NOT
+// rejected — the unknown key is stripped on parse and simply not written back.
+// Nothing reads it anymore, so dropping it is the whole migration.)
 export const AgentRecordSchema = z
   .strictObject({
     name: z.string().min(1).describe("Unique kebab-case id. Reusing an existing name UPDATES that agent."),

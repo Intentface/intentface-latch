@@ -48,9 +48,12 @@ describe("AgentRecordSchema — shape", () => {
     expect(rec.exec).toEqual({ effort: "high", authoredTools: ["t1"] });
   });
 
-  it("a retired exec flag on a stored row still loads (exec is not strict)", () => {
+  it("a retired exec flag (codeMode) on a stored row is stripped, not rejected", () => {
+    // Contract: unknown `exec` keys parse fine and are dropped — nothing reads
+    // `codeMode` anymore, so a re-save writes the row back without it.
     const rec = AgentRecordSchema.parse({ ...BASE, exec: { sandbox: true, codeMode: {} } });
     expect(rec.exec).toEqual({ sandbox: true });
+    expect(rec.exec).not.toHaveProperty("codeMode");
   });
 
   it("rejects an empty memory connection name", () => {
