@@ -1,0 +1,47 @@
+---
+title: Overview
+description: Latch is the backend for agent products — the persistence, safety and operations every agent needs, as a library inside your own stack.
+---
+
+Latch is a **backend for agent products**, built on the Vercel AI SDK. Every agent product needs the same things underneath — conversations that persist, a tool loop, per-tenant isolation, a human in the loop for risky actions, runs that survive a crash, and a bill you can attribute — and rebuilding them per project is where the interesting work goes to die. Latch is those things as a library: it runs inside your backend, behind your auth, against your database, on serverless or a VM, with no resident process and no second distributed system.
+
+## What you can build with it
+
+- **An assistant your users come back to.** Conversations persist, history is one straight line even from two devices, and the agent remembers across sessions.
+- **An agent that acts, safely.** It can refund, send, delete and pay, because anything risky pauses for a human approval and resumes when they decide — from another device, an hour later, after a deploy.
+- **Agents where your users already are.** The same agent in the web app, Slack, Telegram and WhatsApp, with approvals and questions rendered natively, and scheduled briefs delivered into the thread they will actually read.
+- **Agents connected to your customers' tools.** Name a service, the user signs in once, the agent has its tools. Secrets never reach the model and one tenant's access never serves another.
+- **Agents in front of paying customers.** Every token priced per model and per tenant, budgets per team, member and agent, a 429 with a retry time at the cap.
+- **Agents that build agents.** Agent definitions as data, a builder agent that creates and edits them in conversation, evals attached to real turns.
+
+## What each piece is for
+
+| You add | You get | Because |
+| --- | --- | --- |
+| `createRuntime` + storage | Persisted chats, runs and usage; one streaming turn | State is a fold over an append-only run log, so streaming, audit, cost and resume are reads of the same record |
+| `durability: { enabled: true }` + a cron | Runs survive crashes and deploys, on any number of nodes | A lease, a heartbeat and a reaper — a crashed run is resumed by replaying its own log |
+| `toolApproval` | Human-in-the-loop as a run state | The pending approval is a message part, not an open connection |
+| Schedules | Cron and one-shot agent runs, per tenant, delivered where people read | Schedules are rows claimed exactly once; delivery is a host hook |
+| Connections + vault | MCP and OpenAPI tools, per tenant, OAuth once | Secrets are brokered per principal at call time |
+| Channels | Slack, Telegram, WhatsApp | One kernel owns admission, identity and rendering; a platform is a parser plus a surface |
+| Limits | Budgets on turns, tokens and cost | The host names the counters; the runtime refuses, stops and settles |
+| Agent records | Agents as data | One validated schema, served from the web, a channel or a schedule |
+
+Everything past storage is optional and additive. Adding a seam never requires a rewrite or a migration of what you already have.
+
+## The problems you will meet
+
+Most of these features look basic on the surface. Each one hides a problem you meet only after shipping, and each cookbook recipe ends with a **Pitfalls** list that names them: two tabs interleaving one history, a crashed function mid-answer, an approval that dies with its websocket, a webhook delivered twice, a bot answering itself, a removed employee who still gets the daily brief, an OAuth callback landing in the wrong browser. Latch has already met them; the recipes say how.
+
+## Where to start
+
+<Cards>
+  <Card href="/docs/getting-started/quickstart" title="Your first agent in ten minutes" description="One file on createLatchHonoApp: a chat that streams, asks before acting, and survives a restart." />
+  <Card href="/docs/foundations/run-log" title="The run log" description="The one idea the rest is built on." />
+  <Card href="/docs/cookbook" title="Cookbook" description="Task-shaped recipes, each ending in a runnable example." />
+  <Card href="/docs/reference/packages" title="Reference: packages" description="What each @intentface/latch-* package adds and when you need it." />
+</Cards>
+
+<Callout type="info" title="Reading this as an agent">
+Append `.md` to any page URL for the markdown source, and start from `/llms.txt` for an index of every page with a one-line description.
+</Callout>

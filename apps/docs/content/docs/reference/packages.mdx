@@ -49,7 +49,7 @@ createRuntime({
 
 `providerDefaults` supplies `pricing`, `resolveProviderTools`, `resolveReasoningOptions` and `resolvePromptCaching`; list any of them after the spread to override it. The provider SDKs (`@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`) are *optional* peers, imported lazily per provider — a host with one API key never loads the other two, and the core root imports none of them.
 
-→ [Runtime](/docs/runtime) · [Seams](/docs/seams)
+→ [Runtime](/docs/runtime) · [Seams](/docs/reference/seams)
 
 ## latch-drizzle
 
@@ -68,7 +68,7 @@ Beyond the core adapter it also provides the **secret store** (envelope-encrypte
 Key exports: `createSqliteAdapter` · `createPostgresAdapter` · `migrate` / `migratePostgres` · `createSqliteSecretStore` · `createPostgresSecretStore` · `createMemoryJobStore` · `createSqliteAgentBuilderStore` · `schema`.
 
 <Callout title="Writing your own adapter?">
-The [Storage](/docs/storage) page lists four behavioural guarantees — atomic
+The [Storage](/docs/reference/storage) page lists four behavioural guarantees — atomic
 claims, fencing tokens, owner scoping, append-only messages. They only fail
 under concurrency, so point the durability and resume smoke tests at a new
 adapter before trusting it.
@@ -124,7 +124,7 @@ defineAgent<Principal>(() => ({
 
 Key exports: `createMemoryProvider` · `createLoredexStore` · `scopeRefOf` · the extraction/consolidation prompts and schemas.
 
-→ [Seams](/docs/seams#memory--persistent-facts-across-sessions)
+→ [Memory](/docs/memory)
 
 ## latch-channels
 
@@ -144,7 +144,7 @@ You supply the persistence: which agent a bot serves, the identity links, held m
 Decide deliberately whether a turn runs as the *person messaging* or as the
 account that installed the bot. Getting this wrong keys every row to the wrong
 owner and silently disables per-user memory — see the worked example in
-[Principals](/docs/principals#make-sure-the-principal-is-the-person-you-think-it-is).
+[Principals](/docs/foundations/principals#make-sure-the-principal-is-the-person-you-think-it-is).
 </Callout>
 
 ## latch-agent-builder

@@ -1,0 +1,28 @@
+---
+title: The run log
+description: State is a fold over an append-only log of turns — which is why streaming, resume, audit, cost and one-turn-per-chat are all reads of the same record.
+---
+
+Every turn appends to a log: the user message, the assistant message's parts as they stream, a run row with the lease and the usage. Nothing is ever rewritten. Latch is built on the consequence: **state is a fold over that log**, so anything that needs the state of a conversation reads the log, and anything that needs to recover reads it again.
+
+## What falls out of it
+
+- **Resume after a crash.** A run holds a lease and heartbeats it. When the process dies, the lease expires; a reaper marks the run errored and bumps its fencing token; the next tick reclaims it and replays the history. No queue, no workflow engine, no checkpoint format — the log *is* the checkpoint. A stale worker that wakes up later has the wrong fencing token and its writes are refused.
+- **Approvals as run state.** A gated tool call is a message part in `approval-requested`. A decision minutes later is another write to the log, and the turn continues from history. Nothing is held open while a human decides.
+- **One turn per conversation.** The storage adapter enforces one active run per chat (a partial unique index). Two tabs, a webhook retry and a scheduled brief arriving mid-conversation all meet the same rule: one runs, the other is told to wait. A crashed turn never blocks its chat — the next message supersedes it, fencing the old worker out.
+- **Cost and audit.** Every tool call with its input, every token priced per model, per tenant, in the same rows — a query, not a reconstruction.
+- **Compaction without loss.** A long conversation gets a summary boundary appended; later turns read from the boundary. Stored history is never rewritten, so nothing is lost and a chat can be compacted again.
+- **Memory and evals.** Idle conversations are extracted into memory, and evals run on real turns, both by reading the log after the fact.
+
+## Where the hard parts are
+
+- Two nodes must never own one run: leases with fencing tokens make ownership a single-row transition.
+- A resumed turn must not see its own half-written sentence: the trailing assistant prefill is trimmed before the model call.
+- A failed stream must be recorded as errored exactly once, by the writer whose fenced update applied.
+- A conversation must have exactly one thing happening in it: a run and the message that starts it are written together, so a refusal leaves nothing and a crash cannot leave a run without its message.
+
+## Next
+
+- [Operations: durability](/docs/operations#durability) — turning it on, `cron()`, `maxAttempts`
+- [Reference: storage](/docs/reference/storage) — the guarantees an adapter has to make
+- [Cookbook: gate a tool behind approval](/docs/cookbook/approvals)

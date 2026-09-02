@@ -2,16 +2,16 @@
   "title": "Latch",
   "pages": [
     "index",
-    "install",
-    "packages",
-    "hosting",
+    "foundations",
+    "getting-started",
     "runtime",
     "agents",
-    "turn-inputs",
-    "principals",
-    "storage",
-    "client",
     "operations",
-    "seams"
+    "channels",
+    "connections",
+    "memory",
+    "hosting",
+    "reference",
+    "cookbook"
   ]
 }
