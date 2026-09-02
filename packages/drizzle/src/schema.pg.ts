@@ -213,6 +213,21 @@ export const memoryUsage = pgTable(
   (t) => [primaryKey({ columns: [t.scopeKey, t.memoryId] })],
 );
 
+/** Limit counters: one row per (key, fixed window) — see `limits.ts` in core. */
+export const limitCounters = pgTable(
+  "latch_limit_counters",
+  {
+    key: text("key").notNull(),
+    windowStart: bigint("window_start", { mode: "number" }).notNull(),
+    windowMs: bigint("window_ms", { mode: "number" }).notNull(),
+    turns: integer("turns").notNull().default(0),
+    tokens: bigint("tokens", { mode: "number" }).notNull().default(0),
+    cost: doublePrecision("cost").notNull().default(0),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.key, t.windowStart] })],
+);
+
 /** Cron-driven agent runs. Carries the identity blob so a tick can rebuild the caller. */
 export const schedules = pgTable(
   "latch_schedules",

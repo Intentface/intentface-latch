@@ -14,6 +14,7 @@ export type { AgentStoreOptions } from "./agent-store.js";
 export { migrate, migrateWith } from "./migrate.js";
 export * as schema from "./schema.js";
 export { createMemoryJobStore } from "./memory-job-store.js";
+export { createSqliteLimitStore } from "./limit-store.js";
 
 // Postgres dialect (node-postgres / postgres-js in prod, PGlite for tests).
 export { createPostgresAdapter } from "./adapter.pg.js";
@@ -21,3 +22,4 @@ export { createPostgresSecretStore } from "./secret-store.pg.js";
 export { migratePostgres } from "./migrate.pg.js";
 export * as pgSchema from "./schema.pg.js";
 export { createPostgresMemoryJobStore } from "./memory-job-store.pg.js";
+export { createPostgresLimitStore } from "./limit-store.pg.js";

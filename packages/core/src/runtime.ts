@@ -40,6 +40,15 @@ import {
   type PromptCachingPlan,
 } from "./prompt-caching.js";
 import type { TurnTrigger, LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
+import {
+  LimitExceededError,
+  exceededPolicy,
+  remainingTokens,
+  windowRef,
+  type LatchLimits,
+  type LimitPolicy,
+  type LimitUsage,
+} from "./limits.js";
 import type {
   ChatRecord,
   RunLease,
@@ -265,6 +274,14 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * Optional — without it, nothing is observed and behavior is unchanged.
    */
   telemetry?: LatchTelemetry<P>;
+  /**
+   * Per org / user / agent budgets on turns, tokens and cost (see `limits.ts`).
+   * The host names the counters a turn counts against and their caps; the
+   * runtime refuses at admission (`LimitExceededError`, HTTP 429), stops the
+   * tool loop at the tightest remaining token budget, and settles usage on
+   * finish. Optional — without it, nothing is limited.
+   */
+  limits?: LatchLimits<P>;
 }
 
 export interface HandleChatInput<P> {
@@ -1142,9 +1159,12 @@ export function createRuntime<P, RC = unknown>(
      * must keep reading or the tee buffers.
      */
     observeStream?: (stream: ReadableStream<unknown>) => void;
+    /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
+    admitted?: Admitted;
   }): Promise<Response> {
     const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
       args;
+    const admitted = args.admitted;
     const autoApprove = args.autoApprove ?? false;
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
@@ -1522,12 +1542,24 @@ export function createRuntime<P, RC = unknown>(
 
     // Tool-loop ceiling: a number caps it; "unlimited" runs until the model
     // stops on its own; omitted → SDK default (stepCountIs(20)).
-    const stopWhen =
+    const stepCap =
       cfg.maxSteps === "unlimited"
         ? stepCountIs(Number.MAX_SAFE_INTEGER)
         : typeof cfg.maxSteps === "number"
           ? stepCountIs(cfg.maxSteps)
           : undefined;
+    // Mid-turn limit: stop the tool loop once THIS turn's tokens reach the
+    // tightest remaining budget it was admitted with. The model's last text is
+    // kept; no further step runs. (Counters were read at admission — concurrent
+    // turns can overshoot by at most one turn each, which settlement records.)
+    const tokenBudget = admitted?.remainingTokens;
+    const budgetStop =
+      tokenBudget !== undefined
+        ? ({ steps }: { steps: { usage?: { inputTokens?: number; outputTokens?: number } }[] }) =>
+            steps.reduce((n, st) => n + (st.usage?.inputTokens ?? 0) + (st.usage?.outputTokens ?? 0), 0) >=
+            tokenBudget
+        : undefined;
+    const stopWhen = budgetStop ? [stepCap ?? stepCountIs(20), budgetStop] : stepCap;
 
     // Reasoning/thinking effort → provider-specific options (the platform maps
     // it per provider + gates to reasoning-capable models). Called even without
@@ -1902,6 +1934,7 @@ export function createRuntime<P, RC = unknown>(
             ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
             cost,
           });
+          await settleLimits(admitted, { tokens: inputTokens + outputTokens, cost });
         }
         // Only the winning writer reports terminal telemetry. If our lease was
         // reaped and the run re-claimed elsewhere (`!applied`), that node will
@@ -1950,6 +1983,56 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /** Open a run for a turn: durable → leased claim; T1 → an unleased run. */
+  /** What a turn was admitted under: its policies and the token room it started with. */
+  interface Admitted {
+    policies: LimitPolicy[];
+    remainingTokens: number | undefined;
+  }
+
+  /**
+   * The admission gate. Reads every policy's current window; the first exhausted
+   * one refuses the turn (`LimitExceededError`). Counts the turn itself unless
+   * `countTurn: false` (a resume — admitted when it first ran; its tokens still
+   * settle). Undefined when no limits are configured or none apply.
+   */
+  async function admitTurn(
+    principal: P,
+    agent: string,
+    trigger: TurnTrigger,
+    opts: { countTurn: boolean } = { countTurn: true },
+  ): Promise<Admitted | undefined> {
+    const limits = config.limits;
+    if (!limits) return undefined;
+    const policies = await limits.limitsFor({ principal, agent, trigger });
+    if (policies.length === 0) return undefined;
+    const now = Date.now();
+    const refs = policies.map((p) => windowRef(p, now));
+    const usage = await limits.store.read(refs);
+    const over = exceededPolicy(policies, usage, now, { nextTurn: opts.countTurn });
+    if (over) {
+      await Promise.resolve(
+        limits.onRefused?.({ principal, agent, trigger, ...over }),
+      ).catch((e) => console.error("[limits] onRefused failed:", e));
+      throw new LimitExceededError(over.policy, over.usage, over.retryAfterMs);
+    }
+    if (opts.countTurn) {
+      await limits.store.add(refs.map((ref) => ({ ...ref, usage: { turns: 1 } })));
+    }
+    return { policies, remainingTokens: remainingTokens(policies, usage, now) };
+  }
+
+  /** Settlement: add this turn's tokens and cost to every policy it was admitted under. */
+  async function settleLimits(
+    admitted: Admitted | undefined,
+    usage: Pick<LimitUsage, "tokens" | "cost">,
+  ): Promise<void> {
+    if (!admitted || !config.limits) return;
+    const now = Date.now();
+    await config.limits.store
+      .add(admitted.policies.map((p) => ({ ...windowRef(p, now), usage })))
+      .catch((e) => console.error("[limits] settlement failed:", e));
+  }
+
   async function openRun(
     principal: P,
     chatId: string,
@@ -2011,6 +2094,9 @@ export function createRuntime<P, RC = unknown>(
       if (declined.length > 0) await storage.appendMessages(resolvedChatId, declined);
     }
 
+    // Limits gate BEFORE anything is persisted: a refused turn leaves no
+    // trace (the client gets 429 and can retry when the window turns over).
+    const admitted = await admitTurn(principal, agentName, "chat");
     // persist the user message up front (crash-safe), then open the run
     await storage.appendMessages(resolvedChatId, [message]);
     const { run, lease } = await openRun(principal, resolvedChatId, agentName);
@@ -2024,6 +2110,7 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [...prior, message],
       runtimeCtx,
+      admitted,
     });
   }
 
@@ -2045,6 +2132,12 @@ export function createRuntime<P, RC = unknown>(
       fencingToken: run.fencingToken ?? 1,
     };
 
+    // A resume was admitted when the turn first ran — never refuse it (the
+    // half-done work would strand), but its tokens still settle against the
+    // same counters, and the mid-turn stop still applies.
+    const admitted = await admitTurn(principal, run.agent, "resume", { countTurn: false }).catch(
+      (e) => (e instanceof LimitExceededError ? undefined : Promise.reject(e)),
+    );
     // Re-run from persisted history and drive to completion server-side
     // (there's no client to consume the stream).
     const res = await buildTurn({
@@ -2056,6 +2149,7 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages,
       runtimeCtx,
+      admitted,
       // Crash recovery, driven server-side: nobody is watching this stream.
       trigger: "resume",
     });
@@ -2109,6 +2203,14 @@ export function createRuntime<P, RC = unknown>(
         ({ reaped, resumed } = await sweep({ now: opts?.now, maxAttempts: opts?.maxAttempts }));
       } catch (e) {
         errors.push(`sweep: ${describe(e)}`);
+      }
+    }
+    // Limit counters: windows that ended more than a day ago are dead weight.
+    if (config.limits?.store.prune) {
+      try {
+        await config.limits.store.prune((opts?.now ?? Date.now()) - 24 * 3_600_000);
+      } catch (e) {
+        errors.push(`limits.prune: ${describe(e)}`);
       }
     }
     return { due, reaped, resumed, errors };
@@ -2204,6 +2306,7 @@ export function createRuntime<P, RC = unknown>(
       request,
       turnContext,
     );
+    const admitted = await admitTurn(principal, chat.agent, "decision");
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -2220,6 +2323,7 @@ export function createRuntime<P, RC = unknown>(
       // A human just decided something, so a human is present — even if this
       // turn parks again on the NEXT gate (see TurnTrigger).
       trigger: "decision",
+      admitted,
     });
   }
 
@@ -2272,6 +2376,7 @@ export function createRuntime<P, RC = unknown>(
       request,
       turnContext,
     );
+    const admitted = await admitTurn(principal, chat.agent, "decision");
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
     return buildTurn({
@@ -2286,6 +2391,7 @@ export function createRuntime<P, RC = unknown>(
       runtimeCtx,
       // A client-handled tool result is a human answering (see TurnTrigger).
       trigger: "decision",
+      admitted,
     });
   }
 
@@ -2602,6 +2708,9 @@ export function createRuntime<P, RC = unknown>(
       const declined = declinePendingApprovals(prior);
       if (declined.length > 0) await storage.appendMessages(chatId, declined);
     }
+    // Gate before the message persists — a refused schedule/subagent turn
+    // leaves nothing behind, same as handleChat.
+    const admitted = await admitTurn(o.principal, o.agent, o.trigger);
     await storage.appendMessages(chatId, [o.message]);
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
@@ -2621,6 +2730,7 @@ export function createRuntime<P, RC = unknown>(
       lease,
       uiMessages: [...prior, o.message],
       runtimeCtx,
+      admitted,
       autoApprove: o.autoApprove,
       blockGated: o.blockGated,
       promptCaching: o.promptCaching,
@@ -2699,6 +2809,7 @@ export function createRuntime<P, RC = unknown>(
       subChat.agent,
       principal,
     );
+    const admitted = await admitTurn(principal, subChat.agent, "decision");
     const { run, lease } = await openRun(principal, subChatId, subChat.agent);
     const res = await buildTurn({
       resolvedChatId: subChatId,
@@ -2706,6 +2817,7 @@ export function createRuntime<P, RC = unknown>(
       modelId,
       cfg,
       run,
+      admitted,
       lease,
       uiMessages: subMessages,
       runtimeCtx,
