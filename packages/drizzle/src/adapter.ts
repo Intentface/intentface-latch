@@ -39,6 +39,12 @@ export function createSqliteAdapter<P>(
           batch: (stmts: unknown[]) =>
             (db as unknown as { batch: (s: never) => Promise<unknown[]> }).batch(stmts as never),
         }
-      : {}),
+      : {
+          // Synchronous driver (better-sqlite3, bun:sqlite): drizzle's sync
+          // `transaction` with the builders' `.run()` / `.get()` is a real
+          // transaction — `openTurn` uses it, so it is atomic here too.
+          syncTx: <T,>(fn: (tx: unknown) => T) =>
+            (db as unknown as { transaction: (f: (tx: unknown) => T) => T }).transaction(fn),
+        }),
   });
 }

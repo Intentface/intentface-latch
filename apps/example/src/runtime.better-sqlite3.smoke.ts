@@ -6,6 +6,7 @@ import {
   createRuntime,
   defineAgent,
   defineContext,
+  isChatBusyError,
 } from "@intentface/latch-core";
 import { createSqliteAdapter, migrateWith, schema } from "@intentface/latch-drizzle";
 import { assert, mockModel, owner, type Principal } from "./setup.js";
@@ -58,6 +59,22 @@ async function main() {
 
   const loaded = await storage.loadMessages(principal, chat.id);
   assert(loaded.length === 2, `user + assistant persisted (got ${loaded.length})`);
+
+  // One active run per chat on the SYNC driver too, through the synchronous
+  // transaction path of openTurn: a second open is refused and its message
+  // never lands.
+  const busyChat = await storage.createChat(principal, { agent: "echo" });
+  const msg = (id: string): AppMessage => ({ id, role: "user", parts: [{ type: "text", text: id }], metadata: { visibility: "user", createdAt: Date.now() } });
+  await storage.openTurn!(principal, { chatId: busyChat.id, agent: "echo", message: msg("first") });
+  let refused = false;
+  try {
+    await storage.openTurn!(principal, { chatId: busyChat.id, agent: "echo", message: msg("second") });
+  } catch (e) {
+    refused = isChatBusyError(e);
+  }
+  assert(refused, "openTurn on a busy chat is refused (sync driver)");
+  const busyMsgs = await storage.loadMessages(principal, busyChat.id);
+  assert(busyMsgs.length === 1 && busyMsgs[0]!.id === "first", "refused turn's message not persisted (sync driver)");
   const assistant = loaded.find((m) => m.role === "assistant");
   const text = (assistant?.parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")

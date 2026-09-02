@@ -61,6 +61,8 @@ export interface SharedAdapterOptions<P> {
    * dialect offers it and `withTx` isn't a real transaction (libsql).
    */
   batch?: (stmts: any[]) => Promise<any[]>;
+  /** A synchronous transaction (sync SQLite drivers): the builders' `.run()`/`.get()` inside it are atomic. */
+  syncTx?: <T>(fn: (tx: any) => T) => T;
 }
 
 function newId(prefix: string): string {
@@ -389,6 +391,19 @@ export function makeStorageAdapter<P>(
           ]);
           return rowToRun((results[1] as any[])[0]);
         }
+        if (opts.syncTx) {
+          const m = input.message;
+          const got = opts.syncTx((tx) => {
+            supersedeStaleQuery(input.chatId, now, tx).run();
+            const inserted = tx.insert(s.runs).values(row).returning().get();
+            messageInsert(input.chatId, m, tx).run();
+            tx.update(s.chats).set({ updatedAt: now }).where(eq(s.chats.id, input.chatId)).run();
+            return inserted;
+          });
+          return rowToRun(got);
+        }
+        // Real transaction (Postgres). An adapter that is neither batch- nor
+        // sync-capable falls through to `withTx`, whose atomicity is its own.
         const inserted = await opts.withTx(async (tx) => {
           await supersedeStale(tx, input.chatId, now);
           const got = await insertRun(tx, row);

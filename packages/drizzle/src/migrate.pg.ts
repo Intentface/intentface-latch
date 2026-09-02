@@ -30,7 +30,8 @@ const DDL = [
   // One active run per chat (see ChatBusyError). Existing DBs may hold several
   // active rows for one chat (pre-invariant concurrent turns, never-reaped T1
   // crashes): keep the newest, mark the rest errored — then the index can exist.
-  `UPDATE latch_runs SET status = 'errored', error = 'superseded: duplicate active run'
+  `UPDATE latch_runs SET status = 'errored', error = 'superseded: duplicate active run',
+     lease_owner = NULL, fencing_token = COALESCE(fencing_token, 0) + 1
    WHERE status = 'active' AND EXISTS (
      SELECT 1 FROM latch_runs n
      WHERE n.chat_id = latch_runs.chat_id AND n.status = 'active'

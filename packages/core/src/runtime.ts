@@ -1992,6 +1992,8 @@ export function createRuntime<P, RC = unknown>(
   interface Admitted {
     policies: LimitPolicy[];
     remainingTokens: number | undefined;
+    /** True when this admission reserved a turn — released if the turn never opens. */
+    counted: boolean;
   }
 
   /**
@@ -2046,7 +2048,30 @@ export function createRuntime<P, RC = unknown>(
         throw new LimitExceededError(over.policy, over.usage, over.retryAfterMs);
       }
     }
-    return { policies, remainingTokens: remainingTokens(policies, usage, now) };
+    return { policies, remainingTokens: remainingTokens(policies, usage, now), counted: opts.countTurn };
+  }
+
+  /**
+   * Give a reserved turn back when the turn never opened (busy chat, agent
+   * resolution or run creation failed): the window counts turns that RAN, or a
+   * user retrying into a busy chat would exhaust their own turn cap.
+   */
+  async function releaseReservation(admitted: Admitted | undefined): Promise<void> {
+    if (!admitted?.counted || !config.limits) return;
+    const now = Date.now();
+    await config.limits.store
+      .add(admitted.policies.map((p) => ({ ...windowRef(p, now), usage: { turns: -1 } })))
+      .catch((e) => console.error("[limits] reservation release failed:", e));
+  }
+
+  /** Run `open` for a freshly admitted turn; on failure the reservation is released and the error rethrown. */
+  async function withReservation<T>(admitted: Admitted | undefined, open: () => Promise<T>): Promise<T> {
+    try {
+      return await open();
+    } catch (e) {
+      await releaseReservation(admitted);
+      throw e;
+    }
   }
 
   /** `admitTurn` for continuations (see above). */
@@ -2161,8 +2186,10 @@ export function createRuntime<P, RC = unknown>(
     const admitted = await admitTurn(principal, agentName, "chat");
     // Run + message open together (atomically where the adapter can): a chat
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
-    // lands in history — the client retries it.
-    const { run, lease } = await openTurn(principal, resolvedChatId, agentName, message);
+    // lands in history — the client retries it (with its turn reservation released).
+    const { run, lease } = await withReservation(admitted, () =>
+      openTurn(principal, resolvedChatId, agentName, message),
+    );
 
     return buildTurn({
       resolvedChatId,
@@ -2773,13 +2800,11 @@ export function createRuntime<P, RC = unknown>(
     // leaves nothing behind, same as handleChat. Same for a busy chat: open
     // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
-      o.agent,
-      o.principal,
-      undefined,
-      o.turnContext,
-    );
-    const { run, lease } = await openTurn(o.principal, chatId, o.agent, o.message);
+    const { cfg, modelId, runtimeCtx, run, lease } = await withReservation(admitted, async () => {
+      const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext);
+      const opened = await openTurn(o.principal, chatId, o.agent, o.message);
+      return { ...resolved, ...opened };
+    });
     const onProgress = o.onProgress;
     const res = await buildTurn({
       resolvedChatId: chatId,

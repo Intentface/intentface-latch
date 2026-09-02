@@ -280,8 +280,10 @@ export interface StorageAdapter<P> {
    * the user message in one transaction, so a refused turn persists nothing and
    * a crash can never leave a run without its message (or vice versa). With
    * `lease`, the run is claimed durably like `claimRun`; without, like
-   * `createRun`. Optional: the runtime falls back to the two separate calls
-   * when an adapter doesn't implement it. The shipped adapters do.
+   * `createRun`. Optional for compatibility: the runtime falls back to run-
+   * then-message when an adapter doesn't implement it — but that fallback has a
+   * crash window (a run without its message), so a DURABLE adapter should
+   * implement `openTurn` atomically. The shipped adapters do, in every driver.
    */
   openTurn?(
     principal: P,
