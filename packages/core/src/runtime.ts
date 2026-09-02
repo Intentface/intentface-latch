@@ -63,7 +63,7 @@ import type {
 /**
  * T2 durability (opt-in). When enabled, each turn claims a single-writer lease,
  * heartbeats it while streaming, and aborts if the lease is lost. A reaper
- * (`runtime.tick()`, driven by cron) reclaims runs whose owner died.
+ * (`runtime.cron()` → `sweep`, driven by cron) reclaims runs whose owner died.
  */
 export interface DurabilityConfig {
   enabled?: boolean;
@@ -279,7 +279,7 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
  * What started this turn — and, in practice, whether a human is at the other
  * end of it:
  *
- * - `"chat"` — a user message (`handleChat` / `runTurnStream`). Someone is
+ * - `"chat"` — a user message (`handleChat`). Someone is
  *   watching the stream.
  * - `"decision"` — a human answered a pending request: an approval decision or
  *   a client-handled tool result. Someone is watching.
@@ -392,29 +392,6 @@ export interface Runtime<P> {
   /** Run one turn; returns a streaming UIMessage `Response`. */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
-   * Run one agent turn from the supplied messages and stream it back, persisting
-   * NOTHING (no chat/run/message/usage rows). The full tool loop, streaming, and
-   * observability hooks all run; durability, history, and HITL round-tripping are
-   * not available. For read-mostly, single-shot loops where a durable chat would
-   * be pure churn (e.g. inline editor assist). Use `handleChat` when you need
-   * history, resume, or approvals.
-   */
-  runTurnStream(input: {
-    agent: string;
-    principal: P;
-    messages: AppMessage[];
-    request?: Request;
-    /** Per-turn request payload (see HandleChatInput.turnContext). */
-    turnContext?: unknown;
-    /** Body format: `ui` (default) SSE UIMessage stream, or `text` plain text. */
-    format?: "ui" | "text";
-    /** Fired with the final assistant text + messages (capture side outputs). */
-    onComplete?: (result: {
-      text: string;
-      messages: AppMessage[];
-    }) => void | Promise<void>;
-  }): Promise<Response>;
-  /**
    * Run one agent to completion once, autonomously, in an isolated throwaway
    * thread (no streaming) — for programmatic use like the Agent Builder testing
    * an agent it just created. `blockGated` (default true) stubs approval-gated
@@ -499,11 +476,6 @@ export interface Runtime<P> {
    */
   getRun(input: { principal: P; runId: string }): Promise<RunRecord | null>;
   /**
-   * Reaper tick (cron/Scheduler entry point): reclaim runs whose lease expired.
-   * Returns the reaped runs. No-op-safe to call on every node.
-   */
-  tick(opts?: { now?: number; error?: string }): Promise<{ reaped: RunRecord[] }>;
-  /**
    * Resume an interrupted run (requires durability). Re-claims it exactly-once,
    * re-runs the turn from persisted history, and completes it server-side.
    * Returns the run's final state, or null if it wasn't resumable (already
@@ -511,17 +483,32 @@ export interface Runtime<P> {
    */
   resume(runId: string): Promise<RunOutcome | null>;
   /**
-   * Reaper + auto-resume in one call — the Scheduler/cron entry point. Reaps
+   * Reaper + auto-resume in one call — the durability half of `cron()`. Reaps
    * lease-expired runs, then resumes each whose attempt count is still under
    * `maxAttempts` (default 5; the cap stops poison runs from looping forever).
    * Safe to fire on every node: reap and reclaim are atomic, so each run is
-   * handled exactly once.
+   * handled exactly once. Requires durability.
    */
   sweep(opts?: {
     now?: number;
     maxAttempts?: number;
     error?: string;
   }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }>;
+  /**
+   * THE cron entry point — point a platform cron or the in-process scheduler at
+   * this and nothing else. Fires due schedules (`runDue`), then, when
+   * durability is on, reaps lease-expired runs and resumes them (`sweep`). One
+   * call per tick, so a deploy can't wire half of the operational surface. The
+   * two phases are isolated: a failure in one lands in `errors` and the other
+   * still runs. Safe to fire on every node concurrently (claims are atomic).
+   */
+  cron(opts?: { now?: number; maxAttempts?: number }): Promise<{
+    due: { fired: number; errors: number; skipped: number; parked: number };
+    reaped: RunRecord[];
+    resumed: RunOutcome[];
+    /** Phase failures (`"runDue: …"` / `"sweep: …"`) — reported, never thrown. */
+    errors: string[];
+  }>;
   /**
    * Apply HITL tool-approval decisions and continue the turn. Records each
    * decision onto the persisted assistant message (approval-requested →
@@ -679,8 +666,6 @@ const MAX_SUBAGENT_DEPTH = 4;
 const MIN_COMPACTABLE_MESSAGES = 4;
 
 const newInstanceId = createIdGenerator({ prefix: "inst", separator: "_" });
-/** Synthetic run id for an ephemeral (unpersisted) `runTurnStream` turn. */
-const generateRunId = createIdGenerator({ prefix: "run", separator: "_" });
 
 /** A tool/dynamic-tool UI part, narrowed to the approval fields we touch. */
 type ApprovalPart = {
@@ -1253,32 +1238,8 @@ export function createRuntime<P, RC = unknown>(
      *  subagent turns so a delegation tree shares one trace session). */
     rootChatId?: string;
     /**
-     * Ephemeral turn (`runTurnStream`): stream a full tool-loop turn WITHOUT
-     * persisting anything — no run/lease, no message/run/usage writes. The
-     * observability hooks still fire (usage/analytics), tool sources still
-     * open/close. For read-mostly, single-shot loops (e.g. inline editor assist)
-     * where a durable chat would be pure churn. `run` is a synthetic record.
-     */
-    ephemeral?: boolean;
-    /**
-     * Response body format (ephemeral turns): `ui` (default) → the SSE
-     * UIMessage stream; `text` → a plain `text/plain` stream of the assistant's
-     * text deltas (parity with the AI SDK's `toTextStreamResponse`), for
-     * consumers that render raw text.
-     */
-    responseFormat?: "ui" | "text";
-    /**
-     * Fired once the turn's messages are final (after any persistence), with the
-     * assembled assistant text + the full message list — so an ephemeral caller
-     * can capture side outputs (e.g. tool results) that the text stream drops.
-     */
-    onComplete?: (result: {
-      text: string;
-      messages: AppMessage[];
-    }) => void | Promise<void>;
-    /**
      * Observe the turn's UI chunk stream without consuming it (the response
-     * gets a tee'd branch). Used by `runSubagent` to forward a subagent's
+     * gets a tee'd branch). Used by `runToCompletion` to forward a subagent's
      * live output into the parent turn. The observer owns its branch — it
      * must keep reading or the tee buffers.
      */
@@ -1290,7 +1251,6 @@ export function createRuntime<P, RC = unknown>(
     const blockGated = args.blockGated ?? false;
     const depth = args.depth ?? 0;
     const trigger = args.trigger ?? "chat";
-    const ephemeral = args.ephemeral ?? false;
     // The top-level conversation id — this turn's own chat unless a spawn
     // threaded a root down. Subagent turns spawned below inherit it, so a whole
     // delegation tree shares one telemetry session (see telemetryMeta).
@@ -1537,11 +1497,11 @@ export function createRuntime<P, RC = unknown>(
           // Propagate the PARENT turn's approval mode: interactive → the subagent
           // gates its tools (a pending write bubbles up here); autonomous → it
           // auto-approves.
-          const result = await runSubagent({
+          const result = await runToCompletion({
             principal,
             agent,
-            prompt,
-            threadId: subChatId,
+            message: userMessageOf(prompt),
+            chatId: subChatId,
             depth: depth + 1,
             autoApprove,
             onProgress,
@@ -1565,7 +1525,7 @@ export function createRuntime<P, RC = unknown>(
               id: approvalId,
               data: {
                 approvalId,
-                subChatId: result.threadId,
+                subChatId: result.chatId,
                 subApprovalIds: result.pending.map((p) => p.approvalId),
                 spawnToolCallId: options.toolCallId,
                 summaries: result.pending.map((p) => p.summary),
@@ -1577,12 +1537,12 @@ export function createRuntime<P, RC = unknown>(
             });
             return {
               status: "awaiting_approval",
-              threadId: result.threadId,
+              threadId: result.chatId,
               pending: result.pending.map((p) => p.summary),
               note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
             };
           }
-          return { threadId: result.threadId, answer: result.answer };
+          return { threadId: result.chatId, answer: result.answer };
         },
       });
       capabilityTools.push("spawn_agent");
@@ -1851,14 +1811,17 @@ export function createRuntime<P, RC = unknown>(
           runtimeContext: runtimeCtx,
           // `toolsContext` is keyed BY TOOL NAME (the SDK does
           // `toolsContext[toolName]`), so point every tool at the same context:
-          // the project's runtime context + who it's for + the run + the writer.
-          // A tool reads it as `options.context`.
+          // the project's runtime context + who it's for + the run + the writer
+          // + the runtime itself (so a harness tool can schedule, list chats or
+          // spawn a run without reaching for a host-global). A tool reads it as
+          // `options.context`.
           toolsContext: Object.fromEntries(
             Object.keys(tools).map((name) => [
               name,
               {
                 ...(runtimeCtx as Record<string, unknown>),
                 principal,
+                runtime: self,
                 // `agent` is the ref the turn resolved (scope-pinned as stored
                 // on the run), so a tool that acts on "the agent I'm running
                 // as" names the same record the turn is using.
@@ -1994,12 +1957,11 @@ export function createRuntime<P, RC = unknown>(
         // by another node whose writes must win. The guarded update no-ops if
         // the run was reassigned.
         if (isAborted) {
-          if (!ephemeral)
-            await storage.updateRun(
-              run.id,
-              { status: "errored", error: "aborted", endedAt: Date.now() },
-              lease,
-            );
+          await storage.updateRun(
+            run.id,
+            { status: "errored", error: "aborted", endedAt: Date.now() },
+            lease,
+          );
           fireObs(config.observability?.onFinish, {
             principal,
             chatId: resolvedChatId,
@@ -2019,41 +1981,35 @@ export function createRuntime<P, RC = unknown>(
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
-        // Ephemeral turns aren't fenced (no lease/run row) — they always finish
-        // here. For persisted turns, `applied` reflects whether our lease still
-        // owns the run (see below).
-        let applied = true;
-        if (!ephemeral) {
-          // Fenced finish: settle the run FIRST. If the guarded update doesn't
-          // apply (our lease was reaped + the run re-claimed elsewhere), we're
-          // a stale writer — skip the final message/usage persistence so we
-          // don't overwrite the new owner's state.
-          applied = await storage.updateRun(
-            run.id,
-            {
-              status: paused ? "awaiting_input" : "completed",
-              usageInputTokens: inputTokens,
-              usageOutputTokens: outputTokens,
-              usageCacheReadTokens: cacheReadTokens || undefined,
-              usageCacheWriteTokens: cacheWriteTokens || undefined,
-              costTotal: cost,
-              toolsHash,
-              endedAt: paused ? undefined : Date.now(),
-            },
-            lease,
-          );
-          if (applied) {
-            await storage.appendMessages(resolvedChatId, messages);
-            await storage.recordUsage(principal, {
-              runId: run.id,
-              model: modelId,
-              inputTokens,
-              outputTokens,
-              ...(cacheReadTokens ? { cacheReadTokens } : {}),
-              ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
-              cost,
-            });
-          }
+        // Fenced finish: settle the run FIRST. If the guarded update doesn't
+        // apply (our lease was reaped + the run re-claimed elsewhere), we're
+        // a stale writer — skip the final message/usage persistence so we
+        // don't overwrite the new owner's state.
+        const applied = await storage.updateRun(
+          run.id,
+          {
+            status: paused ? "awaiting_input" : "completed",
+            usageInputTokens: inputTokens,
+            usageOutputTokens: outputTokens,
+            usageCacheReadTokens: cacheReadTokens || undefined,
+            usageCacheWriteTokens: cacheWriteTokens || undefined,
+            costTotal: cost,
+            toolsHash,
+            endedAt: paused ? undefined : Date.now(),
+          },
+          lease,
+        );
+        if (applied) {
+          await storage.appendMessages(resolvedChatId, messages);
+          await storage.recordUsage(principal, {
+            runId: run.id,
+            model: modelId,
+            inputTokens,
+            outputTokens,
+            ...(cacheReadTokens ? { cacheReadTokens } : {}),
+            ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+            cost,
+          });
         }
         fireObs(config.observability?.onFinish, {
           principal,
@@ -2068,13 +2024,6 @@ export function createRuntime<P, RC = unknown>(
           cost,
           messages,
         });
-        if (args.onComplete) {
-          try {
-            await args.onComplete({ text: lastAssistantText(messages), messages });
-          } catch (e) {
-            console.error("[runtime] onComplete hook failed:", e);
-          }
-        }
         // Only the winning writer reports terminal telemetry. If our lease was
         // reaped and the run re-claimed elsewhere (`!applied`), that node will
         // finish it — a stale writer must not re-run the judge or emit a
@@ -2104,41 +2053,6 @@ export function createRuntime<P, RC = unknown>(
         return message;
       },
     } as Parameters<typeof createUIMessageStream>[0]);
-
-    // Plain-text stream (ephemeral `responseFormat: "text"`): project the
-    // UIMessage chunks down to their text deltas and emit `text/plain` — parity
-    // with the AI SDK's `toTextStreamResponse`. Tool calls still run (their
-    // side effects happen as the stream is pulled); only the framing differs.
-    if (args.responseFormat === "text") {
-      const text = (
-        stream as ReadableStream<{
-          type?: string;
-          delta?: string;
-          errorText?: string;
-        }>
-      )
-        .pipeThrough(
-          new TransformStream<
-            { type?: string; delta?: string; errorText?: string },
-            string
-          >({
-            transform(chunk, controller) {
-              if (chunk.type === "text-delta" && chunk.delta)
-                controller.enqueue(chunk.delta);
-              // Don't let a failed turn look like an empty-but-successful one:
-              // fail the stream so the client sees an error, not silence.
-              else if (chunk.type === "error")
-                controller.error(
-                  new Error(chunk.errorText || "The run failed."),
-                );
-            },
-          }),
-        )
-        .pipeThrough(new TextEncoderStream());
-      return new Response(text, {
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
 
     // Drain the stream server-side regardless of the client. If the browser
     // closes mid-turn, the response stops being pulled — without this the
@@ -2243,65 +2157,6 @@ export function createRuntime<P, RC = unknown>(
     });
   }
 
-  /**
-   * Run one agent turn from the supplied messages and stream it back, persisting
-   * NOTHING — no chat, run, message, or usage rows. The full tool loop,
-   * streaming, and observability hooks all run; only durability/history are
-   * skipped. For read-mostly, single-shot loops (inline editor assist, one-off
-   * generations) where a durable chat would be pure churn. There's no chatId to
-   * resume and approvals can't round-trip (no persisted state) — use `handleChat`
-   * for anything that needs HITL or history.
-   */
-  async function runTurnStream({
-    agent: agentName,
-    principal,
-    messages,
-    request,
-    turnContext,
-    format,
-    onComplete,
-  }: {
-    agent: string;
-    principal: P;
-    messages: AppMessage[];
-    request?: Request;
-    turnContext?: unknown;
-    format?: "ui" | "text";
-    onComplete?: (result: {
-      text: string;
-      messages: AppMessage[];
-    }) => void | Promise<void>;
-  }): Promise<Response> {
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
-      agentName,
-      principal,
-      request,
-      turnContext,
-    );
-    // Synthetic, unpersisted run — buildTurn only reads `id`/`agent` from it,
-    // and every storage write is guarded by `ephemeral`.
-    const run = {
-      id: generateRunId(),
-      chatId: "ephemeral",
-      agent: agentName,
-      status: "active",
-      startedAt: Date.now(),
-    } as unknown as RunRecord;
-    return buildTurn({
-      resolvedChatId: run.chatId,
-      principal,
-      modelId,
-      cfg,
-      run,
-      lease: undefined,
-      uiMessages: messages,
-      runtimeCtx,
-      ephemeral: true,
-      responseFormat: format ?? "ui",
-      onComplete,
-    });
-  }
-
   async function resumeRun(runId: string): Promise<RunOutcome | null> {
     if (!dur.enabled) throw new Error("resume requires durability.enabled");
 
@@ -2360,6 +2215,33 @@ export function createRuntime<P, RC = unknown>(
       if (outcome) resumed.push(outcome);
     }
     return { reaped, resumed };
+  }
+
+  async function cron(opts?: { now?: number; maxAttempts?: number }): Promise<{
+    due: { fired: number; errors: number; skipped: number; parked: number };
+    reaped: RunRecord[];
+    resumed: RunOutcome[];
+    errors: string[];
+  }> {
+    const errors: string[] = [];
+    const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
+    let due = { fired: 0, errors: 0, skipped: 0, parked: 0 };
+    try {
+      due = await runDue({ now: opts?.now });
+    } catch (e) {
+      errors.push(`runDue: ${describe(e)}`);
+    }
+    let reaped: RunRecord[] = [];
+    let resumed: RunOutcome[] = [];
+    // Without durability there are no leases to reap — nothing to sweep.
+    if (dur.enabled) {
+      try {
+        ({ reaped, resumed } = await sweep({ now: opts?.now, maxAttempts: opts?.maxAttempts }));
+      } catch (e) {
+        errors.push(`sweep: ${describe(e)}`);
+      }
+    }
+    return { due, reaped, resumed, errors };
   }
 
   async function applyApproval({
@@ -2755,44 +2637,6 @@ export function createRuntime<P, RC = unknown>(
     } as AppMessage;
   }
 
-  /**
-   * Run one turn to completion server-side (no client consuming the stream).
-   * Reports whether the turn ended PARKED — waiting on a human (an undecided
-   * approval or client tool result) rather than finished. An unattended caller
-   * (`runDue`) needs that: the stream ending is not the same as an answer, and
-   * a parked scheduled turn has spent its tokens and produced nothing.
-   */
-  async function runTurnToCompletion(
-    principal: P,
-    agentName: string,
-    message: AppMessage,
-    chatId: string,
-  ): Promise<{ parked: boolean }> {
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(agentName, principal);
-    await storage.appendMessages(chatId, [message]);
-    const { run, lease } = await openRun(principal, chatId, agentName);
-    const res = await buildTurn({
-      resolvedChatId: chatId,
-      principal,
-      modelId,
-      cfg,
-      run,
-      lease,
-      uiMessages: [message],
-      runtimeCtx,
-      // A cron/one-shot fire — no human at the other end (see TurnTrigger).
-      trigger: "schedule",
-    });
-    await res.text();
-    // The fold over the persisted log — the same truth every interactive path
-    // trusts — not the run row, which a parked turn also leaves behind.
-    const after = await storage.loadMessages(principal, chatId);
-    const last = after[after.length - 1];
-    return {
-      parked: hasPendingApproval(after) || (!!last && hasPendingToolResult([last])),
-    };
-  }
-
   /** Merged agent directory (code-declared + dynamic) — name/title/description. */
   async function agentInfos(principal: P): Promise<AgentInfo[]> {
     const stat = Object.entries(config.agents).map(([name, factory]) => ({
@@ -2819,98 +2663,101 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /**
-   * Run another agent as an autonomous subagent in its own persisted thread and
-   * return its final answer. `threadId` omitted → a fresh `sub_…` thread;
-   * supplied → continue that thread with full prior context. Approvals are
-   * waived (autonomous). Returns `{ threadId, answer }`.
+   * Run one agent turn to completion, server-side, and report how it ended —
+   * THE single non-streaming path. `runAgent` (programmatic / test runs),
+   * `spawn_agent` (subagent delegation) and `runDue` (scheduled fires) all
+   * funnel here, so approval semantics, telemetry linkage and the "did it
+   * park?" verdict cannot drift between them.
+   *
+   * `chatId` absent (or "") → a fresh internal `sub_…` thread; present → that
+   * chat continues with its full history (created as an internal thread when
+   * it doesn't exist yet). `autoApprove` is REQUIRED, not defaulted: autonomous
+   * runs (subagents, tests) waive HITL gates, while a scheduled fire keeps them
+   * — and parks on them, which is the whole point of `parked`.
+   *
+   * `parked` = the turn ended waiting on a human (an undecided approval or
+   * client tool result) rather than with an answer; the stream ending is not
+   * the same as an answer, and a parked unattended turn has spent its tokens
+   * and produced nothing. `pending` lifts an interactive subagent's undecided
+   * approvals so `spawn_agent` can bubble them up to the parent turn. Both are
+   * read from the fold over the persisted log — the same truth every
+   * interactive path trusts — not the run row.
    */
-  async function runSubagent({
-    principal,
-    agent,
-    prompt,
-    threadId,
-    depth,
-    blockGated,
-    autoApprove = true,
-    onProgress,
-    parentRunId,
-    rootChatId,
-    turnContext,
-    promptCaching,
-    trigger,
-  }: {
+  async function runToCompletion(o: {
     principal: P;
     agent: string;
-    prompt: string;
-    threadId?: string;
-    depth: number;
+    message: AppMessage;
+    chatId?: string;
+    autoApprove: boolean;
     blockGated?: boolean;
     /** Per-turn prompt-caching override (see buildTurn). */
     promptCaching?: boolean;
-    /**
-     * Per-turn request payload for THIS run, passed to `context.build` and the
-     * agent factory (see `HandleChatInput.turnContext`). Ephemeral — applies to
-     * this initial turn only, never to resumes. Lets programmatic callers (e.g.
-     * background jobs) hand a factory-form agent its work payload.
-     */
-    turnContext?: unknown;
-    /** Telemetry: the run that spawned this subagent (nests its trace). */
+    /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
+    depth?: number;
+    trigger: TurnTrigger;
+    /** Telemetry: the run that spawned this turn (nests its trace). */
     parentRunId?: string;
     /** Telemetry: the top-level conversation id (shared session across the tree). */
     rootChatId?: string;
-    /** What set the delegation tree off (see `TurnTrigger`); inherited as-is. */
-    trigger?: TurnTrigger;
     /**
-     * Waive HITL approvals inside the subagent. Default true (autonomous runs —
-     * cron / `runAgent` — have no human). `spawn_agent` passes the PARENT turn's
-     * value, so a subagent spawned from an interactive chat GATES its tools and
-     * a pending approval bubbles up to the parent (see the pending return).
+     * Per-turn request payload for THIS run, passed to `context.build` and the
+     * agent factory (see `HandleChatInput.turnContext`). Ephemeral — applies to
+     * this initial turn only, never to resumes.
      */
-    autoApprove?: boolean;
-    /** Progressive snapshots of the sub-turn's exchange (prompt + streaming assistant). */
+    turnContext?: unknown;
+    /** Progressive snapshots of the turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
-  }): Promise<{ threadId: string; answer: string; pending?: SubagentPending[] }> {
-    // `||` (not `??`): an empty-string threadId must mint a fresh id, or the
-    // subagent chat is created with id "" and the UI can never open it.
-    const subChatId = threadId?.trim() || generateSubchatId();
-    let chat = await storage.getChat(principal, subChatId);
+  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[] }> {
+    // `||` (not `??`): an empty-string id must mint a fresh one, or the chat is
+    // created with id "" and the UI can never open it.
+    const chatId = o.chatId?.trim() || generateSubchatId();
+    let chat = await storage.getChat(o.principal, chatId);
     if (!chat) {
-      chat = await storage.createChat(principal, {
-        id: subChatId,
-        agent,
-        title: prompt.slice(0, 80),
-        // Runtime-created sub-thread: stamp it internal so a host filtering
-        // its chat list on kind never shows it (see ChatRecord.kind).
+      chat = await storage.createChat(o.principal, {
+        id: chatId,
+        agent: o.agent,
+        title: firstText(o.message)?.slice(0, 80),
+        // Runtime-created thread: stamp it internal so a host filtering its
+        // chat list on kind never shows it (see ChatRecord.kind).
         kind: "internal",
       });
     }
-    const prior = await storage.loadMessages(principal, subChatId);
-    const message = userMessageOf(prompt);
-    await storage.appendMessages(subChatId, [message]);
+    const prior = await storage.loadMessages(o.principal, chatId);
+    // Same rule as handleChat: a new message while the thread is parked on an
+    // approval IS the decision — close the stale gate as declined (persisted)
+    // and carry on. Otherwise a continued thread (`runAgent({ threadId })`,
+    // `spawn_agent({ threadId })`) would run with an undecided gate in history
+    // and this turn's verdict below would re-report that stale approval.
+    if (hasPendingApproval(prior)) {
+      const declined = declinePendingApprovals(prior);
+      if (declined.length > 0) await storage.appendMessages(chatId, declined);
+    }
+    await storage.appendMessages(chatId, [o.message]);
 
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
-      agent,
-      principal,
+      o.agent,
+      o.principal,
       undefined,
-      turnContext,
+      o.turnContext,
     );
-    const { run, lease } = await openRun(principal, subChatId, agent);
+    const { run, lease } = await openRun(o.principal, chatId, o.agent);
+    const onProgress = o.onProgress;
     const res = await buildTurn({
-      resolvedChatId: subChatId,
-      principal,
+      resolvedChatId: chatId,
+      principal: o.principal,
       modelId,
       cfg,
       run,
       lease,
-      uiMessages: [...prior, message],
+      uiMessages: [...prior, o.message],
       runtimeCtx,
-      autoApprove,
-      blockGated,
-      promptCaching,
-      depth,
-      parentRunId,
-      rootChatId,
-      trigger,
+      autoApprove: o.autoApprove,
+      blockGated: o.blockGated,
+      promptCaching: o.promptCaching,
+      depth: o.depth ?? 0,
+      parentRunId: o.parentRunId,
+      rootChatId: o.rootChatId,
+      trigger: o.trigger,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
       // streams them into the parent turn). Observation must never break the
       // run — the primary stream is drained independently below.
@@ -2924,7 +2771,7 @@ export function createRuntime<P, RC = unknown>(
                 })) {
                   const msg = m as unknown as AppMessage;
                   byId.set(msg.id, msg);
-                  onProgress([message, ...byId.values()]);
+                  onProgress([o.message, ...byId.values()]);
                 }
               } catch {
                 // ignore — live progress is best-effort
@@ -2935,14 +2782,22 @@ export function createRuntime<P, RC = unknown>(
     });
     await res.text();
 
-    const subMessages = await storage.loadMessages(principal, subChatId);
-    // Interactive subagent paused on a gated tool → lift its pending approval(s)
-    // so the caller (`spawn_agent`) can surface them on the parent turn.
-    const pending = collectPendingApprovals(subMessages);
-    if (pending.length > 0) {
-      return { threadId: subChatId, answer: "", pending };
-    }
-    return { threadId: subChatId, answer: lastAssistantText(subMessages) };
+    const after = await storage.loadMessages(o.principal, chatId);
+    // The verdict is about THIS turn, so read the FINAL message only (the same
+    // rule hasPendingApproval applies): an undecided gate in an older message
+    // is an abandoned turn, not this one's pause point.
+    const last = after[after.length - 1];
+    const pending = last?.role === "assistant" ? collectPendingApprovals([last]) : [];
+    const parked =
+      pending.length > 0 ||
+      hasPendingApproval(after) ||
+      (!!last && hasPendingToolResult([last]));
+    return {
+      chatId,
+      answer: pending.length > 0 ? "" : lastAssistantText(after),
+      parked,
+      ...(pending.length > 0 ? { pending } : {}),
+    };
   }
 
   /**
@@ -3154,12 +3009,16 @@ export function createRuntime<P, RC = unknown>(
           // is the lastRunAt this fire's completeSchedule wrote above, so a
           // delayed stamp can't clobber a newer occurrence's.
           await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id, firedAt: now });
-          const outcome = await runTurnToCompletion(
+          const outcome = await runToCompletion({
             principal,
-            s.agent,
-            userMessageOf(s.prompt),
-            chat.id,
-          );
+            agent: s.agent,
+            message: userMessageOf(s.prompt),
+            chatId: chat.id,
+            // A cron fire keeps HITL gates: nobody is here to waive them, and a
+            // gated tool parks the turn (reported below) instead of running.
+            autoApprove: false,
+            trigger: "schedule",
+          });
           if (outcome.parked) {
             // Say it on THIS tick, not the next one: a one-shot has no next
             // occurrence, and even a cron's operator shouldn't have to wait
@@ -3183,12 +3042,10 @@ export function createRuntime<P, RC = unknown>(
     return { fired, errors, skipped, parked };
   }
 
-  return {
+  const self: Runtime<P> = {
     listAgents: agentInfos,
-    tick: reapTick,
     handleChat,
-    runTurnStream,
-    runAgent: ({
+    runAgent: async ({
       principal,
       agent,
       prompt,
@@ -3199,18 +3056,22 @@ export function createRuntime<P, RC = unknown>(
       // No client stream: assume unattended unless the host says otherwise, so
       // a park here can't be silently filtered out as "someone's watching".
       trigger = "programmatic",
-    }) =>
-      runSubagent({
+    }) => {
+      const r = await runToCompletion({
         principal,
         agent,
-        prompt,
-        threadId,
+        message: userMessageOf(prompt),
+        chatId: threadId,
         depth: 1,
+        // Autonomous: no human to authorize (blockGated stubs the gated tools).
+        autoApprove: true,
         blockGated,
         turnContext,
         promptCaching,
         trigger,
-      }),
+      });
+      return { threadId: r.chatId, answer: r.answer };
+    },
     compactChat,
     loadHistory,
     listChats,
@@ -3219,6 +3080,7 @@ export function createRuntime<P, RC = unknown>(
     getRun,
     resume: resumeRun,
     sweep,
+    cron,
     applyApproval,
     applyToolResult,
     schedule,
@@ -3227,4 +3089,5 @@ export function createRuntime<P, RC = unknown>(
     runScheduleNow: ({ principal, id }) => storage.bumpSchedule(principal, id),
     runDue,
   };
+  return self;
 }

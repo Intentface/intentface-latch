@@ -16,7 +16,7 @@ It starts as thin ergonomics over the AI SDK (define an agent, stream it — run
 - **Persistence built in** — `chats / messages / runs / usage` via a single `StorageAdapter` (Drizzle: **SQLite & Postgres** today, same contract). `AppMessage` *is* a typed `UIMessage`, so all the stock SDK stream/persistence helpers work unchanged.
 - **Stream over HTTP or call the runtime directly** — one framework-agnostic handler you mount at a single route (TanStack/Next/Hono/serverless), or use the runtime from cron / your own routes / non-HTTP triggers.
 - **Durability without a workflow engine** — opt-in lease + heartbeat + reaper + fencing + **resume** + per-step checkpointing. A turn that dies is reclaimed and re-run, exactly once across nodes, on plain TypeScript + your DB.
-- **Scheduler seam** — an in-process reaper loop *or* a serverless `POST /cron/sweep` route; both reap-and-resume stalled runs.
+- **One cron entry point** — `runtime.cron()` fires due schedules and reaps-and-resumes stalled runs; drive it from an in-process interval loop *or* a serverless `POST /cron/run` route.
 - **Tools + MCP host** — connect MCP servers as tools behind a **per-tenant SSRF allowlist** and **vault-brokered auth** (incl. **OAuth** — authorization-code + PKCE, tokens in the vault). Custom/stdio/in-memory transports supported.
 - **Vault** — envelope-encrypted, per-tenant secret storage (Web Crypto, serverless-portable). Credentials never reach the model, logs, or telemetry.
 - **HITL tool approvals** — gate sensitive tools; the turn pauses (`awaiting_input`), the decision round-trips as message state, then continues. No suspension machinery.

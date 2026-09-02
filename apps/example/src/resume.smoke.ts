@@ -19,16 +19,20 @@ async function main() {
     metadata: { visibility: "user", createdAt: Date.now() },
   };
   await storage.appendMessages(chat.id, [user]);
+  // A real, short lease: `reclaimRun` checks expiry against the wall clock
+  // (a reaped run keeps its expired leaseExpiresAt), so advancing only the
+  // reaper's clock would reap the run but leave it un-reclaimable.
   const original = await storage.claimRun({
     principal: scope,
     chatId: chat.id,
     agent: "echo",
     owner: "dead_node",
-    ttlMs: 30_000,
+    ttlMs: 20,
   });
 
-  // ...then the process died. The reaper (clock advanced past the lease) reclaims it.
-  await runtime.tick({ now: Date.now() + 60_000 });
+  // ...then the process died. Once the lease has lapsed, the reaper reclaims it.
+  await new Promise((r) => setTimeout(r, 40));
+  await storage.reapExpiredRuns(Date.now());
   const reaped = await storage.getRun(original.id);
   assert(reaped?.status === "errored", "original run was reaped (errored)");
   const before = await storage.loadMessages(scope, chat.id);

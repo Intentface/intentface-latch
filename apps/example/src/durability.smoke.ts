@@ -40,7 +40,7 @@ async function main() {
   // --- reaper reclaims an expired lease ----------------------------------
   // Reap as if the clock is well past the lease expiry (no real waiting).
   const future = Date.now() + 60_000;
-  const { reaped } = await runtime.tick({ now: future });
+  const reaped = await storage.reapExpiredRuns(future);
   assert(reaped.length === 1, `reaper reclaimed the expired run (got ${reaped.length})`);
   assert(reaped[0]!.id === run.id, "reaped the right run");
 
@@ -59,8 +59,8 @@ async function main() {
   assert(fenced?.status === "errored", "stale-owner guarded write was fenced out (still errored)");
 
   // a second reaper tick finds nothing (the run is no longer active)
-  const second = await runtime.tick({ now: future });
-  assert(second.reaped.length === 0, "second tick reaps nothing (idempotent)");
+  const second = await storage.reapExpiredRuns(future);
+  assert(second.length === 0, "second reap finds nothing (idempotent)");
 
   // --- a normal durable turn still completes -----------------------------
   const principal: Principal = { orgId: "org_a", userId: "user_1" };

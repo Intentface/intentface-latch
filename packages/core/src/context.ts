@@ -8,8 +8,10 @@
  * and tools.
  *
  * Tools receive the built context automatically: the runtime hands every tool
- * `{ ...runtimeContext, principal, run, writer }` as its `options.context`, so a
- * tool that needs a credential resolves it itself, scoped by the principal
+ * `{ ...runtimeContext, principal, run, writer, runtime }` as its
+ * `options.context` (the runtime itself included, so a harness tool can
+ * schedule or spawn without a host-global), so a tool that needs a credential
+ * resolves it itself, scoped by the principal
  * (e.g. `vault.resolver(ctx.principal, "crm_api_key")`) — the model never sees
  * the value.
  *

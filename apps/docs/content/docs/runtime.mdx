@@ -64,15 +64,12 @@ runtime.handleChat({ agent, chatId, principal, message, request, turnContext });
 `chatId` is create-or-continue; omit it to start a new chat.
 
 ```ts
-// Streamed but persists NOTHING — no chat, run, message or usage rows.
-runtime.runTurnStream({ agent, principal, messages, format, onComplete });
-
 // One autonomous turn to completion in a throwaway thread, no streaming.
 runtime.runAgent({ principal, agent, prompt, threadId, blockGated });
 // → Promise<{ threadId, answer }>
 ```
 
-`runTurnStream` suits read-mostly single shots where a durable chat would be churn (inline editor assist). `runAgent` is for programmatic use — an Agent Builder testing an agent it just wrote. Its `blockGated` defaults to **true**, stubbing approval-gated tools so a test run has no real side effects.
+`runAgent` is for programmatic use — an Agent Builder testing an agent it just wrote, a background job. Its `blockGated` defaults to **true**, stubbing approval-gated tools so a test run has no real side effects. Every non-streaming turn — `runAgent`, a `spawn_agent` delegation, a scheduled fire — runs through the same internal path, so approval semantics and the "did it park?" verdict never differ between them.
 
 ### Read history
 
@@ -97,10 +94,12 @@ See [Operations](/docs/operations) for the full approval lifecycle.
 ### Operate it
 
 ```ts
-runtime.tick({ now, error }); // reap lease-expired runs
-runtime.resume(runId); // re-claim and finish one interrupted run
-runtime.sweep({ maxAttempts }); // reap + auto-resume — the cron entry point
+runtime.cron({ now, maxAttempts }); // THE cron entry point: runDue + sweep
+// → { due: { fired, errors, skipped, parked }, reaped, resumed, errors }
+
 runtime.runDue({ now }); // fire all due schedules, all tenants
+runtime.sweep({ maxAttempts }); // reap lease-expired runs + auto-resume them
+runtime.resume(runId); // re-claim and finish one interrupted run
 
 runtime.schedule({ principal, agent, cron, timezone, prompt, delivery });
 runtime.listSchedules({ principal });
@@ -108,19 +107,17 @@ runtime.unschedule({ principal, id });
 runtime.runScheduleNow({ principal, id });
 ```
 
-`sweep` and `runDue` are the two operations a cron should call. Both are safe to fire on every node concurrently: reaping and claiming are atomic single-row transitions, so each run and each schedule is handled exactly once.
+`cron()` is the one operation a cron should call: it fires due schedules, then (with durability on) reaps and resumes stalled runs. The two phases are isolated — a failure in one is reported in `errors` and the other still runs. `runDue`, `sweep` and `resume` remain available when you want the halves separately. All are safe to fire on every node concurrently: reaping and claiming are atomic single-row transitions, so each run and each schedule is handled exactly once.
 
 ```ts title="One route is the whole operational surface"
 export async function POST(request: Request) {
   assertCronSecret(request); // yours
-  await runtime.runDue(); // fire due schedules
-  await runtime.sweep(); // reap + resume interrupted runs
-  return new Response("ok");
+  return Response.json(await runtime.cron());
 }
 ```
 
 <Callout type="warn" title="Guard the cron route">
-`sweep` and `runDue` are system-wide — they act across all tenants and take no principal. Whatever exposes them must authenticate, and should fail closed when its secret is unset rather than leaving every tenant's schedules runnable by anyone.
+`cron()` (and `sweep`/`runDue`) is system-wide — it acts across all tenants and takes no principal. Whatever exposes it must authenticate, and should fail closed when its secret is unset rather than leaving every tenant's schedules runnable by anyone.
 </Callout>
 
 ## What a turn actually does

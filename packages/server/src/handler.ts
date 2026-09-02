@@ -119,8 +119,9 @@ export interface LatchHandlerConfig<P> {
   /**
    * The system-wide tick `POST /cron/run` fires. Required when `runtime` is a
    * resolver (DB-per-tenant): no principal exists on this route, so the host
-   * must supply the tick that sweeps its tenants (each `runtime.runDue()` +
-   * `sweep()`). With a static runtime it defaults to `runtime.runDue()`.
+   * must supply the tick that covers its tenants (each `runtime.cron()`). With
+   * a static runtime it defaults to `runtime.cron()` — due schedules fired,
+   * stalled runs reaped and resumed, in one call.
    */
   cronRun?: () => Promise<unknown>;
 }
@@ -594,8 +595,9 @@ export function createLatchHandler<P>(
       }
     }
 
-    // POST cron/run — system-wide tick (fires ALL tenants' due schedules).
-    // Host-guarded by `cronSecret`, NOT user auth. Disabled if no secret set.
+    // POST cron/run — system-wide tick: fire ALL tenants' due schedules, then
+    // reap + resume stalled runs. Host-guarded by `cronSecret`, NOT user auth.
+    // Disabled if no secret set.
     if (seg[0] === "cron" && seg[1] === "run" && method === "POST") {
       if (!config.cronSecret) return json({ error: "cron route disabled" }, 404);
       if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
@@ -610,7 +612,7 @@ export function createLatchHandler<P>(
           400,
         );
       }
-      return json(await runtime.runDue());
+      return json(await runtime.cron());
     }
 
     return undefined;

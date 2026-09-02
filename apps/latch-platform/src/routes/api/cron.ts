@@ -5,10 +5,10 @@ import { memorySweep } from "@/lib/memory/sweep";
 
 /**
  * System cron entrypoint (prod replacement for the dev in-process tick).
- * Point Vercel Cron at `/api/cron` (see vercel.json). It does three things:
- *   • runDue()      — fire all tenants' due scheduled agents
- *   • sweep()       — reap lease-expired/crashed runs and resume them (durability)
- *   • memorySweep() — extract idle chats into episodic memory + consolidate
+ * Point Vercel Cron at `/api/cron` (see vercel.json). It does two things:
+ *   • runtime.cron() — fire all tenants' due scheduled agents, then reap
+ *                      lease-expired/crashed runs and resume them (durability)
+ *   • memorySweep()  — extract idle chats into episodic memory + consolidate
  *
  * Guarded by Vercel's `CRON_SECRET` (Vercel sends it as `Authorization:
  * Bearer …`). Unauthenticated and system-wide, so it fails CLOSED: in production
@@ -29,8 +29,10 @@ async function runCron(request: Request): Promise<Response> {
     if (expected.length !== got.length || !timingSafeEqual(expected, got)) return forbidden();
   }
   const { runtime, slackStore } = await getLatch();
-  const due = await runtime.runDue().catch((e: unknown) => ({ error: String(e) }));
-  const swept = await runtime.sweep().catch((e: unknown) => ({ error: String(e) }));
+  // Phases are isolated inside cron(): a runDue failure is reported in
+  // `errors` and the sweep still runs (and vice versa).
+  const latch = await runtime.cron().catch((e: unknown) => ({ error: String(e) }));
+  if ("errors" in latch && latch.errors.length) console.error("[cron] latch phase failed:", latch.errors);
   // Retention for the Slack channel's TTL'd tables (dedupe claims, held
   // replays, turn leases, and the legacy event table until it's dropped).
   await slackStore.pruneExpired().catch((e: unknown) => {
@@ -42,7 +44,7 @@ async function runCron(request: Request): Promise<Response> {
     process.env.NODE_ENV !== "production" &&
     new URL(request.url).searchParams.get("force") === "1";
   const memory = await memorySweep({ force }).catch((e: unknown) => ({ error: String(e) }));
-  return Response.json({ ok: true, due, swept, memory });
+  return Response.json({ ok: true, latch, memory });
 }
 
 export const Route = createFileRoute("/api/cron")({

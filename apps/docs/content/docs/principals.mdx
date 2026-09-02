@@ -132,8 +132,7 @@ createLatchHandler({
     const results = await Promise.allSettled(
       tenants.map(async (tenant) => {
         const rt = await runtimeFor(tenant);
-        await rt.runDue();
-        await rt.sweep();
+        await rt.cron();
       }),
     );
     results.forEach((r, i) => {
@@ -143,7 +142,7 @@ createLatchHandler({
 });
 ```
 
-The resolver runs *after* `resolveContext`, so the principal picks the database. Note the `cronRun`: the system-wide tick has no principal, so with per-tenant databases you must supply the sweep yourself. With a single runtime it defaults to `runtime.runDue()`.
+The resolver runs *after* `resolveContext`, so the principal picks the database. Note the `cronRun`: the system-wide tick has no principal, so with per-tenant databases you must supply it yourself. With a single runtime it defaults to `runtime.cron()`.
 
 Both models can coexist — column-scoped for self-serve customers, a dedicated database for enterprise ones — because the choice lives in a function rather than in the schema.
 
