@@ -44,7 +44,8 @@ import {
   updateSlackAppSettingsFn,
   unbindSlackAppFn,
 } from "@/lib/server";
-import { CHANNEL_KIND_UI, type DmChannelKind } from "@/lib/channel-kinds-ui";
+import { CHANNEL_KIND_UI } from "@/lib/channel-kinds-ui";
+import type { DmChannelKind } from "@/lib/channel-kinds-ui";
 import { AgentRecordSchema } from "@intentface/latch-agent-builder/record";
 import { authorizeUrl } from "@/lib/latch-client";
 import {
@@ -1723,7 +1724,7 @@ function ChannelSection({ kind, agent }: { kind: DmChannelKind; agent: string })
     const res = await createChannelBotFn({ data: { kind, agent, handle: handle.trim() } });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "Couldn't create the bot.");
+      setError(res.error);
       return;
     }
     setHandle("");
@@ -1742,7 +1743,7 @@ function ChannelSection({ kind, agent }: { kind: DmChannelKind; agent: string })
     const res = await saveChannelBotCredentialsFn({ data: { kind, botId: credsFor, credentials: creds } });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "The platform rejected the credentials.");
+      setError(res.error);
       return;
     }
     const botId = credsFor;
@@ -1758,7 +1759,7 @@ function ChannelSection({ kind, agent }: { kind: DmChannelKind; agent: string })
     const res = await registerChannelWebhookFn({ data: { kind, botId } });
     setBusy(false);
     if (!res.ok) {
-      setError(res.error ?? "Couldn't register the webhook.");
+      setError(res.error);
       return;
     }
     await Promise.all([load(), showWebhook(botId)]);

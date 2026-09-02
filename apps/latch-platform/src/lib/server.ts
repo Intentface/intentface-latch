@@ -39,7 +39,8 @@ import {
 } from "./slack-store";
 import { buildOauthState } from "./slack-oauth-state";
 import { createAppFromManifest, updateAppManifest, authTest } from "./slack-admin";
-import { CHANNEL_KINDS, isDmChannelKind, type DmChannelKind, type KindCtx } from "./channel-kinds";
+import { CHANNEL_KINDS, isDmChannelKind } from "./channel-kinds";
+import type { DmChannelKind, KindCtx } from "./channel-kinds";
 import { baseUrl } from "./base-url";
 import type { CredentialScope } from "./credentials";
 import { upsertConnection } from "./connection-upsert";
