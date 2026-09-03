@@ -45,7 +45,21 @@ export interface StateStore {
   push(channel: string, key: string, obs: Observation): Promise<void>;
   /** Drain the inbox, oldest first. */
   drain(channel: string): Promise<Observation[]>;
+  /** Look without draining: the queued observations and the age of the oldest. */
+  peek(channel: string): Promise<{ events: Observation[]; oldestReceivedAt: number | null }>;
   pending(channel: string): Promise<number>;
+  /** Every triage verdict, for "why did it (not) react". */
+  logTriage(channel: string, v: TriageRow): Promise<void>;
+  listTriage(channel: string, limit?: number): Promise<(TriageRow & { at: number })[]>;
+}
+
+export interface TriageRow {
+  act: boolean;
+  stage: "rule" | "model";
+  reason: string;
+  events: number;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 export function createStateStore(client: Client, now: () => number = Date.now): StateStore {
@@ -67,6 +81,18 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
              PRIMARY KEY (channel, ts)
            )`,
           `CREATE INDEX IF NOT EXISTS ambient_posts_channel_at ON ambient_posts (channel, posted_at)`,
+          `CREATE TABLE IF NOT EXISTS ambient_triage (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             channel TEXT NOT NULL,
+             at INTEGER NOT NULL,
+             act INTEGER NOT NULL,
+             stage TEXT NOT NULL,
+             reason TEXT NOT NULL,
+             events INTEGER NOT NULL,
+             input_tokens INTEGER,
+             output_tokens INTEGER
+           )`,
+          `CREATE INDEX IF NOT EXISTS ambient_triage_channel_at ON ambient_triage (channel, at DESC)`,
           `CREATE TABLE IF NOT EXISTS ambient_inbox (
              channel TEXT NOT NULL,
              key TEXT NOT NULL,
@@ -141,6 +167,36 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
       return r.rows
         .map((row) => JSON.parse(String(row.payload)) as Observation)
         .sort((a, b) => Number(a.ts) - Number(b.ts));
+    },
+
+    async peek(channel) {
+      const r = await client.execute({ sql: `SELECT ts, payload, received_at FROM ambient_inbox WHERE channel = ?`, args: [channel] });
+      const events = r.rows.map((row) => JSON.parse(String(row.payload)) as Observation).sort((a, b) => Number(a.ts) - Number(b.ts));
+      const oldest = r.rows.reduce<number | null>((m, row) => (m === null ? Number(row.received_at) : Math.min(m, Number(row.received_at))), null);
+      return { events, oldestReceivedAt: oldest };
+    },
+
+    async logTriage(channel, v) {
+      await client.execute({
+        sql: `INSERT INTO ambient_triage (channel, at, act, stage, reason, events, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [channel, now(), v.act ? 1 : 0, v.stage, v.reason, v.events, v.inputTokens ?? null, v.outputTokens ?? null],
+      });
+    },
+
+    async listTriage(channel, limit = 50) {
+      const r = await client.execute({
+        sql: `SELECT at, act, stage, reason, events, input_tokens, output_tokens FROM ambient_triage WHERE channel = ? ORDER BY at DESC, id DESC LIMIT ?`,
+        args: [channel, limit],
+      });
+      return r.rows.map((row) => ({
+        at: Number(row.at),
+        act: Number(row.act) === 1,
+        stage: String(row.stage) as "rule" | "model",
+        reason: String(row.reason),
+        events: Number(row.events),
+        ...(row.input_tokens == null ? {} : { inputTokens: Number(row.input_tokens) }),
+        ...(row.output_tokens == null ? {} : { outputTokens: Number(row.output_tokens) }),
+      }));
     },
 
     async pending(channel) {

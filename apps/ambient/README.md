@@ -26,6 +26,12 @@ Slack events ──▶ POST /slack/events ──▶ inbox (SQLite) ──▶ tic
 - **When it speaks:** addressed (in the thread), a commitment overdue and unmentioned for a day, an open question
   it can answer from the channel's own history, a decision contradicting an earlier one. Never about tone or
   dynamics. Unprompted posts are capped per day.
+- **Triage before every tick:** is this batch worth waking the agent *now*? Rules settle the obvious (a mention,
+  anything touching what the state tracks, a question or commitment, a stale inbox → act; only reactions on
+  untracked messages → defer). Plain human talk goes to a cheap model when `AMBIENT_TRIAGE_MODEL` is set. "No"
+  means **defer, never discard**: events stay queued and fold into the next batch; after 30 minutes they are read
+  regardless. Every verdict is logged with its reason (`/channels/:id/triage`) and the judge's tokens count against
+  the channel's budget like any other spend.
 - **Heartbeat:** an hourly tick on quiet channels, for overdue checks only.
 
 ## Run
@@ -45,6 +51,7 @@ curl localhost:8790/channels                      # watched channels and what is
 curl localhost:8790/channels/C0123/state          # the document as the agent last wrote it
 curl localhost:8790/channels/C0123/monologue      # the whole long-lived chat: read, thought, did
 curl localhost:8790/channels/C0123/runs           # status, tokens, cost per tick
+curl localhost:8790/channels/C0123/triage         # why it did or did not wake, with the judge's token cost
 curl -X POST localhost:8790/channels/C0123/tick   # run now (a heartbeat if nothing is queued)
 ```
 

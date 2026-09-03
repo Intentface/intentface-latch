@@ -13,6 +13,7 @@ import { owner, type Principal } from "./principal.js";
 import { createSlack } from "./slack.js";
 import { createStateStore } from "./state.js";
 import { createTicker } from "./ticker.js";
+import { createTriage } from "./triage.js";
 import { createTools } from "./tools.js";
 
 /**
@@ -41,6 +42,10 @@ const config = {
   quietMs: Number(env("AMBIENT_QUIET_MS", "90000")),
   /** Heartbeat for quiet channels (overdue checks); 0 disables. */
   heartbeatMs: Number(env("AMBIENT_HEARTBEAT_MS", String(60 * 60_000))),
+  /** A cheap model that decides whether a batch is worth waking the agent now; empty = rules only. */
+  triageModel: process.env.AMBIENT_TRIAGE_MODEL ?? "",
+  /** Deferred events are read regardless after this long. */
+  maxDeferMs: Number(env("AMBIENT_MAX_DEFER_MS", String(30 * 60_000))),
   /** Compact the monologue once it holds this many messages. */
   compactAfter: Number(env("AMBIENT_COMPACT_AFTER", "80")),
   maxPostsPerDay: Number(env("AMBIENT_MAX_POSTS_PER_DAY", "5")),
@@ -74,7 +79,12 @@ const tools = createTools({ slack, state, maxPostsPerDay: config.maxPostsPerDay 
 /** The channel's one long-lived chat: its monologue. */
 const chatIdOf = (channel: string) => `ambient_${channel}`;
 
-const { app: latch, runtime, stop } = await createLatchHonoApp<Principal, Ctx>({
+const limitStore = createSqliteLimitStore(db);
+const policiesFor = (channel: string) => [
+  { key: `channel:${channel}`, windowMs: DAY_MS, max: { tokens: config.tokensPerDay }, label: "this channel's daily token budget" },
+];
+
+const { app: latch, runtime, stop, models } = await createLatchHonoApp<Principal, Ctx>({
   storage: createSqliteAdapter<Principal>(db, { owner }),
   // Latch's own HTTP surface is for operators here: the caller names a watched
   // channel. Locked behind AMBIENT_ADMIN_TOKEN when set; local-only otherwise.
@@ -94,10 +104,8 @@ const { app: latch, runtime, stop } = await createLatchHonoApp<Principal, Ctx>({
   runtime: {
     // A chatty channel cannot run away: one token budget per channel per day.
     limits: {
-      store: createSqliteLimitStore(db),
-      limitsFor: ({ principal }) => [
-        { key: `channel:${principal.channel}`, windowMs: DAY_MS, max: { tokens: config.tokensPerDay }, label: "this channel's daily token budget" },
-      ],
+      store: limitStore,
+      limitsFor: ({ principal }) => policiesFor(principal.channel),
       onRefused: ({ principal, retryAfterMs }) =>
         console.warn(`[ambient] ${principal.channel}: tick refused, budget resets in ${Math.ceil(retryAfterMs / 60_000)} min`),
     },
@@ -115,14 +123,32 @@ const { app: latch, runtime, stop } = await createLatchHonoApp<Principal, Ctx>({
 
 // ---- The tick ----------------------------------------------------------------
 
+// Triage: rules, then (optionally) a cheap model. Its tokens hit the same budget as the agent's.
+const triage = createTriage({
+  model: config.triageModel ? models.modelFor(config.triageModel) : undefined,
+  limits: { store: limitStore, policiesFor },
+  maxDeferMs: config.maxDeferMs,
+});
+
 /**
- * One more turn of the channel's monologue: a tick when the inbox has events,
- * a heartbeat otherwise. Returns true when more arrived meanwhile. Every
- * caller goes through the ticker, so a channel never runs two at once.
+ * One more turn of the channel's monologue: a tick when the inbox has events
+ * worth it, a heartbeat when the ticker fires on an empty inbox. Returns true
+ * when more arrived meanwhile. Every caller goes through the ticker, so a
+ * channel never runs two at once.
  */
 async function tick(channel: string): Promise<boolean> {
   const principal: Principal = { channel };
-  const prompt = (await state.pending(channel)) > 0 ? TICK_PROMPT : HEARTBEAT_PROMPT;
+  const { events, oldestReceivedAt } = await state.peek(channel);
+  let prompt = HEARTBEAT_PROMPT;
+  if (events.length > 0) {
+    const verdict = await triage.decide({ channel, events, stateDoc: (await state.load(channel)).doc, oldestAgeMs: oldestReceivedAt ? Date.now() - oldestReceivedAt : 0 });
+    await state.logTriage(channel, { ...verdict, events: events.length, ...verdict.usage });
+    if (!verdict.act) {
+      console.log(`[ambient] ${channel}: deferred ${events.length} event(s) — ${verdict.reason}`);
+      return false;
+    }
+    prompt = TICK_PROMPT;
+  }
   await runtime.runAgent({ principal, agent: "watcher", prompt, threadId: chatIdOf(channel), blockGated: false });
   // Keep the monologue bounded: fold old thinking into a summary; the state document carries the facts.
   const history = await runtime.loadHistory({ chatId: chatIdOf(channel), principal });
@@ -208,6 +234,9 @@ app.get("/channels", async (c) => {
 /** The state document as the agent last wrote it. */
 app.get("/channels/:id/state", async (c) => c.json(await state.load(c.req.param("id"))));
 
+/** Why it did or did not wake: every triage verdict, newest first. */
+app.get("/channels/:id/triage", async (c) => c.json(await state.listTriage(c.req.param("id"))));
+
 /** Recent runs: status, usage, cost. */
 app.get("/channels/:id/runs", async (c) => c.json(await runtime.listRuns({ principal: { channel: c.req.param("id") }, limit: 20 })));
 
@@ -243,7 +272,7 @@ app.route("/latch", latch);
 
 serve({ fetch: app.fetch, port: config.port });
 console.log(`👁  ambient listening on http://localhost:${config.port}`);
-console.log(`   ${watched.size} channel(s); quiet ${config.quietMs / 1000}s; heartbeat ${config.heartbeatMs / 60_000} min; model ${config.model}; state in ${config.stateIn}`);
+console.log(`   ${watched.size} channel(s); quiet ${config.quietMs / 1000}s; heartbeat ${config.heartbeatMs / 60_000} min; model ${config.model}; triage ${config.triageModel || "rules only"}; state in ${config.stateIn}`);
 console.log(`   /invite the bot to a channel to watch it — Slack events at POST /slack/events`);
 console.log(`   curl http://localhost:${config.port}/channels`);
 

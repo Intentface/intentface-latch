@@ -39,6 +39,27 @@ describe("channel state store", () => {
     expect(await store.drain("C2")).toEqual([{ kind: "reaction_added", ts: "300.1", emoji: "eyes", targetTs: "100.1" }]);
   });
 
+  it("peek shows the queue and the oldest arrival without draining; triage verdicts are logged newest-first", async () => {
+    let t = 100;
+    const store = await fresh(() => t);
+    await store.push("C1", "e1", { kind: "message", ts: "1.0", text: "a" });
+    t = 250;
+    await store.push("C1", "e2", { kind: "message", ts: "2.0", text: "b" });
+    const peeked = await store.peek("C1");
+    expect(peeked.events.map((o) => o.ts)).toEqual(["1.0", "2.0"]);
+    expect(peeked.oldestReceivedAt).toBe(100);
+    expect(await store.pending("C1")).toBe(2);
+    expect(await store.peek("C2")).toEqual({ events: [], oldestReceivedAt: null });
+
+    await store.logTriage("C1", { act: false, stage: "rule", reason: "noise", events: 2 });
+    t = 300;
+    await store.logTriage("C1", { act: true, stage: "model", reason: "a promise", events: 3, inputTokens: 120, outputTokens: 15 });
+    expect(await store.listTriage("C1")).toEqual([
+      { at: 300, act: true, stage: "model", reason: "a promise", events: 3, inputTokens: 120, outputTokens: 15 },
+      { at: 250, act: false, stage: "rule", reason: "noise", events: 2 },
+    ]);
+  });
+
   it("counts only unprompted posts inside the window, per channel", async () => {
     let t = 0;
     const store = await fresh(() => t);

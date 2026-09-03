@@ -37,7 +37,10 @@ export function createCanvasStateStore(input: {
     unpromptedPostsSince: (c, s) => base.unpromptedPostsSince(c, s),
     push: (c, k, o) => base.push(c, k, o),
     drain: (c) => base.drain(c),
+    peek: (c) => base.peek(c),
     pending: (c) => base.pending(c),
+    logTriage: (c, v) => base.logTriage(c, v),
+    listTriage: (c, n) => base.listTriage(c, n),
 
     async load(channel): Promise<ChannelState> {
       const shadow = await base.load(channel);
