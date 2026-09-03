@@ -34,25 +34,11 @@ export const SCHEDULE_TOOLS: readonly string[] = [
   "cancel_schedule",
 ];
 
-/**
- * The Slack capability = the conversation tools together: reads are gated on
- * the requester's channel membership server-side, and `post_to_channel` is
- * approval-gated. They self-refuse outside a Slack conversation, so granting
- * them to an agent that also runs on the web is harmless.
- */
-export const SLACK_TOOLS: readonly string[] = [
-  "slack_read_thread",
-  "slack_read_channel",
-  "slack_list_channels",
-  "post_to_channel",
-];
-
 /** Each editor toggle grants one group of `defaultTools` names. */
 export const DEFAULT_TOOL_GROUPS = {
   web: ["web_fetch"],
   askUser: ["askUser"],
   schedules: SCHEDULE_TOOLS,
-  slack: SLACK_TOOLS,
 } as const satisfies Record<string, readonly string[]>;
 export type DefaultToolGroup = keyof typeof DEFAULT_TOOL_GROUPS;
 

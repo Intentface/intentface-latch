@@ -44,6 +44,13 @@ import type { AgentStore } from "./agent-store";
 import { memoryAgentOf } from "./memory/agent-identity";
 import { isOrgMember } from "./auth";
 import { createSlackStore, migrateSlack, slackVaultKeys } from "./slack-store";
+import {
+  createChannelAuditStore,
+  migrateChannelAudit,
+  type ChannelAuditStore,
+} from "./channel-audit-store";
+import { toChannelAuditRecord } from "./slack-audit";
+import { slackScopeGuard } from "@intentface/latch-channels/slack";
 import type {SlackStore} from "./slack-store";
 import { createTelegramStore, migrateTelegram } from "./telegram-store";
 import type {TelegramStore} from "./telegram-store";
@@ -106,6 +113,7 @@ let cached:
       allConnections: ConnectionRegistry<Principal>;
       agentStore: AgentStore;
       slackStore: SlackStore;
+      channelAudit: ChannelAuditStore;
       telegramStore: TelegramStore;
       whatsappStore: WhatsappStore;
       toolStore: ToolStore;
@@ -136,6 +144,7 @@ export async function getLatch(): Promise<{
   allConnections: ConnectionRegistry<Principal>;
   agentStore: AgentStore;
   slackStore: SlackStore;
+  channelAudit: ChannelAuditStore;
   telegramStore: TelegramStore;
   whatsappStore: WhatsappStore;
   toolStore: ToolStore;
@@ -162,6 +171,7 @@ export async function getLatch(): Promise<{
   await migrateSlack(client); // latch_slack_app + latch_slack_event (Slack channel)
   await migrateTelegram(client); // latch_telegram_* (Telegram channel)
   await migrateWhatsapp(client); // latch_whatsapp_* (WhatsApp channel)
+  await migrateChannelAudit(client); // latch_channel_audit (TTL'd admission + tool-call log)
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
   await migrateRunScores(client); // latch_run_scores (fast local mirror for the chat evals panel)
@@ -211,6 +221,17 @@ export async function getLatch(): Promise<{
     loadAuthoredTools: (p, names, scope) => authoredTools.executableTools(p, names, scope),
   });
   const slackStore = createSlackStore(client);
+  const channelAudit = createChannelAuditStore(client);
+  // Short-lived per-app binding cache for the guard's audit sink (a rebind is
+  // rare; 60s staleness on an audit row's org/agent is acceptable).
+  const slackAppCache = new Map<string, { at: number; app: Awaited<ReturnType<SlackStore["resolve"]>> }>();
+  const resolveSlackAppCached = async (appId: string) => {
+    const hit = slackAppCache.get(appId);
+    if (hit && Date.now() - hit.at < 60_000) return hit.app;
+    const app = await slackStore.resolve(appId);
+    slackAppCache.set(appId, { at: Date.now(), app });
+    return app;
+  };
   const telegramStore = createTelegramStore(client);
   const whatsappStore = createWhatsappStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
@@ -487,6 +508,23 @@ export async function getLatch(): Promise<{
         (await googleWorkspace?.mountCredsFor(principal)) ?? null,
     }),
     harnessTools,
+    // Code-level tool policy, evaluated before any approval on EVERY turn
+    // (subagents included): a Slack-triggered tree stays inside the channel it
+    // was mentioned in. Every decision lands in the channel audit log.
+    toolGuards: [
+      slackScopeGuard<Principal>({
+        // The guard does not await the sink (never on the tool call's path),
+        // so the write is handed to waitUntil on Vercel and the binding lookup
+        // is memoized per app — one tool call must not cost a DB round trip.
+        audit: (e) => {
+          const write = (async () => {
+            const app = e.appId ? await resolveSlackAppCached(e.appId) : null;
+            await channelAudit.record(toChannelAuditRecord(e, app));
+          })().catch((err) => console.error("[slack-guard] audit write failed:", err));
+          if (process.env.VERCEL) waitUntil(write);
+        },
+      }),
+    ],
     // Native provider web tools (search/fetch) for agents that opt in.
     resolveProviderTools,
     // Per-agent reasoning effort → provider options (gated to reasoning models).
@@ -689,6 +727,7 @@ export async function getLatch(): Promise<{
     allConnections,
     agentStore,
     slackStore,
+    channelAudit,
     telegramStore,
     whatsappStore,
     toolStore,

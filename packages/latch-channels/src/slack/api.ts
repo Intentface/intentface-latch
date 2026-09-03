@@ -181,7 +181,11 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       icon_url?: string;
       metadata?: unknown;
     }): Promise<{ ts: string; channel: string }> {
-      const r = await call("chat.postMessage", { unfurl_links: false, ...input });
+      const r = await call("chat.postMessage", {
+        unfurl_links: false,
+        unfurl_media: false,
+        ...input,
+      });
       return { ts: String(r.ts), channel: String(r.channel) };
     },
 
@@ -299,13 +303,25 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
 
     // ── Conversations ────────────────────────────────────────────────────────
 
-    /** Fetch a thread's messages (oldest first) — for seeding prior context. */
+    /**
+     * Fetch a thread's messages — for seeding prior context. Slack paginates
+     * replies OLDEST FIRST and always includes the thread parent, so "the most
+     * recent N" needs `latest` (exclusive) plus a client-side tail slice, and a
+     * delta needs `oldest` (exclusive) plus a `ts > oldest` filter.
+     */
     async threadReplies(
       channel: string,
       ts: string,
-      limit = 50,
+      opts: { limit?: number; oldest?: string; latest?: string; inclusive?: boolean } = {},
     ): Promise<{ userId?: string; text: string; isBot: boolean; ts: string }[]> {
-      const r = await call("conversations.replies", { channel, ts, limit: String(limit) });
+      const r = await call("conversations.replies", {
+        channel,
+        ts,
+        limit: String(opts.limit ?? 50),
+        ...(opts.oldest ? { oldest: opts.oldest } : {}),
+        ...(opts.latest ? { latest: opts.latest } : {}),
+        ...(opts.inclusive !== undefined ? { inclusive: String(opts.inclusive) } : {}),
+      });
       const msgs = (r.messages as Record<string, unknown>[] | undefined) ?? [];
       return msgs.map((m) => ({
         userId: m.user ? String(m.user) : undefined,

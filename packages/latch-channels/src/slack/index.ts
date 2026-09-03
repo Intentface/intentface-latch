@@ -14,6 +14,8 @@ export type {
   SlackThreadStore,
   SlackPeek,
 } from "./slackChannel.js";
+export { slackScopeGuard, REMOVED_SLACK_TOOLS } from "./guard.js";
+export type { SlackAuditAction, SlackAuditEvent, SlackAuditSink } from "./audit.js";
 export { slackChatId, parseSlackChatId, DM_ROOT } from "./ids.js";
 export type { SlackChatRef } from "./ids.js";
 export { normalizeSlackText, isRenderableUserMessage } from "./normalize.js";
@@ -35,6 +37,7 @@ export {
   signInCard,
   errorBlocks,
   feedbackActions,
+  contextLine,
   APPROVE_ACTION,
   DENY_ACTION,
   FEEDBACK_ACTION,

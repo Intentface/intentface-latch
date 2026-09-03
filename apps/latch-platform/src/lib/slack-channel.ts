@@ -1,6 +1,7 @@
 import { waitUntil } from "@vercel/functions";
 import { slackChannel } from "@intentface/latch-channels/slack";
 import { getLatch } from "./latch";
+import { toChannelAuditRecord } from "./slack-audit";
 import { isOrgMember } from "./auth";
 import { slackVaultKeys } from "./slack-store";
 import { buildLinkUrl } from "./slack-link";
@@ -21,7 +22,7 @@ const lastTouch = new Map<string, number>();
 
 // Claim TTLs owned here (policy), passed through the adapter's claimOnce.
 export async function getSlackChannelForApp(appId: string) {
-  const { runtime, slackStore, credentials } = await getLatch();
+  const { runtime, slackStore, credentials, channelAudit } = await getLatch();
   const app = await slackStore.resolve(appId);
   if (!app) return null;
   if (!app.botUserId || !app.teamId) {
@@ -30,6 +31,8 @@ export async function getSlackChannelForApp(appId: string) {
   }
 
   const principal: Principal = { orgId: app.orgId, userId: app.userId };
+  /** The installed workspace — the only team identities are ever resolved under. */
+  const installedTeam = app.teamId;
   const keys = slackVaultKeys(appId);
   const disabled = app.status === "disabled";
 
@@ -74,6 +77,7 @@ export async function getSlackChannelForApp(appId: string) {
           initiatorUserId: row.initiatorSlackUserId,
           teamId: meta.teamId,
           createdAt: row.createdAt,
+          ...(row.lastSeenTs ? { lastSeenTs: row.lastSeenTs } : {}),
         };
       },
       get: async (chatId) => {
@@ -83,20 +87,30 @@ export async function getSlackChannelForApp(appId: string) {
           initiatorUserId: row.initiatorSlackUserId,
           teamId: app.teamId ?? "",
           createdAt: row.createdAt,
+          ...(row.lastSeenTs ? { lastSeenTs: row.lastSeenTs } : {}),
         };
       },
+      markSeen: (chatId, ts) => slackStore.markThreadSeen(chatId, ts),
       markStopped: (chatId) => slackStore.markThreadStopped(chatId),
       stoppedSince: (chatId, sinceMs) => slackStore.threadStoppedSince(chatId, sinceMs),
     },
 
+    // ── Audit ─────────────────────────────────────────────────────────────────
+    // Every admission decision → latch_channel_audit (the adapter defers the
+    // promise through waitUntil; nothing here is on the turn's path).
+    audit: (e) => channelAudit.record(toChannelAuditRecord(e, app)),
+
     // ── Identity gate ─────────────────────────────────────────────────────────
     // Only linked platform users may drive the agent. On refusal, stash the
     // message so it can be replayed once they link.
-    authorizeUser: async ({ teamId, userId, channelId, threadRoot, anchorTs, prompt }) => {
+    authorizeUser: async ({ userId, channelId, threadRoot, anchorTs, prompt }) => {
       // A disabled binding (uninstalled/revoked) never replies — Slack may
       // still deliver queued events for a while.
       if (disabled) return { allowed: false, silent: true };
-      const team = teamId || app.teamId || "";
+      // Identities are looked up under the INSTALLED workspace only — never the
+      // event's team. A Slack Connect guest's message must not create a
+      // pending row or a link under their foreign team.
+      const team = installedTeam;
       const identity = await slackStore.resolveIdentity(team, userId);
       if (identity) {
         // The identity table is keyed by (team, slack user) ALONE — a link

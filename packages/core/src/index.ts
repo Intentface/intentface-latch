@@ -21,3 +21,4 @@ export * from "./compaction.js";
 export * from "./pricing.js";
 export * from "./prompt-caching.js";
 export * from "./telemetry.js";
+export * from "./tool-guard.js";

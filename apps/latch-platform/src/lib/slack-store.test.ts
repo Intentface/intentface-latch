@@ -129,6 +129,20 @@ describe("slack store: thread ownership", () => {
     // An old stop never cancels a NEW turn.
     expect(await store.threadStoppedSince("slack2_A1_D1_dm", Date.now() + 1000)).toBe(false);
   });
+
+  it("keeps a forward-only history watermark per thread", async () => {
+    await store.claimThread({ chatId: "slack2_A1_C1_5.0", appId: "A1", initiatorSlackUserId: "UA" });
+    expect((await store.getThread("slack2_A1_C1_5.0"))?.lastSeenTs).toBeUndefined();
+    // Real Slack ts: same second, adjacent microseconds — beyond double precision.
+    await store.markThreadSeen("slack2_A1_C1_5.0", "1712345678.123456");
+    await store.markThreadSeen("slack2_A1_C1_5.0", "1712345678.123457");
+    expect((await store.getThread("slack2_A1_C1_5.0"))?.lastSeenTs).toBe("1712345678.123457");
+    // A late write for an OLDER message never rewinds it.
+    await store.markThreadSeen("slack2_A1_C1_5.0", "1712345678.123450");
+    expect((await store.getThread("slack2_A1_C1_5.0"))?.lastSeenTs).toBe("1712345678.123457");
+    // Unknown chat: no row, no error.
+    await store.markThreadSeen("slack2_A1_C1_9.0", "9.1");
+  });
 });
 
 describe("slack store: pending replays (app-keyed)", () => {

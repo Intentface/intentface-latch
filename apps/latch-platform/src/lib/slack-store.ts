@@ -120,6 +120,13 @@ export async function migrateSlack(client: Client): Promise<void> {
   } catch {
     /* column already exists */
   }
+  // History watermark: ts of the last message the chat processed (strict v1
+  // fetches the thread delta since it on the next mention).
+  try {
+    await client.execute(`ALTER TABLE latch_slack_thread ADD COLUMN last_seen_ts TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 /** Vault credential key names for a Slack app's secrets (stored at org scope). */
@@ -189,6 +196,8 @@ export interface SlackThread {
   initiatorUserId?: string;
   stoppedAt?: number;
   createdAt: number;
+  /** ts of the last processed message — the delta-fetch watermark. */
+  lastSeenTs?: string;
 }
 
 const APP_COLUMNS = `SELECT app_id, team_id, agent, agent_scope, org_id, user_id, bot_name, credential_mode, bot_user_id,
@@ -228,7 +237,7 @@ const TURN_LEASE_MS = 5 * 60_000;
 export function createSlackStore(client: Client) {
   async function getThread(chatId: string): Promise<SlackThread | null> {
     const res = await client.execute({
-      sql: `SELECT chat_id, app_id, initiator_slack_user_id, initiator_user_id, stopped_at, created_at
+      sql: `SELECT chat_id, app_id, initiator_slack_user_id, initiator_user_id, stopped_at, created_at, last_seen_ts
             FROM latch_slack_thread WHERE chat_id = ? LIMIT 1`,
       args: [chatId],
     });
@@ -241,6 +250,7 @@ export function createSlackStore(client: Client) {
       initiatorUserId: r.initiator_user_id ? String(r.initiator_user_id) : undefined,
       stoppedAt: r.stopped_at ? Number(r.stopped_at) : undefined,
       createdAt: Number(r.created_at),
+      lastSeenTs: r.last_seen_ts ? String(r.last_seen_ts) : undefined,
     };
   }
 
@@ -497,6 +507,19 @@ export function createSlackStore(client: Client) {
     },
 
     getThread,
+
+    /**
+     * Advance the history watermark — only forward, a late write never rewinds
+     * it. Slack ts are fixed-width `seconds.micros`, so TEXT comparison is exact
+     * (a REAL cast would lose the last microsecond digit).
+     */
+    async markThreadSeen(chatId: string, ts: string): Promise<void> {
+      await client.execute({
+        sql: `UPDATE latch_slack_thread SET last_seen_ts = ?
+              WHERE chat_id = ? AND (last_seen_ts IS NULL OR last_seen_ts < ?)`,
+        args: [ts, chatId, ts],
+      });
+    },
 
     async markThreadStopped(chatId: string): Promise<void> {
       await client.execute({

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   KNOWN_DEFAULT_TOOLS,
   SCHEDULE_TOOLS,
-  SLACK_TOOLS,
   coerceRecord,
   expandDefaultTools,
   groupOn,
@@ -38,11 +37,11 @@ describe("defaultTools as an explicit list", () => {
     expect(on).toEqual(["list_schedules", "future_tool", ...SCHEDULE_TOOLS.filter((n) => n !== "list_schedules")]);
     const off = toggleGroup([...SCHEDULE_TOOLS, "web_fetch", "future_tool"], "schedules", false);
     expect(off).toEqual(["web_fetch", "future_tool"]);
-    expect(toggleGroup([], "slack", true)).toEqual(SLACK_TOOLS);
+    expect(toggleGroup([], "web", true)).toEqual(["web_fetch"]);
   });
 
   it("round-trips an unchanged full grant", () => {
-    const prev = ["web_fetch", "askUser", ...SCHEDULE_TOOLS, ...SLACK_TOOLS];
+    const prev = ["web_fetch", "askUser", ...SCHEDULE_TOOLS];
     const rec = loadAgentRecord({ ...base, exec: { defaultTools: prev } });
     expect(toSavePayload(rec, ctx).exec?.defaultTools).toEqual(prev);
   });
@@ -50,7 +49,7 @@ describe("defaultTools as an explicit list", () => {
   it("nothing granted → defaultTools absent", () => {
     const rec = loadAgentRecord({ ...base, exec: { defaultTools: true } });
     let list = rec.exec!.defaultTools as string[];
-    for (const g of ["web", "askUser", "schedules", "slack"] as const) list = toggleGroup(list, g, false);
+    for (const g of ["web", "askUser", "schedules"] as const) list = toggleGroup(list, g, false);
     expect(toSavePayload({ ...rec, exec: { defaultTools: list } }, ctx).exec?.defaultTools).toBeUndefined();
   });
 });

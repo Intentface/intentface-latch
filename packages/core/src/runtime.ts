@@ -32,6 +32,7 @@ import {
 } from "./projections.js";
 import { summarizeForCompaction } from "./compaction.js";
 import { computeCost, type Pricing } from "./pricing.js";
+import { guardedApprovalPolicy, type ToolGuard } from "./tool-guard.js";
 import {
   defaultPromptCachingPlan,
   markLastFunctionTool,
@@ -274,6 +275,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * Optional — without it, nothing is traced and behavior is unchanged.
    */
   telemetry?: LatchTelemetry<P>;
+  /**
+   * Deterministic tool-call policy, evaluated BEFORE the approval policy on
+   * every call of every turn — including autonomous/subagent turns that waive
+   * approvals. A denial never executes and never asks a human; its reason goes
+   * back to the model as a tool result. Guards AND-compose (first deny wins) and
+   * receive the tree's `rootChatId`, so a channel-scoped guard holds inside
+   * delegated subagents too. See `tool-guard.ts`. Runtime-level only in v1.
+   */
+  toolGuards?: ToolGuard<P>[];
   /**
    * Optional observability seam — consumer telemetry (usage rollups, per-tool
    * analytics, tracing) attached WITHOUT wrapping `handleChat`. Complements the
@@ -1650,13 +1660,27 @@ export function createRuntime<P, RC = unknown>(
       harnessApproval,
       ...opened.map((o) => o.toolApproval ?? {}),
     ) as Record<string, unknown>;
-    const toolApproval = autoApprove
+    const baseApproval = autoApprove
       ? undefined
       : cfg.toolApproval && typeof cfg.toolApproval !== "function"
         ? { ...sourceApproval, ...(cfg.toolApproval as Record<string, unknown>) }
         : Object.keys(sourceApproval).length > 0 && !cfg.toolApproval
           ? sourceApproval
           : cfg.toolApproval;
+    // Tool guards wrap the policy as the SDK's generic approval function: a
+    // guard denial short-circuits to `denied` (no execute, no card), otherwise
+    // the base policy applies. Installed even under `autoApprove` — a subagent
+    // waives HUMAN approval, never code-level scope.
+    const toolApproval = config.toolGuards?.length
+      ? guardedApprovalPolicy(config.toolGuards, baseApproval, {
+          principal,
+          chatId: resolvedChatId,
+          rootChatId,
+          runId: run.id,
+          agent: run.agent,
+          trigger,
+        })
+      : baseApproval;
 
     // Which tools the model may call. `enabledTools` restricts only CONNECTION
     // tools, so union in each source's `alwaysActive` (e.g. connect_<name>) AND

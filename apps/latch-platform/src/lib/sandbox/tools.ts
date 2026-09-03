@@ -2,7 +2,6 @@ import { tool, jsonSchema } from "ai";
 import type { Experimental_SandboxSession, Tool } from "ai";
 import { parseTelegramChatId } from "@intentface/latch-channels/telegram";
 import { parseSlackChatId } from "@intentface/latch-channels/slack";
-import { slackTools, slackToolsApproval } from "./slack-tools";
 import { webFetch } from "@/lib/web-fetch";
 import { renderFetch, renderFetchConfigured } from "@/lib/render-fetch";
 import { getLatch } from "@/lib/latch";
@@ -643,19 +642,14 @@ export const appTools = {
   create_schedule,
   list_schedules,
   cancel_schedule,
-  // Slack conversation tools — self-refusing outside a Slack chat (the
-  // authority derives from the run's chat id; see slack-tools.ts).
-  ...slackTools,
 } as Record<string, unknown>;
 /**
  * Default gates for harness tools. Creating a schedule persists a recurring
- * side effect and — on a channel — a recurring push, so the user confirms it;
- * posting to another Slack channel publishes outside the conversation, ditto.
+ * side effect and — on a channel — a recurring push, so the user confirms it.
  * An agent may still override these in its own `toolApproval`.
  */
 export const harnessApproval: Record<string, unknown> = {
   create_schedule: "user-approval",
-  ...slackToolsApproval,
 };
 /**
  * Render tool(s) — a separate capability (agent flag `renderTools: true`), NOT

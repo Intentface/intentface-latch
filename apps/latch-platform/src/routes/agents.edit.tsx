@@ -39,12 +39,10 @@ import {
   saveTelegramTokenFn,
   saveWhatsappCredentialsFn,
   setSlackConfigTokenFn,
-  slackAppChannelsFn,
   slackAppHealthFn,
   slackConfigStatusFn,
   slackManifestFn,
   migrateSlackAppFn,
-  updateSlackAppSettingsFn,
   telegramWebhookStatusFn,
   unbindSlackAppFn,
   whatsappWebhookInfoFn,
@@ -767,13 +765,6 @@ const DEFAULT_TOOL_TOGGLES: {
     help:
       "the agent can set up its own recurring runs (“brief me every weekday at 8”) and deliver them to a linked Telegram/Slack channel. Creating one asks the user for approval first; runs fire at most every 15 minutes.",
   },
-  {
-    group: "slack",
-    label: "Slack tools",
-    tools: "slack_read_thread / slack_read_channel / slack_list_channels / post_to_channel",
-    help:
-      "in Slack conversations the agent can read threads/channels the requesting user is a member of (checked live, fails closed) and post to other channels behind an approval card. Outside Slack these tools refuse themselves — safe to leave on.",
-  },
 ];
 
 const MEMORY_LEVEL_LABELS: Record<MemoryLevel, string> = {
@@ -948,8 +939,7 @@ function MemoryStatus({ agent }: { agent: string }) {
  * Turn this agent into its own Slack bot (own-app-per-agent). One-button via
  * the org config token, or the manual manifest flow. Each binding card shows
  * health (token, events), the manifest generation with a migrate-to-v2
- * button, whose credentials the bot uses, and the unattended-posting
- * allowlist.
+ * button, and whose credentials the bot uses.
  */
 function SlackSection({ agent }: { agent: string }) {
   const [apps, setApps] = useState<
@@ -1302,7 +1292,7 @@ function timeAgo(ts: number): string {
   return `${Math.round(s / 86400)}d ago`;
 }
 
-/** One bound Slack app: identity, credential mode, health, migrate, settings. */
+/** One bound Slack app: identity, credential mode, health, migrate. */
 function SlackAppCard({
   app,
   onDisconnect,
@@ -1311,10 +1301,7 @@ function SlackAppCard({
   onDisconnect: () => void;
 }) {
   const [health, setHealth] = useState<Awaited<ReturnType<typeof slackAppHealthFn>>>(null);
-  const [channels, setChannels] = useState<{ id: string; name: string }[] | null>(null);
-  const [allow, setAllow] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [migrateManifest, setMigrateManifest] = useState<string | null>(null);
   const [migrateUrl, setMigrateUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1325,7 +1312,6 @@ function SlackAppCard({
       .then((h) => {
         if (!alive) return;
         setHealth(h);
-        if (h) setAllow(h.unattendedChannels);
       })
       .catch(() => {
         if (alive) setError("Couldn't load the bot's health.");
@@ -1352,38 +1338,6 @@ function SlackAppCard({
     // No config token: manual path — paste the manifest, then reinstall.
     setMigrateManifest(res.manifestJson);
     setMigrateUrl(res.reinstallUrl);
-  }
-
-  async function loadChannels() {
-    if (channels !== null) return;
-    try {
-      setChannels(await slackAppChannelsFn({ data: app.appId }));
-    } catch {
-      setChannels([]);
-      setError("Couldn't list the workspace's channels.");
-    }
-  }
-
-  async function saveAllow() {
-    setBusy(true);
-    try {
-      const res = await updateSlackAppSettingsFn({
-        data: { appId: app.appId, unattendedChannels: allow },
-      });
-      if (res.ok) {
-        // The server validates and caps the list — show what it actually
-        // stored, not what was selected.
-        setAllow(res.channels);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 1500);
-      } else {
-        setError("Couldn't save the allowlist.");
-      }
-    } catch {
-      setError("Couldn't save the allowlist.");
-    } finally {
-      setBusy(false);
-    }
   }
 
   const v2 = (health?.manifestVersion ?? 1) >= 2;
@@ -1476,44 +1430,6 @@ function SlackAppCard({
           {error && <p className="text-destructive text-xs">{error}</p>}
         </div>
       )}
-
-      <details className="text-xs" onToggle={(e) => e.currentTarget.open && void loadChannels()}>
-        <summary className="text-ink-tertiary hover:text-ink-secondary cursor-pointer">
-          Unattended posting ({allow.length ? `${allow.length} channel(s)` : "off"})
-        </summary>
-        <div className="mt-1 space-y-1.5">
-          <p className="text-ink-tertiary">
-            In these channels the agent's <code>post_to_channel</code> runs WITHOUT an approval
-            card — for scheduled digests. Everywhere else a human approves each post.
-          </p>
-          {channels === null ? (
-            <p className="text-ink-tertiary">Loading channels…</p>
-          ) : (
-            <div className="max-h-40 space-y-0.5 overflow-auto">
-              {channels.map((c) => (
-                <label key={c.id} className="text-ink-secondary flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={allow.includes(c.id)}
-                    onChange={(e) =>
-                      setAllow((prev) =>
-                        e.target.checked ? [...prev, c.id] : prev.filter((x) => x !== c.id),
-                      )
-                    }
-                  />
-                  #{c.name}
-                </label>
-              ))}
-              {channels.length === 0 && (
-                <p className="text-ink-tertiary">No public channels visible to the bot.</p>
-              )}
-            </div>
-          )}
-          <Button type="button" size="sm" variant="ghost" onClick={saveAllow} disabled={busy}>
-            {saved ? "Saved" : "Save allowlist"}
-          </Button>
-        </div>
-      </details>
     </div>
   );
 }

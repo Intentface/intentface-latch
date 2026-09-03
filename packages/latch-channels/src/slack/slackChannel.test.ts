@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { AppMessage } from "@intentface/latch-core";
 import { slackChannel, type SlackChannelConfig, type SlackChatMeta } from "./slackChannel.js";
+import type { SlackAuditEvent } from "./audit.js";
 import { encodeAction } from "./payloads.js";
 import { APPROVE_ACTION, DENY_ACTION } from "./blocks.js";
 
@@ -102,6 +103,10 @@ function memoryStores() {
         return meta;
       },
       get: async (chatId: string) => threads.get(chatId) ?? null,
+      markSeen: async (chatId: string, ts: string) => {
+        const meta = threads.get(chatId);
+        if (meta) threads.set(chatId, { ...meta, lastSeenTs: ts });
+      },
       markStopped: async (chatId: string) => {
         stops.set(chatId, Date.now());
       },
@@ -115,7 +120,10 @@ function memoryStores() {
 
 type P = { userId: string; actor?: string };
 
-function harness(overrides: Partial<SlackChannelConfig<P>> = {}) {
+function harness(
+  overrides: Partial<SlackChannelConfig<P>> = {},
+  slack: { reply?: (method: string, body: Record<string, string>) => unknown } = {},
+) {
   const calls: { method: string; body: Record<string, string> }[] = [];
   let postSeq = 0;
   const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -127,8 +135,11 @@ function harness(overrides: Partial<SlackChannelConfig<P>> = {}) {
       ? (JSON.parse(raw) as Record<string, string>)
       : Object.fromEntries(new URLSearchParams(raw));
     calls.push({ method, body });
+    const custom = slack.reply?.(method, body);
     const payload =
-      method === "chat.startStream"
+      custom !== undefined
+        ? custom
+        : method === "chat.startStream"
         ? { ok: true, ts: "100.1", channel: body.channel }
         : method === "chat.postMessage"
           ? { ok: true, ts: `200.${++postSeq}`, channel: body.channel }
@@ -377,20 +388,10 @@ describe("slackChannel v2 — initiator-owned threads", () => {
     await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0", user: "UA" }))));
     await h.flush();
 
-    // UB replies in UA's thread — twice.
+    // UB @-mentions the bot in UA's thread — twice.
     for (const ts of ["1.2", "1.3"]) {
       await h.channel.handleRequest(
-        signedRequest(
-          eventBody({
-            type: "message",
-            channel_type: "channel",
-            channel: "C1",
-            ts,
-            thread_ts: "1.0",
-            user: "UB",
-            text: "and my dms?",
-          }),
-        ),
+        signedRequest(eventBody(mention({ ts, thread_ts: "1.0", user: "UB", text: `<@${BOT}> and my dms?` }))),
       );
       await h.flush();
     }
@@ -680,6 +681,243 @@ describe("slackChannel v2 — host entries", () => {
       userId: "U1",
     });
     expect(h.runtime.applyApproval).not.toHaveBeenCalled();
+  });
+});
+
+describe("slackChannel v2 — strict mention-only & channel history", () => {
+  const promptOf = (h: ReturnType<typeof harness>, n = 0) => {
+    const arg = h.runtime.handleChat.mock.calls[n]![0] as {
+      message: { parts: { type: string; text: string }[] };
+    };
+    return arg.message.parts[0]!.text;
+  };
+  const msg = (ts: string, user: string, text: string, extra: Record<string, unknown> = {}) => ({
+    ts,
+    user,
+    text,
+    ...extra,
+  });
+
+  it("never runs on an un-mentioned thread reply — not even the owner's", async () => {
+    const audits: SlackAuditEvent[] = [];
+    const h = harness({ audit: (e) => void audits.push(e) });
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0", user: "UA" }))));
+    await h.flush();
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    expect(audits).toEqual([
+      expect.objectContaining({ action: "trigger", decision: "allow", chatId: "slack2_A1_C1_1.0" }),
+    ]);
+
+    await h.channel.handleRequest(
+      signedRequest(
+        eventBody({
+          type: "message",
+          channel_type: "channel",
+          channel: "C1",
+          ts: "1.2",
+          thread_ts: "1.0",
+          user: "UA",
+          text: "follow-up without a mention",
+        }),
+      ),
+    );
+    await h.flush();
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    expect(audits.length).toBe(1); // dropped at the router — not even a decision
+  });
+
+  it("top-level mention: fetches the last 20 channel messages before it, oldest-first, fenced, bot excluded", async () => {
+    const h = harness({}, {
+      reply: (method) =>
+        method === "conversations.history"
+          ? {
+              ok: true,
+              messages: [
+                msg("1.100", "U1", `<@${BOT}> hello there`), // the mention itself
+                msg("1.050", BOT, "earlier bot answer"),
+                msg("1.040", "U2", "second human line", { bot_id: undefined }),
+                msg("1.030", "U3", "first human line"),
+                msg("1.020", "UB", "bot-ish", { bot_id: "B1" }),
+              ],
+            }
+          : undefined,
+    });
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.100" }))));
+    await h.flush();
+
+    const hist = h.of("conversations.history");
+    expect(hist.length).toBe(1);
+    expect(hist[0]!.body).toMatchObject({ channel: "C1", latest: "1.100", limit: "20" });
+    expect(h.of("conversations.replies").length).toBe(0);
+
+    const text = promptOf(h);
+    expect(text).toContain("untrusted third-party data");
+    expect(text).toContain('<slack-history kind="channel" channel="C1">');
+    const i3 = text.indexOf("first human line");
+    const i2 = text.indexOf("second human line");
+    expect(i3).toBeGreaterThan(-1);
+    expect(i2).toBeGreaterThan(i3); // oldest first
+    expect(text).not.toContain("earlier bot answer");
+    expect(text).not.toContain("bot-ish");
+    expect(text).not.toContain("hello there\n"); // the asking message is not in the fence
+    expect(text.endsWith("The message addressed to you:\nhello there")).toBe(true);
+    expect(h.stores.threads.get("slack2_A1_C1_1.100")?.lastSeenTs).toBe("1.100");
+  });
+
+  it("repeat mention in an owned thread: fetches only the delta since last seen, parent excluded, third parties fenced", async () => {
+    const audits: SlackAuditEvent[] = [];
+    const h = harness({ audit: (e) => void audits.push(e) }, {
+      reply: (method, body) =>
+        method === "conversations.replies"
+          ? {
+              ok: true,
+              messages: [
+                msg("1.0", "UA", "the parent"), // always returned by Slack
+                ...(body.oldest
+                  ? [msg("1.2", "UB", "maria's reply"), msg("1.3", "UA", `<@${BOT}> what did she say?`)]
+                  : []),
+              ],
+            }
+          : undefined,
+    });
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0", user: "UA" }))));
+    await h.flush();
+    expect(h.stores.threads.get("slack2_A1_C1_1.0")?.lastSeenTs).toBe("1.0");
+    expect(h.of("conversations.replies").length).toBe(0); // top-level opener: no thread to read
+
+    await h.channel.handleRequest(
+      signedRequest(eventBody(mention({ ts: "1.3", thread_ts: "1.0", user: "UA", text: `<@${BOT}> what did she say?` }))),
+    );
+    await h.flush();
+    const replies = h.of("conversations.replies");
+    expect(replies.length).toBe(1);
+    expect(replies[0]!.body).toMatchObject({ channel: "C1", ts: "1.0", oldest: "1.0" });
+    expect(replies[0]!.body.latest).toBeUndefined();
+
+    const text = promptOf(h, 1);
+    expect(text).toContain('<slack-history kind="thread" channel="C1">');
+    expect(text).toContain("[1.2] <@UB>: maria's reply");
+    expect(text).not.toContain("the parent");
+    expect(text).not.toContain("what did she say?\n"); // the mention itself is not context
+    expect(h.stores.threads.get("slack2_A1_C1_1.0")?.lastSeenTs).toBe("1.3");
+    expect(audits.map((a) => a.action)).toEqual(["trigger", "resume"]);
+  });
+
+  it("first mention inside a pre-existing human thread (or a thread without a watermark) reads a fresh tail, never an unbounded window", async () => {
+    const h = harness({}, {
+      reply: (method) =>
+        method === "conversations.replies"
+          ? { ok: true, messages: [msg("7.0", "U2", "parent"), msg("7.1", "U3", "reply one")] }
+          : undefined,
+    });
+    // Thread row exists without lastSeenTs (a replay/delivery created it).
+    h.stores.threads.set("slack2_A1_C1_7.0", { initiatorUserId: "U1", teamId: TEAM, createdAt: 1 });
+    await h.channel.handleRequest(
+      signedRequest(eventBody(mention({ ts: "7.5", thread_ts: "7.0", user: "U1" }))),
+    );
+    await h.flush();
+    const r = h.of("conversations.replies");
+    expect(r.length).toBe(1);
+    expect(r[0]!.body).toMatchObject({ ts: "7.0", latest: "7.5", limit: "200" });
+    expect(r[0]!.body.oldest).toBeUndefined();
+    expect(promptOf(h)).toContain("[7.0] <@U2>: parent"); // no delta → the parent IS context
+    expect(promptOf(h)).toContain("[7.1] <@U3>: reply one");
+  });
+
+  it("a failed turn does not advance the watermark", async () => {
+    const h = harness();
+    h.runtime.handleChat.mockRejectedValueOnce(new Error("model down"));
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0" }))));
+    await h.flush();
+    expect(h.stores.threads.get("slack2_A1_C1_1.0")?.lastSeenTs).toBeUndefined();
+    expect(h.of("chat.postMessage").some((c) => c.body.text?.includes("Something went wrong"))).toBe(true);
+  });
+
+  it("DMs: answered without a mention, no history fetched, no attribution footer", async () => {
+    const h = harness();
+    await h.channel.handleRequest(
+      signedRequest(
+        eventBody({ type: "message", channel_type: "im", channel: "D1", ts: "5.0", user: "U1", text: "hi" }),
+      ),
+    );
+    await h.flush();
+    expect(h.runtime.handleChat).toHaveBeenCalledTimes(1);
+    expect(h.of("conversations.history").length).toBe(0);
+    expect(h.of("conversations.replies").length).toBe(0);
+    expect(promptOf(h)).toBe("hi");
+    const stop = h.of("chat.stopStream")[0]!.body as unknown as { blocks?: unknown[] };
+    expect(JSON.stringify(stop.blocks ?? [])).not.toContain("requested by");
+  });
+
+  it("channel answers end with a 'requested by' footer on the closing message", async () => {
+    const h = harness();
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0", user: "UA" }))));
+    await h.flush();
+    const stop = h.of("chat.stopStream")[0]!.body as unknown as {
+      blocks?: { type: string; elements?: { text: string }[] }[];
+    };
+    const footer = stop.blocks?.find((b) => b.type === "context");
+    expect(footer?.elements?.[0]?.text).toBe("_requested by <@UA>_");
+  });
+
+  it("drops messages from another workspace before any identity lookup (Slack Connect)", async () => {
+    const audits: SlackAuditEvent[] = [];
+    const authorizeUser = vi.fn(async () => ({ allowed: true }));
+    const h = harness({ audit: (e) => void audits.push(e), authorizeUser });
+    // Envelope team differs from the installed workspace.
+    const raw = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvX",
+      team_id: "T_OTHER",
+      event: mention({ ts: "3.0", user: "UX" }),
+    });
+    await h.channel.handleRequest(signedRequest(raw));
+    await h.flush();
+    // Envelope team matches but the message carries a foreign user_team.
+    await h.channel.handleRequest(
+      signedRequest(eventBody(mention({ ts: "3.1", user: "UY", user_team: "T_OTHER" }))),
+    );
+    await h.flush();
+
+    expect(authorizeUser).not.toHaveBeenCalled();
+    expect(h.runtime.handleChat).not.toHaveBeenCalled();
+    expect(h.of("chat.postEphemeral").length).toBe(0);
+    expect(audits).toEqual([
+      expect.objectContaining({ decision: "deny", reason: "external_workspace", teamId: "T_OTHER", slackUserId: "UX" }),
+      expect.objectContaining({ decision: "deny", reason: "external_workspace", teamId: "T_OTHER", slackUserId: "UY" }),
+    ]);
+  });
+
+  it("audits the deny paths: non-starter, unlinked, busy", async () => {
+    const audits: SlackAuditEvent[] = [];
+    const authorizeUser = vi.fn(async ({ userId }: { userId: string }) =>
+      userId === "UN"
+        ? { allowed: false, linkUrl: "https://latch/link", message: "link please" }
+        : { allowed: true, principal: { userId: "actor" } },
+    );
+    const h = harness({ audit: (e) => void audits.push(e), authorizeUser });
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0", user: "UA" }))));
+    await h.flush();
+    await h.channel.handleRequest(
+      signedRequest(eventBody(mention({ ts: "1.1", thread_ts: "1.0", user: "UB" }))),
+    );
+    await h.flush();
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "2.0", user: "UN" }))));
+    await h.flush();
+    // Hold the lease, then mention again.
+    h.stores.leases.set("slack2_A1_C1_1.0", "held");
+    await h.channel.handleRequest(
+      signedRequest(eventBody(mention({ ts: "1.2", thread_ts: "1.0", user: "UA" }))),
+    );
+    await h.flush();
+
+    expect(audits.map((a) => [a.action, a.decision, a.reason])).toEqual([
+      ["trigger", "allow", undefined],
+      ["resume", "deny", "non_starter"],
+      ["trigger", "deny", "unlinked"],
+      ["resume", "deny", "busy"],
+    ]);
+    expect(audits.every((a) => a.appId === APP)).toBe(true);
   });
 });
 

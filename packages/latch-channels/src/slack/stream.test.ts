@@ -187,6 +187,51 @@ describe("renderSlackStream — streaming mode", () => {
     expect(r.stopped).toBe(true);
   });
 
+  it("puts the attribution footer on the LAST message: the overflow post if any, else the close", async () => {
+    const footer = { type: "context", elements: [{ type: "mrkdwn", text: "_requested by <@U1>_" }] };
+    const withOverflow = fakeApi();
+    await renderSlackStream(
+      gen(
+        { type: "text-delta", text: "aaaaa" },
+        { type: "text-delta", text: "bbbbb" },
+        { type: "text-delta", text: "ccccc" },
+        { type: "finish" },
+      ),
+      opts(withOverflow.api, { maxStreamedChars: 10, attribution: "_requested by <@U1>_" }),
+    );
+    const stop = withOverflow.calls.find((c) => c.method === "stopStream")!;
+    expect(JSON.stringify(stop.args.blocks ?? [])).not.toContain("requested by");
+    const post = withOverflow.calls.find((c) => c.method === "postMessage")!;
+    const blocks = post.args.blocks as unknown[];
+    expect(blocks[blocks.length - 1]).toEqual(footer);
+
+    const noOverflow = fakeApi();
+    await renderSlackStream(
+      gen({ type: "text-delta", text: "short" }, { type: "finish" }),
+      opts(noOverflow.api, { attribution: "_requested by <@U1>_" }),
+    );
+    const stop2 = noOverflow.calls.find((c) => c.method === "stopStream")!;
+    const closeBlocks = stop2.args.blocks as unknown[];
+    expect(closeBlocks[closeBlocks.length - 1]).toEqual(footer);
+    expect(noOverflow.calls.some((c) => c.method === "postMessage")).toBe(false);
+  });
+
+  it("never adds the footer to a stopped or error-only turn", async () => {
+    const stoppedApi = fakeApi();
+    await renderSlackStream(
+      gen({ type: "text-delta", text: "partial" }, { type: "finish" }),
+      opts(stoppedApi.api, { attribution: "_requested by <@U1>_", shouldStop: async () => true }),
+    );
+    const errApi = fakeApi();
+    await renderSlackStream(
+      gen({ type: "error", message: "boom" }, { type: "finish" }),
+      opts(errApi.api, { attribution: "_requested by <@U1>_" }),
+    );
+    for (const { calls } of [stoppedApi, errApi]) {
+      expect(JSON.stringify(calls.map((c) => c.args))).not.toContain("requested by");
+    }
+  });
+
   it("overflows past the streamed budget into a follow-up markdown message", async () => {
     const { api, calls } = fakeApi();
     const r = await renderSlackStream(

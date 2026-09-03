@@ -30,7 +30,13 @@
 
 import type { RenderEvent } from "../types.js";
 import { SlackApiError, type SlackClient, type StreamChunk } from "./api.js";
-import { errorBlocks, feedbackActions, markdownBlocks, notificationText } from "./blocks.js";
+import {
+  contextLine,
+  errorBlocks,
+  feedbackActions,
+  markdownBlocks,
+  notificationText,
+} from "./blocks.js";
 
 export interface SlackStreamOptions {
   api: Pick<
@@ -72,6 +78,13 @@ export interface SlackStreamOptions {
   setStatus?: (text: string) => void | Promise<void>;
   /** Append the native 👍/👎 row to the final message. */
   feedback?: boolean;
+  /**
+   * Footer (mrkdwn) for the LAST message this turn posts — the channel
+   * threads' "_requested by <@U…>_" line. Rides on the overflow post when
+   * there is one, else on the closing message. Never added to a stopped or
+   * error-only turn (there is no answer to attribute).
+   */
+  attribution?: string;
   flushIntervalMs?: number;
   /** Text budget of the streamed message itself; the rest overflows. */
   maxStreamedChars?: number;
@@ -287,6 +300,7 @@ export async function renderSlackStream(
     }
     if (errorMessage) blocks.push(...errorBlocks(errorMessage));
     if (opts.feedback) blocks.push(feedbackActions());
+    if (opts.attribution && text.trim()) blocks.push(contextLine(opts.attribution));
     const r = await opts.api.postMessage({
       channel: opts.channel,
       ...threadArgs,
@@ -426,13 +440,18 @@ export async function renderSlackStream(
   const finalBlocks: unknown[] = [];
   if (errorMessage) finalBlocks.push(...errorBlocks(errorMessage));
   if (opts.feedback) finalBlocks.push(feedbackActions());
+  // The footer belongs to whichever message lands LAST. It is kept OUT of
+  // `finalBlocks` so the degraded tail-recovery post below never consists of a
+  // footer alone.
+  const footer = opts.attribution && !overflow ? [contextLine(opts.attribution)] : [];
+  const closeBlocks = [...finalBlocks, ...footer];
 
   const stopArgs = {
     channel: opts.channel,
     ts: ts as string,
     ...(tail ? { markdown_text: tail } : {}),
     ...(pendingChunks.length ? { chunks: pendingChunks } : {}),
-    ...(finalBlocks.length ? { blocks: finalBlocks } : {}),
+    ...(closeBlocks.length ? { blocks: closeBlocks } : {}),
   };
   let tailDelivered = false;
   try {
@@ -465,7 +484,7 @@ export async function renderSlackStream(
       .postMessage({
         channel: opts.channel,
         ...threadArgs,
-        blocks: [...(tail ? markdownBlocks(tail) : []), ...finalBlocks],
+        blocks: [...(tail ? markdownBlocks(tail) : []), ...finalBlocks, ...(tail ? footer : [])],
         text: notificationText(tail || errorMessage || "Answer"),
       })
       .catch((e) => console.error("[slack] tail recovery post failed:", e));
@@ -481,6 +500,7 @@ export async function renderSlackStream(
         text: "_Answer truncated for Slack — the full turn is available in Latch._",
       });
     }
+    if (opts.attribution) capped.push(contextLine(opts.attribution));
     const r = await opts.api.postMessage({
       channel: opts.channel,
       ...threadArgs,

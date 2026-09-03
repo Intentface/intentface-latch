@@ -404,9 +404,12 @@ async function runSlackDelivery(
   }
 
   const api = slackApi(token);
+  // Strict mention-only channel: follow-ups in this thread need an @-mention,
+  // so the anchor says so (the bot's own id when we have it).
+  const me = resolved.app.botUserId ? `<@${resolved.app.botUserId}>` : "@-mention me";
   const anchor = await api.postMessage({
     channel: target.channel,
-    text: `:alarm_clock: ${summarize(schedule.prompt)}`,
+    text: `:alarm_clock: ${summarize(schedule.prompt)}\n_${me} in this thread to follow up._`,
   });
 
   // The adapter expects a SLACK user id: it becomes the thread's initiator

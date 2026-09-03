@@ -157,6 +157,11 @@ export function signInCard(linkUrl: string, message?: string): unknown[] {
  * `alert` block would be nicer but its exact JSON shape isn't verifiable
  * without a live workspace — swap in once confirmed in the dev workspace.
  */
+/** One small grey line (a `context` block) — footers such as "requested by". */
+export function contextLine(text: string): unknown {
+  return { type: "context", elements: [{ type: "mrkdwn", text }] };
+}
+
 export function errorBlocks(message: string): unknown[] {
   return [
     {

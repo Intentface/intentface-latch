@@ -93,6 +93,23 @@ describe("slack api client", () => {
     expect(sent.chunks[0]).toMatchObject({ type: "task_update", id: "t1", status: "complete" });
   });
 
+  it("never unfurls links or media by default", async () => {
+    const { fetchImpl, calls } = scriptedFetch([ok({ ts: "1.2", channel: "C1" })]);
+    const api = slackApi("xoxb-t", { fetchImpl, sleep });
+    await api.postMessage({ channel: "C1", text: "see https://x" });
+    expect(calls[0]!.body.get("unfurl_links")).toBe("false");
+    expect(calls[0]!.body.get("unfurl_media")).toBe("false");
+  });
+
+  it("threadReplies forwards the window options (oldest/latest/limit)", async () => {
+    const { fetchImpl, calls } = scriptedFetch([ok({ messages: [] }), ok({ messages: [] })]);
+    const api = slackApi("xoxb-t", { fetchImpl, sleep });
+    await api.threadReplies("C1", "1.0", { oldest: "1.0", limit: 200 });
+    expect(Object.fromEntries(calls[0]!.body)).toEqual({ channel: "C1", ts: "1.0", limit: "200", oldest: "1.0" });
+    await api.threadReplies("C1", "1.0", { latest: "1.5" });
+    expect(Object.fromEntries(calls[1]!.body)).toEqual({ channel: "C1", ts: "1.0", limit: "50", latest: "1.5" });
+  });
+
   it("keeps non-streaming methods form-encoded", async () => {
     const { fetchImpl, calls } = scriptedFetch([ok({ ts: "1.2", channel: "C1" })]);
     const api = slackApi("xoxb-t", { fetchImpl, sleep });
