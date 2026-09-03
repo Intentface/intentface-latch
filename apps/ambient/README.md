@@ -22,8 +22,11 @@ cp apps/ambient/.env.example apps/ambient/.env   # fill in the token, channels, 
 pnpm --filter @intentface/latch-ambient serve
 ```
 
-Slack app: a bot token with `channels:history`, `channels:read`, `users:read`, `chat:write`,
-invited to each watched channel. No event subscriptions, no public URL.
+Slack app: create one from [`slack-manifest.json`](./slack-manifest.json) (api.slack.com/apps → Create New App →
+From a manifest), install it to the workspace, copy the Bot User OAuth Token into `SLACK_BOT_TOKEN`, and
+`/invite @Ambient` in each watched channel. The manifest has no event subscriptions, no interactivity and no
+request URLs: the app only calls Slack, so it runs from a laptop with **no tunnel**. (Canvas scopes are
+included so `AMBIENT_STATE=canvas` needs no reinstall; `groups:*` lets it watch private channels.)
 
 ```bash
 curl -X POST localhost:8790/channels/C0123/tick        # fire now, through the real cron path
