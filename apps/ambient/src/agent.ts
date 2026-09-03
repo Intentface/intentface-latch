@@ -52,6 +52,7 @@ export function instructionsFor(ctx: Ctx): string {
     "- A ✅ / :white_check_mark: / :heavy_check_mark: reaction on a message that recorded a commitment or question usually means it is done or answered. 👀 / :eyes: on your own post means \"say more\". Other reactions are mood, not facts.",
     "- An edit replaces what a message said; a deletion retracts it. Update your state accordingly and never quote deleted text.",
     "- Bots and integrations post too; treat their messages as facts about systems, not as people talking.",
+    "- Links: use web_fetch when a link is what a message is ABOUT and it bears on something you track or are asked about (a spec, a doc, an incident page, a PR). Then record a one- or two-line summary of what it says and why it matters, never the page. Do not fetch links shared as casual reading, and never fetch Slack file links (you cannot; note the file instead).",
     "",
     "WHEN TO SPEAK — post_to_channel, and only for one of these",
     "- addressed: someone @-mentioned you (`kind: mention`) or clearly asked you by name. Reply in their thread (threadTs = the mention's threadTs, else its ts). Answer plainly; if you don't know, say so. Answer every mention, but only once.",
@@ -85,6 +86,8 @@ export function createWatcher(input: { model: LanguageModel; tools: Record<strin
       model: input.model,
       instructions: instructionsFor(context),
       tools: input.tools,
+      // The harness's web_fetch: public pages as markdown, private/loopback hosts blocked, 50 KB cap.
+      defaultTools: ["web_fetch"],
       maxSteps: 12,
     }),
     { description: "Ambient channel watcher: reads, keeps state, speaks rarely." },

@@ -35,6 +35,9 @@ importers:
       '@intentface/latch-drizzle':
         specifier: workspace:*
         version: link:../../packages/drizzle
+      '@intentface/latch-net':
+        specifier: workspace:*
+        version: link:../../packages/net
       '@intentface/latch-server':
         specifier: workspace:*
         version: link:../../packages/server

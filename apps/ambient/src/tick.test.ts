@@ -91,6 +91,17 @@ async function harness() {
   return { runtime, state, slack, systemPrompts, tick, setSlow: (v: boolean) => (slow = v) };
 }
 
+describe("the watcher's toolset", () => {
+  it("asks for the harness web_fetch alongside its own four tools", async () => {
+    const { runtime } = await harness();
+    void runtime;
+    const factory = createWatcher({ model: {} as never, tools: { a: {} as never } });
+    const cfg = await factory({ context: { state: { channel: "C1", doc: "", bootstrappedAt: null, updatedAt: null }, channelName: "g" }, principal: { channel: "C1" } });
+    expect(cfg.defaultTools).toEqual(["web_fetch"]);
+    expect(cfg.instructions).toContain("web_fetch");
+  });
+});
+
 describe("ticks on the channel's long-lived chat", () => {
   it("drains the inbox, writes state, and the next tick continues the same chat with that state", async () => {
     const { runtime, state, slack, systemPrompts, tick } = await harness();

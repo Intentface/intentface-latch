@@ -23,6 +23,9 @@ Slack events ──▶ POST /slack/events ──▶ inbox (SQLite) ──▶ tic
 - **What it sees:** messages, thread replies, edits, deletions, reactions added/removed, mentions — normalized
   into observations. A ✅ on a recorded commitment closes it; 👀 on its own post means "say more". The first look
   at a channel also pulls recent history for context.
+- **Links:** the harness's `web_fetch` tool (public pages as markdown, private hosts blocked, 50 KB cap) — used only
+  when a link is what a message is about and it bears on something tracked or asked; it records a two-line summary,
+  never the page.
 - **When it speaks:** addressed (in the thread), a commitment overdue and unmentioned for a day, an open question
   it can answer from the channel's own history, a decision contradicting an earlier one. Never about tone or
   dynamics. Unprompted posts are capped per day.

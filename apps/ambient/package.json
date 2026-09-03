@@ -13,6 +13,7 @@
     "@intentface/latch-channels": "workspace:*",
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
+    "@intentface/latch-net": "workspace:*",
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
     "ai": "^7.0.2",
