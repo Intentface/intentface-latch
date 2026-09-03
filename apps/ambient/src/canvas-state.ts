@@ -32,11 +32,12 @@ export function createCanvasStateStore(input: {
 
   return {
     migrate: () => base.migrate(),
-    advanceCursor: (c, ts) => base.advanceCursor(c, ts),
+    markBootstrapped: (c) => base.markBootstrapped(c),
     recordPost: (c, ts, k) => base.recordPost(c, ts, k),
     unpromptedPostsSince: (c, s) => base.unpromptedPostsSince(c, s),
-    addMention: (c, m) => base.addMention(c, m),
-    takeMentions: (c) => base.takeMentions(c),
+    push: (c, k, o) => base.push(c, k, o),
+    drain: (c) => base.drain(c),
+    pending: (c) => base.pending(c),
 
     async load(channel): Promise<ChannelState> {
       const shadow = await base.load(channel);

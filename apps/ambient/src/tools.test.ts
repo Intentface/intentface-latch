@@ -10,15 +10,15 @@ const options = (channel: string) =>
 
 const msg = (ts: string, text: string): ChannelMessage => ({ ts, author: "anna", isBot: false, mentionsMe: false, text, at: "2026-09-03T00:00:00.000Z" });
 
-async function build(messages: ChannelMessage[] = []) {
+async function build(history: ChannelMessage[] = []) {
   const state = createStateStore(createClient({ url: ":memory:" }));
   await state.migrate();
   const slack: Slack = {
     botUserId: async () => "UBOT",
-    myChannels: async () => [{ id: "C1", name: "general" }],
     userName: async (id) => (id === "U1" ? "anna" : id ?? "someone"),
     channelName: async () => "general",
-    readSince: vi.fn(async (_c, cursor) => messages.filter((m) => !cursor || Number(m.ts) > Number(cursor))),
+    myChannels: async () => [{ id: "C1", name: "general" }],
+    recentHistory: vi.fn(async () => history),
     readThread: vi.fn(async () => []),
     post: vi.fn(async () => ({ ts: `${Math.random()}` })),
   };
@@ -29,24 +29,22 @@ async function build(messages: ChannelMessage[] = []) {
 }
 
 describe("ambient tools", () => {
-  it("read_new_messages returns what is newer than the cursor and advances it", async () => {
-    const { call, state } = await build([msg("100.1", "a"), msg("200.1", "b"), msg("300.1", "c")]);
-    const first = (await call("read_new_messages", {})) as { count: number; since: string };
-    expect(first.count).toBe(3);
-    expect(first.since).toBe("the beginning");
-    expect((await state.load("C1")).cursor).toBe("300.1");
-    const again = (await call("read_new_messages", {})) as { count: number };
-    expect(again.count).toBe(0);
-  });
-
-  it("read_new_messages hands over queued mentions with names, once", async () => {
-    const { call, state } = await build([msg("100.1", "a")]);
-    await state.addMention("C1", { ts: "300.1", threadTs: "200.0", userId: "U1", text: "<@UBOT> status?" });
-    const out = (await call("read_new_messages", {})) as { mentions: unknown[] };
-    expect(out.mentions).toEqual([
-      { ts: "300.1", threadTs: "200.0", author: "anna", text: "<@UBOT> status?", at: "1970-01-01T00:05:00.100Z" },
+  it("read_inbox drains the inbox with names, and bootstraps history exactly once", async () => {
+    const { call, state, slack } = await build([msg("50.1", "old context")]);
+    await state.push("C1", "e1", { kind: "message", ts: "100.1", userId: "U1", text: "who owns the deploy?" });
+    await state.push("C1", "e2", { kind: "reaction_added", ts: "100.2", userId: "U2", emoji: "white_check_mark", targetTs: "90.0" });
+    const first = (await call("read_inbox", {})) as { count: number; events: unknown[]; history?: unknown[]; note?: string };
+    expect(first.count).toBe(2);
+    expect(first.events).toEqual([
+      { kind: "message", ts: "100.1", text: "who owns the deploy?", at: "1970-01-01T00:01:40.100Z", who: "anna" },
+      { kind: "reaction_added", ts: "100.2", emoji: "white_check_mark", targetTs: "90.0", at: "1970-01-01T00:01:40.200Z", who: "U2" },
     ]);
-    expect(((await call("read_new_messages", {})) as { mentions: unknown[] }).mentions).toEqual([]);
+    expect(first.history).toHaveLength(1);
+    expect(first.note).toMatch(/First look/);
+    const second = (await call("read_inbox", {})) as { count: number; history?: unknown };
+    expect(second.count).toBe(0);
+    expect(second.history).toBeUndefined();
+    expect(slack.recentHistory).toHaveBeenCalledTimes(1);
   });
 
   it("update_state stores the document and refuses one over the cap", async () => {
@@ -67,7 +65,6 @@ describe("ambient tools", () => {
     expect(refused.ok).toBe(false);
     expect(refused.error).toMatch(/budget spent \(2\/2/);
     expect(await call("post_to_channel", { text: "reply", reason: "addressed", threadTs: "1.0" })).toMatchObject({ ok: true, kind: "addressed" });
-    // Another channel has its own budget.
     expect(await call("post_to_channel", { text: "elsewhere", reason: "overdue" }, "C2")).toMatchObject({ ok: true });
     expect(slack.post).toHaveBeenCalledTimes(4);
     expect(slack.post).toHaveBeenLastCalledWith("C2", "elsewhere", undefined);

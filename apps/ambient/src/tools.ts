@@ -3,7 +3,7 @@ import { z } from "zod";
 import { DAY_MS } from "@intentface/latch-core";
 import type { Principal } from "./principal.js";
 import type { Slack } from "./slack.js";
-import { MAX_DOC_CHARS, type StateStore } from "./state.js";
+import { MAX_DOC_CHARS, type Observation, type StateStore } from "./state.js";
 
 /**
  * The agent's four verbs. Every tool reads the channel from `options.context`
@@ -20,6 +20,8 @@ export interface ToolDeps {
   state: StateStore;
   /** Unprompted posts allowed per channel per rolling day. */
   maxPostsPerDay: number;
+  /** How much history to read when a channel is seen for the first time. */
+  bootstrapMessages?: number;
   now?: () => number;
 }
 
@@ -29,41 +31,38 @@ const ctxOf = (options: unknown): ToolContext => {
   return ctx;
 };
 
+const isoOf = (ts: string) => new Date(Number(ts) * 1000).toISOString();
+
 export function createTools(deps: ToolDeps): Record<string, Tool> {
   const now = deps.now ?? Date.now;
 
-  const read_new_messages = tool({
+  /** Observations with names instead of ids and a readable time. */
+  async function present(obs: Observation[]) {
+    const out = [];
+    for (const o of obs) {
+      const { userId, ...rest } = o as Observation & { userId?: string };
+      out.push({ ...rest, at: isoOf(o.ts), ...(userId !== undefined ? { who: await deps.slack.userName(userId) } : {}) });
+    }
+    return out;
+  }
+
+  const read_inbox = tool({
     description:
-      "Read the top-level channel messages posted since your last read (oldest first), plus any @-mentions of you " +
-      "delivered since the last tick (`mentions` — these can be inside threads; answer in the thread given by their threadTs). " +
-      "Advances your read cursor. Call this first on every tick. Thread replies are not included in `messages` — " +
-      "a root with `threadTs` set has a thread; use read_thread to see it.",
-    inputSchema: z.object({
-      limit: z.number().int().min(1).max(200).optional().describe("Max messages to return (default 200)."),
-    }),
-    execute: async ({ limit }, options) => {
+      "Drain everything that happened in the channel since your last tick, oldest first: new messages, thread replies " +
+      "(`threadTs`), edits and deletions of earlier messages (`targetTs`), reactions added or removed on a message (`emoji`, " +
+      "`targetTs`), and mentions of you (`kind: mention`). Call this first on every tick. The first time you see a channel " +
+      "you also get its recent history as context.",
+    inputSchema: z.object({}),
+    execute: async (_input, options) => {
       const { channel } = ctxOf(options).principal;
-      const before = await deps.state.load(channel);
-      const messages = await deps.slack.readSince(channel, before.cursor, limit ?? 200);
-      const last = messages.at(-1);
-      if (last) await deps.state.advanceCursor(channel, last.ts);
-      const queued = await deps.state.takeMentions(channel);
-      const mentions = [];
-      for (const m of queued) {
-        mentions.push({
-          ts: m.ts,
-          ...(m.threadTs ? { threadTs: m.threadTs } : {}),
-          author: await deps.slack.userName(m.userId),
-          text: m.text,
-          at: new Date(Number(m.ts) * 1000).toISOString(),
-        });
+      const state = await deps.state.load(channel);
+      const events = await present(await deps.state.drain(channel));
+      let history: Awaited<ReturnType<Slack["recentHistory"]>> | undefined;
+      if (state.bootstrappedAt === null) {
+        history = await deps.slack.recentHistory(channel, deps.bootstrapMessages ?? 50);
+        await deps.state.markBootstrapped(channel);
       }
-      return {
-        count: messages.length,
-        since: before.cursor ? new Date(Number(before.cursor) * 1000).toISOString() : "the beginning",
-        messages,
-        mentions,
-      };
+      return { count: events.length, events, ...(history ? { history, note: "First look at this channel: recent history for context." } : {}) };
     },
   });
 
@@ -84,10 +83,7 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
     execute: async ({ doc }, options) => {
       const { channel } = ctxOf(options).principal;
       if (doc.length > MAX_DOC_CHARS) {
-        return {
-          ok: false as const,
-          error: `State document is ${doc.length} chars; the cap is ${MAX_DOC_CHARS}. Prune closed items and try again.`,
-        };
+        return { ok: false as const, error: `State document is ${doc.length} chars; the cap is ${MAX_DOC_CHARS}. Prune closed items and try again.` };
       }
       await deps.state.saveDoc(channel, doc);
       return { ok: true as const, chars: doc.length };
@@ -111,10 +107,7 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
       if (kind === "unprompted") {
         const used = await deps.state.unpromptedPostsSince(channel, now() - DAY_MS);
         if (used >= deps.maxPostsPerDay) {
-          return {
-            ok: false as const,
-            error: `Unprompted post budget spent (${used}/${deps.maxPostsPerDay} in the last 24h). Note it in your state and wait.`,
-          };
+          return { ok: false as const, error: `Unprompted post budget spent (${used}/${deps.maxPostsPerDay} in the last 24h). Note it in your state and wait.` };
         }
       }
       const { ts } = await deps.slack.post(channel, text, threadTs);
@@ -123,5 +116,5 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
     },
   });
 
-  return { read_new_messages, read_thread, update_state, post_to_channel };
+  return { read_inbox, read_thread, update_state, post_to_channel };
 }

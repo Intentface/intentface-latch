@@ -11,20 +11,32 @@ const fresh = async (now = () => 1_000) => {
 describe("channel state store", () => {
   it("reads an empty state for an unknown channel and round-trips a document", async () => {
     const store = await fresh();
-    expect(await store.load("C1")).toEqual({ channel: "C1", doc: "", cursor: null, updatedAt: null });
+    expect(await store.load("C1")).toEqual({ channel: "C1", doc: "", bootstrappedAt: null, updatedAt: null });
     await store.saveDoc("C1", "## Open questions\n- none");
     expect(await store.load("C1")).toMatchObject({ doc: "## Open questions\n- none", updatedAt: 1_000 });
   });
 
-  it("the cursor only moves forward and survives a later doc write", async () => {
-    const store = await fresh();
-    await store.advanceCursor("C1", "1700000000.000100");
-    await store.advanceCursor("C1", "1600000000.000100"); // older — ignored
-    expect((await store.load("C1")).cursor).toBe("1700000000.000100");
+  it("bootstrapped is set once and survives a doc write", async () => {
+    let t = 5;
+    const store = await fresh(() => t);
+    await store.markBootstrapped("C1");
+    t = 9;
+    await store.markBootstrapped("C1");
     await store.saveDoc("C1", "doc");
-    expect((await store.load("C1")).cursor).toBe("1700000000.000100");
-    await store.advanceCursor("C1", "1700000001.000000");
-    expect((await store.load("C1")).cursor).toBe("1700000001.000000");
+    expect(await store.load("C1")).toMatchObject({ bootstrappedAt: 5, doc: "doc", updatedAt: 9 });
+  });
+
+  it("the inbox is idempotent on key, drains oldest-first, and is per channel", async () => {
+    const store = await fresh();
+    await store.push("C1", "ev2", { kind: "message", ts: "200.1", text: "b" });
+    await store.push("C1", "ev1", { kind: "message", ts: "100.1", text: "a" });
+    await store.push("C1", "ev1", { kind: "message", ts: "100.1", text: "a (dup)" });
+    await store.push("C2", "ev3", { kind: "reaction_added", ts: "300.1", emoji: "eyes", targetTs: "100.1" });
+    expect(await store.pending("C1")).toBe(2);
+    expect((await store.drain("C1")).map((o) => (o.kind === "message" ? o.text : o.kind))).toEqual(["a", "b"]);
+    expect(await store.pending("C1")).toBe(0);
+    expect(await store.drain("C1")).toEqual([]);
+    expect(await store.drain("C2")).toEqual([{ kind: "reaction_added", ts: "300.1", emoji: "eyes", targetTs: "100.1" }]);
   });
 
   it("counts only unprompted posts inside the window, per channel", async () => {

@@ -1,20 +1,21 @@
 import type { Client } from "@libsql/client";
 
 /**
- * The channel's STATE DOCUMENT — the agent's own notes, written by the agent
- * through `update_state`, read back verbatim at the start of every tick.
+ * Host-side state next to Latch's tables, in the same SQLite file:
  *
- * Deliberately not the memory package: memory extracts facts after the fact,
- * asynchronously, by inference. Here the agent is the only writer, the write
- * happens inside the turn, and what it wrote is exactly what it reads next
- * time. Two host tables next to Latch's own in the same SQLite file.
+ *   • the channel's STATE DOCUMENT — the agent's notes, written by the agent
+ *     through `update_state`, read back verbatim at the start of every tick
+ *     (deliberately not the memory package: the agent is the only writer, the
+ *     write happens inside the turn, and it reads exactly what it wrote);
+ *   • the INBOX — every Slack event for the channel, waiting for the next tick;
+ *   • the POST LOG — for the unprompted-post budget.
  */
 export interface ChannelState {
   channel: string;
   /** Markdown, following the schema in the agent's instructions. Empty on first tick. */
   doc: string;
-  /** Slack `ts` of the newest message the agent has read; null = never read. */
-  cursor: string | null;
+  /** When the agent first read the channel's recent history; null = never. */
+  bootstrappedAt: number | null;
   updatedAt: number | null;
   /** Lines a human changed in the document since the agent last wrote it (canvas-backed store only). */
   humanEdits?: { added: string[]; removed: string[] };
@@ -25,30 +26,27 @@ export const MAX_DOC_CHARS = 12_000;
 
 export type PostKind = "addressed" | "unprompted";
 
-/** An @-mention delivered by the events route — the start of an inbox. */
-export interface Mention {
-  ts: string;
-  threadTs?: string;
-  userId?: string;
-  text: string;
-}
+/** One normalized Slack event, as the agent sees it. */
+export type Observation =
+  | { kind: "message" | "reply" | "mention"; ts: string; threadTs?: string; userId?: string; text: string; files?: number }
+  | { kind: "edit"; ts: string; threadTs?: string; userId?: string; text: string; targetTs: string }
+  | { kind: "delete"; ts: string; threadTs?: string; targetTs: string }
+  | { kind: "reaction_added" | "reaction_removed"; ts: string; userId?: string; emoji: string; targetTs: string };
 
 export interface StateStore {
   migrate(): Promise<void>;
   load(channel: string): Promise<ChannelState>;
   saveDoc(channel: string, doc: string): Promise<void>;
-  /** Advance the read cursor; never moves it backwards. */
-  advanceCursor(channel: string, ts: string): Promise<void>;
+  markBootstrapped(channel: string): Promise<void>;
   recordPost(channel: string, ts: string, kind: PostKind): Promise<void>;
   /** Unprompted posts in the trailing window. */
   unpromptedPostsSince(channel: string, since: number): Promise<number>;
-  /** Queue a mention for the next tick (idempotent on ts). */
-  addMention(channel: string, m: Mention): Promise<void>;
-  /** Drain queued mentions, oldest first. */
-  takeMentions(channel: string): Promise<Mention[]>;
+  /** Queue an observation (idempotent on `key`, e.g. Slack's event_id). */
+  push(channel: string, key: string, obs: Observation): Promise<void>;
+  /** Drain the inbox, oldest first. */
+  drain(channel: string): Promise<Observation[]>;
+  pending(channel: string): Promise<number>;
 }
-
-const tsNum = (ts: string | null): number => (ts ? Number(ts) : 0);
 
 export function createStateStore(client: Client, now: () => number = Date.now): StateStore {
   return {
@@ -58,7 +56,7 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
           `CREATE TABLE IF NOT EXISTS ambient_channel_state (
              channel TEXT PRIMARY KEY,
              doc TEXT NOT NULL DEFAULT '',
-             cursor TEXT,
+             bootstrapped_at INTEGER,
              updated_at INTEGER
            )`,
           `CREATE TABLE IF NOT EXISTS ambient_posts (
@@ -69,14 +67,13 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
              PRIMARY KEY (channel, ts)
            )`,
           `CREATE INDEX IF NOT EXISTS ambient_posts_channel_at ON ambient_posts (channel, posted_at)`,
-          `CREATE TABLE IF NOT EXISTS ambient_mentions (
+          `CREATE TABLE IF NOT EXISTS ambient_inbox (
              channel TEXT NOT NULL,
+             key TEXT NOT NULL,
              ts TEXT NOT NULL,
-             thread_ts TEXT,
-             user_id TEXT,
-             text TEXT NOT NULL,
+             payload TEXT NOT NULL,
              received_at INTEGER NOT NULL,
-             PRIMARY KEY (channel, ts)
+             PRIMARY KEY (channel, key)
            )`,
         ],
         "write",
@@ -85,15 +82,15 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
 
     async load(channel) {
       const r = await client.execute({
-        sql: `SELECT doc, cursor, updated_at FROM ambient_channel_state WHERE channel = ?`,
+        sql: `SELECT doc, bootstrapped_at, updated_at FROM ambient_channel_state WHERE channel = ?`,
         args: [channel],
       });
       const row = r.rows[0];
-      if (!row) return { channel, doc: "", cursor: null, updatedAt: null };
+      if (!row) return { channel, doc: "", bootstrappedAt: null, updatedAt: null };
       return {
         channel,
         doc: String(row.doc ?? ""),
-        cursor: row.cursor == null ? null : String(row.cursor),
+        bootstrappedAt: row.bootstrapped_at == null ? null : Number(row.bootstrapped_at),
         updatedAt: row.updated_at == null ? null : Number(row.updated_at),
       };
     },
@@ -106,13 +103,11 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
       });
     },
 
-    async advanceCursor(channel, ts) {
-      const current = await this.load(channel);
-      if (tsNum(ts) <= tsNum(current.cursor)) return;
+    async markBootstrapped(channel) {
       await client.execute({
-        sql: `INSERT INTO ambient_channel_state (channel, cursor) VALUES (?, ?)
-              ON CONFLICT (channel) DO UPDATE SET cursor = excluded.cursor`,
-        args: [channel, ts],
+        sql: `INSERT INTO ambient_channel_state (channel, bootstrapped_at) VALUES (?, ?)
+              ON CONFLICT (channel) DO UPDATE SET bootstrapped_at = coalesce(ambient_channel_state.bootstrapped_at, excluded.bootstrapped_at)`,
+        args: [channel, now()],
       });
     },
 
@@ -123,33 +118,33 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
       });
     },
 
-    async addMention(channel, m) {
-      await client.execute({
-        sql: `INSERT OR IGNORE INTO ambient_mentions (channel, ts, thread_ts, user_id, text, received_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [channel, m.ts, m.threadTs ?? null, m.userId ?? null, m.text, now()],
-      });
-    },
-
-    async takeMentions(channel) {
-      const r = await client.execute({
-        sql: `DELETE FROM ambient_mentions WHERE channel = ? RETURNING ts, thread_ts, user_id, text`,
-        args: [channel],
-      });
-      return r.rows
-        .map((row) => ({
-          ts: String(row.ts),
-          ...(row.thread_ts == null ? {} : { threadTs: String(row.thread_ts) }),
-          ...(row.user_id == null ? {} : { userId: String(row.user_id) }),
-          text: String(row.text ?? ""),
-        }))
-        .sort((a, b) => Number(a.ts) - Number(b.ts));
-    },
-
     async unpromptedPostsSince(channel, since) {
       const r = await client.execute({
         sql: `SELECT count(*) AS n FROM ambient_posts WHERE channel = ? AND kind = 'unprompted' AND posted_at >= ?`,
         args: [channel, since],
       });
+      return Number(r.rows[0]?.n ?? 0);
+    },
+
+    async push(channel, key, obs) {
+      await client.execute({
+        sql: `INSERT OR IGNORE INTO ambient_inbox (channel, key, ts, payload, received_at) VALUES (?, ?, ?, ?, ?)`,
+        args: [channel, key, obs.ts, JSON.stringify(obs), now()],
+      });
+    },
+
+    async drain(channel) {
+      const r = await client.execute({
+        sql: `DELETE FROM ambient_inbox WHERE channel = ? RETURNING ts, payload`,
+        args: [channel],
+      });
+      return r.rows
+        .map((row) => JSON.parse(String(row.payload)) as Observation)
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
+    },
+
+    async pending(channel) {
+      const r = await client.execute({ sql: `SELECT count(*) AS n FROM ambient_inbox WHERE channel = ?`, args: [channel] });
       return Number(r.rows[0]?.n ?? 0);
     },
   };

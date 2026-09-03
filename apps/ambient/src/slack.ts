@@ -19,14 +19,14 @@ export interface ChannelMessage {
 }
 
 export interface Slack {
-  /** The bot's own user id (auth.test, cached). */
+  /** The bot's own user id (auth.test, cached on success). */
   botUserId(): Promise<string>;
-  /** Public + private channels the bot is a member of (not archived). */
-  myChannels(): Promise<{ id: string; name: string }[]>;
   userName(id: string | undefined): Promise<string>;
   channelName(channel: string): Promise<string>;
-  /** Top-level messages newer than `cursor` (all of them when null), oldest first. */
-  readSince(channel: string, cursor: string | null, limit?: number): Promise<ChannelMessage[]>;
+  /** Public + private channels the bot is a member of (not archived). */
+  myChannels(): Promise<{ id: string; name: string }[]>;
+  /** The most recent top-level messages, oldest first — context for a channel seen for the first time. */
+  recentHistory(channel: string, limit?: number): Promise<ChannelMessage[]>;
   readThread(channel: string, threadTs: string): Promise<ChannelMessage[]>;
   post(channel: string, text: string, threadTs?: string): Promise<{ ts: string }>;
 }
@@ -41,9 +41,7 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
 
   async function get(method: string, params: Record<string, string>): Promise<Record<string, unknown>> {
     const q = new URLSearchParams(params).toString();
-    const res = await fetchImpl(`https://slack.com/api/${method}?${q}`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
+    const res = await fetchImpl(`https://slack.com/api/${method}?${q}`, { headers: { authorization: `Bearer ${token}` } });
     const json = (await res.json()) as Record<string, unknown> & { ok?: boolean; error?: string };
     if (!json.ok) throw new Error(`slack:${method} failed: ${json.error ?? res.status}`);
     return json;
@@ -66,7 +64,6 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   }
 
   const botUserId = (): Promise<string> => {
-    // Cached on success only, so a transient failure is retried next call.
     self ??= get("auth.test", {})
       .then((r) => String(r.user_id ?? ""))
       .catch((e: unknown) => {
@@ -77,7 +74,7 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   };
 
   const toMessage = async (m: { userId?: string; text: string; isBot: boolean; ts: string; threadTs?: string }): Promise<ChannelMessage> => {
-    const me = await botUserId();
+    const me = await botUserId().catch(() => "");
     return {
       ts: m.ts,
       ...(m.threadTs ? { threadTs: m.threadTs } : {}),
@@ -92,6 +89,21 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   return {
     botUserId,
     userName,
+
+    async channelName(channel) {
+      const hit = channels.get(channel);
+      if (hit) return hit;
+      let name = channel;
+      try {
+        const r = await get("conversations.info", { channel });
+        name = (r.channel as { name?: string } | undefined)?.name ?? channel;
+      } catch {
+        // Fall back to the id.
+      }
+      channels.set(channel, name);
+      return name;
+    },
+
     async myChannels() {
       const out: { id: string; name: string }[] = [];
       let cursor: string | undefined;
@@ -112,27 +124,10 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
       }
       return out;
     },
-    async channelName(channel) {
-      const hit = channels.get(channel);
-      if (hit) return hit;
-      let name = channel;
-      try {
-        const r = await get("conversations.info", { channel });
-        name = (r.channel as { name?: string } | undefined)?.name ?? channel;
-      } catch {
-        // Fall back to the id.
-      }
-      channels.set(channel, name);
-      return name;
-    },
 
-    async readSince(channel, cursor, limit = 200) {
-      const raw = await api.conversationsHistory({ channel, limit, ...(cursor ? { oldest: cursor } : {}) });
-      // Slack returns newest first and `oldest` is exclusive; sort oldest-first
-      // and drop the cursor row defensively.
-      const rows = raw
-        .filter((m) => !cursor || Number(m.ts) > Number(cursor))
-        .sort((a, b) => Number(a.ts) - Number(b.ts));
+    async recentHistory(channel, limit = 50) {
+      const raw = await api.conversationsHistory({ channel, limit });
+      const rows = [...raw].sort((a, b) => Number(a.ts) - Number(b.ts));
       const out: ChannelMessage[] = [];
       for (const m of rows) out.push(await toMessage(m));
       return out;

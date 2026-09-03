@@ -3,28 +3,23 @@ import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
-import { createRuntime, defineContext } from "@intentface/latch-core";
+import { createRuntime, defineContext, isChatBusyError } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { createWatcher, TICK_PROMPT, type Ctx } from "./agent.js";
 import { owner, type Principal } from "./principal.js";
-import type { ChannelMessage, Slack } from "./slack.js";
+import type { Slack } from "./slack.js";
 import { createStateStore } from "./state.js";
 import { createTools } from "./tools.js";
 
 /**
- * One whole tick through Latch, no network: a one-shot schedule fires through
- * `runtime.cron()`, the agent factory receives the channel's state via the
- * context builder, the model reads the channel, writes its state document and
- * thinks out loud, and the next tick's instructions carry what it wrote.
- * Channels are isolated by principal alone.
+ * Two ticks through Latch, no network: each is one more turn of the channel's
+ * ONE long-lived chat. The model drains the inbox, writes its state and thinks
+ * out loud; the second tick's instructions carry the state, the chat carries
+ * the earlier thinking, and a concurrent tick on the same channel is refused
+ * as busy rather than interleaved. Another channel sees none of it.
  */
 
-const finish = (reason: "tool-calls" | "stop") => ({
-  type: "finish",
-  finishReason: reason,
-  usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } },
-});
-
+const finish = (reason: "tool-calls" | "stop") => ({ type: "finish", finishReason: reason, usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } });
 const toolStep = (name: string, input: string) => ({
   stream: simulateReadableStream({
     initialDelayInMs: 0,
@@ -39,18 +34,11 @@ const toolStep = (name: string, input: string) => ({
     ],
   }),
 });
-
-const textStep = (text: string) => ({
+const textStep = (text: string, delayMs = 0) => ({
   stream: simulateReadableStream({
-    initialDelayInMs: 0,
+    initialDelayInMs: delayMs,
     chunkDelayInMs: 0,
-    chunks: [
-      { type: "stream-start", warnings: [] },
-      { type: "text-start", id: "0" },
-      { type: "text-delta", id: "0", delta: text },
-      { type: "text-end", id: "0" },
-      finish("stop"),
-    ],
+    chunks: [{ type: "stream-start", warnings: [] }, { type: "text-start", id: "0" }, { type: "text-delta", id: "0", delta: text }, { type: "text-end", id: "0" }, finish("stop")],
   }),
 });
 
@@ -63,34 +51,31 @@ async function harness() {
   await state.migrate();
   const db = drizzle(client, { schema });
 
-  const messages: ChannelMessage[] = [
-    { ts: "100.1", author: "bob", isBot: false, mentionsMe: false, text: "morning", at: "2026-09-03T08:00:00.000Z" },
-    { ts: "200.1", author: "anna", isBot: false, mentionsMe: false, text: "who owns the deploy?", at: "2026-09-03T08:05:00.000Z" },
-  ];
   const slack: Slack = {
     botUserId: async () => "UBOT",
-    myChannels: async () => [{ id: "C1", name: "general" }],
-    userName: async (id) => id ?? "someone",
+    userName: async (id) => (id === "U1" ? "anna" : id ?? "someone"),
     channelName: async (c) => (c === "C1" ? "general" : "other"),
-    readSince: vi.fn(async (_c, cursor) => messages.filter((m) => !cursor || Number(m.ts) > Number(cursor))),
+    myChannels: async () => [{ id: "C1", name: "general" }],
+    recentHistory: vi.fn(async () => [{ ts: "50.0", author: "bob", isBot: false, mentionsMe: false, text: "morning", at: "2026-09-03T08:00:00.000Z" }]),
     readThread: vi.fn(async () => []),
     post: vi.fn(async () => ({ ts: "999.0" })),
   };
   const tools = createTools({ slack, state, maxPostsPerDay: 5 });
 
-  // Scripted model: read → update_state → monologue. Records every system prompt it saw.
   const systemPrompts: string[] = [];
   const script = [
-    () => toolStep("read_new_messages", "{}"),
+    () => toolStep("read_inbox", "{}"),
     () => toolStep("update_state", JSON.stringify({ doc: DOC })),
     () => textStep("Anna's question is open; nothing for me to say yet."),
   ];
   let step = 0;
+  let slow = false;
   const model = new MockLanguageModelV4({
     modelId: "mock-watcher",
     doStream: (async (options: { prompt: { role: string; content: unknown }[] }) => {
       const sys = options.prompt.find((m) => m.role === "system");
       if (sys) systemPrompts.push(typeof sys.content === "string" ? sys.content : JSON.stringify(sys.content));
+      if (slow) return textStep("slow", 150);
       return script[step++ % script.length]!();
     }) as never,
   });
@@ -98,55 +83,55 @@ async function harness() {
   const runtime = createRuntime<Principal, Ctx>({
     storage: createSqliteAdapter<Principal>(db, { owner }),
     context: defineContext<Principal, Ctx>({
-      build: async ({ principal }) => ({
-        state: await state.load(principal.channel),
-        channelName: await slack.channelName(principal.channel),
-      }),
+      build: async ({ principal }) => ({ state: await state.load(principal.channel), channelName: await slack.channelName(principal.channel) }),
     }),
     agents: { watcher: createWatcher({ model, tools }) },
   });
-  return { runtime, state, slack, systemPrompts };
+  const tick = (channel: string) => runtime.runAgent({ principal: { channel }, agent: "watcher", prompt: TICK_PROMPT, threadId: `ambient_${channel}`, blockGated: false });
+  return { runtime, state, slack, systemPrompts, tick, setSlow: (v: boolean) => (slow = v) };
 }
 
-describe("one ambient tick through Latch", () => {
-  it("a scheduled fire reads the channel, writes state, and the next tick starts from that state", async () => {
-    const { runtime, state, slack, systemPrompts } = await harness();
+describe("ticks on the channel's long-lived chat", () => {
+  it("drains the inbox, writes state, and the next tick continues the same chat with that state", async () => {
+    const { runtime, state, slack, systemPrompts, tick } = await harness();
     const principal: Principal = { channel: "C1" };
+    await state.push("C1", "e1", { kind: "message", ts: "200.1", userId: "U1", text: "who owns the deploy?" });
 
-    await runtime.schedule({ principal, agent: "watcher", cron: null, prompt: TICK_PROMPT, onParked: "fire" });
-    const first = await runtime.cron();
-    expect(first.due).toMatchObject({ fired: 1, errors: 0 });
-    expect(first.errors).toEqual([]);
-
-    // The tools acted on the principal's channel, the cursor moved, the doc landed.
-    expect(slack.readSince).toHaveBeenCalledWith("C1", null, 200);
-    const saved = await state.load("C1");
-    expect(saved.cursor).toBe("200.1");
-    expect(saved.doc).toBe(DOC);
+    const first = await tick("C1");
+    expect(first.threadId).toBe("ambient_C1");
+    expect(first.answer).toContain("open");
+    expect(await state.pending("C1")).toBe(0);
+    expect((await state.load("C1")).doc).toBe(DOC);
+    expect(slack.recentHistory).toHaveBeenCalledWith("C1", 50); // first look → bootstrap
     expect(slack.post).not.toHaveBeenCalled();
-
-    // First tick: instructions said the state was empty and named the channel.
     expect(systemPrompts[0]).toContain("#general");
     expect(systemPrompts[0]).toContain("(empty — you have not written one yet)");
-    expect(systemPrompts[0]).toContain("Last read: never");
 
-    // The run and the monologue are on record, under this channel only.
-    const runs = await runtime.listRuns({ principal, limit: 5 });
-    expect(runs).toHaveLength(1);
-    expect(runs[0]!.status).toBe("completed");
-    const [chat] = await runtime.listChats({ principal, limit: 1 });
-    const history = await runtime.loadHistory({ chatId: chat!.id, principal });
-    const text = history.flatMap((m) => m.parts).find((p) => p.type === "text" && p.text.includes("open"));
-    expect(text).toBeDefined();
-    expect(await runtime.listChats({ principal: { channel: "C2" }, limit: 5 })).toEqual([]);
-    expect(await state.load("C2")).toMatchObject({ doc: "", cursor: null });
-
-    // Second tick: the factory rebuilt instructions from the saved document.
-    await runtime.schedule({ principal, agent: "watcher", cron: null, prompt: TICK_PROMPT });
-    const second = await runtime.cron();
-    expect(second.due.fired).toBe(1);
+    // Second tick: same chat, instructions rebuilt from the saved document, earlier thinking still in history.
+    await state.push("C1", "e2", { kind: "reaction_added", ts: "300.1", userId: "U2", emoji: "white_check_mark", targetTs: "200.1" });
+    const second = await tick("C1");
+    expect(second.threadId).toBe("ambient_C1");
     expect(systemPrompts[3]).toContain("anna asked who owns the deploy");
-    expect(systemPrompts[3]).toContain("Last read: 1970-01-01T00:03:20.100Z");
-    expect(slack.readSince).toHaveBeenLastCalledWith("C1", "200.1", 200);
+    const history = await runtime.loadHistory({ chatId: "ambient_C1", principal });
+    expect(history.filter((m) => m.role === "user")).toHaveLength(2);
+    expect(history.flatMap((m) => m.parts).filter((p) => p.type === "text" && p.text.includes("open"))).toHaveLength(2);
+    expect(slack.recentHistory).toHaveBeenCalledTimes(1);
+
+    // Isolation: another channel has no chat, no state.
+    expect(await runtime.listChats({ principal: { channel: "C2" }, limit: 5 })).toEqual([]);
+    expect(await state.load("C2")).toMatchObject({ doc: "", bootstrappedAt: null });
+    expect(await runtime.listRuns({ principal, limit: 5 })).toHaveLength(2);
+  });
+
+  it("a second tick while one runs is refused as busy, not interleaved", async () => {
+    const { tick, setSlow, state } = await harness();
+    await state.push("C1", "e1", { kind: "message", ts: "1.0", text: "x" });
+    await tick("C1"); // the chat exists now
+    setSlow(true);
+    const a = tick("C1");
+    await new Promise((r) => setTimeout(r, 30)); // a has opened its run; the model is still "thinking"
+    const b = await tick("C1").catch((e) => e);
+    expect(isChatBusyError(b)).toBe(true);
+    await a;
   });
 });

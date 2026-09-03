@@ -1,47 +1,51 @@
-# Ambient channel agents (the simple version)
+# Ambient channel agents
 
-One Latch agent per Slack channel that **wakes on a schedule, reads what is new,
-keeps an honest state document of the channel, and speaks only through a tool**.
-It is not a chatbot: its replies are an internal monologue nobody in Slack sees.
-The channel only hears from it via `post_to_channel`, on a budget.
+One Latch agent per Slack channel the bot is a member of. Slack events land in an inbox; after a quiet
+period (or at once for a mention) the channel's tick runs as **one more turn of one long-lived chat** — the
+agent's continuous monologue, compacted as it grows — which reads the inbox, keeps an honest **state
+document** of the channel (open questions, commitments, decisions), and speaks only through `post_to_channel`,
+on a daily budget. It is not a chatbot: nobody in Slack sees its thinking.
 
-This is also a test of Latch from the outside: a Hono + SQLite app built on the
-published package surface alone, in a shape the platform does not use.
+This is also a test of Latch from the outside: a Hono + SQLite app on the public package surface alone.
 
-## What it does each tick
+## How it works
 
-1. `read_new_messages` — top-level messages since its cursor (thread replies on demand via `read_thread`).
-2. Thinks out loud (the assistant text of the run).
-3. `update_state` — rewrites its state document: open questions, commitments, decisions, watching, notes to self.
-4. Speaks only if addressed, or a commitment is overdue, or an open question has a known answer, or a decision contradicts an earlier one. Unprompted posts are capped per day.
+```
+Slack events ──▶ POST /slack/events ──▶ inbox (SQLite) ──▶ ticker (quiet 90 s, or now for a mention)
+                                                                │
+                              runtime.runAgent(threadId = ambient_<channel>)  ◀── one chat per channel
+                                                                │
+                   read_inbox → think → update_state → (post_to_channel)   ◀── the four tools
+```
+
+- **Which channels:** the ones the bot is in. `/invite` starts watching, `/kick` stops. Membership is listed at
+  boot and kept current by `member_joined_channel` / `member_left_channel`.
+- **What it sees:** messages, thread replies, edits, deletions, reactions added/removed, mentions — normalized
+  into observations. A ✅ on a recorded commitment closes it; 👀 on its own post means "say more". The first look
+  at a channel also pulls recent history for context.
+- **When it speaks:** addressed (in the thread), a commitment overdue and unmentioned for a day, an open question
+  it can answer from the channel's own history, a decision contradicting an earlier one. Never about tone or
+  dynamics. Unprompted posts are capped per day.
+- **Heartbeat:** an hourly tick on quiet channels, for overdue checks only.
 
 ## Run
 
 ```bash
-cp apps/ambient/.env.example apps/ambient/.env   # fill in the token, signing secret, a model key
+cp apps/ambient/.env.example apps/ambient/.env   # bot token, signing secret, a model key
+ngrok http 8790                                   # or cloudflared tunnel --url localhost:8790
 pnpm --filter @intentface/latch-ambient serve
 ```
 
-Slack app: create one from [`slack-manifest.json`](./slack-manifest.json) (api.slack.com/apps → Create New App →
-From a manifest), install it to the workspace, copy the Bot User OAuth Token into `SLACK_BOT_TOKEN` and the
-Signing Secret into `SLACK_SIGNING_SECRET`, then `/invite @Ambient` in any channel: **membership is the
-configuration**. The app lists the channels the bot is in at boot and every five minutes, creates a schedule for
-each new one and drops the schedule when kicked (state and history stay, under the channel's partition). Canvas
-scopes are included so `AMBIENT_STATE=canvas` needs no reinstall; `groups:*` lets it watch private channels.
-
-**Tagging it.** The manifest subscribes to one event, `app_mention`. A mention is queued and the channel's
-tick runs immediately, so the reply arrives in seconds through the same read → think → update → speak loop.
-That needs Slack to reach you: run a tunnel (`ngrok http 8790`, `cloudflared tunnel --url localhost:8790`),
-put `https://<tunnel>/slack/events` as the manifest's `request_url`, and Slack verifies it on save. Mentions
-inside threads arrive this way too (the poll only sees top-level messages). Without a tunnel, leave
-`SLACK_SIGNING_SECRET` unset and remove `event_subscriptions` from the manifest: everything still works,
-but a mention is answered on the next cadence.
+Create the Slack app from [`slack-manifest.json`](./slack-manifest.json) (api.slack.com/apps → Create New App →
+From a manifest) with `request_url` set to `https://<tunnel>/slack/events`; Slack verifies it on save. Install,
+copy the Bot User OAuth Token and Signing Secret, then `/invite @Ambient` in a channel.
 
 ```bash
-curl -X POST localhost:8790/channels/C0123/tick        # fire now, through the real cron path
-curl localhost:8790/channels/C0123/state               # the document as the agent last wrote it
-curl localhost:8790/channels/C0123/monologue           # what the last tick read, thought and did
-curl localhost:8790/channels/C0123/runs                # status, tokens, cost per tick
+curl localhost:8790/channels                      # watched channels and what is queued
+curl localhost:8790/channels/C0123/state          # the document as the agent last wrote it
+curl localhost:8790/channels/C0123/monologue      # the whole long-lived chat: read, thought, did
+curl localhost:8790/channels/C0123/runs           # status, tokens, cost per tick
+curl -X POST localhost:8790/channels/C0123/tick   # run now (a heartbeat if nothing is queued)
 ```
 
 Set `AMBIENT_ADMIN_TOKEN` to require `Authorization: Bearer …` on those routes.
@@ -51,31 +55,25 @@ Set `AMBIENT_ADMIN_TOKEN` to require `Authorization: Bearer …` on those routes
 | Need | Latch piece |
 | --- | --- |
 | One partition per channel | `Principal = { channel }`; owner key is the channel id. No org, no user. |
-| Waking up | `runtime.schedule()` per channel the bot is in (idempotent, dropped on leave); fires via `runtime.cron()` every 30 s in-process; `runScheduleNow` on a mention. |
+| The monologue | `runtime.runAgent({ threadId })` continues one chat per channel (created on first use); `compactChat` folds old thinking once it grows. |
+| No two ticks interleave | one active run per chat: a concurrent tick gets `ChatBusyError`; the ticker retries. |
 | State into the prompt | `context.build` loads the document; the agent factory renders instructions from it each turn. |
-| Tools that cannot escape the channel | Every tool reads the channel from `options.context.principal`, never from model input. |
+| Tools that cannot escape the channel | every tool reads the channel from `options.context.principal`, never from model input. |
 | Cost ceiling | `limits`: one token budget per channel per day. |
-| Observability | `telemetry.onRunFinished` logs status, trigger and tokens; `/runs` and `/monologue` read the run log. |
-| Durability | Default on via `createLatchHonoApp`; a tick interrupted by a restart resumes on the next cron. |
+| Observability | `telemetry.onRunFinished`; `/runs` and `/monologue` read the run log. |
+| Durability | on by default; a tick interrupted by a restart resumes on the next cron sweep, and the inbox is durable. |
 
 ### State in the channel canvas (`AMBIENT_STATE=canvas`)
 
-The document can live in the **channel's canvas** instead of SQLite. Everyone in the channel sees what the
-agent believes and can fix it in place; the agent reads the canvas before every tick and is told what
-changed since it last wrote ("removed: … / added: …"), treating human edits as corrections it must keep.
-
-- Read path: `files.info` on the canvas id → `url_private_download` → HTML with the bot token → markdown.
-  Slack documents no read method; this is the path every working client uses. Unverified here against a
-  real token — the first run against your workspace is the spike.
-- Write path: `canvases.edit` with one `replace` of the whole document.
-- The canvas is created on first contact (`conversations.canvases.create`) if the channel has none.
-- SQLite still keeps the cursor, the post log, and a **shadow** of the last written document: it is what
-  makes edits visible and the fallback when the canvas cannot be read.
-- Extra scopes: `canvases:read`, `canvases:write`, `files:read`.
+The document can live in the **channel's canvas**. Everyone sees what the agent believes and can fix it in
+place; the agent reads the canvas before every tick and is told what changed since it last wrote, treating human
+edits as corrections it must keep. Read path: `files.info` → `url_private_download` → HTML → markdown (Slack
+documents no read method; this is what every working client does — **unverified here against a real token**).
+Write: `canvases.edit` replace. SQLite keeps the inbox, the post log and a shadow of the last written document
+(the fallback when the canvas cannot be read).
 
 State is **not** the memory package. Memory extracts facts after the fact by inference. Here the agent is the
 only writer, the write happens inside the turn, and what it wrote is exactly what it reads next time.
-Two host tables (`ambient_channel_state`, `ambient_posts`) live next to Latch's in the same SQLite file.
 
 ## Tests
 
@@ -83,17 +81,13 @@ Two host tables (`ambient_channel_state`, `ambient_posts`) live next to Latch's 
 pnpm --filter @intentface/latch-ambient test
 ```
 
-`tick.test.ts` runs a whole tick with a scripted model and a fake Slack: schedule → cron → factory with
-state → tools → state saved → next tick's instructions carry it. No network.
+State store and inbox, event normalization and the signed route, the debounce ticker (fake timers), the tools,
+canvas plumbing, and two ticks through the runtime on one chat with a scripted model and a fake Slack, including
+the busy refusal. No network.
 
-## Known limits of the simple version
+## Known limits
 
-- **Pull, not push.** Up to one cadence of delay before it notices anything. Reactions and edits are invisible.
-- **Each tick is a fresh chat.** The state survives; the thinking does not. Read `/monologue` for the last one.
-- **Cursor advances on read.** A tick that fails after `read_new_messages` loses those messages from the
-  agent's view (the state document still holds what it knew). Acceptable for notes; not for anything exact-once.
-- **Mentions without the events route** are just messages seen on the next tick; thread mentions are invisible
-  to the poll. With the route they tick the channel at once.
-
-Next steps, each additive: an events route feeding an inbox table (replaces the poll), a cheap judge that gates
-the expensive turn, one long-lived chat per channel for the monologue, reactions as signal.
+- **Whole-document canvas replace:** a human edit landing between the agent's read and write loses.
+- **In-process debounce timers:** a restart forgets pending timers, but not the inbox — a watched channel with
+  queued events ticks at boot.
+- **Heartbeat is a plain interval**, not a Latch schedule; on one process that is all it needs.

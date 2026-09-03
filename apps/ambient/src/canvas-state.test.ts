@@ -60,11 +60,13 @@ describe("canvas-backed state", () => {
     expect(state.doc).toBe(DOC);
   });
 
-  it("cursor and post log stay in sqlite", async () => {
+  it("inbox, bootstrap flag and post log stay in sqlite", async () => {
     const { store, base } = await build({ current: "" });
-    await store.advanceCursor("C1", "100.1");
+    await store.push("C1", "e1", { kind: "message", ts: "100.1", text: "hi" });
+    await store.markBootstrapped("C1");
     await store.recordPost("C1", "1.0", "unprompted");
-    expect((await base.load("C1")).cursor).toBe("100.1");
+    expect(await store.pending("C1")).toBe(1);
+    expect((await base.load("C1")).bootstrappedAt).not.toBeNull();
     expect(await store.unpromptedPostsSince("C1", 0)).toBe(1);
   });
 });

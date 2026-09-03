@@ -18,6 +18,7 @@
         "channels:read",
         "groups:history",
         "groups:read",
+        "reactions:read",
         "users:read",
         "chat:write",
         "canvases:read",
@@ -29,7 +30,15 @@
   "settings": {
     "event_subscriptions": {
       "request_url": "https://REPLACE-ME.example/slack/events",
-      "bot_events": ["app_mention"]
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "reaction_added",
+        "reaction_removed",
+        "member_joined_channel",
+        "member_left_channel"
+      ]
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": false,
