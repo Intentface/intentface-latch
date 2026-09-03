@@ -58,8 +58,17 @@ export function instructionsFor(ctx: Ctx): string {
     "",
     `Last read: ${lastRead}.`,
     "",
-    "YOUR CURRENT STATE DOCUMENT (as you last wrote it):",
+    ctx.state.humanEdits ? "YOUR CURRENT STATE DOCUMENT (someone in the channel edited it since you last wrote it — see below):" : "YOUR CURRENT STATE DOCUMENT (as you last wrote it):",
     doc || "(empty — you have not written one yet)",
+    ...(ctx.state.humanEdits ? ["", humanEditsBlock(ctx.state.humanEdits)] : []),
+  ].join("\n");
+}
+
+function humanEditsBlock(e: { added: string[]; removed: string[] }): string {
+  return [
+    "HUMAN EDITS SINCE YOUR LAST WRITE — treat these as corrections from people who know better than you. Keep them; never revert them; note in Notes to self what you learned.",
+    ...e.removed.map((l) => `- removed: ${l}`),
+    ...e.added.map((l) => `+ added: ${l}`),
   ].join("\n");
 }
 

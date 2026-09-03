@@ -46,6 +46,21 @@ Set `AMBIENT_ADMIN_TOKEN` to require `Authorization: Bearer …` on those routes
 | Observability | `telemetry.onRunFinished` logs status, trigger and tokens; `/runs` and `/monologue` read the run log. |
 | Durability | Default on via `createLatchHonoApp`; a tick interrupted by a restart resumes on the next cron. |
 
+### State in the channel canvas (`AMBIENT_STATE=canvas`)
+
+The document can live in the **channel's canvas** instead of SQLite. Everyone in the channel sees what the
+agent believes and can fix it in place; the agent reads the canvas before every tick and is told what
+changed since it last wrote ("removed: … / added: …"), treating human edits as corrections it must keep.
+
+- Read path: `files.info` on the canvas id → `url_private_download` → HTML with the bot token → markdown.
+  Slack documents no read method; this is the path every working client uses. Unverified here against a
+  real token — the first run against your workspace is the spike.
+- Write path: `canvases.edit` with one `replace` of the whole document.
+- The canvas is created on first contact (`conversations.canvases.create`) if the channel has none.
+- SQLite still keeps the cursor, the post log, and a **shadow** of the last written document: it is what
+  makes edits visible and the fallback when the canvas cannot be read.
+- Extra scopes: `canvases:read`, `canvases:write`, `files:read`.
+
 State is **not** the memory package. Memory extracts facts after the fact by inference. Here the agent is the
 only writer, the write happens inside the turn, and what it wrote is exactly what it reads next time.
 Two host tables (`ambient_channel_state`, `ambient_posts`) live next to Latch's in the same SQLite file.

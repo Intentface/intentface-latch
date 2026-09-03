@@ -16,6 +16,8 @@ export interface ChannelState {
   /** Slack `ts` of the newest message the agent has read; null = never read. */
   cursor: string | null;
   updatedAt: number | null;
+  /** Lines a human changed in the document since the agent last wrote it (canvas-backed store only). */
+  humanEdits?: { added: string[]; removed: string[] };
 }
 
 /** Cap on the state document: past this `update_state` refuses and asks the agent to prune. */

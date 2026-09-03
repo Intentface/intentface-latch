@@ -5,9 +5,11 @@ import { drizzle } from "drizzle-orm/libsql";
 import { DAY_MS, defineContext } from "@intentface/latch-core";
 import { createSqliteAdapter, createSqliteLimitStore, migrate, schema } from "@intentface/latch-drizzle";
 import { createLatchHonoApp } from "@intentface/latch-server/hono";
-import { createWatcher, TICK_PROMPT, type Ctx } from "./agent.js";
+import { createWatcher, STATE_SCHEMA, TICK_PROMPT, type Ctx } from "./agent.js";
 import { owner, type Principal } from "./principal.js";
 import { createSlack } from "./slack.js";
+import { createCanvas } from "./canvas.js";
+import { createCanvasStateStore } from "./canvas-state.js";
 import { createStateStore } from "./state.js";
 import { createTools } from "./tools.js";
 
@@ -37,6 +39,8 @@ const config = {
   maxPostsPerDay: Number(env("AMBIENT_MAX_POSTS_PER_DAY", "5")),
   tokensPerDay: Number(env("AMBIENT_TOKENS_PER_DAY", "500000")),
   adminToken: process.env.AMBIENT_ADMIN_TOKEN,
+  /** Where the state document lives: the channel canvas (humans can edit it) or SQLite only. */
+  stateIn: env("AMBIENT_STATE", "sqlite") as "sqlite" | "canvas",
   db: env("AMBIENT_DB", "file:./ambient.db"),
   port: Number(env("PORT", "8790")),
 };
@@ -45,8 +49,17 @@ if (config.channels.length === 0) throw new Error("AMBIENT_CHANNELS is empty");
 // Storage: Latch's tables and the app's two host tables in the same file.
 const client = createClient({ url: config.db });
 await migrate(client);
-const state = createStateStore(client);
-await state.migrate();
+const sqliteState = createStateStore(client);
+await sqliteState.migrate();
+const state =
+  config.stateIn === "canvas"
+    ? createCanvasStateStore({
+        base: sqliteState,
+        canvas: createCanvas(config.slackToken),
+        initial: `# Channel notes\n\nKept by the ambient agent. Edit freely — it reads this before every tick.\n\n${STATE_SCHEMA}`,
+        onError: (channel, e) => console.warn(`[ambient] ${channel}: canvas unreadable, using last written copy:`, e),
+      })
+    : sqliteState;
 const db = drizzle(client, { schema });
 
 const slack = createSlack(config.slackToken);
@@ -182,7 +195,7 @@ app.route("/latch", latch);
 
 serve({ fetch: app.fetch, port: config.port });
 console.log(`👁  ambient listening on http://localhost:${config.port}`);
-console.log(`   watching ${config.channels.join(", ")} every "${config.every}" with ${config.model}`);
+console.log(`   watching ${config.channels.join(", ")} every "${config.every}" with ${config.model}; state in ${config.stateIn}`);
 console.log(`   curl http://localhost:${config.port}/channels/${config.channels[0]}/state`);
 console.log(`   curl -X POST http://localhost:${config.port}/channels/${config.channels[0]}/tick`);
 

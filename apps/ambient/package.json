@@ -18,10 +18,12 @@
     "ai": "^7.0.2",
     "drizzle-orm": "^0.45.0",
     "hono": "^4.6.0",
+    "turndown": "^7.2.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.9.3",
+    "@types/turndown": "^5.0.6",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4"
