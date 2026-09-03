@@ -64,10 +64,12 @@ async function harness() {
   const db = drizzle(client, { schema });
 
   const messages: ChannelMessage[] = [
-    { ts: "100.1", author: "bob", isBot: false, text: "morning", at: "2026-09-03T08:00:00.000Z" },
-    { ts: "200.1", author: "anna", isBot: false, text: "who owns the deploy?", at: "2026-09-03T08:05:00.000Z" },
+    { ts: "100.1", author: "bob", isBot: false, mentionsMe: false, text: "morning", at: "2026-09-03T08:00:00.000Z" },
+    { ts: "200.1", author: "anna", isBot: false, mentionsMe: false, text: "who owns the deploy?", at: "2026-09-03T08:05:00.000Z" },
   ];
   const slack: Slack = {
+    botUserId: async () => "UBOT",
+    userName: async (id) => id ?? "someone",
     channelName: async (c) => (c === "C1" ? "general" : "other"),
     readSince: vi.fn(async (_c, cursor) => messages.filter((m) => !cursor || Number(m.ts) > Number(cursor))),
     readThread: vi.fn(async () => []),

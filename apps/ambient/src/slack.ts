@@ -11,12 +11,17 @@ export interface ChannelMessage {
   threadTs?: string;
   author: string;
   isBot: boolean;
+  /** The message @-mentions the bot. */
+  mentionsMe: boolean;
   text: string;
   /** ISO time, for the agent's sense of "how long ago". */
   at: string;
 }
 
 export interface Slack {
+  /** The bot's own user id (auth.test, cached). */
+  botUserId(): Promise<string>;
+  userName(id: string | undefined): Promise<string>;
   channelName(channel: string): Promise<string>;
   /** Top-level messages newer than `cursor` (all of them when null), oldest first. */
   readSince(channel: string, cursor: string | null, limit?: number): Promise<ChannelMessage[]>;
@@ -30,6 +35,7 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   const api = slackApi(token, { fetchImpl });
   const users = new Map<string, string>();
   const channels = new Map<string, string>();
+  let self: Promise<string> | undefined;
 
   async function get(method: string, params: Record<string, string>): Promise<Record<string, unknown>> {
     const q = new URLSearchParams(params).toString();
@@ -57,16 +63,27 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
     return name;
   }
 
-  const toMessage = async (m: { userId?: string; text: string; isBot: boolean; ts: string; threadTs?: string }) => ({
-    ts: m.ts,
-    ...(m.threadTs ? { threadTs: m.threadTs } : {}),
-    author: await userName(m.userId),
-    isBot: m.isBot,
-    text: m.text,
-    at: isoOf(m.ts),
-  });
+  const botUserId = (): Promise<string> => {
+    self ??= get("auth.test", {}).then((r) => String(r.user_id ?? ""));
+    return self;
+  };
+
+  const toMessage = async (m: { userId?: string; text: string; isBot: boolean; ts: string; threadTs?: string }): Promise<ChannelMessage> => {
+    const me = await botUserId();
+    return {
+      ts: m.ts,
+      ...(m.threadTs ? { threadTs: m.threadTs } : {}),
+      author: await userName(m.userId),
+      isBot: m.isBot,
+      mentionsMe: !!me && m.text.includes(`<@${me}>`),
+      text: m.text,
+      at: isoOf(m.ts),
+    };
+  };
 
   return {
+    botUserId,
+    userName,
     async channelName(channel) {
       const hit = channels.get(channel);
       if (hit) return hit;

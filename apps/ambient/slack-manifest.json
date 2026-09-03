@@ -13,6 +13,7 @@
   "oauth_config": {
     "scopes": {
       "bot": [
+        "app_mentions:read",
         "channels:history",
         "channels:read",
         "groups:history",
@@ -26,6 +27,10 @@
     }
   },
   "settings": {
+    "event_subscriptions": {
+      "request_url": "https://REPLACE-ME.example/slack/events",
+      "bot_events": ["app_mention"]
+    },
     "org_deploy_enabled": false,
     "socket_mode_enabled": false,
     "token_rotation_enabled": false

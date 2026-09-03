@@ -35,6 +35,8 @@ export function createCanvasStateStore(input: {
     advanceCursor: (c, ts) => base.advanceCursor(c, ts),
     recordPost: (c, ts, k) => base.recordPost(c, ts, k),
     unpromptedPostsSince: (c, s) => base.unpromptedPostsSince(c, s),
+    addMention: (c, m) => base.addMention(c, m),
+    takeMentions: (c) => base.takeMentions(c),
 
     async load(channel): Promise<ChannelState> {
       const shadow = await base.load(channel);

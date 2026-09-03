@@ -25,6 +25,14 @@ export const MAX_DOC_CHARS = 12_000;
 
 export type PostKind = "addressed" | "unprompted";
 
+/** An @-mention delivered by the events route — the start of an inbox. */
+export interface Mention {
+  ts: string;
+  threadTs?: string;
+  userId?: string;
+  text: string;
+}
+
 export interface StateStore {
   migrate(): Promise<void>;
   load(channel: string): Promise<ChannelState>;
@@ -34,6 +42,10 @@ export interface StateStore {
   recordPost(channel: string, ts: string, kind: PostKind): Promise<void>;
   /** Unprompted posts in the trailing window. */
   unpromptedPostsSince(channel: string, since: number): Promise<number>;
+  /** Queue a mention for the next tick (idempotent on ts). */
+  addMention(channel: string, m: Mention): Promise<void>;
+  /** Drain queued mentions, oldest first. */
+  takeMentions(channel: string): Promise<Mention[]>;
 }
 
 const tsNum = (ts: string | null): number => (ts ? Number(ts) : 0);
@@ -57,6 +69,15 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
              PRIMARY KEY (channel, ts)
            )`,
           `CREATE INDEX IF NOT EXISTS ambient_posts_channel_at ON ambient_posts (channel, posted_at)`,
+          `CREATE TABLE IF NOT EXISTS ambient_mentions (
+             channel TEXT NOT NULL,
+             ts TEXT NOT NULL,
+             thread_ts TEXT,
+             user_id TEXT,
+             text TEXT NOT NULL,
+             received_at INTEGER NOT NULL,
+             PRIMARY KEY (channel, ts)
+           )`,
         ],
         "write",
       );
@@ -100,6 +121,28 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
         sql: `INSERT OR IGNORE INTO ambient_posts (channel, ts, kind, posted_at) VALUES (?, ?, ?, ?)`,
         args: [channel, ts, kind, now()],
       });
+    },
+
+    async addMention(channel, m) {
+      await client.execute({
+        sql: `INSERT OR IGNORE INTO ambient_mentions (channel, ts, thread_ts, user_id, text, received_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [channel, m.ts, m.threadTs ?? null, m.userId ?? null, m.text, now()],
+      });
+    },
+
+    async takeMentions(channel) {
+      const r = await client.execute({
+        sql: `DELETE FROM ambient_mentions WHERE channel = ? RETURNING ts, thread_ts, user_id, text`,
+        args: [channel],
+      });
+      return r.rows
+        .map((row) => ({
+          ts: String(row.ts),
+          ...(row.thread_ts == null ? {} : { threadTs: String(row.thread_ts) }),
+          ...(row.user_id == null ? {} : { userId: String(row.user_id) }),
+          text: String(row.text ?? ""),
+        }))
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
     },
 
     async unpromptedPostsSince(channel, since) {

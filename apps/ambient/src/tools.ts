@@ -34,8 +34,9 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
 
   const read_new_messages = tool({
     description:
-      "Read the top-level channel messages posted since your last read (oldest first). " +
-      "Advances your read cursor. Call this first on every tick. Thread replies are not included — " +
+      "Read the top-level channel messages posted since your last read (oldest first), plus any @-mentions of you " +
+      "delivered since the last tick (`mentions` — these can be inside threads; answer in the thread given by their threadTs). " +
+      "Advances your read cursor. Call this first on every tick. Thread replies are not included in `messages` — " +
       "a root with `threadTs` set has a thread; use read_thread to see it.",
     inputSchema: z.object({
       limit: z.number().int().min(1).max(200).optional().describe("Max messages to return (default 200)."),
@@ -46,10 +47,22 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
       const messages = await deps.slack.readSince(channel, before.cursor, limit ?? 200);
       const last = messages.at(-1);
       if (last) await deps.state.advanceCursor(channel, last.ts);
+      const queued = await deps.state.takeMentions(channel);
+      const mentions = [];
+      for (const m of queued) {
+        mentions.push({
+          ts: m.ts,
+          ...(m.threadTs ? { threadTs: m.threadTs } : {}),
+          author: await deps.slack.userName(m.userId),
+          text: m.text,
+          at: new Date(Number(m.ts) * 1000).toISOString(),
+        });
+      }
       return {
         count: messages.length,
         since: before.cursor ? new Date(Number(before.cursor) * 1000).toISOString() : "the beginning",
         messages,
+        mentions,
       };
     },
   });

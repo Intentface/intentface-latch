@@ -8,12 +8,14 @@ import type { ChannelMessage, Slack } from "./slack.js";
 const options = (channel: string) =>
   ({ toolCallId: "t1", messages: [], context: { principal: { channel }, run: { id: "r", chatId: "c", agent: "watcher" } } }) as never;
 
-const msg = (ts: string, text: string): ChannelMessage => ({ ts, author: "anna", isBot: false, text, at: "2026-09-03T00:00:00.000Z" });
+const msg = (ts: string, text: string): ChannelMessage => ({ ts, author: "anna", isBot: false, mentionsMe: false, text, at: "2026-09-03T00:00:00.000Z" });
 
 async function build(messages: ChannelMessage[] = []) {
   const state = createStateStore(createClient({ url: ":memory:" }));
   await state.migrate();
   const slack: Slack = {
+    botUserId: async () => "UBOT",
+    userName: async (id) => (id === "U1" ? "anna" : id ?? "someone"),
     channelName: async () => "general",
     readSince: vi.fn(async (_c, cursor) => messages.filter((m) => !cursor || Number(m.ts) > Number(cursor))),
     readThread: vi.fn(async () => []),
@@ -34,6 +36,16 @@ describe("ambient tools", () => {
     expect((await state.load("C1")).cursor).toBe("300.1");
     const again = (await call("read_new_messages", {})) as { count: number };
     expect(again.count).toBe(0);
+  });
+
+  it("read_new_messages hands over queued mentions with names, once", async () => {
+    const { call, state } = await build([msg("100.1", "a")]);
+    await state.addMention("C1", { ts: "300.1", threadTs: "200.0", userId: "U1", text: "<@UBOT> status?" });
+    const out = (await call("read_new_messages", {})) as { mentions: unknown[] };
+    expect(out.mentions).toEqual([
+      { ts: "300.1", threadTs: "200.0", author: "anna", text: "<@UBOT> status?", at: "1970-01-01T00:05:00.100Z" },
+    ]);
+    expect(((await call("read_new_messages", {})) as { mentions: unknown[] }).mentions).toEqual([]);
   });
 
   it("update_state stores the document and refuses one over the cap", async () => {

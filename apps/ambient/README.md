@@ -23,10 +23,17 @@ pnpm --filter @intentface/latch-ambient serve
 ```
 
 Slack app: create one from [`slack-manifest.json`](./slack-manifest.json) (api.slack.com/apps → Create New App →
-From a manifest), install it to the workspace, copy the Bot User OAuth Token into `SLACK_BOT_TOKEN`, and
-`/invite @Ambient` in each watched channel. The manifest has no event subscriptions, no interactivity and no
-request URLs: the app only calls Slack, so it runs from a laptop with **no tunnel**. (Canvas scopes are
-included so `AMBIENT_STATE=canvas` needs no reinstall; `groups:*` lets it watch private channels.)
+From a manifest), install it to the workspace, copy the Bot User OAuth Token into `SLACK_BOT_TOKEN` and the
+Signing Secret into `SLACK_SIGNING_SECRET`, and `/invite @Ambient` in each watched channel. Canvas scopes are
+included so `AMBIENT_STATE=canvas` needs no reinstall; `groups:*` lets it watch private channels.
+
+**Tagging it.** The manifest subscribes to one event, `app_mention`. A mention is queued and the channel's
+tick runs immediately, so the reply arrives in seconds through the same read → think → update → speak loop.
+That needs Slack to reach you: run a tunnel (`ngrok http 8790`, `cloudflared tunnel --url localhost:8790`),
+put `https://<tunnel>/slack/events` as the manifest's `request_url`, and Slack verifies it on save. Mentions
+inside threads arrive this way too (the poll only sees top-level messages). Without a tunnel, leave
+`SLACK_SIGNING_SECRET` unset and remove `event_subscriptions` from the manifest: everything still works,
+but a mention is answered on the next cadence.
 
 ```bash
 curl -X POST localhost:8790/channels/C0123/tick        # fire now, through the real cron path
@@ -83,8 +90,8 @@ state → tools → state saved → next tick's instructions carry it. No networ
 - **Each tick is a fresh chat.** The state survives; the thinking does not. Read `/monologue` for the last one.
 - **Cursor advances on read.** A tick that fails after `read_new_messages` loses those messages from the
   agent's view (the state document still holds what it knew). Acceptable for notes; not for anything exact-once.
-- **Mentions are not special.** The bot has no event path, so an @-mention is just a message it will see on
-  the next tick and may answer then.
+- **Mentions without the events route** are just messages seen on the next tick; thread mentions are invisible
+  to the poll. With the route they tick the channel at once.
 
 Next steps, each additive: an events route feeding an inbox table (replaces the poll), a cheap judge that gates
 the expensive turn, one long-lived chat per channel for the monologue, reactions as signal.

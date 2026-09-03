@@ -9,6 +9,7 @@ import { createWatcher, STATE_SCHEMA, TICK_PROMPT, type Ctx } from "./agent.js";
 import { owner, type Principal } from "./principal.js";
 import { createSlack } from "./slack.js";
 import { createCanvas } from "./canvas.js";
+import { createEventsHandler } from "./events.js";
 import { createCanvasStateStore } from "./canvas-state.js";
 import { createStateStore } from "./state.js";
 import { createTools } from "./tools.js";
@@ -30,6 +31,8 @@ const env = (name: string, fallback?: string): string => {
 
 const config = {
   slackToken: env("SLACK_BOT_TOKEN"),
+  /** Enables POST /slack/events (app_mention → immediate tick). Needs a public URL. */
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
   channels: env("AMBIENT_CHANNELS")
     .split(",")
     .map((s) => s.trim())
@@ -180,16 +183,37 @@ app.get("/channels/:id/monologue", async (c) => {
   return c.json({ chatId: chat.id, messages });
 });
 
-/** Fire the channel's schedule now (through the same path the cron uses). */
-app.post("/channels/:id/tick", async (c) => {
-  const principal: Principal = { channel: c.req.param("id") };
+/** Make the channel's schedule due and run the cron pass now — the same path the cadence uses. */
+async function tickNow(channel: string) {
+  const principal: Principal = { channel };
   const schedules = await runtime.listSchedules({ principal });
   const s = schedules.find((x) => x.agent === "watcher" && x.enabled);
-  if (!s) return c.json({ error: "no schedule" }, 404);
+  if (!s) return null;
   await runtime.runScheduleNow({ principal, id: s.id });
-  const result = await runtime.cron();
-  return c.json(result);
+  return runtime.cron();
+}
+
+/** Fire the channel's schedule now. */
+app.post("/channels/:id/tick", async (c) => {
+  const result = await tickNow(c.req.param("id"));
+  return result ? c.json(result) : c.json({ error: "no schedule" }, 404);
 });
+
+// Slack Events API: app_mention only. Acknowledged at once; the tick runs after.
+if (config.signingSecret) {
+  const events = createEventsHandler({
+    signingSecret: config.signingSecret,
+    isWatched,
+    state,
+    botUserId: () => slack.botUserId(),
+    wake: (channel) => {
+      void tickNow(channel).catch((e) => console.error(`[ambient] ${channel}: wake failed:`, e));
+    },
+  });
+  app.post("/slack/events", (c) => events(c.req.raw));
+} else {
+  console.log("[ambient] SLACK_SIGNING_SECRET unset — @-mentions are seen on the next tick, not immediately");
+}
 
 app.route("/latch", latch);
 
