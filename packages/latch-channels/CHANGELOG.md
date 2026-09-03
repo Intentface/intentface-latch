@@ -1,5 +1,82 @@
 # @intentface/latch-channels
 
+## 0.9.0
+
+### Minor Changes
+
+- f225b17: One turn kernel for direct-message surfaces. `createTurnKernel(config, surface)`
+  (package root) now owns what Telegram and WhatsApp each re-implemented: dedupe,
+  the identity gate with stash + post-link replay, thread epochs, the `/new`
+  `/compact` `/cancel` `/status` `/help` commands, questionnaires, the
+  one-turn-per-chat lease (`withTurnLease`), media folding, rendering the answer,
+  approvals and button taps. Telegram and WhatsApp are now a webhook parser plus a
+  `Surface` each; a new DM platform is the same two pieces. WhatsApp gains the full
+  command set and (with a `thread` store) `/new`; its approval taps are verified
+  against fresh history like Telegram's.
+  
+  **Telegram posts once at finish.** Progressive `editMessageText` streaming is
+  gone (never edit-to-mimic): the answer arrives as one HTML message (plain on an
+  entity-parse failure), split past 4000 chars, with "typing…" refreshed while the
+  turn runs. Removed: `renderTelegramStream`, `TelegramStreamOptions/Result`,
+  `MAX_TELEGRAM_TEXT_CHARS`, `TELEGRAM_TEXT_TRUNCATION_NOTICE`. Link notices use
+  an inline URL button instead of an anchor in the text.
+  
+  **Slack sheds its unused seams.** The multi-tenant `resolve()`/`SlackTenant`/
+  `SlackPeek` seam is removed — `principal`, `botToken`, `runtime`, `botUserId`
+  and `teamId` are required; `runMessage`/`resumeApproval` lose `tenant`.
+  `feedback`/`onFeedback`/`feedbackActions`/`FEEDBACK_ACTION` and
+  `suggestedPrompts` (app_home_opened) are removed, as are the unused client
+  methods `sessionsRename`, `setSuggestedPrompts`, `conversationsInfo`, `authTest`.
+  `authorizeUser` returns the shared `AuthResult<P>`.
+  
+  Also removed: `TelegramAuthResult`, `WhatsappAuthResult` (use `AuthResult`).
+  `splitWhatsappText` stays as an alias of the kernel's `splitText`.
+- ebc0afd: One active run per chat, enforced in storage. `createRun` / `claimRun` throw
+  `ChatBusyError` (code `chat_busy`, `retryAfterMs`) when the chat already has a
+  live active run; the drizzle adapters back it with a partial unique index on
+  `latch_runs (chat_id) WHERE status = 'active'` (both dialects; existing
+  duplicates are marked `superseded` on migrate), and supersede an active run
+  whose lease — or, for non-durable runs, a 10-minute stale window — has expired
+  before opening the next, bumping its fencing token so the old worker's late
+  writes are refused. `reclaimRun` returns null for a crashed run whose chat has
+  since moved on. New optional `StorageAdapter.openTurn` opens the run and
+  appends the user message in one transaction (the shipped adapters implement it;
+  the SQLite adapter now uses real transactions on async drivers such as libsql),
+  so a refused message leaves no trace and a crash can't leave a run without its
+  message; the HTTP handler maps the refusal to 409 with
+  `Retry-After`; the channel kernel renders it as "still working". Two tabs, a
+  webhook retry racing a reply, or a schedule firing mid-conversation can no
+  longer interleave one history — on every surface, not only in channels.
+- 700184d: One turn per chat is core's storage invariant now (`ChatBusyError`, since
+  latch-core 0.9), so the channels stop asking hosts to guard it: Slack's
+  `claimTurn` / `releaseTurn` are optional (the kernel's already were), and a
+  busy refusal from core renders as the same quiet notice the lease produced —
+  in DM surfaces, Slack messages, approval clicks and connect resumes. Hosts on
+  the shipped storage adapters can drop their turn-lease table; a host on an
+  adapter without the invariant may still wire `claimTurn`.
+- 5b9214b: Slack: never edit-to-mimic streaming. The fallback engine no longer fakes
+  streaming with `chat.update` edits — when native streaming is unavailable (or a
+  live stream idle-expires mid-turn) the turn buffers and the finished answer is
+  posted exactly once. A stream that dies mid-turn is now deleted (previously it
+  lingered as a stranded "⚠️ Thinking" message above the answer) and the engine
+  change is reported through `onStreamMode`, so binding health reflects the
+  engine that actually finished the turn. The `chat:write.customize` display
+  identity (`botName`/`iconEmoji` config, `identity` stream option) is removed —
+  every message now renders as the native bot, so streamed and fallback messages
+  share one avatar. `fallbackUpdateIntervalMs` is gone with the edit loop, and
+  the Slack client gains `deleteMessage` (`chat.delete`).
+
+### Patch Changes
+
+- Updated dependencies [ebc0afd]
+- Updated dependencies [d062dd2]
+- Updated dependencies [8745142]
+- Updated dependencies [cbbd775]
+- Updated dependencies [78a40e3]
+- Updated dependencies [7d3c553]
+- Updated dependencies [b22b3cf]
+  - @intentface/latch-core@0.9.0
+
 ## 0.8.1
 
 ### Patch Changes

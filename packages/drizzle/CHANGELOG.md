@@ -1,5 +1,95 @@
 # @intentface/latch-drizzle
 
+## 0.9.0
+
+### Minor Changes
+
+- 42768f6: One agent-record schema. `@intentface/latch-agent-builder` now exports
+  `AgentRecordSchema` (zod, also on the browser-safe `./record` subpath) plus
+  `normalizeAgentRecord` / `parseAgentRecord` / `parseAgentRef`; the `AgentRecord`
+  type is inferred from it. The record gains `exec.memory` (core `MemoryConfig`)
+  and `attachedEvals`; the never-executed `exec.codeMode` is gone. The builder's
+  `save_agent` takes the record itself (the `capabilities` → `exec` remap and the
+  top-level `authoredTools`/`effort` fields are gone — write `exec.*`), so the
+  model, an editor, and a host validator all speak one shape. `CapabilitySupport`
+  adds `renderTools` and opt-in `memory`. `AgentBuilderExtension.validateSave`
+  now receives `(principal, record)`; `SaveAgentInput` is removed.
+  `AgentBuilderStore` adds `getRecord(p, name)` (pin-aware) and
+  `listMemoryEnabledNames()`.
+  
+  Drizzle: `latch_agents` gains an `attached_evals` column (idempotent ALTER; DBs
+  written by latch-platform already have it) and the agent store round-trips
+  `attachedEvals`, resolves `exec.memory`, and implements the two new store
+  methods. `byOwners` filters by name at the query.
+- ebc0afd: One active run per chat, enforced in storage. `createRun` / `claimRun` throw
+  `ChatBusyError` (code `chat_busy`, `retryAfterMs`) when the chat already has a
+  live active run; the drizzle adapters back it with a partial unique index on
+  `latch_runs (chat_id) WHERE status = 'active'` (both dialects; existing
+  duplicates are marked `superseded` on migrate), and supersede an active run
+  whose lease — or, for non-durable runs, a 10-minute stale window — has expired
+  before opening the next, bumping its fencing token so the old worker's late
+  writes are refused. `reclaimRun` returns null for a crashed run whose chat has
+  since moved on. New optional `StorageAdapter.openTurn` opens the run and
+  appends the user message in one transaction (the shipped adapters implement it;
+  the SQLite adapter now uses real transactions on async drivers such as libsql),
+  so a refused message leaves no trace and a crash can't leave a run without its
+  message; the HTTP handler maps the refusal to 409 with
+  `Retry-After`; the channel kernel renders it as "still working". Two tabs, a
+  webhook retry racing a reply, or a schedule firing mid-conversation can no
+  longer interleave one history — on every surface, not only in channels.
+- 8745142: Remove configuration the runtime never read. `RuntimeConfig.secrets` (the
+  vault resolver belongs on `createMcpConnections`, and tools resolve secrets
+  from `options.context.principal`), `RuntimeConfig.codeModeWrap` and
+  `AgentConfig.codeMode` (never executed), `ContextDefinition.toolsContext`
+  (the runtime already hands every tool `{ ...runtimeContext, principal, run,
+  writer }` as `options.context`), and the deprecated `runtime` alias on the
+  agent factory argument (use `context`). Agent-builder's `model` factory
+  receives `{ context, principal }` instead of `{ runtime, principal }`.
+  
+  Drizzle: the unused message-persistence override is gone — the `messages`
+  option on both `createSqliteAdapter` and `createPostgresAdapter`, and the
+  `MessageStore` type export from the package barrel.
+- b22b3cf: Limits — per org / user / agent budgets on turns, tokens and cost.
+  `createRuntime({ limits })` takes a `LatchLimits` seam: `limitsFor({ principal,
+  agent, trigger })` names the counters a turn counts against and their caps
+  (fixed, epoch-aligned windows), and a `LimitStore` holds the counters. The
+  runtime refuses at admission with `LimitExceededError` (stable code
+  `limit_exceeded`, `retryAfterMs`; the HTTP handler maps it to 429 with
+  `Retry-After`), stops the tool loop once this turn's tokens reach the tightest
+  remaining token budget, and settles tokens + cost on finish — resumes and
+  subagent turns included. `runtime.cron()` prunes dead windows.
+  `@intentface/latch-drizzle` adds `latch_limit_counters` (both dialects) and
+  `createSqliteLimitStore` / `createPostgresLimitStore`.
+
+### Patch Changes
+
+- 240a4ce: One adapter body, two dialect wrappers. `createSqliteAdapter` and
+  `createPostgresAdapter` shared ~460 duplicated lines that differed only in the
+  database type, the schema import, and whether a message batch runs in a
+  transaction; the same for the two secret stores. Both now delegate to
+  `adapter.shared.ts` / `secret-store.shared.ts` (the `memory-job-store` pattern),
+  with the transaction choice as a `withTx` seam: Postgres wraps the batch,
+  SQLite stays sequential for synchronous drivers. Public names and behaviour are
+  unchanged.
+  
+  Also: `createRun`, `claimRun` and `createSchedule` read the inserted row back
+  with `.returning()` instead of a second SELECT; and `migrateWith` recognises
+  "column already exists" when a driver wraps it (drizzle's better-sqlite3
+  binding throws a `DrizzleError` with the SqliteError as `cause`), so its
+  idempotent ALTERs no longer fail on a re-run against that driver.
+- Updated dependencies [d96d6d8]
+- Updated dependencies [42768f6]
+- Updated dependencies [ebc0afd]
+- Updated dependencies [d062dd2]
+- Updated dependencies [8745142]
+- Updated dependencies [cbbd775]
+- Updated dependencies [78a40e3]
+- Updated dependencies [7d3c553]
+- Updated dependencies [b22b3cf]
+  - @intentface/latch-agent-builder@0.9.0
+  - @intentface/latch-core@0.9.0
+  - @intentface/latch-memory@0.9.0
+
 ## 0.8.1
 
 ### Patch Changes
