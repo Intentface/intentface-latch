@@ -59,6 +59,7 @@ async function harness() {
     recentHistory: vi.fn(async () => [{ ts: "50.0", author: "bob", isBot: false, mentionsMe: false, text: "morning", at: "2026-09-03T08:00:00.000Z" }]),
     readThread: vi.fn(async () => []),
     post: vi.fn(async () => ({ ts: "999.0" })),
+    setThinking: vi.fn(async () => {}),
   };
   const tools = createTools({ slack, state, maxPostsPerDay: 5 });
 

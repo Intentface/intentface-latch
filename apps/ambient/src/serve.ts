@@ -5,13 +5,14 @@ import { drizzle } from "drizzle-orm/libsql";
 import { DAY_MS, defineContext, isChatBusyError } from "@intentface/latch-core";
 import { createSqliteAdapter, createSqliteLimitStore, migrate, schema } from "@intentface/latch-drizzle";
 import { createLatchHonoApp } from "@intentface/latch-server/hono";
-import { createWatcher, HEARTBEAT_PROMPT, STATE_SCHEMA, TICK_PROMPT, type Ctx } from "./agent.js";
+import { createWatcher, STATE_SCHEMA, type Ctx } from "./agent.js";
 import { createCanvas } from "./canvas.js";
 import { createCanvasStateStore } from "./canvas-state.js";
 import { createEventsHandler } from "./events.js";
 import { owner, type Principal } from "./principal.js";
 import { createSlack } from "./slack.js";
 import { createStateStore } from "./state.js";
+import { chatIdOf, createTick } from "./tick.js";
 import { createTicker } from "./ticker.js";
 import { createTriage } from "./triage.js";
 import { createTools } from "./tools.js";
@@ -76,9 +77,6 @@ const state =
     : sqliteState;
 const tools = createTools({ slack, state, maxPostsPerDay: config.maxPostsPerDay });
 
-/** The channel's one long-lived chat: its monologue. */
-const chatIdOf = (channel: string) => `ambient_${channel}`;
-
 const limitStore = createSqliteLimitStore(db);
 const policiesFor = (channel: string) => [
   { key: `channel:${channel}`, windowMs: DAY_MS, max: { tokens: config.tokensPerDay }, label: "this channel's daily token budget" },
@@ -130,34 +128,7 @@ const triage = createTriage({
   maxDeferMs: config.maxDeferMs,
 });
 
-/**
- * One more turn of the channel's monologue: a tick when the inbox has events
- * worth it, a heartbeat when the ticker fires on an empty inbox. Returns true
- * when more arrived meanwhile. Every caller goes through the ticker, so a
- * channel never runs two at once.
- */
-async function tick(channel: string): Promise<boolean> {
-  const principal: Principal = { channel };
-  const { events, oldestReceivedAt } = await state.peek(channel);
-  let prompt = HEARTBEAT_PROMPT;
-  if (events.length > 0) {
-    const verdict = await triage.decide({ channel, events, stateDoc: (await state.load(channel)).doc, oldestAgeMs: oldestReceivedAt ? Date.now() - oldestReceivedAt : 0 });
-    await state.logTriage(channel, { ...verdict, events: events.length, ...verdict.usage });
-    if (!verdict.act) {
-      console.log(`[ambient] ${channel}: deferred ${events.length} event(s) — ${verdict.reason}`);
-      return false;
-    }
-    prompt = TICK_PROMPT;
-  }
-  await runtime.runAgent({ principal, agent: "watcher", prompt, threadId: chatIdOf(channel), blockGated: false });
-  // Keep the monologue bounded: fold old thinking into a summary; the state document carries the facts.
-  const history = await runtime.loadHistory({ chatId: chatIdOf(channel), principal });
-  if (history.length >= config.compactAfter) {
-    const r = await runtime.compactChat({ chatId: chatIdOf(channel), principal, focus: "Keep what you were watching and why; the state document holds the facts." });
-    if (r) console.log(`[ambient] ${channel}: monologue compacted (${r.compacted} messages)`);
-  }
-  return (await state.pending(channel)) > 0;
-}
+const tick = createTick({ runtime, state, triage, slack, compactAfter: config.compactAfter });
 
 const ticker = createTicker({
   quietMs: config.quietMs,

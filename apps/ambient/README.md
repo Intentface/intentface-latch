@@ -35,6 +35,10 @@ Slack events ──▶ POST /slack/events ──▶ inbox (SQLite) ──▶ tic
   means **defer, never discard**: events stay queued and fold into the next batch; after 30 minutes they are read
   regardless. Every verdict is logged with its reason (`/channels/:id/triage`) and the judge's tokens count against
   the channel's budget like any other spend.
+- **Working signal:** while a mention is being handled its thread root gets a 👀 reaction, removed when the tick ends
+  whatever the agent decided. Slack's native "is thinking…" status is attempted too, best-effort: Slack documents
+  it for DM/assistant threads only (`method_not_supported_for_channel_type` in channels), so the reaction is the
+  signal you can rely on.
 - **Heartbeat:** an hourly tick on quiet channels, for overdue checks only.
 
 ## Run

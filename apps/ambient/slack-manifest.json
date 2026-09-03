@@ -8,6 +8,9 @@
     "bot_user": {
       "display_name": "Ambient",
       "always_online": false
+    },
+    "agent_view": {
+      "agent_description": "Keeps the channel's notes and answers when tagged."
     }
   },
   "oauth_config": {
@@ -19,6 +22,8 @@
         "groups:history",
         "groups:read",
         "reactions:read",
+        "reactions:write",
+        "assistant:write",
         "users:read",
         "chat:write",
         "canvases:read",

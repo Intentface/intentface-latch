@@ -21,6 +21,7 @@ async function build(history: ChannelMessage[] = []) {
     recentHistory: vi.fn(async () => history),
     readThread: vi.fn(async () => []),
     post: vi.fn(async () => ({ ts: `${Math.random()}` })),
+    setThinking: vi.fn(async () => {}),
   };
   const tools = createTools({ slack, state, maxPostsPerDay: 2, now: () => 1_000_000 });
   const call = (name: string, input: unknown, channel = "C1") =>

@@ -29,6 +29,13 @@ export interface Slack {
   recentHistory(channel: string, limit?: number): Promise<ChannelMessage[]>;
   readThread(channel: string, threadTs: string): Promise<ChannelMessage[]>;
   post(channel: string, text: string, threadTs?: string): Promise<{ ts: string }>;
+  /**
+   * "Working on it" on a thread: a 👀 reaction on the thread root (reliable) and
+   * Slack's native "is thinking…" status (assistant.threads.setStatus —
+   * documented for DM/assistant threads only, so best-effort in channels).
+   * Both are cleared with `on: false`.
+   */
+  setThinking(channel: string, threadTs: string, on: boolean): Promise<void>;
 }
 
 const isoOf = (ts: string): string => new Date(Number(ts) * 1000).toISOString();
@@ -138,6 +145,20 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
       const out: ChannelMessage[] = [];
       for (const m of raw) out.push(await toMessage({ ...m, threadTs }));
       return out;
+    },
+
+    async setThinking(channel, threadTs, on) {
+      const quiet = (p: Promise<unknown>) => p.catch(() => undefined);
+      await Promise.all([
+        quiet(api.setStatus({ channel_id: channel, thread_ts: threadTs, status: on ? "is reading…" : "" })),
+        quiet(
+          fetchImpl(`https://slack.com/api/reactions.${on ? "add" : "remove"}`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify({ channel, timestamp: threadTs, name: "eyes" }),
+          }),
+        ),
+      ]);
     },
 
     async post(channel, text, threadTs) {
