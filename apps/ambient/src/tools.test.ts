@@ -15,6 +15,7 @@ async function build(messages: ChannelMessage[] = []) {
   await state.migrate();
   const slack: Slack = {
     botUserId: async () => "UBOT",
+    myChannels: async () => [{ id: "C1", name: "general" }],
     userName: async (id) => (id === "U1" ? "anna" : id ?? "someone"),
     channelName: async () => "general",
     readSince: vi.fn(async (_c, cursor) => messages.filter((m) => !cursor || Number(m.ts) > Number(cursor))),

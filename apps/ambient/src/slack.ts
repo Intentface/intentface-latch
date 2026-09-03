@@ -21,6 +21,8 @@ export interface ChannelMessage {
 export interface Slack {
   /** The bot's own user id (auth.test, cached). */
   botUserId(): Promise<string>;
+  /** Public + private channels the bot is a member of (not archived). */
+  myChannels(): Promise<{ id: string; name: string }[]>;
   userName(id: string | undefined): Promise<string>;
   channelName(channel: string): Promise<string>;
   /** Top-level messages newer than `cursor` (all of them when null), oldest first. */
@@ -90,6 +92,26 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   return {
     botUserId,
     userName,
+    async myChannels() {
+      const out: { id: string; name: string }[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        const r = await get("users.conversations", {
+          types: "public_channel,private_channel",
+          exclude_archived: "true",
+          limit: "200",
+          ...(cursor ? { cursor } : {}),
+        });
+        for (const c of (r.channels as { id: string; name?: string }[] | undefined) ?? []) {
+          const name = c.name ?? c.id;
+          channels.set(c.id, name);
+          out.push({ id: c.id, name });
+        }
+        cursor = (r.response_metadata as { next_cursor?: string } | undefined)?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      return out;
+    },
     async channelName(channel) {
       const hit = channels.get(channel);
       if (hit) return hit;

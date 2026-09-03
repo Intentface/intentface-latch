@@ -9,7 +9,8 @@ import type { StateStore } from "./state.js";
  */
 export function createEventsHandler(deps: {
   signingSecret: string;
-  isWatched: (channel: string) => boolean;
+  /** May refresh membership before answering (a mention from an unknown channel means we are in it). */
+  isWatched: (channel: string) => boolean | Promise<boolean>;
   state: StateStore;
   /** Make the channel's tick run now (fire-and-forget; must not throw). */
   wake: (channel: string) => void;
@@ -37,7 +38,7 @@ export function createEventsHandler(deps: {
     if (body.type !== "event_callback" || body.event?.type !== "app_mention") return new Response("ignored");
 
     const e = body.event as { channel?: string; ts?: string; thread_ts?: string; user?: string; text?: string; bot_id?: string };
-    if (!e.channel || !e.ts || !deps.isWatched(e.channel) || e.bot_id) return new Response("ignored");
+    if (!e.channel || !e.ts || e.bot_id || !(await deps.isWatched(e.channel))) return new Response("ignored");
     if (deps.botUserId && e.user) {
       // Self-filter is best effort: an auth.test hiccup must not drop a mention.
       const me = await deps.botUserId().catch(() => "");

@@ -18,14 +18,16 @@ published package surface alone, in a shape the platform does not use.
 ## Run
 
 ```bash
-cp apps/ambient/.env.example apps/ambient/.env   # fill in the token, channels, a model key
+cp apps/ambient/.env.example apps/ambient/.env   # fill in the token, signing secret, a model key
 pnpm --filter @intentface/latch-ambient serve
 ```
 
 Slack app: create one from [`slack-manifest.json`](./slack-manifest.json) (api.slack.com/apps → Create New App →
 From a manifest), install it to the workspace, copy the Bot User OAuth Token into `SLACK_BOT_TOKEN` and the
-Signing Secret into `SLACK_SIGNING_SECRET`, and `/invite @Ambient` in each watched channel. Canvas scopes are
-included so `AMBIENT_STATE=canvas` needs no reinstall; `groups:*` lets it watch private channels.
+Signing Secret into `SLACK_SIGNING_SECRET`, then `/invite @Ambient` in any channel: **membership is the
+configuration**. The app lists the channels the bot is in at boot and every five minutes, creates a schedule for
+each new one and drops the schedule when kicked (state and history stay, under the channel's partition). Canvas
+scopes are included so `AMBIENT_STATE=canvas` needs no reinstall; `groups:*` lets it watch private channels.
 
 **Tagging it.** The manifest subscribes to one event, `app_mention`. A mention is queued and the channel's
 tick runs immediately, so the reply arrives in seconds through the same read → think → update → speak loop.
@@ -49,7 +51,7 @@ Set `AMBIENT_ADMIN_TOKEN` to require `Authorization: Bearer …` on those routes
 | Need | Latch piece |
 | --- | --- |
 | One partition per channel | `Principal = { channel }`; owner key is the channel id. No org, no user. |
-| Waking up | `runtime.schedule()` per channel at boot (idempotent); fires via `runtime.cron()` every 30 s in-process. |
+| Waking up | `runtime.schedule()` per channel the bot is in (idempotent, dropped on leave); fires via `runtime.cron()` every 30 s in-process; `runScheduleNow` on a mention. |
 | State into the prompt | `context.build` loads the document; the agent factory renders instructions from it each turn. |
 | Tools that cannot escape the channel | Every tool reads the channel from `options.context.principal`, never from model input. |
 | Cost ceiling | `limits`: one token budget per channel per day. |

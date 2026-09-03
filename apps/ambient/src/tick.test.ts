@@ -69,6 +69,7 @@ async function harness() {
   ];
   const slack: Slack = {
     botUserId: async () => "UBOT",
+    myChannels: async () => [{ id: "C1", name: "general" }],
     userName: async (id) => id ?? "someone",
     channelName: async (c) => (c === "C1" ? "general" : "other"),
     readSince: vi.fn(async (_c, cursor) => messages.filter((m) => !cursor || Number(m.ts) > Number(cursor))),

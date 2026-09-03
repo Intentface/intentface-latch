@@ -13,6 +13,7 @@ import { createEventsHandler } from "./events.js";
 import { createCanvasStateStore } from "./canvas-state.js";
 import { createStateStore } from "./state.js";
 import { createTools } from "./tools.js";
+import { createWatchlist } from "./watchlist.js";
 
 /**
  * Ambient channel agents on Latch, the simple version: one agent per Slack
@@ -21,7 +22,8 @@ import { createTools } from "./tools.js";
  *
  *   pnpm --filter @intentface/latch-ambient serve
  *
- * Needs SLACK_BOT_TOKEN, AMBIENT_CHANNELS and a model key (see .env.example).
+ * Needs SLACK_BOT_TOKEN and a model key (see .env.example). It watches every
+ * channel the bot is a member of: /invite it to start, /kick it to stop.
  */
 const env = (name: string, fallback?: string): string => {
   const v = process.env[name] ?? fallback;
@@ -33,10 +35,8 @@ const config = {
   slackToken: env("SLACK_BOT_TOKEN"),
   /** Enables POST /slack/events (app_mention → immediate tick). Needs a public URL. */
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  channels: env("AMBIENT_CHANNELS")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
+  /** How often to re-list the channels the bot is a member of. */
+  discoveryMs: Number(env("AMBIENT_DISCOVERY_MS", String(5 * 60_000))),
   model: env("AMBIENT_MODEL", "claude-sonnet-4-6"),
   every: env("AMBIENT_EVERY", "*/10 * * * *"),
   maxPostsPerDay: Number(env("AMBIENT_MAX_POSTS_PER_DAY", "5")),
@@ -47,7 +47,6 @@ const config = {
   db: env("AMBIENT_DB", "file:./ambient.db"),
   port: Number(env("PORT", "8790")),
 };
-if (config.channels.length === 0) throw new Error("AMBIENT_CHANNELS is empty");
 
 // Storage: Latch's tables and the app's two host tables in the same file.
 const client = createClient({ url: config.db });
@@ -68,7 +67,6 @@ const db = drizzle(client, { schema });
 const slack = createSlack(config.slackToken);
 const tools = createTools({ slack, state, maxPostsPerDay: config.maxPostsPerDay });
 
-const isWatched = (channel: string): boolean => config.channels.includes(channel);
 
 const { app: latch, runtime, stop } = await createLatchHonoApp<Principal, Ctx>({
   storage: createSqliteAdapter<Principal>(db, { owner }),
@@ -115,26 +113,48 @@ const { app: latch, runtime, stop } = await createLatchHonoApp<Principal, Ctx>({
   cronIntervalMs: 30_000,
 });
 
-/** One schedule per watched channel; idempotent across restarts. */
-async function ensureSchedules(): Promise<void> {
-  for (const channel of config.channels) {
-    const principal: Principal = { channel };
-    const existing = await runtime.listSchedules({ principal });
-    const mine = existing.filter((s) => s.agent === "watcher" && s.enabled);
-    if (mine.some((s) => s.cron === config.every)) continue;
-    for (const s of mine) await runtime.unschedule({ principal, id: s.id }); // cadence changed
-    const created = await runtime.schedule({
-      principal,
-      agent: "watcher",
-      cron: config.every,
-      prompt: TICK_PROMPT,
-      // Nobody is here to answer a parked question; every tick still matters.
-      onParked: "fire",
-    });
-    console.log(`[ambient] ${channel}: scheduled ${created.id} (${config.every})`);
-  }
+/** One schedule per watched channel; idempotent across restarts and cadence changes. */
+async function ensureSchedule(channel: string): Promise<void> {
+  const principal: Principal = { channel };
+  const existing = await runtime.listSchedules({ principal });
+  const mine = existing.filter((s) => s.agent === "watcher" && s.enabled);
+  if (mine.some((s) => s.cron === config.every)) return;
+  for (const s of mine) await runtime.unschedule({ principal, id: s.id }); // cadence changed
+  const created = await runtime.schedule({
+    principal,
+    agent: "watcher",
+    cron: config.every,
+    prompt: TICK_PROMPT,
+    // Nobody is here to answer a parked question; every tick still matters.
+    onParked: "fire",
+  });
+  console.log(`[ambient] ${channel}: scheduled ${created.id} (${config.every})`);
 }
-await ensureSchedules();
+
+async function dropSchedules(channel: string): Promise<void> {
+  const principal: Principal = { channel };
+  for (const s of await runtime.listSchedules({ principal })) await runtime.unschedule({ principal, id: s.id });
+}
+
+// Watched channels = channels the bot is in. State and history stay when it
+// leaves (the principal partition is still there if it is invited back).
+const watchlist = createWatchlist({
+  list: () => slack.myChannels(),
+  onAdd: async (ch) => {
+    console.log(`[ambient] watching #${ch.name} (${ch.id})`);
+    await ensureSchedule(ch.id);
+  },
+  onRemove: async (id) => {
+    console.log(`[ambient] left ${id}: schedule dropped`);
+    await dropSchedules(id);
+  },
+  onError: (e) => console.error("[ambient] channel discovery failed:", e),
+});
+await watchlist.refresh();
+const discovery = setInterval(() => void watchlist.refresh(), config.discoveryMs);
+discovery.unref();
+
+const isWatched = (channel: string): boolean => watchlist.has(channel);
 
 // ---- Operator routes -------------------------------------------------------
 // The app's own routes first, then Latch's HTTP surface under /latch (its
@@ -203,7 +223,11 @@ app.post("/channels/:id/tick", async (c) => {
 if (config.signingSecret) {
   const events = createEventsHandler({
     signingSecret: config.signingSecret,
-    isWatched,
+    // A mention from a channel we have not listed yet means we were just invited.
+    isWatched: async (channel) => {
+      if (!watchlist.has(channel)) await watchlist.refresh();
+      return watchlist.has(channel);
+    },
     state,
     botUserId: () => slack.botUserId(),
     wake: (channel) => {
@@ -219,9 +243,11 @@ app.route("/latch", latch);
 
 serve({ fetch: app.fetch, port: config.port });
 console.log(`👁  ambient listening on http://localhost:${config.port}`);
-console.log(`   watching ${config.channels.join(", ")} every "${config.every}" with ${config.model}; state in ${config.stateIn}`);
-console.log(`   curl http://localhost:${config.port}/channels/${config.channels[0]}/state`);
-console.log(`   curl -X POST http://localhost:${config.port}/channels/${config.channels[0]}/tick`);
+const first = watchlist.ids()[0] ?? "<channel id>";
+console.log(`   watching ${watchlist.ids().length} channel(s) every "${config.every}" with ${config.model}; state in ${config.stateIn}`);
+console.log(`   /invite the bot to a channel to watch it; discovery every ${Math.round(config.discoveryMs / 1000)}s`);
+console.log(`   curl http://localhost:${config.port}/channels/${first}/state`);
+console.log(`   curl -X POST http://localhost:${config.port}/channels/${first}/tick`);
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
