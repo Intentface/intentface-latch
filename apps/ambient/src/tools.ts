@@ -33,13 +33,60 @@ const ctxOf = (options: unknown): ToolContext => {
 
 const isoOf = (ts: string) => new Date(Number(ts) * 1000).toISOString();
 
+/**
+ * Reactions are noisy one at a time and meaningful in aggregate. An add and a
+ * remove of the same emoji by the same person on the same message cancel out;
+ * the survivors group per (message, emoji) with who did it. Everything else
+ * passes through unchanged, in order.
+ */
+type FoldedReactions = { kind: "reactions"; ts: string; targetTs: string; emoji: string; userIds: string[]; removed?: boolean };
+
+export function foldReactions(obs: Observation[]): (Observation | FoldedReactions)[] {
+  type Group = { ts: string; targetTs: string; emoji: string; net: Map<string, number> };
+  const groups = new Map<string, Group>();
+  // Keep order: a group sits where its first reaction was.
+  const order: (Observation | { group: Group })[] = [];
+  for (const o of obs) {
+    if (o.kind !== "reaction_added" && o.kind !== "reaction_removed") {
+      order.push(o);
+      continue;
+    }
+    const key = `${o.targetTs}:${o.emoji}`;
+    let g = groups.get(key);
+    if (!g) {
+      groups.set(key, (g = { ts: o.ts, targetTs: o.targetTs, emoji: o.emoji, net: new Map() }));
+      order.push({ group: g });
+    }
+    const who = o.userId ?? "?";
+    g.net.set(who, (g.net.get(who) ?? 0) + (o.kind === "reaction_added" ? 1 : -1));
+  }
+  return order.flatMap((item): (Observation | FoldedReactions)[] => {
+    if (!("group" in item)) return [item];
+    const g = item.group;
+    const added = [...g.net].filter(([, n]) => n > 0).map(([u]) => u);
+    const removed = [...g.net].filter(([, n]) => n < 0).map(([u]) => u);
+    const rows: FoldedReactions[] = [];
+    if (added.length) rows.push({ kind: "reactions", ts: g.ts, targetTs: g.targetTs, emoji: g.emoji, userIds: added });
+    if (removed.length) rows.push({ kind: "reactions", ts: g.ts, targetTs: g.targetTs, emoji: g.emoji, userIds: removed, removed: true });
+    return rows;
+  });
+}
+
 export function createTools(deps: ToolDeps): Record<string, Tool> {
   const now = deps.now ?? Date.now;
 
-  /** Observations with names instead of ids and a readable time. */
+  /** Observations with names instead of ids, reactions folded, and a readable time. */
   async function present(obs: Observation[]) {
     const out = [];
-    for (const o of obs) {
+    for (const o of foldReactions(obs)) {
+      if (o.kind === "reactions") {
+        const who = [];
+        for (const id of o.userIds) who.push(await deps.slack.userName(id));
+        const { userIds, ...rest } = o;
+        void userIds;
+        out.push({ ...rest, at: isoOf(o.ts), who });
+        continue;
+      }
       const { userId, ...rest } = o as Observation & { userId?: string };
       out.push({ ...rest, at: isoOf(o.ts), ...(userId !== undefined ? { who: await deps.slack.userName(userId) } : {}) });
     }
@@ -49,8 +96,8 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
   const read_inbox = tool({
     description:
       "Drain everything that happened in the channel since your last tick, oldest first: new messages, thread replies " +
-      "(`threadTs`), edits and deletions of earlier messages (`targetTs`), reactions added or removed on a message (`emoji`, " +
-      "`targetTs`), and mentions of you (`kind: mention`). Call this first on every tick. The first time you see a channel " +
+      "(`threadTs`), edits and deletions of earlier messages (`targetTs`), reactions grouped per message and emoji " +
+      "(`kind: reactions` — `who` reacted, `removed: true` when taken back), and mentions of you (`kind: mention`). Call this first on every tick. The first time you see a channel " +
       "you also get its recent history as context.",
     inputSchema: z.object({}),
     execute: async (_input, options) => {

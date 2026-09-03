@@ -89,5 +89,7 @@ the busy refusal. No network.
 
 - **Whole-document canvas replace:** a human edit landing between the agent's read and write loses.
 - **In-process debounce timers:** a restart forgets pending timers, but not the inbox — a watched channel with
-  queued events ticks at boot.
+  queued events ticks at boot. A channel that never goes quiet still ticks within four quiet periods (6 min).
+- **Bursts fold before the model sees them:** reactions group per message and emoji, add/remove by the same
+  person cancels. Messages are not folded; a very busy channel simply gets a longer read.
 - **Heartbeat is a plain interval**, not a Latch schedule; on one process that is all it needs.

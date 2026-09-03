@@ -18,6 +18,20 @@ describe("ticker", () => {
     await t.idle("C1");
   });
 
+  it("a channel that never goes quiet still ticks by maxWait", async () => {
+    const run = vi.fn(async () => false);
+    const t = createTicker({ quietMs: 1000, maxWaitMs: 3000, run });
+    for (let i = 0; i < 10; i++) {
+      t.wake("C1");
+      await vi.advanceTimersByTimeAsync(500); // never 1000 ms of quiet
+      if (i === 5) expect(run).toHaveBeenCalledTimes(1); // fired at ~3000 ms
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000); // now quiet → the second batch
+    expect(run).toHaveBeenCalledTimes(2);
+    await t.idle("C1");
+  });
+
   it("a mention runs at once, and a wake during a run re-arms one more tick after it", async () => {
     let release!: () => void;
     const run = vi.fn(() => new Promise<boolean>((r) => (release = () => r(false))));

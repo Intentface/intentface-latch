@@ -1,6 +1,7 @@
 /**
  * Per-channel debounce around "run one tick". Events wake a channel; the tick
- * runs once the channel has been quiet for `quietMs` (a mention runs it now).
+ * runs once the channel has been quiet for `quietMs`, or `maxWaitMs` after the
+ * first wake if the channel never goes quiet (a mention runs it now).
  * One tick at a time per channel: a wake during a run re-arms after it ends,
  * so nothing queued is left behind. Timers are in-process; the inbox is
  * durable, so a restart just runs the tick for whatever is still queued.
@@ -14,6 +15,8 @@ export interface Ticker {
 
 export function createTicker(deps: {
   quietMs: number;
+  /** Upper bound on how long a busy channel can postpone its tick (default 4 × quietMs). */
+  maxWaitMs?: number;
   /** Run one tick. Return true when more is already waiting (run again). */
   run: (channel: string) => Promise<boolean>;
   /** Retry delay when the channel's chat is busy or the tick failed. */
@@ -25,7 +28,16 @@ export function createTicker(deps: {
   const setT = deps.setTimeout ?? globalThis.setTimeout;
   const clearT = deps.clearTimeout ?? globalThis.clearTimeout;
   const retryMs = deps.retryMs ?? 30_000;
-  type Slot = { timer?: ReturnType<typeof globalThis.setTimeout>; running?: Promise<void>; rearm: boolean; waiters: (() => void)[] };
+  const maxWaitMs = deps.maxWaitMs ?? deps.quietMs * 4;
+  const now = () => Date.now();
+  type Slot = {
+    timer?: ReturnType<typeof globalThis.setTimeout>;
+    /** When the current wait started (the first wake since the last tick). */
+    since?: number;
+    running?: Promise<void>;
+    rearm: boolean;
+    waiters: (() => void)[];
+  };
   const slots = new Map<string, Slot>();
   let stopped = false;
 
@@ -51,12 +63,20 @@ export function createTicker(deps: {
     }, delay);
   }
 
+  /** Quiet-period arm that never pushes the tick past `maxWaitMs` from the first wake. */
+  function armDebounced(c: string) {
+    const s = slot(c);
+    s.since ??= now();
+    arm(c, Math.max(0, Math.min(deps.quietMs, s.since + maxWaitMs - now())));
+  }
+
   async function fire(c: string) {
     const s = slot(c);
     if (s.running) {
       s.rearm = true;
       return;
     }
+    s.since = undefined;
     s.running = (async () => {
       // Run until the tick reports nothing more waiting and no wake arrived meanwhile.
       for (;;) {
@@ -86,12 +106,12 @@ export function createTicker(deps: {
         void fire(c);
         return;
       }
-      // A pending immediate fire or a running tick already covers this wake.
+      // A running tick already covers this wake (it re-runs after).
       if (s.running) {
         s.rearm = true;
         return;
       }
-      arm(c, deps.quietMs);
+      armDebounced(c);
     },
     idle(c) {
       const s = slots.get(c);

@@ -37,7 +37,7 @@ describe("ambient tools", () => {
     expect(first.count).toBe(2);
     expect(first.events).toEqual([
       { kind: "message", ts: "100.1", text: "who owns the deploy?", at: "1970-01-01T00:01:40.100Z", who: "anna" },
-      { kind: "reaction_added", ts: "100.2", emoji: "white_check_mark", targetTs: "90.0", at: "1970-01-01T00:01:40.200Z", who: "U2" },
+      { kind: "reactions", ts: "100.2", emoji: "white_check_mark", targetTs: "90.0", at: "1970-01-01T00:01:40.200Z", who: ["U2"] },
     ]);
     expect(first.history).toHaveLength(1);
     expect(first.note).toMatch(/First look/);
@@ -45,6 +45,23 @@ describe("ambient tools", () => {
     expect(second.count).toBe(0);
     expect(second.history).toBeUndefined();
     expect(slack.recentHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pile of reactions folds: same-person add/remove cancels, survivors group per message and emoji", async () => {
+    const { call, state } = await build();
+    await state.push("C1", "r1", { kind: "reaction_added", ts: "1.0", userId: "U1", emoji: "white_check_mark", targetTs: "50.0" });
+    await state.push("C1", "r2", { kind: "reaction_added", ts: "1.1", userId: "U2", emoji: "white_check_mark", targetTs: "50.0" });
+    await state.push("C1", "r3", { kind: "reaction_removed", ts: "1.2", userId: "U1", emoji: "white_check_mark", targetTs: "50.0" });
+    await state.push("C1", "r4", { kind: "reaction_added", ts: "1.3", userId: "U3", emoji: "eyes", targetTs: "50.0" });
+    await state.push("C1", "r5", { kind: "reaction_removed", ts: "1.4", userId: "U4", emoji: "tada", targetTs: "60.0" }); // taken back, added before we watched
+    await state.push("C1", "m1", { kind: "message", ts: "1.5", userId: "U1", text: "done" });
+    const out = (await call("read_inbox", {})) as { events: { kind: string; emoji?: string; who?: unknown; removed?: boolean; targetTs?: string }[] };
+    expect(out.events.map((e) => [e.kind, e.emoji, e.who, e.removed, e.targetTs])).toEqual([
+      ["reactions", "white_check_mark", ["U2"], undefined, "50.0"],
+      ["reactions", "eyes", ["U3"], undefined, "50.0"],
+      ["reactions", "tada", ["U4"], true, "60.0"],
+      ["message", undefined, "anna", undefined, undefined],
+    ]);
   });
 
   it("update_state stores the document and refuses one over the cap", async () => {
