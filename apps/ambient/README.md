@@ -73,7 +73,7 @@ Set `AMBIENT_ADMIN_TOKEN` to require `Authorization: Bearer …` on those routes
 | No two ticks interleave | one active run per chat: a concurrent tick gets `ChatBusyError`; the ticker retries. |
 | State into the prompt | `context.build` loads the document; the agent factory renders instructions from it each turn. |
 | Tools that cannot escape the channel | every tool reads the channel from `options.context.principal`, never from model input. |
-| Cost ceiling | `limits`: one token budget per channel per day. |
+| Cost ceiling | `limits`: one budget per channel per day — **cost** (USD, from the catalog's prices) with a token backstop. A refusal parks the queued events until the window turns; the ticker waits the refusal's retry-after instead of hammering. |
 | Observability | `telemetry.onRunFinished`; `/runs` and `/monologue` read the run log. |
 | Durability | on by default; a tick interrupted by a restart resumes on the next cron sweep, and the inbox is durable. |
 
@@ -98,6 +98,15 @@ pnpm --filter @intentface/latch-ambient test
 State store and inbox, event normalization and the signed route, the debounce ticker (fake timers), the tools,
 canvas plumbing, and two ticks through the runtime on one chat with a scripted model and a fake Slack, including
 the busy refusal. No network.
+
+## Cost
+
+A tick is one turn of a long chat with several tool steps, and every step resends the whole context, so the
+per-tick token count is dominated by what sits in history: earlier tool outputs, fetched pages, the bootstrap
+history. Three things keep it bounded: the monologue compacts every ~24 messages (a few ticks), long texts are
+clipped before the model sees them, and at most one page is fetched per tick. Prompt caching makes most of those
+resent tokens cheap, which is why the budget is in **cost**, not tokens: 500k tokens of a mostly-cached context is
+under a dollar. Watch `/channels/:id/runs` for tokens and cost per tick while tuning.
 
 ## Known limits
 

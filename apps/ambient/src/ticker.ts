@@ -19,8 +19,10 @@ export function createTicker(deps: {
   maxWaitMs?: number;
   /** Run one tick. Return true when more is already waiting (run again). */
   run: (channel: string) => Promise<boolean>;
-  /** Retry delay when the channel's chat is busy or the tick failed. */
+  /** Retry delay when the tick failed (default 30 s). */
   retryMs?: number;
+  /** Per-error retry delay, e.g. a budget refusal's retry-after; undefined → `retryMs`. */
+  retryDelay?: (e: unknown) => number | undefined;
   onError?: (channel: string, e: unknown) => void;
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
@@ -86,7 +88,7 @@ export function createTicker(deps: {
           again = await deps.run(c);
         } catch (e) {
           deps.onError?.(c, e);
-          if (!stopped) arm(c, retryMs);
+          if (!stopped) arm(c, deps.retryDelay?.(e) ?? retryMs);
           break;
         }
         if (stopped || (!again && !s.rearm)) break;

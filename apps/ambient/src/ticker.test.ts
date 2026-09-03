@@ -68,6 +68,16 @@ describe("ticker", () => {
     expect(failing).toHaveBeenCalledTimes(2);
   });
 
+  it("a budget refusal waits its retry-after instead of the default retry", async () => {
+    const run = vi.fn().mockRejectedValueOnce(Object.assign(new Error("limit"), { retryAfterMs: 60_000 })).mockResolvedValue(false);
+    const t = createTicker({ quietMs: 100, run, retryMs: 1000, retryDelay: (e) => (e as { retryAfterMs?: number }).retryAfterMs });
+    t.wake("C1", { now: true });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(run).toHaveBeenCalledTimes(1); // not retried at the default 1 s
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it("channels are independent and stop() cancels pending timers", async () => {
     const run = vi.fn(async () => false);
     const t = createTicker({ quietMs: 100, run });

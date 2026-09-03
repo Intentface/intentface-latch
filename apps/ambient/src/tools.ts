@@ -33,6 +33,10 @@ const ctxOf = (options: unknown): ToolContext => {
 
 const isoOf = (ts: string) => new Date(Number(ts) * 1000).toISOString();
 
+/** Long pastes and bot dumps are clipped: the agent needs the gist, and every character rides along in every later step. */
+const MAX_TEXT = 1200;
+const clip = (t: string) => (t.length > MAX_TEXT ? `${t.slice(0, MAX_TEXT)}… [${t.length - MAX_TEXT} more chars]` : t);
+
 /**
  * Reactions are noisy one at a time and meaningful in aggregate. An add and a
  * remove of the same emoji by the same person on the same message cancel out;
@@ -87,8 +91,8 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
         out.push({ ...rest, at: isoOf(o.ts), who });
         continue;
       }
-      const { userId, ...rest } = o as Observation & { userId?: string };
-      out.push({ ...rest, at: isoOf(o.ts), ...(userId !== undefined ? { who: await deps.slack.userName(userId) } : {}) });
+      const { userId, ...rest } = o as Observation & { userId?: string; text?: string };
+      out.push({ ...rest, ...("text" in rest && typeof rest.text === "string" ? { text: clip(rest.text) } : {}), at: isoOf(o.ts), ...(userId !== undefined ? { who: await deps.slack.userName(userId) } : {}) });
     }
     return out;
   }
@@ -106,7 +110,7 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
       const events = await present(await deps.state.drain(channel));
       let history: Awaited<ReturnType<Slack["recentHistory"]>> | undefined;
       if (state.bootstrappedAt === null) {
-        history = await deps.slack.recentHistory(channel, deps.bootstrapMessages ?? 50);
+        history = (await deps.slack.recentHistory(channel, deps.bootstrapMessages ?? 30)).map((m) => ({ ...m, text: clip(m.text) }));
         await deps.state.markBootstrapped(channel);
       }
       return { count: events.length, events, ...(history ? { history, note: "First look at this channel: recent history for context." } : {}) };

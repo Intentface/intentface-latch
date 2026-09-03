@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { DAY_MS, defineContext, isChatBusyError } from "@intentface/latch-core";
+import { DAY_MS, defineContext, isChatBusyError, isLimitExceededError } from "@intentface/latch-core";
 import { createSqliteAdapter, createSqliteLimitStore, migrate, schema } from "@intentface/latch-drizzle";
 import { createLatchHonoApp } from "@intentface/latch-server/hono";
 import { createWatcher, STATE_SCHEMA, type Ctx } from "./agent.js";
@@ -48,9 +48,11 @@ const config = {
   /** Deferred events are read regardless after this long. */
   maxDeferMs: Number(env("AMBIENT_MAX_DEFER_MS", String(30 * 60_000))),
   /** Compact the monologue once it holds this many messages. */
-  compactAfter: Number(env("AMBIENT_COMPACT_AFTER", "80")),
+  compactAfter: Number(env("AMBIENT_COMPACT_AFTER", "24")),
   maxPostsPerDay: Number(env("AMBIENT_MAX_POSTS_PER_DAY", "5")),
-  tokensPerDay: Number(env("AMBIENT_TOKENS_PER_DAY", "500000")),
+  /** Daily ceilings per channel. Cost is in the pricing seam's currency (USD from models.dev); 0 disables either. */
+  costPerDay: Number(env("AMBIENT_COST_PER_DAY", "2")),
+  tokensPerDay: Number(env("AMBIENT_TOKENS_PER_DAY", "3000000")),
   adminToken: process.env.AMBIENT_ADMIN_TOKEN,
   /** Where the state document lives: the channel canvas (humans can edit it) or SQLite only. */
   stateIn: env("AMBIENT_STATE", "sqlite") as "sqlite" | "canvas",
@@ -78,8 +80,16 @@ const state =
 const tools = createTools({ slack, state, maxPostsPerDay: config.maxPostsPerDay });
 
 const limitStore = createSqliteLimitStore(db);
+// One counter per channel; cost is the honest ceiling (cached prompt tokens are
+// cheap but still count as tokens), the token cap is the backstop when a model
+// has no price.
 const policiesFor = (channel: string) => [
-  { key: `channel:${channel}`, windowMs: DAY_MS, max: { tokens: config.tokensPerDay }, label: "this channel's daily token budget" },
+  {
+    key: `channel:${channel}`,
+    windowMs: DAY_MS,
+    max: { ...(config.costPerDay > 0 ? { cost: config.costPerDay } : {}), ...(config.tokensPerDay > 0 ? { tokens: config.tokensPerDay } : {}) },
+    label: "this channel's daily budget",
+  },
 ];
 
 const { app: latch, runtime, stop, models } = await createLatchHonoApp<Principal, Ctx>({
@@ -133,8 +143,11 @@ const tick = createTick({ runtime, state, triage, slack, compactAfter: config.co
 const ticker = createTicker({
   quietMs: config.quietMs,
   run: tick,
+  // A budget refusal is not an error to retry every 30 s: wait for the window to turn.
+  retryDelay: (e) => (isLimitExceededError(e) ? e.retryAfterMs + 1000 : undefined),
   onError: (channel, e) => {
     if (isChatBusyError(e)) return console.log(`[ambient] ${channel}: tick already running, will retry`);
+    if (isLimitExceededError(e)) return console.warn(`[ambient] ${channel}: ${e.message} (queued events wait)`);
     console.error(`[ambient] ${channel}: tick failed:`, e);
   },
 });

@@ -114,7 +114,7 @@ describe("ticks on the channel's long-lived chat", () => {
     expect(first.answer).toContain("open");
     expect(await state.pending("C1")).toBe(0);
     expect((await state.load("C1")).doc).toBe(DOC);
-    expect(slack.recentHistory).toHaveBeenCalledWith("C1", 50); // first look → bootstrap
+    expect(slack.recentHistory).toHaveBeenCalledWith("C1", 30); // first look → bootstrap
     expect(slack.post).not.toHaveBeenCalled();
     expect(systemPrompts[0]).toContain("#general");
     expect(systemPrompts[0]).toContain("(empty — you have not written one yet)");
