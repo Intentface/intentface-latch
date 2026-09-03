@@ -71,6 +71,25 @@ describe("slack events route", () => {
     expect(await state.takeMentions("C2")).toEqual([]);
   });
 
+  it("a failing self-check does not drop the mention", async () => {
+    const state = createStateStore(createClient({ url: ":memory:" }));
+    await state.migrate();
+    const wake = vi.fn();
+    const handler = createEventsHandler({
+      signingSecret: SECRET,
+      isWatched: () => true,
+      state,
+      wake,
+      botUserId: async () => {
+        throw new Error("slack:auth.test failed: invalid_auth");
+      },
+      now: () => NOW,
+    });
+    expect((await handler(signed(mention()))).status).toBe(200);
+    expect(wake).toHaveBeenCalledWith("C1");
+    expect(await state.takeMentions("C1")).toHaveLength(1);
+  });
+
   it("the same mention delivered twice is queued once", async () => {
     const { handler, state } = await build();
     await handler(signed(mention()));

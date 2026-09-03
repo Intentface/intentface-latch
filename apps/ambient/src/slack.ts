@@ -64,7 +64,13 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   }
 
   const botUserId = (): Promise<string> => {
-    self ??= get("auth.test", {}).then((r) => String(r.user_id ?? ""));
+    // Cached on success only, so a transient failure is retried next call.
+    self ??= get("auth.test", {})
+      .then((r) => String(r.user_id ?? ""))
+      .catch((e: unknown) => {
+        self = undefined;
+        throw e;
+      });
     return self;
   };
 

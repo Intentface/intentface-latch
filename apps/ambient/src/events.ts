@@ -38,7 +38,11 @@ export function createEventsHandler(deps: {
 
     const e = body.event as { channel?: string; ts?: string; thread_ts?: string; user?: string; text?: string; bot_id?: string };
     if (!e.channel || !e.ts || !deps.isWatched(e.channel) || e.bot_id) return new Response("ignored");
-    if (deps.botUserId && e.user && e.user === (await deps.botUserId())) return new Response("ignored");
+    if (deps.botUserId && e.user) {
+      // Self-filter is best effort: an auth.test hiccup must not drop a mention.
+      const me = await deps.botUserId().catch(() => "");
+      if (me && e.user === me) return new Response("ignored");
+    }
 
     await deps.state.addMention(e.channel, {
       ts: e.ts,
