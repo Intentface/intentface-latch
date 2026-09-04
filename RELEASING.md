@@ -5,10 +5,18 @@ Everything is driven by
 [changesets](https://github.com/changesets/changesets); no one runs
 `npm publish` by hand.
 
-Publishing needs one secret: `NPM_TOKEN`, an npm **automation** token for the
-`@intentface` organization. A classic or granular token with publish rights also
-works, but only automation tokens skip the one-time-password prompt, which would
-hang the job instead of failing it.
+Publishing needs one secret: `NPM_TOKEN`, a **granular** access token for the
+`@intentface` organization with read/write on the scope and **2FA bypass**
+enabled (without that, the job hangs on a one-time-password prompt instead of
+failing). Classic tokens, including the automation tokens this kind of workflow
+used for years, were
+[revoked in December 2025](https://github.blog/changelog/2025-12-09-npm-classic-tokens-revoked-session-based-auth-and-cli-token-management-now-available/)
+and cannot be recreated.
+
+**The token is a bootstrap, not the destination.** A granular write token now
+[expires after 90 days at most](https://github.blog/changelog/2025-11-05-npm-security-update-classic-token-creation-disabled-and-granular-token-changes/),
+so a token-based release breaks quarterly until someone rotates it. See
+[Trusted publishing](#trusted-publishing-the-way-off-the-token-treadmill).
 
 ## The flow
 
@@ -116,6 +124,27 @@ full install died on `@intentface/chat` — published from another repository,
 which this repo's `GITHUB_TOKEN` may not read. On the public registry that
 resolves like any other dependency.)
 
+## Trusted publishing, the way off the token treadmill
+
+npm's OIDC flow ([trusted publishing](https://docs.npmjs.com/trusted-publishers/))
+authenticates the workflow itself rather than a secret, so there is nothing to
+rotate and nothing to leak. It works from a private repository. It is where this
+should end up.
+
+The catch is that it cannot perform a package's **first** publish: you authorize
+a publisher in a package's settings on npmjs.com, and those settings do not
+exist until the package does. So the order is fixed:
+
+1. Publish once with `NPM_TOKEN`, creating all ten packages.
+2. For each package, add a trusted publisher (`Intentface/intentface-latch`,
+   workflow `release.yml`). `npm trust github` can do this from the terminal
+   instead of ten trips through the web UI.
+3. In `release.yml`, add `id-token: write` to `permissions` and a step that
+   upgrades the npm CLI (`npm install -g npm@latest`) — OIDC needs 11.5.1 or
+   later, and the CLI bundled with `setup-node` is older. GitHub-hosted runners
+   only.
+4. Delete the `NPM_TOKEN` secret and its `NODE_AUTH_TOKEN` line.
+
 ## Provenance is off, and why
 
 npm can sign each tarball against the workflow run that built it, which is what
@@ -124,6 +153,9 @@ npm [stopped accepting provenance from private source
 repositories](https://github.blog/changelog/2023-07-25-publishing-with-npm-provenance-from-private-source-repositories-is-no-longer-supported/)
 in July 2023. Enabling it here would not degrade quietly — the registry rejects
 the attestation and the publish fails.
+
+This is a property of the repository, not of the token: provenance stays
+unavailable under trusted publishing too, which npm skips rather than fails on.
 
 If this repository ever goes public, it becomes a two-line change: add
 `id-token: write` to the job's `permissions` and `NPM_CONFIG_PROVENANCE: "true"`

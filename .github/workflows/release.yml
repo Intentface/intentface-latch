@@ -63,9 +63,15 @@ jobs:
           title: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # An npm **automation** token. A classic or granular token with
-          # publish rights also works, but only automation tokens skip the
-          # one-time-password prompt that would hang the job.
+          # A granular npm token, scoped to @intentface with read/write and
+          # **2FA bypass** on — without the bypass this hangs on an OTP prompt.
+          # Classic/automation tokens were revoked in December 2025.
+          #
+          # Granular write tokens expire in 90 days or less, so this is meant to
+          # be temporary: once the packages exist on npm, authorize this
+          # workflow as a trusted publisher on each of them and switch to OIDC
+          # (add `id-token: write`, upgrade the npm CLI to >= 11.5.1, drop this
+          # secret). RELEASING.md has the steps.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # NOT set: NPM_CONFIG_PROVENANCE. npm stopped accepting provenance
           # from private source repositories in July 2023 — the registry
