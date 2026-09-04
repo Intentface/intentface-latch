@@ -78,7 +78,17 @@ consequences worth keeping in mind:
 - The durable fix is either reaching 1.0.0 (where `^1.2.0` spans every 1.x) or
   making `latch-core` a `peerDependency` of the packages that need one shared
   instance — the only mechanism that *guarantees* a single copy rather than
-  making duplication unlikely. Worth deciding at or before 1.0.
+  making duplication unlikely.
+
+**We stay below 1.0.0 deliberately**, until the public API is settled enough
+that we would not want to change it. 1.0.0 is a promise about stability, not a
+maturity badge, and making it early costs more than it buys.
+
+So the second option is the one that matters: if duplicated `latch-core`
+instances start biting real consumers before we are ready for 1.0, move core to
+a `peerDependency` of the packages that need to share an instance. Until then,
+prefer `patch` over `minor` wherever the change honestly is one — that is the
+whole mitigation, and it is why this release ships as a patch.
 
 Also note the caret is inert at `0.0.x` for the same reason: `^0.0.1` admits
 only `0.0.1`. That is why this landed before the 0.1.0 release rather than
