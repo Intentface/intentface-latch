@@ -14,7 +14,6 @@ jobs:
     permissions:
       contents: write # commit the version bump, push tags
       pull-requests: write # open/update the "Version Packages" PR
-      packages: write # publish to GitHub Packages
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,26 +25,18 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          # Writes an .npmrc mapping the @intentface scope to GitHub Packages and
-          # adding the auth line publishing needs. Keep `scope` — without it,
-          # setup-node repoints the DEFAULT registry, sending every install there.
-          registry-url: https://npm.pkg.github.com
-          scope: "@intentface"
+          # Writes the .npmrc auth line that publishing needs. No `scope:` here
+          # on purpose — the target IS the default registry, so scoping would
+          # only add a redundant mapping.
+          registry-url: https://registry.npmjs.org
 
       # Only packages/* and the workspace root — the release builds, tests and
       # publishes libraries, so an app's dependencies are dead weight here.
-      #
-      # It is also load-bearing, not just an optimisation. `apps/latch-platform`
-      # depends on `@intentface/chat`, which is published from a DIFFERENT repo.
-      # The scope mapping above sends it to GitHub Packages, where the default
-      # `GITHUB_TOKEN` — scoped to this repository — can't read it, so a full
-      # install dies on `ERR_PNPM_FETCH_403`. If a package under packages/* ever
-      # takes a cross-repo @intentface dependency, grant this repo read access to
-      # that package (or swap in a PAT with read:packages).
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "."
 
       # Gate the release on what actually ships. A broken build must never reach
-      # the registry — a published version can be deprecated but not replaced.
+      # the registry — a published version can be deprecated but not replaced,
+      # and on the public registry it can only be unpublished within 72 hours.
       # Scoped to packages/* on purpose: an app's typecheck failing shouldn't
       # block a library release, and apps are not published from here.
       #
@@ -72,5 +63,14 @@ jobs:
           title: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # `changeset publish` reads this for the registry auth.
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # An npm **automation** token. A classic or granular token with
+          # publish rights also works, but only automation tokens skip the
+          # one-time-password prompt that would hang the job.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # NOT set: NPM_CONFIG_PROVENANCE. npm stopped accepting provenance
+          # from private source repositories in July 2023 — the registry
+          # rejects the bundle with "Unsupported GitHub Actions source
+          # repository visibility", failing the publish. The day this repo goes
+          # public, add `id-token: write` to `permissions` above and
+          # `NPM_CONFIG_PROVENANCE: "true"` here; nothing else is needed, since
+          # `verify:publish` already enforces the `repository` field it wants.

@@ -1,7 +1,20 @@
 {
   "name": "@intentface/latch-core",
   "version": "0.9.0",
-  "description": "Latch core \u2014 runtime, types, and seams for building agents on the AI SDK. Subpaths: /models (models.dev catalog + provider hooks) and /harness (default sandbox/app tools); their extra deps are optional peers, loaded lazily.",
+  "description": "Latch core — runtime, types, and seams for building agents on the AI SDK. Subpaths: /models (models.dev catalog + provider hooks) and /harness (default sandbox/app tools); their extra deps are optional peers, loaded lazily.",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "agent-runtime",
+    "durable-execution",
+    "tool-calling"
+  ],
+  "homepage": "https://github.com/Intentface/intentface-latch/tree/main/packages/core#readme",
+  "bugs": {
+    "url": "https://github.com/Intentface/intentface-latch/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -35,7 +48,7 @@
   "sideEffects": false,
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",

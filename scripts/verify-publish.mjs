@@ -24,7 +24,15 @@ import { readdirSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const REGISTRY = "https://npm.pkg.github.com";
+const REGISTRY = "https://registry.npmjs.org";
+/**
+ * There is ONE LICENSE, at the workspace root. `pnpm pack` copies it into every
+ * package tarball, so no per-package copies exist to drift. That convenience is
+ * pnpm's, not npm's — publish with bare `npm publish` and the tarballs would
+ * assert MIT while shipping no license text, which is why the check below reads
+ * the packed tarball rather than the directory.
+ */
+const LICENSE = readFileSync("LICENSE", "utf8");
 const out = mkdtempSync(join(tmpdir(), "latch-pack-"));
 /**
  * Package names in this workspace — the set the range rule applies to. Derived
@@ -133,9 +141,21 @@ try {
         }
       }
     }
-    // GitHub Packages links a package to its repo through this field.
+    // npm renders the repo link from this field, and monorepo tooling (and
+    // provenance attestation) uses `directory` to find the package's source.
     if (!shipped.repository?.directory) {
       problems.push("no repository.directory");
+    }
+    // A package that declares a license must ship its text.
+    if (!files.includes("LICENSE")) {
+      problems.push("LICENSE is not in the tarball");
+    } else {
+      const shippedLicense = execSync(`tar -xzOf ${tarball} package/LICENSE`, {
+        encoding: "utf8",
+      });
+      if (shippedLicense !== LICENSE) {
+        problems.push("LICENSE in the tarball differs from the root LICENSE");
+      }
     }
     if (shipped.publishConfig?.registry !== REGISTRY) {
       problems.push(`publishConfig.registry is not ${REGISTRY}`);

@@ -1,28 +1,9 @@
 ---
 title: Install
-description: Add the packages from GitHub Packages, wire a database, and get a runtime answering turns.
+description: Add the packages from npm, wire a database, and get a runtime answering turns.
 ---
 
-The `@intentface/latch-*` packages publish to **GitHub Packages**, not the public npm registry. Two lines of config, then install normally.
-
-## Registry access
-
-Add an `.npmrc` at your project root:
-
-```ini title=".npmrc"
-@intentface:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
-```
-
-`GITHUB_TOKEN` needs the **`read:packages`** scope and nothing else — a classic PAT or a fine-grained token both work. Keep it in your environment, not in the file:
-
-```bash
-export GITHUB_TOKEN=ghp_…
-```
-
-<Callout type="warn" title="CI needs the token too">
-The default `GITHUB_TOKEN` in GitHub Actions can read packages in the same organization. Elsewhere — Vercel, Fly, a Docker build — set `GITHUB_TOKEN` as a build-time secret, or installs fail with a `401` that looks like a missing package.
-</Callout>
+The `@intentface/latch-*` packages are on the public npm registry. Nothing to configure — install and go.
 
 ## What to install
 

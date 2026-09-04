@@ -2,6 +2,20 @@
   "name": "@intentface/latch-drizzle",
   "version": "0.9.0",
   "description": "Latch StorageAdapter on Drizzle (SQLite/libsql first, Postgres next).",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "drizzle-orm",
+    "sqlite",
+    "postgres",
+    "persistence"
+  ],
+  "homepage": "https://github.com/Intentface/intentface-latch/tree/main/packages/drizzle#readme",
+  "bugs": {
+    "url": "https://github.com/Intentface/intentface-latch/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +34,7 @@
   "sideEffects": false,
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",

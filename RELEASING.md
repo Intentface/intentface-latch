@@ -1,9 +1,14 @@
 # Releasing
 
-The `@intentface/latch-*` packages publish to **GitHub Packages**
-(`https://npm.pkg.github.com`), not the public npm registry. Everything is
-driven by [changesets](https://github.com/changesets/changesets); no one runs
+The `@intentface/latch-*` packages publish to the **public npm registry**.
+Everything is driven by
+[changesets](https://github.com/changesets/changesets); no one runs
 `npm publish` by hand.
+
+Publishing needs one secret: `NPM_TOKEN`, an npm **automation** token for the
+`@intentface` organization. A classic or granular token with publish rights also
+works, but only automation tokens skip the one-time-password prompt, which would
+hang the job instead of failing it.
 
 ## The flow
 
@@ -24,7 +29,7 @@ driven by [changesets](https://github.com/changesets/changesets); no one runs
    changelogs.
 
 3. **Merge the version PR.** The workflow runs again, sees no pending
-   changesets, and publishes to GitHub Packages.
+   changesets, and publishes to npm.
 
 So a release is always two merges: your change, then the version PR. Nothing
 publishes straight off a feature merge.
@@ -94,31 +99,47 @@ single decision rather than a compatibility matrix.
 
 `pnpm install --frozen-lockfile --filter "./packages/**" --filter "."` — the
 release builds, tests and publishes libraries, so an app's dependencies aren't
-needed.
+needed. Purely a speed choice now.
 
-That filter is load-bearing. `apps/latch-platform` depends on
-`@intentface/chat`, published from a **different repository**. The workflow maps
-the whole `@intentface` scope to GitHub Packages, and the default `GITHUB_TOKEN`
-is scoped to *this* repo — so it can't read a package owned by another one, and a
-full install fails with `ERR_PNPM_FETCH_403`. (403, not 404: the package exists,
-the token just isn't allowed to fetch it.)
+(It used to be load-bearing. While the scope was mapped to GitHub Packages, a
+full install died on `@intentface/chat` — published from another repository,
+which this repo's `GITHUB_TOKEN` may not read. On the public registry that
+resolves like any other dependency.)
 
-If a package under `packages/*` ever takes a cross-repo `@intentface`
-dependency, either grant this repository read access to that package in its
-GitHub Packages settings, or replace `GITHUB_TOKEN` with a PAT carrying
-`read:packages`.
+## Provenance is off, and why
+
+npm can sign each tarball against the workflow run that built it, which is what
+puts the verified badge and a source link on the package page. We don't, because
+npm [stopped accepting provenance from private source
+repositories](https://github.blog/changelog/2023-07-25-publishing-with-npm-provenance-from-private-source-repositories-is-no-longer-supported/)
+in July 2023. Enabling it here would not degrade quietly — the registry rejects
+the attestation and the publish fails.
+
+If this repository ever goes public, it becomes a two-line change: add
+`id-token: write` to the job's `permissions` and `NPM_CONFIG_PROVENANCE: "true"`
+to the publish step's environment. The third prerequisite, a `repository` field
+with a `directory` in every manifest, is already enforced by
+`verify:publish`.
+
+## One license, copied by pnpm
+
+There is a single `LICENSE` at the workspace root, and no per-package copies.
+`pnpm pack` copies the root license into every package tarball, so the copies
+would only be something to keep in sync.
+
+That convenience belongs to pnpm, not to npm. Publish with bare `npm publish`
+and the tarballs would claim MIT while shipping no license text — which is why
+`verify:publish` reads the license out of the packed tarball and compares it to
+the root, rather than checking that a file sits in the directory.
 
 ## Consuming the packages
 
-```ini title=".npmrc"
-@intentface:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```bash
+pnpm add @intentface/latch-core @intentface/latch-drizzle ai
 ```
 
-The token needs **`read:packages`** and nothing more. In GitHub Actions inside
-this organization the default `GITHUB_TOKEN` suffices; anywhere else (Vercel, Fly,
-a Docker build) set it as a build secret, or installs fail with a `401` that
-reads like a missing package.
+No `.npmrc`, no token, no registry mapping. `ai` is a peer dependency of nearly
+every package in the scope, so a consumer always declares it themselves.
 
 ## Why `publishConfig.exports` exists
 
@@ -146,11 +167,14 @@ Before adding a new package to the scope:
 - internal `@intentface/latch-*` dependencies are `workspace:^`, not
   `workspace:*` — see above; `*` publishes an exact pin and duplicates the
   dependency in consumer installs
-- `repository.directory` points at the package (GitHub Packages links the
-  package to the repo through this)
+- `repository.directory` points at the package (npm renders the source link
+  from it, and provenance attestation needs it)
 - `private: true` if it isn't meant to be published — `latch-renderer` is a
   deployable service, not a library, and is marked private for that reason
 - peer dependency ranges agree with the rest of the scope
+- `publishConfig.registry` is `https://registry.npmjs.org` and
+  `publishConfig.access` is `public` — a scoped package defaults to restricted,
+  and the first publish would otherwise land private
 
 Verify by packing and reading what actually ships:
 

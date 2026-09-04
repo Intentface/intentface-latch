@@ -2,6 +2,19 @@
   "name": "@intentface/latch-langfuse",
   "version": "0.9.0",
   "description": "Latch observability on Langfuse — one-line tracing for latch runtimes via the AI SDK telemetry integration, plus score and trace-read helpers for platforms.",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "langfuse",
+    "opentelemetry",
+    "observability"
+  ],
+  "homepage": "https://github.com/Intentface/intentface-latch/tree/main/packages/langfuse#readme",
+  "bugs": {
+    "url": "https://github.com/Intentface/intentface-latch/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +33,7 @@
   "sideEffects": false,
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
