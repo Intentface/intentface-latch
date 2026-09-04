@@ -913,6 +913,60 @@ function markSubagentApprovalResolved(
 }
 
 /**
+ * What crash recovery should DO with a run it just reclaimed, read off the tail
+ * of persisted history.
+ *
+ * The subtlety this exists for: finishing the tool loop and RECORDING that fact
+ * are two different writes. The per-step checkpoint is fire-and-forget at each
+ * step's end, while the run row only becomes `completed` in `onFinish`. Die in
+ * that gap and the row still says `active` with a lease — so the reaper takes a
+ * run whose work is already done and whose answer is already stored.
+ *
+ * Re-running the model there is worse than useless: it pays for a second
+ * generation, and (because the SDK reuses the message id) the new text lands in
+ * the same message as the old, so the reader can end up with the answer twice.
+ * Reconciling the row costs nothing and loses nothing.
+ *
+ *  - `decision-pending` — a gate is awaiting a human. The row never got its
+ *    `awaiting_input`; settle it there and let `applyApproval` drive the rest.
+ *    (Reaping is scoped to `active`, so this only ever arrives via that gap.)
+ *  - `loop-finished` — the last step called no tool, which is exactly the
+ *    condition on which the tool loop stops. The turn is done; settle it.
+ *  - `continue` — there is real work left (a tool result to consume, a step that
+ *    produced nothing, or no assistant message at all). Re-run the model.
+ *
+ * The final step is the parts after the last `step-start`; a tool part there
+ * means the loop had gone round again and was still going.
+ */
+export type ResumeShape = "decision-pending" | "loop-finished" | "continue";
+
+export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
+  // Checked first: a pending gate outranks the tail's shape, and its own tail
+  // (narration after the gated call) would otherwise read as `loop-finished`.
+  if (hasPendingApproval(messages)) return "decision-pending";
+  const last = messages[messages.length - 1];
+  // Nothing of this turn was checkpointed (or a user message came last) — the
+  // model has not spoken yet, so run it.
+  if (last?.role !== "assistant") return "continue";
+  const parts = (last.parts ?? []) as { type: string }[];
+  let stepStart = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i].type === "step-start") {
+      stepStart = i;
+      break;
+    }
+  }
+  const finalStep = parts.slice(stepStart + 1);
+  // A step that opened and produced nothing: the crash landed inside it, so
+  // there is unfinished work regardless of what earlier steps did.
+  if (finalStep.length === 0) return "continue";
+  const calledATool = finalStep.some(
+    (p) => p.type.startsWith("tool-") || p.type === "dynamic-tool",
+  );
+  return calledATool ? "continue" : "loop-finished";
+}
+
+/**
  * The resume paths ({@link applyApproval} / {@link applyToolResult}) re-run the
  * model from history whose LAST message is the assistant turn that paused — no
  * fresh user message is appended. If that turn streamed trailing user-facing
@@ -947,7 +1001,10 @@ function markSubagentApprovalResolved(
  * commentary about a decision that has now been made; the resumed turn
  * regenerates the real continuation.
  */
-export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
+export function trimTrailingAssistantPrefill(
+  messages: AppMessage[],
+  opts?: { unanchored?: boolean },
+): AppMessage[] {
   if (messages.length === 0) return messages;
   const lastIndex = messages.length - 1;
   const last = messages[lastIndex];
@@ -962,8 +1019,15 @@ export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage
       break;
     }
   }
-  // No tool anchor at all → nothing safe to say about this shape; leave it.
-  if (anchor === -1) return messages;
+  // No tool anchor at all. On the DECISION paths that shape is not theirs to
+  // judge, so leave it (a bubbled `data-subagent-approval` message carries its
+  // narration and no `tool-*` part; trimming there would silently lose it).
+  // CRASH RECOVERY passes `unanchored` because it has the opposite problem: a
+  // tool-free turn checkpoints as `[step-start, text]`, and leaving that intact
+  // is precisely the assistant prefill the whole function exists to prevent.
+  // With no anchor every prefill part is dropped, which empties the message out
+  // of the model projection — see `resumeShapeOf`.
+  if (anchor === -1 && !opts?.unanchored) return messages;
   // step-start joins text/reasoning: see the doc comment — keeping it ends the
   // projection on an EMPTY assistant message, which providers also reject.
   const isPrefill = (t: string) => t === "text" || t === "reasoning" || t === "step-start";
@@ -2224,6 +2288,75 @@ export function createRuntime<P, RC = unknown>(
       fencingToken: run.fencingToken ?? 1,
     };
 
+    // What does this run actually need? A crash between the last step's
+    // checkpoint and `onFinish`'s `updateRun` leaves a FINISHED turn on an
+    // `active` row, and re-running the model there would pay twice for an answer
+    // already in history — and append the second copy to the same message. So
+    // reconcile the row instead, and only re-run when work is genuinely left.
+    const shape = resumeShapeOf(uiMessages);
+    if (shape !== "continue") {
+      const status: RunStatus = shape === "decision-pending" ? "awaiting_input" : "completed";
+      // Fenced like every other terminal write: if our lease was reaped again
+      // mid-flight, the new owner decides this run's end state, not us.
+      const applied = await storage.updateRun(
+        run.id,
+        {
+          status,
+          // The reaper stamped "lease expired" on the way in. The turn did not
+          // fail, so that has to go, or the row reads as an error forever.
+          error: null,
+          ...(status === "completed" ? { endedAt: Date.now() } : {}),
+        },
+        lease,
+      );
+      // The process that spent this turn's tokens died before recording them,
+      // so usage is unknowable here — the row and this report agree on zero
+      // rather than inventing a number. The notification still fires: a host
+      // watching `onRunFinished` for "the turn ended" must not miss a turn just
+      // because recovery was a row write instead of a model call.
+      const meta: TelemetryRunMeta<P> = {
+        runId: run.id,
+        chatId: run.chatId,
+        agent: run.agent,
+        modelId,
+        principal,
+        startedAt: run.startedAt,
+        depth: 0,
+        trigger: "resume",
+        rootChatId: run.chatId,
+      };
+      // Same opt-out rule as a streamed turn: a `telemetryFor` that returns
+      // undefined silences this run's hooks too (see buildTurn).
+      const telemetryOn =
+        !!config.telemetry &&
+        !(config.telemetry.telemetryFor && config.telemetry.telemetryFor(meta) === undefined);
+      if (applied && telemetryOn) {
+        try {
+          await config.telemetry?.onRunFinished?.(meta, {
+            status,
+            inputText: lastUserText(uiMessages),
+            messages: uiMessages,
+            usage: { inputTokens: 0, outputTokens: 0 },
+            cost: 0,
+            endedAt: Date.now(),
+          });
+        } catch (e) {
+          console.warn("latch telemetry onRunFinished failed:", e);
+        }
+        try {
+          await config.telemetry?.flush?.();
+        } catch (e) {
+          console.warn("latch telemetry flush failed:", e);
+        }
+      }
+      const settled = await storage.getRun(runId);
+      return {
+        runId,
+        status: settled?.status ?? status,
+        attempt: settled?.attempt ?? run.attempt ?? null,
+      };
+    }
+
     // A resume was admitted when the turn first ran — never refuse it (the
     // half-done work would strand), but its tokens still settle against the
     // same counters, and the mid-turn stop still applies.
@@ -2237,7 +2370,12 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages,
+      // Same prefill guard as the decision paths, plus `unanchored`: a turn
+      // that never called a tool checkpoints as `[step-start, text]`, which has
+      // no tool part to anchor on and would otherwise reach the model as an
+      // assistant prefill (a hard 400 on models that reject one, failing every
+      // identical retry until `maxAttempts` is spent).
+      uiMessages: trimTrailingAssistantPrefill(uiMessages, { unanchored: true }),
       runtimeCtx,
       admitted,
       // Crash recovery, driven server-side: nobody is watching this stream.

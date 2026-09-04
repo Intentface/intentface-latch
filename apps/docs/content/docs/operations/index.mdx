@@ -24,7 +24,7 @@ What happens:
 2. **Heartbeat** — the holder extends the lease while it works.
 3. **Die** — the process is killed mid-turn. Nothing is lost: every step so far is already in the log.
 4. **Reap** — a later `sweep()` (or `cron()`) finds runs whose lease has expired, marks them `errored`, clears the owner and bumps the fencing token (invalidating any zombie holder).
-5. **Resume** — `resume(runId)` reclaims the run under a fresh lease and re-runs it from persisted history, completing server-side.
+5. **Resume** — `resume(runId)` reclaims the run under a fresh lease, then reads the tail of persisted history to decide what it needs. A turn whose last step called no tool had already finished, so its row is reconciled (`completed`, or `awaiting_input` when a gate is pending) with no model call. Anything else re-runs from history and completes server-side.
 
 Point any cron at `cron()` — it fires due schedules, then reaps and resumes in one call:
 

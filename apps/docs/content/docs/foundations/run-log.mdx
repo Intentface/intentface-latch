@@ -17,7 +17,8 @@ Every turn appends to a log: the user message, the assistant message's parts as 
 ## Where the hard parts are
 
 - Two nodes must never own one run: leases with fencing tokens make ownership a single-row transition.
-- A resumed turn must not see its own half-written sentence: the trailing assistant prefill is trimmed before the model call.
+- A resumed turn must not see its own half-written sentence. Nothing partial is ever stored (the checkpoint fires at each step's end, so a step interrupted mid-generation was never written), and what is stored gets its trailing assistant text trimmed, so the model call ends on a user turn rather than being asked to continue its own sentence — a hard rejection on models that refuse a prefill.
+- Finishing the loop and recording that it finished are two writes, and a crash can land between them. So recovery reads the tail of history before spending anything: a run whose last step called no tool is already done, and its row is reconciled rather than re-run. Otherwise the answer would be generated a second time and appended to the message that already holds the first.
 - A failed stream must be recorded as errored exactly once, by the writer whose fenced update applied.
 - A conversation must have exactly one thing happening in it: a run and the message that starts it are written together, so a refusal leaves nothing and a crash cannot leave a run without its message.
 
