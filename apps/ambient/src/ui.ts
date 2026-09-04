@@ -9,51 +9,91 @@ export const UI_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ambient</title>
 <style>
-  :root { color-scheme: light dark; --bg: #f6f7f9; --card: #fff; --ink: #1c2530; --mute: #6b7684; --line: #e3e7ec; --ok: #2f9e6e; --warn: #d98c1f; --bad: #d64545; --accent: #3b6ee8; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #14181d; --card: #1c2229; --ink: #e6ebf0; --mute: #8a96a3; --line: #2b333c; } }
+  :root {
+    color-scheme: light dark;
+    --bg: oklch(0.975 0.004 250); --card: oklch(1 0 0); --ink: oklch(0.22 0.02 250); --mute: oklch(0.55 0.02 250);
+    --line: oklch(0 0 0 / 0.08); --accent: oklch(0.55 0.17 260); --accent-ink: oklch(1 0 0);
+    --ok: oklch(0.62 0.15 155); --warn: oklch(0.72 0.15 70); --bad: oklch(0.6 0.2 25);
+    --shadow: 0 0 0 1px oklch(0 0 0 / 0.06), 0 1px 2px -1px oklch(0 0 0 / 0.06), 0 2px 4px 0 oklch(0 0 0 / 0.04);
+    --shadow-hover: 0 0 0 1px oklch(0 0 0 / 0.08), 0 1px 2px -1px oklch(0 0 0 / 0.08), 0 2px 4px 0 oklch(0 0 0 / 0.06);
+    --ease: cubic-bezier(0.2, 0, 0, 1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: oklch(0.19 0.01 250); --card: oklch(0.24 0.012 250); --ink: oklch(0.93 0.01 250); --mute: oklch(0.65 0.015 250);
+      --line: oklch(1 0 0 / 0.08); --accent: oklch(0.68 0.14 260); --accent-ink: oklch(0.15 0.02 260);
+      --shadow: 0 0 0 1px oklch(1 0 0 / 0.08); --shadow-hover: 0 0 0 1px oklch(1 0 0 / 0.13);
+    }
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--ink); }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card); }
-  header h1 { font-size: 15px; margin: 0; letter-spacing: .2px; }
-  header .mute { color: var(--mute); font-size: 12px; }
-  main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 45px); }
-  nav { border-right: 1px solid var(--line); background: var(--card); padding: 8px; overflow: auto; }
-  nav button { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: inherit; padding: 10px; border-radius: 8px; cursor: pointer; font: inherit; }
-  nav button:hover { background: var(--bg); }
-  nav button.on { background: var(--accent); color: #fff; }
-  nav button.on .mute { color: #dfe7ff; }
-  nav button.on .bar { background: rgba(255,255,255,.25); }
-  nav button.on .bar i { background: #fff; }
-  nav .name { font-weight: 600; }
-  nav .mute { color: var(--mute); font-size: 12px; }
-  .bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--ok); }
-  .bar i.warn { background: var(--warn); } .bar i.bad { background: var(--bad); }
-  section { padding: 16px; overflow: auto; }
-  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 130px; }
-  .stat b { display: block; font-size: 18px; }
-  .stat span { color: var(--mute); font-size: 12px; }
-  .tabs { display: flex; gap: 4px; margin: 8px 0 12px; }
-  .tabs button { border: 1px solid var(--line); background: var(--card); color: inherit; padding: 6px 12px; border-radius: 999px; cursor: pointer; font: inherit; }
-  .tabs button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
-  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--mute); font-weight: 500; font-size: 12px; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--line); }
-  .pill.ok { background: #dff3ea; color: #1d6b49; } .pill.bad { background: #fbe1e1; color: #8f2626; } .pill.warn { background: #fbedd5; color: #7a4d0c; }
-  @media (prefers-color-scheme: dark) { .pill.ok { background: #1e3b30; color: #9fe0c1; } .pill.bad { background: #4a2020; color: #f2a5a5; } .pill.warn { background: #4a3a1c; color: #f0cb8a; } }
-  .msg { border-left: 3px solid var(--line); padding: 6px 10px; margin: 8px 0; }
-  .msg.assistant { border-color: var(--accent); } .msg.user { border-color: var(--mute); }
-  .msg .who { font-size: 12px; color: var(--mute); margin-bottom: 4px; }
-  .tool { font-size: 12px; color: var(--mute); background: var(--bg); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
-  .tool summary { cursor: pointer; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card); position: sticky; top: 0; z-index: 1; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  header .mute { color: var(--mute); font-size: 12.5px; font-variant-numeric: tabular-nums; }
   .actions { margin-left: auto; display: flex; gap: 8px; }
-  .actions button { border: 1px solid var(--line); background: var(--card); color: inherit; padding: 6px 12px; border-radius: 8px; cursor: pointer; font: inherit; }
-  .empty { color: var(--mute); padding: 24px; text-align: center; }
+  .btn { border: 0; background: var(--card); padding: 7px 12px; border-radius: 8px; box-shadow: var(--shadow); transition-property: box-shadow, scale, background-color; transition-duration: 150ms; transition-timing-function: var(--ease); }
+  .btn:hover { box-shadow: var(--shadow-hover); }
+  .btn:active { scale: 0.96; }
+  .btn:disabled { opacity: 0.6; cursor: default; }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); box-shadow: none; }
+
+  main { display: grid; grid-template-columns: 288px minmax(0, 1fr); min-height: calc(100vh - 45px); }
+  nav { border-right: 1px solid var(--line); background: var(--card); padding: 8px; overflow: auto; }
+  nav .item { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 10px 12px; border-radius: 10px; transition-property: background-color, scale; transition-duration: 150ms; transition-timing-function: var(--ease); }
+  nav .item:hover { background: var(--bg); }
+  nav .item:active { scale: 0.98; }
+  nav .item.on { background: var(--accent); color: var(--accent-ink); }
+  nav .item.on .mute { color: var(--accent-ink); opacity: 0.8; }
+  nav .name { font-weight: 600; letter-spacing: -0.005em; }
+  nav .mute { color: var(--mute); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .bar { height: 4px; background: oklch(0 0 0 / 0.08); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+  @media (prefers-color-scheme: dark) { .bar { background: oklch(1 0 0 / 0.1); } }
+  .bar i { display: block; height: 100%; background: var(--ok); border-radius: 2px; transition-property: width; transition-duration: 300ms; transition-timing-function: var(--ease); }
+  .bar i.warn { background: var(--warn); } .bar i.bad { background: var(--bad); }
+  nav .item.on .bar { background: oklch(1 0 0 / 0.25); } nav .item.on .bar i { background: var(--accent-ink); }
+
+  section { padding: 16px; overflow: auto; min-width: 0; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--card); border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow); }
+  .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .stat span { color: var(--mute); font-size: 12px; display: block; margin-top: 2px; }
+
+  .tabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--card); border-radius: 11px; box-shadow: var(--shadow); margin: 2px 0 12px; }
+  .tabs button { border: 0; background: transparent; padding: 5px 12px; border-radius: 8px; color: var(--mute); transition-property: background-color, color, scale; transition-duration: 150ms; transition-timing-function: var(--ease); }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button:active { scale: 0.96; }
+  .tabs button.on { background: var(--ink); color: var(--bg); }
+
+  .card { background: var(--card); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); }
+  .card.flush { padding: 4px; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { color: var(--mute); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--line); color: var(--mute); }
+  .pill.ok { background: oklch(from var(--ok) l c h / 0.15); color: oklch(from var(--ok) 0.4 c h); }
+  .pill.bad { background: oklch(from var(--bad) l c h / 0.15); color: oklch(from var(--bad) 0.45 c h); }
+  .pill.warn { background: oklch(from var(--warn) l c h / 0.18); color: oklch(from var(--warn) 0.45 c h); }
+  @media (prefers-color-scheme: dark) {
+    .pill.ok { color: oklch(from var(--ok) 0.8 c h); } .pill.bad { color: oklch(from var(--bad) 0.8 c h); } .pill.warn { color: oklch(from var(--warn) 0.85 c h); }
+  }
+
+  .msg { border-left: 2px solid var(--line); padding: 8px 12px; margin: 10px 0; border-radius: 0 8px 8px 0; }
+  .msg.assistant { border-color: var(--accent); } .msg.user { border-color: var(--mute); }
+  .msg .who { font-size: 11.5px; color: var(--mute); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .tool { font-size: 12px; color: var(--mute); background: var(--bg); border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
+  .tool summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
+  .tool summary::before { content: ""; width: 0; height: 0; border-left: 5px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; translate: 1px 0; transition-property: rotate; transition-duration: 150ms; transition-timing-function: var(--ease); }
+  .tool[open] summary::before { rotate: 90deg; }
+  .tool pre { margin-top: 6px; }
+  .empty { color: var(--mute); padding: 32px; text-align: center; }
+  .stamp { color: var(--mute); font-size: 12px; margin-bottom: 8px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0ms !important; } }
 </style>
 </head>
 <body>
@@ -61,9 +101,9 @@ export const UI_HTML = `<!doctype html>
   <h1>👁 Ambient</h1>
   <span class="mute" id="meta"></span>
   <div class="actions">
-    <button id="tick" title="Run this channel's tick now (a heartbeat if nothing is queued)">Tick now</button>
-    <button id="newmono" title="Start a fresh monologue chat; the state document stays">New monologue</button>
-    <button id="refresh">Refresh</button>
+    <button class="btn" id="newmono" title="Start a fresh monologue chat; the state document stays">New monologue</button>
+    <button class="btn" id="refresh">Refresh</button>
+    <button class="btn primary" id="tick" title="Run this channel's tick now (a heartbeat if nothing is queued)">Tick now</button>
   </div>
 </header>
 <main>
@@ -93,13 +133,13 @@ async function loadChannels() {
   $("#channels").innerHTML = channels.length ? channels.map((c) => {
     const pct = c.budget && c.budget.max ? Math.min(100, Math.round(100 * c.budget.used / c.budget.max)) : 0;
     const cls = pct >= 90 ? "bad" : pct >= 60 ? "warn" : "";
-    return '<button data-id="' + esc(c.id) + '" class="' + (c.id === current ? "on" : "") + '">' +
+    return '<button data-id="' + esc(c.id) + '" class="item ' + (c.id === current ? "on" : "") + '">' +
       '<div class="name">#' + esc(c.name) + '</div>' +
       '<div class="mute">' + (c.pending ? c.pending + " queued · " : "") + "last tick " + ago(c.lastRunAt) + '</div>' +
       (c.budget && c.budget.max ? '<div class="bar"><i class="' + cls + '" style="width:' + pct + '%"></i></div><div class="mute">' + (c.budget.unit === "cost" ? money(c.budget.used) + " of " + money(c.budget.max) : num(c.budget.used) + " of " + num(c.budget.max) + " tokens") + " today</div>" : "") +
       '</button>';
   }).join("") : '<div class="empty">No channels yet — /invite the bot somewhere.</div>';
-  $("#channels").querySelectorAll("button").forEach((b) => b.onclick = () => { current = b.dataset.id; localStorage.setItem("ambient.channel", current); loadChannels(); loadDetail(); });
+  $("#channels").querySelectorAll(".item").forEach((b) => b.onclick = () => { current = b.dataset.id; localStorage.setItem("ambient.channel", current); loadChannels(); loadDetail(); });
 }
 
 async function loadDetail() {
@@ -121,9 +161,9 @@ async function loadDetail() {
   ];
   const tabs = ["state", "triage", "runs", "monologue"];
   let body = "";
-  if (tab === "state") body = '<div class="card"><div class="mute" style="margin-bottom:8px">Updated ' + ago(state.updatedAt) + (state.bootstrappedAt ? " · first read " + ago(state.bootstrappedAt) : "") + (state.humanEdits ? ' · <span class="pill warn">edited by a human</span>' : "") + '</div><pre>' + esc(state.doc || "(empty — nothing written yet)") + '</pre></div>';
-  if (tab === "triage") body = triage.length ? '<div class="card"><table><tr><th>When</th><th>Verdict</th><th>Stage</th><th>Reason</th><th class="num">Events</th><th class="num">Judge tokens</th></tr>' + triage.map((v) => '<tr><td>' + ago(v.at) + '</td><td><span class="pill ' + (v.act ? "ok" : "") + '">' + (v.act ? "act" : "defer") + '</span></td><td>' + v.stage + '</td><td>' + esc(v.reason) + '</td><td class="num">' + v.events + '</td><td class="num">' + (v.inputTokens != null ? num(v.inputTokens + (v.outputTokens || 0)) : "–") + '</td></tr>').join("") + '</table></div>' : '<div class="empty">No verdicts yet.</div>';
-  if (tab === "runs") body = runs.length ? '<div class="card"><table><tr><th>Started</th><th>Status</th><th class="num">In</th><th class="num">Out</th><th class="num">Cached</th><th class="num">Cost</th><th>Took</th><th>Error</th></tr>' + runs.map((r) => '<tr><td>' + ago(r.startedAt) + '</td><td><span class="pill ' + (r.status === "completed" ? "ok" : r.status === "errored" ? "bad" : "warn") + '">' + r.status + '</span></td><td class="num">' + num(r.usageInputTokens) + '</td><td class="num">' + num(r.usageOutputTokens) + '</td><td class="num">' + num(r.usageCacheReadTokens) + '</td><td class="num">' + money(r.costTotal) + '</td><td>' + (r.endedAt ? Math.round((r.endedAt - r.startedAt) / 1000) + "s" : "…") + '</td><td class="mute">' + esc(r.error || "") + '</td></tr>').join("") + '</table></div>' : '<div class="empty">No runs yet.</div>';
+  if (tab === "state") body = '<div class="card"><div class="stamp">Updated ' + ago(state.updatedAt) + (state.bootstrappedAt ? " · first read " + ago(state.bootstrappedAt) : "") + (state.humanEdits ? ' · <span class="pill warn">edited by a human</span>' : "") + '</div><pre>' + esc(state.doc || "(empty — nothing written yet)") + '</pre></div>';
+  if (tab === "triage") body = triage.length ? '<div class="card flush"><table><tr><th>When</th><th>Verdict</th><th>Stage</th><th>Reason</th><th class="num">Events</th><th class="num">Judge tokens</th></tr>' + triage.map((v) => '<tr><td>' + ago(v.at) + '</td><td><span class="pill ' + (v.act ? "ok" : "") + '">' + (v.act ? "act" : "defer") + '</span></td><td>' + v.stage + '</td><td>' + esc(v.reason) + '</td><td class="num">' + v.events + '</td><td class="num">' + (v.inputTokens != null ? num(v.inputTokens + (v.outputTokens || 0)) : "–") + '</td></tr>').join("") + '</table></div>' : '<div class="empty">No verdicts yet.</div>';
+  if (tab === "runs") body = runs.length ? '<div class="card flush"><table><tr><th>Started</th><th>Status</th><th class="num">In</th><th class="num">Out</th><th class="num">Cached</th><th class="num">Cost</th><th>Took</th><th>Error</th></tr>' + runs.map((r) => '<tr><td>' + ago(r.startedAt) + '</td><td><span class="pill ' + (r.status === "completed" ? "ok" : r.status === "errored" ? "bad" : "warn") + '">' + r.status + '</span></td><td class="num">' + num(r.usageInputTokens) + '</td><td class="num">' + num(r.usageOutputTokens) + '</td><td class="num">' + num(r.usageCacheReadTokens) + '</td><td class="num">' + money(r.costTotal) + '</td><td>' + (r.endedAt ? Math.round((r.endedAt - r.startedAt) / 1000) + "s" : "…") + '</td><td class="mute">' + esc(r.error || "") + '</td></tr>').join("") + '</table></div>' : '<div class="empty">No runs yet.</div>';
   if (tab === "monologue") body = mono.messages.length ? '<div class="card">' + mono.messages.map((m) => '<div class="msg ' + m.role + '"><div class="who">' + (m.role === "user" ? "tick" : "agent") + '</div>' + m.parts.map((p) => p.text != null ? '<div>' + esc(p.text).replace(/\\n/g, "<br>") + '</div>' : p.tool ? '<details class="tool"><summary>🔧 ' + esc(p.tool) + '</summary><pre>' + esc(JSON.stringify({ input: p.input, output: p.output }, null, 2)) + '</pre></details>' : "").join("") + '</div>').join("") + '</div>' : '<div class="empty">No monologue yet.</div>';
   $("#detail").innerHTML = '<div class="row">' + stats.map(([k, v, s]) => '<div class="stat"><b>' + v + '</b><span>' + k + " · " + s + '</span></div>').join("") + '</div>' +
     '<div class="tabs">' + tabs.map((t) => '<button data-tab="' + t + '" class="' + (t === tab ? "on" : "") + '">' + t[0].toUpperCase() + t.slice(1) + '</button>').join("") + '</div>' + body;
