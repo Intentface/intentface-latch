@@ -284,8 +284,10 @@ describe("resumeRun", () => {
     const outcome = await runtime.resume("run_1");
 
     expect(outcome?.status).toBe("awaiting_input");
-    // No endedAt: the turn is paused, not over.
-    expect(patches[0]).toEqual({ status: "awaiting_input", error: null });
+    // The reaper stamped an `endedAt` on the way in, and a paused turn is not
+    // over — `onFinish` leaves it unset for one, so this must clear it. `null`
+    // rather than `undefined`, which the adapters drop from the patch.
+    expect(patches[0]).toEqual({ status: "awaiting_input", error: null, endedAt: null });
   });
 
   it("still re-runs the model when work is genuinely left", async () => {
@@ -308,5 +310,133 @@ describe("resumeRun", () => {
       .filter((p) => p.type === "text")
       .map((p) => p.text);
     expect(texts).toContain("continued");
+  });
+
+  it("never hands the model its own half-written sentence", async () => {
+    // Trailing narration AFTER a tool call: the loop went round again, so there
+    // is work left — and the tail is the turn's own unfinished text. Without
+    // the trim this reaches the model as an assistant prefill, which is a hard
+    // rejection on models that refuse one.
+    const history = [
+      USER,
+      msg("assistant", [
+        { type: "step-start" },
+        { type: "tool-web_fetch", toolCallId: "c1", state: "output-available", input: { url: "u" }, output: { text: "…" } },
+        { type: "text", text: "Now let me check the ot" },
+      ]),
+    ];
+    const prompts: Array<Array<{ role: string }>> = [];
+    const capturingModel = new MockLanguageModelV4({
+      modelId: "mock-model",
+      doStream: (async ({ prompt }: { prompt: Array<{ role: string }> }) => {
+        prompts.push(prompt);
+        return {
+          stream: simulateReadableStream({
+            initialDelayInMs: 0,
+            chunkDelayInMs: 0,
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "text-start", id: "0" },
+              { type: "text-delta", id: "0", delta: "done" },
+              { type: "text-end", id: "0" },
+              {
+                type: "finish",
+                finishReason: "stop",
+                usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } },
+              },
+            ],
+          }),
+        };
+      }) as never,
+    });
+    const { runtime } = runtimeOver(history, capturingModel);
+
+    await runtime.resume("run_1");
+
+    expect(prompts).toHaveLength(1);
+    const sent = prompts[0];
+    expect(sent[sent.length - 1].role).not.toBe("assistant");
+    // The half-written sentence is gone from what the model saw.
+    expect(JSON.stringify(sent)).not.toContain("Now let me check the ot");
+  });
+
+  it("a stale writer settles nothing and reports nothing", async () => {
+    // Our lease was reaped again mid-flight: the fenced update does not apply,
+    // so the new owner decides this run's end state. Reporting here would emit
+    // a second terminal event for one run.
+    const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
+    const finished: string[] = [];
+    let row: RunRecord = { ...RUN };
+    const { storage } = stubStorage({
+      async reclaimRun() {
+        return row;
+      },
+      async loadMessages() {
+        return structuredClone(history);
+      },
+      async updateRun() {
+        return false; // fenced out
+      },
+      async getRun() {
+        return row;
+      },
+    });
+    const runtime = createRuntime<P, Record<string, never>>({
+      storage,
+      context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
+      agents: { assistant: defineAgent(() => ({ model: forbiddenModel(), instructions: "be brief" })) },
+      reconstructPrincipal: (identity) => identity as P,
+      durability: { enabled: true, instanceId: "node_a" },
+      telemetry: {
+        onRunFinished: (_run, outcome) => {
+          finished.push(outcome.status);
+        },
+      },
+    });
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(finished).toEqual([]);
+    // The outcome reflects the row as it stands, not what we wanted to write.
+    expect(outcome?.status).toBe("active");
+  });
+
+  it("reports the settled turn to telemetry, so a host watching for the end sees one", async () => {
+    const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
+    const finished: Array<{ status: string; cost?: number }> = [];
+    let row: RunRecord = { ...RUN };
+    const { storage } = stubStorage({
+      async reclaimRun() {
+        return row;
+      },
+      async loadMessages() {
+        return structuredClone(history);
+      },
+      async updateRun(_id, patch) {
+        row = { ...row, ...(patch as Partial<RunRecord>) };
+        return true;
+      },
+      async getRun() {
+        return row;
+      },
+    });
+    const runtime = createRuntime<P, Record<string, never>>({
+      storage,
+      context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
+      agents: { assistant: defineAgent(() => ({ model: forbiddenModel(), instructions: "be brief" })) },
+      reconstructPrincipal: (identity) => identity as P,
+      durability: { enabled: true, instanceId: "node_a" },
+      telemetry: {
+        onRunFinished: (_run, outcome) => {
+          finished.push({ status: outcome.status, cost: outcome.cost });
+        },
+      },
+    });
+
+    await runtime.resume("run_1");
+
+    // Zero cost, matching the row: the process that spent those tokens died
+    // before recording them, so there is no honest number to report.
+    expect(finished).toEqual([{ status: "completed", cost: 0 }]);
   });
 });

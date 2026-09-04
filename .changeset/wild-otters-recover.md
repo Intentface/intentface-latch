@@ -18,10 +18,15 @@ appended to the message that already held the first one.
 
 When work genuinely remains, the resumed history now also passes through
 `trimTrailingAssistantPrefill`, which the two human-decision resume paths
-already did. New `unanchored` option, used only by crash recovery, covers the
-tool-free shape (`[step-start, text]`) that has no tool part to anchor on and
-would otherwise reach the model as an assistant prefill — a hard rejection on
-models that refuse one, and one that fails every identical retry until
-`maxAttempts` is spent.
+already did and crash recovery never did. Without it a tail ending in the
+turn's own half-written sentence reaches the model as an assistant prefill,
+which models that refuse one reject on the request *shape* — so every identical
+retry fails until `maxAttempts` is spent.
+
+`trimTrailingAssistantPrefill` also gains an `unanchored` option (default off,
+so the decision paths are unchanged) that trims a tail with no `tool-*` part to
+anchor on. Crash recovery passes it as a guard: the one anchorless tail a
+checkpoint can produce is a tool-free turn, which the classifier now settles
+before the trim is reached.
 
 Also exports `resumeShapeOf` for hosts that drive recovery themselves.

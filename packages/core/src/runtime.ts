@@ -935,6 +935,13 @@ function markSubagentApprovalResolved(
  *  - `continue` — there is real work left (a tool result to consume, a step that
  *    produced nothing, or no assistant message at all). Re-run the model.
  *
+ * The yardstick for every verdict: what `onFinish` would have written had the
+ * process lived. That is what makes each one checkable — a `stopWhen` cut (step
+ * cap, token budget) leaves a tool part in the final step and so reads as
+ * `continue`, which costs a wasted turn but never loses work; the reverse
+ * mistake, calling an unfinished turn finished, would silently drop the user's
+ * request.
+ *
  * The final step is the parts after the last `step-start`; a tool part there
  * means the loop had gone round again and was still going.
  */
@@ -1022,11 +1029,14 @@ export function trimTrailingAssistantPrefill(
   // No tool anchor at all. On the DECISION paths that shape is not theirs to
   // judge, so leave it (a bubbled `data-subagent-approval` message carries its
   // narration and no `tool-*` part; trimming there would silently lose it).
-  // CRASH RECOVERY passes `unanchored` because it has the opposite problem: a
-  // tool-free turn checkpoints as `[step-start, text]`, and leaving that intact
-  // is precisely the assistant prefill the whole function exists to prevent.
-  // With no anchor every prefill part is dropped, which empties the message out
-  // of the model projection — see `resumeShapeOf`.
+  //
+  // `unanchored` is belt and braces for CRASH RECOVERY, which cannot afford to
+  // hand the model a prefill under any tail shape: with no anchor every prefill
+  // part is dropped, which empties the message out of the model projection
+  // entirely. Today `resumeShapeOf` settles the one anchorless tail a
+  // checkpoint can actually produce (`[step-start, text]` — a tool-free turn,
+  // which is `loop-finished`) before the trim is reached, so this branch is a
+  // guard against a future classifier change, not a live path.
   if (anchor === -1 && !opts?.unanchored) return messages;
   // step-start joins text/reasoning: see the doc comment — keeping it ends the
   // projection on an EMPTY assistant message, which providers also reject.
@@ -2302,10 +2312,16 @@ export function createRuntime<P, RC = unknown>(
         run.id,
         {
           status,
-          // The reaper stamped "lease expired" on the way in. The turn did not
-          // fail, so that has to go, or the row reads as an error forever.
+          // The reaper stamped BOTH an error and an `endedAt` on the way in
+          // (see `reapExpiredRuns`). The turn did not fail, so the error has to
+          // go or the row reads as failed forever — and a run settling to
+          // `awaiting_input` is paused, not over, so its `endedAt` has to go
+          // too. `onFinish` leaves it unset for a paused turn; a crash-settled
+          // one must match, or inter-run gap stats read a run that ended before
+          // its decision arrived. `null` (not `undefined`) is what clears a
+          // column: the adapters drop undefined from the patch.
           error: null,
-          ...(status === "completed" ? { endedAt: Date.now() } : {}),
+          endedAt: status === "completed" ? Date.now() : null,
         },
         lease,
       );
@@ -2370,11 +2386,13 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      // Same prefill guard as the decision paths, plus `unanchored`: a turn
-      // that never called a tool checkpoints as `[step-start, text]`, which has
-      // no tool part to anchor on and would otherwise reach the model as an
-      // assistant prefill (a hard 400 on models that reject one, failing every
-      // identical retry until `maxAttempts` is spent).
+      // Same prefill guard the decision paths use: a tail ending in the turn's
+      // own half-written sentence would reach the model as an assistant
+      // prefill, which models that reject one refuse on the request SHAPE — so
+      // every identical retry fails until `maxAttempts` is spent. `unanchored`
+      // extends it to a tail with no tool part to anchor on; no checkpoint
+      // produces such a tail on this path today (see the note there), it is
+      // here so a classifier change cannot reintroduce the prefill.
       uiMessages: trimTrailingAssistantPrefill(uiMessages, { unanchored: true }),
       runtimeCtx,
       admitted,
