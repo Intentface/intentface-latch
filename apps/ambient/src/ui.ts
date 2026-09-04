@@ -21,7 +21,9 @@ export const UI_HTML = `<!doctype html>
   nav button { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: inherit; padding: 10px; border-radius: 8px; cursor: pointer; font: inherit; }
   nav button:hover { background: var(--bg); }
   nav button.on { background: var(--accent); color: #fff; }
-  nav button.on .mute, nav button.on .bar i { color: #dfe7ff; background: #dfe7ff; }
+  nav button.on .mute { color: #dfe7ff; }
+  nav button.on .bar { background: rgba(255,255,255,.25); }
+  nav button.on .bar i { background: #fff; }
   nav .name { font-weight: 600; }
   nav .mute { color: var(--mute); font-size: 12px; }
   .bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
