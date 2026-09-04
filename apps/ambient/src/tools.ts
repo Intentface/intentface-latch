@@ -144,17 +144,19 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
   const post_to_channel = tool({
     description:
       "Post a message to THIS channel (or into one of its threads). This is your only voice. " +
-      "Unprompted posts are budgeted per day; a reply to someone who addressed you is not.",
+      "Unprompted posts are budgeted per day; replies (addressed, invited, help) are not.",
     inputSchema: z.object({
       text: z.string().min(1).max(4000).describe("Slack markdown."),
       threadTs: z.string().optional().describe("Reply inside this thread instead of top-level."),
       reason: z
-        .enum(["addressed", "overdue", "correction", "answer", "other"])
-        .describe("Why you are speaking. `addressed` = someone asked you directly; everything else is unprompted."),
+        .enum(["addressed", "invited", "help", "overdue", "correction", "answer", "other"])
+        .describe(
+          "Why you are speaking. `addressed` = someone asked you directly; `invited` = someone asked the group for input; `help` = someone is stuck on something you can settle. Those three are replies and not budgeted; everything else is unprompted.",
+        ),
     }),
     execute: async ({ text, threadTs, reason }, options) => {
       const { channel } = ctxOf(options).principal;
-      const kind = reason === "addressed" ? "addressed" : "unprompted";
+      const kind = reason === "addressed" || reason === "invited" || reason === "help" ? "addressed" : "unprompted";
       if (kind === "unprompted") {
         const used = await deps.state.unpromptedPostsSince(channel, now() - DAY_MS);
         if (used >= deps.maxPostsPerDay) {

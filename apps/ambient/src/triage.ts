@@ -41,7 +41,7 @@ export interface TriageDeps {
 }
 
 const QUESTION_OR_COMMITMENT =
-  /\?|\b(decid\w*|agree\w*|deadline|blocked|blocker|urgent|asap|by (tomorrow|today|monday|tuesday|wednesday|thursday|friday|eod|eow|end of (day|week))|i'?ll|we'?ll|will (do|send|fix|ship|write|handle|take))\b/i;
+  /\?|\b(decid\w*|agree\w*|deadline|blocked|blocker|urgent|asap|by (tomorrow|today|monday|tuesday|wednesday|thursday|friday|eod|eow|end of (day|week))|i'?ll|we'?ll|will (do|send|fix|ship|write|handle|take)|opinions?|thoughts|feedback|ideas|input|everyone|anyone|who can|could someone|can someone|wdyt|poll|vote)\b/i;
 
 /** The rule stage alone; null when the rules cannot settle it. */
 export function ruleVerdict(input: TriageInput, maxDeferMs: number): Verdict | null {
@@ -54,7 +54,7 @@ export function ruleVerdict(input: TriageInput, maxDeferMs: number): Verdict | n
   if (events.some((e) => (e.kind === "reaction_added" || e.kind === "reaction_removed" || e.kind === "edit" || e.kind === "delete") && tracked(e.targetTs)))
     return { act: true, stage: "rule", reason: "a change on a message my state references" };
   const talk = events.filter((e) => e.kind === "message" || e.kind === "reply") as Extract<Observation, { text: string }>[];
-  if (talk.some((e) => QUESTION_OR_COMMITMENT.test(e.text))) return { act: true, stage: "rule", reason: "a question or a commitment in the new messages" };
+  if (talk.some((e) => QUESTION_OR_COMMITMENT.test(e.text))) return { act: true, stage: "rule", reason: "a question, a request for input, or a commitment in the new messages" };
   if (talk.length === 0) return { act: false, stage: "rule", reason: "only reactions/edits on messages I do not track" };
   return null; // plain human talk: the model's call
 }

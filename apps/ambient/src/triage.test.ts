@@ -14,8 +14,9 @@ describe("rule stage", () => {
     expect(ruleVerdict(input([{ kind: "mention", ts: "1.0", text: "<@B> hi" }]), MAX)).toMatchObject({ act: true, reason: /mentioned/ });
     expect(ruleVerdict(input([{ kind: "reply", ts: "1.0", threadTs: "300.0", text: "shipped" }]), MAX)).toMatchObject({ act: true, reason: /thread I am watching/ });
     expect(ruleVerdict(input([{ kind: "reaction_added", ts: "1.0", emoji: "white_check_mark", targetTs: "200.1" }]), MAX)).toMatchObject({ act: true, reason: /my state references/ });
-    expect(ruleVerdict(input([msg("who owns the deploy?")]), MAX)).toMatchObject({ act: true, reason: /question or a commitment/ });
+    expect(ruleVerdict(input([msg("who owns the deploy?")]), MAX)).toMatchObject({ act: true, reason: /question, a request for input, or a commitment/ });
     expect(ruleVerdict(input([msg("I'll send it by Friday")]), MAX)).toMatchObject({ act: true });
+    expect(ruleVerdict(input([msg("I would like to hear everyone's opinion about topic x")]), MAX)).toMatchObject({ act: true, reason: /request for input/ });
     expect(ruleVerdict(input([msg("lol nice")], MAX + 1), MAX)).toMatchObject({ act: true, reason: /waited 30 min/ });
   });
 

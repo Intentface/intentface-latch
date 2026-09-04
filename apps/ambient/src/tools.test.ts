@@ -83,8 +83,9 @@ describe("ambient tools", () => {
     expect(refused.ok).toBe(false);
     expect(refused.error).toMatch(/budget spent \(2\/2/);
     expect(await call("post_to_channel", { text: "reply", reason: "addressed", threadTs: "1.0" })).toMatchObject({ ok: true, kind: "addressed" });
+    expect(await call("post_to_channel", { text: "my take", reason: "invited", threadTs: "1.0" })).toMatchObject({ ok: true, kind: "addressed" });
     expect(await call("post_to_channel", { text: "elsewhere", reason: "overdue" }, "C2")).toMatchObject({ ok: true });
-    expect(slack.post).toHaveBeenCalledTimes(4);
+    expect(slack.post).toHaveBeenCalledTimes(5);
     expect(slack.post).toHaveBeenLastCalledWith("C2", "elsewhere", undefined);
   });
 
