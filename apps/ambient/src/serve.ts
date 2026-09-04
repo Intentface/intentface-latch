@@ -76,6 +76,7 @@ const state =
         canvas: createCanvas(config.slackToken),
         initial: `# Channel notes\n\nKept by the ambient agent. Edit freely — it reads this before every tick.\n\n${STATE_SCHEMA}`,
         onError: (channel, e) => console.warn(`[ambient] ${channel}: canvas unreadable, using last written copy:`, e),
+        onCanvas: (channel, id, how) => console.log(`[ambient] ${channel}: state canvas ${id} (${how})`),
       })
     : sqliteState;
 const tools = createTools({ slack, state, maxPostsPerDay: config.maxPostsPerDay });

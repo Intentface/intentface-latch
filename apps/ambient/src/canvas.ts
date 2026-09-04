@@ -9,8 +9,12 @@ import TurndownService from "turndown";
  * the bot must be a member of the channel.
  */
 export interface Canvas {
-  /** The channel's canvas id, created with `initial` markdown when the channel has none. */
-  ensure(channel: string, initial: string): Promise<string>;
+  /**
+   * The channel's canvas id: the channel canvas from `conversations.info` if it
+   * has one, else created with `initial` markdown. `how` says which path was
+   * taken so a workspace that keeps creating canvases can be diagnosed.
+   */
+  ensure(channel: string, initial: string): Promise<{ id: string; how: "existing" | "created" | "found-after-conflict" }>;
   /** The whole canvas as markdown (via the HTML download). */
   read(canvasId: string): Promise<string>;
   /** Replace the whole canvas with `markdown`. */
@@ -48,17 +52,29 @@ export function createCanvas(token: string, fetchImpl: typeof fetch = fetch): Ca
 
   return {
     async ensure(channel, initial) {
-      const info = await get("conversations.info", { channel });
-      const ch = info.channel as { properties?: { canvas?: { file_id?: string; id?: string } } } | undefined;
-      const existing = ch?.properties?.canvas?.file_id ?? ch?.properties?.canvas?.id;
-      if (existing) return existing;
-      const created = await api("conversations.canvases.create", {
-        channel_id: channel,
-        document_content: { type: "markdown", markdown: initial },
-      });
-      const id = created.canvas_id as string | undefined;
-      if (!id) throw new Error("slack:conversations.canvases.create returned no canvas_id");
-      return id;
+      const lookup = async (): Promise<string | undefined> => {
+        const info = await get("conversations.info", { channel });
+        const ch = info.channel as { properties?: { canvas?: { file_id?: string; id?: string } } } | undefined;
+        return ch?.properties?.canvas?.file_id ?? ch?.properties?.canvas?.id;
+      };
+      const existing = await lookup();
+      if (existing) return { id: existing, how: "existing" };
+      try {
+        const created = await api("conversations.canvases.create", {
+          channel_id: channel,
+          document_content: { type: "markdown", markdown: initial },
+        });
+        const id = created.canvas_id as string | undefined;
+        if (!id) throw new Error("slack:conversations.canvases.create returned no canvas_id");
+        return { id, how: "created" };
+      } catch (e) {
+        // The channel already has a canvas we could not see a moment ago (eventual consistency,
+        // or a workspace that hides it from conversations.info): look once more before giving up.
+        if (!/already/i.test(String(e))) throw e;
+        const again = await lookup();
+        if (!again) throw e;
+        return { id: again, how: "found-after-conflict" };
+      }
     },
 
     async read(canvasId) {

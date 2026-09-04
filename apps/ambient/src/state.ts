@@ -48,6 +48,9 @@ export interface StateStore {
   /** Look without draining: the queued observations and the age of the oldest. */
   peek(channel: string): Promise<{ events: Observation[]; oldestReceivedAt: number | null }>;
   pending(channel: string): Promise<number>;
+  /** The channel canvas that holds the state document (canvas mode), remembered across restarts. */
+  getCanvasId(channel: string): Promise<string | null>;
+  setCanvasId(channel: string, id: string): Promise<void>;
   /** Every triage verdict, for "why did it (not) react". */
   logTriage(channel: string, v: TriageRow): Promise<void>;
   listTriage(channel: string, limit?: number): Promise<(TriageRow & { at: number })[]>;
@@ -104,6 +107,22 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
         ],
         "write",
       );
+      // Added later; idempotent.
+      await client.execute(`ALTER TABLE ambient_channel_state ADD COLUMN canvas_id TEXT`).catch(() => undefined);
+    },
+
+    async getCanvasId(channel) {
+      const r = await client.execute({ sql: `SELECT canvas_id FROM ambient_channel_state WHERE channel = ?`, args: [channel] });
+      const v = r.rows[0]?.canvas_id;
+      return v == null ? null : String(v);
+    },
+
+    async setCanvasId(channel, id) {
+      await client.execute({
+        sql: `INSERT INTO ambient_channel_state (channel, canvas_id) VALUES (?, ?)
+              ON CONFLICT (channel) DO UPDATE SET canvas_id = excluded.canvas_id`,
+        args: [channel, id],
+      });
     },
 
     async load(channel) {

@@ -18,14 +18,22 @@ export function createCanvasStateStore(input: {
   /** Markdown for a canvas created on first contact. */
   initial: string;
   onError?: (channel: string, e: unknown) => void;
+  /** A canvas was resolved for a channel (once per channel per database). */
+  onCanvas?: (channel: string, id: string, how: "existing" | "created" | "found-after-conflict") => void;
 }): StateStore {
   const { base, canvas } = input;
   const ids = new Map<string, string>();
 
+  /** Persisted per channel so a restart reuses the same canvas instead of creating another. */
   const canvasId = async (channel: string): Promise<string> => {
-    const hit = ids.get(channel);
-    if (hit) return hit;
-    const id = await canvas.ensure(channel, input.initial);
+    const hit = ids.get(channel) ?? (await base.getCanvasId(channel));
+    if (hit) {
+      ids.set(channel, hit);
+      return hit;
+    }
+    const { id, how } = await canvas.ensure(channel, input.initial);
+    input.onCanvas?.(channel, id, how);
+    await base.setCanvasId(channel, id);
     ids.set(channel, id);
     return id;
   };
@@ -35,6 +43,8 @@ export function createCanvasStateStore(input: {
     markBootstrapped: (c) => base.markBootstrapped(c),
     recordPost: (c, ts, k) => base.recordPost(c, ts, k),
     unpromptedPostsSince: (c, s) => base.unpromptedPostsSince(c, s),
+    getCanvasId: (c) => base.getCanvasId(c),
+    setCanvasId: (c, id) => base.setCanvasId(c, id),
     push: (c, k, o) => base.push(c, k, o),
     drain: (c) => base.drain(c),
     peek: (c) => base.peek(c),

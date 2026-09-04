@@ -11,7 +11,7 @@ async function build(canvasDoc: { current: string }) {
   const base = createStateStore(createClient({ url: ":memory:" }));
   await base.migrate();
   const canvas: Canvas = {
-    ensure: vi.fn(async () => "F123"),
+    ensure: vi.fn(async () => ({ id: "F123", how: "created" as const })),
     read: vi.fn(async () => canvasDoc.current),
     replace: vi.fn(async (_id, md) => void (canvasDoc.current = md)),
   };
@@ -30,6 +30,17 @@ describe("canvas-backed state", () => {
     expect(state.doc).toBe(DOC);
     expect(state.humanEdits).toBeUndefined();
     expect(canvas.ensure).toHaveBeenCalledTimes(1); // id cached per channel
+  });
+
+  it("the canvas id is persisted: a fresh store over the same database reuses it instead of creating", async () => {
+    const doc = { current: "" };
+    const { store, base, canvas } = await build(doc);
+    await store.saveDoc("C1", DOC);
+    expect(await base.getCanvasId("C1")).toBe("F123");
+    const again = createCanvasStateStore({ base, canvas, initial: "# notes" }); // "restart"
+    await again.saveDoc("C1", DOC + "\n- more");
+    expect(canvas.ensure).toHaveBeenCalledTimes(1);
+    expect(canvas.replace).toHaveBeenLastCalledWith("F123", DOC + "\n- more");
   });
 
   it("a human edit shows up as a diff against the shadow, and the instructions carry it", async () => {
@@ -77,6 +88,34 @@ describe("canvas plumbing", () => {
     expect(canvasHtmlToMarkdown(html)).toBe("## Open questions\n\n- who owns the deploy?\n\n## Decisions\n\nnone");
   });
 
+  it("ensure creates when the channel has no canvas, and recovers the existing one on an already-exists error", async () => {
+    let hasCanvas = false;
+    const fetchImpl = vi.fn(async (url: string) => {
+      const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+      if (url.startsWith("https://slack.com/api/conversations.info")) return json({ ok: true, channel: hasCanvas ? { properties: { canvas: { file_id: "F1" } } } : {} });
+      if (url === "https://slack.com/api/conversations.canvases.create") {
+        if (hasCanvas) return json({ ok: false, error: "channel_canvas_already_exists" });
+        hasCanvas = true;
+        return json({ ok: true, canvas_id: "F1" });
+      }
+      return json({ ok: false, error: `unexpected ${url}` });
+    }) as unknown as typeof fetch;
+    const canvas = createCanvas("xoxb-t", fetchImpl);
+    expect(await canvas.ensure("C1", "# init")).toEqual({ id: "F1", how: "created" });
+    // Info lags behind: a second ensure before info catches up hits the conflict and recovers.
+    hasCanvas = true;
+    const lagging = createCanvas("xoxb-t", (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("https://slack.com/api/conversations.info")) {
+        // First lookup: nothing; after the conflict: the canvas.
+        const n = (lagging as unknown as { n?: number }).n ?? 0;
+        (lagging as unknown as { n?: number }).n = n + 1;
+        return new Response(JSON.stringify({ ok: true, channel: n === 0 ? {} : { properties: { canvas: { file_id: "F1" } } } }));
+      }
+      return fetchImpl(url, init);
+    }) as unknown as typeof fetch);
+    expect(await lagging.ensure("C1", "# init")).toEqual({ id: "F1", how: "found-after-conflict" });
+  });
+
   it("lineDiff reports added and removed lines only", () => {
     expect(lineDiff("a\nb\nc", "a\nc\nd")).toEqual({ added: ["d"], removed: ["b"] });
     expect(lineDiff("a\n\n b ", "a\nb")).toEqual({ added: [], removed: [] });
@@ -94,7 +133,7 @@ describe("canvas plumbing", () => {
       return json({ ok: false, error: `unexpected ${url}` });
     }) as unknown as typeof fetch;
     const canvas = createCanvas("xoxb-t", fetchImpl);
-    expect(await canvas.ensure("C1", "# init")).toBe("F9");
+    expect(await canvas.ensure("C1", "# init")).toEqual({ id: "F9", how: "existing" });
     expect(await canvas.read("F9")).toBe("## Hi\n\n- one");
     expect(calls.find((c) => c.url === "https://files.slack.com/x")?.init?.headers).toEqual({ authorization: "Bearer xoxb-t" });
     await canvas.replace("F9", "## New");
