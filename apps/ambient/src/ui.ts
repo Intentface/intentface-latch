@@ -91,6 +91,11 @@ export const UI_HTML = `<!doctype html>
   .tool summary::before { content: ""; width: 0; height: 0; border-left: 5px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; translate: 1px 0; transition-property: rotate; transition-duration: 150ms; transition-timing-function: var(--ease); }
   .tool[open] summary::before { rotate: 90deg; }
   .tool pre { margin-top: 6px; }
+  .doc h3 { font-size: 12px; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: 0.05em; margin: 14px 0 6px; }
+  .doc h3:first-child { margin-top: 0; }
+  .doc li { list-style: none; position: relative; padding-left: 14px; margin: 3px 0; }
+  .doc li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 5px; height: 5px; border-radius: 50%; background: var(--mute); }
+  .doc p { margin: 4px 0; }
   .empty { color: var(--mute); padding: 32px; text-align: center; }
   .stamp { color: var(--mute); font-size: 12px; margin-bottom: 8px; }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0ms !important; } }
@@ -121,6 +126,12 @@ const api = async (path, init) => {
   return r.json();
 };
 const ago = (ms) => { if (!ms) return "never"; const s = Math.round((Date.now() - ms) / 1000); return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + " min ago" : s < 86400 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago"; };
+const renderDoc = (doc) => doc.split("\\n").map((l) => {
+  if (/^##\\s+/.test(l)) return '<h3>' + esc(l.replace(/^##\\s+/, "")) + '</h3>';
+  if (/^-\\s+/.test(l)) return '<li>' + esc(l.replace(/^-\\s+/, "")) + '</li>';
+  if (!l.trim()) return "";
+  return '<p>' + esc(l) + '</p>';
+}).join("");
 const money = (n) => "$" + (n ?? 0).toFixed(n >= 1 ? 2 : 3);
 const num = (n) => (n ?? 0).toLocaleString();
 
@@ -156,12 +167,12 @@ async function loadDetail() {
     ["Ticks", runsToday.length, "last 24 h"],
     ["Tokens", num(runsToday.reduce((a, r) => a + tokens(r), 0)), "last 24 h"],
     ["Cost", money(runsToday.reduce((a, r) => a + (r.costTotal || 0), 0)), "last 24 h"],
-    ["Deferred", triage.filter((v) => !v.act && v.at >= today).length + "/" + triage.filter((v) => v.at >= today).length, "verdicts, last 24 h"],
+    ["Deferred", triage.filter((v) => !v.act && v.at >= today).length + "/" + triage.filter((v) => v.at >= today).length, "of verdicts · 24 h"],
     ["Judge tokens", num(triage.filter((v) => v.at >= today).reduce((a, v) => a + (v.inputTokens || 0) + (v.outputTokens || 0), 0)), "last 24 h"],
   ];
   const tabs = ["state", "triage", "runs", "monologue"];
   let body = "";
-  if (tab === "state") body = '<div class="card"><div class="stamp">Updated ' + ago(state.updatedAt) + (state.bootstrappedAt ? " · first read " + ago(state.bootstrappedAt) : "") + (state.humanEdits ? ' · <span class="pill warn">edited by a human</span>' : "") + '</div><pre>' + esc(state.doc || "(empty — nothing written yet)") + '</pre></div>';
+  if (tab === "state") body = '<div class="card"><div class="stamp">Updated ' + ago(state.updatedAt) + (state.bootstrappedAt ? " · first read " + ago(state.bootstrappedAt) : "") + (state.humanEdits ? ' · <span class="pill warn">edited by a human</span>' : "") + '</div>' + (state.doc ? '<div class="doc">' + renderDoc(state.doc) + '</div>' : '<div class="empty">Nothing written yet.</div>') + '</div>';
   if (tab === "triage") body = triage.length ? '<div class="card flush"><table><tr><th>When</th><th>Verdict</th><th>Stage</th><th>Reason</th><th class="num">Events</th><th class="num">Judge tokens</th></tr>' + triage.map((v) => '<tr><td>' + ago(v.at) + '</td><td><span class="pill ' + (v.act ? "ok" : "") + '">' + (v.act ? "act" : "defer") + '</span></td><td>' + v.stage + '</td><td>' + esc(v.reason) + '</td><td class="num">' + v.events + '</td><td class="num">' + (v.inputTokens != null ? num(v.inputTokens + (v.outputTokens || 0)) : "–") + '</td></tr>').join("") + '</table></div>' : '<div class="empty">No verdicts yet.</div>';
   if (tab === "runs") body = runs.length ? '<div class="card flush"><table><tr><th>Started</th><th>Status</th><th class="num">In</th><th class="num">Out</th><th class="num">Cached</th><th class="num">Cost</th><th>Took</th><th>Error</th></tr>' + runs.map((r) => '<tr><td>' + ago(r.startedAt) + '</td><td><span class="pill ' + (r.status === "completed" ? "ok" : r.status === "errored" ? "bad" : "warn") + '">' + r.status + '</span></td><td class="num">' + num(r.usageInputTokens) + '</td><td class="num">' + num(r.usageOutputTokens) + '</td><td class="num">' + num(r.usageCacheReadTokens) + '</td><td class="num">' + money(r.costTotal) + '</td><td>' + (r.endedAt ? Math.round((r.endedAt - r.startedAt) / 1000) + "s" : "…") + '</td><td class="mute">' + esc(r.error || "") + '</td></tr>').join("") + '</table></div>' : '<div class="empty">No runs yet.</div>';
   if (tab === "monologue") body = mono.messages.length ? '<div class="card">' + mono.messages.map((m) => '<div class="msg ' + m.role + '"><div class="who">' + (m.role === "user" ? "tick" : "agent") + '</div>' + m.parts.map((p) => p.text != null ? '<div>' + esc(p.text).replace(/\\n/g, "<br>") + '</div>' : p.tool ? '<details class="tool"><summary>🔧 ' + esc(p.tool) + '</summary><pre>' + esc(JSON.stringify({ input: p.input, output: p.output }, null, 2)) + '</pre></details>' : "").join("") + '</div>').join("") + '</div>' : '<div class="empty">No monologue yet.</div>';
