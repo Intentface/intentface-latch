@@ -183,8 +183,13 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
     }),
     execute: async ({ ts, emoji }, options) => {
       const { channel } = ctxOf(options).principal;
-      await deps.slack.react(channel, ts, emoji);
-      return { ok: true as const };
+      try {
+        await deps.slack.react(channel, ts, emoji);
+        return { ok: true as const };
+      } catch (e) {
+        // Missing scope, rate limit, unknown emoji: report it as this call's failure, not as a lost ability.
+        return { ok: false as const, error: String((e as Error).message ?? e), transient: true as const, note: "Try again on a later tick; do not conclude you cannot react." };
+      }
     },
   });
 

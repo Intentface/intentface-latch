@@ -62,6 +62,7 @@ export const UI_HTML = `<!doctype html>
   <span class="mute" id="meta"></span>
   <div class="actions">
     <button id="tick" title="Run this channel's tick now (a heartbeat if nothing is queued)">Tick now</button>
+    <button id="newmono" title="Start a fresh monologue chat; the state document stays">New monologue</button>
     <button id="refresh">Refresh</button>
   </div>
 </header>
@@ -130,6 +131,7 @@ async function loadDetail() {
 }
 
 $("#refresh").onclick = () => { loadChannels().then(loadDetail); };
+$("#newmono").onclick = async () => { if (!current || !confirm("Start a fresh monologue for this channel? Its notes (state) are kept.")) return; await api("/channels/" + current + "/new-monologue", { method: "POST" }); tab = "monologue"; loadDetail(); };
 $("#tick").onclick = async () => { if (!current) return; $("#tick").disabled = true; $("#tick").textContent = "Ticking…"; try { await api("/channels/" + current + "/tick", { method: "POST" }); } finally { $("#tick").disabled = false; $("#tick").textContent = "Tick now"; loadChannels().then(loadDetail); } };
 loadChannels().then(loadDetail).catch((e) => { $("#channels").innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
 setInterval(() => { loadChannels().then(loadDetail).catch(() => {}); }, 15000);

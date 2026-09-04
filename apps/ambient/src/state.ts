@@ -50,6 +50,9 @@ export interface StateStore {
   /** Look without draining: the queued observations and the age of the oldest. */
   peek(channel: string): Promise<{ events: Observation[]; oldestReceivedAt: number | null }>;
   pending(channel: string): Promise<number>;
+  /** Which long-lived chat is the current monologue; bumping starts a fresh one (the state document stays). */
+  monologueGen(channel: string): Promise<number>;
+  newMonologue(channel: string): Promise<number>;
   /** The channel canvas that holds the state document (canvas mode), remembered across restarts. */
   getCanvasId(channel: string): Promise<string | null>;
   setCanvasId(channel: string, id: string): Promise<void>;
@@ -112,6 +115,21 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
       // Added later; idempotent.
       await client.execute(`ALTER TABLE ambient_channel_state ADD COLUMN canvas_id TEXT`).catch(() => undefined);
       await client.execute(`ALTER TABLE ambient_posts ADD COLUMN thread_ts TEXT`).catch(() => undefined);
+      await client.execute(`ALTER TABLE ambient_channel_state ADD COLUMN monologue_gen INTEGER NOT NULL DEFAULT 0`).catch(() => undefined);
+    },
+
+    async monologueGen(channel) {
+      const r = await client.execute({ sql: `SELECT monologue_gen FROM ambient_channel_state WHERE channel = ?`, args: [channel] });
+      return Number(r.rows[0]?.monologue_gen ?? 0);
+    },
+
+    async newMonologue(channel) {
+      await client.execute({
+        sql: `INSERT INTO ambient_channel_state (channel, monologue_gen) VALUES (?, 1)
+              ON CONFLICT (channel) DO UPDATE SET monologue_gen = ambient_channel_state.monologue_gen + 1`,
+        args: [channel],
+      });
+      return this.monologueGen(channel);
     },
 
     async getCanvasId(channel) {

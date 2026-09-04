@@ -256,7 +256,8 @@ app.get("/channels/:id/runs", async (c) => c.json(await runtime.listRuns({ princ
 /** The monologue: what it read, thought, and did — the whole long-lived chat, compacted as it grows. */
 app.get("/channels/:id/monologue", async (c) => {
   const channel = c.req.param("id");
-  const history = await runtime.loadHistory({ chatId: chatIdOf(channel), principal: { channel } }).catch(() => []);
+  const chatId = chatIdOf(channel, await state.monologueGen(channel));
+  const history = await runtime.loadHistory({ chatId, principal: { channel } }).catch(() => []);
   const messages = history.map((m) => ({
     role: m.role,
     parts: m.parts.map((p) => {
@@ -268,7 +269,16 @@ app.get("/channels/:id/monologue", async (c) => {
       return { type: p.type };
     }),
   }));
-  return c.json({ chatId: chatIdOf(channel), messages });
+  return c.json({ chatId, messages });
+});
+
+/** Start a fresh monologue: the next tick opens a new chat. The state document and the inbox stay. */
+app.post("/channels/:id/new-monologue", async (c) => {
+  const channel = c.req.param("id");
+  await ticker.idle(channel);
+  const gen = await state.newMonologue(channel);
+  console.log(`[ambient] ${channel}: new monologue (${chatIdOf(channel, gen)})`);
+  return c.json({ chatId: chatIdOf(channel, gen) });
 });
 
 /** Run the channel's tick now (a heartbeat if nothing is queued) and wait for it. */

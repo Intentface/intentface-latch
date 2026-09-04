@@ -44,6 +44,8 @@ export function createCanvasStateStore(input: {
     recordPost: (c, ts, k, t) => base.recordPost(c, ts, k, t),
     unpromptedPostsSince: (c, s) => base.unpromptedPostsSince(c, s),
     recentPosts: (c, s) => base.recentPosts(c, s),
+    monologueGen: (c) => base.monologueGen(c),
+    newMonologue: (c) => base.newMonologue(c),
     getCanvasId: (c) => base.getCanvasId(c),
     setCanvasId: (c, id) => base.setCanvasId(c, id),
     push: (c, k, o) => base.push(c, k, o),

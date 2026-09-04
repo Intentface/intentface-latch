@@ -110,6 +110,8 @@ describe("ambient tools", () => {
     ]);
     await call("react", { ts: "160.0", emoji: "coffee" }, "C1");
     expect(slack.react).toHaveBeenCalledWith("C1", "160.0", "coffee");
+    (slack.react as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("slack:reactions.add failed: missing_scope"));
+    expect(await call("react", { ts: "160.0", emoji: "coffee" }, "C1")).toMatchObject({ ok: false, transient: true, error: /missing_scope/ });
   });
 
   it("every tool acts on the principal's channel, never on model input", async () => {

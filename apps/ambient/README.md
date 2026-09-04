@@ -65,6 +65,7 @@ curl localhost:8790/channels/C0123/monologue      # the whole long-lived chat: r
 curl localhost:8790/channels/C0123/runs           # status, tokens, cost per tick
 curl localhost:8790/channels/C0123/triage         # why it did or did not wake, with the judge's token cost
 curl -X POST localhost:8790/channels/C0123/tick   # run now (a heartbeat if nothing is queued)
+curl -X POST localhost:8790/channels/C0123/new-monologue  # fresh chat next tick; notes and inbox stay
 ```
 
 Set `AMBIENT_ADMIN_TOKEN` to require `Authorization: Bearer …` on those routes.

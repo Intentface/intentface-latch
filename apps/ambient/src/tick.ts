@@ -6,8 +6,8 @@ import type { Triage } from "./triage.js";
 import { engagementOf } from "./engagement.js";
 import { DAY_MS } from "@intentface/latch-core";
 
-/** The channel's one long-lived chat: its monologue. */
-export const chatIdOf = (channel: string) => `ambient_${channel}`;
+/** The channel's long-lived chat — its monologue. Generation 0 keeps the original id; a "new monologue" bumps it. */
+export const chatIdOf = (channel: string, gen = 0) => (gen === 0 ? `ambient_${channel}` : `ambient_${channel}_${gen}`);
 
 export interface TickRuntime {
   runAgent(input: { principal: Principal; agent: string; prompt: string; threadId: string; blockGated: boolean }): Promise<unknown>;
@@ -41,6 +41,7 @@ export function createTick(deps: TickDeps) {
 
   return async function tick(channel: string): Promise<boolean> {
     const principal: Principal = { channel };
+    const chatId = chatIdOf(channel, await deps.state.monologueGen(channel));
     const { events, oldestReceivedAt } = await deps.state.peek(channel);
     let prompt = HEARTBEAT_PROMPT;
     if (events.length > 0) {
@@ -63,16 +64,16 @@ export function createTick(deps: TickDeps) {
     const thinking = [...new Set(events.filter((e) => e.kind === "mention").map((e) => (e.kind === "mention" && e.threadTs) || e.ts))];
     await Promise.all(thinking.map((t) => deps.slack.setThinking(channel, t, true)));
     try {
-      await deps.runtime.runAgent({ principal, agent: "watcher", prompt, threadId: chatIdOf(channel), blockGated: false });
+      await deps.runtime.runAgent({ principal, agent: "watcher", prompt, threadId: chatId, blockGated: false });
     } finally {
       await Promise.all(thinking.map((t) => deps.slack.setThinking(channel, t, false)));
     }
 
     // Keep the monologue bounded: fold old thinking into a summary; the state document carries the facts.
-    const history = await deps.runtime.loadHistory({ chatId: chatIdOf(channel), principal });
+    const history = await deps.runtime.loadHistory({ chatId, principal });
     if (history.length >= deps.compactAfter) {
       const r = await deps.runtime.compactChat({
-        chatId: chatIdOf(channel),
+        chatId,
         principal,
         focus: "Keep what you were watching and why; the state document holds the facts.",
       });

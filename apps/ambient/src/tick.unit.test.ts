@@ -36,6 +36,19 @@ describe("tick", () => {
     expect(await state.pending("C1")).toBe(3); // nothing drained: the agent's read_inbox does that, and it never ran
   });
 
+  it("a new monologue moves the next tick to a fresh chat; the state stays", async () => {
+    const { tick, state, runtime } = await build();
+    await state.saveDoc("C1", "## notes");
+    await state.push("C1", "m1", { kind: "message", ts: "1.0", text: "who can review?" });
+    await tick("C1");
+    expect(runtime.runAgent).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: "ambient_C1" }));
+    expect(await state.newMonologue("C1")).toBe(1);
+    await state.push("C1", "m2", { kind: "message", ts: "2.0", text: "who can review this?" });
+    await tick("C1");
+    expect(runtime.runAgent).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: "ambient_C1_1" }));
+    expect((await state.load("C1")).doc).toBe("## notes");
+  });
+
   it("a deferred batch runs nothing and is logged; an acted batch is logged too and compaction kicks in past the cap", async () => {
     const { tick, state, runtime, log } = await build({ historyLength: 5 });
     await state.push("C1", "r1", { kind: "reaction_added", ts: "1.0", emoji: "tada", targetTs: "999.0" });
