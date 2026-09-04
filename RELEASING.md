@@ -133,17 +133,31 @@ should end up.
 
 The catch is that it cannot perform a package's **first** publish: you authorize
 a publisher in a package's settings on npmjs.com, and those settings do not
-exist until the package does. So the order is fixed:
+exist until the package does. Something else has to create the packages once.
 
-1. Publish once with `NPM_TOKEN`, creating all ten packages.
-2. For each package, add a trusted publisher (`Intentface/intentface-latch`,
-   workflow `release.yml`). `npm trust github` can do this from the terminal
-   instead of ten trips through the web UI.
-3. In `release.yml`, add `id-token: write` to `permissions` and a step that
-   upgrades the npm CLI (`npm install -g npm@latest`) — OIDC needs 11.5.1 or
-   later, and the CLI bundled with `setup-node` is older. GitHub-hosted runners
-   only.
-4. Delete the `NPM_TOKEN` secret and its `NODE_AUTH_TOKEN` line.
+1. **Bootstrap the ten packages.** Two ways, and the second stores nothing:
+
+   - `NPM_TOKEN` in CI, as described above. Simple, and the 90-day clock never
+     matters because the token is revoked at step 4.
+   - **One publish from a laptop.** `npm login` issues a two-hour session that
+     satisfies 2FA, then `pnpm release` runs the same four gates CI does
+     (typecheck, test, build, `verify:publish`) and publishes the current
+     version of every package. Nothing long-lived is created, and no secret ever
+     enters the repository.
+
+2. **Authorize the workflow on each package**: a trusted publisher pointing at
+   `Intentface/intentface-latch`, workflow `release.yml` (the filename must
+   match exactly, extension included). `npm trust github` does this from the
+   terminal instead of ten trips through the web UI.
+3. **Switch `release.yml` to OIDC**: add `id-token: write` to `permissions` and
+   a step that upgrades the npm CLI (`npm install -g npm@latest`) — OIDC needs
+   11.5.1 or later and the CLI bundled with `setup-node` is older. GitHub-hosted
+   runners only; self-hosted cannot mint the token.
+4. **Remove the credential**: delete the `NODE_AUTH_TOKEN` line, and the
+   `NPM_TOKEN` secret if you created one.
+
+From then on a release is the same two merges, authenticated by the workflow's
+own identity, with nothing to rotate.
 
 ## Provenance is off, and why
 
