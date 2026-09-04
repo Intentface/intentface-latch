@@ -4,6 +4,7 @@ import { DAY_MS } from "@intentface/latch-core";
 import type { Principal } from "./principal.js";
 import type { Slack } from "./slack.js";
 import { MAX_DOC_CHARS, type Observation, type StateStore } from "./state.js";
+import { addressesMe, engagementOf, followsMe } from "./engagement.js";
 
 /**
  * The agent's four verbs. Every tool reads the channel from `options.context`
@@ -79,8 +80,9 @@ export function foldReactions(obs: Observation[]): (Observation | FoldedReaction
 export function createTools(deps: ToolDeps): Record<string, Tool> {
   const now = deps.now ?? Date.now;
 
-  /** Observations with names instead of ids, reactions folded, and a readable time. */
-  async function present(obs: Observation[]) {
+  /** Observations with names instead of ids, reactions folded, follow-ups to the agent marked, and a readable time. */
+  async function present(channel: string, obs: Observation[]) {
+    const engagement = engagementOf(await deps.state.recentPosts(channel, now() - 7 * DAY_MS), await deps.slack.botName().catch(() => ""));
     const out = [];
     for (const o of foldReactions(obs)) {
       if (o.kind === "reactions") {
@@ -92,7 +94,8 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
         continue;
       }
       const { userId, ...rest } = o as Observation & { userId?: string; text?: string };
-      out.push({ ...rest, ...("text" in rest && typeof rest.text === "string" ? { text: clip(rest.text) } : {}), at: isoOf(o.ts), ...(userId !== undefined ? { who: await deps.slack.userName(userId) } : {}) });
+      const flags = { ...(followsMe(o, engagement) ? { followsMe: true } : {}), ...(addressesMe(o, engagement) ? { addressesMe: true } : {}) };
+      out.push({ ...rest, ...("text" in rest && typeof rest.text === "string" ? { text: clip(rest.text) } : {}), ...flags, at: isoOf(o.ts), ...(userId !== undefined ? { who: await deps.slack.userName(userId) } : {}) });
     }
     return out;
   }
@@ -107,7 +110,7 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
     execute: async (_input, options) => {
       const { channel } = ctxOf(options).principal;
       const state = await deps.state.load(channel);
-      const events = await present(await deps.state.drain(channel));
+      const events = await present(channel, await deps.state.drain(channel));
       let history: Awaited<ReturnType<Slack["recentHistory"]>> | undefined;
       if (state.bootstrappedAt === null) {
         history = (await deps.slack.recentHistory(channel, deps.bootstrapMessages ?? 30)).map((m) => ({ ...m, text: clip(m.text) }));
@@ -164,10 +167,26 @@ export function createTools(deps: ToolDeps): Record<string, Tool> {
         }
       }
       const { ts } = await deps.slack.post(channel, text, threadTs);
-      await deps.state.recordPost(channel, ts, kind);
+      await deps.state.recordPost(channel, ts, kind, threadTs);
       return { ok: true as const, ts, kind };
     },
   });
 
-  return { read_inbox, read_thread, update_state, post_to_channel };
+  const react = tool({
+    description:
+      "Add an emoji reaction to a message in THIS channel. The right response to a message that expects no reply — " +
+      "\"thanks\", \"ok\", \"interesting\", a kind word after you helped: a fitting reaction says you saw it, without " +
+      "spending anyone's attention. Not budgeted. Use a plain emoji name like `thumbsup`, `pray`, `eyes`, `bulb`, `coffee`.",
+    inputSchema: z.object({
+      ts: z.string().describe("The message's ts."),
+      emoji: z.string().min(1).max(64).describe("Emoji name without colons."),
+    }),
+    execute: async ({ ts, emoji }, options) => {
+      const { channel } = ctxOf(options).principal;
+      await deps.slack.react(channel, ts, emoji);
+      return { ok: true as const };
+    },
+  });
+
+  return { read_inbox, read_thread, update_state, post_to_channel, react };
 }

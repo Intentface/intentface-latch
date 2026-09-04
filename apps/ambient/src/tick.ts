@@ -3,6 +3,8 @@ import type { Principal } from "./principal.js";
 import type { Slack } from "./slack.js";
 import type { StateStore } from "./state.js";
 import type { Triage } from "./triage.js";
+import { engagementOf } from "./engagement.js";
+import { DAY_MS } from "@intentface/latch-core";
 
 /** The channel's one long-lived chat: its monologue. */
 export const chatIdOf = (channel: string) => `ambient_${channel}`;
@@ -17,7 +19,7 @@ export interface TickDeps {
   runtime: TickRuntime;
   state: StateStore;
   triage: Triage;
-  slack: Pick<Slack, "setThinking">;
+  slack: Pick<Slack, "setThinking" | "botName">;
   compactAfter: number;
   log?: (line: string) => void;
   now?: () => number;
@@ -47,6 +49,7 @@ export function createTick(deps: TickDeps) {
         events,
         stateDoc: (await deps.state.load(channel)).doc,
         oldestAgeMs: oldestReceivedAt ? now() - oldestReceivedAt : 0,
+        engagement: engagementOf(await deps.state.recentPosts(channel, now() - 7 * DAY_MS), await deps.slack.botName().catch(() => "")),
       });
       await deps.state.logTriage(channel, { ...verdict, events: events.length, ...verdict.usage });
       if (!verdict.act) {

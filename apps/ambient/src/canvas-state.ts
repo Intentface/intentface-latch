@@ -41,8 +41,9 @@ export function createCanvasStateStore(input: {
   return {
     migrate: () => base.migrate(),
     markBootstrapped: (c) => base.markBootstrapped(c),
-    recordPost: (c, ts, k) => base.recordPost(c, ts, k),
+    recordPost: (c, ts, k, t) => base.recordPost(c, ts, k, t),
     unpromptedPostsSince: (c, s) => base.unpromptedPostsSince(c, s),
+    recentPosts: (c, s) => base.recentPosts(c, s),
     getCanvasId: (c) => base.getCanvasId(c),
     setCanvasId: (c, id) => base.setCanvasId(c, id),
     push: (c, k, o) => base.push(c, k, o),

@@ -15,6 +15,8 @@ async function build(history: ChannelMessage[] = []) {
   await state.migrate();
   const slack: Slack = {
     botUserId: async () => "UBOT",
+    botName: async () => "Ambient",
+    react: vi.fn(async () => {}),
     userName: async (id) => (id === "U1" ? "anna" : id ?? "someone"),
     channelName: async () => "general",
     myChannels: async () => [{ id: "C1", name: "general" }],
@@ -87,6 +89,27 @@ describe("ambient tools", () => {
     expect(await call("post_to_channel", { text: "elsewhere", reason: "overdue" }, "C2")).toMatchObject({ ok: true });
     expect(slack.post).toHaveBeenCalledTimes(5);
     expect(slack.post).toHaveBeenLastCalledWith("C2", "elsewhere", undefined);
+  });
+
+  it("marks follow-ups to its own posts and messages that say its name; react is pinned to the channel", async () => {
+    const { call, state, slack } = await build();
+    await state.recordPost("C1", "100.0", "addressed"); // a top-level post of ours
+    await state.recordPost("C1", "210.0", "addressed", "200.0"); // a reply of ours in thread 200.0
+    await state.push("C1", "a", { kind: "message", ts: "160.0", userId: "U1", text: "so filter coffee is fine then?" }); // 60 s after our post
+    await state.push("C1", "b", { kind: "reply", ts: "220.0", threadTs: "200.0", userId: "U1", text: "and this?" });
+    await state.push("C1", "c", { kind: "message", ts: "5000.0", userId: "U1", text: "Ambient we are talking here" }); // long after, but by name
+    await state.push("C1", "d", { kind: "message", ts: "5001.0", userId: "U1", text: "unrelated ambient noise levels" }); // 'ambient' as a word, not addressed? it is — name match is case-insensitive
+    await state.push("C1", "e", { kind: "reply", ts: "5002.0", threadTs: "999.0", userId: "U2", text: "other thread" });
+    const out = (await call("read_inbox", {})) as { events: { ts: string; followsMe?: boolean; addressesMe?: boolean }[] };
+    expect(out.events.map((e) => [e.ts, !!e.followsMe, !!e.addressesMe])).toEqual([
+      ["160.0", true, false],
+      ["220.0", true, false],
+      ["5000.0", false, true],
+      ["5001.0", false, true],
+      ["5002.0", false, false],
+    ]);
+    await call("react", { ts: "160.0", emoji: "coffee" }, "C1");
+    expect(slack.react).toHaveBeenCalledWith("C1", "160.0", "coffee");
   });
 
   it("every tool acts on the principal's channel, never on model input", async () => {

@@ -2,6 +2,7 @@ import { generateText, Output, type LanguageModel } from "ai";
 import { z } from "zod";
 import { windowRef, type LimitPolicy, type LimitStore } from "@intentface/latch-core";
 import type { Observation } from "./state.js";
+import { addressesMe, followsMe, type Engagement } from "./engagement.js";
 
 /**
  * Triage: is this batch worth waking the expensive model NOW? "No" means
@@ -29,6 +30,8 @@ export interface TriageInput {
   stateDoc: string;
   /** Age of the oldest queued event, ms. */
   oldestAgeMs: number;
+  /** Where the agent is already in a conversation; absent → treated as nowhere. */
+  engagement?: Engagement;
 }
 
 export interface TriageDeps {
@@ -49,6 +52,8 @@ export function ruleVerdict(input: TriageInput, maxDeferMs: number): Verdict | n
   const tracked = (ts?: string) => !!ts && stateDoc.includes(ts);
   if (events.length === 0) return { act: false, stage: "rule", reason: "nothing queued" };
   if (events.some((e) => e.kind === "mention")) return { act: true, stage: "rule", reason: "someone mentioned me" };
+  if (input.engagement && events.some((e) => addressesMe(e, input.engagement!))) return { act: true, stage: "rule", reason: "someone said my name" };
+  if (input.engagement && events.some((e) => followsMe(e, input.engagement!))) return { act: true, stage: "rule", reason: "a follow-up in a conversation I am part of" };
   if (input.oldestAgeMs >= maxDeferMs) return { act: true, stage: "rule", reason: `events waited ${Math.round(input.oldestAgeMs / 60_000)} min` };
   if (events.some((e) => e.kind === "reply" && tracked(e.threadTs))) return { act: true, stage: "rule", reason: "a reply in a thread I am watching" };
   if (events.some((e) => (e.kind === "reaction_added" || e.kind === "reaction_removed" || e.kind === "edit" || e.kind === "delete") && tracked(e.targetTs)))

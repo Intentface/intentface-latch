@@ -14,7 +14,7 @@ async function build(opts: { historyLength?: number } = {}) {
     loadHistory: vi.fn(async () => new Array(opts.historyLength ?? 0).fill({})),
     compactChat: vi.fn(async () => ({ compacted: 7 })),
   };
-  const slack = { setThinking: vi.fn(async (c: string, t: string, on: boolean) => void calls.push(`thinking:${t}:${on}`)) };
+  const slack = { setThinking: vi.fn(async (c: string, t: string, on: boolean) => void calls.push(`thinking:${t}:${on}`)), botName: async () => "Ambient" };
   const log = vi.fn();
   const tick = createTick({ runtime, state, triage: createTriage(), slack, compactAfter: 5, log });
   return { tick, state, runtime, slack, calls, log };

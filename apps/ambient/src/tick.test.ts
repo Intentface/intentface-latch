@@ -53,6 +53,8 @@ async function harness() {
 
   const slack: Slack = {
     botUserId: async () => "UBOT",
+    botName: async () => "Ambient",
+    react: vi.fn(async () => {}),
     userName: async (id) => (id === "U1" ? "anna" : id ?? "someone"),
     channelName: async (c) => (c === "C1" ? "general" : "other"),
     myChannels: async () => [{ id: "C1", name: "general" }],

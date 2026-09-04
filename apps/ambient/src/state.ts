@@ -38,9 +38,11 @@ export interface StateStore {
   load(channel: string): Promise<ChannelState>;
   saveDoc(channel: string, doc: string): Promise<void>;
   markBootstrapped(channel: string): Promise<void>;
-  recordPost(channel: string, ts: string, kind: PostKind): Promise<void>;
+  recordPost(channel: string, ts: string, kind: PostKind, threadTs?: string): Promise<void>;
   /** Unprompted posts in the trailing window. */
   unpromptedPostsSince(channel: string, since: number): Promise<number>;
+  /** The agent's own posts since `since` — where it is already in a conversation. */
+  recentPosts(channel: string, since: number): Promise<{ ts: string; threadTs?: string; postedAt: number }[]>;
   /** Queue an observation (idempotent on `key`, e.g. Slack's event_id). */
   push(channel: string, key: string, obs: Observation): Promise<void>;
   /** Drain the inbox, oldest first. */
@@ -109,6 +111,7 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
       );
       // Added later; idempotent.
       await client.execute(`ALTER TABLE ambient_channel_state ADD COLUMN canvas_id TEXT`).catch(() => undefined);
+      await client.execute(`ALTER TABLE ambient_posts ADD COLUMN thread_ts TEXT`).catch(() => undefined);
     },
 
     async getCanvasId(channel) {
@@ -156,11 +159,19 @@ export function createStateStore(client: Client, now: () => number = Date.now): 
       });
     },
 
-    async recordPost(channel, ts, kind) {
+    async recordPost(channel, ts, kind, threadTs) {
       await client.execute({
-        sql: `INSERT OR IGNORE INTO ambient_posts (channel, ts, kind, posted_at) VALUES (?, ?, ?, ?)`,
-        args: [channel, ts, kind, now()],
+        sql: `INSERT OR IGNORE INTO ambient_posts (channel, ts, kind, posted_at, thread_ts) VALUES (?, ?, ?, ?, ?)`,
+        args: [channel, ts, kind, now(), threadTs ?? null],
       });
+    },
+
+    async recentPosts(channel, since) {
+      const r = await client.execute({
+        sql: `SELECT ts, thread_ts, posted_at FROM ambient_posts WHERE channel = ? AND posted_at >= ? ORDER BY posted_at`,
+        args: [channel, since],
+      });
+      return r.rows.map((row) => ({ ts: String(row.ts), ...(row.thread_ts == null ? {} : { threadTs: String(row.thread_ts) }), postedAt: Number(row.posted_at) }));
     },
 
     async unpromptedPostsSince(channel, since) {

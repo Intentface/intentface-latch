@@ -21,6 +21,10 @@ export interface ChannelMessage {
 export interface Slack {
   /** The bot's own user id (auth.test, cached on success). */
   botUserId(): Promise<string>;
+  /** The bot's handle as people would type it ("Ambient"), from auth.test. */
+  botName(): Promise<string>;
+  /** Add a reaction to a message in this channel (already-reacted is fine). */
+  react(channel: string, ts: string, emoji: string): Promise<void>;
   userName(id: string | undefined): Promise<string>;
   channelName(channel: string): Promise<string>;
   /** Public + private channels the bot is a member of (not archived). */
@@ -44,7 +48,7 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
   const api = slackApi(token, { fetchImpl });
   const users = new Map<string, string>();
   const channels = new Map<string, string>();
-  let self: Promise<string> | undefined;
+  let self: Promise<{ id: string; name: string }> | undefined;
 
   async function get(method: string, params: Record<string, string>): Promise<Record<string, unknown>> {
     const q = new URLSearchParams(params).toString();
@@ -70,15 +74,17 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
     return name;
   }
 
-  const botUserId = (): Promise<string> => {
+  const whoami = (): Promise<{ id: string; name: string }> => {
     self ??= get("auth.test", {})
-      .then((r) => String(r.user_id ?? ""))
+      .then((r) => ({ id: String(r.user_id ?? ""), name: String(r.user ?? "") }))
       .catch((e: unknown) => {
         self = undefined;
         throw e;
       });
     return self;
   };
+  const botUserId = () => whoami().then((w) => w.id);
+  const botName = () => whoami().then((w) => w.name);
 
   const toMessage = async (m: { userId?: string; text: string; isBot: boolean; ts: string; threadTs?: string }): Promise<ChannelMessage> => {
     const me = await botUserId().catch(() => "");
@@ -95,7 +101,18 @@ export function createSlack(token: string, fetchImpl: typeof fetch = fetch): Sla
 
   return {
     botUserId,
+    botName,
     userName,
+
+    async react(channel, ts, emoji) {
+      const res = await fetchImpl("https://slack.com/api/reactions.add", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ channel, timestamp: ts, name: emoji.replace(/^:|:$/g, "") }),
+      });
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!json.ok && json.error !== "already_reacted") throw new Error(`slack:reactions.add failed: ${json.error ?? res.status}`);
+    },
 
     async channelName(channel) {
       const hit = channels.get(channel);

@@ -60,6 +60,16 @@ describe("channel state store", () => {
     ]);
   });
 
+  it("remembers where it posted: recentPosts carries the thread", async () => {
+    let t = 10;
+    const store = await fresh(() => t);
+    await store.recordPost("C1", "1.0", "addressed");
+    t = 20;
+    await store.recordPost("C1", "2.5", "addressed", "2.0");
+    expect(await store.recentPosts("C1", 0)).toEqual([{ ts: "1.0", postedAt: 10 }, { ts: "2.5", threadTs: "2.0", postedAt: 20 }]);
+    expect(await store.recentPosts("C1", 15)).toHaveLength(1);
+  });
+
   it("counts only unprompted posts inside the window, per channel", async () => {
     let t = 0;
     const store = await fresh(() => t);
