@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { DAY_MS, defineContext, isChatBusyError, isLimitExceededError } from "@intentface/latch-core";
+import { DAY_MS, defineContext, isChatBusyError, isLimitExceededError, usageKey, windowRef } from "@intentface/latch-core";
 import { createSqliteAdapter, createSqliteLimitStore, migrate, schema } from "@intentface/latch-drizzle";
 import { createLatchHonoApp } from "@intentface/latch-server/hono";
 import { createWatcher, STATE_SCHEMA, type Ctx } from "./agent.js";
@@ -15,6 +15,7 @@ import { createStateStore } from "./state.js";
 import { chatIdOf, createTick } from "./tick.js";
 import { createTicker } from "./ticker.js";
 import { createTriage } from "./triage.js";
+import { UI_HTML } from "./ui.js";
 import { createTools } from "./tools.js";
 
 /**
@@ -207,13 +208,40 @@ app.use("/channels/*", async (c, next) => {
   await next();
 });
 
-/** Watched channels and what is queued for each. */
+/** The operator page — static; it carries the admin token to the JSON routes itself. */
+app.get("/", (c) => c.html(UI_HTML));
+
+/** Today's spend against the channel's budget, from the limit counters. */
+async function budgetOf(channel: string) {
+  const [policy] = policiesFor(channel);
+  if (!policy) return null;
+  const ref = windowRef(policy, Date.now());
+  const usage = (await limitStore.read([ref]))[usageKey(ref)] ?? { turns: 0, tokens: 0, cost: 0 };
+  const unit = policy.max.cost !== undefined ? "cost" : policy.max.tokens !== undefined ? "tokens" : null;
+  return {
+    unit,
+    used: unit === "cost" ? usage.cost : usage.tokens,
+    max: unit === "cost" ? policy.max.cost : policy.max.tokens,
+    turns: usage.turns,
+    tokens: usage.tokens,
+    cost: usage.cost,
+    resetsInMs: ref.windowStart + ref.windowMs - Date.now(),
+  };
+}
+
+/** Watched channels: what is queued, when they last ticked, today's spend. */
 app.get("/channels", async (c) => {
   if (!authorized(c.req.raw)) return c.json({ error: "unauthorized" }, 401);
   const out = [];
-  for (const id of watched) out.push({ id, name: await slack.channelName(id), pending: await state.pending(id) });
+  for (const id of watched) {
+    const [last] = await runtime.listRuns({ principal: { channel: id }, limit: 1 });
+    out.push({ id, name: await slack.channelName(id), pending: await state.pending(id), lastRunAt: last?.startedAt ?? null, budget: await budgetOf(id) });
+  }
   return c.json(out);
 });
+
+/** Today's spend against the budget, for one channel. */
+app.get("/channels/:id/usage", async (c) => c.json(await budgetOf(c.req.param("id"))));
 
 /** The state document as the agent last wrote it. */
 app.get("/channels/:id/state", async (c) => c.json(await state.load(c.req.param("id"))));
@@ -258,7 +286,7 @@ serve({ fetch: app.fetch, port: config.port });
 console.log(`👁  ambient listening on http://localhost:${config.port}`);
 console.log(`   ${watched.size} channel(s); quiet ${config.quietMs / 1000}s; heartbeat ${config.heartbeatMs / 60_000} min; model ${config.model}; triage ${config.triageModel || "rules only"}; state in ${config.stateIn}`);
 console.log(`   /invite the bot to a channel to watch it — Slack events at POST /slack/events`);
-console.log(`   curl http://localhost:${config.port}/channels`);
+console.log(`   operator page: http://localhost:${config.port}/${config.adminToken ? "?token=<AMBIENT_ADMIN_TOKEN>" : ""}`);
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {

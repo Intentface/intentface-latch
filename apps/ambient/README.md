@@ -53,8 +53,13 @@ Create the Slack app from [`slack-manifest.json`](./slack-manifest.json) (api.sl
 From a manifest) with `request_url` set to `https://<tunnel>/slack/events`; Slack verifies it on save. Install,
 copy the Bot User OAuth Token and Signing Secret, then `/invite @Ambient` in a channel.
 
+Open **http://localhost:8790/** for the operator page: channels with today's spend against the budget, and per
+channel the state document, triage verdicts, runs (tokens, cached, cost, duration, errors), the monologue with
+tool calls, and a "Tick now" button. Refreshes every 15 s. With `AMBIENT_ADMIN_TOKEN` set, open `/?token=…` once.
+
 ```bash
-curl localhost:8790/channels                      # watched channels and what is queued
+curl localhost:8790/channels                      # watched channels, queued events, last tick, today's spend
+curl localhost:8790/channels/C0123/usage          # today's spend vs budget, resets-in
 curl localhost:8790/channels/C0123/state          # the document as the agent last wrote it
 curl localhost:8790/channels/C0123/monologue      # the whole long-lived chat: read, thought, did
 curl localhost:8790/channels/C0123/runs           # status, tokens, cost per tick
