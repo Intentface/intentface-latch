@@ -234,6 +234,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       chunks?: StreamChunk[];
       markdown_text?: string;
     }): Promise<{ ts: string; channel: string }> {
+      if (process.env.LATCH_SLACK_STREAM_DEBUG) console.log("[slack-stream] startStream", JSON.stringify(input));
       const r = await call("chat.startStream", input);
       return { ts: String(r.ts), channel: String(r.channel) };
     },
@@ -249,6 +250,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       markdown_text?: string;
       chunks?: StreamChunk[];
     }): Promise<void> {
+      if (process.env.LATCH_SLACK_STREAM_DEBUG) console.log("[slack-stream] appendStream", JSON.stringify(input));
       await call("chat.appendStream", input);
     },
 
@@ -261,6 +263,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       blocks?: unknown[];
       metadata?: unknown;
     }): Promise<void> {
+      if (process.env.LATCH_SLACK_STREAM_DEBUG) console.log("[slack-stream] stopStream", JSON.stringify(input));
       await call("chat.stopStream", input);
     },
 

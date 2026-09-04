@@ -17,3 +17,10 @@ Slack-triggered tree to its channel — and a "_requested by @user_" footer on
 channel answers. Messages from another workspace (Slack Connect) are dropped
 before any identity lookup. `chat.postMessage` now defaults `unfurl_media` off
 alongside `unfurl_links`.
+
+Fix: the streaming renderer now stays in Slack's `chunks` mode for the whole
+stream (text travels as a `markdown_text` chunk). Mixing a task card with a
+top-level `markdown_text` append made Slack reject every later append with
+`streaming_mode_mismatch`; the close failed, the answer arrived as a fallback
+post, and the "Thinking" card spun forever. `LATCH_SLACK_STREAM_DEBUG=1` logs
+every stream call for diagnosis.

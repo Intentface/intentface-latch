@@ -49,6 +49,11 @@ function opts(api: SlackStreamOptions["api"], extra: Partial<SlackStreamOptions>
 }
 
 const chunksOf = (c: Recorded) => (c.args.chunks ?? []) as StreamChunk[];
+/** Streamed text of one call — always a markdown_text CHUNK (one streaming mode). */
+const textOf = (c: Recorded) =>
+  chunksOf(c)
+    .map((k) => (k.type === "markdown_text" ? k.text : ""))
+    .join("");
 
 describe("renderSlackStream — streaming mode", () => {
   it("starts on first delta with recipient_team_id, appends, closes with the tail", async () => {
@@ -68,10 +73,12 @@ describe("renderSlackStream — streaming mode", () => {
     expect(start.args.thread_ts).toBe("1.0");
     const streamedText = calls
       .filter((c) => c.method === "appendStream" || c.method === "stopStream")
-      .map((c) => String(c.args.markdown_text ?? ""))
+      .map(textOf)
       .join("");
     expect(streamedText).toBe("Hello world");
     expect(calls[calls.length - 1]!.method).toBe("stopStream");
+    // Never the top-level markdown field: mixing modes breaks the stream.
+    expect(calls.some((c) => c.args.markdown_text !== undefined)).toBe(false);
   });
 
   it("coalesces deltas inside the flush interval into the final close", async () => {
@@ -89,9 +96,9 @@ describe("renderSlackStream — streaming mode", () => {
     // First content creates the stream (one append); the rest waits for close.
     const appends = calls.filter((c) => c.method === "appendStream");
     expect(appends.length).toBe(1);
-    expect(appends[0]!.args.markdown_text).toBe("a");
+    expect(textOf(appends[0]!)).toBe("a");
     const stop = calls.find((c) => c.method === "stopStream")!;
-    expect(stop.args.markdown_text).toBe("bc");
+    expect(textOf(stop)).toBe("bc");
   });
 
   it("renders tool calls as task_update chunks with settled status", async () => {
@@ -142,7 +149,7 @@ describe("renderSlackStream — streaming mode", () => {
     expect(r.text).toBe("The answer.");
     const streamedText = calls
       .filter((c) => c.method === "appendStream" || c.method === "stopStream")
-      .map((c) => String(c.args.markdown_text ?? ""))
+      .map(textOf)
       .join("");
     expect(streamedText).not.toContain("think");
     const reasoning = calls
@@ -170,7 +177,7 @@ describe("renderSlackStream — streaming mode", () => {
     );
     expect(r.stopped).toBe(true);
     const stop = calls.find((c) => c.method === "stopStream")!;
-    expect(String(stop.args.markdown_text)).toContain("Stopped");
+    expect(textOf(stop)).toContain("Stopped");
   });
 
   it("honors the host-backed stop flag between flushes", async () => {

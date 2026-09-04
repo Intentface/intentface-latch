@@ -9,6 +9,13 @@
  *   finish → `stopStream` with any trailing text, an error section if the run
  *   failed, and an optional feedback row.
  *
+ *   ONE STREAMING MODE, ALWAYS `chunks`. A Slack stream is either "markdown"
+ *   (top-level `markdown_text`) or "chunks"; once a `task_update` has gone out,
+ *   a later top-level `markdown_text` append fails with
+ *   `streaming_mode_mismatch` — every text flush then fails, the close fails,
+ *   and the message is left spinning forever. So text always travels as a
+ *   `{ type: "markdown_text" }` chunk alongside the task updates.
+ *
  * Stop is two signals, either wins: `appendStream` throwing `stopped_by_user`
  * (the viewer pressed Slack's native Stop button on THIS message) and the
  * host-backed `shouldStop` poll (a stop that landed on another instance).
@@ -115,6 +122,10 @@ const STOPPED_NOTICE = "\n\n_Stopped._";
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/** Text as a stream chunk (see "one streaming mode" above); empty → none. */
+const textChunk = (text: string): StreamChunk[] =>
+  text ? [{ type: "markdown_text", text }] : [];
 
 function taskChunk(
   id: string,
@@ -233,20 +244,15 @@ export async function renderSlackStream(
     // Respect the streamed-message budget; the remainder overflows at finish.
     const room = Math.max(0, maxStreamed - streamedChars);
     const sendText = pendingText.slice(0, Math.min(room, MAX_APPEND_CHARS));
-    const chunks = pendingChunks;
-    if (!sendText && !chunks.length) return;
+    const chunks = [...pendingChunks, ...textChunk(sendText)];
+    if (!chunks.length) return;
     try {
-      await opts.api.appendStream({
-        channel: opts.channel,
-        ts,
-        ...(sendText ? { markdown_text: sendText } : {}),
-        ...(chunks.length ? { chunks } : {}),
-      });
+      await opts.api.appendStream({ channel: opts.channel, ts, chunks });
+      pendingChunks = [];
       streamedChars += sendText.length;
       // Drop exactly what went out; anything the budget refused stays pending
       // so the finish-time overflow message still carries it.
       pendingText = pendingText.slice(sendText.length);
-      pendingChunks = [];
       lastFlushAt = now();
     } catch (e) {
       if (isStoppedByUser(e)) {
@@ -388,7 +394,7 @@ export async function renderSlackStream(
   if (stopped) {
     if (modeNow() === "stream" && ts) {
       await opts.api
-        .stopStream({ channel: opts.channel, ts, markdown_text: STOPPED_NOTICE })
+        .stopStream({ channel: opts.channel, ts, chunks: textChunk(STOPPED_NOTICE) })
         .catch(() => {
           /* the stop already landed user-side; closing is best-effort */
         });
@@ -446,11 +452,11 @@ export async function renderSlackStream(
   const footer = opts.attribution && !overflow ? [contextLine(opts.attribution)] : [];
   const closeBlocks = [...finalBlocks, ...footer];
 
+  const closeChunks = [...pendingChunks, ...textChunk(tail)];
   const stopArgs = {
     channel: opts.channel,
     ts: ts as string,
-    ...(tail ? { markdown_text: tail } : {}),
-    ...(pendingChunks.length ? { chunks: pendingChunks } : {}),
+    ...(closeChunks.length ? { chunks: closeChunks } : {}),
     ...(closeBlocks.length ? { blocks: closeBlocks } : {}),
   };
   let tailDelivered = false;
