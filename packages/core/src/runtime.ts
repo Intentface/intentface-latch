@@ -646,6 +646,14 @@ function firstText(message: AppMessage): string | undefined {
 }
 
 /** The text of the turn's incoming user message (for telemetry). */
+/** The model that produced this history's last assistant message, if recorded. */
+function ranAs(messages: AppMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") return messages[i].metadata?.model;
+  }
+  return undefined;
+}
+
 function lastUserText(messages: AppMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -2291,7 +2299,6 @@ export function createRuntime<P, RC = unknown>(
     // System op (no request): rebuild the principal from the run's identity blob.
     const principal = await reconstructPrincipal(run.identity);
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
     const uiMessages = await storage.loadMessages(principal, run.chatId);
     const lease: RunLease = {
       owner: dur.instanceId,
@@ -2334,7 +2341,11 @@ export function createRuntime<P, RC = unknown>(
         runId: run.id,
         chatId: run.chatId,
         agent: run.agent,
-        modelId,
+        // The model that ACTUALLY ran, off the message it produced — not a
+        // freshly resolved config. Reconciling a finished turn must not need
+        // the agent to still exist (see above), and this is the truer answer
+        // anyway: the agent's model may have been changed since.
+        modelId: ranAs(uiMessages) ?? "unknown",
         principal,
         startedAt: run.startedAt,
         depth: 0,
@@ -2372,6 +2383,13 @@ export function createRuntime<P, RC = unknown>(
         attempt: settled?.attempt ?? run.attempt ?? null,
       };
     }
+
+    // Only now resolve the agent — `resolveAgentConfig` throws on an agent that
+    // no longer resolves, and a run whose answer is already stored must be
+    // reconcilable even if its (dynamic, DB-stored) agent was since deleted.
+    // Before this ordering that throw also aborted `sweep`'s loop, so one such
+    // run held up recovery for every other run until its attempts ran out.
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
 
     // A resume was admitted when the turn first ran — never refuse it (the
     // half-done work would strand), but its tokens still settle against the

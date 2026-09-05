@@ -401,6 +401,54 @@ describe("resumeRun", () => {
     expect(outcome?.status).toBe("active");
   });
 
+  it("settles a finished turn whose agent no longer exists", async () => {
+    // Dynamic agents are rows: one can be deleted between the crash and the
+    // sweep. Resolving it would throw — and that throw used to abort the whole
+    // sweep loop, holding up recovery for every other run. A turn whose answer
+    // is already stored must reconcile without it.
+    const history = [
+      USER,
+      msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }]),
+    ];
+    (history[1] as AppMessage).metadata = { model: "anthropic/claude-sonnet-4-6" };
+    const reported: string[] = [];
+    let row: RunRecord = { ...RUN, agent: "deleted_agent" };
+    const { storage } = stubStorage({
+      async reclaimRun() {
+        return row;
+      },
+      async loadMessages() {
+        return structuredClone(history);
+      },
+      async updateRun(_id, patch) {
+        row = { ...row, ...(patch as Partial<RunRecord>) };
+        return true;
+      },
+      async getRun() {
+        return row;
+      },
+    });
+    const runtime = createRuntime<P, Record<string, never>>({
+      storage,
+      context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
+      agents: {}, // the agent is gone
+      reconstructPrincipal: (identity) => identity as P,
+      durability: { enabled: true, instanceId: "node_a" },
+      telemetry: {
+        onRunFinished: (run, outcome) => {
+          reported.push(`${outcome.status}:${run.modelId}`);
+        },
+      },
+    });
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("completed");
+    // Telemetry names the model that actually ran, read off the message it
+    // produced — there is no agent left to ask.
+    expect(reported).toEqual(["completed:anthropic/claude-sonnet-4-6"]);
+  });
+
   it("reports the settled turn to telemetry, so a host watching for the end sees one", async () => {
     const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
     const finished: Array<{ status: string; cost?: number }> = [];
