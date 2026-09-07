@@ -14,7 +14,10 @@ already in history.
 tool means the loop had stopped, so the row is reconciled (`completed`, or
 `awaiting_input` when a gate is pending) without a model call — previously the
 answer was generated a second time and, because the message id is reused,
-appended to the message that already held the first one.
+appended to the message that already held the first one. A turn waiting on a
+client-handled tool (`askUser`) is finished in the same sense: `onFinish`
+records it as completed and the answer arrives through `applyToolResult`, so
+recovery records the same instead of re-running and asking the question twice.
 
 When work genuinely remains, the resumed history now also passes through
 `trimTrailingAssistantPrefill`, which the two human-decision resume paths

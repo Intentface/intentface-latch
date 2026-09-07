@@ -958,7 +958,9 @@ function markSubagentApprovalResolved(
  *    `awaiting_input`; settle it there and let `applyApproval` drive the rest.
  *    (Reaping is scoped to `active`, so this only ever arrives via that gap.)
  *  - `loop-finished` — the last step called no tool, which is exactly the
- *    condition on which the tool loop stops. The turn is done; settle it.
+ *    condition on which the tool loop stops; or it is waiting on a CLIENT-
+ *    handled tool (askUser), which `onFinish` also records as completed, the
+ *    answer arriving later via `applyToolResult`. The turn is done; settle it.
  *  - `continue` — there is real work left (a tool result to consume, a step that
  *    produced nothing, or no assistant message at all). Re-run the model.
  *
@@ -1007,14 +1009,30 @@ export function resumeShapeOf(messages: AppMessage[], runId?: string): ResumeSha
       break;
     }
   }
-  const finalStep = parts.slice(stepStart + 1);
+  const finalStep = parts.slice(stepStart + 1) as Array<{
+    type: string;
+    toolCallId?: unknown;
+    state?: unknown;
+    providerExecuted?: unknown;
+  }>;
   // A step that opened and produced nothing: the crash landed inside it, so
   // there is unfinished work regardless of what earlier steps did.
   if (finalStep.length === 0) return "continue";
-  const calledATool = finalStep.some(
-    (p) => p.type.startsWith("tool-") || p.type === "dynamic-tool",
+  const toolParts = finalStep.filter((p) => p.type.startsWith("tool-") || p.type === "dynamic-tool");
+  // A CLIENT-handled tool (no `execute`, e.g. askUser) is the one tool part a
+  // checkpoint can hold with no result: the step's other tools ran, this one is
+  // for the client to answer, and the loop stops because not every call has an
+  // output. `onFinish` records that turn as `completed` and the answer arrives
+  // later through `applyToolResult`, which opens its own run — so that is what
+  // recovery must record too. Re-running instead would make the projection
+  // close the call as "interrupted" and the model ask its question twice.
+  // (A provider-executed tool still pending is the loop continuing, not a
+  // client wait, so it must not match.)
+  const awaitingClient = toolParts.some(
+    (p) => p.state === "input-available" && typeof p.toolCallId === "string" && !p.providerExecuted,
   );
-  return calledATool ? "continue" : "loop-finished";
+  if (awaitingClient) return "loop-finished";
+  return toolParts.length > 0 ? "continue" : "loop-finished";
 }
 
 /**

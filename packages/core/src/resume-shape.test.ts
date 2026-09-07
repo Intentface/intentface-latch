@@ -72,7 +72,12 @@ describe("resumeShapeOf", () => {
     expect(resumeShapeOf(history)).toBe("continue");
   });
 
-  it("a tool that never returned has work left", () => {
+  it("an unanswered call at a step boundary is a client wait, not a tool that never returned", () => {
+    // The checkpoint fires at finish-step, AFTER tool execution, so a server
+    // tool is always output-available or output-error by then. The only call
+    // that can be checkpointed without a result is one with no `execute` —
+    // whatever its name. Reading it as "interrupted mid-execution" would re-run
+    // a turn onFinish had already recorded as completed.
     const history = [
       USER,
       msg("assistant", [
@@ -80,7 +85,7 @@ describe("resumeShapeOf", () => {
         { type: "tool-web_fetch", toolCallId: "c1", state: "input-available", input: { url: "u" } },
       ]),
     ];
-    expect(resumeShapeOf(history)).toBe("continue");
+    expect(resumeShapeOf(history)).toBe("loop-finished");
   });
 
   it("trailing narration after a tool call still has work left — the loop went round again", () => {
@@ -107,6 +112,43 @@ describe("resumeShapeOf", () => {
       ]),
     ];
     expect(resumeShapeOf(history)).toBe("decision-pending");
+  });
+
+  describe("a client-handled tool awaiting its answer", () => {
+    // askUser has no `execute`: the step ends with the call in
+    // `input-available`, the loop stops because not every call has an output,
+    // and onFinish records the turn as `completed` — the answer arrives later
+    // through applyToolResult, which opens its own run. Recovery must say the
+    // same. Re-running would make the projection close the call as
+    // "interrupted" and the model ask its question twice.
+    const asking = { type: "tool-askUser", toolCallId: "q1", state: "input-available", input: { question: "Which one?" } };
+
+    it("is a finished loop, not work left", () => {
+      expect(resumeShapeOf([USER, msg("assistant", [{ type: "step-start" }, asking])])).toBe("loop-finished");
+    });
+
+    it("still finished when other tools in the same step already ran", () => {
+      const history = [
+        USER,
+        msg("assistant", [
+          { type: "step-start" },
+          { type: "tool-web_fetch", toolCallId: "c1", state: "output-available", input: { url: "u" }, output: {} },
+          asking,
+        ]),
+      ];
+      expect(resumeShapeOf(history)).toBe("loop-finished");
+    });
+
+    it("a provider-executed call still pending is the loop continuing, not a client wait", () => {
+      const history = [
+        USER,
+        msg("assistant", [
+          { type: "step-start" },
+          { type: "tool-web_search", toolCallId: "p1", state: "input-available", input: {}, providerExecuted: true },
+        ]),
+      ];
+      expect(resumeShapeOf(history)).toBe("continue");
+    });
   });
 
   it("a step that opened and produced nothing has work left", () => {
@@ -502,6 +544,26 @@ describe("resumeRun", () => {
     ]);
     expect(calls).not.toContain("appendMessages");
     expect(finished).toEqual([{ status: "errored", error: expect.stringMatching(/^superseded/) }]);
+  });
+
+  it("settles a turn waiting on the client as completed, without re-asking", async () => {
+    const history = [
+      USER,
+      msg("assistant", [
+        { type: "step-start" },
+        { type: "tool-askUser", toolCallId: "q1", state: "input-available", input: { question: "Which one?" } },
+      ]),
+    ];
+    const { runtime, patches, appended } = runtimeOver(history, forbiddenModel());
+
+    const outcome = await runtime.resume("run_1");
+
+    // What onFinish would have written: completed, the question left standing
+    // for applyToolResult to answer. Not awaiting_input — that is the approval
+    // state, and applyToolResult opens its own run regardless.
+    expect(outcome?.status).toBe("completed");
+    expect(patches).toEqual([expect.objectContaining({ status: "completed", error: null })]);
+    expect(appended).toEqual([]);
   });
 
   it("settles a finished turn whose agent no longer exists", async () => {
