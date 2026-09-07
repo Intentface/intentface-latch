@@ -646,10 +646,24 @@ function firstText(message: AppMessage): string | undefined {
 }
 
 /** The text of the turn's incoming user message (for telemetry). */
-/** The model that produced this history's last assistant message, if recorded. */
-function ranAs(messages: AppMessage[]): string | undefined {
+function lastAssistant(messages: AppMessage[]): AppMessage | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") return messages[i].metadata?.model;
+    if (messages[i].role === "assistant") return messages[i];
+  }
+  return undefined;
+}
+
+/**
+ * The model that ran THIS run, off the assistant message it produced (each one
+ * carries its run id). Falls back to the tail when nothing is correlated —
+ * the legacy shape — and to nothing when the run never produced a message.
+ */
+function ranAs(messages: AppMessage[], runId: string): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    const owner = (m.metadata as { runId?: unknown } | undefined)?.runId;
+    if (owner === runId || owner === undefined) return m.metadata?.model;
   }
   return undefined;
 }
@@ -935,6 +949,11 @@ function markSubagentApprovalResolved(
  * the same message as the old, so the reader can end up with the answer twice.
  * Reconciling the row costs nothing and loses nothing.
  *
+ *  - `superseded` — the last assistant message belongs to a LATER run: the
+ *    conversation moved on while this run sat reaped. Settle it as errored with
+ *    the same "superseded" outcome `openTurn` gives a stale run. Never re-run —
+ *    that would generate against a conversation that has moved on and append
+ *    the result to the later turn's message.
  *  - `decision-pending` — a gate is awaiting a human. The row never got its
  *    `awaiting_input`; settle it there and let `applyApproval` drive the rest.
  *    (Reaping is scoped to `active`, so this only ever arrives via that gap.)
@@ -953,10 +972,27 @@ function markSubagentApprovalResolved(
  * The final step is the parts after the last `step-start`; a tool part there
  * means the loop had gone round again and was still going.
  */
-export type ResumeShape = "decision-pending" | "loop-finished" | "continue";
+export type ResumeShape = "superseded" | "decision-pending" | "loop-finished" | "continue";
 
-export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
-  // Checked first: a pending gate outranks the tail's shape, and its own tail
+export function resumeShapeOf(messages: AppMessage[], runId?: string): ResumeShape {
+  // Whose tail is this? Reaping and resuming are not one step: `sweep` resumes
+  // reaped runs one at a time, and an earlier resume can run a model for a
+  // while. In that gap this chat is free (the run is `errored`), so a user can
+  // send the next message and have a WHOLE later turn complete before we get
+  // here. Reclaim only refuses while a sibling is still live, so we would then
+  // classify — and settle — someone else's finished turn as ours, or worse
+  // re-run the model over a conversation that has moved on and append the
+  // result to the later turn's message. Every assistant message carries the id
+  // of the run that produced it; if the last one is not ours, we were
+  // superseded, exactly as `openTurn` supersedes a stale run when the next
+  // message arrives. (A tail with no id recorded is treated as ours — that is
+  // the pre-correlation legacy shape, and refusing it would strand real runs.)
+  if (runId !== undefined) {
+    const tail = lastAssistant(messages);
+    const tailRunId = (tail?.metadata as { runId?: unknown } | undefined)?.runId;
+    if (tail && tailRunId !== undefined && tailRunId !== runId) return "superseded";
+  }
+  // Checked next: a pending gate outranks the tail's shape, and its own tail
   // (narration after the gated call) would otherwise read as `loop-finished`.
   if (hasPendingApproval(messages)) return "decision-pending";
   const last = messages[messages.length - 1];
@@ -2310,9 +2346,13 @@ export function createRuntime<P, RC = unknown>(
     // `active` row, and re-running the model there would pay twice for an answer
     // already in history — and append the second copy to the same message. So
     // reconcile the row instead, and only re-run when work is genuinely left.
-    const shape = resumeShapeOf(uiMessages);
+    const shape = resumeShapeOf(uiMessages, run.id);
     if (shape !== "continue") {
-      const status: RunStatus = shape === "decision-pending" ? "awaiting_input" : "completed";
+      const status: RunStatus =
+        shape === "superseded" ? "errored" : shape === "decision-pending" ? "awaiting_input" : "completed";
+      // Same outcome `openTurn` records when a fresh message supersedes a stale
+      // run, so a superseded run reads the same however it got there.
+      const error = shape === "superseded" ? "superseded: a later turn moved the conversation on" : null;
       // Fenced like every other terminal write: if our lease was reaped again
       // mid-flight, the new owner decides this run's end state, not us.
       const applied = await storage.updateRun(
@@ -2320,15 +2360,15 @@ export function createRuntime<P, RC = unknown>(
         {
           status,
           // The reaper stamped BOTH an error and an `endedAt` on the way in
-          // (see `reapExpiredRuns`). The turn did not fail, so the error has to
-          // go or the row reads as failed forever — and a run settling to
+          // (see `reapExpiredRuns`). A finished turn did not fail, so its error
+          // has to go or the row reads as failed forever — and a run settling to
           // `awaiting_input` is paused, not over, so its `endedAt` has to go
           // too. `onFinish` leaves it unset for a paused turn; a crash-settled
           // one must match, or inter-run gap stats read a run that ended before
           // its decision arrived. `null` (not `undefined`) is what clears a
           // column: the adapters drop undefined from the patch.
-          error: null,
-          endedAt: status === "completed" ? Date.now() : null,
+          error,
+          endedAt: status === "awaiting_input" ? null : Date.now(),
         },
         lease,
       );
@@ -2345,7 +2385,7 @@ export function createRuntime<P, RC = unknown>(
         // freshly resolved config. Reconciling a finished turn must not need
         // the agent to still exist (see above), and this is the truer answer
         // anyway: the agent's model may have been changed since.
-        modelId: ranAs(uiMessages) ?? "unknown",
+        modelId: ranAs(uiMessages, run.id) ?? "unknown",
         principal,
         startedAt: run.startedAt,
         depth: 0,
@@ -2361,6 +2401,7 @@ export function createRuntime<P, RC = unknown>(
         try {
           await config.telemetry?.onRunFinished?.(meta, {
             status,
+            ...(error !== null ? { error } : {}),
             inputText: lastUserText(uiMessages),
             messages: uiMessages,
             usage: { inputTokens: 0, outputTokens: 0 },

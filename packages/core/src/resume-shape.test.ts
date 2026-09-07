@@ -118,6 +118,54 @@ describe("resumeShapeOf", () => {
     expect(resumeShapeOf([USER])).toBe("continue");
     expect(resumeShapeOf([])).toBe("continue");
   });
+
+  describe("whose tail is it", () => {
+    const ours = (parts: Array<{ type: string } & Record<string, unknown>>, runId: string) =>
+      ({ ...msg("assistant", parts), metadata: { runId } }) as AppMessage;
+
+    it("a finished tail that belongs to a LATER run means we were superseded", () => {
+      // The chat moved on while this run sat reaped: another turn ran and
+      // completed. Settling that turn as ours, or re-running over it, are both
+      // wrong — and the second appends to the later turn's message.
+      const history = [
+        USER,
+        ours([{ type: "step-start" }, { type: "text", text: "partial" }], "run_1"),
+        msg("user", [{ type: "text", text: "actually, something else" }]),
+        ours([{ type: "step-start" }, { type: "text", text: "Sure." }], "run_2"),
+      ];
+      expect(resumeShapeOf(history, "run_1")).toBe("superseded");
+    });
+
+    it("superseded outranks a pending gate that is not ours", () => {
+      const history = [
+        USER,
+        ours(
+          [{ type: "tool-create_page", toolCallId: "c9", state: "approval-requested", input: {}, approval: { approvalId: "apv_9" } }],
+          "run_2",
+        ),
+      ];
+      // Without correlation this would settle run_1 as awaiting a decision that
+      // belongs to run_2 — a human's answer would then land on the wrong run.
+      expect(resumeShapeOf(history, "run_1")).toBe("superseded");
+      // The run the gate actually belongs to still reads as pending.
+      expect(resumeShapeOf(history, "run_2")).toBe("decision-pending");
+    });
+
+    it("our own tail classifies as before", () => {
+      const history = [USER, ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_1")];
+      expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
+    });
+
+    it("a tail with no run id recorded is treated as ours — the legacy shape", () => {
+      const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
+      expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
+    });
+
+    it("without a run id to compare, correlation is skipped", () => {
+      const history = [USER, ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_2")];
+      expect(resumeShapeOf(history)).toBe("loop-finished");
+    });
+  });
 });
 
 describe("trimTrailingAssistantPrefill — unanchored", () => {
@@ -399,6 +447,61 @@ describe("resumeRun", () => {
     expect(finished).toEqual([]);
     // The outcome reflects the row as it stands, not what we wanted to write.
     expect(outcome?.status).toBe("active");
+  });
+
+  it("a run superseded by a later turn settles as errored, and never re-runs", async () => {
+    const history = [
+      USER,
+      { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "partial" }]), metadata: { runId: "run_1" } } as AppMessage,
+      msg("user", [{ type: "text", text: "actually, something else" }]),
+      { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "Sure." }]), metadata: { runId: "run_2", model: "m2" } } as AppMessage,
+    ];
+    const finished: Array<{ status: string; error?: string }> = [];
+    let row: RunRecord = { ...RUN };
+    const patches: Array<Record<string, unknown>> = [];
+    const { storage, calls } = stubStorage({
+      async reclaimRun() {
+        return row;
+      },
+      async loadMessages() {
+        return structuredClone(history);
+      },
+      async updateRun(_id, patch) {
+        patches.push(patch as Record<string, unknown>);
+        row = { ...row, ...(patch as Partial<RunRecord>) };
+        return true;
+      },
+      async getRun() {
+        return row;
+      },
+    });
+    const runtime = createRuntime<P, Record<string, never>>({
+      storage,
+      context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
+      agents: { assistant: defineAgent(() => ({ model: forbiddenModel(), instructions: "be brief" })) },
+      reconstructPrincipal: (identity) => identity as P,
+      durability: { enabled: true, instanceId: "node_a" },
+      telemetry: {
+        onRunFinished: (_run, outcome) => {
+          finished.push({ status: outcome.status, error: outcome.error });
+        },
+      },
+    });
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("errored");
+    // The same outcome openTurn records for a stale run a fresh message
+    // supersedes, so it reads identically however it got there.
+    expect(patches).toEqual([
+      expect.objectContaining({
+        status: "errored",
+        error: expect.stringMatching(/^superseded/),
+        endedAt: expect.any(Number),
+      }),
+    ]);
+    expect(calls).not.toContain("appendMessages");
+    expect(finished).toEqual([{ status: "errored", error: expect.stringMatching(/^superseded/) }]);
   });
 
   it("settles a finished turn whose agent no longer exists", async () => {

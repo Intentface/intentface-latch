@@ -29,4 +29,11 @@ anchor on. Crash recovery passes it as a guard: the one anchorless tail a
 checkpoint can produce is a tool-free turn, which the classifier now settles
 before the trim is reached.
 
+Recovery also checks whose turn the tail is. Reaped runs are resumed one at a
+time, and while one waits its chat is free — so a later message can start and
+finish a whole turn first. Every assistant message carries the id of the run
+that produced it; a tail belonging to a later run means this run was superseded,
+and it settles as errored with the same outcome `openTurn` gives a stale run,
+rather than being classified (or re-run) against a conversation that moved on.
+
 Also exports `resumeShapeOf` for hosts that drive recovery themselves.
