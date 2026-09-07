@@ -32,14 +32,14 @@ anchor on. Crash recovery passes it as a guard: the one anchorless tail a
 checkpoint can produce is a tool-free turn, which the classifier now settles
 before the trim is reached.
 
-Recovery also checks whose turn the tail is. Reaped runs are resumed one at a
-time, and while one waits its chat is free — so a later message can start and
-finish a whole turn first. Every assistant message carries the id of the run
-that produced it; a tail belonging to a later run — or any user message after
-this run's own assistant message, since a user message is only ever persisted
-together with its run — means this run was superseded, and it settles as errored
-with the same outcome `openTurn` gives a stale run, rather than being classified
-(or re-run) against a conversation that moved on.
+Recovery also checks whether the chat moved on. Reaped runs are resumed one at a
+time, and while one waits its chat is free — so a later message can start, and
+even finish, a whole turn first. That is read off the runs table, never inferred
+from message shapes: a user message is only ever persisted together with its
+run, so a later run in the same chat is the one fact that proves a later turn
+exists. Such a run settles as errored with the same outcome `openTurn` gives a
+stale run, rather than being classified (or re-run) against a conversation that
+moved on. Compaction runs are summaries, not turns, and do not count.
 
 The runtime now also warns at startup when durability is enabled on a storage
 adapter without `openTurn`: turn creation is then two writes, and a crash between

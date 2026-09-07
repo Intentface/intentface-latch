@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
-import { createRuntime, resumeShapeOf, trimTrailingAssistantPrefill } from "./runtime.js";
+import { createRuntime, resumeShapeOf, supersededBy, trimTrailingAssistantPrefill } from "./runtime.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
 import { toModelMessages } from "./projections.js";
@@ -161,77 +161,54 @@ describe("resumeShapeOf", () => {
     expect(resumeShapeOf([])).toBe("continue");
   });
 
-  describe("whose tail is it", () => {
-    const ours = (parts: Array<{ type: string } & Record<string, unknown>>, runId: string) =>
-      ({ ...msg("assistant", parts), metadata: { runId } }) as AppMessage;
+  it("a compaction marker after our message is not a later turn", () => {
+    // The runtime's own user-role message: a summary of the conversation so
+    // far plus a boundary part. It can land after a reaped run's message and
+    // must not read as a user turn that makes the tail look unfinished.
+    const history = [
+      USER,
+      msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }]),
+      { ...msg("user", [{ type: "text", text: "summary" }, { type: "data-compaction", data: { compacted: 2, at: 1 } }]), metadata: { visibility: "internal" } } as AppMessage,
+    ];
+    expect(resumeShapeOf(history)).toBe("loop-finished");
+  });
+});
 
-    it("a finished tail that belongs to a LATER run means we were superseded", () => {
-      // The chat moved on while this run sat reaped: another turn ran and
-      // completed. Settling that turn as ours, or re-running over it, are both
-      // wrong — and the second appends to the later turn's message.
-      const history = [
-        USER,
-        ours([{ type: "step-start" }, { type: "text", text: "partial" }], "run_1"),
-        msg("user", [{ type: "text", text: "actually, something else" }]),
-        ours([{ type: "step-start" }, { type: "text", text: "Sure." }], "run_2"),
-      ];
-      expect(resumeShapeOf(history, "run_1")).toBe("superseded");
-    });
+describe("supersededBy", () => {
+  // Whether the chat moved on is read off the RUNS, never inferred from message
+  // shapes: user messages carry no run id, and when a turn crashes before its
+  // first checkpoint the previous turn's assistant message is legitimately the
+  // last assistant in history. Every user message is persisted with its run
+  // (openTurn), so "a later run in this chat" is the one fact that proves a
+  // later turn exists.
+  const run = (id: string, chatId: string, startedAt: number, extra: Partial<RunRecord> = {}): RunRecord =>
+    ({ id, chatId, agent: "assistant", status: "completed", startedAt, ...extra }) as RunRecord;
+  const ours = run("run_1", "chat_1", 1000);
 
-    it("superseded outranks a pending gate that is not ours", () => {
-      const history = [
-        USER,
-        ours(
-          [{ type: "tool-create_page", toolCallId: "c9", state: "approval-requested", input: {}, approval: { approvalId: "apv_9" } }],
-          "run_2",
-        ),
-      ];
-      // Without correlation this would settle run_1 as awaiting a decision that
-      // belongs to run_2 — a human's answer would then land on the wrong run.
-      expect(resumeShapeOf(history, "run_1")).toBe("superseded");
-      // The run the gate actually belongs to still reads as pending.
-      expect(resumeShapeOf(history, "run_2")).toBe("decision-pending");
-    });
+  it("a later run in the same chat means we were superseded", () => {
+    expect(supersededBy(ours, [ours, run("run_2", "chat_1", 1500)])).toBe(true);
+  });
 
-    it("a later USER turn after our assistant message means we were superseded, even with no reply yet", () => {
-      // The later run may have crashed too, or be queued behind us in the same
-      // sweep. Its user message alone proves it exists: openTurn persists a
-      // user message and its run together. Without this, we would re-run over
-      // the conversation and answer user_B on run_1's behalf.
-      const history = [
-        USER,
-        ours([{ type: "step-start" }, { type: "text", text: "partial" }], "run_1"),
-        msg("user", [{ type: "text", text: "actually, something else" }]),
-      ];
-      expect(resumeShapeOf(history, "run_1")).toBe("superseded");
-    });
+  it("a later run that has not finished counts too", () => {
+    // It may have crashed as well, or be queued behind us in the same sweep.
+    expect(supersededBy(ours, [ours, run("run_2", "chat_1", 1500, { status: "errored" })])).toBe(true);
+  });
 
-    it("a compaction marker after our message is not a later turn", () => {
-      // The runtime's own user-role message: a summary of the conversation so
-      // far plus a boundary part. It can land after a reaped run's message and
-      // must not read as the conversation moving on.
-      const history = [
-        USER,
-        ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_1"),
-        { ...msg("user", [{ type: "text", text: "summary" }, { type: "data-compaction", data: { compacted: 2, at: 1 } }]), metadata: { visibility: "internal" } } as AppMessage,
-      ];
-      expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
-    });
+  it("an earlier run in the chat is history, not supersession", () => {
+    expect(supersededBy(ours, [run("run_0", "chat_1", 500), ours])).toBe(false);
+  });
 
-    it("our own tail classifies as before", () => {
-      const history = [USER, ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_1")];
-      expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
-    });
+  it("a later run in another chat is irrelevant", () => {
+    expect(supersededBy(ours, [ours, run("run_9", "chat_2", 1500)])).toBe(false);
+  });
 
-    it("a tail with no run id recorded is treated as ours — the legacy shape", () => {
-      const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
-      expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
-    });
+  it("a later compaction run is a summary, not a turn", () => {
+    expect(supersededBy(ours, [ours, run("cmp_1", "chat_1", 1500, { kind: "compaction" })])).toBe(false);
+  });
 
-    it("without a run id to compare, correlation is skipped", () => {
-      const history = [USER, ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_2")];
-      expect(resumeShapeOf(history)).toBe("loop-finished");
-    });
+  it("we never supersede ourselves", () => {
+    expect(supersededBy(ours, [ours])).toBe(false);
+    expect(supersededBy(ours, [])).toBe(false);
   });
 });
 
@@ -332,13 +309,20 @@ const workingModel = () =>
     })) as never,
   });
 
-function runtimeOver(history: AppMessage[], model: ReturnType<typeof workingModel>) {
+function runtimeOver(
+  history: AppMessage[],
+  model: ReturnType<typeof workingModel>,
+  opts: { siblings?: RunRecord[] } = {},
+) {
   const patches: Array<Record<string, unknown>> = [];
   const appended: AppMessage[][] = [];
   let row: RunRecord = { ...RUN };
   const { storage, calls } = stubStorage({
     async reclaimRun() {
       return row;
+    },
+    async listRuns() {
+      return [row, ...(opts.siblings ?? [])];
     },
     async loadMessages() {
       return structuredClone(history);
@@ -495,6 +479,9 @@ describe("resumeRun", () => {
       async getRun() {
         return row;
       },
+      async listRuns() {
+        return [row];
+      },
     });
     const runtime = createRuntime<P, Record<string, never>>({
       storage,
@@ -517,43 +504,15 @@ describe("resumeRun", () => {
   });
 
   it("a run superseded by a later turn settles as errored, and never re-runs", async () => {
+    // The later turn ran to completion while this run sat reaped.
     const history = [
       USER,
       { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "partial" }]), metadata: { runId: "run_1" } } as AppMessage,
       msg("user", [{ type: "text", text: "actually, something else" }]),
       { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "Sure." }]), metadata: { runId: "run_2", model: "m2" } } as AppMessage,
     ];
-    const finished: Array<{ status: string; error?: string }> = [];
-    let row: RunRecord = { ...RUN };
-    const patches: Array<Record<string, unknown>> = [];
-    const { storage, calls } = stubStorage({
-      async reclaimRun() {
-        return row;
-      },
-      async loadMessages() {
-        return structuredClone(history);
-      },
-      async updateRun(_id, patch) {
-        patches.push(patch as Record<string, unknown>);
-        row = { ...row, ...(patch as Partial<RunRecord>) };
-        return true;
-      },
-      async getRun() {
-        return row;
-      },
-    });
-    const runtime = createRuntime<P, Record<string, never>>({
-      storage,
-      context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
-      agents: { assistant: defineAgent(() => ({ model: forbiddenModel(), instructions: "be brief" })) },
-      reconstructPrincipal: (identity) => identity as P,
-      durability: { enabled: true, instanceId: "node_a" },
-      telemetry: {
-        onRunFinished: (_run, outcome) => {
-          finished.push({ status: outcome.status, error: outcome.error });
-        },
-      },
-    });
+    const later: RunRecord = { ...RUN, id: "run_2", startedAt: RUN.startedAt + 500, status: "completed" };
+    const { runtime, patches, calls } = runtimeOver(history, forbiddenModel(), { siblings: [later] });
 
     const outcome = await runtime.resume("run_1");
 
@@ -568,22 +527,70 @@ describe("resumeRun", () => {
       }),
     ]);
     expect(calls).not.toContain("appendMessages");
-    expect(finished).toEqual([{ status: "errored", error: expect.stringMatching(/^superseded/) }]);
   });
 
-  it("a run whose chat received a later message never answers it", async () => {
+  it("a later turn that has not answered yet still supersedes us", async () => {
+    // Its run row exists (openTurn wrote it with the user message) even though
+    // no assistant message does — it crashed too, or is queued behind us.
     const history = [
       USER,
       { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "partial" }]), metadata: { runId: "run_1" } } as AppMessage,
       msg("user", [{ type: "text", text: "actually, something else" }]),
     ];
-    const { runtime, patches, appended } = runtimeOver(history, forbiddenModel());
+    const later: RunRecord = { ...RUN, id: "run_2", startedAt: RUN.startedAt + 500, status: "errored" };
+    const { runtime, patches, appended } = runtimeOver(history, forbiddenModel(), { siblings: [later] });
 
     const outcome = await runtime.resume("run_1");
 
     expect(outcome?.status).toBe("errored");
     expect(patches[0]).toEqual(expect.objectContaining({ error: expect.stringMatching(/^superseded/) }));
     expect(appended).toEqual([]);
+  });
+
+  it("REGRESSION: a crash before the first checkpoint on a chat's SECOND turn still answers", async () => {
+    // History: the previous turn (run_0, completed) and OUR opening user
+    // message, nothing else — we died before checkpointing anything. The last
+    // assistant message in history is legitimately run_0's. Reading it as
+    // "someone else's tail", or our own user message as "a later turn", marked
+    // this live run superseded and dropped the request without a model call.
+    const history = [
+      msg("user", [{ type: "text", text: "first question" }]),
+      { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "First answer." }]), metadata: { runId: "run_0" } } as AppMessage,
+      msg("user", [{ type: "text", text: "second question" }]),
+    ];
+    const earlier: RunRecord = { ...RUN, id: "run_0", startedAt: RUN.startedAt - 5000, status: "completed" };
+    const { runtime, appended } = runtimeOver(history, workingModel(), { siblings: [earlier] });
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("completed");
+    const texts = appended
+      .flat()
+      .flatMap((m) => (m.parts ?? []) as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === "text")
+      .map((p) => p.text);
+    expect(texts).toContain("continued");
+  });
+
+  it("a crash before the first checkpoint on a chat's FIRST turn answers", async () => {
+    // The resume smoke's shape: only our user message persisted.
+    const { runtime, appended } = runtimeOver([USER], workingModel());
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("completed");
+    expect(appended.flat().some((m) => m.role === "assistant")).toBe(true);
+  });
+
+  it("a later compaction run does not supersede a finished turn", async () => {
+    const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
+    const compaction: RunRecord = { ...RUN, id: "cmp_1", startedAt: RUN.startedAt + 500, status: "completed", kind: "compaction" };
+    const { runtime, patches } = runtimeOver(history, forbiddenModel(), { siblings: [compaction] });
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("completed");
+    expect(patches[0]).toEqual(expect.objectContaining({ status: "completed", error: null }));
   });
 
   it("settles a turn waiting on the client as completed, without re-asking", async () => {
@@ -632,6 +639,9 @@ describe("resumeRun", () => {
       async getRun() {
         return row;
       },
+      async listRuns() {
+        return [row];
+      },
     });
     const runtime = createRuntime<P, Record<string, never>>({
       storage,
@@ -671,6 +681,9 @@ describe("resumeRun", () => {
       },
       async getRun() {
         return row;
+      },
+      async listRuns() {
+        return [row];
       },
     });
     const runtime = createRuntime<P, Record<string, never>>({

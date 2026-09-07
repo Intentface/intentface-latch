@@ -646,13 +646,6 @@ function firstText(message: AppMessage): string | undefined {
 }
 
 /** The text of the turn's incoming user message (for telemetry). */
-function lastAssistantIndex(messages: AppMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") return i;
-  }
-  return -1;
-}
-
 /** The runtime's own user-role message: a compaction summary + boundary marker, not a turn. */
 function isCompactionMarker(m: AppMessage): boolean {
   return (m.parts ?? []).some((p) => (p as { type: string }).type === COMPACTION_PART_TYPE);
@@ -954,11 +947,9 @@ function markSubagentApprovalResolved(
  * the same message as the old, so the reader can end up with the answer twice.
  * Reconciling the row costs nothing and loses nothing.
  *
- *  - `superseded` — the last assistant message belongs to a LATER run: the
- *    conversation moved on while this run sat reaped. Settle it as errored with
- *    the same "superseded" outcome `openTurn` gives a stale run. Never re-run —
- *    that would generate against a conversation that has moved on and append
- *    the result to the later turn's message.
+ *  - `superseded` — not produced here but by `supersededBy`, from the runs
+ *    table: the chat opened a later turn while this run sat reaped. Settle it as
+ *    errored with the same "superseded" outcome `openTurn` gives a stale run.
  *  - `decision-pending` — a gate is awaiting a human. The row never got its
  *    `awaiting_input`; settle it there and let `applyApproval` drive the rest.
  *    (Reaping is scoped to `active`, so this only ever arrives via that gap.)
@@ -981,41 +972,38 @@ function markSubagentApprovalResolved(
  */
 export type ResumeShape = "superseded" | "decision-pending" | "loop-finished" | "continue";
 
-export function resumeShapeOf(messages: AppMessage[], runId?: string): ResumeShape {
-  // Whose tail is this? Reaping and resuming are not one step: `sweep` resumes
-  // reaped runs one at a time, and an earlier resume can run a model for a
-  // while. In that gap this chat is free (the run is `errored`), so a user can
-  // send the next message and have a WHOLE later turn complete before we get
-  // here. Reclaim only refuses while a sibling is still live, so we would then
-  // classify — and settle — someone else's finished turn as ours, or worse
-  // re-run the model over a conversation that has moved on and append the
-  // result to the later turn's message. Every assistant message carries the id
-  // of the run that produced it; if the last one is not ours, we were
-  // superseded, exactly as `openTurn` supersedes a stale run when the next
-  // message arrives. (A tail with no id recorded is treated as ours — that is
-  // the pre-correlation legacy shape, and refusing it would strand real runs.)
-  if (runId !== undefined) {
-    const at = lastAssistantIndex(messages);
-    const tail = at === -1 ? undefined : messages[at];
-    const tailRunId = (tail?.metadata as { runId?: unknown } | undefined)?.runId;
-    if (tail && tailRunId !== undefined && tailRunId !== runId) return "superseded";
-    // The later turn may not have produced an assistant message yet (its own
-    // run crashed too, or is being resumed after ours). Its USER message is
-    // still proof it exists: `openTurn` persists a user message and its run
-    // together, so any user turn after our assistant message opened a later
-    // run. User messages carry no run id, so this is positional. The one
-    // runtime-written user-role message is the compaction marker, which is a
-    // summary of the conversation so far, not a new turn — skip it.
-    for (let i = at + 1; i < messages.length; i++) {
-      const m = messages[i];
-      if (m.role === "user" && !isCompactionMarker(m)) return "superseded";
-    }
-    // Still uncorrelated: a later user message when WE never checkpointed an
-    // assistant message (`[user_A, user_B]`, two crashes on one chat). Nothing
-    // in history says which user message is ours. Closing that needs the
-    // adapter to refuse a reclaim when a later run exists in the chat — a
-    // storage-contract change, tracked as a follow-up.
-  }
+/**
+ * Has this chat opened another turn since `run` started? Then `run` was
+ * superseded — the conversation moved on while it sat reaped — and it must
+ * settle rather than run: re-running would generate against a conversation that
+ * has moved on and, because the message id is reused, append the result to the
+ * later turn's message.
+ *
+ * Read off the RUNS, not the messages. Every user message is persisted together
+ * with its run (`openTurn`), so a later run in the chat is the one fact that
+ * proves a later turn exists. Messages cannot tell us this: user messages carry
+ * no run id, and when a turn crashes before its first checkpoint the previous
+ * turn's assistant message is legitimately the last assistant in history —
+ * reading either as "someone else's" marks a live run superseded and drops the
+ * user's request without a model call, which is the one failure worse than the
+ * bug this all fixes.
+ *
+ * Compaction runs summarise the conversation so far; they are not turns.
+ */
+export function supersededBy(
+  run: Pick<RunRecord, "id" | "chatId" | "startedAt">,
+  runs: readonly RunRecord[],
+): boolean {
+  return runs.some(
+    (r) => r.chatId === run.chatId && r.id !== run.id && r.kind !== "compaction" && r.startedAt > run.startedAt,
+  );
+}
+
+/**
+ * What a reclaimed run's OWN history says it needs. Pure: whether the chat has
+ * since moved on is `supersededBy`'s question, answered from the runs table.
+ */
+export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   // Compaction markers are not turns, so the tail is read past them: a summary
   // appended after a reaped run's finished message must not make that message
   // look like it was followed by a user turn (which would say "continue" and
@@ -2406,7 +2394,14 @@ export function createRuntime<P, RC = unknown>(
     // `active` row, and re-running the model there would pay twice for an answer
     // already in history — and append the second copy to the same message. So
     // reconcile the row instead, and only re-run when work is genuinely left.
-    const shape = resumeShapeOf(uiMessages, run.id);
+    // Did the chat move on while this run sat reaped? Asked of the runs table,
+    // never inferred from message shapes — see `supersededBy` for why. The list
+    // is owner-scoped and most-recent first; a later sibling is more recent than
+    // we are, so it is present unless more than `limit` runs happened owner-wide
+    // after IT. A miss errs toward re-running (today's behaviour), never toward
+    // settling a live run.
+    const siblings = await storage.listRuns(principal, { limit: 500 });
+    const shape: ResumeShape = supersededBy(run, siblings) ? "superseded" : resumeShapeOf(uiMessages);
     if (shape !== "continue") {
       const status: RunStatus =
         shape === "superseded" ? "errored" : shape === "decision-pending" ? "awaiting_input" : "completed";
