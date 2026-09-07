@@ -193,6 +193,31 @@ describe("resumeShapeOf", () => {
       expect(resumeShapeOf(history, "run_2")).toBe("decision-pending");
     });
 
+    it("a later USER turn after our assistant message means we were superseded, even with no reply yet", () => {
+      // The later run may have crashed too, or be queued behind us in the same
+      // sweep. Its user message alone proves it exists: openTurn persists a
+      // user message and its run together. Without this, we would re-run over
+      // the conversation and answer user_B on run_1's behalf.
+      const history = [
+        USER,
+        ours([{ type: "step-start" }, { type: "text", text: "partial" }], "run_1"),
+        msg("user", [{ type: "text", text: "actually, something else" }]),
+      ];
+      expect(resumeShapeOf(history, "run_1")).toBe("superseded");
+    });
+
+    it("a compaction marker after our message is not a later turn", () => {
+      // The runtime's own user-role message: a summary of the conversation so
+      // far plus a boundary part. It can land after a reaped run's message and
+      // must not read as the conversation moving on.
+      const history = [
+        USER,
+        ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_1"),
+        { ...msg("user", [{ type: "text", text: "summary" }, { type: "data-compaction", data: { compacted: 2, at: 1 } }]), metadata: { visibility: "internal" } } as AppMessage,
+      ];
+      expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
+    });
+
     it("our own tail classifies as before", () => {
       const history = [USER, ours([{ type: "step-start" }, { type: "text", text: "It is 4." }], "run_1")];
       expect(resumeShapeOf(history, "run_1")).toBe("loop-finished");
@@ -544,6 +569,21 @@ describe("resumeRun", () => {
     ]);
     expect(calls).not.toContain("appendMessages");
     expect(finished).toEqual([{ status: "errored", error: expect.stringMatching(/^superseded/) }]);
+  });
+
+  it("a run whose chat received a later message never answers it", async () => {
+    const history = [
+      USER,
+      { ...msg("assistant", [{ type: "step-start" }, { type: "text", text: "partial" }]), metadata: { runId: "run_1" } } as AppMessage,
+      msg("user", [{ type: "text", text: "actually, something else" }]),
+    ];
+    const { runtime, patches, appended } = runtimeOver(history, forbiddenModel());
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("errored");
+    expect(patches[0]).toEqual(expect.objectContaining({ error: expect.stringMatching(/^superseded/) }));
+    expect(appended).toEqual([]);
   });
 
   it("settles a turn waiting on the client as completed, without re-asking", async () => {

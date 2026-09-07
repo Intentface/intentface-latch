@@ -35,8 +35,15 @@ before the trim is reached.
 Recovery also checks whose turn the tail is. Reaped runs are resumed one at a
 time, and while one waits its chat is free — so a later message can start and
 finish a whole turn first. Every assistant message carries the id of the run
-that produced it; a tail belonging to a later run means this run was superseded,
-and it settles as errored with the same outcome `openTurn` gives a stale run,
-rather than being classified (or re-run) against a conversation that moved on.
+that produced it; a tail belonging to a later run — or any user message after
+this run's own assistant message, since a user message is only ever persisted
+together with its run — means this run was superseded, and it settles as errored
+with the same outcome `openTurn` gives a stale run, rather than being classified
+(or re-run) against a conversation that moved on.
+
+The runtime now also warns at startup when durability is enabled on a storage
+adapter without `openTurn`: turn creation is then two writes, and a crash between
+them is a shape recovery can only partly reason about. Every shipped adapter
+implements it.
 
 Also exports `resumeShapeOf` for hosts that drive recovery themselves.

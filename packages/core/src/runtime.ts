@@ -646,11 +646,16 @@ function firstText(message: AppMessage): string | undefined {
 }
 
 /** The text of the turn's incoming user message (for telemetry). */
-function lastAssistant(messages: AppMessage[]): AppMessage | undefined {
+function lastAssistantIndex(messages: AppMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") return messages[i];
+    if (messages[i].role === "assistant") return i;
   }
-  return undefined;
+  return -1;
+}
+
+/** The runtime's own user-role message: a compaction summary + boundary marker, not a turn. */
+function isCompactionMarker(m: AppMessage): boolean {
+  return (m.parts ?? []).some((p) => (p as { type: string }).type === COMPACTION_PART_TYPE);
 }
 
 /**
@@ -990,14 +995,39 @@ export function resumeShapeOf(messages: AppMessage[], runId?: string): ResumeSha
   // message arrives. (A tail with no id recorded is treated as ours — that is
   // the pre-correlation legacy shape, and refusing it would strand real runs.)
   if (runId !== undefined) {
-    const tail = lastAssistant(messages);
+    const at = lastAssistantIndex(messages);
+    const tail = at === -1 ? undefined : messages[at];
     const tailRunId = (tail?.metadata as { runId?: unknown } | undefined)?.runId;
     if (tail && tailRunId !== undefined && tailRunId !== runId) return "superseded";
+    // The later turn may not have produced an assistant message yet (its own
+    // run crashed too, or is being resumed after ours). Its USER message is
+    // still proof it exists: `openTurn` persists a user message and its run
+    // together, so any user turn after our assistant message opened a later
+    // run. User messages carry no run id, so this is positional. The one
+    // runtime-written user-role message is the compaction marker, which is a
+    // summary of the conversation so far, not a new turn — skip it.
+    for (let i = at + 1; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role === "user" && !isCompactionMarker(m)) return "superseded";
+    }
+    // Still uncorrelated: a later user message when WE never checkpointed an
+    // assistant message (`[user_A, user_B]`, two crashes on one chat). Nothing
+    // in history says which user message is ours. Closing that needs the
+    // adapter to refuse a reclaim when a later run exists in the chat — a
+    // storage-contract change, tracked as a follow-up.
   }
+  // Compaction markers are not turns, so the tail is read past them: a summary
+  // appended after a reaped run's finished message must not make that message
+  // look like it was followed by a user turn (which would say "continue" and
+  // regenerate against the summary). `compactChat` refuses while a gate or
+  // client tool is pending, so a marker can never sit after an undecided one.
+  let end = messages.length;
+  while (end > 0 && isCompactionMarker(messages[end - 1])) end--;
+  const turns = end === messages.length ? messages : messages.slice(0, end);
   // Checked next: a pending gate outranks the tail's shape, and its own tail
   // (narration after the gated call) would otherwise read as `loop-finished`.
-  if (hasPendingApproval(messages)) return "decision-pending";
-  const last = messages[messages.length - 1];
+  if (hasPendingApproval(turns)) return "decision-pending";
+  const last = turns[turns.length - 1];
   // Nothing of this turn was checkpointed (or a user message came last) — the
   // model has not spoken yet, so run it.
   if (last?.role !== "assistant") return "continue";
@@ -1224,6 +1254,18 @@ export function createRuntime<P, RC = unknown>(
     heartbeatMs: config.durability?.heartbeatMs ?? 10_000,
     instanceId: config.durability?.instanceId ?? newInstanceId(),
   };
+  if (dur.enabled && !storage.openTurn) {
+    // Without `openTurn` a turn opens as two writes (run, then message), and a
+    // crash between them leaves a run whose own message never landed. Recovery
+    // then reads the PREVIOUS turn's tail as this run's history. Run
+    // correlation catches the common shape, but the contract is explicit that
+    // a durable adapter should be atomic here — every shipped adapter is.
+    console.warn(
+      "[latch] durability is enabled but the storage adapter has no openTurn(): " +
+        "turn creation is not atomic, so a crash can leave a run without its message. " +
+        "Implement openTurn — see the StorageAdapter contract.",
+    );
+  }
 
   /** Resolve an agent's per-request config + a display model id. */
   async function resolveAgentConfig(
