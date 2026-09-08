@@ -14,6 +14,8 @@ export {
   AgentToolsSchema,
   AgentScopeSchema,
   AttachedEvalSchema,
+  AgentExtensionSchema,
+  ExtensionTriggerSchema,
   MemoryConfigSchema,
   MemoryScopeSchema,
   EffortSchema,
@@ -22,6 +24,12 @@ export {
   parseAgentRecord,
   parseAgentRef,
 } from "./record";
-export type { AgentRecord, AgentRecordInput, AgentScope, AttachedEval } from "./record";
+export type {
+  AgentRecord,
+  AgentRecordInput,
+  AgentScope,
+  AttachedEval,
+  AgentExtensionRecord,
+} from "./record";
 export { sharedReadTools } from "./shared-read-tools";
 export type { SharedReadDeps } from "./shared-read-tools";

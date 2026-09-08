@@ -150,6 +150,8 @@ export const agents = pgTable(
     subagents: jsonb("subagents"),
     /** AgentRecord["attachedEvals"] — online judge rubrics (host eval feature). */
     attachedEvals: jsonb("attached_evals"),
+    /** AgentRecord["extensions"] — pre-turn scripts + templates. */
+    extensions: jsonb("extensions"),
     /** NULL=default, 0=unlimited, N=cap (AgentRecord["maxSteps"]). */
     maxSteps: integer("max_steps"),
     scope: text("scope").notNull(),

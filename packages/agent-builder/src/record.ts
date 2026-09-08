@@ -87,6 +87,107 @@ export const AttachedEvalSchema = z.object({
 });
 export type AttachedEval = z.infer<typeof AttachedEvalSchema>;
 
+/**
+ * Names the chat channels claim for their own `/` commands (`/new`, `/compact`,
+ * …). A slash extension may not shadow them — the kernel parses those first,
+ * so such an extension would be unreachable from Telegram/WhatsApp/Slack.
+ * Mirrors core's `RESERVED_SLASH_NAMES` (this module stays zod-only).
+ */
+const RESERVED_SLASH_NAMES = new Set([
+  "new",
+  "reset",
+  "compact",
+  "cancel",
+  "skip",
+  "status",
+  "help",
+  "commands",
+  "start",
+]);
+
+export const ExtensionTriggerSchema = z.enum(["slash", "chat-start", "every-turn"]);
+
+/**
+ * One agent extension: a script over the agent's tools plus a template, run
+ * BEFORE the model. Shape mirrors core's `AgentExtension` (the record stores
+ * `script` as text: JS subset or a JSON plan).
+ */
+export const AgentExtensionSchema = z
+  .object({
+    name: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,31}$/)
+      .describe("Identifier: lowercase letter first, then letters/digits/underscore. A slash extension is typed as /<name>."),
+    description: z.string().max(200).optional().describe("One line — shown in the / menu and to authors."),
+    on: ExtensionTriggerSchema.describe(
+      "slash: runs when the user types /<name> args · chat-start: once per conversation (refreshable) · every-turn: before every message.",
+    ),
+    input: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("JSON Schema documenting the input. A typed slash invocation yields { args, argv }; a structured one is passed through."),
+    script: z
+      .string()
+      .optional()
+      .describe(
+        "JavaScript subset over the agent's tools, e.g. `const h = await clockify_hours({ period: input.args }); return { h };`. Bare tool names, const only, no loops/new/globals — validated before it runs. Read-only unless allowMutations.",
+      ),
+    template: z
+      .string()
+      .optional()
+      .describe("Liquid template over { input, output, steps, error } rendered into the prompt. Absent → the script output as a JSON block."),
+    target: z
+      .enum(["message", "instructions"])
+      .optional()
+      .describe("Where the rendered text lands: the user turn (default) or the system prompt."),
+    placement: z
+      .enum(["before", "after"])
+      .optional()
+      .describe("Message target: the rendered block goes before or after the user's own text (default after)."),
+    scope: z
+      .enum(["turn", "chat"])
+      .optional()
+      .describe("Instructions target: this turn only (default) or every later turn of the chat."),
+    refresh: z
+      .object({ afterMs: z.number().int().positive().optional() })
+      .optional()
+      .describe("chat-start only: run again when the last result is older than this many ms."),
+    reveal: z
+      .enum(["command", "prompt", "both"])
+      .optional()
+      .describe("What the user sees on their message: only what they typed (default), the rendered prompt in its place, or both."),
+    allowMutations: z
+      .boolean()
+      .optional()
+      .describe("Let the script call approval-gated (mutating) tools. Default false: such a call is refused before anything runs."),
+    onError: z
+      .enum(["proceed", "fail"])
+      .optional()
+      .describe("A failed script: proceed with the failure visible to the model (default), or fail the turn."),
+    limits: z
+      .object({
+        timeoutMs: z.number().int().positive().optional(),
+        maxRenderedChars: z.number().int().positive().optional(),
+      })
+      .optional(),
+  })
+  .superRefine((ext, ctx) => {
+    if (ext.script === undefined && ext.template === undefined) {
+      ctx.addIssue({ code: "custom", path: ["script"], message: "An extension needs a script, a template, or both." });
+    }
+    if (ext.on === "slash" && RESERVED_SLASH_NAMES.has(ext.name)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["name"],
+        message: `"/${ext.name}" is reserved for chat commands (${[...RESERVED_SLASH_NAMES].join(", ")}).`,
+      });
+    }
+    if (ext.refresh && ext.on !== "chat-start") {
+      ctx.addIssue({ code: "custom", path: ["refresh"], message: "refresh only applies to chat-start extensions." });
+    }
+  });
+export type AgentExtensionRecord = z.infer<typeof AgentExtensionSchema>;
+
 /** Per-tool selection over the connections' tools. */
 export const AgentToolsSchema = z.object({
   /** Namespaced tool names the model may call (empty → all). */
@@ -151,11 +252,26 @@ export const AgentRecordSchema = z
     exec: AgentExecSchema.optional(),
     subagents: z.array(z.string()).optional().describe("Names of agents this one may delegate to."),
     attachedEvals: z.array(AttachedEvalSchema).optional(),
+    extensions: z
+      .array(AgentExtensionSchema)
+      .optional()
+      .describe(
+        "Pre-turn scripts + templates (slash commands, chat-start data loaders, every-turn context). Only where the host runs a script engine.",
+      ),
     scope: AgentScopeSchema.describe("'user' (personal) or 'org' (shared). Ask the user — never guess."),
   })
   .superRefine((rec, ctx) => {
     if (!normalizeAgentName(rec.name)) {
       ctx.addIssue({ code: "custom", path: ["name"], message: "invalid name" });
+    }
+    if (rec.extensions) {
+      const seen = new Set<string>();
+      rec.extensions.forEach((e, i) => {
+        if (seen.has(e.name)) {
+          ctx.addIssue({ code: "custom", path: ["extensions", i, "name"], message: `Duplicate extension name "${e.name}".` });
+        }
+        seen.add(e.name);
+      });
     }
     const mem = rec.exec?.memory;
     if (!mem) return;
@@ -221,7 +337,7 @@ function compact<T extends object>(obj: T): T | undefined {
  *  - name normalized; title/description trimmed (blank → absent)
  *  - `exec.memory.extractTo` = unique levels, primary first (absent when it
  *    would only repeat the primary); blank index schemas dropped
- *  - empty `exec` / `subagents` / `schemas` → absent, not `{}` / `[]`
+ *  - empty `exec` / `subagents` / `schemas` / `extensions` → absent, not `{}` / `[]`
  */
 export function normalizeAgentRecord(rec: AgentRecord): AgentRecord {
   let exec = rec.exec ? { ...rec.exec } : undefined;
@@ -250,6 +366,7 @@ export function normalizeAgentRecord(rec: AgentRecord): AgentRecord {
     exec,
     subagents: rec.subagents?.length ? rec.subagents : undefined,
     attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : undefined,
+    extensions: rec.extensions?.length ? rec.extensions : undefined,
   };
 }
 

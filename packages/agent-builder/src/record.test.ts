@@ -69,6 +69,49 @@ describe("AgentRecordSchema — shape", () => {
   });
 });
 
+describe("AgentRecordSchema — extensions", () => {
+  const report = {
+    name: "report",
+    on: "slash",
+    script: "const h = await clockify_hours({ period: input.args }); return { h };",
+    template: "Report: {{ output.h }}",
+  };
+
+  it("accepts a slash extension and a template-only prelude", () => {
+    const rec = AgentRecordSchema.parse({
+      ...BASE,
+      extensions: [report, { name: "ctx", on: "chat-start", template: "You help {{ input }}", target: "instructions" }],
+    });
+    expect(rec.extensions).toHaveLength(2);
+  });
+
+  it("needs a script or a template", () => {
+    expect(issues({ ...BASE, extensions: [{ name: "x", on: "slash" }] })).toContain(
+      "An extension needs a script, a template, or both.",
+    );
+  });
+
+  it("rejects bad names, reserved slash names and duplicates", () => {
+    expect(issues({ ...BASE, extensions: [{ ...report, name: "Report" }] })).not.toEqual([]);
+    expect(issues({ ...BASE, extensions: [{ ...report, name: "my-report" }] })).not.toEqual([]);
+    expect(issues({ ...BASE, extensions: [{ ...report, name: "compact" }] })[0]).toMatch(/reserved for chat commands/);
+    // ...but a chat-start loader may use any name: it has no slash face.
+    expect(issues({ ...BASE, extensions: [{ ...report, name: "status", on: "chat-start" }] })).toEqual([]);
+    expect(issues({ ...BASE, extensions: [report, report] })).toContain('Duplicate extension name "report".');
+  });
+
+  it("refresh only applies to chat-start", () => {
+    expect(issues({ ...BASE, extensions: [{ ...report, refresh: { afterMs: 1000 } }] })).toContain(
+      "refresh only applies to chat-start extensions.",
+    );
+    expect(issues({ ...BASE, extensions: [{ ...report, on: "chat-start", refresh: { afterMs: 1000 } }] })).toEqual([]);
+  });
+
+  it("an empty list normalizes to absent", () => {
+    expect(parseAgentRecord({ ...BASE, extensions: [] }).extensions).toBeUndefined();
+  });
+});
+
 describe("AgentRecordSchema — memory invariants (host-independent)", () => {
   it("requires the memory connection to be one of the agent's own", () => {
     const memory = { scope: "agent-user", connection: "loredex" };

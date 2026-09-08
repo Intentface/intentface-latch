@@ -30,6 +30,7 @@ async function main() {
     exec: { sandbox: true, effort: "low", memory: { scope: "agent-user", connection: "github" } },
     subagents: ["assistant"],
     attachedEvals: [{ name: "on-topic", prompt: "Stays on topic.", scale: "binary", enabled: true }],
+    extensions: [{ name: "report", on: "slash", script: "return 1", template: "x {{ output }}" }],
     scope: "user",
   });
   await store.upsert(p, {
@@ -53,6 +54,7 @@ async function main() {
   assert(Array.isArray(helper.connections) && helper.connections[0] === "github", "connections round-trip");
   assert(helper.attachedEvals?.[0]?.name === "on-topic", "attachedEvals round-trip");
   assert(helper.exec?.memory?.connection === "github", "exec.memory round-trips");
+  assert(helper.extensions?.[0]?.name === "report" && helper.extensions[0].on === "slash", "extensions round-trip");
 
   // getRecord: bare name (personal wins), org: pin, user: pin miss
   assert((await store.getRecord(p, "helper"))?.modelId === "m-1", "getRecord bare name");
@@ -67,6 +69,7 @@ async function main() {
   const cfg = await store.resolve("helper", p);
   assert(cfg && cfg.instructions === "help" && cfg.maxSteps === "unlimited", "resolve builds config");
   assert(cfg!.memory?.scope === "agent-user", "resolve carries exec.memory");
+  assert(cfg!.extensions?.[0]?.name === "report", "resolve carries extensions");
   assert((cfg!.model as { modelId: string }).modelId === "m-1", "modelFor applied");
   assert(cfg!.subagents?.[0] === "assistant", "subagents resolve");
   assert(await store.resolve("org:shared", p2), "org: pin resolves");

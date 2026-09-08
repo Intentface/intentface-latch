@@ -64,6 +64,7 @@ interface AgentRow {
   exec: unknown;
   subagents: unknown;
   attachedEvals: unknown;
+  extensions: unknown;
   maxSteps: number | null;
   scope: string;
 }
@@ -107,6 +108,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
     exec: (row.exec ?? undefined) as AgentRecord["exec"],
     subagents: (row.subagents ?? undefined) as string[] | undefined,
     attachedEvals: (row.attachedEvals ?? undefined) as AgentRecord["attachedEvals"],
+    extensions: (row.extensions ?? undefined) as AgentRecord["extensions"],
     scope: row.scope as AgentScope,
   });
 
@@ -190,6 +192,8 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
           effort: rec.exec?.effort,
           // Persistent cross-session memory (needs a MemoryProvider on the runtime).
           memory: rec.exec?.memory,
+          // Pre-turn scripts + templates (needs a ScriptEngine on the runtime).
+          extensions: rec.extensions?.length ? rec.extensions : undefined,
           smoothStream: true,
         },
         rec,
@@ -255,6 +259,7 @@ function upsertValues(row: { id: string; owner: string; rec: AgentRecord; maxSte
       exec: rec.exec ?? null,
       subagents: rec.subagents?.length ? rec.subagents : null,
       attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : null,
+      extensions: rec.extensions?.length ? rec.extensions : null,
       maxSteps,
       scope: rec.scope,
       createdAt: now,
@@ -270,6 +275,7 @@ function upsertValues(row: { id: string; owner: string; rec: AgentRecord; maxSte
       exec: rec.exec ?? null,
       subagents: rec.subagents?.length ? rec.subagents : null,
       attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : null,
+      extensions: rec.extensions?.length ? rec.extensions : null,
       maxSteps,
       scope: rec.scope,
       updatedAt: now,
