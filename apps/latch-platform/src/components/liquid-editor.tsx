@@ -26,16 +26,24 @@ export function LiquidEditor({
   onChange,
   scope,
   height = "160px",
+  minHeight,
+  maxHeight,
   className,
   placeholder,
+  ariaLabel = "Template",
 }: {
   value: string;
   onChange: (v: string) => void;
   /** Sample data the template renders over — drives variable/property completions. */
   scope?: Record<string, unknown>;
+  /** Fixed height, or "auto" to grow with content between `minHeight` and `maxHeight`. */
   height?: string;
+  minHeight?: string;
+  maxHeight?: string;
   className?: string;
   placeholder?: string;
+  /** The editor's accessible name. */
+  ariaLabel?: string;
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
@@ -55,8 +63,9 @@ export function LiquidEditor({
       liquidInput,
       liquidChips,
       EditorView.lineWrapping,
+      EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
     ];
-  }, [scope]);
+  }, [scope, ariaLabel]);
 
   if (!mounted) {
     return (
@@ -64,8 +73,9 @@ export function LiquidEditor({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        aria-label={ariaLabel}
         spellCheck={false}
-        style={{ height }}
+        style={{ height: height === "auto" ? minHeight : height }}
         className={cn(
           "border-input w-full rounded-lg border bg-transparent px-2.5 py-2 font-mono text-xs",
           className,
@@ -75,10 +85,12 @@ export function LiquidEditor({
   }
 
   return (
-    <div className={cn("border-input liquid-editor overflow-hidden rounded-lg border", className)}>
+    <div className={cn("border-input liquid-editor focus-within:ring-ring/50 overflow-hidden rounded-lg border focus-within:ring-3", className)}>
       <CodeMirror
         value={value}
         height={height}
+        minHeight={minHeight}
+        maxHeight={maxHeight}
         placeholder={placeholder}
         extensions={extensions}
         onChange={onChange}

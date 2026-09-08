@@ -483,6 +483,7 @@
   line-height: 1.9;
   background: transparent;
 }
+/* The wrapper draws the focus ring (focus-within), so the inner outline is redundant. */
 .liquid-editor .cm-editor.cm-focused {
   outline: none;
 }

@@ -8,7 +8,7 @@
  * would mint fresh values per render and defeat the memo.
  */
 
-import { KeyRound, Mic, ThumbsDown, ThumbsUp, Zap } from "lucide-react"
+import { ChevronDown, KeyRound, Mic, ThumbsDown, ThumbsUp, Zap } from "lucide-react"
 import { memo  } from "react"
 import type {ReactNode} from "react";
 import { Message } from "@/components/ai/message"
@@ -338,14 +338,28 @@ function ExtensionChips({ parts }: { parts: ExtensionPartView[] }) {
             <Zap className="size-3" />
             <span className="font-mono">{label}</span>
             {d.calls && d.calls.length > 0 && (
-              <span className="text-ink-tertiary">· {d.calls.map((c) => c.tool).join(", ")}</span>
+              <span className="text-ink-secondary">· {d.calls.map((c) => c.tool).join(", ")}</span>
             )}
+            {d.rendered && <ChevronDown className="size-3 transition-transform [details[open]>summary_&]:rotate-180" aria-hidden />}
           </span>
         )
-        if (!d.rendered) return <span key={p.id ?? i}>{body}</span>
+        const errorLine = d.error && (
+          <span className="text-destructive block">
+            {d.error.message}
+          </span>
+        )
+        if (!d.rendered) {
+          return (
+            <span key={p.id ?? i} className="min-w-0">
+              {body}
+              {errorLine}
+            </span>
+          )
+        }
         return (
           <details key={p.id ?? i} className="min-w-0">
             <summary className="cursor-pointer list-none">{body}</summary>
+            {errorLine}
             <pre className="mt-1 max-h-64 overflow-auto rounded bg-input/40 p-2 whitespace-pre-wrap text-ink-secondary">
               {d.rendered}
             </pre>

@@ -237,7 +237,7 @@ export function PlanStory({
         return (
           <div key={ri} className="grid grid-cols-[28px_1fr] gap-3">
             <div className="flex flex-col items-center">
-              <span className="bg-ink-primary text-primary-bg mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold">
+              <span className="bg-ink-primary text-primary-bg mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold">
                 {n}
               </span>
               {ri < rows.length - 1 && <span className="bg-primary-border my-1.5 w-px flex-1" />}
@@ -266,13 +266,13 @@ export function PlanStory({
       {plan.output && (
         <div className="grid grid-cols-[28px_1fr] gap-3">
           <div className="flex flex-col items-center">
-            <span className="border-ink-primary text-ink-primary mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold">
+            <span className="border-ink-primary text-ink-primary mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold">
               ✓
             </span>
           </div>
           <div className="border-primary-border rounded-lg border p-2.5">
             <div className="text-ink-primary font-semibold">Done — hand this to the template</div>
-            <div className="text-ink-tertiary font-mono break-words">{plan.output}</div>
+            <div className="text-ink-secondary font-mono break-words">{plan.output}</div>
             {ran && output !== undefined && summarize(output) !== plan.output && (
               <div className="text-ink-secondary mt-1 font-mono break-words">{summarize(output)}</div>
             )}
@@ -335,7 +335,7 @@ function StoryCard({
     const conn = tool?.connection;
     title = (
       <>
-        {conn && <span className="text-ink-tertiary mr-1.5 text-[10px] font-semibold tracking-wide uppercase">{conn}</span>}
+        {conn && <span className="text-ink-secondary mr-1.5 text-xs font-semibold tracking-wide uppercase">{conn}</span>}
         {desc}
       </>
     );
@@ -367,7 +367,7 @@ function StoryCard({
       <div className="flex items-start gap-2.5">
         <span
           className={cn(
-            "mt-px inline-flex size-5 shrink-0 items-center justify-center rounded text-[11px]",
+            "mt-px inline-flex size-5 shrink-0 items-center justify-center rounded text-xs",
             kind === "call" && "bg-ring/10 text-ring",
             kind === "let" && "bg-primary-border text-ink-secondary",
             kind === "exit" && "bg-destructive/10 text-destructive",
@@ -394,7 +394,7 @@ function StoryCard({
               )}
             </div>
           )}
-          {detail && <div className="text-ink-tertiary font-mono break-words">{detail}</div>}
+          {detail && <div className="text-ink-secondary font-mono break-words">{detail}</div>}
           {(dataDeps.length > 0 || step.after?.length || step.max || step.suspend || step.onError === "skip") && (
             <div className="flex flex-wrap gap-1.5 pt-0.5">
               {dataDeps.length > 0 && (
@@ -421,12 +421,12 @@ function StoryCard({
           ) : settled ? (
             <div className="text-ink-secondary font-mono">{stop ? "run ended here" : summarize(value)}</div>
           ) : ran && !stop ? (
-            <div className="text-ink-tertiary font-mono">did not run</div>
+            <div className="text-ink-secondary font-mono">did not run</div>
           ) : ran && stop ? (
-            <div className="text-ink-tertiary font-mono">not needed — carried on</div>
+            <div className="text-ink-secondary font-mono">not needed — carried on</div>
           ) : null}
         </div>
-        <span className="text-ink-tertiary shrink-0 font-mono text-[11px]">{step.id}</span>
+        <span className="text-ink-secondary shrink-0 font-mono text-xs">{step.id}</span>
       </div>
     </div>
   );
@@ -435,7 +435,7 @@ function StoryCard({
 const Tag = ({ children, tone }: { children: React.ReactNode; tone?: "warn" }) => (
   <span
     className={cn(
-      "border-primary-border text-ink-secondary inline-flex items-center gap-1 rounded border px-1.5 py-px text-[11px]",
+      "border-primary-border text-ink-secondary inline-flex items-center gap-1 rounded border px-1.5 py-px text-xs",
       tone === "warn" && "border-destructive/40 text-destructive",
     )}
   >
