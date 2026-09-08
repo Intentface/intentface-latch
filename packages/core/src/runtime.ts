@@ -1,5 +1,6 @@
 import {
   ToolLoopAgent,
+  asSchema,
   consumeStream,
   createIdGenerator,
   createUIMessageStream,
@@ -24,6 +25,20 @@ import type {
 } from "./agent.js";
 import { currentDateLine } from "./current-date.js";
 import type { MemoryProvider } from "./memory.js";
+import {
+  EXTENSION_PART_TYPE,
+  ExtensionFailedError,
+  executeExtensions,
+  extensionInstructionBlocks,
+  gatedToolNames,
+  parseSlashInvocation,
+  redactExtensionParts,
+  selectExtensions,
+  type ExtensionPart,
+  type ExtensionPartData,
+  type ScriptEngine,
+  type ScriptToolMount,
+} from "./extensions.js";
 import {
   COMPACTION_PART_TYPE,
   sliceAtCompaction,
@@ -137,6 +152,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * `memory` declaration is ignored. See `MemoryProvider`.
    */
   memory?: MemoryProvider<P>;
+  /**
+   * Script seam: runs agent `extensions` (pre-turn scripts + templates) —
+   * `@intentface/latch-script` implements it over callscript and LiquidJS.
+   * Optional — without it, an agent's `extensions` declaration is ignored.
+   * See `extensions.ts`.
+   */
+  scripts?: ScriptEngine;
   /**
    * Rebuild a `Principal` from the opaque identity blob a run stored, for
    * resume/cron (no request). Default: passthrough (`identity as P`). Override to
@@ -368,6 +390,25 @@ export interface Runtime<P> {
     principal: P;
   }): Promise<AppMessage[]>;
   /**
+   * Run ONE of an agent's extensions outside a turn and return the part it
+   * would have produced — no model call, nothing persisted. For an editor's
+   * "Test" panel and the Agent Builder's `test_extension`. Mounts the agent's
+   * static tools, tool sources and connections (not the harness tools, which
+   * exist only inside a turn). A `slash` extension takes `text` (parsed like a
+   * typed `/name args`) or a structured `input`. Throws when the agent or the
+   * extension is unknown, or when the runtime has no `scripts` engine; a
+   * failing script returns a part carrying `error` (even with `onError: "fail"`).
+   */
+  previewExtension(input: {
+    agent: string;
+    principal: P;
+    name: string;
+    input?: unknown;
+    text?: string;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<ExtensionPartData>;
+  /**
    * The caller's chats, most-recent first (for a chat list / sidebar).
    * `kind` filters to one chat kind (e.g. `'user'` to hide the runtime's
    * internal `sub_…` threads); omitted → all kinds (back-compatible default).
@@ -570,6 +611,53 @@ export interface SubagentProgressData {
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
+
+/**
+ * The turn's tools as script mounts for an extension: the model-callable set
+ * (respecting `activeTools`), minus the OAuth `connect_*` gates and
+ * `spawn_agent` (a script has no human to answer either), minus tools with no
+ * server-side `execute` (provider-defined), and minus approval-gated tools
+ * unless the extension allows mutations. Each mount calls the real tool with
+ * the same `context` the model's own calls get — a script call is a direct
+ * `execute`, which bypasses the SDK's approval gate; that is why gated tools
+ * are excluded here rather than trusted to the policy.
+ */
+function scriptMounts(
+  tools: Record<string, unknown>,
+  opts: {
+    activeTools: string[] | undefined;
+    gatedNames: ReadonlySet<string>;
+    includeGated: boolean;
+    execOptions: Record<string, unknown>;
+  },
+): ScriptToolMount[] {
+  const active = opts.activeTools ? new Set(opts.activeTools) : null;
+  const out: ScriptToolMount[] = [];
+  for (const [name, t] of Object.entries(tools)) {
+    if (active && !active.has(name)) continue;
+    if (name.startsWith("connect_") || name === "spawn_agent") continue;
+    if (!opts.includeGated && opts.gatedNames.has(name)) continue;
+    const def = t as { description?: unknown; inputSchema?: unknown; execute?: unknown };
+    if (typeof def.execute !== "function") continue;
+    let inputSchema: Record<string, unknown> | undefined;
+    try {
+      inputSchema = def.inputSchema
+        ? (asSchema(def.inputSchema as never).jsonSchema as Record<string, unknown>)
+        : undefined;
+    } catch {
+      inputSchema = undefined;
+    }
+    const execute = def.execute as (args: unknown, options: unknown) => unknown;
+    out.push({
+      name,
+      description: typeof def.description === "string" ? def.description : undefined,
+      inputSchema,
+      execute: async (args, ctx) =>
+        execute(args, { toolCallId: ctx.toolCallId, messages: [], ...opts.execOptions }),
+    });
+  }
+  return out;
+}
 /** Sub-thread chat ids start with `sub_` so the host can keep them out of the
  * main chat list (they're nested under the parent's spawn_agent tool calls). */
 const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
@@ -1638,28 +1726,22 @@ export function createRuntime<P, RC = unknown>(
 
     // Subagent runs are autonomous — there's no human to authorize, so waive
     // approvals and drop the OAuth `connect_` gates (they'd pause forever).
+    // The approval-gated (mutating) tool names this turn: connection defaults +
+    // harness gates, the agent's policy winning per name; a function policy
+    // can't be enumerated, so it gates everything. Read by test-run stubbing
+    // below and by extension scripts (read-only unless `allowMutations`).
+    const gatedNames = gatedToolNames({
+      harnessApproval,
+      sourceApproval: opened.map((o) => o.toolApproval),
+      agentApproval: cfg.toolApproval,
+      allNames: Object.keys(tools),
+    });
     if (autoApprove) {
       for (const k of Object.keys(tools)) if (k.startsWith("connect_")) delete tools[k];
       // Test runs: stub the approval-gated (mutating) tools so a trial has no
-      // real side effects. Gated set = connection defaults + the agent's policy.
+      // real side effects.
       if (blockGated) {
-        const gated = new Set<string>();
-        for (const [k, v] of Object.entries(harnessApproval)) if (v) gated.add(k);
-        for (const o of opened) {
-          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
-        }
-        if (cfg.toolApproval && typeof cfg.toolApproval !== "function") {
-          for (const [k, v] of Object.entries(cfg.toolApproval as Record<string, unknown>)) {
-            if (v) gated.add(k);
-            else gated.delete(k);
-          }
-        } else if (typeof cfg.toolApproval === "function") {
-          // A function policy can't be enumerated — it may gate ANY tool. To keep
-          // the test side-effect-free, conservatively block every executable tool
-          // (connection, authored, and harness — `connect_` is already dropped).
-          for (const k of Object.keys(tools)) gated.add(k);
-        }
-        for (const name of gated) {
+        for (const name of gatedNames) {
           const t = tools[name] as { execute?: unknown } | undefined;
           if (t && typeof t.execute === "function") {
             tools[name] = {
@@ -1794,36 +1876,52 @@ export function createRuntime<P, RC = unknown>(
       !!config.telemetry &&
       !(config.telemetry.telemetryFor && telemetryOptions === undefined);
 
-    const agent = new ToolLoopAgent({
-      model: cfg.model,
-      // Every agent gets a trailing "today's date" line — after the memory
-      // block, so it stays the tail. Day-granularity by design — see
-      // `currentDateLine` for the prompt-cache reasoning. With a caching plan,
-      // the instructions become a MARKED system message and the date line a
-      // separate unmarked one, so the daily flip lands after the breakpoint
-      // instead of invalidating it at midnight UTC.
-      instructions: caching?.systemProviderOptions
-        ? [
-            ...(instructions
-              ? [
-                  {
-                    role: "system",
-                    content: instructions,
-                    providerOptions: caching.systemProviderOptions,
-                  },
-                ]
-              : []),
-            { role: "system", content: currentDateLine() },
-          ]
-        : [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
-      tools,
-      toolApproval,
-      stopWhen,
-      activeTools,
-      ...(providerOptions ? { providerOptions } : {}),
-      ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
-      ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
-    } as ConstructorParameters<typeof ToolLoopAgent>[0]);
+    // Built inside the stream's `execute` (below), after any extension has run:
+    // an extension targeting the system prompt contributes `extensionBlocks`.
+    const buildAgent = (extensionBlocks: string[]) => {
+      const extensionSystem = extensionBlocks.map((content) => ({ role: "system", content }));
+      return new ToolLoopAgent({
+        model: cfg.model,
+        // Every agent gets a trailing "today's date" line — after the memory
+        // block, so it stays the tail. Day-granularity by design — see
+        // `currentDateLine` for the prompt-cache reasoning. With a caching plan,
+        // the instructions become a MARKED system message and the date line a
+        // separate unmarked one, so the daily flip lands after the breakpoint
+        // instead of invalidating it at midnight UTC. Extension blocks follow
+        // the date line for the same reason: per-turn content stays past the
+        // breakpoint, so a refreshed block never invalidates the cached prefix.
+        instructions: caching?.systemProviderOptions
+          ? [
+              ...(instructions
+                ? [
+                    {
+                      role: "system",
+                      content: instructions,
+                      providerOptions: caching.systemProviderOptions,
+                    },
+                  ]
+                : []),
+              { role: "system", content: currentDateLine() },
+              ...extensionSystem,
+            ]
+          : extensionSystem.length > 0
+            ? [
+                {
+                  role: "system",
+                  content: [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
+                },
+                ...extensionSystem,
+              ]
+            : [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
+        tools,
+        toolApproval,
+        stopWhen,
+        activeTools,
+        ...(providerOptions ? { providerOptions } : {}),
+        ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
+        ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
+      } as ConstructorParameters<typeof ToolLoopAgent>[0]);
+    };
 
     let inputTokens = 0;
     let outputTokens = 0;
@@ -1901,12 +1999,9 @@ export function createRuntime<P, RC = unknown>(
       // turn would upsert onto the same row — see the dup-id regression test).
       generateId: generateMessageId,
       execute: async ({ writer }: { writer: TurnWriter }) => {
-        // (in-turn writer writes — e.g. a "compacting…" / compaction marker —
-        //  would go here, before the model output is merged in)
-        // Model projection: drops `sendToModel:false` messages (and data-* parts).
-        const modelMessages = await toModelMessages(uiMessages, { tools });
         // Per-session sandbox (one per chat) for agents that declared `sandbox`.
-        // Exposed to sandbox tools as `options.experimental_sandbox`.
+        // Exposed to sandbox tools as `options.experimental_sandbox`. Resolved
+        // first: an extension script may call sandbox tools.
         const sandbox = wantSandbox
           ? await config.sandbox!({
               principal,
@@ -1915,6 +2010,89 @@ export function createRuntime<P, RC = unknown>(
               provider: cfg.sandboxProvider,
             })
           : undefined;
+        // The per-tool context (read by a tool as `options.context`): the
+        // project's runtime context + who it's for + the run + the writer + the
+        // runtime itself (so a harness tool can schedule, list chats or spawn a
+        // run without reaching for a host-global). `agent` is the ref the turn
+        // resolved (scope-pinned as stored on the run), so a tool that acts on
+        // "the agent I'm running as" names the same record the turn is using.
+        const toolContext = {
+          ...(runtimeCtx as Record<string, unknown>),
+          principal,
+          runtime: self,
+          run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
+          writer,
+        };
+        // Agent extensions: scripts that run BEFORE the model over this turn's
+        // tools. Their results are persisted on the user message FIRST (one
+        // upsert), then the in-memory message is swapped so both the model
+        // projection below and onFinish's re-persist carry the parts — and a
+        // crash-resume reads the same prompt from the log. Skipped on resume
+        // (replay reads the stored parts) and on decision turns (no new user
+        // message). See `extensions.ts`.
+        const lastMessage = uiMessages[uiMessages.length - 1];
+        if (
+          config.scripts &&
+          cfg.extensions?.length &&
+          lastMessage?.role === "user" &&
+          (trigger === "chat" || trigger === "programmatic" || trigger === "schedule")
+        ) {
+          const selected = selectExtensions({
+            extensions: cfg.extensions,
+            message: lastMessage,
+            window: sliceAtCompaction(uiMessages),
+            now: Date.now(),
+          });
+          if (selected.length > 0) {
+            const execOptions = {
+              abortSignal: dur.enabled ? abort.signal : undefined,
+              experimental_sandbox: sandbox,
+              context: toolContext,
+            };
+            const persistAndStream = async (message: AppMessage, parts: ExtensionPart[]) => {
+              await storage.appendMessages(resolvedChatId, [message]);
+              uiMessages[uiMessages.length - 1] = message;
+              // Live UI: a TRANSIENT data part (delivered to `onData`, never
+              // attached to the assistant message being streamed) — the
+              // durable copy lives on the user message and arrives on reload.
+              const visible = redactExtensionParts([
+                { ...message, parts: parts as unknown[] } as AppMessage,
+              ])[0].parts as unknown as ExtensionPart[];
+              for (const p of visible) {
+                writer.write({
+                  type: EXTENSION_PART_TYPE,
+                  id: p.id,
+                  data: { ...p.data, messageId: message.id },
+                  transient: true,
+                });
+              }
+            };
+            try {
+              const ran = await executeExtensions({
+                engine: config.scripts,
+                selected,
+                message: lastMessage,
+                mounts: (includeGated) =>
+                  scriptMounts(tools, { activeTools, gatedNames, includeGated, execOptions }),
+                gatedNames,
+                signal: dur.enabled ? abort.signal : undefined,
+              });
+              await persistAndStream(ran.message, ran.parts);
+            } catch (e) {
+              if (e instanceof ExtensionFailedError && e.partial) {
+                await persistAndStream(e.partial.message, e.partial.parts);
+              }
+              throw e;
+            }
+          }
+        }
+        // System-prompt blocks from extensions with `target: "instructions"` —
+        // read from the stored history (this turn's and earlier `scope: "chat"`
+        // results), never recomputed, so a resume renders the same instructions.
+        const agent = buildAgent(extensionInstructionBlocks(sliceAtCompaction(uiMessages)));
+        // Model projection: drops `sendToModel:false` messages, renders
+        // extension parts, drops other data-* parts.
+        const modelMessages = await toModelMessages(uiMessages, { tools });
         // Start the model call inside the telemetry run span (when provided)
         // so the impl can root every AI SDK span in one seeded trace.
         const startStream = () =>
@@ -1929,26 +2107,8 @@ export function createRuntime<P, RC = unknown>(
           // Shared context for hooks / prepareStep / approval policies.
           runtimeContext: runtimeCtx,
           // `toolsContext` is keyed BY TOOL NAME (the SDK does
-          // `toolsContext[toolName]`), so point every tool at the same context:
-          // the project's runtime context + who it's for + the run + the writer
-          // + the runtime itself (so a harness tool can schedule, list chats or
-          // spawn a run without reaching for a host-global). A tool reads it as
-          // `options.context`.
-          toolsContext: Object.fromEntries(
-            Object.keys(tools).map((name) => [
-              name,
-              {
-                ...(runtimeCtx as Record<string, unknown>),
-                principal,
-                runtime: self,
-                // `agent` is the ref the turn resolved (scope-pinned as stored
-                // on the run), so a tool that acts on "the agent I'm running
-                // as" names the same record the turn is using.
-                run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
-                writer,
-              },
-            ]),
-          ),
+          // `toolsContext[toolName]`), so point every tool at the same context.
+          toolsContext: Object.fromEntries(Object.keys(tools).map((name) => [name, toolContext])),
           // generate-text step callback: accumulate usage across steps,
           // including the cached-prompt breakdown so cost reflects cache reads.
           onStepEnd: (step: {
@@ -2945,6 +3105,82 @@ export function createRuntime<P, RC = unknown>(
     return toClientMessages(messages);
   }
 
+  async function previewExtension({
+    agent: agentName,
+    principal,
+    name,
+    input,
+    text,
+    request,
+    turnContext,
+  }: {
+    agent: string;
+    principal: P;
+    name: string;
+    input?: unknown;
+    text?: string;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<ExtensionPartData> {
+    if (!config.scripts) throw new Error("No script engine: set `RuntimeConfig.scripts`");
+    const { cfg, runtimeCtx } = await resolveAgentConfig(agentName, principal, request, turnContext);
+    const ext = cfg.extensions?.find((e) => e.name.toLowerCase() === name.toLowerCase());
+    if (!ext) throw new Error(`Unknown extension "${name}" on agent "${agentName}"`);
+    // Same tool assembly as a turn, minus the harness (which needs a live turn).
+    const sources = [...(cfg.toolSources ?? [])];
+    if (config.connections && cfg.connections && cfg.connections.length > 0) {
+      sources.push(config.connections.hostFor(cfg.connections));
+    }
+    const opened: OpenToolSet[] = [];
+    try {
+      for (const source of sources) opened.push(await source.open(principal));
+      const tools = Object.assign({}, cfg.tools, ...opened.map((o) => o.tools));
+      for (const n of cfg.disableTools ?? []) delete tools[n];
+      const gatedNames = gatedToolNames({
+        harnessApproval: {},
+        sourceApproval: opened.map((o) => o.toolApproval),
+        agentApproval: cfg.toolApproval,
+        allNames: Object.keys(tools),
+      });
+      const alwaysActive = opened.flatMap((o) => o.alwaysActive ?? []);
+      const activeTools = cfg.enabledTools
+        ? Array.from(
+            new Set([...cfg.enabledTools, ...alwaysActive, ...Object.keys(cfg.tools ?? {})]),
+          ).filter((n) => n in tools)
+        : undefined;
+      const execOptions = {
+        context: { ...(runtimeCtx as Record<string, unknown>), principal, runtime: self },
+      };
+      const message: AppMessage = {
+        id: "preview",
+        role: "user",
+        parts: [{ type: "text", text: text ?? `/${ext.name}` }],
+        metadata: { visibility: "user", createdAt: Date.now() },
+      };
+      let resolvedInput = input;
+      if (resolvedInput === undefined && ext.on === "slash" && text) {
+        const parsed = parseSlashInvocation(text, [ext.name]);
+        if (parsed) resolvedInput = { args: parsed.args, argv: parsed.argv };
+      }
+      try {
+        const ran = await executeExtensions({
+          engine: config.scripts,
+          selected: [{ ext, input: resolvedInput }],
+          message,
+          mounts: (includeGated) =>
+            scriptMounts(tools, { activeTools, gatedNames, includeGated, execOptions }),
+          gatedNames,
+        });
+        return ran.parts[0].data;
+      } catch (e) {
+        if (e instanceof ExtensionFailedError && e.partial) return e.partial.parts[0].data;
+        throw e;
+      }
+    } finally {
+      await Promise.all(opened.map((o) => o.close().catch(() => {})));
+    }
+  }
+
   async function listChats({
     principal,
     limit,
@@ -3447,6 +3683,7 @@ export function createRuntime<P, RC = unknown>(
     },
     compactChat,
     loadHistory,
+    previewExtension,
     listChats,
     getChat: getChatById,
     listRuns,

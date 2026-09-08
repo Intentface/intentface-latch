@@ -1,5 +1,6 @@
 import { convertToModelMessages, type ModelMessage } from "ai";
 import type { AppMessage } from "./message.js";
+import { applyExtensionParts, redactExtensionParts } from "./extensions.js";
 
 /**
  * The two message projections (see `message.ts`). `AppMessage` is the stored
@@ -8,9 +9,14 @@ import type { AppMessage } from "./message.js";
  * user; absent `sendToModel` → fed to the model. Exceptions are explicit.
  */
 
-/** Client projection: keep user-visible messages, drop `internal`/`redacted`. */
+/**
+ * Client projection: keep user-visible messages, drop `internal`/`redacted`;
+ * then reduce `data-extension` parts to what their `reveal` allows.
+ */
 export function toClientMessages(messages: AppMessage[]): AppMessage[] {
-  return messages.filter((m) => (m.metadata?.visibility ?? "user") === "user");
+  return redactExtensionParts(
+    messages.filter((m) => (m.metadata?.visibility ?? "user") === "user"),
+  );
 }
 
 /**
@@ -123,17 +129,20 @@ export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
 
 /**
  * Model projection: cut to the live context window, drop `sendToModel === false`,
- * neutralize audio file parts, close any dangling tool calls, then convert to
- * model messages. (`data-*` parts — e.g. the compaction marker — are dropped by
- * the SDK during conversion, so they never reach the model.)
+ * neutralize audio file parts, render extension results into the user turn,
+ * close any dangling tool calls, then convert to model messages. (Other
+ * `data-*` parts — e.g. the compaction marker — are dropped by the SDK during
+ * conversion, so they never reach the model.)
  */
 export async function toModelMessages(
   messages: AppMessage[],
   opts?: { tools?: Record<string, unknown> },
 ): Promise<ModelMessage[]> {
   const forModel = closeDanglingToolCalls(
-    replaceAudioFileParts(
-      sliceAtCompaction(messages).filter((m) => m.metadata?.sendToModel !== false),
+    applyExtensionParts(
+      replaceAudioFileParts(
+        sliceAtCompaction(messages).filter((m) => m.metadata?.sendToModel !== false),
+      ),
     ),
   );
   return convertToModelMessages(forModel as never, (opts ?? {}) as never);

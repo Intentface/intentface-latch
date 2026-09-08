@@ -13,6 +13,11 @@ import type { UIMessage, UITools, UIDataTypes } from "ai";
  *    the model, the end user, both, or neither;
  *  - the execution facts (usage/cost/model/finishReason) live in `metadata`,
  *    so there is no separate "steps" table and no duplication.
+ *
+ * One part-level exception to the message-level axes: a `data-extension` part
+ * (an agent extension's pre-turn result, see `extensions.ts`) is rendered for
+ * the model and redacted for the client per its own `reveal` field, so the
+ * user's typed text and what the model actually read share one row.
  */
 
 /** Who sees a message on the client projection. */
@@ -41,6 +46,11 @@ export interface AppMetadata {
   createdAt?: number;
   /** Set when the message text is a transcription of a recorded voice message. */
   voice?: { durationMs: number };
+  /**
+   * Structured invocation of a slash extension (`AgentConfig.extensions`), an
+   * alternative to typing `/name args` in the text. Wins over text parsing.
+   */
+  extension?: { name: string; input?: unknown };
 }
 
 /** The stored conversation unit — a `UIMessage` typed with our metadata. */

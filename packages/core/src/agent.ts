@@ -1,5 +1,6 @@
 import type { LanguageModel } from "ai";
 import type { MemoryConfig } from "./memory.js";
+import type { AgentExtension } from "./extensions.js";
 
 /**
  * Agent definitions.
@@ -157,6 +158,15 @@ export interface AgentConfig<P> {
    * background jobs handle extraction and consolidation out of band.
    */
   memory?: MemoryConfig;
+  /**
+   * Work that runs BEFORE the model on a turn: scripts over the agent's tools
+   * plus templates, triggered by a `/slash` invocation, once per chat, or every
+   * turn (see `AgentExtension`). Requires the runtime to be composed with a
+   * `ScriptEngine` (`RuntimeConfig.scripts`) — without one the declaration is
+   * ignored. Results are persisted on the triggering user message, so the
+   * model reads them from the log on this turn and on every resume.
+   */
+  extensions?: AgentExtension[];
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */
