@@ -37,7 +37,7 @@ import {
   unwrapToolResult,
   type AgentExtension,
   type ExtensionPart,
-  type ExtensionPartData,
+  type ExtensionPreview,
   type ScriptEngine,
   type ScriptToolMount,
 } from "./extensions.js";
@@ -414,7 +414,7 @@ export interface Runtime<P> {
     text?: string;
     request?: Request;
     turnContext?: unknown;
-  }): Promise<ExtensionPartData>;
+  }): Promise<ExtensionPreview>;
   /**
    * An agent's declared extensions (name, description, trigger, input schema —
    * never the script), resolved for the caller. For a composer's `/` menu.
@@ -3145,7 +3145,7 @@ export function createRuntime<P, RC = unknown>(
     text?: string;
     request?: Request;
     turnContext?: unknown;
-  }): Promise<ExtensionPartData> {
+  }): Promise<ExtensionPreview> {
     if (!config.scripts) throw new Error("No script engine: set `RuntimeConfig.scripts`");
     const { cfg, runtimeCtx } = await resolveAgentConfig(agentName, principal, request, turnContext);
     const ext =
@@ -3197,9 +3197,11 @@ export function createRuntime<P, RC = unknown>(
           gatedNames,
           inactiveNames: inactiveToolNames(tools, activeTools),
         });
-        return ran.parts[0].data;
+        return { ...ran.parts[0].data, ...ran.details[0] };
       } catch (e) {
-        if (e instanceof ExtensionFailedError && e.partial) return e.partial.parts[0].data;
+        if (e instanceof ExtensionFailedError && e.partial) {
+          return { ...e.partial.parts[0].data, ...e.partial.details[0] };
+        }
         throw e;
       }
     } finally {

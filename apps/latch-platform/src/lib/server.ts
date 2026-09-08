@@ -668,7 +668,14 @@ export const previewExtensionFn = createServerFn({ method: "POST" })
           files: (part.files ?? []).map((f) => ({ mediaType: f.mediaType, filename: f.filename ?? null })),
           calls: part.calls.map((c) => ({ tool: c.tool, stepId: c.stepId })),
           durationMs: part.durationMs ?? 0,
-          error: part.error ? { message: part.error.message, code: part.error.code ?? null } : null,
+          error: part.error
+            ? { message: part.error.message, code: part.error.code ?? null, at: part.error.at ?? null }
+            : null,
+          // Editor-only: the compiled plan and every settled step's value (bounded).
+          plan: part.plan === undefined ? null : JSON.stringify(part.plan),
+          steps: part.steps
+            ? Object.fromEntries(Object.entries(part.steps).map(([k, v]) => [k, JSON.stringify(v)]))
+            : null,
         },
       };
     } catch (e) {

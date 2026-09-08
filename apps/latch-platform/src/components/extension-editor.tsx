@@ -12,6 +12,7 @@ import { RichSelect } from "@/components/ui/rich-select";
 import { Switch } from "@/components/ui/switch";
 import { CodeEditor } from "@/components/code-editor";
 import { LiquidEditor } from "@/components/liquid-editor";
+import { PlanStory, type Plan } from "@/components/plan-story";
 import type { ToolInfo } from "@/routes/agents";
 
 /**
@@ -162,7 +163,7 @@ function ExtensionEditor({
   const [testJson, setTestJson] = useState("");
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<Preview | null>(null);
-  const [scriptTab, setScriptTab] = useState<"script" | "input" | "output">("script");
+  const [scriptTab, setScriptTab] = useState<"script" | "story" | "input" | "output">("script");
   const [templateTab, setTemplateTab] = useState<"template" | "rendered">("template");
   const set = <K extends keyof ExtensionRec>(key: K, value: ExtensionRec[K]) =>
     onChange((e) => ({ ...e, [key]: value }));
@@ -218,8 +219,9 @@ function ExtensionEditor({
       const text = ext.on === "slash" ? testText.trim() || `/${ext.name}` : undefined;
       const input = testJson.trim() ? (JSON.parse(testJson) as unknown) : undefined;
       setResult(await previewExtensionFn({ data: { agent: agentName, extension: ext, text, input } }));
-      // Show what the run produced, in both columns.
-      setScriptTab("output");
+      // Show what the run produced, in both columns: the story on the left
+      // (the plan with every step's real value), the rendered text on the right.
+      setScriptTab("story");
       setTemplateTab("rendered");
     } finally {
       setTesting(false);
@@ -227,6 +229,24 @@ function ExtensionEditor({
   }
 
   const part = result?.ok ? result.part : null;
+  const story = useMemo(() => {
+    if (!part?.plan) return null;
+    try {
+      const plan = JSON.parse(part.plan) as Plan;
+      if (!Array.isArray(plan.steps)) return null;
+      const steps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(part.steps ?? {})) {
+        try {
+          steps[k] = JSON.parse(v);
+        } catch {
+          steps[k] = v;
+        }
+      }
+      return { plan, steps };
+    } catch {
+      return null;
+    }
+  }, [part]);
   // A failure with no output belongs to the script stage; with output, to the template.
   const scriptError = result && !result.ok ? result.error : part?.error && part.output === null && part.error.code !== "media_dropped" ? part.error.message : null;
   const templateError = part?.error && part.output !== null && part.rendered === null ? part.error.message : null;
@@ -304,6 +324,12 @@ function ExtensionEditor({
               onChange={setScriptTab}
               tabs={[
                 { value: "script", label: "1 · Script" },
+                {
+                  value: "story",
+                  label: "Story",
+                  badge: story ? `${story.plan.steps.length} steps` : undefined,
+                  tone: story && scriptError ? "error" : undefined,
+                },
                 { value: "input", label: "Input", badge: testText.trim() || testJson.trim() ? "set" : undefined },
                 {
                   value: "output",
@@ -344,6 +370,28 @@ function ExtensionEditor({
                 No loops, no globals; validated before it runs.
               </p>
             </>
+          )}
+          {scriptTab === "story" && (
+            <div className="border-input h-[340px] overflow-auto rounded-lg border p-3">
+              {story ? (
+                <PlanStory
+                  plan={story.plan}
+                  steps={story.steps}
+                  output={part?.output ? safeParse(part.output) : undefined}
+                  tools={tools}
+                  ran={!!part && part.output !== null}
+                  error={part?.error && part.error.code !== "media_dropped" ? part.error : null}
+                />
+              ) : (
+                <p className="text-ink-tertiary text-xs">
+                  {result && !result.ok
+                    ? result.error
+                    : scriptError
+                      ? `The script did not compile: ${scriptError}`
+                      : "Run once and the compiled plan appears here as a numbered story, with what each step produced."}
+                </p>
+              )}
+            </div>
           )}
           {scriptTab === "input" && (
             <div className="space-y-2 text-xs">
@@ -542,6 +590,14 @@ function ExtensionEditor({
       </div>
     </div>
   );
+}
+
+function safeParse(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return json;
+  }
 }
 
 /** One line of prose with inline controls — reads as a sentence, not a form. */

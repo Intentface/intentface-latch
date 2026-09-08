@@ -760,6 +760,8 @@ describe("previewExtension", () => {
     const rt = runtimeWith({ extensions: [report], engine, model });
     const data = await rt.runtime.previewExtension({ agent: "helper", principal, name: "report", text: "/report q3" });
     expect(data.rendered).toBe('Weekly report for q3: ["q3"]');
+    expect(data.plan).toEqual({ ok: true }); // the engine's compiled plan, for editors
+    expect(data.steps).toEqual({ s1: { members: ["q3"] } }); // every settled step's value
     expect(runs[0].input).toEqual({ args: "q3", argv: ["q3"] });
     expect(runs[0].mounts).toEqual(["clockify_hours"]);
     expect(prompts).toHaveLength(0);

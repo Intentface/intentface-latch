@@ -628,7 +628,22 @@ export interface ExecuteExtensionsResult {
   /** The user message with the new parts appended (same id). */
   message: AppMessage;
   parts: ExtensionPart[];
+  /**
+   * Per part, what is NOT persisted but an editor wants: the compiled plan and
+   * every settled step's value (each bounded). Aligned with `parts`.
+   */
+  details: ExtensionRunDetails[];
 }
+
+export interface ExtensionRunDetails {
+  /** The engine's compiled plan (callscript's JSON steps), when the script validated. */
+  plan?: unknown;
+  /** Settled step outputs by id, each bounded like `output`. */
+  steps?: Record<string, unknown>;
+}
+
+/** What `previewExtension` returns: the part plus the editor-only details. */
+export type ExtensionPreview = ExtensionPartData & ExtensionRunDetails;
 
 /**
  * Run the selected extensions and build their parts. Pure with respect to
@@ -653,6 +668,7 @@ export async function executeExtensions(opts: {
   const now = opts.now ?? Date.now;
   const newId = opts.newId ?? (() => `ext_${Math.random().toString(36).slice(2, 12)}`);
   const parts: ExtensionPart[] = [];
+  const details: ExtensionRunDetails[] = [];
 
   for (const { ext, input } of opts.selected) {
     const r = resolveExtension(ext);
@@ -671,6 +687,7 @@ export async function executeExtensions(opts: {
     const fail = (message: string, code?: string, at?: string) => {
       data.error = { message, ...(code ? { code } : {}), ...(at ? { at } : {}) };
     };
+    const detail: ExtensionRunDetails = {};
     try {
       let scope: Record<string, unknown> = { input };
       if (ext.script !== undefined) {
@@ -678,6 +695,7 @@ export async function executeExtensions(opts: {
         const names = all.map((t) => t.name);
         const inactive = opts.inactiveNames ?? new Set<string>();
         const analysis = opts.engine.analyze(ext.script, { tools: names });
+        if (analysis.plan !== undefined) detail.plan = analysis.plan;
         const inactiveCalls = analysis.calls.filter((c) => inactive.has(c));
         const gatedCalls = analysis.calls.filter((c) => opts.gatedNames.has(c));
         if (analysis.issues.length > 0) {
@@ -721,6 +739,9 @@ export async function executeExtensions(opts: {
               opts.signal?.removeEventListener("abort", onOuter);
             }
             data.calls = result.calls;
+            detail.steps = Object.fromEntries(
+              Object.entries(result.steps).map(([id, v]) => [id, boundOutput(v, 16 * 1024).output]),
+            );
             if (result.status !== "ok") {
               const e = result.error ?? { message: `script ${result.status}` };
               fail(
@@ -777,14 +798,15 @@ export async function executeExtensions(opts: {
     }
     data.durationMs = now() - startedAt;
     parts.push({ type: EXTENSION_PART_TYPE, id: newId(), data });
+    details.push(detail);
     if (data.error && !data.rendered && r.onError === "fail") {
       const err = new ExtensionFailedError(ext.name, data.error.message);
-      err.partial = { message: withParts(opts.message, parts), parts };
+      err.partial = { message: withParts(opts.message, parts), parts, details };
       throw err;
     }
   }
 
-  return { message: withParts(opts.message, parts), parts };
+  return { message: withParts(opts.message, parts), parts, details };
 }
 
 function withParts(message: AppMessage, parts: ExtensionPart[]): AppMessage {
