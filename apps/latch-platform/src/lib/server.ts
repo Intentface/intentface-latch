@@ -586,6 +586,26 @@ export const saveAgentFn = createServerFn({ method: "POST" })
   });
 
 /**
+ * The slash extensions an agent offers, for the chat composer's `/` menu —
+ * names and descriptions only, never scripts.
+ */
+export const listAgentExtensionsFn = createServerFn({ method: "GET" })
+  .validator((data: { agent: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const { runtime } = await getLatch();
+    try {
+      const all = await runtime.listExtensions({ agent: data.agent, principal });
+      return all
+        .filter((e) => e.on === "slash")
+        .map((e) => ({ name: e.name, description: e.description ?? null }));
+    } catch {
+      return [];
+    }
+  });
+
+/**
  * Run one agent extension outside a turn (the editor's "Test" panel): the
  * saved one by `name`, or an inline draft — no model call, nothing persisted.
  * Resolves the agent under the caller, so its connections and tools are the

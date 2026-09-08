@@ -20,6 +20,10 @@ const latch = {
     listChats: async () => [],
     loadHistory: async () => [],
     runAgent: async () => ({ threadId: "sub_1", answer: "hi" }),
+    previewExtension: async () => ({
+      name: "x", on: "slash", target: "message", placement: "after", scope: "turn", reveal: "command",
+      at: 0, calls: [], rendered: "ok",
+    }),
     schedule: async () => ({ id: "sch_1", agent: "x", cron: null, nextRunAt: 0 }),
     listSchedules: async () => schedules,
     unschedule: async () => {},
@@ -85,7 +89,7 @@ describe("platform agent builder (package + extensions)", () => {
       [
         // package core
         "delete_agent", "get_agent", "list_agents", "list_chats", "list_connection_tools",
-        "list_connections", "list_models", "read_chat", "save_agent", "test_agent",
+        "list_connections", "list_models", "read_chat", "save_agent", "test_agent", "test_extension",
         // connections
         "list_secrets", "request_secret", "create_connection", "connect_connection", "delete_connection",
         // memory

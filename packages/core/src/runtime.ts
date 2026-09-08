@@ -415,6 +415,17 @@ export interface Runtime<P> {
     turnContext?: unknown;
   }): Promise<ExtensionPartData>;
   /**
+   * An agent's declared extensions (name, description, trigger, input schema —
+   * never the script), resolved for the caller. For a composer's `/` menu.
+   * Empty when the agent has none or the runtime has no `scripts` engine.
+   */
+  listExtensions(input: {
+    agent: string;
+    principal: P;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<Array<Pick<AgentExtension, "name" | "description" | "on" | "input">>>;
+  /**
    * The caller's chats, most-recent first (for a chat list / sidebar).
    * `kind` filters to one chat kind (e.g. `'user'` to hide the runtime's
    * internal `sub_…` threads); omitted → all kinds (back-compatible default).
@@ -3191,6 +3202,27 @@ export function createRuntime<P, RC = unknown>(
     }
   }
 
+  async function listExtensions({
+    agent: agentName,
+    principal,
+    request,
+    turnContext,
+  }: {
+    agent: string;
+    principal: P;
+    request?: Request;
+    turnContext?: unknown;
+  }): Promise<Array<Pick<AgentExtension, "name" | "description" | "on" | "input">>> {
+    if (!config.scripts) return [];
+    const { cfg } = await resolveAgentConfig(agentName, principal, request, turnContext);
+    return (cfg.extensions ?? []).map(({ name, description, on, input }) => ({
+      name,
+      ...(description !== undefined ? { description } : {}),
+      on,
+      ...(input !== undefined ? { input } : {}),
+    }));
+  }
+
   async function listChats({
     principal,
     limit,
@@ -3694,6 +3726,7 @@ export function createRuntime<P, RC = unknown>(
     compactChat,
     loadHistory,
     previewExtension,
+    listExtensions,
     listChats,
     getChat: getChatById,
     listRuns,

@@ -730,6 +730,10 @@ describe("previewExtension", () => {
     });
     expect(draft.name).toBe("draft");
     expect(draft.rendered).toBe('draft says ["d"]');
+    // listExtensions: names/descriptions/triggers only, never the script.
+    const listed = await rt.runtime.listExtensions({ agent: "helper", principal });
+    expect(listed).toEqual([{ name: "report", on: "slash" }]);
+    expect(JSON.stringify(listed)).not.toContain("clockify_hours");
   });
 
   it("returns the failed part instead of throwing, even with onError: fail", async () => {

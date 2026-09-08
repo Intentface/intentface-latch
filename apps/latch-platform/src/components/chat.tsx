@@ -24,7 +24,7 @@ import type { AppMessage, SubagentProgressData } from "@intentface/latch-core"
 import { Message } from "@/components/ai/message"
 import { Thread } from "@/components/ai/thread"
 import { ChatInput  } from "@/components/chat/chat-input"
-import type {ChatSelection} from "@/components/chat/chat-input";
+import type {ChatSelection, SlashCommandItem} from "@/components/chat/chat-input";
 import {
   ChatSessionProvider
   
@@ -58,6 +58,7 @@ import {
 } from "@/lib/latch-client"
 import {
   chatGeneratingFn,
+  listAgentExtensionsFn,
   getAgentEvalsFn,
   rejudgeRunFn,
   saveSecretsFn,
@@ -234,6 +235,22 @@ export function Chat({
       .catch((e) => {
         // Non-fatal: leave eval UI at its defaults (off) if the lookup fails.
         if (!cancelled) console.warn("getAgentEvals failed:", e)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [agent])
+
+  // The agent's slash extensions, for the composer's `/` menu (names only).
+  const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([])
+  useEffect(() => {
+    let cancelled = false
+    listAgentExtensionsFn({ data: { agent } })
+      .then((items) => {
+        if (!cancelled) setSlashCommands(items)
+      })
+      .catch((e) => {
+        if (!cancelled) console.warn("listAgentExtensions failed:", e)
       })
     return () => {
       cancelled = true
@@ -775,6 +792,7 @@ export function Chat({
                 onSaveSecret={answerSecretRequest}
                 onVoiceTranscribed={handleVoiceTranscribed}
                 onStop={stop}
+                slashCommands={slashCommands}
               />
             </Thread.Composer>
 

@@ -34,6 +34,18 @@ function makeDeps(): AgentBuilderDeps<P> & {
       listChats: vi.fn(async () => []),
       loadHistory: vi.fn(async () => []),
       runAgent: vi.fn(async () => ({ threadId: "sub_1", answer: "hi" })),
+      previewExtension: vi.fn(async (input: { name?: string; extension?: { name: string } }) => ({
+        name: input.extension?.name ?? input.name ?? "x",
+        on: "slash",
+        target: "message",
+        placement: "after",
+        scope: "turn",
+        reveal: "command",
+        at: 0,
+        durationMs: 3,
+        calls: [{ tool: "clockify_hours", stepId: "h" }],
+        rendered: "Weekly report: 50h",
+      })),
       schedule: vi.fn(async (input: { agent: string; cron: string | null; prompt: string; timezone?: string }) => {
         const rec: StubSchedule = {
           id: `sch_${schedules.length + 1}`,
@@ -624,5 +636,44 @@ describe("testHeartbeatMs guard", () => {
     // Only the immediate heartbeat — the interval fell back to 10s, far
     // beyond this 60ms run. Without the guard this would be dozens.
     expect(written.length).toBe(1);
+  });
+});
+
+describe("extensions capability (opt-in)", () => {
+  const ext = { name: "report", on: "slash" as const, script: "return 1", template: "x" };
+
+  it("is rejected and absent from the toolset/prompt unless the host declares it", async () => {
+    const { tools, cfg } = await openTools(makeDeps());
+    expect(tools.test_extension).toBeUndefined();
+    expect(cfg.instructions).not.toContain("EXTENSIONS (");
+    const res = (await tools.save_agent!.execute({ ...SAVE, extensions: [ext] })) as { error?: string };
+    expect(res.error).toMatch(/Not available in this host: extensions/);
+  });
+
+  it("when declared: the prompt teaches it, test_extension runs a draft, and save_agent persists the list", async () => {
+    const deps = makeDeps();
+    const { tools, cfg } = await openTools(deps, undefined, undefined, {
+      capabilities: { extensions: { description: "callscript + Liquid" } },
+    });
+    expect(cfg.instructions).toContain("EXTENSIONS (");
+    expect(cfg.instructions).toContain("callscript + Liquid");
+    const test = (await tools.test_extension!.execute({
+      agent: "My Agent",
+      extension: ext,
+      text: "/report week",
+    })) as Record<string, unknown>;
+    expect(test.rendered).toBe("Weekly report: 50h");
+    expect(test.calls).toEqual(["clockify_hours"]);
+    expect(deps.runtime.previewExtension).toHaveBeenCalledWith(
+      expect.objectContaining({ agent: "my-agent", extension: ext, text: "/report week" }),
+    );
+    const ok = (await tools.save_agent!.execute({ ...SAVE, extensions: [ext] })) as { saved?: boolean };
+    expect(ok.saved).toBe(true);
+    expect(deps.records[0]!.extensions).toEqual([ext]);
+    // A reserved slash name is refused by the record schema itself.
+    const bad = (await tools.save_agent!.execute({ ...SAVE, extensions: [{ ...ext, name: "compact" }] })) as {
+      error?: string;
+    };
+    expect(bad.error).toMatch(/reserved/);
   });
 });

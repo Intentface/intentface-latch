@@ -8,7 +8,7 @@
  * would mint fresh values per render and defeat the memo.
  */
 
-import { KeyRound, Mic, ThumbsDown, ThumbsUp } from "lucide-react"
+import { KeyRound, Mic, ThumbsDown, ThumbsUp, Zap } from "lucide-react"
 import { memo  } from "react"
 import type {ReactNode} from "react";
 import { Message } from "@/components/ai/message"
@@ -94,6 +94,9 @@ export const ChatMessageItem = memo(
       ? getReasoningInfo(segments, isStreaming)
       : null
     const askUser = getAskUserInfo(parts)
+    // Agent extensions that ran before the model on this user turn (their
+    // payload is already redacted server-side per the extension's `reveal`).
+    const extensionParts = isUser ? getExtensionParts(parts) : []
     const sourcesInfo = isAssistant ? getSourcesInfo(parts) : null
     const secretsAnswered = isAssistant ? getSecretRequestsAnswered(parts) : []
     const gated = readOnly
@@ -167,6 +170,8 @@ export const ChatMessageItem = memo(
             )
           })}
         </Message.Content>
+
+        {extensionParts.length > 0 && <ExtensionChips parts={extensionParts} />}
 
         {/* A turn paused on the user's decision */}
         {gated.map((part) => (
@@ -281,3 +286,72 @@ export const ChatMessageItem = memo(
 )
 
 ChatMessageItem.displayName = "ChatMessageItem"
+
+// ---------------------------------------------------------------- extensions
+
+type ExtensionPartView = {
+  id?: string
+  data: {
+    name: string
+    on: "slash" | "chat-start" | "every-turn"
+    target: "message" | "instructions"
+    reveal?: "command" | "prompt" | "both"
+    rendered?: string
+    error?: { message: string; code?: string }
+    calls?: { tool: string }[]
+    durationMs?: number
+  }
+}
+
+function getExtensionParts(parts: readonly unknown[]): ExtensionPartView[] {
+  return parts.filter(
+    (p): p is ExtensionPartView =>
+      typeof p === "object" &&
+      p !== null &&
+      (p as { type?: unknown }).type === "data-extension" &&
+      typeof (p as { data?: unknown }).data === "object"
+  )
+}
+
+/**
+ * What ran before the model on this turn: one chip per extension, with the
+ * rendered prompt behind a disclosure when the extension chose to reveal it.
+ */
+function ExtensionChips({ parts }: { parts: ExtensionPartView[] }) {
+  return (
+    <div className="flex flex-wrap gap-1.5 text-xs">
+      {parts.map((p, i) => {
+        const d = p.data
+        const label = d.on === "slash" ? `/${d.name}` : d.name
+        const detail = d.error
+          ? `${label} failed: ${d.error.message}`
+          : `${label} ran before the model${d.target === "instructions" ? " (system prompt)" : ""}`
+        const body = (
+          <span
+            className={
+              d.error
+                ? "inline-flex items-center gap-1 rounded-md border border-destructive/40 px-1.5 py-0.5 text-destructive"
+                : "inline-flex items-center gap-1 rounded-md border border-primary-border px-1.5 py-0.5 text-ink-secondary"
+            }
+            title={detail}
+          >
+            <Zap className="size-3" />
+            <span className="font-mono">{label}</span>
+            {d.calls && d.calls.length > 0 && (
+              <span className="text-ink-tertiary">· {d.calls.map((c) => c.tool).join(", ")}</span>
+            )}
+          </span>
+        )
+        if (!d.rendered) return <span key={p.id ?? i}>{body}</span>
+        return (
+          <details key={p.id ?? i} className="min-w-0">
+            <summary className="cursor-pointer list-none">{body}</summary>
+            <pre className="mt-1 max-h-64 overflow-auto rounded bg-input/40 p-2 whitespace-pre-wrap text-ink-secondary">
+              {d.rendered}
+            </pre>
+          </details>
+        )
+      })}
+    </div>
+  )
+}

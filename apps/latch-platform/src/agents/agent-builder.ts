@@ -61,6 +61,7 @@ export const agentBuilder = createAgentBuilder<Principal, { orgId: string }>({
     },
     // Opt-in capabilities this host actually composes.
     memory: { description: "persistent cross-session memory — see MEMORY & SCHEMAS" },
+    extensions: { description: "the platform runs callscript + Liquid; slash commands show up in the chat composer's / menu" },
   },
   extensions: [
     connectionsExtension,

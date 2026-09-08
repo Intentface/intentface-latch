@@ -4,7 +4,13 @@ import { defineAgent } from "@intentface/latch-core";
 import type { AgentFactory, AgentMeta, Runtime, TurnWriter } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
 import type { AgentBuilderExtension } from "./extension";
-import { AgentRecordSchema, AgentScopeSchema, normalizeAgentName, normalizeAgentRecord } from "./record";
+import {
+  AgentExtensionSchema,
+  AgentRecordSchema,
+  AgentScopeSchema,
+  normalizeAgentName,
+  normalizeAgentRecord,
+} from "./record";
 import type { AgentRecord } from "./record";
 import type { AgentBuilderStore } from "./store";
 import { sharedReadTools } from "./shared-read-tools";
@@ -53,7 +59,14 @@ export interface ConnectionChoice {
 export interface AgentBuilderDeps<P> {
   runtime: Pick<
     Runtime<P>,
-    "listAgents" | "listChats" | "loadHistory" | "runAgent" | "schedule" | "listSchedules" | "unschedule"
+    | "listAgents"
+    | "listChats"
+    | "loadHistory"
+    | "runAgent"
+    | "schedule"
+    | "listSchedules"
+    | "unschedule"
+    | "previewExtension"
   >;
   store: AgentBuilderStore<P>;
   /** The host's model catalog (assignable model ids). */
@@ -90,6 +103,12 @@ export interface CapabilitySupport {
    * memory config nothing will ever read.
    */
   memory?: boolean | { description: string };
+  /**
+   * Whether this host composes a script engine (`RuntimeConfig.scripts`) for
+   * agent `extensions` — pre-turn scripts + templates. Opt-IN: without an
+   * engine an extension is silently ignored, so the builder must not offer it.
+   */
+  extensions?: boolean | { description: string };
 }
 
 export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
@@ -165,6 +184,17 @@ function capabilitiesBullet(support: CapabilitySupport): string {
     : `- exec: only ${effort}. No other capabilities exist in this host — never promise behavior outside the fields above.`;
 }
 
+const EXTENSIONS_PROMPT = `EXTENSIONS (the record's \`extensions\` list; test with test_extension):
+An extension runs BEFORE the model on a turn: a small script fetches data through the agent's tools and a Liquid template renders it into the prompt. When the agent always needs the same data first, do NOT write "first fetch X, then Y" into the instructions — write an extension. The result is stored on the user's message, so the model reads exactly what ran.
+- on: "slash" (the user types /name args → \`input.args\` is the text after the name, \`input.argv\` the words), "chat-start" (once per conversation; \`refresh: { afterMs }\` to re-run when stale), "every-turn".
+- script: a JavaScript SUBSET, parsed into a plan and fully validated before it runs. Call tools by their EXACT names from list_connection_tools: \`const h = await clockify_hours({ period: input.args });\`. Pure transforms between calls (filter/map/reduce, template literals, ternaries); bounded fan-out \`await Promise.all(items.slice(0, 10).map((i) => tool({ id: i.id })))\`; try/catch around a call; end with \`return { ... }\`. NOT allowed (validation rejects with a message you can act on): loops, reassignment, \`new\`, globals, regex, network.
+- template: Liquid — {{ output.field }}, {% for x in output.items %}…{% endfor %}, {% if %} — over \`input\`, \`output\` (the return value) and every \`const\` by name. Blank → the output as a JSON block.
+- target: "message" (default; rendered next to the user's text — \`placement\` "before"|"after") or "instructions" (system prompt; \`scope: "chat"\` keeps it for the whole conversation).
+- reveal: what the user sees on their own message — "command" (default: only what they typed), "prompt" (the rendered prompt), "both".
+- Read-only by default: a script calling an approval-gated (mutating) tool is refused unless \`allowMutations: true\` — leave it off unless the user asks. \`onError\`: "proceed" (default; the model is told the extension failed and continues) or "fail" (the turn errors).
+- Slash names: lowercase letter first, then letters/digits/underscore; NEVER new, reset, compact, cancel, skip, status, help, commands, start (those are chat commands).
+- WORKFLOW: draft the extension → test_extension with the draft (before saving; read \`rendered\`, \`calls\`, \`error\`) → fix → save_agent with the COMPLETE extensions list (it replaces the agent's previous list; get_agent shows the current one).`;
+
 const SCHEDULING_PROMPT = `SCHEDULING (schedule_agent / list_schedules / unschedule_agent):
 An agent runs as one TURN per trigger — it cannot loop in the background. For "do X every …" or "do X at …", save the agent to do X ONCE per run, then put it on a schedule.
 - schedule_agent takes the agent name, a prompt (the message each fire sends it), and a cron expression — croner syntax, 5 fields (minute-level) or 6 with leading seconds — interpreted in the given IANA timezone (default UTC). Omit cron for a ONE-SHOT that fires on the next tick. It pauses for the user's approval (a schedule spends money unattended).
@@ -182,8 +212,8 @@ WHAT AN AGENT IS — the fields you set with save_agent:
 - connections: integration names from list_connections. Only wire ones that exist; prefer authorized ones. Use list_connection_tools to see what a connection offers.
 ${capabilitiesBullet(support)}
 - subagents: names of other agents this one may delegate to.
-- scope: "user" (personal) or "org" (shared with the whole org).
-${scheduling ? `\n${SCHEDULING_PROMPT}\n` : ""}
+${support.extensions ? `- extensions: pre-turn scripts + templates${typeof support.extensions === "object" ? ` (${support.extensions.description})` : ""} — see EXTENSIONS.\n` : ""}- scope: "user" (personal) or "org" (shared with the whole org).
+${support.extensions ? `\n${EXTENSIONS_PROMPT}\n` : ""}${scheduling ? `\n${SCHEDULING_PROMPT}\n` : ""}
 WORKFLOW:
 1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).
 2. Discover before proposing: call list_models and list_connections (and list_connection_tools for any you'll wire).
@@ -381,6 +411,10 @@ async function builderTools<P>(
         // rejection beats silently dropping a capability the model asked for.
         if (rec.exec?.authoredTools?.length && !authoredToolsSupported) {
           return { error: "Tool authoring is not available here — omit exec.authoredTools." };
+        }
+        // Extensions need a script engine on the host — same rule as above.
+        if (rec.extensions?.length && !support.extensions) {
+          return { error: "Not available in this host: extensions. Omit them — and don't promise the user pre-turn scripts." };
         }
         // Same for capability flags the host never wired: rejecting beats
         // persisting a silent no-op the user believes in.
@@ -643,6 +677,48 @@ async function builderTools<P>(
         });
       },
     }),
+
+    ...(support.extensions
+      ? {
+          test_extension: tool({
+            description:
+              "Run ONE extension (a DRAFT you pass inline, or a saved one by name) over an existing agent's live tools — no model call, nothing persisted — and get what the model would have seen: `rendered`, the `calls` it made, `output`, or the `error` (validation, gated tool, tool failure). Use it to iterate on a draft BEFORE save_agent. For a slash extension pass `text` like the user would type it (\"/report week\").",
+            inputSchema: z.object({
+              agent: z.string().describe("An existing agent whose tools the script runs over."),
+              extension: AgentExtensionSchema.optional().describe("The draft to run (preferred while iterating)."),
+              name: z.string().optional().describe("Or: a saved extension's name on that agent."),
+              text: z.string().optional().describe("For slash extensions: the invocation as typed, e.g. \"/report week\"."),
+              input: z.json().optional().describe("Structured input instead of `text`."),
+            }),
+            execute: async ({ agent, extension, name, text, input }) => {
+              if (!extension && !name) return { error: "Pass a draft `extension` or a saved `name`." };
+              try {
+                const part = await runtime.previewExtension({
+                  agent: normalizeAgentName(agent),
+                  principal,
+                  extension,
+                  name,
+                  text,
+                  input,
+                });
+                return {
+                  rendered: part.rendered,
+                  calls: part.calls.map((c) => c.tool),
+                  output: part.output,
+                  files: (part.files ?? []).map((f) => f.filename ?? f.mediaType),
+                  durationMs: part.durationMs,
+                  ...(part.error ? { error: part.error } : {}),
+                  note: part.error
+                    ? "Fix the script/template and test again."
+                    : "This is what the model would read. Save it with save_agent (full extensions list).",
+                };
+              } catch (error) {
+                return { error: error instanceof Error ? error.message : String(error) };
+              }
+            },
+          }),
+        }
+      : {}),
 
     ...extensionTools,
   };

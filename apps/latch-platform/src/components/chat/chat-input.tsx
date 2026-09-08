@@ -12,8 +12,9 @@ import type {
   ComposerAnswerEntry,
   ComposerSubmitData,
 } from "@intentface/chat/composer"
-import { memo, useEffect, useState } from "react"
+import { memo, useEffect, useMemo, useState } from "react"
 import { Composer } from "@/components/ai/composer"
+import type { ComposerCommandsMap } from "@/components/ai/composer"
 import { SecretRequestForm } from "@/components/chat/secret-request-form"
 import type { ChatPanelState } from "@/components/chat/use-panel-state"
 import { CrossMediumIcon } from "@/components/icons/cross-medium"
@@ -22,6 +23,9 @@ import Button from "@/components/ui/button"
 import { VoiceRecorder } from "@/components/voice-recorder"
 
 export type ChatSelection = { id: string; text: string }
+
+/** A slash extension the agent offers — one row in the composer's `/` menu. */
+export type SlashCommandItem = { name: string; description?: string | null }
 
 export type ChatInputProps = {
   panel: ChatPanelState
@@ -43,6 +47,8 @@ export type ChatInputProps = {
   onSaveSecret: (values: Record<string, string>, declined: boolean) => void
   onVoiceTranscribed: (text: string, durationMs: number) => void
   onStop: () => void
+  /** The agent's slash extensions; `/` at the start of the message opens them. */
+  slashCommands?: SlashCommandItem[]
 }
 
 const ChatInputInner = memo(
@@ -59,8 +65,34 @@ const ChatInputInner = memo(
     onSaveSecret,
     onVoiceTranscribed,
     onStop,
+    slashCommands,
   }: ChatInputProps) => {
     const isAskUser = panel.type === "ask-user"
+
+    // The `/` menu: picking an item replaces the trigger with `/name ` so the
+    // user types the arguments; the runtime parses the text like any typed
+    // command (unknown `/paths` stay ordinary messages).
+    const commands = useMemo<ComposerCommandsMap | undefined>(() => {
+      if (!slashCommands?.length) return undefined
+      return {
+        "/": {
+          kind: "execute",
+          trigger: "doc-start",
+          suggestion: false,
+          items: slashCommands.map((c) => ({
+            value: c.name,
+            label: `/${c.name}`,
+            description: c.description ?? undefined,
+            keywords: c.description ?? undefined,
+            onSelect: ({ editor }) => {
+              editor.clear()
+              editor.insertText(`/${c.name} `)
+              editor.focus()
+            },
+          })),
+        },
+      }
+    }, [slashCommands])
     const isSecretRequest = panel.type === "secret-request"
 
     // The credential form's values. Held here, not in a store: they exist only
@@ -101,13 +133,16 @@ const ChatInputInner = memo(
           onSubmit={handleSubmit}
           isSubmitting={isGenerating}
           questions={isAskUser ? panel.questions : undefined}
+          commands={commands}
         >
           <Composer.Panel>
             {(composer) => {
               // One at a time, by priority: the composer's own ask-user flow,
-              // then the credential form. (No command prefixes are registered
-              // here yet — `commands` on the root is what mounts those.)
+              // then the agent's `/` menu, then the credential form.
               if (composer.askUser.active) return <Composer.AskUser />
+              if (commands && composer.commands.trigger === "/") {
+                return <Composer.Commands prefix="/" />
+              }
               if (isSecretRequest) {
                 return (
                   <SecretRequestForm
