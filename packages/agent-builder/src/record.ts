@@ -123,7 +123,7 @@ export const AgentExtensionSchema = z
       "slash: runs when the user types /<name> args · chat-start: once per conversation (refreshable) · every-turn: before every message.",
     ),
     input: z
-      .record(z.string(), z.unknown())
+      .record(z.string(), z.json())
       .optional()
       .describe("JSON Schema documenting the input. A typed slash invocation yields { args, argv }; a structured one is passed through."),
     script: z

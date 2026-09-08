@@ -14,7 +14,9 @@ import {
   Copy,
   Hash,
   MessageCircle,
+  Play,
   Plug,
+  Plus,
   RefreshCw,
   Send,
   TriangleAlert,
@@ -33,6 +35,7 @@ import {
   listChannelBotsFn,
   registerChannelWebhookFn,
   deleteAgentFn,
+  previewExtensionFn,
   saveAgentFn,
   saveChannelBotCredentialsFn,
   setSlackConfigTokenFn,
@@ -692,6 +695,8 @@ function AgentEditor() {
             </div>
           )}
         </div>
+
+        <ExtensionsSection rec={rec} patch={patch} editing={editing} />
 
         {error && <p className="text-destructive text-sm">{error}</p>}
         <div className="border-primary-border flex items-center gap-2 border-t pt-4">
@@ -1923,5 +1928,328 @@ function ChannelSection({ kind, agent }: { kind: DmChannelKind; agent: string })
       )}
       {error && <p className="text-destructive text-xs">{error}</p>}
     </section>
+  );
+}
+
+// ------------------------------------------------------------------ extensions
+
+type ExtensionRec = NonNullable<AgentRecord["extensions"]>[number];
+
+const EXTENSION_TRIGGERS = [
+  { value: "slash", label: "Slash command", description: "Runs when the user types /name …" },
+  { value: "chat-start", label: "Chat start", description: "Runs once per conversation (refreshable)" },
+  { value: "every-turn", label: "Every turn", description: "Runs before every message" },
+] as const;
+
+/**
+ * Agent extensions: scripts that run BEFORE the model over the agent's tools,
+ * rendered into the prompt with a Liquid template. The list lives on the record
+ * like everything else; each row is one `AgentExtensionSchema` entry.
+ */
+function ExtensionsSection({
+  rec,
+  patch,
+  editing,
+}: {
+  rec: AgentRecord;
+  patch: (fn: (r: AgentRecord) => AgentRecord) => void;
+  editing: boolean;
+}) {
+  const list = rec.extensions ?? [];
+  const update = (i: number, fn: (e: ExtensionRec) => ExtensionRec) =>
+    patch((r) => {
+      const xs = [...(r.extensions ?? [])];
+      xs[i] = fn(xs[i]!);
+      return { ...r, extensions: xs };
+    });
+  const remove = (i: number) =>
+    patch((r) => ({ ...r, extensions: (r.extensions ?? []).filter((_, j) => j !== i) }));
+  const add = () =>
+    patch((r) => ({
+      ...r,
+      extensions: [...(r.extensions ?? []), { name: "", on: "slash", script: "", template: "" }],
+    }));
+
+  return (
+    <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-3">
+      <div className="flex items-center justify-between">
+        <FieldLabel>Extensions</FieldLabel>
+        <Button type="button" variant="ghost" size="sm" onClick={add}>
+          <Plus className="size-3.5" /> Add extension
+        </Button>
+      </div>
+      <p className="text-ink-tertiary text-xs">
+        Scripts that run <em>before</em> the model over this agent's tools, with a Liquid template
+        that renders the result into the prompt. Use them for slash commands (
+        <span className="font-mono">/report week</span>), a once-per-chat data loader, or
+        every-turn context. Read-only unless allowed; the result is stored on the user's message.
+      </p>
+      {list.map((ext, i) => (
+        <ExtensionEditor
+          key={i}
+          ext={ext}
+          agentName={rec.name}
+          editing={editing}
+          onChange={(fn) => update(i, fn)}
+          onRemove={() => remove(i)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ExtensionEditor({
+  ext,
+  agentName,
+  editing,
+  onChange,
+  onRemove,
+}: {
+  ext: ExtensionRec;
+  agentName: string;
+  editing: boolean;
+  onChange: (fn: (e: ExtensionRec) => ExtensionRec) => void;
+  onRemove: () => void;
+}) {
+  const [open, setOpen] = useState(!ext.name);
+  const [testText, setTestText] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testOut, setTestOut] = useState<Awaited<ReturnType<typeof previewExtensionFn>> | null>(null);
+  const set = <K extends keyof ExtensionRec>(key: K, value: ExtensionRec[K]) =>
+    onChange((e) => ({ ...e, [key]: value }));
+  const target = ext.target ?? "message";
+
+  async function runTest() {
+    if (testing) return;
+    setTesting(true);
+    setTestOut(null);
+    try {
+      const text = testText.trim() || (ext.on === "slash" ? `/${ext.name}` : undefined);
+      setTestOut(await previewExtensionFn({ data: { agent: agentName, extension: ext, text } }));
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <div className="border-primary-border space-y-2 rounded-lg border p-2">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="text-ink-secondary flex flex-1 items-center gap-1 text-left text-xs"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
+          <span className="font-mono">{ext.on === "slash" ? "/" : ""}{ext.name || "(unnamed)"}</span>
+          <span className="text-ink-tertiary">
+            · {EXTENSION_TRIGGERS.find((t) => t.value === ext.on)?.label} → {target}
+          </span>
+        </button>
+        <Button type="button" variant="ghost" size="sm" onClick={onRemove} aria-label="Remove extension">
+          <Trash2 className="size-3.5" />
+        </Button>
+      </div>
+      {open && (
+        <div className="space-y-2">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="space-y-1">
+              <FieldLabel>Name</FieldLabel>
+              <Input
+                value={ext.name}
+                onChange={(e) => set("name", e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_"))}
+                placeholder="report"
+                className="font-mono"
+              />
+            </div>
+            <div className="space-y-1">
+              <FieldLabel>Runs</FieldLabel>
+              <RichSelect
+                value={ext.on}
+                onValueChange={(v) => set("on", v as ExtensionRec["on"])}
+                className="w-full"
+                options={EXTENSION_TRIGGERS.map((t) => ({ ...t }))}
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <FieldLabel>Description</FieldLabel>
+            <Input
+              value={ext.description ?? ""}
+              onChange={(e) => set("description", e.target.value || undefined)}
+              placeholder="Weekly time report from Clockify and GitHub"
+            />
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <div className="space-y-1">
+              <FieldLabel>Renders into</FieldLabel>
+              <RichSelect
+                value={target}
+                onValueChange={(v) => set("target", v as ExtensionRec["target"])}
+                className="w-full"
+                options={[
+                  { value: "message", label: "User message", description: "Next to what the user typed" },
+                  { value: "instructions", label: "System prompt", description: "After the agent's instructions" },
+                ]}
+              />
+            </div>
+            {target === "message" ? (
+              <div className="space-y-1">
+                <FieldLabel>Placement</FieldLabel>
+                <RichSelect
+                  value={ext.placement ?? "after"}
+                  onValueChange={(v) => set("placement", v as ExtensionRec["placement"])}
+                  className="w-full"
+                  options={[
+                    { value: "after", label: "After the text", description: "User text, then the block" },
+                    { value: "before", label: "Before the text", description: "Block, then the user text" },
+                  ]}
+                />
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <FieldLabel>Applies</FieldLabel>
+                <RichSelect
+                  value={ext.scope ?? "turn"}
+                  onValueChange={(v) => set("scope", v as ExtensionRec["scope"])}
+                  className="w-full"
+                  options={[
+                    { value: "turn", label: "This turn", description: "Only the turn that ran it" },
+                    { value: "chat", label: "Whole chat", description: "Every later turn too" },
+                  ]}
+                />
+              </div>
+            )}
+            <div className="space-y-1">
+              <FieldLabel>User sees</FieldLabel>
+              <RichSelect
+                value={ext.reveal ?? "command"}
+                onValueChange={(v) => set("reveal", v as ExtensionRec["reveal"])}
+                className="w-full"
+                options={[
+                  { value: "command", label: "Only their text", description: "The result stays server-side" },
+                  { value: "prompt", label: "The rendered prompt", description: "In place of their text" },
+                  { value: "both", label: "Both", description: "Their text, with the result expandable" },
+                ]}
+              />
+            </div>
+          </div>
+          {ext.on === "chat-start" && (
+            <div className="space-y-1">
+              <FieldLabel>Refresh after (minutes, blank = never)</FieldLabel>
+              <Input
+                type="number"
+                min={1}
+                value={ext.refresh?.afterMs ? String(Math.round(ext.refresh.afterMs / 60_000)) : ""}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  set("refresh", n > 0 ? { afterMs: n * 60_000 } : undefined);
+                }}
+                className="w-40"
+              />
+            </div>
+          )}
+          <div className="space-y-1">
+            <FieldLabel>Script</FieldLabel>
+            <CodeEditor
+              value={ext.script ?? ""}
+              onChange={(v) => set("script", v || undefined)}
+              height="140px"
+              placeholder={
+                "const hours = await clockify_hours({ period: input.args });\nreturn { hours, total: hours.reduce((s, h) => s + h.total, 0) };"
+              }
+            />
+            <p className="text-ink-tertiary text-xs">
+              A JavaScript subset: call the agent's tools by name with{" "}
+              <span className="font-mono">await tool_name({"{…}"})</span>, transform with{" "}
+              <span className="font-mono">filter/map/reduce</span>, end with{" "}
+              <span className="font-mono">return</span>. <span className="font-mono">input.args</span>{" "}
+              is the text after the slash. No loops, no globals — validated before it runs.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <FieldLabel>Template (Liquid)</FieldLabel>
+            <Textarea
+              value={ext.template ?? ""}
+              onChange={(e) => set("template", e.target.value || undefined)}
+              className="min-h-24 font-mono text-xs"
+              spellCheck={false}
+              placeholder={
+                "Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"
+              }
+            />
+            <p className="text-ink-tertiary text-xs">
+              Scope: <span className="font-mono">input</span>, <span className="font-mono">output</span>{" "}
+              (the script's return), <span className="font-mono">steps</span>. Blank = the output as JSON.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-4">
+            <label className="flex items-center gap-2 text-xs">
+              <Switch
+                checked={!!ext.allowMutations}
+                onCheckedChange={(on) => set("allowMutations", on || undefined)}
+              />
+              <span>Allow approval-gated (mutating) tools in the script</span>
+            </label>
+            <label className="flex items-center gap-2 text-xs">
+              <Switch
+                checked={ext.onError === "fail"}
+                onCheckedChange={(on) => set("onError", on ? "fail" : undefined)}
+              />
+              <span>Fail the turn if the script fails (default: tell the model and continue)</span>
+            </label>
+          </div>
+          <div className="border-primary-border space-y-2 rounded-md border p-2">
+            <div className="flex items-center justify-between">
+              <FieldLabel>Test</FieldLabel>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void runTest()}
+                disabled={testing || !editing || !ext.name}
+              >
+                <Play className="size-3.5" /> {testing ? "Running…" : "Run"}
+              </Button>
+            </div>
+            {!editing && (
+              <p className="text-ink-tertiary text-xs">Save the agent once, then test against its live tools.</p>
+            )}
+            <Input
+              value={testText}
+              onChange={(e) => setTestText(e.target.value)}
+              placeholder={ext.on === "slash" ? `/${ext.name || "name"} week` : "(no input)"}
+              className="font-mono text-xs"
+            />
+            {testOut && !testOut.ok && <p className="text-destructive text-xs">{testOut.error}</p>}
+            {testOut?.ok && (
+              <div className="space-y-1 text-xs">
+                {testOut.part.error && (
+                  <p className="text-destructive">
+                    {testOut.part.error.code ? `[${testOut.part.error.code}] ` : ""}
+                    {testOut.part.error.message}
+                  </p>
+                )}
+                {testOut.part.calls.length > 0 && (
+                  <p className="text-ink-tertiary">
+                    Called: {testOut.part.calls.map((c) => c.tool).join(", ")} ·{" "}
+                    {testOut.part.durationMs} ms
+                  </p>
+                )}
+                {testOut.part.rendered !== null && (
+                  <pre className="text-ink-secondary bg-input/40 max-h-64 overflow-auto rounded p-2 whitespace-pre-wrap">
+                    {testOut.part.rendered}
+                  </pre>
+                )}
+                {testOut.part.files.length > 0 && (
+                  <p className="text-ink-tertiary">
+                    Files for the model: {testOut.part.files.map((f) => f.filename ?? f.mediaType).join(", ")}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

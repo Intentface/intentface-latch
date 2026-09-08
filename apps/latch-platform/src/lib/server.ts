@@ -25,8 +25,8 @@ import { getPrincipal } from "./session";
 import type { Principal } from "./session";
 import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
-import { AgentRecordSchema, normalizeAgentRecord } from "@intentface/latch-agent-builder";
-import type { AgentRecordInput } from "@intentface/latch-agent-builder";
+import { AgentExtensionSchema, AgentRecordSchema, normalizeAgentRecord } from "@intentface/latch-agent-builder";
+import type { AgentExtensionRecord, AgentRecordInput } from "@intentface/latch-agent-builder";
 import { normalizeAgentName, evalOwnerKeysOf, rubricsOf } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
 import { resolveRunners, type Runner } from "./observability/runners";
@@ -583,6 +583,63 @@ export const saveAgentFn = createServerFn({ method: "POST" })
       attachedEvals: rec.attachedEvals ?? existing?.attachedEvals,
     });
     return { ok: true };
+  });
+
+/**
+ * Run one agent extension outside a turn (the editor's "Test" panel): the
+ * saved one by `name`, or an inline draft — no model call, nothing persisted.
+ * Resolves the agent under the caller, so its connections and tools are the
+ * caller's own.
+ */
+export const previewExtensionFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      agent: string;
+      name?: string;
+      extension?: AgentExtensionRecord;
+      text?: string;
+      input?: unknown;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    if (data.extension) {
+      const parsed = AgentExtensionSchema.safeParse(data.extension);
+      if (!parsed.success) {
+        const first = parsed.error.issues[0];
+        return { ok: false as const, error: first ? `${first.path.join(".") || "extension"}: ${first.message}` : "invalid extension" };
+      }
+    }
+    const { runtime } = await getLatch();
+    try {
+      const part = await runtime.previewExtension({
+        agent: data.agent,
+        principal,
+        name: data.name,
+        extension: data.extension,
+        text: data.text,
+        input: data.input,
+      });
+      // Wire-safe shape (no `unknown` leaves): values as JSON text, files as a list.
+      return {
+        ok: true as const,
+        part: {
+          name: part.name,
+          on: part.on,
+          target: part.target,
+          rendered: part.rendered ?? null,
+          output: part.output === undefined ? null : JSON.stringify(part.output, null, 2),
+          outputTruncated: part.outputTruncated ?? false,
+          files: (part.files ?? []).map((f) => ({ mediaType: f.mediaType, filename: f.filename ?? null })),
+          calls: part.calls.map((c) => ({ tool: c.tool, stepId: c.stepId })),
+          durationMs: part.durationMs ?? 0,
+          error: part.error ? { message: part.error.message, code: part.error.code ?? null } : null,
+        },
+      };
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+    }
   });
 
 /**

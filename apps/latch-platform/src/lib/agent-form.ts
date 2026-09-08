@@ -207,6 +207,7 @@ export function toSavePayload(rec: AgentRecord, ctx: SaveContext): AgentRecordIn
     tools,
     exec,
     subagents: rec.subagents?.length ? rec.subagents : undefined,
+    extensions: rec.extensions?.length ? rec.extensions : undefined,
     scope: rec.scope,
   };
 }

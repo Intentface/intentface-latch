@@ -178,6 +178,9 @@ importers:
       '@intentface/latch-openapi':
         specifier: workspace:*
         version: link:../../packages/openapi
+      '@intentface/latch-script':
+        specifier: workspace:*
+        version: link:../../packages/script
       '@intentface/latch-server':
         specifier: workspace:*
         version: link:../../packages/server

@@ -21,6 +21,7 @@ import {
 import { createLoredexStore, createMemoryProvider, scopeRefOf } from "@intentface/latch-memory";
 import type { MemoryJobStore, MemoryStore } from "@intentface/latch-memory";
 import { isLangfuseConfigured, langfuseTelemetry } from "@intentface/latch-langfuse";
+import { createScriptEngine } from "@intentface/latch-script";
 import { waitUntil } from "@vercel/functions";
 import { createMcpConnections  } from "@intentface/latch-mcp";
 import type {McpConnections} from "@intentface/latch-mcp";
@@ -438,6 +439,9 @@ export async function getLatch(): Promise<{
     // Persistent agent memory: injects the compiled index + memory tools into
     // any agent (code or UI) that declares `memory`.
     memory: memoryProvider,
+    // Agent extensions (pre-turn scripts + Liquid templates) for any agent
+    // (code or UI) that declares `extensions`.
+    scripts: createScriptEngine(),
     // Resume/cron: the run stored our Principal verbatim; pass it back as-is.
     reconstructPrincipal: (identity) => identity as Principal,
     durability: { enabled: true, leaseTtlMs: 30_000, heartbeatMs: 10_000 },

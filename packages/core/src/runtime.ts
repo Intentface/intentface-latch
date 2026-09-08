@@ -34,6 +34,7 @@ import {
   parseSlashInvocation,
   redactExtensionParts,
   selectExtensions,
+  type AgentExtension,
   type ExtensionPart,
   type ExtensionPartData,
   type ScriptEngine,
@@ -395,14 +396,19 @@ export interface Runtime<P> {
    * "Test" panel and the Agent Builder's `test_extension`. Mounts the agent's
    * static tools, tool sources and connections (not the harness tools, which
    * exist only inside a turn). A `slash` extension takes `text` (parsed like a
-   * typed `/name args`) or a structured `input`. Throws when the agent or the
-   * extension is unknown, or when the runtime has no `scripts` engine; a
-   * failing script returns a part carrying `error` (even with `onError: "fail"`).
+   * typed `/name args`) or a structured `input`. Pass `extension` to test a
+   * definition that is not (yet) saved on the agent — an editor's draft — over
+   * that agent's tools. Throws when the agent or the extension is unknown, or
+   * when the runtime has no `scripts` engine; a failing script returns a part
+   * carrying `error` (even with `onError: "fail"`).
    */
   previewExtension(input: {
     agent: string;
     principal: P;
-    name: string;
+    /** The saved extension to run — or omit and pass `extension`. */
+    name?: string;
+    /** An inline definition to run instead of a saved one. */
+    extension?: AgentExtension;
     input?: unknown;
     text?: string;
     request?: Request;
@@ -3109,6 +3115,7 @@ export function createRuntime<P, RC = unknown>(
     agent: agentName,
     principal,
     name,
+    extension,
     input,
     text,
     request,
@@ -3116,7 +3123,8 @@ export function createRuntime<P, RC = unknown>(
   }: {
     agent: string;
     principal: P;
-    name: string;
+    name?: string;
+    extension?: AgentExtension;
     input?: unknown;
     text?: string;
     request?: Request;
@@ -3124,8 +3132,10 @@ export function createRuntime<P, RC = unknown>(
   }): Promise<ExtensionPartData> {
     if (!config.scripts) throw new Error("No script engine: set `RuntimeConfig.scripts`");
     const { cfg, runtimeCtx } = await resolveAgentConfig(agentName, principal, request, turnContext);
-    const ext = cfg.extensions?.find((e) => e.name.toLowerCase() === name.toLowerCase());
-    if (!ext) throw new Error(`Unknown extension "${name}" on agent "${agentName}"`);
+    const ext =
+      extension ??
+      (name ? cfg.extensions?.find((e) => e.name.toLowerCase() === name.toLowerCase()) : undefined);
+    if (!ext) throw new Error(`Unknown extension "${name ?? ""}" on agent "${agentName}"`);
     // Same tool assembly as a turn, minus the harness (which needs a live turn).
     const sources = [...(cfg.toolSources ?? [])];
     if (config.connections && cfg.connections && cfg.connections.length > 0) {

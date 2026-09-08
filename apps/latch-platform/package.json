@@ -33,6 +33,7 @@
     "@intentface/latch-memory": "workspace:*",
     "@intentface/latch-net": "workspace:*",
     "@intentface/latch-openapi": "workspace:*",
+    "@intentface/latch-script": "workspace:*",
     "@intentface/latch-server": "workspace:*",
     "@jitl/quickjs-singlefile-mjs-release-asyncify": "^0.32.0",
     "@libsql/client": "^0.15.15",

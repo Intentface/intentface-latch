@@ -179,3 +179,12 @@ describe("loadAgentRecord ↔ toSavePayload", () => {
     expect(out.description).toBe(" "); // trimming is the server's normalize job
   });
 });
+
+describe("extensions", () => {
+  it("ride the save payload as-is; an empty list is dropped", () => {
+    const ext = { name: "report", on: "slash" as const, script: "return 1", template: "x" };
+    expect(toSavePayload({ ...base, extensions: [ext] }, ctx).extensions).toEqual([ext]);
+    expect(toSavePayload({ ...base, extensions: [] }, ctx).extensions).toBeUndefined();
+    expect(toSavePayload(base, ctx).extensions).toBeUndefined();
+  });
+});

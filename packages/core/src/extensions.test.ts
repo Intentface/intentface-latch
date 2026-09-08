@@ -721,6 +721,15 @@ describe("previewExtension", () => {
     expect(prompts).toHaveLength(0);
     expect(rt.log).toHaveLength(0);
     await expect(rt.runtime.previewExtension({ agent: "helper", principal, name: "nope" })).rejects.toThrow(/Unknown extension/);
+    // An inline draft runs over the agent's tools without being saved on it.
+    const draft = await rt.runtime.previewExtension({
+      agent: "helper",
+      principal,
+      extension: { name: "draft", on: "every-turn", script: "return 1", template: "draft says {{ output.members }}" },
+      input: { args: "d" },
+    });
+    expect(draft.name).toBe("draft");
+    expect(draft.rendered).toBe('draft says ["d"]');
   });
 
   it("returns the failed part instead of throwing, even with onError: fail", async () => {
