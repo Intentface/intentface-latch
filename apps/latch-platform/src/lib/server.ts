@@ -655,10 +655,11 @@ export const analyzeExtensionScriptFn = createServerFn({ method: "POST" })
   .validator((data: { script: string; toolNames: string[] }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
-    if (!principal) return { issues: ["unauthorized"], calls: [] as string[] };
+    if (!principal) return { issues: ["unauthorized"], calls: [] as string[], plan: null as string | null };
     const { createScriptEngine } = await import("@intentface/latch-script");
     const a = createScriptEngine().analyze(data.script, { tools: data.toolNames });
-    return { issues: a.issues, calls: a.calls };
+    // The plan lets the editor tell the story before anything has run.
+    return { issues: a.issues, calls: a.calls, plan: a.plan === undefined ? null : JSON.stringify(a.plan) };
   });
 
 /**

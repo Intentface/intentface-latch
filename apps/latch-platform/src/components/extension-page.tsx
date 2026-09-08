@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRightToLine, Check, ChevronDown, Eye, Play, Plus, Repeat, Sparkles, Terminal, Trash2, X } from "lucide-react";
 import { snippetCompletion } from "@codemirror/autocomplete";
 import type { AgentExtensionRecord } from "@intentface/latch-agent-builder";
@@ -24,17 +24,16 @@ import { PlanStory, type Plan } from "@/components/plan-story";
 import type { ToolInfo } from "@/routes/agents";
 
 /**
- * The extension page. One rule: you write on the left, you see what it
- * produced on the right.
+ * The extension page: two columns, side by side, each with a segmented toggle.
  *
- *   SCRIPT     | DATA      — the script's output (or sample data before a run)
- *   TEMPLATE   | PREVIEW   — the template rendered live, in the browser, against DATA
+ *   left:  Script · Story · Data     right:  Template · Preview
  *
- * Run executes the script over the agent's live tools and fills DATA; the
- * template re-renders on every keystroke without a server call. A variables
- * check above the template marks each path it reads against DATA. Properties
- * are pills in the header. Save writes this one extension onto the stored
- * agent.
+ * The story is the compiled plan and needs no run — the same compile that
+ * lints the script produces it; a run fills in each step's value. Data is the
+ * run's output, or sample JSON before one. The preview renders the template
+ * live in the browser against Data. A variables check marks each path the
+ * template reads. Properties are pills in the header. Save writes this one
+ * extension onto the stored agent.
  */
 
 export type ExtensionRec = AgentExtensionRecord;
@@ -109,6 +108,39 @@ export function ExtensionPage({
     }
   }
 
+  // ---- compile (shared by lint and the story) ------------------------------
+  type Analysis = { issues: string[]; calls: string[]; plan: string | null };
+  const toolNames = useMemo(() => tools.map((t) => t.name), [tools]);
+  const analyses = useRef(new Map<string, Promise<Analysis>>());
+  const analyze = useCallback(
+    (source: string): Promise<Analysis> => {
+      const key = `${toolNames.join(",")}\u0000${source}`;
+      const cached = analyses.current.get(key);
+      if (cached) return cached;
+      const p: Promise<Analysis> = analyzeExtensionScriptFn({ data: { script: source, toolNames } });
+      analyses.current.set(key, p);
+      if (analyses.current.size > 50) analyses.current.delete(analyses.current.keys().next().value!);
+      return p;
+    },
+    [toolNames],
+  );
+  const [compiled, setCompiled] = useState<Analysis | null>(null);
+  useEffect(() => {
+    const source = ext.script ?? "";
+    if (!source.trim()) {
+      setCompiled(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      analyze(source).then((a) => !cancelled && setCompiled(a));
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [ext.script, analyze]);
+
   // ---- data panel ----------------------------------------------------------
   const [dataText, setDataText] = useState("{}");
   const data = useMemo<{ value: unknown; error: string | null }>(() => {
@@ -118,19 +150,21 @@ export function ExtensionPage({
       return { value: undefined, error: e instanceof Error ? e.message : String(e) };
     }
   }, [dataText]);
-  const [showStory, setShowStory] = useState(false);
+  const [leftPane, setLeftPane] = useState<"script" | "story" | "data">("script");
+  const [rightPane, setRightPane] = useState<"template" | "preview">("template");
   const story = useMemo(() => {
-    if (!part?.plan) return null;
+    const planJson = part?.plan ?? compiled?.plan ?? null;
+    if (!planJson) return null;
     try {
-      const plan = JSON.parse(part.plan) as Plan;
+      const plan = JSON.parse(planJson) as Plan;
       if (!Array.isArray(plan.steps)) return null;
       const steps: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(part.steps ?? {})) steps[k] = safeParse(v);
-      return { plan, steps };
+      for (const [k, v] of Object.entries(part?.steps ?? {})) steps[k] = safeParse(v);
+      return { plan, steps, ran: !!part && part.output !== null };
     } catch {
       return null;
     }
-  }, [part]);
+  }, [part, compiled]);
 
   // ---- template preview (live, client-side) -------------------------------
   const scope_ = useMemo(
@@ -176,10 +210,9 @@ export function ExtensionPage({
   );
 
   // ---- script editor helpers -----------------------------------------------
-  const toolNames = useMemo(() => tools.map((t) => t.name), [tools]);
   const lint = useCallback(
     async (source: string) => {
-      const r = await analyzeExtensionScriptFn({ data: { script: source, toolNames } });
+      const r = await analyze(source);
       const gated = tools.filter((t) => t.defaultApproval && r.calls.includes(t.name)).map((t) => t.name);
       return [
         ...r.issues,
@@ -188,7 +221,7 @@ export function ExtensionPage({
           : []),
       ];
     },
-    [toolNames, tools, ext.allowMutations],
+    [analyze, tools, ext.allowMutations],
   );
   const toolByName = useMemo(() => new Map(tools.map((t) => [t.name, t])), [tools]);
   const hover = useCallback(
@@ -388,81 +421,69 @@ export function ExtensionPage({
         />
       </div>
 
-      {/* Row 1: script | data */}
+      {/* Two columns, each with a segmented toggle */}
       <div className="grid gap-5 lg:grid-cols-2">
+        {/* Left: Script · Story · Data */}
         <section className="min-w-0 space-y-2">
-          <div className="flex h-7 items-center justify-between">
-            <Eyebrow>Script</Eyebrow>
-            <Popover>
-              <Popover.Trigger render={<Button type="button" variant="ghost" size="sm" className="text-ink-secondary" />}>
-                {tools.length} tool{tools.length === 1 ? "" : "s"}
-                <ChevronDown className="size-3" />
-              </Popover.Trigger>
-              <Popover.Content className="w-[26rem] p-2" align="end">
-                <ToolsReference tools={tools} onInsert={(call) => set("script", `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}${call}`)} />
-              </Popover.Content>
-            </Popover>
+          <div className="flex h-7 items-center justify-between gap-2">
+            <Segmented
+              value={leftPane}
+              onChange={setLeftPane}
+              options={[
+                { value: "script", label: "Script" },
+                { value: "story", label: "Story", badge: story ? `${story.plan.steps.length} steps` : undefined },
+                { value: "data", label: "Data", badge: part?.output ? "from run" : undefined },
+              ]}
+            />
+            {leftPane === "script" && (
+              <Popover>
+                <Popover.Trigger render={<Button type="button" variant="ghost" size="sm" className="text-ink-secondary" />}>
+                  {tools.length} tool{tools.length === 1 ? "" : "s"}
+                  <ChevronDown className="size-3" />
+                </Popover.Trigger>
+                <Popover.Content className="w-[26rem] p-2" align="end">
+                  <ToolsReference tools={tools} onInsert={(call) => set("script", `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}${call}`)} />
+                </Popover.Content>
+              </Popover>
+            )}
           </div>
-          <CodeEditor
-            value={ext.script ?? ""}
-            onChange={(v) => set("script", v || undefined)}
-            completions={scriptCompletions}
-            lint={lint}
-            hover={hover}
-            ariaLabel="Script"
-            height="auto"
-            minHeight="260px"
-            maxHeight="520px"
-            placeholder={
-              "// Fetch what the agent always needs first — type a tool name for its parameters.\nconst hours = await clockify_hours({ period: input.args }, { reason: \"this week's hours\" });\nreturn { hours };"
-            }
-          />
-          {(part || runError) && (
-            <Strip
-              tone={runError ? "error" : "ok"}
-              text={
-                runError
-                  ? runError
-                  : `Ran in ${part!.durationMs} ms${part!.calls.length ? ` · called ${part!.calls.map((c) => c.tool).join(", ")}` : ""}`
+          {leftPane === "script" && (
+            <CodeEditor
+              value={ext.script ?? ""}
+              onChange={(v) => set("script", v || undefined)}
+              completions={scriptCompletions}
+              lint={lint}
+              hover={hover}
+              ariaLabel="Script"
+              height="480px"
+              placeholder={
+                "// Fetch what the agent always needs first — type a tool name for its parameters.\nconst hours = await clockify_hours({ period: input.args }, { reason: \"this week's hours\" });\nreturn { hours };"
               }
             />
           )}
-        </section>
-
-        <section className="min-w-0 space-y-2">
-          <div className="flex h-7 items-center justify-between">
-            <Eyebrow>
-              Data{" "}
-              <span className="text-ink-tertiary font-normal normal-case tracking-normal">
-                · {part?.output ? "from the last run — edit to try other cases" : "sample data until you run the script"}
-              </span>
-            </Eyebrow>
-            {story && (
-              <button
-                type="button"
-                aria-pressed={showStory}
-                onClick={() => setShowStory((o) => !o)}
-                className={cn(
-                  "rounded-md border px-1.5 py-0.5 text-xs transition-colors",
-                  showStory ? "border-ring bg-base-active text-ink-primary" : "border-primary-border text-ink-secondary hover:bg-input/40",
-                )}
-              >
-                Story
-              </button>
-            )}
-          </div>
-          {showStory && story ? (
-            <div className="border-input max-h-[520px] overflow-auto rounded-lg border p-3">
-              <PlanStory
-                plan={story.plan}
-                steps={story.steps}
-                output={data.value}
-                tools={tools}
-                ran={!!part && part.output !== null}
-                error={part?.error && part.error.code !== "media_dropped" ? part.error : null}
-              />
+          {leftPane === "story" && (
+            <div className="border-input h-[480px] overflow-auto rounded-lg border p-3">
+              {story ? (
+                <PlanStory
+                  plan={story.plan}
+                  steps={story.steps}
+                  output={story.ran ? data.value : undefined}
+                  tools={tools}
+                  ran={story.ran}
+                  error={part?.error && part.error.code !== "media_dropped" ? part.error : null}
+                />
+              ) : (
+                <p className="text-ink-secondary text-xs">
+                  {compiled?.issues.length
+                    ? `The script does not compile yet: ${compiled.issues[0]}`
+                    : ext.script?.trim()
+                      ? "Compiling…"
+                      : "Write a script and its plan appears here as numbered steps — before you run anything."}
+                </p>
+              )}
             </div>
-          ) : (
+          )}
+          {leftPane === "data" && (
             <>
               <textarea
                 value={dataText}
@@ -470,21 +491,39 @@ export function ExtensionPage({
                 aria-label="Data the template renders against (JSON)"
                 spellCheck={false}
                 className={cn(
-                  "border-input focus-visible:ring-ring/50 min-h-[260px] w-full resize-y rounded-lg border bg-transparent px-2.5 py-2 font-mono text-xs outline-none focus-visible:ring-3",
+                  "border-input focus-visible:ring-ring/50 h-[480px] w-full resize-none rounded-lg border bg-transparent px-2.5 py-2 font-mono text-xs outline-none focus-visible:ring-3",
                   data.error && "border-destructive",
                 )}
               />
               {data.error && <p className="text-destructive text-xs">{data.error}</p>}
             </>
           )}
+          {(part || runError) && (
+            <Strip
+              tone={runError ? "error" : "ok"}
+              text={
+                runError
+                  ? runError
+                  : `Ran in ${part!.durationMs} ms${part!.calls.length ? ` · called ${part!.calls.map((c) => c.tool).join(", ")}` : ""} — the data panel holds the output`
+              }
+            />
+          )}
+          {!part && !runError && leftPane === "data" && (
+            <p className="text-ink-secondary text-xs">Sample data until you run the script; edit it to try other cases.</p>
+          )}
         </section>
-      </div>
 
-      {/* Row 2: template | preview */}
-      <div className="grid gap-5 lg:grid-cols-2">
+        {/* Right: Template · Preview */}
         <section className="min-w-0 space-y-2">
           <div className="flex h-7 flex-wrap items-center justify-between gap-2">
-            <Eyebrow>Template</Eyebrow>
+            <Segmented
+              value={rightPane}
+              onChange={setRightPane}
+              options={[
+                { value: "template", label: "Template" },
+                { value: "preview", label: "Preview", badge: preview.error ? "error" : preview.text ? `${preview.text.length.toLocaleString()} chars` : undefined, tone: preview.error ? "error" : undefined },
+              ]}
+            />
             {refChecks.length > 0 && (
               <ul className="flex flex-wrap items-center gap-1 text-xs" aria-label="Variables the template reads">
                 {refChecks.map((r) => (
@@ -503,36 +542,32 @@ export function ExtensionPage({
               </ul>
             )}
           </div>
-          <LiquidEditor
-            value={ext.template ?? ""}
-            onChange={(v) => set("template", v || undefined)}
-            scope={scope_}
-            ariaLabel="Template"
-            height="auto"
-            minHeight="200px"
-            maxHeight="480px"
-            placeholder={"Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"}
-          />
-        </section>
-
-        <section className="min-w-0 space-y-2">
-          <div className="flex h-7 items-center">
-            <Eyebrow>
-              Preview{" "}
-              <span className="text-ink-tertiary font-normal normal-case tracking-normal">
-                · what the model reads{target === "instructions" ? ", in the system prompt" : ", in the user turn"}
-              </span>
-            </Eyebrow>
-          </div>
-          <div className="border-input min-h-[200px] max-h-[480px] overflow-auto rounded-lg border px-3 py-2">
-            {preview.error ? (
-              <p className="text-destructive text-xs whitespace-pre-wrap">{preview.error}</p>
-            ) : preview.text ? (
-              <pre className="text-ink-primary font-sans text-sm leading-relaxed whitespace-pre-wrap">{preview.text}</pre>
-            ) : (
-              <p className="text-ink-tertiary text-xs">Type a template, or run the script — the preview updates as you type.</p>
-            )}
-          </div>
+          {rightPane === "template" && (
+            <LiquidEditor
+              value={ext.template ?? ""}
+              onChange={(v) => set("template", v || undefined)}
+              scope={scope_}
+              ariaLabel="Template"
+              height="480px"
+              placeholder={"Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"}
+            />
+          )}
+          {rightPane === "preview" && (
+            <div className="border-input h-[480px] overflow-auto rounded-lg border px-3 py-2">
+              {preview.error ? (
+                <p className="text-destructive text-xs whitespace-pre-wrap">{preview.error}</p>
+              ) : preview.text ? (
+                <pre className="text-ink-primary font-sans text-sm leading-relaxed whitespace-pre-wrap">{preview.text}</pre>
+              ) : (
+                <p className="text-ink-tertiary text-xs">Type a template, or run the script — the preview updates as you type.</p>
+              )}
+            </div>
+          )}
+          <p className="text-ink-secondary text-xs">
+            {rightPane === "template"
+              ? "Renders live against the data panel; switch to Preview to read it as the model will."
+              : `What the model reads${target === "instructions" ? ", in the system prompt" : ", in the user turn"}.`}
+          </p>
         </section>
       </div>
 
@@ -549,9 +584,36 @@ export function ExtensionPage({
 
 // ------------------------------------------------------------------ pieces
 
-const Eyebrow = ({ children }: { children: React.ReactNode }) => (
-  <span className="text-ink-secondary text-xs font-medium tracking-wide uppercase">{children}</span>
-);
+/** A small segmented control switching a column's pane. */
+function Segmented<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: Array<{ value: T; label: string; badge?: string; tone?: "error" }>;
+}) {
+  return (
+    <div className="border-primary-border inline-flex items-center rounded-lg border p-0.5" role="group">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          aria-pressed={value === o.value}
+          onClick={() => onChange(o.value)}
+          className={cn(
+            "rounded-md px-2 py-0.5 text-xs transition-colors",
+            value === o.value ? "bg-base-active text-ink-primary font-medium" : "text-ink-secondary hover:bg-input/40",
+          )}
+        >
+          {o.label}
+          {o.badge && <span className={cn("ml-1.5 text-xs", o.tone === "error" ? "text-destructive" : "text-ink-tertiary")}>{o.badge}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function Pill({ icon: Icon, label, title, menu }: { icon: typeof Terminal; label: string; title: string; menu: React.ReactNode }) {
   return (
