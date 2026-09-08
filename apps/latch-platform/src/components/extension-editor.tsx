@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, Play, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { snippetCompletion } from "@codemirror/autocomplete";
 import type { AgentRecord } from "@/lib/agent-form";
 import { previewExtensionFn } from "@/lib/server";
 import { paramsOf, parseSchema, signatureOf, snippetOf } from "@/lib/tool-signature";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { RichSelect } from "@/components/ui/rich-select";
 import { Switch } from "@/components/ui/switch";
@@ -14,14 +15,17 @@ import { LiquidEditor } from "@/components/liquid-editor";
 import type { ToolInfo } from "@/routes/agents";
 
 /**
- * The agent editor's Extensions section.
+ * The agent editor's Extensions section: a compact list in the form, and a
+ * wide dialog to edit one.
  *
- * Laid out as the pipeline a person is actually building — script → output →
- * template → rendered text — with one Run that fills both result slots, so
- * the output sits under the script that produced it and the rendered prompt
- * under the template. Name, trigger, script and template are the whole common
- * case; where the result lands, what the user sees, refresh, mutations and
- * the failure policy live behind "Advanced" with sensible defaults.
+ * The dialog is laid out as the pipeline a person is actually building —
+ * script → output on the left, template → rendered text on the right — with
+ * one Run that fills both result slots, so the output sits under the script
+ * that produced it and the rendered prompt under the template. Name, trigger,
+ * script and template are the whole common case; where the result lands, what
+ * the user sees, refresh, mutations and the failure policy live behind
+ * "Advanced" with sensible defaults. Edits apply to the form's record as you
+ * type — the agent's Save persists them; the dialog only gives room.
  */
 
 type ExtensionRec = NonNullable<AgentRecord["extensions"]>[number];
@@ -50,19 +54,25 @@ export function ExtensionsSection({
   tools: ToolInfo[];
 }) {
   const list = rec.extensions ?? [];
+  const [openIndex, setOpenIndex] = useState<number | null>(null);
   const update = (i: number, fn: (e: ExtensionRec) => ExtensionRec) =>
     patch((r) => {
       const xs = [...(r.extensions ?? [])];
       xs[i] = fn(xs[i]!);
       return { ...r, extensions: xs };
     });
-  const remove = (i: number) =>
+  const remove = (i: number) => {
+    setOpenIndex(null);
     patch((r) => ({ ...r, extensions: (r.extensions ?? []).filter((_, j) => j !== i) }));
-  const add = () =>
+  };
+  const add = () => {
     patch((r) => ({
       ...r,
       extensions: [...(r.extensions ?? []), { name: "", on: "slash", script: "", template: "" }],
     }));
+    setOpenIndex(list.length);
+  };
+  const current = openIndex !== null ? list[openIndex] : undefined;
 
   return (
     <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg space-y-3 rounded-lg p-3">
@@ -78,17 +88,53 @@ export function ExtensionsSection({
         every-turn context. The result is stored on the user's message, so the model reads exactly
         what ran.
       </p>
-      {list.map((ext, i) => (
-        <ExtensionEditor
-          key={i}
-          ext={ext}
-          agentName={rec.name}
-          editing={editing}
-          tools={tools}
-          onChange={(fn) => update(i, fn)}
-          onRemove={() => remove(i)}
-        />
-      ))}
+      {list.length > 0 && (
+        <ul className="divide-primary-border border-primary-border divide-y rounded-md border text-xs">
+          {list.map((ext, i) => {
+            const trigger = TRIGGERS.find((t) => t.value === ext.on) ?? TRIGGERS[0]!;
+            return (
+              <li key={i} className="flex items-center gap-3 px-2.5 py-2">
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-baseline gap-2 text-left"
+                  onClick={() => setOpenIndex(i)}
+                >
+                  <span className="text-ink-primary shrink-0 font-mono">
+                    {ext.on === "slash" ? "/" : ""}
+                    {ext.name || <span className="text-ink-tertiary italic">unnamed</span>}
+                  </span>
+                  <span className="text-ink-tertiary shrink-0">{trigger.label}</span>
+                  <span className="text-ink-tertiary truncate">
+                    {ext.description || summarize(ext)}
+                  </span>
+                </button>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setOpenIndex(i)}>
+                  <Pencil className="size-3.5" /> Edit
+                </Button>
+                <Button type="button" variant="ghost" size="sm" onClick={() => remove(i)} aria-label="Remove extension">
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <Dialog open={openIndex !== null && !!current} onOpenChange={(o) => !o && setOpenIndex(null)}>
+        <Dialog.Content className="max-h-[92vh] w-[min(96vw,78rem)] max-w-[78rem] overflow-y-auto p-5">
+          {current && openIndex !== null && (
+            <ExtensionEditor
+              key={openIndex}
+              ext={current}
+              agentName={rec.name}
+              editing={editing}
+              tools={tools}
+              onChange={(fn) => update(openIndex, fn)}
+              onRemove={() => remove(openIndex)}
+              onDone={() => setOpenIndex(null)}
+            />
+          )}
+        </Dialog.Content>
+      </Dialog>
     </div>
   );
 }
@@ -100,6 +146,7 @@ function ExtensionEditor({
   tools,
   onChange,
   onRemove,
+  onDone,
 }: {
   ext: ExtensionRec;
   agentName: string;
@@ -107,8 +154,8 @@ function ExtensionEditor({
   tools: ToolInfo[];
   onChange: (fn: (e: ExtensionRec) => ExtensionRec) => void;
   onRemove: () => void;
+  onDone: () => void;
 }) {
-  const [open, setOpen] = useState(!ext.name);
   const [advanced, setAdvanced] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [testText, setTestText] = useState("");
@@ -169,234 +216,241 @@ function ExtensionEditor({
   const note = part?.error?.code === "media_dropped" ? part.error.message : null;
 
   return (
-    <div className="border-primary-border space-y-3 rounded-lg border p-3">
-      {/* Header: identity + trigger, always visible */}
-      <div className="flex items-start gap-2">
-        <button
-          type="button"
-          className="text-ink-secondary mt-1.5 flex items-center"
-          onClick={() => setOpen((o) => !o)}
-          aria-label={open ? "Collapse" : "Expand"}
-        >
-          <ChevronDown className={cn("size-3.5 transition-transform", !open && "-rotate-90")} />
-        </button>
-        <div className="grid flex-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-          <div className="flex items-center gap-1.5">
-            {ext.on === "slash" && <span className="text-ink-tertiary font-mono text-sm">/</span>}
-            <Input
-              value={ext.name}
-              onChange={(e) => set("name", e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_"))}
-              placeholder={ext.on === "slash" ? "report" : "context"}
-              className="font-mono"
-            />
-          </div>
-          <div className="flex gap-1" role="radiogroup" aria-label="Runs">
-            {TRIGGERS.map((t) => (
-              <button
-                key={t.value}
-                type="button"
-                role="radio"
-                aria-checked={ext.on === t.value}
-                onClick={() => set("on", t.value)}
-                className={cn(
-                  "rounded-md border px-2 py-1 text-xs transition-colors",
-                  ext.on === t.value
-                    ? "border-ring bg-base-active text-ink-primary"
-                    : "border-input text-ink-secondary hover:bg-input/40",
-                )}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <Button type="button" variant="ghost" size="sm" onClick={onRemove} aria-label="Remove extension">
-          <Trash2 className="size-3.5" />
-        </Button>
-      </div>
-
-      {open && (
-        <div className="space-y-4 pl-5">
-          <div className="space-y-1">
+    <div className="space-y-4">
+      {/* Header: identity + trigger + description; Run controls on the right */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 space-y-2">
+          <Dialog.Title className="text-sm">
+            {ext.on === "slash" ? `/${ext.name || "…"}` : ext.name || "New extension"}
+            <span className="text-ink-tertiary ml-2 text-xs font-normal">{trigger.label}</span>
+          </Dialog.Title>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,14rem)_auto_minmax(0,1fr)]">
+            <div className="flex items-center gap-1.5">
+              {ext.on === "slash" && <span className="text-ink-tertiary font-mono text-sm">/</span>}
+              <Input
+                value={ext.name}
+                onChange={(e) => set("name", e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_"))}
+                placeholder={ext.on === "slash" ? "report" : "context"}
+                className="font-mono"
+                autoFocus={!ext.name}
+              />
+            </div>
+            <div className="flex gap-1" role="radiogroup" aria-label="Runs">
+              {TRIGGERS.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={ext.on === t.value}
+                  onClick={() => set("on", t.value)}
+                  className={cn(
+                    "rounded-md border px-2 py-1 text-xs whitespace-nowrap transition-colors",
+                    ext.on === t.value
+                      ? "border-ring bg-base-active text-ink-primary"
+                      : "border-input text-ink-secondary hover:bg-input/40",
+                  )}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
             <Input
               value={ext.description ?? ""}
               onChange={(e) => set("description", e.target.value || undefined)}
               placeholder="What it fetches — shown in the / menu"
             />
-            <p className="text-ink-tertiary text-xs">{trigger.hint}</p>
           </div>
+          <p className="text-ink-tertiary text-xs">{trigger.hint}</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {ext.on === "slash" && (
+            <Input
+              value={testText}
+              onChange={(e) => setTestText(e.target.value)}
+              placeholder={`/${ext.name || "name"} week`}
+              className="h-8 w-48 font-mono text-xs"
+              aria-label="Test invocation"
+            />
+          )}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void run()}
+            disabled={testing || !editing || !ext.name}
+            title={editing ? "Run the script and render the template against the agent's live tools" : "Save the agent first"}
+          >
+            <Play className="size-3.5" /> {testing ? "Running…" : "Run"}
+          </Button>
+        </div>
+      </div>
+      {!editing && <p className="text-ink-tertiary text-xs">Save the agent once to run against its live tools.</p>}
 
-          {/* Stage 1: script → output */}
-          <section className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <Label>1 · Script</Label>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  className="text-ink-secondary hover:text-ink-primary text-xs underline-offset-2 hover:underline"
-                  onClick={() => setToolsOpen((o) => !o)}
-                >
-                  {tools.length} tool{tools.length === 1 ? "" : "s"} available
-                </button>
-                {ext.on === "slash" && (
-                  <Input
-                    value={testText}
-                    onChange={(e) => setTestText(e.target.value)}
-                    placeholder={`/${ext.name || "name"} week`}
-                    className="h-7 w-44 font-mono text-xs"
-                    aria-label="Test invocation"
-                  />
-                )}
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void run()}
-                  disabled={testing || !editing || !ext.name}
-                  title={editing ? "Run the script and render the template against the agent's live tools" : "Save the agent first"}
-                >
-                  <Play className="size-3.5" /> {testing ? "Running…" : "Run"}
-                </Button>
-              </div>
-            </div>
-            {toolsOpen && <ToolsReference tools={tools} onInsert={(call) => set("script", `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}${call}`)} />}
-            <CodeEditor
-              value={ext.script ?? ""}
-              onChange={(v) => set("script", v || undefined)}
-              completions={scriptCompletions}
-              height="150px"
-              placeholder={"const hours = await clockify_hours({ period: input.args });\nreturn { hours, total: hours.reduce((s, h) => s + h.total, 0) };"}
-            />
-            <p className="text-ink-tertiary text-xs">
-              Call tools with <span className="font-mono">await tool_name({"{…}"})</span> — type a name for its
-              parameters. Transform with filter/map/reduce, end with <span className="font-mono">return</span>.
-              No loops, no globals; validated before it runs.
-            </p>
-            {!editing && <p className="text-ink-tertiary text-xs">Save the agent once to run against its live tools.</p>}
-            <ResultSlot
-              title="Output"
-              subtitle={part ? `${part.calls.length ? `called ${part.calls.map((c) => c.tool).join(", ")} · ` : ""}${part.durationMs} ms` : undefined}
-              error={scriptError}
-              body={part?.output ?? null}
-            />
-          </section>
-
-          {/* Stage 2: template → rendered */}
-          <section className="space-y-1.5">
-            <Label>2 · Template</Label>
-            <LiquidEditor
-              value={ext.template ?? ""}
-              onChange={(v) => set("template", v || undefined)}
-              scope={templateScope}
-              height="150px"
-              placeholder={"Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"}
-            />
-            <p className="text-ink-tertiary text-xs">
-              Liquid over <span className="font-mono">output</span> (the script's return),{" "}
-              <span className="font-mono">input</span> and <span className="font-mono">steps</span>. After a run,{" "}
-              <span className="font-mono">output.</span> completes with the real keys. Blank = the output as JSON.
-            </p>
-            <ResultSlot
-              title={target === "instructions" ? "Rendered — added to the system prompt" : "Rendered — what the model reads"}
-              error={templateError}
-              note={note}
-              body={part?.rendered ?? null}
-            />
-          </section>
-
-          {/* Advanced */}
-          <div className="border-primary-border rounded-md border">
+      {/* Two columns: script → output | template → rendered */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="min-w-0 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <Label>1 · Script</Label>
             <button
               type="button"
-              className="text-ink-secondary flex w-full items-center gap-1 px-2 py-1.5 text-left text-xs"
-              onClick={() => setAdvanced((o) => !o)}
+              className="text-ink-secondary hover:text-ink-primary text-xs underline-offset-2 hover:underline"
+              onClick={() => setToolsOpen((o) => !o)}
             >
-              <ChevronDown className={cn("size-3 transition-transform", !advanced && "-rotate-90")} />
-              Advanced
-              <span className="text-ink-tertiary">· {summarize(ext)}</span>
+              {tools.length} tool{tools.length === 1 ? "" : "s"} available
             </button>
-            {advanced && (
-              <div className="border-primary-border space-y-3 border-t p-2 text-xs">
-                <Sentence>
-                  Render into
-                  <RichSelect
-                    value={target}
-                    onValueChange={(v) => set("target", v as ExtensionRec["target"])}
-                    options={[
-                      { value: "message", label: "the user message", description: "Next to what the user typed" },
-                      { value: "instructions", label: "the system prompt", description: "After the agent's instructions" },
-                    ]}
-                  />
-                  {target === "message" ? (
-                    <>
-                      <RichSelect
-                        value={ext.placement ?? "after"}
-                        onValueChange={(v) => set("placement", v as ExtensionRec["placement"])}
-                        options={[
-                          { value: "after", label: "after", description: "User text, then the block" },
-                          { value: "before", label: "before", description: "Block, then the user text" },
-                        ]}
-                      />
-                      their text.
-                    </>
-                  ) : (
-                    <>
-                      for
-                      <RichSelect
-                        value={ext.scope ?? "turn"}
-                        onValueChange={(v) => set("scope", v as ExtensionRec["scope"])}
-                        options={[
-                          { value: "turn", label: "this turn", description: "Only the turn that ran it" },
-                          { value: "chat", label: "the whole chat", description: "Every later turn too" },
-                        ]}
-                      />
-                      .
-                    </>
-                  )}
-                </Sentence>
-                <Sentence>
-                  The user sees
-                  <RichSelect
-                    value={ext.reveal ?? "command"}
-                    onValueChange={(v) => set("reveal", v as ExtensionRec["reveal"])}
-                    options={[
-                      { value: "command", label: "only their text", description: "The result stays server-side" },
-                      { value: "prompt", label: "the rendered prompt", description: "In place of their text" },
-                      { value: "both", label: "both", description: "Their text, with the result expandable" },
-                    ]}
-                  />
-                  on their message.
-                </Sentence>
-                {ext.on === "chat-start" && (
-                  <Sentence>
-                    Run again after
-                    <Input
-                      type="number"
-                      min={1}
-                      value={ext.refresh?.afterMs ? String(Math.round(ext.refresh.afterMs / 60_000)) : ""}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        set("refresh", n > 0 ? { afterMs: n * 60_000 } : undefined);
-                      }}
-                      placeholder="never"
-                      className="h-7 w-20 text-xs"
-                    />
-                    minutes, when the chat continues.
-                  </Sentence>
-                )}
-                <label className="flex items-center gap-2">
-                  <Switch checked={!!ext.allowMutations} onCheckedChange={(on) => set("allowMutations", on || undefined)} />
-                  <span>Allow approval-gated (mutating) tools in the script</span>
-                </label>
-                <label className="flex items-center gap-2">
-                  <Switch checked={ext.onError === "fail"} onCheckedChange={(on) => set("onError", on ? "fail" : undefined)} />
-                  <span>Fail the turn if the script fails (default: tell the model and continue)</span>
-                </label>
-              </div>
-            )}
           </div>
+          {toolsOpen && (
+            <ToolsReference
+              tools={tools}
+              onInsert={(call) => set("script", `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}${call}`)}
+            />
+          )}
+          <CodeEditor
+            value={ext.script ?? ""}
+            onChange={(v) => set("script", v || undefined)}
+            completions={scriptCompletions}
+            height="320px"
+            placeholder={"const hours = await clockify_hours({ period: input.args });\nreturn { hours, total: hours.reduce((s, h) => s + h.total, 0) };"}
+          />
+          <p className="text-ink-tertiary text-xs">
+            Call tools with <span className="font-mono">await tool_name({"{…}"})</span> — type a name for its
+            parameters. Transform with filter/map/reduce, end with <span className="font-mono">return</span>.
+            No loops, no globals; validated before it runs.
+          </p>
+          <ResultSlot
+            title="Output"
+            subtitle={part ? `${part.calls.length ? `called ${part.calls.map((c) => c.tool).join(", ")} · ` : ""}${part.durationMs} ms` : undefined}
+            error={scriptError}
+            body={part?.output ?? null}
+          />
+        </section>
+
+        <section className="min-w-0 space-y-1.5">
+          <Label>2 · Template</Label>
+          <LiquidEditor
+            value={ext.template ?? ""}
+            onChange={(v) => set("template", v || undefined)}
+            scope={templateScope}
+            height="320px"
+            placeholder={"Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"}
+          />
+          <p className="text-ink-tertiary text-xs">
+            Liquid over <span className="font-mono">output</span> (the script's return),{" "}
+            <span className="font-mono">input</span> and <span className="font-mono">steps</span>. After a run,{" "}
+            <span className="font-mono">output.</span> completes with the real keys. Blank = the output as JSON.
+          </p>
+          <ResultSlot
+            title={target === "instructions" ? "Rendered — added to the system prompt" : "Rendered — what the model reads"}
+            error={templateError}
+            note={note}
+            body={part?.rendered ?? null}
+          />
+        </section>
+      </div>
+
+      {/* Advanced */}
+      <div className="border-primary-border rounded-md border">
+        <button
+          type="button"
+          className="text-ink-secondary flex w-full items-center gap-1 px-2 py-1.5 text-left text-xs"
+          onClick={() => setAdvanced((o) => !o)}
+        >
+          <ChevronDown className={cn("size-3 transition-transform", !advanced && "-rotate-90")} />
+          Advanced
+          <span className="text-ink-tertiary">· {summarize(ext)}</span>
+        </button>
+        {advanced && (
+          <div className="border-primary-border space-y-3 border-t p-2 text-xs">
+            <Sentence>
+              Render into
+              <RichSelect
+                value={target}
+                onValueChange={(v) => set("target", v as ExtensionRec["target"])}
+                options={[
+                  { value: "message", label: "the user message", description: "Next to what the user typed" },
+                  { value: "instructions", label: "the system prompt", description: "After the agent's instructions" },
+                ]}
+              />
+              {target === "message" ? (
+                <>
+                  <RichSelect
+                    value={ext.placement ?? "after"}
+                    onValueChange={(v) => set("placement", v as ExtensionRec["placement"])}
+                    options={[
+                      { value: "after", label: "after", description: "User text, then the block" },
+                      { value: "before", label: "before", description: "Block, then the user text" },
+                    ]}
+                  />
+                  their text.
+                </>
+              ) : (
+                <>
+                  for
+                  <RichSelect
+                    value={ext.scope ?? "turn"}
+                    onValueChange={(v) => set("scope", v as ExtensionRec["scope"])}
+                    options={[
+                      { value: "turn", label: "this turn", description: "Only the turn that ran it" },
+                      { value: "chat", label: "the whole chat", description: "Every later turn too" },
+                    ]}
+                  />
+                  .
+                </>
+              )}
+            </Sentence>
+            <Sentence>
+              The user sees
+              <RichSelect
+                value={ext.reveal ?? "command"}
+                onValueChange={(v) => set("reveal", v as ExtensionRec["reveal"])}
+                options={[
+                  { value: "command", label: "only their text", description: "The result stays server-side" },
+                  { value: "prompt", label: "the rendered prompt", description: "In place of their text" },
+                  { value: "both", label: "both", description: "Their text, with the result expandable" },
+                ]}
+              />
+              on their message.
+            </Sentence>
+            {ext.on === "chat-start" && (
+              <Sentence>
+                Run again after
+                <Input
+                  type="number"
+                  min={1}
+                  value={ext.refresh?.afterMs ? String(Math.round(ext.refresh.afterMs / 60_000)) : ""}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    set("refresh", n > 0 ? { afterMs: n * 60_000 } : undefined);
+                  }}
+                  placeholder="never"
+                  className="h-7 w-20 text-xs"
+                />
+                minutes, when the chat continues.
+              </Sentence>
+            )}
+            <label className="flex items-center gap-2">
+              <Switch checked={!!ext.allowMutations} onCheckedChange={(on) => set("allowMutations", on || undefined)} />
+              <span>Allow approval-gated (mutating) tools in the script</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <Switch checked={ext.onError === "fail"} onCheckedChange={(on) => set("onError", on ? "fail" : undefined)} />
+              <span>Fail the turn if the script fails (default: tell the model and continue)</span>
+            </label>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 pt-1">
+        <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+          <Trash2 className="size-3.5" /> Remove extension
+        </Button>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-tertiary text-xs">Changes apply to the agent form; save the agent to persist.</span>
+          <Button type="button" size="sm" onClick={onDone}>
+            Done
+          </Button>
         </div>
-      )}
+      </div>
     </div>
   );
 }
