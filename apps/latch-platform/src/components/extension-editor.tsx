@@ -332,30 +332,30 @@ function ExtensionEditor({
           title="Where the rendered text goes"
           menu={
             <>
-              <DropdownMenuLabel>Render into</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={target} onValueChange={(v) => set("target", v as ExtensionRec["target"])}>
+                <DropdownMenuLabel>Render into</DropdownMenuLabel>
                 <DropdownMenuRadioItem value="message">The user message</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="instructions">The system prompt</DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
               <DropdownMenuSeparator />
               {target === "message" ? (
                 <>
-                  <DropdownMenuLabel>Placement</DropdownMenuLabel>
                   <DropdownMenuRadioGroup
                     value={ext.placement ?? "after"}
                     onValueChange={(v) => set("placement", v as ExtensionRec["placement"])}
                   >
+                    <DropdownMenuLabel>Placement</DropdownMenuLabel>
                     <DropdownMenuRadioItem value="after">After the user's text</DropdownMenuRadioItem>
                     <DropdownMenuRadioItem value="before">Before the user's text</DropdownMenuRadioItem>
                   </DropdownMenuRadioGroup>
                 </>
               ) : (
                 <>
-                  <DropdownMenuLabel>Applies</DropdownMenuLabel>
                   <DropdownMenuRadioGroup
                     value={ext.scope ?? "turn"}
                     onValueChange={(v) => set("scope", v as ExtensionRec["scope"])}
                   >
+                    <DropdownMenuLabel>Applies</DropdownMenuLabel>
                     <DropdownMenuRadioItem value="turn">This turn only</DropdownMenuRadioItem>
                     <DropdownMenuRadioItem value="chat">The whole chat</DropdownMenuRadioItem>
                   </DropdownMenuRadioGroup>
@@ -402,11 +402,11 @@ function ExtensionEditor({
               {ext.on === "chat-start" && (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Run again</DropdownMenuLabel>
                   <DropdownMenuRadioGroup
                     value={String(ext.refresh?.afterMs ?? "")}
                     onValueChange={(v) => set("refresh", v ? { afterMs: Number(v) } : undefined)}
                   >
+                    <DropdownMenuLabel>Run again</DropdownMenuLabel>
                     {REFRESH_PRESETS.map((p) => (
                       <DropdownMenuRadioItem key={p.label} value={p.ms === null ? "" : String(p.ms)}>
                         {p.label}
