@@ -18,6 +18,8 @@ export interface ToolInfo {
   connection: string;
   defaultApproval: boolean;
   description?: string;
+  /** The tool's input JSON Schema, serialized — what a script has to pass. */
+  inputSchemaJson?: string;
 }
 
 export type ConnStatus = Record<string, { oauth: boolean; authorized: boolean }>;

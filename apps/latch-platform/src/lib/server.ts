@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import type { AppMessage } from "@intentface/latch-core";
+import { asSchema } from "ai";
 import {
   slackManifest,
   createFromManifestUrl,
@@ -512,17 +513,30 @@ export const connectionToolsFn = createServerFn({ method: "GET" })
       const approval = (opened.toolApproval ?? {});
       return Object.keys(opened.tools)
         .filter((k) => !k.startsWith("connect_"))
-        .map((name) => ({
-          name,
-          connection: names.find((n) => name.startsWith(`${n}_`)) ?? name.split("_")[0],
-          defaultApproval: !!approval[name],
-          description:
-            (opened.tools[name] as { description?: string } | undefined)?.description ?? undefined,
-        }));
+        .map((name) => {
+          const t = opened.tools[name] as { description?: string; inputSchema?: unknown } | undefined;
+          return {
+            name,
+            connection: names.find((n) => name.startsWith(`${n}_`)) ?? name.split("_")[0],
+            defaultApproval: !!approval[name],
+            description: t?.description ?? undefined,
+            inputSchemaJson: inputSchemaJsonOf(t?.inputSchema),
+          };
+        });
     } finally {
       await opened.close();
     }
   });
+
+/** A tool's input schema as JSON Schema text (zod, standard schema or jsonSchema() all normalize). */
+function inputSchemaJsonOf(inputSchema: unknown): string | undefined {
+  if (!inputSchema) return undefined;
+  try {
+    return JSON.stringify(asSchema(inputSchema as never).jsonSchema);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Create or update a UI agent at its scope. The record schema owns the shape

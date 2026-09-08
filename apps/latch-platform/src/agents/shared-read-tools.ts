@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool, asSchema } from "ai";
 import { z } from "zod";
 import { sharedReadTools as packageSharedReadTools } from "@intentface/latch-agent-builder";
 import { normalizeAgentName } from "@/lib/agent-store";
@@ -24,17 +24,28 @@ export async function listConnectionTools(
   allConnections: Latch["allConnections"],
   principal: Principal,
   names: string[],
-): Promise<{ name: string; description: string }[]> {
+): Promise<{ name: string; description: string; inputSchema?: unknown }[]> {
   if (names.length === 0) return [];
   const opened = await allConnections.hostFor(names).open(principal);
   try {
     return Object.keys(opened.tools)
       .filter((k) => !k.startsWith("connect_"))
-      .map((toolName) => ({
-        name: toolName,
-        description:
-          (opened.tools[toolName] as { description?: string } | undefined)?.description ?? "",
-      }));
+      .map((toolName) => {
+        const t = opened.tools[toolName] as { description?: string; inputSchema?: unknown } | undefined;
+        let inputSchema: unknown;
+        try {
+          inputSchema = t?.inputSchema ? asSchema(t.inputSchema as never).jsonSchema : undefined;
+        } catch {
+          inputSchema = undefined;
+        }
+        return {
+          name: toolName,
+          description: t?.description ?? "",
+          // What a call must pass — the builder reads this when it writes an
+          // extension script (`await tool({ ... })`) or a tool selection.
+          ...(inputSchema ? { inputSchema } : {}),
+        };
+      });
   } finally {
     await opened.close();
   }

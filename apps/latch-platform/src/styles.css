@@ -553,3 +553,31 @@
   margin-left: auto;
   padding-left: 1rem;
 }
+
+/* Tool signature card in the script editor's completion info panel. */
+.cm-tooltip.cm-completionInfo {
+  border: 1px solid var(--color-primary-border);
+  border-radius: 0.625rem;
+  background: var(--color-primary-bg);
+  padding: 0.5rem 0.625rem;
+  max-width: 28rem;
+  font-size: 0.75rem;
+}
+.cm-tool-info-sig {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--color-ink-primary);
+  white-space: pre-wrap;
+}
+.cm-tool-info-desc {
+  color: var(--color-ink-secondary);
+  margin-top: 0.25rem;
+}
+.cm-tool-info-param {
+  color: var(--color-ink-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  margin-top: 0.15rem;
+}
+.cm-tool-info-gated {
+  color: var(--destructive, #a02626);
+  margin-top: 0.35rem;
+}

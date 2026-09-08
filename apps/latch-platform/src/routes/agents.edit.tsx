@@ -71,6 +71,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { CodeEditor } from "@/components/code-editor";
 import { LiquidEditor } from "@/components/liquid-editor";
+import { snippetCompletion } from "@codemirror/autocomplete";
+import { paramsOf, parseSchema, signatureOf, snippetOf } from "@/lib/tool-signature";
 import type { ToolInfo } from "./agents";
 
 export const Route = createFileRoute("/agents/edit")({
@@ -2019,14 +2021,54 @@ function ExtensionEditor({
   onRemove: () => void;
 }) {
   const [open, setOpen] = useState(!ext.name);
-  // Script completions: the tools the script may call by name, plus `input`.
+  // Script completions: the tools the script may call, each as a snippet with
+  // the required parameters as tab stops and the full signature in the info
+  // panel — so a person never has to guess what a tool takes.
   const scriptCompletions = useMemo(
     () => [
       { label: "input", type: "variable", detail: "{ args, argv } or structured input" },
-      ...tools.map((t) => ({ label: t.name, type: "function", detail: t.description?.slice(0, 60) })),
+      ...tools.map((t) => {
+        const schema = parseSchema(t.inputSchemaJson);
+        const params = paramsOf(schema);
+        return snippetCompletion(snippetOf(t.name, schema), {
+          label: t.name,
+          type: "function",
+          detail: params.length
+            ? `(${params.map((p) => `${p.name}${p.required ? "" : "?"}`).join(", ")})`
+            : "()",
+          info: () => {
+            const el = document.createElement("div");
+            el.className = "cm-tool-info";
+            const sig = document.createElement("div");
+            sig.className = "cm-tool-info-sig";
+            sig.textContent = signatureOf(t.name, schema);
+            el.appendChild(sig);
+            if (t.description) {
+              const d = document.createElement("div");
+              d.className = "cm-tool-info-desc";
+              d.textContent = t.description;
+              el.appendChild(d);
+            }
+            for (const p of params) {
+              const row = document.createElement("div");
+              row.className = "cm-tool-info-param";
+              row.textContent = `${p.name}${p.required ? "" : "?"}: ${p.type}${p.description ? " — " + p.description : ""}`;
+              el.appendChild(row);
+            }
+            if (t.defaultApproval) {
+              const g = document.createElement("div");
+              g.className = "cm-tool-info-gated";
+              g.textContent = "approval-gated: needs “Allow approval-gated tools” on this extension";
+              el.appendChild(g);
+            }
+            return el;
+          },
+        });
+      }),
     ],
     [tools],
   );
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [testText, setTestText] = useState("");
   const [testing, setTesting] = useState(false);
   const [testOut, setTestOut] = useState<Awaited<ReturnType<typeof previewExtensionFn>> | null>(null);
@@ -2192,8 +2234,69 @@ function ExtensionEditor({
               <span className="font-mono">await tool_name({"{…}"})</span>, transform with{" "}
               <span className="font-mono">filter/map/reduce</span>, end with{" "}
               <span className="font-mono">return</span>. <span className="font-mono">input.args</span>{" "}
-              is the text after the slash. No loops, no globals — validated before it runs.
+              is the text after the slash. No loops, no globals — validated before it runs. Start typing
+              a tool name (or press Ctrl-Space) for its parameters.
             </p>
+            <div className="border-primary-border rounded-md border">
+              <button
+                type="button"
+                className="text-ink-secondary flex w-full items-center gap-1 px-2 py-1.5 text-left text-xs"
+                onClick={() => setToolsOpen((o) => !o)}
+              >
+                <ChevronDown className={cn("size-3 transition-transform", !toolsOpen && "-rotate-90")} />
+                Tools this script can call
+                <span className="text-ink-tertiary">
+                  · {tools.length}
+                  {tools.length === 0 ? " (pick connections above)" : ""}
+                </span>
+              </button>
+              {toolsOpen && tools.length > 0 && (
+                <ul className="border-primary-border max-h-64 space-y-2 overflow-auto border-t p-2 text-xs">
+                  {tools.map((t) => {
+                    const schema = parseSchema(t.inputSchemaJson);
+                    const params = paramsOf(schema);
+                    return (
+                      <li key={t.name} className="space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className="text-ink-primary font-mono hover:underline"
+                            title="Insert a call"
+                            onClick={() =>
+                              set(
+                                "script",
+                                `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}const result = ${snippetOf(t.name, schema).replace(/\$\{(\w+)\}/g, "$1")};`,
+                              )
+                            }
+                          >
+                            {signatureOf(t.name, schema)}
+                          </button>
+                          {t.defaultApproval && (
+                            <span className="text-destructive rounded border border-destructive/40 px-1 py-px text-[10px]">
+                              approval-gated
+                            </span>
+                          )}
+                        </div>
+                        {t.description && <p className="text-ink-tertiary">{t.description}</p>}
+                        {params.length > 0 && (
+                          <ul className="text-ink-secondary ml-3 list-disc">
+                            {params.map((p) => (
+                              <li key={p.name}>
+                                <span className="font-mono">
+                                  {p.name}
+                                  {p.required ? "" : "?"}: {p.type}
+                                </span>
+                                {p.description ? ` — ${p.description}` : ""}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
           </div>
           <div className="space-y-1">
             <FieldLabel>Template (Liquid)</FieldLabel>
