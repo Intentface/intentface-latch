@@ -163,26 +163,41 @@ function parseEach(expr: string) {
   return m ? { list: m[1]!, item: m[2]!, body: m[3]! } : null;
 }
 
-/** A value as one readable line. */
-export function summarize(v: unknown): string {
+/** The first sentence of a description — tool docs are written for the model, the story is not. */
+export function firstSentence(text: string, max = 110): string {
+  const t = text.trim().replace(/\s+/g, " ");
+  const m = t.match(/^(.+?[.!?])(\s|$)/);
+  const first = m ? m[1]! : t;
+  return first.length > max ? `${first.slice(0, max - 1).replace(/[\s,;:—-]+$/, "")}…` : first;
+}
+
+/**
+ * A value as one readable line, with values one level deep: a person checking
+ * a step wants "files: 3 items", not the key list.
+ */
+export function summarize(v: unknown, depth = 0): string {
   if (v === undefined) return "";
   if (v === null) return "null";
   if (Array.isArray(v)) {
     if (v.length === 0) return "empty list";
     const first = v[0];
-    const shape =
-      first && typeof first === "object" && !Array.isArray(first)
-        ? ` of { ${Object.keys(first as object).slice(0, 4).join(", ")}${Object.keys(first as object).length > 4 ? ", …" : ""} }`
-        : typeof first === "string"
-          ? ` — ${JSON.stringify(first).slice(0, 40)}${v.length > 1 ? ", …" : ""}`
-          : "";
-    return `${v.length} item${v.length === 1 ? "" : "s"}${shape}`;
+    const n = `${v.length} item${v.length === 1 ? "" : "s"}`;
+    if (depth > 0) return n;
+    if (first && typeof first === "object" && !Array.isArray(first)) {
+      const keys = Object.keys(first as object);
+      return `${n} of { ${keys.slice(0, 4).join(", ")}${keys.length > 4 ? ", …" : ""} }`;
+    }
+    if (typeof first === "string") return `${n} — ${JSON.stringify(first).slice(0, 40)}${v.length > 1 ? ", …" : ""}`;
+    return n;
   }
   if (typeof v === "object") {
-    const keys = Object.keys(v as object);
-    return keys.length ? `{ ${keys.slice(0, 5).join(", ")}${keys.length > 5 ? ", …" : ""} }` : "empty object";
+    const entries = Object.entries(v as Record<string, unknown>);
+    if (entries.length === 0) return "empty object";
+    if (depth > 0) return `{ ${entries.slice(0, 4).map(([k]) => k).join(", ")}${entries.length > 4 ? ", …" : ""} }`;
+    const shown = entries.slice(0, 5).map(([k, val]) => `${k}: ${summarize(val, depth + 1)}`);
+    return `{ ${shown.join(", ")}${entries.length > 5 ? ", …" : ""} }`;
   }
-  if (typeof v === "string") return v.length > 80 ? `"${v.slice(0, 80)}…"` : `"${v}"`;
+  if (typeof v === "string") return v.length > 60 ? `"${v.slice(0, 60)}…"` : `"${v}"`;
   return String(v);
 }
 
@@ -258,8 +273,8 @@ export function PlanStory({
           <div className="border-primary-border rounded-lg border p-2.5">
             <div className="text-ink-primary font-semibold">Done — hand this to the template</div>
             <div className="text-ink-tertiary font-mono break-words">{plan.output}</div>
-            {ran && output !== undefined && (
-              <div className="text-ink-secondary mt-1 font-mono">{summarize(output)}</div>
+            {ran && output !== undefined && summarize(output) !== plan.output && (
+              <div className="text-ink-secondary mt-1 font-mono break-words">{summarize(output)}</div>
             )}
           </div>
         </div>
@@ -316,7 +331,7 @@ function StoryCard({
       : `Work out ${step.id}`;
     if (!words) detail = step.let;
   } else {
-    const desc = step.reason ? cap(step.reason) : tool?.description ? cap(tool.description) : step.call!;
+    const desc = step.reason ? cap(step.reason) : tool?.description ? cap(firstSentence(tool.description)) : step.call!;
     const conn = tool?.connection;
     title = (
       <>

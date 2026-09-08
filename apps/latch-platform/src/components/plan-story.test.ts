@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyze, condQuestion, predicateWords, storyRows, summarize, type Plan } from "./plan-story";
+import { analyze, condQuestion, firstSentence, predicateWords, storyRows, summarize, type Plan } from "./plan-story";
 
 /** The story's pure half: dependency edges from expressions, row grouping, wording. */
 
@@ -38,11 +38,24 @@ describe("plan story", () => {
     expect(predicateWords("i => i.a && i.b")).toBeNull();
   });
 
-  it("summarizes values in one line", () => {
+  it("summarizes values in one line, with values one level deep", () => {
     expect(summarize([{ name: "Anna", total: 38 }, { name: "Bo", total: 12 }])).toBe("2 items of { name, total }");
     expect(summarize([])).toBe("empty list");
-    expect(summarize({ since: 1, files: [] })).toBe("{ since, files }");
+    expect(summarize({ since: 1788739200, until: 1788825600, files: [{ a: 1 }, { a: 2 }, { a: 3 }] })).toBe(
+      "{ since: 1788739200, until: 1788825600, files: 3 items }",
+    );
+    expect(summarize({ changes: { since: 1, files: [] } })).toBe("{ changes: { since, files } }");
     expect(summarize("x".repeat(100))).toMatch(/…"$/);
     expect(summarize(7)).toBe("7");
+  });
+
+  it("uses only the first sentence of a tool description, capped", () => {
+    expect(
+      firstSentence(
+        "What changed in this workspace in a time range — creates, edits, deletes. fileId follows one file. Omit your own surface.",
+      ),
+    ).toBe("What changed in this workspace in a time range — creates, edits, deletes.");
+    expect(firstSentence("no period here")).toBe("no period here");
+    expect(firstSentence("a".repeat(200)).endsWith("…")).toBe(true);
   });
 });
