@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
-import { closePercentBrace, liquid } from "@codemirror/lang-liquid";
+import { liquid, liquidCompletionSource } from "@codemirror/lang-liquid";
 import { markdown } from "@codemirror/lang-markdown";
-import { autocompletion, closeBrackets, type Completion } from "@codemirror/autocomplete";
-import { syntaxTree } from "@codemirror/language";
+import {
+  autocompletion,
+  startCompletion,
+  type Completion,
+  type CompletionContext,
+  type CompletionResult,
+} from "@codemirror/autocomplete";
 import { RangeSetBuilder } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { cn } from "@/lib/utils";
@@ -35,21 +40,23 @@ export function LiquidEditor({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  const extensions = useMemo(
-    () => [
-      liquid({
-        base: markdown(),
-        variables: variableCompletions(scope ?? {}),
-        properties: (path) => propertyCompletions(scope ?? {}, path),
+  const extensions = useMemo(() => {
+    const config = {
+      variables: variableCompletions(scope ?? {}),
+      properties: (path: readonly string[]) => propertyCompletions(scope ?? {}, path),
+    };
+    return [
+      liquid({ base: markdown(), ...config }),
+      autocompletion({
+        activateOnTyping: true,
+        icons: false,
+        override: [delimiterCompletions, liquidCompletionSource(config)],
       }),
-      closeBrackets(),
-      closePercentBrace,
-      autocompletion({ activateOnTyping: true, icons: false }),
+      liquidInput,
       liquidChips,
       EditorView.lineWrapping,
-    ],
-    [scope],
-  );
+    ];
+  }, [scope]);
 
   if (!mounted) {
     return (
@@ -93,51 +100,92 @@ const chipOut = Decoration.mark({ class: "cm-liquid-chip cm-liquid-chip-out" });
 const chipTag = Decoration.mark({ class: "cm-liquid-chip cm-liquid-chip-tag" });
 const chipCmt = Decoration.mark({ class: "cm-liquid-chip cm-liquid-chip-cmt" });
 
-/** Every Liquid construct in the visible ranges becomes a chip. */
-function buildChips(view: EditorView): DecorationSet {
+/**
+ * Every Liquid construct becomes a chip. Text-based rather than tree-based on
+ * purpose: the grammar's node for an empty or half-typed `{{ }}` ends early,
+ * which would leave the closing braces outside the chip while the person is
+ * still typing. Comment and raw blocks chip as one muted span.
+ */
+const CONSTRUCT =
+  /\{%-?\s*(comment|raw)\b[\s\S]*?\{%-?\s*end\1\s*-?%\}|\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g;
+
+export function buildChips(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
-  const tree = syntaxTree(view.state);
-  for (const { from, to } of view.visibleRanges) {
-    tree.iterate({
-      from,
-      to,
-      enter(node) {
-        switch (node.name) {
-          case "Interpolation":
-            builder.add(node.from, node.to, chipOut);
-            return false;
-          case "Comment":
-          case "RawDirective":
-          case "InlineComment":
-            builder.add(node.from, node.to, chipCmt);
-            return false;
-          case "Tag":
-          case "EndTag":
-            builder.add(node.from, node.to, chipTag);
-            return false;
-          default:
-            return undefined;
-        }
-      },
-    });
+  const text = view.state.doc.toString();
+  CONSTRUCT.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CONSTRUCT.exec(text))) {
+    const deco = m[1] ? chipCmt : m[0].startsWith("{{") ? chipOut : chipTag;
+    builder.add(m.index, m.index + m[0].length, deco);
   }
   return builder.finish();
 }
 
-const liquidChips = ViewPlugin.fromClass(
+export const liquidChips = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
     constructor(view: EditorView) {
       this.decorations = buildChips(view);
     }
     update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged || syntaxTree(update.startState) !== syntaxTree(update.state)) {
-        this.decorations = buildChips(update.view);
-      }
+      if (update.docChanged) this.decorations = buildChips(update.view);
     }
   },
   { decorations: (v) => v.decorations },
 );
+
+// -------------------------------------------------------------------- typing
+
+/**
+ * Typing the second `{` of `{{`, or the `%` of `{%`, closes the construct with
+ * a space on each side and puts the cursor in the middle, then opens the
+ * suggestions — the artifact's behaviour, without a generic bracket closer
+ * fighting it.
+ */
+export function handleLiquidInput(view: EditorView, from: number, to: number, text: string): boolean {
+  if (from !== to || (text !== "{" && text !== "%")) return false;
+  const line = view.state.doc.lineAt(from);
+  const before = line.text.slice(0, from - line.from);
+  const after = line.text.slice(from - line.from);
+  if (!before.endsWith("{")) return false;
+  const close = text === "{" ? "}}" : "%}";
+  if (after.trimStart().startsWith(close)) return false;
+  view.dispatch({
+    changes: { from, to, insert: `${text}  ${close}` },
+    selection: { anchor: from + 2 },
+    userEvent: "input.type",
+  });
+  startCompletion(view);
+  return true;
+}
+
+const liquidInput = EditorView.inputHandler.of(handleLiquidInput);
+
+/** A lone `{` offers the two constructs, like the artifact did. */
+export function delimiterCompletions(ctx: CompletionContext): CompletionResult | null {
+  const brace = ctx.matchBefore(/\{$/);
+  if (!brace) return null;
+  const line = ctx.state.doc.lineAt(ctx.pos);
+  const before = line.text.slice(0, brace.from - line.from);
+  // Only at the start of a construct, not for the `{` inside one already open.
+  if (/\{\{[^}]*$|\{%[^%]*$/.test(before)) return null;
+  const item = (label: string, detail: string, open: string, close: string): Completion => ({
+    label,
+    detail,
+    apply: (view, _c, from, to) => {
+      view.dispatch({
+        changes: { from, to, insert: `${open}  ${close}` },
+        selection: { anchor: from + open.length + 1 },
+      });
+      startCompletion(view);
+    },
+  });
+  return {
+    from: brace.from,
+    options: [item("{{ }}", "output a value", "{{", "}}"), item("{% %}", "tag", "{%", "%}")],
+    filter: false,
+  };
+}
 
 // -------------------------------------------------------------- completions
 

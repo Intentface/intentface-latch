@@ -476,10 +476,11 @@
    chip so the tags stand out from the prose. Output chips and tag chips get
    their own hue; comments and raw blocks are muted.
    ------------------------------------------------------------------------ */
-.liquid-editor .cm-editor {
+.liquid-editor .cm-editor,
+.liquid-editor .cm-scroller {
   font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
-  font-size: 0.8125rem;
-  line-height: 1.8;
+  font-size: 0.875rem;
+  line-height: 1.9;
   background: transparent;
 }
 .liquid-editor .cm-editor.cm-focused {
@@ -491,8 +492,8 @@
 .liquid-editor .cm-liquid-chip {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 0.75rem;
-  padding: 0.125rem 0.375rem;
-  border-radius: 0.375rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.45rem;
   border: 1px solid transparent;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
