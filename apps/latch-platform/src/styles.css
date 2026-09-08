@@ -470,3 +470,85 @@
 .dark .shiki span {
   color: var(--shiki-dark);
 }
+
+/* ------------------------------------------------------------------------
+   Liquid template editor (components/liquid-editor.tsx): every construct is a
+   chip so the tags stand out from the prose. Output chips and tag chips get
+   their own hue; comments and raw blocks are muted.
+   ------------------------------------------------------------------------ */
+.liquid-editor .cm-editor {
+  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+  font-size: 0.8125rem;
+  line-height: 1.8;
+  background: transparent;
+}
+.liquid-editor .cm-editor.cm-focused {
+  outline: none;
+}
+.liquid-editor .cm-content {
+  padding: 0.5rem 0.625rem 0.75rem;
+}
+.liquid-editor .cm-liquid-chip {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.75rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.375rem;
+  border: 1px solid transparent;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.liquid-editor .cm-liquid-chip-out {
+  background: oklch(0.93 0.03 230);
+  border-color: oklch(0.86 0.05 230);
+  color: oklch(0.38 0.08 230);
+}
+.liquid-editor .cm-liquid-chip-tag {
+  background: oklch(0.94 0.04 135);
+  border-color: oklch(0.86 0.07 135);
+  color: oklch(0.38 0.09 135);
+}
+.liquid-editor .cm-liquid-chip-cmt {
+  background: oklch(0.94 0 0);
+  border-color: oklch(0.87 0 0);
+  color: var(--color-ink-tertiary);
+  font-style: italic;
+}
+.dark .liquid-editor .cm-liquid-chip-out {
+  background: oklch(0.3 0.04 230);
+  border-color: oklch(0.4 0.05 230);
+  color: oklch(0.85 0.06 230);
+}
+.dark .liquid-editor .cm-liquid-chip-tag {
+  background: oklch(0.3 0.05 135);
+  border-color: oklch(0.4 0.06 135);
+  color: oklch(0.85 0.08 135);
+}
+.dark .liquid-editor .cm-liquid-chip-cmt {
+  background: oklch(0.28 0 0);
+  border-color: oklch(0.38 0 0);
+}
+/* The completion dropdown, shared by the Liquid and script editors. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  border: 1px solid var(--color-primary-border);
+  border-radius: 0.625rem;
+  background: var(--color-primary-bg);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.14);
+  padding: 0.25rem;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.75rem;
+}
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  padding: 0.3rem 0.6rem;
+  border-radius: 0.375rem;
+  color: var(--color-ink-primary);
+}
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--color-primary-bg-hover, var(--color-input));
+  color: var(--color-ink-primary);
+}
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionDetail {
+  color: var(--color-ink-tertiary);
+  font-style: normal;
+  margin-left: auto;
+  padding-left: 1rem;
+}

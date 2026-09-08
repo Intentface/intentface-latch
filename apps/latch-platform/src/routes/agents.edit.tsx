@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createFileRoute,
   Link,
@@ -70,6 +70,7 @@ import { RichSelect } from "@/components/ui/rich-select";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { CodeEditor } from "@/components/code-editor";
+import { LiquidEditor } from "@/components/liquid-editor";
 import type { ToolInfo } from "./agents";
 
 export const Route = createFileRoute("/agents/edit")({
@@ -696,7 +697,7 @@ function AgentEditor() {
           )}
         </div>
 
-        <ExtensionsSection rec={rec} patch={patch} editing={editing} />
+        <ExtensionsSection rec={rec} patch={patch} editing={editing} tools={toolList} />
 
         {error && <p className="text-destructive text-sm">{error}</p>}
         <div className="border-primary-border flex items-center gap-2 border-t pt-4">
@@ -1950,10 +1951,13 @@ function ExtensionsSection({
   rec,
   patch,
   editing,
+  tools,
 }: {
   rec: AgentRecord;
   patch: (fn: (r: AgentRecord) => AgentRecord) => void;
   editing: boolean;
+  /** The connections' tools as last listed — completions for the script editor. */
+  tools: ToolInfo[];
 }) {
   const list = rec.extensions ?? [];
   const update = (i: number, fn: (e: ExtensionRec) => ExtensionRec) =>
@@ -1990,6 +1994,7 @@ function ExtensionsSection({
           ext={ext}
           agentName={rec.name}
           editing={editing}
+          tools={tools}
           onChange={(fn) => update(i, fn)}
           onRemove={() => remove(i)}
         />
@@ -2002,22 +2007,45 @@ function ExtensionEditor({
   ext,
   agentName,
   editing,
+  tools,
   onChange,
   onRemove,
 }: {
   ext: ExtensionRec;
   agentName: string;
   editing: boolean;
+  tools: ToolInfo[];
   onChange: (fn: (e: ExtensionRec) => ExtensionRec) => void;
   onRemove: () => void;
 }) {
   const [open, setOpen] = useState(!ext.name);
+  // Script completions: the tools the script may call by name, plus `input`.
+  const scriptCompletions = useMemo(
+    () => [
+      { label: "input", type: "variable", detail: "{ args, argv } or structured input" },
+      ...tools.map((t) => ({ label: t.name, type: "function", detail: t.description?.slice(0, 60) })),
+    ],
+    [tools],
+  );
   const [testText, setTestText] = useState("");
   const [testing, setTesting] = useState(false);
   const [testOut, setTestOut] = useState<Awaited<ReturnType<typeof previewExtensionFn>> | null>(null);
   const set = <K extends keyof ExtensionRec>(key: K, value: ExtensionRec[K]) =>
     onChange((e) => ({ ...e, [key]: value }));
   const target = ext.target ?? "message";
+  // Template completions come from the last Test run's real output; before
+  // one exists, the scope's shape is all we can offer.
+  const templateScope = useMemo(() => {
+    let output: unknown = {};
+    if (testOut?.ok && testOut.part.output) {
+      try {
+        output = JSON.parse(testOut.part.output);
+      } catch {
+        output = {};
+      }
+    }
+    return { input: { args: "", argv: [] as string[] }, output, steps: {} } as Record<string, unknown>;
+  }, [testOut]);
 
   async function runTest() {
     if (testing) return;
@@ -2153,6 +2181,7 @@ function ExtensionEditor({
             <CodeEditor
               value={ext.script ?? ""}
               onChange={(v) => set("script", v || undefined)}
+              completions={scriptCompletions}
               height="140px"
               placeholder={
                 "const hours = await clockify_hours({ period: input.args });\nreturn { hours, total: hours.reduce((s, h) => s + h.total, 0) };"
@@ -2168,11 +2197,11 @@ function ExtensionEditor({
           </div>
           <div className="space-y-1">
             <FieldLabel>Template (Liquid)</FieldLabel>
-            <Textarea
+            <LiquidEditor
               value={ext.template ?? ""}
-              onChange={(e) => set("template", e.target.value || undefined)}
-              className="min-h-24 font-mono text-xs"
-              spellCheck={false}
+              onChange={(v) => set("template", v || undefined)}
+              scope={templateScope}
+              height="160px"
               placeholder={
                 "Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"
               }
