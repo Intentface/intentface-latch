@@ -159,8 +159,11 @@ function ExtensionEditor({
   const [advanced, setAdvanced] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [testText, setTestText] = useState("");
+  const [testJson, setTestJson] = useState("");
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<Preview | null>(null);
+  const [scriptTab, setScriptTab] = useState<"script" | "input" | "output">("script");
+  const [templateTab, setTemplateTab] = useState<"template" | "rendered">("template");
   const set = <K extends keyof ExtensionRec>(key: K, value: ExtensionRec[K]) =>
     onChange((e) => ({ ...e, [key]: value }));
   const target = ext.target ?? "message";
@@ -198,12 +201,26 @@ function ExtensionEditor({
     return { input: { args: "", argv: [] as string[] }, output, steps: {} } as Record<string, unknown>;
   }, [result]);
 
+  const testJsonError = useMemo(() => {
+    if (!testJson.trim()) return null;
+    try {
+      JSON.parse(testJson);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }, [testJson]);
+
   async function run() {
-    if (testing) return;
+    if (testing || testJsonError) return;
     setTesting(true);
     try {
-      const text = testText.trim() || (ext.on === "slash" ? `/${ext.name}` : undefined);
-      setResult(await previewExtensionFn({ data: { agent: agentName, extension: ext, text } }));
+      const text = ext.on === "slash" ? testText.trim() || `/${ext.name}` : undefined;
+      const input = testJson.trim() ? (JSON.parse(testJson) as unknown) : undefined;
+      setResult(await previewExtensionFn({ data: { agent: agentName, extension: ext, text, input } }));
+      // Show what the run produced, in both columns.
+      setScriptTab("output");
+      setTemplateTab("rendered");
     } finally {
       setTesting(false);
     }
@@ -263,21 +280,12 @@ function ExtensionEditor({
           <p className="text-ink-tertiary text-xs">{trigger.hint}</p>
         </div>
         <div className="flex items-center gap-1.5">
-          {ext.on === "slash" && (
-            <Input
-              value={testText}
-              onChange={(e) => setTestText(e.target.value)}
-              placeholder={`/${ext.name || "name"} week`}
-              className="h-8 w-48 font-mono text-xs"
-              aria-label="Test invocation"
-            />
-          )}
           <Button
             type="button"
             size="sm"
             variant="outline"
             onClick={() => void run()}
-            disabled={testing || !editing || !ext.name}
+            disabled={testing || !editing || !ext.name || !!testJsonError}
             title={editing ? "Run the script and render the template against the agent's live tools" : "Save the agent first"}
           >
             <Play className="size-3.5" /> {testing ? "Running…" : "Run"}
@@ -286,65 +294,145 @@ function ExtensionEditor({
       </div>
       {!editing && <p className="text-ink-tertiary text-xs">Save the agent once to run against its live tools.</p>}
 
-      {/* Two columns: script → output | template → rendered */}
+      {/* Two columns, each a tab strip: script · input · output | template · rendered.
+          Run switches both to their result tab; the badge keeps the numbers in view. */}
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="min-w-0 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
-            <Label>1 · Script</Label>
-            <button
-              type="button"
-              className="text-ink-secondary hover:text-ink-primary text-xs underline-offset-2 hover:underline"
-              onClick={() => setToolsOpen((o) => !o)}
-            >
-              {tools.length} tool{tools.length === 1 ? "" : "s"} available
-            </button>
+            <Tabs
+              value={scriptTab}
+              onChange={setScriptTab}
+              tabs={[
+                { value: "script", label: "1 · Script" },
+                { value: "input", label: "Input", badge: testText.trim() || testJson.trim() ? "set" : undefined },
+                {
+                  value: "output",
+                  label: "Output",
+                  badge: part ? `${part.durationMs} ms` : result && !result.ok ? "error" : undefined,
+                  tone: scriptError ? "error" : undefined,
+                },
+              ]}
+            />
+            {scriptTab === "script" && (
+              <button
+                type="button"
+                className="text-ink-secondary hover:text-ink-primary text-xs underline-offset-2 hover:underline"
+                onClick={() => setToolsOpen((o) => !o)}
+              >
+                {tools.length} tool{tools.length === 1 ? "" : "s"} available
+              </button>
+            )}
           </div>
-          {toolsOpen && (
-            <ToolsReference
-              tools={tools}
-              onInsert={(call) => set("script", `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}${call}`)}
+          {scriptTab === "script" && (
+            <>
+              {toolsOpen && (
+                <ToolsReference
+                  tools={tools}
+                  onInsert={(call) => set("script", `${ext.script ? ext.script.replace(/\s*$/, "\n") : ""}${call}`)}
+                />
+              )}
+              <CodeEditor
+                value={ext.script ?? ""}
+                onChange={(v) => set("script", v || undefined)}
+                completions={scriptCompletions}
+                height="340px"
+                placeholder={"const hours = await clockify_hours({ period: input.args });\nreturn { hours, total: hours.reduce((s, h) => s + h.total, 0) };"}
+              />
+              <p className="text-ink-tertiary text-xs">
+                Call tools with <span className="font-mono">await tool_name({"{…}"})</span> — type a name for its
+                parameters. Transform with filter/map/reduce, end with <span className="font-mono">return</span>.
+                No loops, no globals; validated before it runs.
+              </p>
+            </>
+          )}
+          {scriptTab === "input" && (
+            <div className="space-y-2 text-xs">
+              {ext.on === "slash" ? (
+                <>
+                  <Label>Invocation, as the user would type it</Label>
+                  <Input
+                    value={testText}
+                    onChange={(e) => setTestText(e.target.value)}
+                    placeholder={`/${ext.name || "name"} week`}
+                    className="font-mono"
+                  />
+                  <p className="text-ink-tertiary">
+                    The text after the name becomes <span className="font-mono">input.args</span>; its words{" "}
+                    <span className="font-mono">input.argv</span>.
+                  </p>
+                </>
+              ) : (
+                <p className="text-ink-tertiary">
+                  This extension runs on its own, without a slash invocation. Provide a structured{" "}
+                  <span className="font-mono">input</span> below only if your script reads one.
+                </p>
+              )}
+              <Label>Structured input (JSON, optional)</Label>
+              <textarea
+                value={testJson}
+                onChange={(e) => setTestJson(e.target.value)}
+                spellCheck={false}
+                placeholder={'{ "period": "this-week" }'}
+                className={cn(
+                  "border-input h-40 w-full rounded-lg border bg-transparent px-2.5 py-2 font-mono text-xs",
+                  testJsonError && "border-destructive",
+                )}
+              />
+              {testJsonError && <p className="text-destructive">{testJsonError}</p>}
+              <p className="text-ink-tertiary">
+                When set, this is <span className="font-mono">input</span> for the run, instead of the parsed text.
+              </p>
+            </div>
+          )}
+          {scriptTab === "output" && (
+            <ResultPane
+              empty="Run to see what the script returns."
+              status={part ? `${part.calls.length ? `called ${part.calls.map((c) => c.tool).join(", ")} · ` : ""}${part.durationMs} ms` : undefined}
+              error={scriptError}
+              body={part?.output ?? null}
             />
           )}
-          <CodeEditor
-            value={ext.script ?? ""}
-            onChange={(v) => set("script", v || undefined)}
-            completions={scriptCompletions}
-            height="320px"
-            placeholder={"const hours = await clockify_hours({ period: input.args });\nreturn { hours, total: hours.reduce((s, h) => s + h.total, 0) };"}
-          />
-          <p className="text-ink-tertiary text-xs">
-            Call tools with <span className="font-mono">await tool_name({"{…}"})</span> — type a name for its
-            parameters. Transform with filter/map/reduce, end with <span className="font-mono">return</span>.
-            No loops, no globals; validated before it runs.
-          </p>
-          <ResultSlot
-            title="Output"
-            subtitle={part ? `${part.calls.length ? `called ${part.calls.map((c) => c.tool).join(", ")} · ` : ""}${part.durationMs} ms` : undefined}
-            error={scriptError}
-            body={part?.output ?? null}
-          />
         </section>
 
         <section className="min-w-0 space-y-1.5">
-          <Label>2 · Template</Label>
-          <LiquidEditor
-            value={ext.template ?? ""}
-            onChange={(v) => set("template", v || undefined)}
-            scope={templateScope}
-            height="320px"
-            placeholder={"Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"}
+          <Tabs
+            value={templateTab}
+            onChange={setTemplateTab}
+            tabs={[
+              { value: "template", label: "2 · Template" },
+              {
+                value: "rendered",
+                label: "Rendered",
+                badge: part?.rendered != null ? `${part.rendered.length} chars` : undefined,
+                tone: templateError ? "error" : undefined,
+              },
+            ]}
           />
-          <p className="text-ink-tertiary text-xs">
-            Liquid over <span className="font-mono">output</span> (the script's return),{" "}
-            <span className="font-mono">input</span> and <span className="font-mono">steps</span>. After a run,{" "}
-            <span className="font-mono">output.</span> completes with the real keys. Blank = the output as JSON.
-          </p>
-          <ResultSlot
-            title={target === "instructions" ? "Rendered — added to the system prompt" : "Rendered — what the model reads"}
-            error={templateError}
-            note={note}
-            body={part?.rendered ?? null}
-          />
+          {templateTab === "template" && (
+            <>
+              <LiquidEditor
+                value={ext.template ?? ""}
+                onChange={(v) => set("template", v || undefined)}
+                scope={templateScope}
+                height="340px"
+                placeholder={"Write the weekly report for {{ input.args }}.\n{% for h in output.hours %}- {{ h.name }}: {{ h.total }}h\n{% endfor %}"}
+              />
+              <p className="text-ink-tertiary text-xs">
+                Liquid over <span className="font-mono">output</span> (the script's return),{" "}
+                <span className="font-mono">input</span> and <span className="font-mono">steps</span>. After a run,{" "}
+                <span className="font-mono">output.</span> completes with the real keys. Blank = the output as JSON.
+              </p>
+            </>
+          )}
+          {templateTab === "rendered" && (
+            <ResultPane
+              empty="Run to see what the model would read."
+              status={target === "instructions" ? "added to the system prompt" : "in the user turn, what the model reads"}
+              error={templateError}
+              note={note}
+              body={part?.rendered ?? null}
+            />
+          )}
         </section>
       </div>
 
@@ -473,32 +561,70 @@ function summarize(ext: ExtensionRec): string {
   return bits.join(" · ");
 }
 
-/** A result under the stage that produced it: body, or the stage's error. */
-function ResultSlot({
-  title,
-  subtitle,
+/** A small tab strip; a tab may carry a badge (a count, a duration, "error"). */
+function Tabs<T extends string>({
+  value,
+  onChange,
+  tabs,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  tabs: Array<{ value: T; label: string; badge?: string; tone?: "error" }>;
+}) {
+  return (
+    <div role="tablist" className="flex items-center gap-1">
+      {tabs.map((t) => (
+        <button
+          key={t.value}
+          type="button"
+          role="tab"
+          aria-selected={value === t.value}
+          onClick={() => onChange(t.value)}
+          className={cn(
+            "rounded-md px-2 py-1 text-xs transition-colors",
+            value === t.value ? "bg-base-active text-ink-primary font-medium" : "text-ink-secondary hover:bg-input/40",
+          )}
+        >
+          {t.label}
+          {t.badge && (
+            <span className={cn("ml-1.5 text-[10px]", t.tone === "error" ? "text-destructive" : "text-ink-tertiary")}>
+              {t.badge}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A result tab's body: the stage's output at full editor height, or its error. */
+function ResultPane({
+  empty,
+  status,
   body,
   error,
   note,
 }: {
-  title: string;
-  subtitle?: string;
+  empty: string;
+  status?: string;
   body: string | null;
   error?: string | null;
   note?: string | null;
 }) {
-  if (!error && body === null) return null;
   return (
-    <div className="bg-input/30 rounded-md p-2 text-xs">
-      <div className="text-ink-tertiary mb-1 flex items-center justify-between gap-2">
-        <span>{title}</span>
-        {subtitle && <span className="truncate">{subtitle}</span>}
+    <div className="border-input flex h-[340px] flex-col overflow-hidden rounded-lg border text-xs">
+      <div className="text-ink-tertiary border-input flex items-center justify-between gap-2 border-b px-2.5 py-1.5">
+        <span className="truncate">{status ?? ""}</span>
       </div>
-      {error && <p className="text-destructive whitespace-pre-wrap">{error}</p>}
-      {note && <p className="text-ink-tertiary whitespace-pre-wrap">{note}</p>}
-      {body !== null && (
-        <pre className="text-ink-secondary max-h-64 overflow-auto font-mono whitespace-pre-wrap">{body}</pre>
-      )}
+      <div className="flex-1 overflow-auto p-2.5">
+        {error && <p className="text-destructive mb-2 whitespace-pre-wrap">{error}</p>}
+        {note && <p className="text-ink-tertiary mb-2 whitespace-pre-wrap">{note}</p>}
+        {body !== null ? (
+          <pre className="text-ink-secondary font-mono whitespace-pre-wrap">{body}</pre>
+        ) : (
+          !error && <p className="text-ink-tertiary">{empty}</p>
+        )}
+      </div>
     </div>
   );
 }
