@@ -646,6 +646,7 @@ describe("extensions capability (opt-in)", () => {
     const { tools, cfg } = await openTools(makeDeps());
     expect(tools.test_extension).toBeUndefined();
     expect(cfg.instructions).not.toContain("EXTENSIONS (");
+    expect(cfg.instructions).not.toContain("LISTEN FOR DATA THE AGENT ALWAYS NEEDS FIRST");
     const res = (await tools.save_agent!.execute({ ...SAVE, extensions: [ext] })) as { error?: string };
     expect(res.error).toMatch(/Not available in this host: extensions/);
   });
@@ -657,6 +658,9 @@ describe("extensions capability (opt-in)", () => {
     });
     expect(cfg.instructions).toContain("EXTENSIONS (");
     expect(cfg.instructions).toContain("callscript + Liquid");
+    // ...and WHEN to reach for one, not only how.
+    expect(cfg.instructions).toContain("LISTEN FOR DATA THE AGENT ALWAYS NEEDS FIRST");
+    expect(cfg.instructions).toContain("run test_extension by name");
     const test = (await tools.test_extension!.execute({
       agent: "My Agent",
       extension: ext,

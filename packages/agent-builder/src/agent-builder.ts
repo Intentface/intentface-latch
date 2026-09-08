@@ -215,15 +215,28 @@ ${capabilitiesBullet(support)}
 ${support.extensions ? `- extensions: pre-turn scripts + templates${typeof support.extensions === "object" ? ` (${support.extensions.description})` : ""} — see EXTENSIONS.\n` : ""}- scope: "user" (personal) or "org" (shared with the whole org).
 ${support.extensions ? `\n${EXTENSIONS_PROMPT}\n` : ""}${scheduling ? `\n${SCHEDULING_PROMPT}\n` : ""}
 WORKFLOW:
-1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).
+1. Understand the goal. If it's vague, ask a few sharp questions first (purpose, behavior, integrations, tone).${
+    support.extensions
+      ? `
+   LISTEN FOR DATA THE AGENT ALWAYS NEEDS FIRST. "Start every chat by fetching…", "first look up X, then…", a daily/weekly report, a briefing, "summarise yesterday's…", "/something" — those are EXTENSIONS, not instructions: a script fetches the data before the model runs and a template renders it into the prompt. Propose one (say which trigger and why) rather than writing "first fetch X" into the system prompt, which is slow and unreliable. Repeatable reports become slash commands; per-conversation context becomes chat-start; live state becomes every-turn.`
+      : ""
+  }
 2. Discover before proposing: call list_models and list_connections (and list_connection_tools for any you'll wire).
 3. ALWAYS ask whether the agent should be personal (user) or org-shared before saving — scope is required and you must not guess it.
 4. Propose: summarize the agent in plain language (name, model, connections, key instruction points) and get a quick confirmation.
-5. Call save_agent. It pauses for the user's approval — they'll see the full spec; that's expected.
+5. Call save_agent. It pauses for the user's approval — they'll see the full spec; that's expected.${
+    support.extensions
+      ? ` If the agent has extensions, draft and test_extension them BEFORE this save (an existing agent) or right after the first save (a new one — the tools come from its saved connections), then save_agent again with the extensions attached.`
+      : ""
+  }
 6. TEST IT: after saving, offer to test_agent with a realistic message. Read the answer + tool calls it returns, and tell the user how it did. If it's off (wrong tone, missed a tool, weak reasoning), refine the instructions and save_agent again, then re-test — iterate until it's good. test_agent blocks mutating tools by default (no real side effects); only pass live=true if the user explicitly wants a real end-to-end run.
 7. Confirm it's ready and that they can pick it from the agent list.
 
-MODIFYING an existing agent: call get_agent first, change only what's needed, then save_agent with the SAME name and scope. Re-test with test_agent to confirm the change had the intended effect.
+MODIFYING an existing agent: call get_agent first, change only what's needed, then save_agent with the SAME name and scope. Re-test with test_agent to confirm the change had the intended effect.${
+    support.extensions
+      ? ` When the user wants a better template, a different trigger, or asks why an extension shows odd output, get_agent shows the extension; run test_extension by name to see its real output and rendered text, fix, then save_agent with the COMPLETE extensions list.`
+      : ""
+  }
 
 USING HISTORY: when the user refers to past work ("make an agent like in that chat"), use list_chats + read_chat to read the relevant conversation and ground the prompt/connections in what actually happened.
 
