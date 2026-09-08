@@ -694,7 +694,7 @@ function AgentEditor() {
           )}
         </div>
 
-        <ExtensionsSection rec={rec} patch={patch} editing={editing} tools={toolList} />
+        <ExtensionsSection rec={rec} editing={editing} />
 
         {error && <p className="text-destructive text-sm">{error}</p>}
         <div className="border-primary-border flex items-center gap-2 border-t pt-4">

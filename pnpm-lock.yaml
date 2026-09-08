@@ -160,6 +160,9 @@ importers:
       '@codemirror/language':
         specifier: ^6.12.4
         version: 6.12.4
+      '@codemirror/lint':
+        specifier: ^6.9.7
+        version: 6.9.7
       '@codemirror/state':
         specifier: ^6.7.0
         version: 6.7.0
@@ -274,6 +277,9 @@ importers:
       kysely:
         specifier: ^0.29.2
         version: 0.29.2
+      liquidjs:
+        specifier: ^10.29.0
+        version: 10.29.0
       lucide-react:
         specifier: ^1.21.0
         version: 1.21.0(react@19.2.7)

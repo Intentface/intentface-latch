@@ -23,6 +23,7 @@ import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
 import { Route as AgentsEditRouteImport } from './routes/agents.edit'
+import { Route as AgentsExtensionRouteImport } from './routes/agents.extension'
 import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ApiTranscribeRouteImport } from './routes/api/transcribe'
@@ -106,6 +107,11 @@ const AgentsEditRoute = AgentsEditRouteImport.update({
   path: '/edit',
   getParentRoute: () => AgentsRoute,
 } as any)
+const AgentsExtensionRoute = AgentsExtensionRouteImport.update({
+  id: '/extension',
+  path: '/extension',
+  getParentRoute: () => AgentsRoute,
+} as any)
 const ApiCronRoute = ApiCronRouteImport.update({
   id: '/api/cron',
   path: '/api/cron',
@@ -181,6 +187,7 @@ export interface FileRoutesByFullPath {
   '/schedules': typeof SchedulesRoute
   '/tools': typeof ToolsRoute
   '/agents/edit': typeof AgentsEditRoute
+  '/agents/extension': typeof AgentsExtensionRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/api/transcribe': typeof ApiTranscribeRoute
@@ -207,6 +214,7 @@ export interface FileRoutesByTo {
   '/schedules': typeof SchedulesRoute
   '/tools': typeof ToolsRoute
   '/agents/edit': typeof AgentsEditRoute
+  '/agents/extension': typeof AgentsExtensionRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/api/transcribe': typeof ApiTranscribeRoute
@@ -236,6 +244,7 @@ export interface FileRoutesById {
   '/schedules': typeof SchedulesRoute
   '/tools': typeof ToolsRoute
   '/agents/edit': typeof AgentsEditRoute
+  '/agents/extension': typeof AgentsExtensionRoute
   '/api/cron': typeof ApiCronRoute
   '/api/slack': typeof ApiSlackRouteWithChildren
   '/api/transcribe': typeof ApiTranscribeRoute
@@ -266,6 +275,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/tools'
     | '/agents/edit'
+    | '/agents/extension'
     | '/api/cron'
     | '/api/slack'
     | '/api/transcribe'
@@ -292,6 +302,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/tools'
     | '/agents/edit'
+    | '/agents/extension'
     | '/api/cron'
     | '/api/slack'
     | '/api/transcribe'
@@ -320,6 +331,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/tools'
     | '/agents/edit'
+    | '/agents/extension'
     | '/api/cron'
     | '/api/slack'
     | '/api/transcribe'
@@ -458,6 +470,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsEditRouteImport
       parentRoute: typeof AgentsRoute
     }
+    '/agents/extension': {
+      id: '/agents/extension'
+      path: '/extension'
+      fullPath: '/agents/extension'
+      preLoaderRoute: typeof AgentsExtensionRouteImport
+      parentRoute: typeof AgentsRoute
+    }
     '/api/cron': {
       id: '/api/cron'
       path: '/api/cron'
@@ -547,11 +566,13 @@ declare module '@tanstack/react-router' {
 
 interface AgentsRouteChildren {
   AgentsEditRoute: typeof AgentsEditRoute
+  AgentsExtensionRoute: typeof AgentsExtensionRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
 }
 
 const AgentsRouteChildren: AgentsRouteChildren = {
   AgentsEditRoute: AgentsEditRoute,
+  AgentsExtensionRoute: AgentsExtensionRoute,
   AgentsIndexRoute: AgentsIndexRoute,
 }
 

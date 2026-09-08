@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { autocompletion, type Completion, type CompletionContext } from "@codemirror/autocomplete";
+import { linter, type Diagnostic } from "@codemirror/lint";
 import type { Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, hoverTooltip } from "@codemirror/view";
 import { cn } from "@/lib/utils";
 
 /**
@@ -21,6 +22,8 @@ export function CodeEditor({
   ariaLabel = "Code",
   minHeight,
   maxHeight,
+  lint,
+  hover,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -34,6 +37,13 @@ export function CodeEditor({
   completions?: Completion[];
   /** The editor's accessible name (it is a textbox to assistive technology). */
   ariaLabel?: string;
+  /**
+   * Live diagnostics: given the source, return problems as callscript reports
+   * them (`"line 2: …"` or `"steps[0].call: …"`). Debounced by the editor.
+   */
+  lint?: (source: string) => Promise<string[]>;
+  /** Hover documentation for an identifier under the pointer (a tool card), or null. */
+  hover?: (word: string) => HTMLElement | null;
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
@@ -42,6 +52,36 @@ export function CodeEditor({
       javascript({ typescript: true }),
       EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
     ];
+    if (lint) {
+      exts.push(
+        linter(
+          async (view) => {
+            const source = view.state.doc.toString();
+            if (!source.trim()) return [];
+            const issues = await lint(source);
+            return issues.map((issue): Diagnostic => {
+              // "line N: message" → that line; anything else → the first line.
+              const m = issue.match(/^line (\d+):\s*(.*)$/s);
+              const lineNo = m ? Math.min(Number(m[1]), view.state.doc.lines) : 1;
+              const line = view.state.doc.line(Math.max(1, lineNo));
+              return { from: line.from, to: line.to, severity: "error", message: m ? m[2]! : issue };
+            });
+          },
+          { delay: 500 },
+        ),
+      );
+    }
+    if (hover) {
+      exts.push(
+        hoverTooltip((view, pos) => {
+          const word = view.state.wordAt(pos);
+          if (!word) return null;
+          const dom = hover(view.state.sliceDoc(word.from, word.to));
+          if (!dom) return null;
+          return { pos: word.from, end: word.to, above: true, create: () => ({ dom }) };
+        }),
+      );
+    }
     if (completions?.length) {
       const source = (ctx: CompletionContext) => {
         const word = ctx.matchBefore(/[A-Za-z_][\w]*/);
@@ -51,7 +91,7 @@ export function CodeEditor({
       exts.push(autocompletion({ override: [source], activateOnTyping: true, icons: false }));
     }
     return exts;
-  }, [completions, ariaLabel]);
+  }, [completions, ariaLabel, lint, hover]);
 
   if (!mounted) {
     return (

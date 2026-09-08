@@ -600,6 +600,68 @@ export const saveAgentFn = createServerFn({ method: "POST" })
   });
 
 /**
+ * Save ONE extension onto a stored agent — the extension page's Save. The
+ * record schema validates the entry; the list keeps its order; renaming
+ * replaces the entry under `previousName`. Everything else on the record is
+ * carried over untouched (same rule the agent form applies to attached evals).
+ */
+export const saveAgentExtensionFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { agent: string; scope: "user" | "org"; extension: AgentExtensionRecord; previousName?: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const parsed = AgentExtensionSchema.safeParse(data.extension);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      return { ok: false as const, error: first ? `${first.path.join(".") || "extension"}: ${first.message}` : "invalid extension" };
+    }
+    const { agentStore } = await getLatch();
+    const existing = await agentStore.getRecord(principal, `${data.scope}:${data.agent}`);
+    if (!existing) return { ok: false as const, error: `Agent "${data.agent}" not found — save it first.` };
+    const list = [...(existing.extensions ?? [])];
+    const replaceName = data.previousName ?? parsed.data.name;
+    const i = list.findIndex((e) => e.name === replaceName);
+    if (list.some((e, j) => e.name === parsed.data.name && j !== i)) {
+      return { ok: false as const, error: `An extension named "${parsed.data.name}" already exists on this agent.` };
+    }
+    if (i >= 0) list[i] = parsed.data;
+    else list.push(parsed.data);
+    await agentStore.upsert(principal, { ...existing, extensions: list });
+    return { ok: true as const, name: parsed.data.name };
+  });
+
+/** Remove one extension from a stored agent. */
+export const deleteAgentExtensionFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; scope: "user" | "org"; name: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore } = await getLatch();
+    const existing = await agentStore.getRecord(principal, `${data.scope}:${data.agent}`);
+    if (!existing) return { ok: false as const, error: "agent not found" };
+    const list = (existing.extensions ?? []).filter((e) => e.name !== data.name);
+    await agentStore.upsert(principal, { ...existing, extensions: list.length ? list : undefined });
+    return { ok: true as const };
+  });
+
+/**
+ * Validate a script as it is typed (the editor's lint): parse + check against
+ * the tool names the client already holds. No connections are opened and
+ * nothing runs — it is the same `analyze` the turn performs first.
+ */
+export const analyzeExtensionScriptFn = createServerFn({ method: "POST" })
+  .validator((data: { script: string; toolNames: string[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { issues: ["unauthorized"], calls: [] as string[] };
+    const { createScriptEngine } = await import("@intentface/latch-script");
+    const a = createScriptEngine().analyze(data.script, { tools: data.toolNames });
+    return { issues: a.issues, calls: a.calls };
+  });
+
+/**
  * The slash extensions an agent offers, for the chat composer's `/` menu —
  * names and descriptions only, never scripts.
  */
