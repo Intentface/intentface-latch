@@ -1,0 +1,81 @@
+---
+title: Extensions
+description: Scripts that run before the model — fetch what the agent always needs, render it into the prompt, and store exactly what the model read.
+---
+
+Some agents always need the same data before they can answer: the week's hours before a report, the customer record before a support chat, the open pull requests before a standup. Writing "first fetch this, then that" into the instructions works, slowly and unreliably. An **extension** does it before the model runs: a small script over the agent's tools, and a template that renders the result into the prompt.
+
+```ts
+defineAgent<Principal>(() => ({
+  model,
+  instructions: "You write crisp weekly reports.",
+  connections: ["clockify", "github"],
+  extensions: [
+    {
+      name: "report", // typed as `/report week`
+      on: "slash",
+      script: `
+        const hours = await clockify_getTimeEntries({ period: input.args });
+        const prs = await github_listPullRequests({ state: "merged" });
+        return { hours, merged: prs.length };
+      `,
+      template: `Write the weekly report for {{ input.args }}.
+{% for h in output.hours %}- {{ h.member }}: {{ h.total }}h
+{% endfor %}Merged PRs: {{ output.merged }}`,
+    },
+  ],
+}));
+```
+
+Extensions need a script engine on the runtime: `scripts: createScriptEngine()` from [`@intentface/latch-script`](/docs/reference/packages#latch-script). Without one, the declaration is ignored.
+
+## Three triggers
+
+| `on` | Runs | Typical use |
+| --- | --- | --- |
+| `slash` | when the user types `/name …` — `input.args` is the rest of the line, `input.argv` the words | repeatable reports, commands with arguments |
+| `chat-start` | once per conversation; `refresh: { afterMs }` runs it again when the last result is stale | who the user is, the account, the document the chat was opened from |
+| `every-turn` | before every message | live state: queue depth, sprint burn, on-call |
+
+Unknown `/text` stays an ordinary message, so a pasted path never triggers anything. A client may also stamp `metadata.extension = { name, input }` on the message instead of relying on text.
+
+## Where the result goes
+
+`target: "message"` (the default) renders the template next to the user's text, before or after it (`placement`). `target: "instructions"` renders it as a system message placed **after** the prompt-cache breakpoint, so a refreshed block never invalidates the cached prefix; `scope: "chat"` keeps that block for the rest of the conversation. Media the script returns under `files` (images, PDFs, capped at 4.5 MB) becomes file parts the model reads natively.
+
+`reveal` decides what the user sees on their own message: only what they typed (`command`, the default), the rendered prompt (`prompt`), or both.
+
+## What happens underneath
+
+1. The turn opens and the agent's tools are opened, as on any turn.
+2. The script is **parsed into an inert plan and validated** against the mounted tool names — unknown tools, bad arguments, loops, `new`, globals and prototype access are all rejected before anything runs. Approval-gated tools are excluded from the mount unless the extension sets `allowMutations`, because a script call is a direct `execute` that bypasses the SDK's approval gate.
+3. The plan runs; the template renders.
+4. The result is **persisted as a `data-extension` part on the user message** — before the model is called.
+5. The model projection renders that part into the user turn or the system prompt. The client projection redacts it per `reveal`.
+
+Step 4 is the point. The model reads exactly what is in the log, a crash-resume replays the identical prompt without re-fetching, and the user's typed text is never rewritten. Everything the AI SDK's own hooks (`prepareCall`, `prepareStep`) could inject would be lost on resume, because the SDK persists only what the model produced.
+
+## Failure
+
+A script that fails — validation, a tool error, a timeout (default 30 s), a gated call — leaves a part carrying `error` and, by default, a one-line note the model can act on: it may call the tools itself, under the normal approval flow. `onError: "fail"` errors the turn instead.
+
+## Where this gets hard
+
+- **Read-only by default is a safety rule, not a convenience.** A `chat-start` extension runs again on every new chat and after every compaction; an `every-turn` one runs constantly. A mutating call there is a repeated side effect. Turn `allowMutations` on only for a slash extension a person invokes deliberately.
+- **Data in the system prompt has instruction authority.** A fetched ticket title that reads like an instruction becomes one. Keep content in the user turn; keep the system target for facts about the situation ("the user is Anna, in Helsinki").
+- **Size.** `rendered` is capped (`limits.maxRenderedChars`, default 50 000) *before* it becomes the model text, and the stored output is bounded — the cap is part of "what is stored is what the model read".
+- **Function-form `toolApproval`** cannot be enumerated, so every tool counts as gated; such an agent's extensions need `allowMutations`.
+
+## Authoring and testing
+
+`runtime.previewExtension({ agent, principal, extension, text })` runs one extension — saved or a draft — over the agent's live tools with no model call and nothing persisted, and returns the part it would have produced. The Agent Builder's `test_extension` and an editor's Test panel are both that call.
+
+## See it running
+
+`pnpm --filter @intentface/latch-example smoke:extensions` runs a slash and a chat-start extension through the real engine and the drizzle adapter, then checks the prompt, the stored part, the redaction and a resume-safe second turn.
+
+## Next
+
+- [Reference: packages — latch-script](/docs/reference/packages#latch-script)
+- [Reference: seams](/docs/reference/seams#scripts--extensions-before-the-model)
+- [Foundations: the run log](/docs/foundations/run-log)

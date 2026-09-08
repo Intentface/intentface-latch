@@ -13,6 +13,7 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 | [`latch-mcp`](#latch-mcp) | tools from MCP servers |
 | [`latch-openapi`](#latch-openapi) | tools from an OpenAPI spec |
 | [`latch-memory`](#latch-memory) | agents that remember across sessions |
+| [`latch-script`](#latch-script) | scripts that run before the model (slash commands, data loaders) |
 | [`latch-channels`](#latch-channels) | Slack, Telegram, WhatsApp |
 | [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
 | [`latch-langfuse`](#latch-langfuse) | tracing |
@@ -124,6 +125,17 @@ defineAgent<Principal>(() => ({
 
 Key exports: `createMemoryProvider` · `createLoredexStore` · `scopeRefOf` · the extraction/consolidation prompts and schemas.
 
+## latch-script
+
+**Fetch first, then think.** Implements the `scripts` seam for agent [extensions](/docs/agents/extensions): a script in a JavaScript subset is parsed by [callscript](https://github.com/vercel-labs/callscript) into an inert JSON plan — nothing the author wrote executes as code, so there is no sandbox and the whole plan validates before a single tool fires — and a Liquid template renders the result into the prompt. Core stores the result on the user message before the model runs; the model reads it from the log, on this turn and on every resume.
+
+```ts
+import { createScriptEngine } from "@intentface/latch-script";
+createRuntime({ /* … */ scripts: createScriptEngine() });
+```
+
+Key exports: `createScriptEngine`. Dependencies: `callscript`, `liquidjs`.
+
 → [Memory](/docs/memory)
 
 ## latch-channels
@@ -213,7 +225,7 @@ that remember. This covers most products.
 pnpm add @intentface/latch-core @intentface/latch-drizzle \
          @intentface/latch-server @intentface/latch-mcp \
          @intentface/latch-openapi @intentface/latch-memory \
-         @intentface/latch-channels @intentface/latch-agent-builder \
+         @intentface/latch-script @intentface/latch-channels @intentface/latch-agent-builder \
          @intentface/latch-langfuse @intentface/latch-net \
          ai @ai-sdk/anthropic
 ```

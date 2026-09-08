@@ -64,6 +64,7 @@ Each of these needs the matching runtime seam; without it the flag is a no-op.
 | `providerWebTools` | `resolveProviderTools` | The provider's native server-side web search/fetch. |
 | `memory` | `memory` provider | A compiled memory index in the prompt plus `memory_search`/`memory_save`. See [Seams](/docs/reference/seams). |
 | `subagents` | — | A `spawn_agent` tool that runs one of the named agents as a child run. |
+| `extensions` | `scripts` engine | Scripts that run before the model and render into the prompt — slash commands, chat-start loaders, every-turn context. See [Extensions](/docs/agents/extensions). |
 
 ### Control
 

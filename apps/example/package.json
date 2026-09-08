@@ -22,6 +22,7 @@
     "smoke:writer": "tsx --conditions development src/writer.smoke.ts",
     "smoke:cost": "tsx --conditions development src/cost.smoke.ts",
     "smoke:projections": "tsx --conditions development src/projections.smoke.ts",
+    "smoke:extensions": "tsx --conditions development src/extensions.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "@intentface/latch-core": "workspace:*",
     "@intentface/latch-drizzle": "workspace:*",
     "@intentface/latch-mcp": "workspace:*",
+    "@intentface/latch-script": "workspace:*",
     "@intentface/latch-server": "workspace:*",
     "@libsql/client": "^0.15.0",
     "ai": "^7.0.2",

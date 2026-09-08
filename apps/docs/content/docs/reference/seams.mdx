@@ -147,6 +147,15 @@ harnessTools: {
 
 `approval` here is a *default* — an agent that names the same tool in its own `toolApproval` wins, so a host can ship a side-effecting harness tool gated by default without freezing that choice for every agent.
 
+## Scripts — extensions before the model
+
+```ts
+import { createScriptEngine } from "@intentface/latch-script";
+createRuntime({ /* … */ scripts: createScriptEngine() });
+```
+
+The engine behind an agent's `extensions`: it parses a script (a JavaScript subset) into an inert plan, validates it against the turn's tool names, runs it over tool mounts core has already bound to the turn's context (approval-gated tools excluded unless the extension allows mutations), and renders a Liquid template. Core persists the result on the user message before the model runs and projects it from there. Omit the seam and every `extensions` declaration is ignored. See [Extensions](/docs/agents/extensions).
+
 ## Provider tools and reasoning
 
 ```ts
