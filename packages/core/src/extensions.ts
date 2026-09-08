@@ -548,6 +548,49 @@ export function collectFiles(output: unknown): {
   return { output: rest, files, dropped };
 }
 
+// ------------------------------------------------------------ tool results
+
+/**
+ * Give a script the VALUE a tool produced, not the wire envelope. MCP tools
+ * return `{ content: [{ type: "text", text }], structuredContent?, isError? }`
+ * — fine for the model, useless for `output.changes.files`. Mirrors what an
+ * MCP client adapter does: `structuredContent` wins; one text part that parses
+ * as JSON becomes that value; several text parts join; anything else (files,
+ * images, non-MCP shapes) passes through untouched. `isError` throws, so a
+ * script's `try/catch` and the step's error branch see it as a failure.
+ */
+export function unwrapToolResult(result: unknown): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const r = result as {
+    content?: unknown;
+    structuredContent?: unknown;
+    isError?: unknown;
+  };
+  if (!Array.isArray(r.content)) return result;
+  const parts = r.content as Array<{ type?: unknown; text?: unknown }>;
+  if (!parts.every((p) => p && typeof p === "object" && typeof p.type === "string")) return result;
+  const texts = parts.filter((p) => p.type === "text" && typeof p.text === "string").map((p) => p.text as string);
+  if (r.isError === true) {
+    throw Object.assign(new Error(texts.join("\n") || "tool returned an error"), { code: "tool_error" });
+  }
+  if (r.structuredContent !== undefined && r.structuredContent !== null) return r.structuredContent;
+  if (texts.length === parts.length) {
+    if (texts.length === 1) {
+      const t = texts[0]!.trim();
+      if (/^[[{]/.test(t)) {
+        try {
+          return JSON.parse(t);
+        } catch {
+          // not JSON after all — hand back the text
+        }
+      }
+      return texts[0];
+    }
+    return texts.join("\n");
+  }
+  return result;
+}
+
 // ------------------------------------------------------------------- gating
 
 /**

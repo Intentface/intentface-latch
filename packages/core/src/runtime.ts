@@ -34,6 +34,7 @@ import {
   parseSlashInvocation,
   redactExtensionParts,
   selectExtensions,
+  unwrapToolResult,
   type AgentExtension,
   type ExtensionPart,
   type ExtensionPartData,
@@ -672,7 +673,9 @@ function scriptMounts(
       description: typeof def.description === "string" ? def.description : undefined,
       inputSchema,
       execute: async (args, ctx) =>
-        execute(args, { toolCallId: ctx.toolCallId, messages: [], ...opts.execOptions }),
+        unwrapToolResult(
+          await execute(args, { toolCallId: ctx.toolCallId, messages: [], ...opts.execOptions }),
+        ),
     });
   }
   return out;

@@ -420,7 +420,8 @@ function ExtensionEditor({
               <p className="text-ink-tertiary text-xs">
                 Liquid over <span className="font-mono">output</span> (the script's return),{" "}
                 <span className="font-mono">input</span> and <span className="font-mono">steps</span>. After a run,{" "}
-                <span className="font-mono">output.</span> completes with the real keys. Blank = the output as JSON.
+                <span className="font-mono">output.</span> completes with the real keys. Objects and lists need{" "}
+                <span className="font-mono">| json</span> or a loop. Blank = the output as JSON.
               </p>
             </>
           )}

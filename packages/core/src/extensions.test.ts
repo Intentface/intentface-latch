@@ -15,6 +15,7 @@ import {
   parseSlashInvocation,
   redactExtensionParts,
   selectExtensions,
+  unwrapToolResult,
   type AgentExtension,
   type ExtensionPart,
   type ScriptEngine,
@@ -402,6 +403,38 @@ describe("a slash extension on a turn", () => {
     const text = userText(prompts[0]);
     expect(text.indexOf("```json")).toBeLessThan(text.indexOf("/report week"));
     expect(text).toContain('"n": 1');
+  });
+});
+
+describe("unwrapToolResult", () => {
+  it("gives scripts the value, not the MCP envelope", () => {
+    const json = JSON.stringify({ files: [{ name: "week-37" }] });
+    expect(unwrapToolResult({ content: [{ type: "text", text: json }] })).toEqual({ files: [{ name: "week-37" }] });
+    expect(unwrapToolResult({ content: [{ type: "text", text: "plain words" }] })).toBe("plain words");
+    expect(unwrapToolResult({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] })).toBe("a\nb");
+    expect(
+      unwrapToolResult({ content: [{ type: "text", text: "ignored" }], structuredContent: { n: 1 } }),
+    ).toEqual({ n: 1 });
+    // Mixed media stays an envelope; non-MCP shapes pass through.
+    const mixed = { content: [{ type: "text", text: "x" }, { type: "image", data: "…", mimeType: "image/png" }] };
+    expect(unwrapToolResult(mixed)).toBe(mixed);
+    expect(unwrapToolResult({ rows: 3 })).toEqual({ rows: 3 });
+    expect(unwrapToolResult([1, 2])).toEqual([1, 2]);
+    expect(unwrapToolResult("s")).toBe("s");
+    expect(() => unwrapToolResult({ content: [{ type: "text", text: "not found" }], isError: true })).toThrow(/not found/);
+  });
+
+  it("is applied to every script mount", async () => {
+    const mcpLike = tool({
+      description: "mcp-shaped",
+      inputSchema: z.object({}),
+      execute: async () => ({ content: [{ type: "text", text: JSON.stringify({ hello: "world" }) }] }),
+    });
+    const { engine, toolResults } = fakeEngine({ calls: ["mcp_thing"], callTool: { name: "mcp_thing", args: {} } });
+    const { model } = capturingModel();
+    const rt = runtimeWith({ extensions: [report], engine, model, tools: { mcp_thing: mcpLike }, toolApproval: {} });
+    await turn(rt, userMessage("/report week"));
+    expect(toolResults[0]).toEqual({ hello: "world" });
   });
 });
 

@@ -27,6 +27,8 @@ defineAgent<Principal>(() => ({
 }));
 ```
 
+Tool results reach the script as plain values: an MCP result whose text is JSON is parsed, `structuredContent` wins when present, and an `isError` result throws so `try/catch` sees it. In the template, render an object or a list with the `json` filter (`{{ output.hours | json }}`); a bare object prints as `[object Object]`.
+
 Extensions need a script engine on the runtime: `scripts: createScriptEngine()` from [`@intentface/latch-script`](/docs/reference/packages#latch-script). Without one, the declaration is ignored.
 
 ## Three triggers
