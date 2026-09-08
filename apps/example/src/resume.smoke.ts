@@ -62,6 +62,33 @@ async function main() {
   const again = await runtime.resume(original.id);
   assert(again === null, "second resume is a no-op (run already completed)");
 
+  // The chat's SECOND turn dies the same way. Now the last assistant message in
+  // history is legitimately the PREVIOUS turn's, and the last message overall is
+  // this run's own opening user message. Recovery must read neither as "the
+  // chat moved on" — that regression settled a live run as superseded and
+  // dropped the request without a model call.
+  const user2: AppMessage = {
+    id: "msg_user_2",
+    role: "user",
+    parts: [{ type: "text", text: "and again" }],
+    metadata: { visibility: "user", createdAt: Date.now() },
+  };
+  await storage.appendMessages(chat.id, [user2]);
+  const second = await storage.claimRun({
+    principal: scope,
+    chatId: chat.id,
+    agent: "echo",
+    owner: "dead_node",
+    ttlMs: 20,
+  });
+  await new Promise((r) => setTimeout(r, 40));
+  await storage.reapExpiredRuns(Date.now());
+  const result2 = await runtime.resume(second.id);
+  assert(result2?.status === "completed", `second-turn crash resumed to completed (got ${result2?.status})`);
+  const after2 = await storage.loadMessages(scope, chat.id);
+  assert(after2.length === 4, `second-turn resume produced its reply (got ${after2.length} messages)`);
+  assert(after2[3]?.role === "assistant", "the reply follows the second user message");
+
   console.log("✅ resume smoke passed — reaped run re-claimed, re-run, completed (exactly once)");
 }
 

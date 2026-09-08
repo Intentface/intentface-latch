@@ -646,6 +646,26 @@ function firstText(message: AppMessage): string | undefined {
 }
 
 /** The text of the turn's incoming user message (for telemetry). */
+/** The runtime's own user-role message: a compaction summary + boundary marker, not a turn. */
+function isCompactionMarker(m: AppMessage): boolean {
+  return (m.parts ?? []).some((p) => (p as { type: string }).type === COMPACTION_PART_TYPE);
+}
+
+/**
+ * The model that ran THIS run, off the assistant message it produced (each one
+ * carries its run id). Falls back to the tail when nothing is correlated —
+ * the legacy shape — and to nothing when the run never produced a message.
+ */
+function ranAs(messages: AppMessage[], runId: string): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    const owner = (m.metadata as { runId?: unknown } | undefined)?.runId;
+    if (owner === runId || owner === undefined) return m.metadata?.model;
+  }
+  return undefined;
+}
+
 function lastUserText(messages: AppMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -913,6 +933,127 @@ function markSubagentApprovalResolved(
 }
 
 /**
+ * What crash recovery should DO with a run it just reclaimed, read off the tail
+ * of persisted history.
+ *
+ * The subtlety this exists for: finishing the tool loop and RECORDING that fact
+ * are two different writes. The per-step checkpoint is fire-and-forget at each
+ * step's end, while the run row only becomes `completed` in `onFinish`. Die in
+ * that gap and the row still says `active` with a lease — so the reaper takes a
+ * run whose work is already done and whose answer is already stored.
+ *
+ * Re-running the model there is worse than useless: it pays for a second
+ * generation, and (because the SDK reuses the message id) the new text lands in
+ * the same message as the old, so the reader can end up with the answer twice.
+ * Reconciling the row costs nothing and loses nothing.
+ *
+ *  - `superseded` — not produced here but by `supersededBy`, from the runs
+ *    table: the chat opened a later turn while this run sat reaped. Settle it as
+ *    errored with the same "superseded" outcome `openTurn` gives a stale run.
+ *  - `decision-pending` — a gate is awaiting a human. The row never got its
+ *    `awaiting_input`; settle it there and let `applyApproval` drive the rest.
+ *    (Reaping is scoped to `active`, so this only ever arrives via that gap.)
+ *  - `loop-finished` — the last step called no tool, which is exactly the
+ *    condition on which the tool loop stops; or it is waiting on a CLIENT-
+ *    handled tool (askUser), which `onFinish` also records as completed, the
+ *    answer arriving later via `applyToolResult`. The turn is done; settle it.
+ *  - `continue` — there is real work left (a tool result to consume, a step that
+ *    produced nothing, or no assistant message at all). Re-run the model.
+ *
+ * The yardstick for every verdict: what `onFinish` would have written had the
+ * process lived. That is what makes each one checkable — a `stopWhen` cut (step
+ * cap, token budget) leaves a tool part in the final step and so reads as
+ * `continue`, which costs a wasted turn but never loses work; the reverse
+ * mistake, calling an unfinished turn finished, would silently drop the user's
+ * request.
+ *
+ * The final step is the parts after the last `step-start`; a tool part there
+ * means the loop had gone round again and was still going.
+ */
+export type ResumeShape = "superseded" | "decision-pending" | "loop-finished" | "continue";
+
+/**
+ * Has this chat opened another turn since `run` started? Then `run` was
+ * superseded — the conversation moved on while it sat reaped — and it must
+ * settle rather than run: re-running would generate against a conversation that
+ * has moved on and, because the message id is reused, append the result to the
+ * later turn's message.
+ *
+ * Read off the RUNS, not the messages. Every user message is persisted together
+ * with its run (`openTurn`), so a later run in the chat is the one fact that
+ * proves a later turn exists. Messages cannot tell us this: user messages carry
+ * no run id, and when a turn crashes before its first checkpoint the previous
+ * turn's assistant message is legitimately the last assistant in history —
+ * reading either as "someone else's" marks a live run superseded and drops the
+ * user's request without a model call, which is the one failure worse than the
+ * bug this all fixes.
+ *
+ * Compaction runs summarise the conversation so far; they are not turns.
+ */
+export function supersededBy(
+  run: Pick<RunRecord, "id" | "chatId" | "startedAt">,
+  runs: readonly RunRecord[],
+): boolean {
+  return runs.some(
+    (r) => r.chatId === run.chatId && r.id !== run.id && r.kind !== "compaction" && r.startedAt > run.startedAt,
+  );
+}
+
+/**
+ * What a reclaimed run's OWN history says it needs. Pure: whether the chat has
+ * since moved on is `supersededBy`'s question, answered from the runs table.
+ */
+export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
+  // Compaction markers are not turns, so the tail is read past them: a summary
+  // appended after a reaped run's finished message must not make that message
+  // look like it was followed by a user turn (which would say "continue" and
+  // regenerate against the summary). `compactChat` refuses while a gate or
+  // client tool is pending, so a marker can never sit after an undecided one.
+  let end = messages.length;
+  while (end > 0 && isCompactionMarker(messages[end - 1])) end--;
+  const turns = end === messages.length ? messages : messages.slice(0, end);
+  // Checked next: a pending gate outranks the tail's shape, and its own tail
+  // (narration after the gated call) would otherwise read as `loop-finished`.
+  if (hasPendingApproval(turns)) return "decision-pending";
+  const last = turns[turns.length - 1];
+  // Nothing of this turn was checkpointed (or a user message came last) — the
+  // model has not spoken yet, so run it.
+  if (last?.role !== "assistant") return "continue";
+  const parts = (last.parts ?? []) as { type: string }[];
+  let stepStart = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i].type === "step-start") {
+      stepStart = i;
+      break;
+    }
+  }
+  const finalStep = parts.slice(stepStart + 1) as Array<{
+    type: string;
+    toolCallId?: unknown;
+    state?: unknown;
+    providerExecuted?: unknown;
+  }>;
+  // A step that opened and produced nothing: the crash landed inside it, so
+  // there is unfinished work regardless of what earlier steps did.
+  if (finalStep.length === 0) return "continue";
+  const toolParts = finalStep.filter((p) => p.type.startsWith("tool-") || p.type === "dynamic-tool");
+  // A CLIENT-handled tool (no `execute`, e.g. askUser) is the one tool part a
+  // checkpoint can hold with no result: the step's other tools ran, this one is
+  // for the client to answer, and the loop stops because not every call has an
+  // output. `onFinish` records that turn as `completed` and the answer arrives
+  // later through `applyToolResult`, which opens its own run — so that is what
+  // recovery must record too. Re-running instead would make the projection
+  // close the call as "interrupted" and the model ask its question twice.
+  // (A provider-executed tool still pending is the loop continuing, not a
+  // client wait, so it must not match.)
+  const awaitingClient = toolParts.some(
+    (p) => p.state === "input-available" && typeof p.toolCallId === "string" && !p.providerExecuted,
+  );
+  if (awaitingClient) return "loop-finished";
+  return toolParts.length > 0 ? "continue" : "loop-finished";
+}
+
+/**
  * The resume paths ({@link applyApproval} / {@link applyToolResult}) re-run the
  * model from history whose LAST message is the assistant turn that paused — no
  * fresh user message is appended. If that turn streamed trailing user-facing
@@ -947,7 +1088,10 @@ function markSubagentApprovalResolved(
  * commentary about a decision that has now been made; the resumed turn
  * regenerates the real continuation.
  */
-export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage[] {
+export function trimTrailingAssistantPrefill(
+  messages: AppMessage[],
+  opts?: { unanchored?: boolean },
+): AppMessage[] {
   if (messages.length === 0) return messages;
   const lastIndex = messages.length - 1;
   const last = messages[lastIndex];
@@ -962,8 +1106,18 @@ export function trimTrailingAssistantPrefill(messages: AppMessage[]): AppMessage
       break;
     }
   }
-  // No tool anchor at all → nothing safe to say about this shape; leave it.
-  if (anchor === -1) return messages;
+  // No tool anchor at all. On the DECISION paths that shape is not theirs to
+  // judge, so leave it (a bubbled `data-subagent-approval` message carries its
+  // narration and no `tool-*` part; trimming there would silently lose it).
+  //
+  // `unanchored` is belt and braces for CRASH RECOVERY, which cannot afford to
+  // hand the model a prefill under any tail shape: with no anchor every prefill
+  // part is dropped, which empties the message out of the model projection
+  // entirely. Today `resumeShapeOf` settles the one anchorless tail a
+  // checkpoint can actually produce (`[step-start, text]` — a tool-free turn,
+  // which is `loop-finished`) before the trim is reached, so this branch is a
+  // guard against a future classifier change, not a live path.
+  if (anchor === -1 && !opts?.unanchored) return messages;
   // step-start joins text/reasoning: see the doc comment — keeping it ends the
   // projection on an EMPTY assistant message, which providers also reject.
   const isPrefill = (t: string) => t === "text" || t === "reasoning" || t === "step-start";
@@ -1088,6 +1242,18 @@ export function createRuntime<P, RC = unknown>(
     heartbeatMs: config.durability?.heartbeatMs ?? 10_000,
     instanceId: config.durability?.instanceId ?? newInstanceId(),
   };
+  if (dur.enabled && !storage.openTurn) {
+    // Without `openTurn` a turn opens as two writes (run, then message), and a
+    // crash between them leaves a run whose own message never landed. Recovery
+    // then reads the PREVIOUS turn's tail as this run's history. Run
+    // correlation catches the common shape, but the contract is explicit that
+    // a durable adapter should be atomic here — every shipped adapter is.
+    console.warn(
+      "[latch] durability is enabled but the storage adapter has no openTurn(): " +
+        "turn creation is not atomic, so a crash can leave a run without its message. " +
+        "Implement openTurn — see the StorageAdapter contract.",
+    );
+  }
 
   /** Resolve an agent's per-request config + a display model id. */
   async function resolveAgentConfig(
@@ -2217,12 +2383,109 @@ export function createRuntime<P, RC = unknown>(
     // System op (no request): rebuild the principal from the run's identity blob.
     const principal = await reconstructPrincipal(run.identity);
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
     const uiMessages = await storage.loadMessages(principal, run.chatId);
     const lease: RunLease = {
       owner: dur.instanceId,
       fencingToken: run.fencingToken ?? 1,
     };
+
+    // What does this run actually need? A crash between the last step's
+    // checkpoint and `onFinish`'s `updateRun` leaves a FINISHED turn on an
+    // `active` row, and re-running the model there would pay twice for an answer
+    // already in history — and append the second copy to the same message. So
+    // reconcile the row instead, and only re-run when work is genuinely left.
+    // Did the chat move on while this run sat reaped? Asked of the runs table,
+    // never inferred from message shapes — see `supersededBy` for why. The list
+    // is owner-scoped and most-recent first; a later sibling is more recent than
+    // we are, so it is present unless more than `limit` runs happened owner-wide
+    // after IT. A miss errs toward re-running (today's behaviour), never toward
+    // settling a live run.
+    const siblings = await storage.listRuns(principal, { limit: 500 });
+    const shape: ResumeShape = supersededBy(run, siblings) ? "superseded" : resumeShapeOf(uiMessages);
+    if (shape !== "continue") {
+      const status: RunStatus =
+        shape === "superseded" ? "errored" : shape === "decision-pending" ? "awaiting_input" : "completed";
+      // Same outcome `openTurn` records when a fresh message supersedes a stale
+      // run, so a superseded run reads the same however it got there.
+      const error = shape === "superseded" ? "superseded: a later turn moved the conversation on" : null;
+      // Fenced like every other terminal write: if our lease was reaped again
+      // mid-flight, the new owner decides this run's end state, not us.
+      const applied = await storage.updateRun(
+        run.id,
+        {
+          status,
+          // The reaper stamped BOTH an error and an `endedAt` on the way in
+          // (see `reapExpiredRuns`). A finished turn did not fail, so its error
+          // has to go or the row reads as failed forever — and a run settling to
+          // `awaiting_input` is paused, not over, so its `endedAt` has to go
+          // too. `onFinish` leaves it unset for a paused turn; a crash-settled
+          // one must match, or inter-run gap stats read a run that ended before
+          // its decision arrived. `null` (not `undefined`) is what clears a
+          // column: the adapters drop undefined from the patch.
+          error,
+          endedAt: status === "awaiting_input" ? null : Date.now(),
+        },
+        lease,
+      );
+      // The process that spent this turn's tokens died before recording them,
+      // so usage is unknowable here — the row and this report agree on zero
+      // rather than inventing a number. The notification still fires: a host
+      // watching `onRunFinished` for "the turn ended" must not miss a turn just
+      // because recovery was a row write instead of a model call.
+      const meta: TelemetryRunMeta<P> = {
+        runId: run.id,
+        chatId: run.chatId,
+        agent: run.agent,
+        // The model that ACTUALLY ran, off the message it produced — not a
+        // freshly resolved config. Reconciling a finished turn must not need
+        // the agent to still exist (see above), and this is the truer answer
+        // anyway: the agent's model may have been changed since.
+        modelId: ranAs(uiMessages, run.id) ?? "unknown",
+        principal,
+        startedAt: run.startedAt,
+        depth: 0,
+        trigger: "resume",
+        rootChatId: run.chatId,
+      };
+      // Same opt-out rule as a streamed turn: a `telemetryFor` that returns
+      // undefined silences this run's hooks too (see buildTurn).
+      const telemetryOn =
+        !!config.telemetry &&
+        !(config.telemetry.telemetryFor && config.telemetry.telemetryFor(meta) === undefined);
+      if (applied && telemetryOn) {
+        try {
+          await config.telemetry?.onRunFinished?.(meta, {
+            status,
+            ...(error !== null ? { error } : {}),
+            inputText: lastUserText(uiMessages),
+            messages: uiMessages,
+            usage: { inputTokens: 0, outputTokens: 0 },
+            cost: 0,
+            endedAt: Date.now(),
+          });
+        } catch (e) {
+          console.warn("latch telemetry onRunFinished failed:", e);
+        }
+        try {
+          await config.telemetry?.flush?.();
+        } catch (e) {
+          console.warn("latch telemetry flush failed:", e);
+        }
+      }
+      const settled = await storage.getRun(runId);
+      return {
+        runId,
+        status: settled?.status ?? status,
+        attempt: settled?.attempt ?? run.attempt ?? null,
+      };
+    }
+
+    // Only now resolve the agent — `resolveAgentConfig` throws on an agent that
+    // no longer resolves, and a run whose answer is already stored must be
+    // reconcilable even if its (dynamic, DB-stored) agent was since deleted.
+    // Before this ordering that throw also aborted `sweep`'s loop, so one such
+    // run held up recovery for every other run until its attempts ran out.
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
 
     // A resume was admitted when the turn first ran — never refuse it (the
     // half-done work would strand), but its tokens still settle against the
@@ -2237,7 +2500,14 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages,
+      // Same prefill guard the decision paths use: a tail ending in the turn's
+      // own half-written sentence would reach the model as an assistant
+      // prefill, which models that reject one refuse on the request SHAPE — so
+      // every identical retry fails until `maxAttempts` is spent. `unanchored`
+      // extends it to a tail with no tool part to anchor on; no checkpoint
+      // produces such a tail on this path today (see the note there), it is
+      // here so a classifier change cannot reintroduce the prefill.
+      uiMessages: trimTrailingAssistantPrefill(uiMessages, { unanchored: true }),
       runtimeCtx,
       admitted,
       // Crash recovery, driven server-side: nobody is watching this stream.
