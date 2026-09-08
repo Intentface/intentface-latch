@@ -630,30 +630,32 @@ export interface SubagentProgressData {
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 
 /**
- * The turn's tools as script mounts for an extension: the model-callable set
- * (respecting `activeTools`), minus the OAuth `connect_*` gates and
- * `spawn_agent` (a script has no human to answer either), minus tools with no
- * server-side `execute` (provider-defined), and minus approval-gated tools
- * unless the extension allows mutations. Each mount calls the real tool with
- * the same `context` the model's own calls get — a script call is a direct
- * `execute`, which bypasses the SDK's approval gate; that is why gated tools
- * are excluded here rather than trusted to the policy.
+ * The turn's executable tools as script mounts for an extension: everything
+ * with a server-side `execute`, minus the OAuth `connect_*` gates and
+ * `spawn_agent` (a script has no human to answer either). `executeExtensions`
+ * validates against ALL of these so a refusal can name its reason, then runs
+ * with the inactive ones removed and the approval-gated ones removed unless
+ * the extension allows mutations — a script call is a direct `execute`, which
+ * bypasses the SDK's approval gate, so exclusion is the enforcement. Each mount
+ * calls the real tool with the same `context` the model's own calls get.
  */
+/** Tool names an `activeTools` restriction hides from the model this turn. */
+function inactiveToolNames(
+  tools: Record<string, unknown>,
+  activeTools: string[] | undefined,
+): Set<string> {
+  if (!activeTools) return new Set();
+  const active = new Set(activeTools);
+  return new Set(Object.keys(tools).filter((n) => !active.has(n)));
+}
+
 function scriptMounts(
   tools: Record<string, unknown>,
-  opts: {
-    activeTools: string[] | undefined;
-    gatedNames: ReadonlySet<string>;
-    includeGated: boolean;
-    execOptions: Record<string, unknown>;
-  },
+  opts: { execOptions: Record<string, unknown> },
 ): ScriptToolMount[] {
-  const active = opts.activeTools ? new Set(opts.activeTools) : null;
   const out: ScriptToolMount[] = [];
   for (const [name, t] of Object.entries(tools)) {
-    if (active && !active.has(name)) continue;
     if (name.startsWith("connect_") || name === "spawn_agent") continue;
-    if (!opts.includeGated && opts.gatedNames.has(name)) continue;
     const def = t as { description?: unknown; inputSchema?: unknown; execute?: unknown };
     if (typeof def.execute !== "function") continue;
     let inputSchema: Record<string, unknown> | undefined;
@@ -2089,9 +2091,9 @@ export function createRuntime<P, RC = unknown>(
                 engine: config.scripts,
                 selected,
                 message: lastMessage,
-                mounts: (includeGated) =>
-                  scriptMounts(tools, { activeTools, gatedNames, includeGated, execOptions }),
+                mounts: () => scriptMounts(tools, { execOptions }),
                 gatedNames,
+                inactiveNames: inactiveToolNames(tools, activeTools),
                 signal: dur.enabled ? abort.signal : undefined,
               });
               await persistAndStream(ran.message, ran.parts);
@@ -3188,9 +3190,9 @@ export function createRuntime<P, RC = unknown>(
           engine: config.scripts,
           selected: [{ ext, input: resolvedInput }],
           message,
-          mounts: (includeGated) =>
-            scriptMounts(tools, { activeTools, gatedNames, includeGated, execOptions }),
+          mounts: () => scriptMounts(tools, { execOptions }),
           gatedNames,
+          inactiveNames: inactiveToolNames(tools, activeTools),
         });
         return ran.parts[0].data;
       } catch (e) {

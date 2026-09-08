@@ -428,6 +428,17 @@ describe("tool mounting", () => {
     expect(runs[0].mounts).toEqual(["clockify_hours", "write_page"]);
   });
 
+  it("names the tools it can see when a script calls an unknown one", async () => {
+    const { engine } = fakeEngine({ issues: ['steps[0].call: Unknown tool "Fiva_loredex_concept_search"'] });
+    const { model } = capturingModel();
+    const rt = runtimeWith({ extensions: [report], engine, model });
+    const { stored } = await turn(rt, userMessage("/report week"));
+    const err = extPartsOf(stored[0])[0].data.error!;
+    expect(err.code).toBe("invalid_script");
+    // Validation sees EVERY executable tool, gated ones included, so the list is honest.
+    expect(err.message).toContain("Tools this script can call: clockify_hours, write_page");
+  });
+
   it("refuses a script that calls a gated tool, tells the model, and the turn still completes", async () => {
     const { engine, runs } = fakeEngine({ calls: ["write_page"] });
     const { model, prompts } = capturingModel();
@@ -485,7 +496,7 @@ describe("failure handling", () => {
     const rt = runtimeWith({ extensions: [{ ...report, onError: "fail" }], engine, model });
     const { stored } = await turn(rt, userMessage("/report week"));
     expect(prompts).toHaveLength(0);
-    expect(extPartsOf(stored[0])[0].data.error?.message).toBe("bad");
+    expect(extPartsOf(stored[0])[0].data.error?.message).toMatch(/^bad/);
     const run = [...rt.runs.values()][0];
     expect(run.status).toBe("errored");
     expect(run.error).toContain('Extension "report" failed: bad');
@@ -741,6 +752,6 @@ describe("previewExtension", () => {
     const { model } = capturingModel();
     const rt = runtimeWith({ extensions: [{ ...report, onError: "fail" }], engine, model });
     const data = await rt.runtime.previewExtension({ agent: "helper", principal, name: "report", input: { args: "x" } });
-    expect(data.error?.message).toBe("bad");
+    expect(data.error?.message).toMatch(/^bad/);
   });
 });

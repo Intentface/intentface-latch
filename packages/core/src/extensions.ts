@@ -596,9 +596,12 @@ export async function executeExtensions(opts: {
   engine: ScriptEngine;
   selected: readonly SelectedExtension[];
   message: AppMessage;
-  /** Mounts the script may call; `includeGated` adds approval-gated tools. */
-  mounts: (includeGated: boolean) => ScriptToolMount[];
+  /** Every executable tool of the turn (gated and inactive included) — the
+   *  script is validated against ALL of them so a refusal names its reason. */
+  mounts: () => ScriptToolMount[];
   gatedNames: ReadonlySet<string>;
+  /** Tools the agent's `enabledTools` hides from this turn (never run by a script). */
+  inactiveNames?: ReadonlySet<string>;
   now?: () => number;
   newId?: () => string;
   /** Outer abort (e.g. the lease). */
@@ -628,19 +631,33 @@ export async function executeExtensions(opts: {
     try {
       let scope: Record<string, unknown> = { input };
       if (ext.script !== undefined) {
-        const mounts = opts.mounts(r.allowMutations);
-        const names = mounts.map((t) => t.name);
+        const all = opts.mounts();
+        const names = all.map((t) => t.name);
+        const inactive = opts.inactiveNames ?? new Set<string>();
         const analysis = opts.engine.analyze(ext.script, { tools: names });
+        const inactiveCalls = analysis.calls.filter((c) => inactive.has(c));
+        const gatedCalls = analysis.calls.filter((c) => opts.gatedNames.has(c));
         if (analysis.issues.length > 0) {
-          fail(analysis.issues.join("; "), "invalid_script");
+          const available = names.length
+            ? ` Tools this script can call: ${names.slice(0, 40).join(", ")}${names.length > 40 ? ", …" : ""}.`
+            : " No tools are mounted for this agent (are its connections saved and authorized?).";
+          fail(analysis.issues.join("; ") + available, "invalid_script");
+        } else if (inactiveCalls.length > 0) {
+          fail(
+            `calls tool(s) not enabled for this agent: ${inactiveCalls.join(", ")} (enable them under the agent's tools)`,
+            "tool_not_enabled",
+          );
+        } else if (gatedCalls.length > 0 && !r.allowMutations) {
+          fail(
+            `calls approval-gated tool(s) ${gatedCalls.join(", ")}; set allowMutations to permit`,
+            "gated_tool",
+          );
         } else {
-          const gatedCalls = analysis.calls.filter((c) => opts.gatedNames.has(c));
-          if (gatedCalls.length > 0 && !r.allowMutations) {
-            fail(
-              `calls approval-gated tool(s) ${gatedCalls.join(", ")}; set allowMutations to permit`,
-              "gated_tool",
+          {
+            // Only what this extension may run: never inactive; gated only when allowed.
+            const mounts = all.filter(
+              (t) => !inactive.has(t.name) && (r.allowMutations || !opts.gatedNames.has(t.name)),
             );
-          } else {
             const ac = new AbortController();
             const onOuter = () => ac.abort(opts.signal?.reason);
             opts.signal?.addEventListener("abort", onOuter, { once: true });
