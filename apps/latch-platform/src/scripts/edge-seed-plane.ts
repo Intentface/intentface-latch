@@ -20,8 +20,7 @@ const FIXTURES = resolve("src/evals/edge/fixtures/client-plane");
 const PLANE_ROOT = "edge";
 // Never seed a knowledge/inbox workspace: this script recreates `edge/` wholesale.
 // (2026-09-10: the user chose to run the eval against the REAL client workspace
-// ws_7e_rtGs6Hbd0IUAhJ_Pdf, so that id is deliberately NOT protected; its prior
-// edge/memory/ is archived under fixtures/client-plane-archive/.)
+// ws_7e_rtGs6Hbd0IUAhJ_Pdf, so that id is deliberately NOT protected.)
 const PROTECTED_WS = new Set(["ws_diTBvPuyFL7jHOKPJKM1S", "ws_tRUBqZ-dKZDFalqejsUrs"]);
 
 const dryRun = process.argv.includes("--dry-run");
