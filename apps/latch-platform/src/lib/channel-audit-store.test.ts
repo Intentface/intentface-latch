@@ -65,4 +65,27 @@ describe("channel audit store", () => {
     const rows = await store.list({ appId: "A1" });
     expect(rows.map((r) => r.ts)).toEqual([101, 50]);
   });
+
+  it("never reads back an expired row, swept or not", async () => {
+    let t = 0;
+    const store = createChannelAuditStore(client, { now: () => t, ttlMs: 100 });
+    await store.record({ channel: "slack", action: "trigger", decision: "allow", appId: "A1" });
+    t = 101;
+    expect(await store.list({ appId: "A1" })).toEqual([]);
+    // Still on disk (nothing wrote since) — the read, not the sweep, hid it.
+    const raw = await client.execute("SELECT COUNT(*) AS n FROM latch_channel_audit");
+    expect(Number((raw.rows[0] as Record<string, unknown>).n)).toBe(1);
+  });
+
+  it("prunes expired rows on the cron path, with no audit traffic at all", async () => {
+    let t = 0;
+    const store = createChannelAuditStore(client, { now: () => t, ttlMs: 100 });
+    await store.record({ channel: "slack", action: "trigger", decision: "allow", appId: "A1" });
+    t = 50;
+    await store.record({ channel: "slack", action: "resume", decision: "allow", appId: "A1" });
+    t = 101; // the first row is past its TTL; the second is not
+    await store.pruneExpired();
+    const raw = await client.execute("SELECT ts FROM latch_channel_audit ORDER BY ts");
+    expect(raw.rows.map((r) => Number((r as Record<string, unknown>).ts))).toEqual([50]);
+  });
 });

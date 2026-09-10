@@ -162,6 +162,19 @@ describe("slack api client", () => {
     }
   });
 
+  it("keeps unfurling off even when a caller passes the flags", async () => {
+    const { fetchImpl, calls } = scriptedFetch([ok({ ts: "1.2", channel: "C1" })]);
+    const api = slackApi("xoxb-t", { fetchImpl, sleep });
+    await api.postMessage({
+      channel: "C1",
+      text: "https://example.com",
+      // Not in the public input type — but nothing stops an untyped caller.
+      ...({ unfurl_links: true, unfurl_media: true } as Record<string, unknown>),
+    });
+    expect(calls[0]!.body.get("unfurl_links")).toBe("false");
+    expect(calls[0]!.body.get("unfurl_media")).toBe("false");
+  });
+
   it("resolves a lazy token per call", async () => {
     const { fetchImpl, calls } = scriptedFetch([ok({ ts: "1.2", channel: "C1" })]);
     let reads = 0;

@@ -833,6 +833,28 @@ describe("slackChannel v2 — strict mention-only & channel history", () => {
     expect(h.of("chat.postMessage").some((c) => c.body.text?.includes("Something went wrong"))).toBe(true);
   });
 
+  it("a turn that errors mid-stream does not advance the watermark either", async () => {
+    const h = harness();
+    h.runtime.handleChat.mockResolvedValueOnce(
+      sseResponse([
+        { type: "text-delta", id: "1", delta: "half an " },
+        { type: "error", message: "model exploded" },
+      ]),
+    );
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0" }))));
+    await h.flush();
+    // The replies the mention asked about must survive for the next turn.
+    expect(h.stores.threads.get("slack2_A1_C1_1.0")?.lastSeenTs).toBeUndefined();
+  });
+
+  it("a stopped turn does not advance the watermark", async () => {
+    const h = harness();
+    h.stores.stops.set("slack2_A1_C1_1.0", Date.now() + 1_000); // stop seen mid-turn
+    await h.channel.handleRequest(signedRequest(eventBody(mention({ ts: "1.0" }))));
+    await h.flush();
+    expect(h.stores.threads.get("slack2_A1_C1_1.0")?.lastSeenTs).toBeUndefined();
+  });
+
   it("DMs: answered without a mention, no history fetched, no attribution footer", async () => {
     const h = harness();
     await h.channel.handleRequest(

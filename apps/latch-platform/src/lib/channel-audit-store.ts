@@ -5,7 +5,9 @@
  *
  * TTL'd, not grow-forever: `latch_slack_event` taught us that an unbounded
  * per-event table is the wrong shape on a hosted row budget. Every write
- * carries `expires_at` and sweeps what has expired — retention needs no job.
+ * carries `expires_at`; retention is enforced three ways so it never waits on a
+ * later event: writes sweep opportunistically, `pruneExpired()` runs on the
+ * system cron, and reads exclude expired rows outright.
  * Queried by SQL until a UI earns its place.
  */
 import type { Client } from "@libsql/client";
@@ -122,8 +124,10 @@ export function createChannelAuditStore(
     async list(filter: { appId?: string; chatId?: string; limit?: number } = {}): Promise<
       ChannelAuditRow[]
     > {
-      const where: string[] = [];
-      const args: (string | number)[] = [];
+      // Retention is a read-side guarantee too: an expired row is gone as far
+      // as callers are concerned, whether or not a sweep has run yet.
+      const where: string[] = ["expires_at >= ?"];
+      const args: (string | number)[] = [now()];
       if (filter.appId) {
         where.push("app_id = ?");
         args.push(filter.appId);
@@ -134,7 +138,7 @@ export function createChannelAuditStore(
       }
       args.push(filter.limit ?? 100);
       const res = await client.execute({
-        sql: `SELECT * FROM latch_channel_audit ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+        sql: `SELECT * FROM latch_channel_audit WHERE ${where.join(" AND ")}
               ORDER BY ts DESC, id DESC LIMIT ?`,
         args,
       });
@@ -174,6 +178,17 @@ export function createChannelAuditStore(
           }
         }
         return row;
+      });
+    },
+
+    /**
+     * Cron retention: delete what has expired regardless of traffic. An app
+     * that goes quiet must not keep Slack and chat identifiers past the TTL.
+     */
+    async pruneExpired(): Promise<void> {
+      await client.execute({
+        sql: `DELETE FROM latch_channel_audit WHERE expires_at < ?`,
+        args: [now()],
       });
     },
   };

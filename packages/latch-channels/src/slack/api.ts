@@ -76,6 +76,62 @@ export type StreamChunk =
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const MAX_RETRY_AFTER_S = 10;
 
+/** Streaming payload a `chat.*Stream` call carries, for the debug shape log. */
+interface StreamPayload {
+  channel: string;
+  ts?: string;
+  thread_ts?: string;
+  task_display_mode?: string;
+  markdown_text?: string;
+  chunks?: StreamChunk[];
+  blocks?: unknown[];
+  metadata?: unknown;
+}
+
+/**
+ * `LATCH_SLACK_STREAM_DEBUG` diagnoses stream SHAPE — chunk types, sizes,
+ * anchors — which is what every streaming bug so far has been about. It must
+ * never log the payloads themselves: they carry Slack messages, model output,
+ * tool output and requester data, and app logs are a wider audience than the
+ * channel. Titles and text become lengths; ids and statuses stay.
+ */
+function streamShape(input: StreamPayload): Record<string, unknown> {
+  const chunk = (c: StreamChunk): Record<string, unknown> => {
+    switch (c.type) {
+      case "markdown_text":
+        return { type: c.type, textLen: c.text.length };
+      case "task_update":
+        return {
+          type: c.type,
+          id: c.id,
+          status: c.status,
+          titleLen: c.title.length,
+          ...(c.details !== undefined ? { detailsLen: c.details.length } : {}),
+          ...(c.output !== undefined ? { outputLen: c.output.length } : {}),
+        };
+      case "blocks":
+        return { type: c.type, blocks: c.blocks.length };
+      default:
+        return { type: c.type };
+    }
+  };
+  return {
+    channel: input.channel,
+    ...(input.ts ? { ts: input.ts } : {}),
+    ...(input.thread_ts ? { thread_ts: input.thread_ts } : {}),
+    ...(input.task_display_mode ? { task_display_mode: input.task_display_mode } : {}),
+    ...(input.markdown_text !== undefined ? { markdownTextLen: input.markdown_text.length } : {}),
+    ...(input.chunks ? { chunks: input.chunks.map(chunk) } : {}),
+    ...(input.blocks ? { blocks: input.blocks.length } : {}),
+    ...(input.metadata !== undefined ? { metadata: true } : {}),
+  };
+}
+
+function debugStream(method: string, input: StreamPayload): void {
+  if (!process.env.LATCH_SLACK_STREAM_DEBUG) return;
+  console.log(`[slack-stream] ${method}`, JSON.stringify(streamShape(input)));
+}
+
 async function resolveToken(token: SlackToken): Promise<string> {
   return typeof token === "function" ? token() : token;
 }
@@ -182,9 +238,10 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       metadata?: unknown;
     }): Promise<{ ts: string; channel: string }> {
       const r = await call("chat.postMessage", {
+        ...input,
+        // Policy last: link previews stay off even if a caller asks for them.
         unfurl_links: false,
         unfurl_media: false,
-        ...input,
       });
       return { ts: String(r.ts), channel: String(r.channel) };
     },
@@ -234,7 +291,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       chunks?: StreamChunk[];
       markdown_text?: string;
     }): Promise<{ ts: string; channel: string }> {
-      if (process.env.LATCH_SLACK_STREAM_DEBUG) console.log("[slack-stream] startStream", JSON.stringify(input));
+      debugStream("startStream", input);
       const r = await call("chat.startStream", input);
       return { ts: String(r.ts), channel: String(r.channel) };
     },
@@ -250,7 +307,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       markdown_text?: string;
       chunks?: StreamChunk[];
     }): Promise<void> {
-      if (process.env.LATCH_SLACK_STREAM_DEBUG) console.log("[slack-stream] appendStream", JSON.stringify(input));
+      debugStream("appendStream", input);
       await call("chat.appendStream", input);
     },
 
@@ -263,7 +320,7 @@ export function slackApi(token: SlackToken, options: SlackApiOptions = {}) {
       blocks?: unknown[];
       metadata?: unknown;
     }): Promise<void> {
-      if (process.env.LATCH_SLACK_STREAM_DEBUG) console.log("[slack-stream] stopStream", JSON.stringify(input));
+      debugStream("stopStream", input);
       await call("chat.stopStream", input);
     },
 

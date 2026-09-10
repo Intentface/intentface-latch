@@ -350,6 +350,12 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
 
   // ── Turn rendering (shared by messages, resumes, replays) ─────────────────
 
+  /**
+   * Render one turn's stream, then its approval cards. Returns `false` when the
+   * turn did not complete (the viewer pressed Stop, or the stream errored) —
+   * the caller must not advance the thread watermark past replies whose answer
+   * never landed.
+   */
   async function renderTurn(
     b: Bound<P>,
     res: Response,
@@ -373,7 +379,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       principal: P;
       turnStartedAt: number;
     },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const threadTs = threadTsOf(ctx.root) ?? ctx.anchorTs;
     const result = await renderSlackStream(consumeRun(res), {
       api: b.api,
@@ -405,13 +411,13 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
     });
     if (result.stopped) {
       await setSession(b.api, ctx.channel, ctx.root, "active");
-      return;
+      return false;
     }
     if (result.errorMessage) {
       // The stream's own error surface already rendered; don't hunt approvals
       // on a failed turn.
       await setSession(b.api, ctx.channel, ctx.root, "active");
-      return;
+      return false;
     }
 
     // Approvals are message state, not stream chunks — check fresh history.
@@ -464,6 +470,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
       console.error("[slack] approval rendering failed:", e);
     }
     await setSession(b.api, ctx.channel, ctx.root, hasPending ? "suspended" : "active");
+    return true;
   }
 
   /** Run one gated message inside the chat's turn lease. */
@@ -501,8 +508,7 @@ export function slackChannel<P>(config: SlackChannelConfig<P>) {
         principal: ctx.principal,
         message,
       });
-      await renderTurn(b, res, { ...ctx, turnStartedAt });
-      return true;
+      return await renderTurn(b, res, { ...ctx, turnStartedAt });
     } catch (e) {
       // Never post raw internals into the channel: masked stream errors render
       // through the renderer; a pre-stream throw gets the generic line.
