@@ -5,14 +5,14 @@
  *
  *   node --import tsx src/scripts/edge-version.ts
  *
- * Re-run after any prompt edit, fixture change, or knowledge-plane re-capture. The
+ * Re-run after any prompt edit, plane snapshot, or knowledge-plane re-capture. The
  * vertical-plane block is recorded by hand from orient/read_file (read-only scope, no bulk
  * export) — update it when edge-base changes.
  */
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { buildAllVariants } from "../evals/edge/variants";
-import { fixtureFiles, planeVersion } from "./edge-seed-plane";
+import { fixtureFiles, planeVersion } from "./edge-plane-snapshot";
 
 const sha = execSync("git rev-parse HEAD").toString().trim();
 const variants = Object.fromEntries(
@@ -60,10 +60,10 @@ const version = {
     note: "Recorded from orient/read_file on 2026-09-10; no content hash (read-only scope, no bulk export). Re-capture after the catalog dedupe.",
   },
   horizontal_context_version: {
-    workspace: "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the real client workspace, re-seeded before every sweep",
-    fixture_tree: "src/evals/edge/fixtures/client-plane/edge/",
+    workspace: "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used AS IS (no wipe, no reseed)",
+    snapshot_tree: "src/evals/edge/fixtures/client-plane/edge/ (read-only snapshot for diffing; never seeded back)",
     sha256: planeVersion(fixtureFiles()),
-    seed_script: "src/scripts/edge-seed-plane.ts",
+    snapshot_script: "src/scripts/edge-plane-snapshot.ts (--verify at sweep start and end)",
     client: "TwentyOne (fictional)",
   },
   retrieval_config: "agent-driven: Loredex MCP orient then read_file per turn; no RAG, no injected context beyond the system prompt",
@@ -75,7 +75,7 @@ const version = {
     blockGated: true,
   },
   memory_config:
-    "exec.memory OFF in all arms (production: agent-user on edge-client). Tier-3 under test = edge/memory/notes.md, seeded header-only before every sweep.",
+    "exec.memory OFF in all arms (production: agent-user on edge-client). Tier-3 under test = the live edge/memory/ notes as they are; writes are inert under blockGated so they cannot grow mid-sweep.",
   notes: [
     "Pre-freeze edits vs production (guide line 84, mechanical failures): E1 deleted the two get_current_date lines (no such tool on the record); E2 rewrote the gap path around edge-v2-inbox_create into edge-inbox/inbox-twentyone (the write-only inbox scope has no orient/read_file; edit_file cannot match an empty gaps file); E3 split Tier-4/precedence clauses so no variant references a plane it lacks.",
     "Deliberate divergences from production, identical across arms: model gpt-5.6-sol (production gpt-5.5) per the guide's Sol Edge; exec.memory off (production on).",
