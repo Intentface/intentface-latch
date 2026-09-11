@@ -6,12 +6,17 @@
  * Scores are read with `fields=details,subject,annotation` so `authorUserId` and `queueId`
  * come back (plan finding 4). Each preference is mapped through review/pairs.json (local)
  * from left/right to the variant it favoured. Writes review/annotations.jsonl and
- * review/review-summary.json: D-vs-A win rate (humans), per-reviewer counts, and the anchor
- * set's raw agreement — the inputs for edge-analyze.ts.
+ * review/review-summary.json: D-vs-A win rate (humans), per-reviewer counts, the anchor
+ * set's raw agreement, and — when the pairwise judge has run over the same pairs
+ * (review/judgments-pairwise.jsonl) — judge-vs-human agreement on exactly the same question:
+ * raw, sign, Cohen's κ and quadratically weighted κ over the −2…+2 scale, plus agreement on
+ * the primary reason. That is the calibration number; the inputs for edge-analyze.ts.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getLangfuseClient } from "@intentface/latch-langfuse";
+import { categoricalAgreement, ordinalAgreement } from "../evals/edge/judge/agreement";
+import type { PairJudgment } from "./edge-judge-pairwise";
 import type { Pair } from "./edge-review-export";
 
 const arg = (name: string, fallback?: string) => {
@@ -103,6 +108,38 @@ async function main() {
     .map((id) => annotations.filter((a) => a.pair_id === id).map((a) => a.preferred_variant))
     .filter((vs) => vs.length >= 2);
   const anchorAgreement = agreements.length ? +(agreements.filter((vs) => new Set(vs).size === 1).length / agreements.length).toFixed(2) : null;
+  // Judge vs human on the SAME artefact and the SAME question (plan improvement 1).
+  // One human rating per (pair, reviewer): a pair with three reviewers contributes three
+  // comparisons against the one judge verdict, which is what κ against a single rater means.
+  const judgePath = join(REVIEW_DIR, arg("judge-file", "judgments-pairwise.jsonl")!);
+  const judgeByPair = new Map<string, PairJudgment>(
+    existsSync(judgePath)
+      ? readFileSync(judgePath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as PairJudgment).filter((j) => !j.error).map((j) => [j.pair_id, j])
+      : [],
+  );
+  const joined = annotations.flatMap((a) => {
+    const j = judgeByPair.get(a.pair_id);
+    return j ? [{ a, j }] : [];
+  });
+  const judgeVsHuman = joined.length
+    ? {
+        judge_file: judgePath,
+        judge_model: joined[0]!.j.judge_model,
+        comparisons: joined.length,
+        pairs: new Set(joined.map((x) => x.a.pair_id)).size,
+        preference: ordinalAgreement(joined.map((x) => [x.j.d_minus_a, x.a.d_minus_a] as [number, number])),
+        primary_reason: categoricalAgreement(joined.map((x) => [x.j.primary_reason, x.a.primary_reason ?? "none"] as [string, string])),
+        // Does the judge lean the same way overall, or is it simply harsher/softer?
+        mean_d_minus_a: { judge: +(joined.reduce((s, x) => s + x.j.d_minus_a, 0) / joined.length).toFixed(2), human: +(joined.reduce((s, x) => s + x.a.d_minus_a, 0) / joined.length).toFixed(2) },
+        per_reviewer: Object.fromEntries(
+          [...new Set(joined.map((x) => x.a.reviewer))].map((r) => {
+            const xs = joined.filter((x) => x.a.reviewer === r);
+            return [r, ordinalAgreement(xs.map((x) => [x.j.d_minus_a, x.a.d_minus_a] as [number, number]))];
+          }),
+        ),
+      }
+    : null;
+
   const summary = {
     run: RUN,
     annotations: annotations.length,
@@ -115,10 +152,15 @@ async function main() {
     anchor_pairs_with_2plus_reviews: agreements.length,
     anchor_raw_agreement: anchorAgreement,
     reasons: Object.fromEntries([...new Set(annotations.map((a) => a.primary_reason ?? "none"))].map((r) => [r, annotations.filter((a) => (a.primary_reason ?? "none") === r).length])),
+    judge_vs_human: judgeVsHuman,
   };
   writeFileSync(join(REVIEW_DIR, "review-summary.json"), JSON.stringify(summary, null, 2) + "\n");
   console.log(`[review-import] ${annotations.length} annotations on ${summary.pairs_annotated}/${mapping.pairs.length} pairs · human D-vs-A win rate ${summary.human_d_vs_a_win_rate ?? "–"} · anchor agreement ${anchorAgreement ?? "–"}`);
   console.log(`[review-import] per reviewer`, perReviewer);
+  if (judgeVsHuman) {
+    const p = judgeVsHuman.preference;
+    console.log(`[review-import] judge (${judgeVsHuman.judge_model}) vs human on ${judgeVsHuman.comparisons} ratings · raw ${p.raw} · sign ${p.signAgreement} · κ ${p.kappa ?? "–"} · weighted κ ${p.weightedKappa ?? "–"} · mean |Δ| ${p.meanAbsDelta} · reason κ ${judgeVsHuman.primary_reason.kappa ?? "–"}`);
+  } else console.log(`[review-import] no pairwise judge file at ${judgePath} — run edge-judge-pairwise.ts for judge–human agreement`);
 }
 
 main()

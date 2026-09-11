@@ -20,7 +20,7 @@ import { resolve } from "node:path";
 import { getLatch } from "../lib/latch";
 import { CONNECTIONS } from "../evals/edge/variants";
 import { DIMENSIONS, PILLAR_FOR } from "../evals/edge/judge/rubric";
-import { CTX_FILES, callTool, listMemoryFiles, readViaConnection, stripLineNumbers, withPlanes, type Dynamic } from "../evals/edge/judge/reference";
+import { CTX_FILES, callTool, listMemoryFiles, readViaConnection, section, stripLineNumbers, withPlanes, type Dynamic } from "../evals/edge/judge/reference";
 import { evalPrincipal } from "./edge-connections";
 import { CONTRACTS } from "../evals/edge/cases/contracts";
 import { QUESTIONS } from "../evals/edge/cases/questions";
@@ -39,13 +39,6 @@ const jsonl = (p: string) => (existsSync(p) ? readFileSync(p, "utf8").split("\n"
 const json = (p: string) => (existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>) : null);
 
 const WITH_BACKGROUND = !process.argv.includes("--no-background");
-
-/** Pull the section of a markdown doc under `## <heading>` (until the next ## / #). */
-function section(md: string, heading: string): string {
-  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$([\\s\\S]*?)(?=^#{1,2}\\s|(?![\\s\\S]))`, "m");
-  const m = re.exec(md);
-  return m ? m[1]!.trim() : "";
-}
 
 interface Background {
   client: { name: string; what: string; summary: string; market: string; constraints: string; aiStrategy: string; nextRung: string };
@@ -120,6 +113,8 @@ const data = {
   }),
   cells,
   judgments,
+  pairwiseSummary: json(`${DIR}/review/judgments-pairwise-summary.json`),
+  reliability: json(`${DIR}/judge-reliability.json`),
 };
 
 const html = `<title>Edge Ablation Bench</title>
@@ -129,7 +124,7 @@ const html = `<title>Edge Ablation Bench</title>
 :root {
   color-scheme: light;
   --ground: #f6f7f9; --surface: #ffffff; --surface-2: #eef0f4; --ink: #15181d; --ink-2: #5a6270; --ink-3: #8a919c; --rule: #dfe3ea;
-  --arm-A: #2a78d6; --arm-B: #eb6834; --arm-C: #1baf7a; --arm-D: #4a3aa7;
+  --arm-A: #2a78d6; --arm-AP: #b8397f; --arm-B: #eb6834; --arm-C: #1baf7a; --arm-D: #4a3aa7;
   --good: #008300; --bad: #e34948; --good-bg: #e8f4e8; --bad-bg: #fbeaea; --warn-bg: #fff4dc; --warn: #8a5a00;
   --display: "Fraunces", Georgia, "Times New Roman", serif;
   --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
@@ -139,14 +134,14 @@ const html = `<title>Edge Ablation Bench</title>
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --ground: #15171b; --surface: #1f2228; --surface-2: #272b33; --ink: #f2f3f5; --ink-2: #a7adb8; --ink-3: #737b88; --rule: #2e333b;
-    --arm-A: #3987e5; --arm-B: #d95926; --arm-C: #199e70; --arm-D: #9085e9;
+    --arm-A: #3987e5; --arm-AP: #d4589f; --arm-B: #d95926; --arm-C: #199e70; --arm-D: #9085e9;
     --good: #4fbf4f; --bad: #e66767; --good-bg: #1d2e1d; --bad-bg: #3a2222; --warn-bg: #3a3020; --warn: #e0b45c;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
   --ground: #15171b; --surface: #1f2228; --surface-2: #272b33; --ink: #f2f3f5; --ink-2: #a7adb8; --ink-3: #737b88; --rule: #2e333b;
-  --arm-A: #3987e5; --arm-B: #d95926; --arm-C: #199e70; --arm-D: #9085e9;
+  --arm-A: #3987e5; --arm-AP: #d4589f; --arm-B: #d95926; --arm-C: #199e70; --arm-D: #9085e9;
   --good: #4fbf4f; --bad: #e66767; --good-bg: #1d2e1d; --bad-bg: #3a2222; --warn-bg: #3a3020; --warn: #e0b45c;
 }
 * { box-sizing: border-box; }
@@ -168,7 +163,7 @@ header .lede { color: var(--ink-2); max-width: 65ch; margin-top: 10px; }
 .arms { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; }
 .arm-key { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); }
 .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-.swatch.A { background: var(--arm-A); } .swatch.B { background: var(--arm-B); } .swatch.C { background: var(--arm-C); } .swatch.D { background: var(--arm-D); }
+.swatch.A { background: var(--arm-A); } .swatch.AP { background: var(--arm-AP); } .swatch.B { background: var(--arm-B); } .swatch.C { background: var(--arm-C); } .swatch.D { background: var(--arm-D); }
 
 /* background */
 .bg { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
@@ -200,6 +195,18 @@ header .lede { color: var(--ink-2); max-width: 65ch; margin-top: 10px; }
 .chip.pass { background: var(--good-bg); color: var(--good); } .chip.fail { background: var(--bad-bg); color: var(--bad); } .chip.hf { background: var(--warn-bg); color: var(--warn); text-transform: none; letter-spacing: 0; font-weight: 600; }
 .chip.neutral { background: var(--surface-2); color: var(--ink-2); }
 
+/* deltas */
+.deltas { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+.tile { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; border-top: 4px solid var(--arm-color, var(--rule)); }
+.tile .k { font: 600 12px/1 var(--body); letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
+.tile .v { font-family: var(--mono); font-size: 30px; font-weight: 500; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.tile .sub { font-size: 13px; color: var(--ink-2); margin-top: 4px; }
+.ranks { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 18px; margin-top: 14px; }
+.ranks .row { display: grid; grid-template-columns: 150px 1fr 74px; gap: 12px; align-items: center; margin: 8px 0; font-size: 14px; }
+.ranks .track { background: var(--surface-2); border-radius: 4px; height: 16px; overflow: hidden; }
+.ranks .track i { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--arm-color); }
+.ranks .num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+
 /* case sections */
 .case-head { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .case-head .q { font-family: var(--display); font-size: 22px; line-height: 1.3; font-weight: 500; max-width: 70ch; }
@@ -207,7 +214,8 @@ header .lede { color: var(--ink-2); max-width: 65ch; margin-top: 10px; }
 .contract { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 28px; font-size: 14px; }
 .contract h4 { margin: 0 0 6px; font: 600 12px/1 var(--body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
 .contract ul { margin: 0; padding-left: 18px; color: var(--ink-2); } .contract li { margin: 2px 0; }
-.arms-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.arms-grid { display: grid; grid-template-columns: repeat(var(--arm-cols, 4), minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 1240px) { .arms-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 1000px) { .arms-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .arms-grid { grid-template-columns: 1fr; } }
 .arm { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 0 16px 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; border-top: 4px solid var(--arm-color); }
@@ -237,8 +245,10 @@ details summary:focus-visible { outline: 2px solid var(--arm-color); outline-off
 <script id="data" type="application/json">${JSON.stringify(data).replace(/</g, "\\u003c")}</script>
 <script>
 const D = JSON.parse(document.getElementById("data").textContent);
-const ARMS = ["A","B","C","D"];
-const ARM_NAME = { A: "A · prompt only", B: "B · client plane", C: "C · knowledge plane", D: "D · full Edge" };
+const ALL_ARMS = ["A","AP","B","C","D"];
+// Only the arms this run actually has cells for — a 4-arm run must not render 5 columns.
+const ARMS = ALL_ARMS.filter((a) => D.cells.some((c) => c.variant === a));
+const ARM_NAME = { A: "A · prompt only", AP: "A\u2032 · prompted baseline", B: "B · client plane", C: "C · knowledge plane", D: "D · full Edge" };
 const SCALED = ["decision_quality","client_specificity","expert_stance_fidelity","stage_calibration"];
 const DIM_LABEL = { decision_quality: "Decision quality", client_specificity: "Client specificity", expert_stance_fidelity: "Stance fidelity", stage_calibration: "Stage calibration", grounding: "Grounded", actionability: "Actionable", decisiveness: "Decisive", first_turn_quality: "Turn 1 short" };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -273,11 +283,12 @@ function header() {
   return '<header>' +
     '<div class="eyebrow">Edge Eval v0 · run ' + esc(D.run) + '</div>' +
     '<h1 style="margin-top:8px">Edge Ablation Bench</h1>' +
-    '<p class="lede">The same question asked four ways: a prompt-only advisor, the client context plane alone, the knowledge plane alone, and the full Edge. Each cell is two turns — the question, then the canned follow-up — scored by Judge v0 against the case contract. Writes were attempted and left inert; the client workspace hash was identical before and after.</p>' +
+    '<p class="lede">The same question asked several ways: a prompt-only advisor, that same advisor handed a short written card about the client, the client context plane alone, the knowledge plane alone, and the full Edge. Each cell is two turns — the question, then the canned follow-up — scored by Judge v0 against the case contract. Writes were attempted and left inert; both context-plane hashes were identical before and after.</p>' +
     '<div class="arms">' + ARMS.map((a) => '<span class="arm-key"><span class="swatch ' + a + '"></span>' + esc(ARM_NAME[a]) + '</span>').join("") + '</div>' +
     '<dl class="facts">' +
       fact("app model", s.model) + fact("judge", js.judge_model) + fact("cells", D.cells.length + " · " + (s.reps || 1) + " rep") + fact("run cost", money(cost)) +
       fact("client plane", plane.unchanged === false ? "CHANGED" : (plane.before || "").slice(0, 12) + (plane.unchanged ? " · unchanged" : "")) +
+      fact("knowledge plane", !s.vertical_ctx_version ? "not hashed" : s.vertical_ctx_version.unchanged === false ? "CHANGED" : s.vertical_ctx_version.before.slice(0, 12) + " · unchanged") +
       fact("prompts", ARMS.map((a) => a + ":" + ((s.variants || {})[a] || {}).prompt_sha8).join(" ")) +
     '</dl></header>';
 }
@@ -295,13 +306,62 @@ function board() {
     '<p class="small" style="margin:10px 2px 0">Bar = the four 0–3 dimensions stacked (decision quality, client specificity, stance fidelity, stage calibration), 12 max. Pass = all binaries pass, every dimension ≥ 2, no hard failure.</p></section>';
 }
 
+/**
+ * What the benchmark is for: how far ahead of each baseline the full product is. Mean
+ * composite per arm (magnitude → bars on one 0–12 scale), then D minus each other arm as a
+ * headline number with the per-case win/loss count under it. D−A\u2032 is the outside-world
+ * comparison (a generic model that was told who the client is); D−B and D−C are the internal
+ * diagnostics (which plane is carrying the result).
+ */
+function deltas() {
+  const armCells = (a) => D.cases.map((k) => judgOf(k.id, a)).filter(Boolean);
+  const mean = (xs) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
+  const composite = Object.fromEntries(ARMS.map((a) => [a, mean(armCells(a).map((j) => j.composite))]));
+  const judged = ARMS.filter((a) => composite[a] !== null);
+  if (judged.length < 2 || !judged.includes("D")) return "";
+  const others = judged.filter((a) => a !== "D");
+  const paired = (a) => D.cases.map((k) => [judgOf(k.id, "D"), judgOf(k.id, a)]).filter(([d, x]) => d && x);
+  const tile = (a) => {
+    const ps = paired(a);
+    const delta = composite.D - composite[a];
+    const wins = ps.filter(([d, x]) => d.composite > x.composite).length;
+    const losses = ps.filter(([d, x]) => d.composite < x.composite).length;
+    return '<div class="tile" style="--arm-color:var(--arm-' + a + ')">' +
+      '<div class="k">D − ' + esc(ARM_NAME[a].split(" · ")[0]) + '</div>' +
+      '<div class="v">' + (delta > 0 ? "+" : "") + delta.toFixed(1) + '</div>' +
+      '<div class="sub">composite points, mean of ' + ps.length + ' cases · D ahead on ' + wins + ", behind on " + losses + ", level on " + (ps.length - wins - losses) + '</div></div>';
+  };
+  const maxC = Math.max(...judged.map((a) => composite[a]));
+  void maxC;
+  return '<section><div class="eyebrow">The comparison</div><h2 style="margin:6px 0 6px">How far ahead is the full product?</h2>' +
+    '<p class="small" style="margin:0 0 14px;max-width:70ch">Composite is the four 0–3 judge dimensions summed, 12 max. A\u2032 is the fair outside comparison — the same generic advisor, handed a written paragraph about the client, as anyone would paste into a chat window.</p>' +
+    '<div class="deltas">' + others.map(tile).join("") + '</div>' +
+    '<div class="ranks">' + judged.map((a) =>
+      '<div class="row" style="--arm-color:var(--arm-' + a + ')"><span><span class="swatch ' + a + '" style="vertical-align:-1px;margin-right:8px"></span>' + esc(ARM_NAME[a]) + '</span>' +
+      '<span class="track"><i style="width:' + (composite[a] / 12 * 100).toFixed(1) + '%"></i></span>' +
+      '<span class="num">' + composite[a].toFixed(1) + '<span class="small">/12</span></span></div>').join("") +
+    '</div>' + judgePanel() + '</section>';
+}
+
+/** The instrument\u2019s own error bars, when they have been measured (judge reliability + the pairwise judge). */
+function judgePanel() {
+  const R = D.reliability;
+  const P = D.pairwiseSummary;
+  if (!R && !P) return "";
+  const parts = [];
+  if (P) parts.push('<div><b>Pairwise judge</b> (' + esc(P.judge_model) + ') on ' + P.pairs + ' blinded pairs — the same question the human reviewers answer: prefers D on ' + Math.round((P.judge_d_vs_a_win_rate || 0) * 100) + '% of them, mean margin ' + P.mean_d_minus_a + ' on a −2…+2 scale.</div>');
+  if (R && R.rubric) parts.push('<div><b>Judge noise floor</b> (' + esc(R.rubric.kind) + ', ' + esc(R.rubric.judge_models.a) + ' vs ' + esc(R.rubric.judge_models.b) + ') over ' + R.rubric.cells + ' cells: composite moves ' + R.rubric.composite.meanAbsDelta + ' points between passes; pass/fail agrees on ' + Math.round(R.rubric.overall_pass.raw * 100) + '%. A difference smaller than that is not a result.</div>');
+  if (R && R.pairwise) parts.push('<div><b>Second judge</b> (' + esc(R.pairwise.judge_models.b) + ') on ' + R.pairwise.pairs + ' pairs: agrees on the winner ' + Math.round((R.pairwise.preference.signAgreement || 0) * 100) + '% of the time (weighted κ ' + (R.pairwise.preference.weightedKappa ?? "–") + ').</div>');
+  return '<div class="note" style="margin-top:14px;display:grid;gap:8px;max-width:none">' + parts.join("") + '</div>';
+}
+
 function caseSection(k) {
   const con = k.contract;
   return '<section id="case-' + esc(k.id) + '"><div class="case-head"><div class="eyebrow">' + esc(k.category) + ' · ' + esc(k.id) + ' · asked by ' + esc(k.author) + (con ? ' · persona ' + esc(con.persona) : "") + '</div>' +
     '<div class="q">' + esc(k.question) + '</div><div class="fu"><span class="eyebrow" style="margin-right:8px">follow-up</span>' + esc(k.followup) + '</div></div>' +
     (con ? '<div class="contract" style="margin-top:14px"><div style="grid-column:1/-1"><h4>Why this case exists</h4><div style="color:var(--ink-2)">' + esc(con.why_this_case_exists) + '</div></div>' +
       cl("Required client facts", con.required_client_facts) + cl("Required expert ideas", con.required_expert_ideas) + cl("Expected shape", con.expected_recommendation_shape) + cl("Forbidden", con.forbidden_behaviors) + '</div>' : '<p class="note">No contract for this case (pilot-only question): judged on the rubric alone.</p>') +
-    '<div class="arms-grid" style="margin-top:14px">' + ARMS.map((a) => armCard(k, a)).join("") + '</div></section>';
+    '<div class="arms-grid" style="margin-top:14px;--arm-cols:' + ARMS.length + '">' + ARMS.map((a) => armCard(k, a)).join("") + '</div></section>';
 }
 const cl = (title, items) => '<div><h4>' + esc(title) + '</h4><ul>' + items.map((i) => '<li>' + esc(i) + '</li>').join("") + '</ul></div>';
 
@@ -325,7 +385,7 @@ function armCard(k, a) {
 function background() {
   const B = D.background;
   const howto = '<section><div class="eyebrow">How to read this</div><h2 style="margin:6px 0 14px">One question, four advisors, one judge</h2><div class="howto">' +
-    '<div><b>The four arms</b> share the same model, prompt craft and settings. They differ only in which planes they can reach and the prompt sections that go with them: A has neither, B the client context, C the knowledge plane, D both plus the gap inbox.</div>' +
+    '<div><b>The arms</b> share the same model, prompt craft and settings. They differ only in which planes they can reach and the prompt sections that go with them: A has neither, B the client context, C the knowledge plane, D both plus the gap inbox. A\u2032 is arm A with one addition — a fixed paragraph about the client, written once from the client plane and pasted in front of every question, exactly as an outsider would brief a general-purpose chatbot.</div>' +
     '<div><b>Two turns per cell.</b> Edge answers a first question with a short clarifier, then gets the same canned follow-up ("yes, that direction — full recommendation now"). The recommendation is what is judged; the clarifier is judged separately for brevity.</div>' +
     '<div><b>Writes are inert.</b> Memory notes and gap notes are attempted (you can see the calls) but never reach a workspace; the client plane is hashed before and after every sweep.</div>' +
     '<div><b>Judge v0</b> is a Claude model, one call per rubric dimension, given the client plane, the category pillar, the peer catalog and the case contract. It is not yet calibrated against human reviewers.</div>' +
@@ -346,7 +406,7 @@ function background() {
     '</div></section>';
 }
 
-document.getElementById("app").innerHTML = header() + background() + board() + D.cases.map(caseSection).join("") +
+document.getElementById("app").innerHTML = header() + background() + deltas() + board() + D.cases.map(caseSection).join("") +
   '<p class="small">Generated from edge-eval-runs/' + esc(D.run) + ' · scores are Judge v0 (uncalibrated) · answers verbatim from the agents.</p>';
 </script>
 `;

@@ -21,6 +21,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getLangfuseClient, isLangfuseConfigured } from "@intentface/latch-langfuse";
+import type { Arm } from "../evals/edge/variants";
+// The pair rubric — the same two score configs the pairwise JUDGE answers against
+// (src/evals/edge/judge/pairwise.ts), so humans and judge annotate one vocabulary.
+import { PREFERENCE_CONFIG, REASON_CONFIG } from "../evals/edge/judge/pairwise";
 import { QUESTIONS } from "../evals/edge/cases/questions";
 import { followupFor } from "../evals/edge/cases/followup";
 import { seededRandom } from "../evals/edge/cases/holdout";
@@ -38,45 +42,17 @@ const REP = Number(arg("rep", "1"));
 const ANCHOR_N = Number(arg("anchor", "10"));
 const DRY = process.argv.includes("--dry-run");
 const SEED = arg("seed", `edge-review-${RUN}`)!;
+// One clock for everything this export creates: the pair traces carry it, pairs.json keeps
+// it, and the pairwise judge pins its score writes to it so re-judging upserts rather than
+// duplicating (Langfuse dedupes a score on id + name + timestamp at date granularity).
+const NOW = new Date().toISOString();
 const LEFT_ARM = "D" as const;
 const RIGHT_ARM = "A" as const; // the pair under review is D vs A (plan: headline = D-vs-A win rate)
-
-export const PREFERENCE_CONFIG = {
-  name: "edge_pairwise_preference",
-  description: "Which recommendation would you rather the client received? −2 strong left … +2 strong right. Judge the substance for THIS client, not polish.",
-  categories: [
-    { label: "strong left", value: -2 },
-    { label: "left", value: -1 },
-    { label: "tie", value: 0 },
-    { label: "right", value: 1 },
-    { label: "strong right", value: 2 },
-  ],
-};
-export const REASON_CONFIG = {
-  name: "edge_primary_reason",
-  description: "The single most important reason for your preference. Put further reasons in the comment.",
-  categories: [
-    "tie_or_no_reason",
-    "invented_client_fact",
-    "invented_house_stance",
-    "missed_required_fact",
-    "wrong_stage",
-    "failed_to_recommend",
-    "unnecessary_clarification",
-    "generic_advice",
-    "better_grounding",
-    "better_sequencing",
-    "better_trade_off",
-    "more_actionable",
-    "more_decisive",
-    "style_only",
-  ].map((label, value) => ({ label, value })),
-};
 
 interface Cell {
   case_id: string;
   category: string;
-  variant: "A" | "B" | "C" | "D";
+  variant: Arm;
   repetition: number;
   turn1: { runId?: string; answer: string };
   turn2: { runId?: string; answer: string };
@@ -85,6 +61,8 @@ interface Cell {
 export interface Pair {
   pair_id: string;
   trace_id: string;
+  /** The pair trace's clock, fixed at first export: re-exports and score writes pin to it. */
+  timestamp?: string;
   case_id: string;
   category: string;
   anchor: boolean;
@@ -151,6 +129,7 @@ async function main() {
     return {
       pair_id: `${RUN}-${String(i + 1).padStart(2, "0")}-${id}`,
       trace_id: traceIdFor(RUN, id),
+      timestamp: NOW,
       case_id: id,
       category: QUESTIONS.find((q) => q.id === id)!.category,
       anchor: anchors.has(id),
@@ -182,19 +161,19 @@ async function main() {
   // 2. Blinded pair traces (trace-create is idempotent on id; a re-run overwrites the same trace).
   const questionOf = (id: string) => QUESTIONS.find((q) => q.id === id)!;
   const cellOf = (p: Pair, side: "left" | "right") => cells.find((c) => c.case_id === p.case_id && c.variant === p[side].variant && c.repetition === REP)!;
-  const now = new Date().toISOString();
   type TraceCreate = Parameters<typeof lf.api.ingestion.batch>[0]["batch"][number];
   const events: TraceCreate[] = pairs.map((p) => {
     const q = questionOf(p.case_id);
     const L = cellOf(p, "left");
     const R = cellOf(p, "right");
+    const ts = p.timestamp ?? NOW;
     return {
       id: `evt-${p.trace_id}`,
       type: "trace-create" as const,
-      timestamp: now,
+      timestamp: ts,
       body: {
         id: p.trace_id,
-        timestamp: now,
+        timestamp: ts,
         name: `edge-review · ${p.case_id}`,
         environment: process.env.LANGFUSE_TRACING_ENVIRONMENT ?? "edge-eval-local",
         tags: ["edge-review", RUN] as string[],

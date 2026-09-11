@@ -2,6 +2,8 @@
  * Edge Eval v0 — Judge v0 over a sweep's cells (plan Step 4).
  *
  *   node --env-file=.env --import tsx src/scripts/edge-judge.ts --run smoke-3 [--judge-model claude-sonnet-5] [--concurrency 4] [--dims decision_quality,grounding]
+ *   node … src/scripts/edge-judge.ts --run demo-3 --out judgments-pass2.jsonl            # self-consistency: a second pass, same model
+ *   node … src/scripts/edge-judge.ts --run demo-3 --judge-model claude-opus-5 --out judgments-opus.jsonl
  *
  * Reads edge-eval-runs/<run>/cells.jsonl, fetches the reference material LIVE through the
  * eval principal's connections (client plane via edge-client_read_file, the category's
@@ -20,7 +22,7 @@ import { generateObject, type LanguageModel } from "ai";
 import { isLangfuseConfigured, postScore } from "@intentface/latch-langfuse";
 import { getLatch } from "../lib/latch";
 import type { Principal } from "../lib/session";
-import { CONNECTIONS } from "../evals/edge/variants";
+import { ARMS, type Arm } from "../evals/edge/variants";
 import { byId } from "../evals/edge/cases/questions";
 import { followupFor } from "../evals/edge/cases/followup";
 import { CONTRACTS, contractCriteria } from "../evals/edge/cases/contracts";
@@ -40,7 +42,7 @@ import {
   type HardFailure,
 } from "../evals/edge/judge/rubric";
 import { evalPrincipal } from "./edge-connections";
-import { CTX_FILES, listMemoryFiles, readViaConnection, withPlanes, type Dynamic } from "../evals/edge/judge/reference";
+import { loadJudgeReference, type Dynamic } from "../evals/edge/judge/reference";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -56,13 +58,18 @@ const FORCE = process.argv.includes("--force");
 // --redo-errors: re-judge ONLY the dimensions that errored on already-judged cells, merging
 // into the existing judgment (the default resume skips a cell as soon as it has a line).
 const REDO_ERRORS = process.argv.includes("--redo-errors");
+// --out: write to a second file instead of judgments.jsonl. A second pass over the same
+// cells (same model, or a second family) is the judge's noise floor — see
+// edge-judge-reliability.ts, which diffs two such files.
+const OUT_NAME = arg("out", "judgments.jsonl")!;
+const SUMMARY_NAME = OUT_NAME === "judgments.jsonl" ? "judge-summary.json" : `${OUT_NAME.replace(/\.jsonl$/, "")}-summary.json`;
 
 // ── Types shared with the runner's cell record (subset) ──────────────────────
 interface Cell {
   run_name: string;
   case_id: string;
   category: Category;
-  variant: "A" | "B" | "C" | "D";
+  variant: Arm;
   repetition: number;
   prompt_sha8: string;
   model: string;
@@ -78,7 +85,7 @@ export interface Judgment {
   run_name: string;
   case_id: string;
   category: Category;
-  variant: Cell["variant"];
+  variant: Arm;
   repetition: number;
   judge_model: string;
   judge_version: "v0";
@@ -91,29 +98,6 @@ export interface Judgment {
   overall_pass: boolean;
   errors: Partial<Record<Dimension, string>>;
   judged_at: string;
-}
-
-// ── Reference material, fetched live once per connection/file ────────────────
-
-async function loadReference(principal: Principal, dynamic: Dynamic) {
-  return withPlanes(dynamic, principal, async (client, kn) => {
-    // Tier 2 (ctx) AND Tier 3 (memory): the agent legitimately grounds in prior engagement
-    // notes, so the judge must see them too — otherwise every fact drawn from memory reads
-    // as "invented" (pilot-luna, first judge pass: 15 false invented_client_fact verdicts).
-    const parts: string[] = [];
-    for (const f of CTX_FILES) parts.push(`--- ${f} (Tier 2, client context) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
-    for (const f of await listMemoryFiles(client)) parts.push(`--- ${f} (Tier 3, engagement memory — prior exchanges with this client) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
-    const clientContext = parts.join("\n\n");
-    // Expert stance = the category's pillar + the peer-examples catalog (IF's own case
-    // studies — a cited peer is house material, not an invented company).
-    const catalog = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, "edge-kn/examples/catalog.md");
-    const stances: Partial<Record<Category, string>> = {};
-    for (const [cat, pillar] of Object.entries(PILLAR_FOR) as Array<[Category, string]>) {
-      const playbook = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, `edge-kn/kn/${pillar}/playbook.md`);
-      stances[cat] = `--- edge-kn/kn/${pillar}/playbook.md (the pillar) ---\n${playbook}\n\n--- edge-kn/examples/catalog.md (approved peer examples the advisor may cite) ---\n${catalog}`;
-    }
-    return { clientContext, stances: stances as Record<Category, string> };
-  });
 }
 
 // ── Judging ──────────────────────────────────────────────────────────────────
@@ -225,7 +209,7 @@ async function main() {
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Cell)
     .filter((c) => !c.error);
-  const outPath = join(RUN_DIR, "judgments.jsonl");
+  const outPath = join(RUN_DIR, OUT_NAME);
   const done = new Set<string>();
   if (existsSync(outPath) && !FORCE) {
     for (const l of readFileSync(outPath, "utf8").split("\n").filter(Boolean)) {
@@ -256,7 +240,7 @@ async function main() {
   const model = modelFor(JUDGE_MODEL);
 
   console.log(`[judge] fetching reference material live (client plane + 4 pillars)…`);
-  const { clientContext, stances } = await loadReference(principal, dynamic as unknown as Dynamic);
+  const { clientContext, stances } = await loadJudgeReference(principal, dynamic as unknown as Dynamic);
   // Reference per CATEGORY (cacheable prefix); the case contract, when one exists, is
   // appended per cell as the "case-specific criteria" (guide line 343). Pilot cells for
   // questions outside the sealed 30 have no contract and are judged on the rubric alone.
@@ -294,7 +278,7 @@ async function main() {
   // Summary over ALL judgments in the file (previous + this run).
   const all = readFileSync(outPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Judgment);
   const byVariant = Object.fromEntries(
-    (["A", "B", "C", "D"] as const).map((v) => {
+    ARMS.map((v) => {
       const js = all.filter((j) => j.variant === v);
       const mean = (f: (j: Judgment) => number) => (js.length ? +(js.reduce((a, j) => a + f(j), 0) / js.length).toFixed(2) : null);
       return [
@@ -315,8 +299,8 @@ async function main() {
     }),
   );
   const summary = { run_name: RUN, judge_model: JUDGE_MODEL, judge_version: "v0", judged: all.length, by_variant: byVariant, deterministic_hard_failures: DETERMINISTIC_HARD_FAILURES };
-  writeFileSync(join(RUN_DIR, "judge-summary.json"), JSON.stringify(summary, null, 2) + "\n");
-  console.log(`[judge] done · ${all.length} judgments · ${join(RUN_DIR, "judge-summary.json")}`);
+  writeFileSync(join(RUN_DIR, SUMMARY_NAME), JSON.stringify(summary, null, 2) + "\n");
+  console.log(`[judge] done · ${all.length} judgments · ${join(RUN_DIR, SUMMARY_NAME)}`);
 }
 
 const b = (v: boolean | undefined) => (v === undefined ? "?" : v ? "✓" : "✗");
