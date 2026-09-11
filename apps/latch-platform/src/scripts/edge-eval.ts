@@ -48,6 +48,9 @@ const CONCURRENCY = Number(arg("concurrency", "2"));
 const ALLOW_DRIFT = flag("allow-drift");
 const DRY_RUN = flag("dry-run");
 const MAX_ATTEMPTS = Number(arg("attempts", "3"));
+// The pilot runs on a cheaper sibling (gpt-5.6-luna) to rank questions by spread without
+// coupling the selection to Sol's own noise; the benchmark itself stays on EDGE_EVAL_MODEL.
+const MODEL = arg("model", EDGE_EVAL_MODEL) ?? EDGE_EVAL_MODEL;
 const OUT_DIR = resolve(arg("out") ?? `edge-eval-runs/${RUN_NAME}`);
 
 for (const v of VARIANT_ARG) if (!VARIANTS.includes(v)) throw new Error(`unknown variant ${v}`);
@@ -143,11 +146,11 @@ async function main() {
   const { agentStore, runtime, dynamic, modelFor } = latch;
 
   // 1. Model resolves to itself (catalog falls back to the default model on unknown ids).
-  const resolved = modelFor(EDGE_EVAL_MODEL) as { modelId?: string; provider?: string };
-  if (resolved.modelId !== EDGE_EVAL_MODEL) {
-    throw new Error(`model "${EDGE_EVAL_MODEL}" resolved to "${resolved.modelId}" (${resolved.provider}) — catalog fallback; aborting`);
+  const resolved = modelFor(MODEL) as { modelId?: string; provider?: string };
+  if (resolved.modelId !== MODEL) {
+    throw new Error(`model "${MODEL}" resolved to "${resolved.modelId}" (${resolved.provider}) — catalog fallback; aborting`);
   }
-  console.log(`[eval] model ${EDGE_EVAL_MODEL} → ${resolved.provider}/${resolved.modelId} ✓`);
+  console.log(`[eval] model ${MODEL} → ${resolved.provider}/${resolved.modelId} ✓${MODEL !== EDGE_EVAL_MODEL ? "  (NOT the benchmark model — pilot/selection only)" : ""}`);
 
   // 2. Connections: authorized + expected surface, for every connection a selected variant needs.
   const needed = new Set(VARIANT_ARG.flatMap((v) => CONNECTIONS_FOR[v]));
@@ -184,7 +187,7 @@ async function main() {
   const variants: Record<string, EdgeVariant> = {};
   for (const v of VARIANT_ARG) {
     const built = buildVariant(v);
-    const rec = parseAgentRecord(built.record);
+    const rec = parseAgentRecord({ ...built.record, modelId: MODEL });
     if (!DRY_RUN) await agentStore.upsert(principal, rec);
     variants[v] = built;
     console.log(`[eval] agent ${built.name} prompt:${built.promptSha8} connections=[${rec.connections.join(",")}] ${DRY_RUN ? "(dry-run, not upserted)" : "✓"}`);
@@ -229,7 +232,8 @@ async function main() {
     edge_version: "v0",
     started_at: new Date(t0).toISOString(),
     ended_at: new Date().toISOString(),
-    model: EDGE_EVAL_MODEL,
+    model: MODEL,
+    benchmark_model: EDGE_EVAL_MODEL,
     variants: Object.fromEntries(Object.values(variants).map((x) => [x.variant, { agent: x.name, prompt_sha8: x.promptSha8 }])),
     cases: cases.map((q) => q.id),
     reps: REPS,
@@ -290,7 +294,7 @@ async function runCell(args: {
     repetition: rep,
     agent: variant.name,
     prompt_sha8: variant.promptSha8,
-    model: EDGE_EVAL_MODEL,
+    model: MODEL,
     horizontal_ctx_version: args.planeBefore,
     turn1: { answer: "", answerChars: 0 },
     turn2: { answer: "", answerChars: 0 },
