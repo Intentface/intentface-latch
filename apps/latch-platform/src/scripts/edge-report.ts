@@ -8,10 +8,20 @@
  * cases × arms, then every case with the four arms side by side — scores, tool calls,
  * both turns, the judge's reasons. No external libraries; fonts from Google Fonts.
  *
- * The output is a static page: what the judge saw, what the agent did, nothing more.
+ * With --background (default on; --no-background to skip) the page opens with what the
+ * answers are grounded against, fetched LIVE through the connections at render time: who
+ * the client is (placement summary, market context, constraints, named next rung, AI
+ * strategy), what the knowledge plane holds (pillars with their stance titles, peer
+ * catalog), what memory the advisor had (note titles), and the rubric. Plane content flows
+ * into the published page only — never into the repo.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getLatch } from "../lib/latch";
+import { CONNECTIONS } from "../evals/edge/variants";
+import { DIMENSIONS, PILLAR_FOR } from "../evals/edge/judge/rubric";
+import { CTX_FILES, callTool, listMemoryFiles, readViaConnection, stripLineNumbers, withPlanes, type Dynamic } from "../evals/edge/judge/reference";
+import { evalPrincipal } from "./edge-connections";
 import { CONTRACTS } from "../evals/edge/cases/contracts";
 import { QUESTIONS } from "../evals/edge/cases/questions";
 import { CANNED_FOLLOWUP } from "../evals/edge/cases/followup";
@@ -28,13 +38,79 @@ const OUT = resolve(arg("out") ?? `${DIR}/report.html`);
 const jsonl = (p: string) => (existsSync(p) ? readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) : []);
 const json = (p: string) => (existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>) : null);
 
+const WITH_BACKGROUND = !process.argv.includes("--no-background");
+
+/** Pull the section of a markdown doc under `## <heading>` (until the next ## / #). */
+function section(md: string, heading: string): string {
+  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$([\\s\\S]*?)(?=^#{1,2}\\s|(?![\\s\\S]))`, "m");
+  const m = re.exec(md);
+  return m ? m[1]!.trim() : "";
+}
+
+interface Background {
+  client: { name: string; what: string; summary: string; market: string; constraints: string; aiStrategy: string; nextRung: string };
+  pillars: Array<{ pillar: string; category: string; stances: string[] }>;
+  peers: string[];
+  memory: string[];
+  rubric: Array<{ name: string; kind: string; target: string; criterion: string }>;
+}
+
+async function loadBackground(): Promise<Background | null> {
+  if (!WITH_BACKGROUND) return null;
+  const principal = await evalPrincipal();
+  const { dynamic } = await getLatch();
+  return withPlanes(dynamic as unknown as Dynamic, principal, async (client, kn) => {
+    const read = (f: string) => readViaConnection(client, `${CONNECTIONS.client}_read_file`, f);
+    const placement = await read(CTX_FILES[0]!);
+    const strategy = await read(CTX_FILES[1]!);
+    const product = await read(CTX_FILES[2]!);
+    const memoryFiles = await listMemoryFiles(client);
+    const memory: string[] = [];
+    for (const f of memoryFiles) {
+      const txt = await read(f);
+      memory.push(...[...txt.matchAll(/^# (.+)$/gm)].map((m) => m[1]!.trim()));
+    }
+    const pillars: Background["pillars"] = [];
+    for (const [category, pillar] of Object.entries(PILLAR_FOR)) {
+      const txt = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, `edge-kn/kn/${pillar}/playbook.md`);
+      const stances = [...txt.matchAll(/^##\s+(.+)$/gm)].map((m) => m[1]!.trim()).filter((h) => !/^(Article candidates|Open questions|What to avoid|Sources|Needs decision|Needs redaction|Not covered yet)/i.test(h));
+      pillars.push({ pillar, category, stances });
+    }
+    const catalog = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, "edge-kn/examples/catalog.md");
+    const peers = [...new Set([...catalog.matchAll(/^###\s+(.+)$/gm)].map((m) => m[1]!.trim()))];
+    const orientKn = stripLineNumbers(await callTool(kn, `${CONNECTIONS.kn}_orient`, {}));
+    void orientKn;
+    return {
+      client: {
+        name: (/^# (.+?) — /m.exec(placement)?.[1] ?? "the client").trim(),
+        what: section(product, "What it is"),
+        summary: section(placement, "Summary"),
+        market: section(placement, "Market context"),
+        constraints: section(strategy, "Funding and constraints"),
+        aiStrategy: section(strategy, "AI strategy"),
+        nextRung: section(placement, "The named next rung"),
+      },
+      pillars,
+      peers,
+      memory,
+      rubric: DIMENSIONS.map((d) => ({ name: d.name, kind: d.kind, target: d.target, criterion: d.criterion.split("\n")[0]! })),
+    };
+  });
+}
+
 const cells = jsonl(`${DIR}/cells.jsonl`).filter((c) => !c.error);
 const judgments = jsonl(`${DIR}/judgments.jsonl`);
 const summary = json(`${DIR}/summary.json`);
 const judgeSummary = json(`${DIR}/judge-summary.json`);
 const caseIds = [...new Set(cells.map((c) => c.case_id as string))];
+async function main() {
+const background = await loadBackground().catch((e) => {
+  console.warn(`[report] background skipped: ${(e as Error).message}`);
+  return null;
+});
 const data = {
   run: RUN,
+  background,
   summary,
   judgeSummary,
   cases: caseIds.map((id) => {
@@ -94,6 +170,19 @@ header .lede { color: var(--ink-2); max-width: 65ch; margin-top: 10px; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 .swatch.A { background: var(--arm-A); } .swatch.B { background: var(--arm-B); } .swatch.C { background: var(--arm-C); } .swatch.D { background: var(--arm-D); }
 
+/* background */
+.bg { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.bg .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 18px; font-size: 14px; min-width: 0; }
+.bg .panel.wide { grid-column: 1 / -1; }
+.bg h3 { margin-bottom: 8px; }
+.bg .prose { color: var(--ink-2); max-width: 70ch; } .bg .prose p { margin: 0 0 8px; } .bg .prose b { color: var(--ink); }
+.bg ul { margin: 0; padding-left: 18px; color: var(--ink-2); } .bg li { margin: 3px 0; }
+.bg .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.bg .rubric { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
+.bg .rubric .k { font-family: var(--mono); font-size: 12px; color: var(--ink); white-space: nowrap; }
+.bg .rubric .d { color: var(--ink-2); }
+.howto { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 22px; font-size: 14px; color: var(--ink-2); }
+.howto b { color: var(--ink); }
 /* scoreboard */
 .board { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; }
 .board table { width: 100%; border-collapse: collapse; min-width: 720px; }
@@ -233,9 +322,41 @@ function armCard(k, a) {
     '</div>';
 }
 
-document.getElementById("app").innerHTML = header() + board() + D.cases.map(caseSection).join("") +
+function background() {
+  const B = D.background;
+  const howto = '<section><div class="eyebrow">How to read this</div><h2 style="margin:6px 0 14px">One question, four advisors, one judge</h2><div class="howto">' +
+    '<div><b>The four arms</b> share the same model, prompt craft and settings. They differ only in which planes they can reach and the prompt sections that go with them: A has neither, B the client context, C the knowledge plane, D both plus the gap inbox.</div>' +
+    '<div><b>Two turns per cell.</b> Edge answers a first question with a short clarifier, then gets the same canned follow-up ("yes, that direction — full recommendation now"). The recommendation is what is judged; the clarifier is judged separately for brevity.</div>' +
+    '<div><b>Writes are inert.</b> Memory notes and gap notes are attempted (you can see the calls) but never reach a workspace; the client plane is hashed before and after every sweep.</div>' +
+    '<div><b>Judge v0</b> is a Claude model, one call per rubric dimension, given the client plane, the category pillar, the peer catalog and the case contract. It is not yet calibrated against human reviewers.</div>' +
+    '</div></section>';
+  if (!B) return howto;
+  const prose = (t) => '<div class="prose">' + md(t) + '</div>';
+  return howto + '<section><div class="eyebrow">What the answers are grounded against</div><h2 style="margin:6px 0 14px">The client, the knowledge plane, the memory</h2><div class="bg">' +
+    '<div class="panel wide"><h3>' + esc(B.client.name) + ' — the client (horizontal plane)</h3>' + prose(B.client.what) + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px 24px;margin-top:8px">' +
+      '<div><div class="eyebrow" style="margin-bottom:4px">Placement</div>' + prose(B.client.summary) + '</div>' +
+      '<div><div class="eyebrow" style="margin-bottom:4px">Market</div>' + prose(B.client.market) + '</div>' +
+      '<div><div class="eyebrow" style="margin-bottom:4px">Constraints</div>' + prose(B.client.constraints) + '</div>' +
+      '<div><div class="eyebrow" style="margin-bottom:4px">AI strategy</div>' + prose(B.client.aiStrategy) + '</div>' +
+      '<div style="grid-column:1/-1"><div class="eyebrow" style="margin-bottom:4px">The named next rung</div>' + prose(B.client.nextRung) + '</div></div></div>' +
+    B.pillars.map((p) => '<div class="panel"><h3>' + esc(p.category) + ' → <span class="mono">' + esc(p.pillar) + '</span></h3><div class="small" style="margin-bottom:6px">IF\'s stances (knowledge plane, Tier 1)</div><ul>' + p.stances.map((st) => '<li>' + esc(st) + '</li>').join("") + '</ul></div>').join("") +
+    '<div class="panel"><h3>Peer examples the advisor may cite</h3><ul>' + B.peers.map((x) => '<li>' + esc(x) + '</li>').join("") + '</ul></div>' +
+    '<div class="panel"><h3>Engagement memory (Tier 3)</h3><div class="small" style="margin-bottom:6px">Prior exchanges on file — only B and D can read these</div><ul>' + B.memory.map((x) => '<li>' + esc(x) + '</li>').join("") + '</ul></div>' +
+    '<div class="panel wide"><h3>The rubric</h3><div class="rubric">' + B.rubric.map((r) => '<span class="k">' + esc(r.name) + ' <span class="small">' + (r.kind === "scaled" ? "0–3" : r.kind === "binary" ? "pass/fail" : "category") + (r.target === "turn1" ? " · turn 1" : "") + '</span></span><span class="d">' + esc(r.criterion) + '</span>').join("") + '</div></div>' +
+    '</div></section>';
+}
+
+document.getElementById("app").innerHTML = header() + background() + board() + D.cases.map(caseSection).join("") +
   '<p class="small">Generated from edge-eval-runs/' + esc(D.run) + ' · scores are Judge v0 (uncalibrated) · answers verbatim from the agents.</p>';
 </script>
 `;
 writeFileSync(OUT, html);
-console.log(`[report] ${cells.length} cells, ${judgments.length} judgments, ${caseIds.length} cases → ${OUT}`);
+console.log(`[report] ${cells.length} cells, ${judgments.length} judgments, ${caseIds.length} cases${background ? " + background" : ""} → ${OUT}`);
+}
+
+main()
+  .catch((e) => {
+    console.error("[report] failed:", e);
+    process.exitCode = 1;
+  })
+  .finally(() => setTimeout(() => process.exit(process.exitCode ?? 0), 300));

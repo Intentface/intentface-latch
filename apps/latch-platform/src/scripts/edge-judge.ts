@@ -40,6 +40,7 @@ import {
   type HardFailure,
 } from "../evals/edge/judge/rubric";
 import { evalPrincipal } from "./edge-connections";
+import { CTX_FILES, listMemoryFiles, readViaConnection, withPlanes, type Dynamic } from "../evals/edge/judge/reference";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -94,56 +95,13 @@ export interface Judgment {
 
 // ── Reference material, fetched live once per connection/file ────────────────
 
-type Opened = { tools: Record<string, unknown>; close: () => Promise<void> };
-type Executable = { execute?: (input: unknown, opts: { toolCallId: string; messages: unknown[] }) => Promise<unknown> };
-
-function textOf(result: unknown): string {
-  // MCP tool results arrive either as the parsed JSON or as { content: [{ type: "text", text }] }.
-  if (typeof result === "string") return result;
-  const r = result as { content?: Array<{ type?: string; text?: string }> };
-  if (Array.isArray(r?.content)) return r.content.map((c) => c.text ?? "").join("\n");
-  return JSON.stringify(result);
-}
-
-/** Strip the `N|` line-number prefixes Loredex read_file returns. */
-const stripLineNumbers = (s: string) => s.replace(/^\d+\|/gm, "");
-
-async function readViaConnection(opened: Opened, tool: string, fileId: string): Promise<string> {
-  const t = opened.tools[tool] as Executable | undefined;
-  if (!t?.execute) throw new Error(`tool ${tool} not available on the opened connection`);
-  const raw = textOf(await t.execute({ fileId }, { toolCallId: `judge_${Date.now()}`, messages: [] }));
-  // read_file returns { file, content } (or the batch { files: [...] }); keep the content.
-  try {
-    const parsed = JSON.parse(raw) as { content?: string; files?: Array<{ content?: string }> };
-    const content = parsed.content ?? parsed.files?.map((f) => f.content ?? "").join("\n\n");
-    if (content) return stripLineNumbers(content);
-  } catch {
-    /* not JSON — raw text */
-  }
-  return stripLineNumbers(raw);
-}
-
-/** The client's memory files, discovered live (orient lists edge/memory/*). */
-async function listMemoryFiles(client: Opened): Promise<string[]> {
-  const t = client.tools[`${CONNECTIONS.client}_orient`] as Executable | undefined;
-  if (!t?.execute) return [];
-  const manifest = textOf(await t.execute({}, { toolCallId: `judge_orient_${Date.now()}`, messages: [] }));
-  // Manifest lines look like `    - notes.md [notes] 238L` under a `memory/ (N files)` heading.
-  const section = manifest.split(/^\s*memory\/ \(\d+ files\)/m)[1]?.split(/^\s*\S+\/ \(\d+ files\)/m)[0] ?? "";
-  return [...section.matchAll(/^\s*- (\S+\.md) \[/gm)].map((m) => `edge/memory/${m[1]}`).filter((f) => !f.endsWith("/index.md"));
-}
-
-async function loadReference(principal: Principal, dynamic: { hostFor: (names: string[]) => { open: (p: Principal) => Promise<Opened> } }) {
-  const client = await dynamic.hostFor([CONNECTIONS.client]).open(principal);
-  const kn = await dynamic.hostFor([CONNECTIONS.kn]).open(principal);
-  try {
+async function loadReference(principal: Principal, dynamic: Dynamic) {
+  return withPlanes(dynamic, principal, async (client, kn) => {
     // Tier 2 (ctx) AND Tier 3 (memory): the agent legitimately grounds in prior engagement
     // notes, so the judge must see them too — otherwise every fact drawn from memory reads
     // as "invented" (pilot-luna, first judge pass: 15 false invented_client_fact verdicts).
-    // The memory folder's file list is discovered live via orient.
-    const ctxFiles = ["edge/ctx/placement.md", "edge/ctx/strategy.md", "edge/ctx/product.md", "edge/ctx/roadmap.md", "edge/ctx/tech-stack.md"];
     const parts: string[] = [];
-    for (const f of ctxFiles) parts.push(`--- ${f} (Tier 2, client context) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
+    for (const f of CTX_FILES) parts.push(`--- ${f} (Tier 2, client context) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
     for (const f of await listMemoryFiles(client)) parts.push(`--- ${f} (Tier 3, engagement memory — prior exchanges with this client) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
     const clientContext = parts.join("\n\n");
     // Expert stance = the category's pillar + the peer-examples catalog (IF's own case
@@ -155,10 +113,7 @@ async function loadReference(principal: Principal, dynamic: { hostFor: (names: s
       stances[cat] = `--- edge-kn/kn/${pillar}/playbook.md (the pillar) ---\n${playbook}\n\n--- edge-kn/examples/catalog.md (approved peer examples the advisor may cite) ---\n${catalog}`;
     }
     return { clientContext, stances: stances as Record<Category, string> };
-  } finally {
-    await client.close();
-    await kn.close();
-  }
+  });
 }
 
 // ── Judging ──────────────────────────────────────────────────────────────────
@@ -301,7 +256,7 @@ async function main() {
   const model = modelFor(JUDGE_MODEL);
 
   console.log(`[judge] fetching reference material live (client plane + 4 pillars)…`);
-  const { clientContext, stances } = await loadReference(principal, dynamic as never);
+  const { clientContext, stances } = await loadReference(principal, dynamic as unknown as Dynamic);
   // Reference per CATEGORY (cacheable prefix); the case contract, when one exists, is
   // appended per cell as the "case-specific criteria" (guide line 343). Pilot cells for
   // questions outside the sealed 30 have no contract and are judged on the rubric alone.
