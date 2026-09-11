@@ -315,3 +315,145 @@ describe("options.context carries the runtime", () => {
     expect(ctx.runtime).toBe(rt);
   });
 });
+
+/**
+ * Execution restrictions travel down a delegation AS A SET. A parent test run
+ * (autoApprove + blockGated) stubs its own gated tools; the child it spawns
+ * must be a test run too, or the "side-effect-free" trial writes for real one
+ * level down.
+ */
+describe("delegation inherits the parent's restrictions", () => {
+  it("a blockGated test run spawns a blockGated child: the child's gated tool is stubbed, never executed", async () => {
+    const mem = memoryStorage();
+    let executed = 0;
+    const writeThing = tool({
+      description: "writes something",
+      inputSchema: z.object({ what: z.string() }),
+      execute: async ({ what }) => {
+        executed++;
+        return { wrote: what };
+      },
+    });
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        lead: defineAgent({
+          model: model("delegated.", { name: "spawn_agent", input: '{"agent":"writer","prompt":"write x"}' }),
+          instructions: "delegate",
+          subagents: ["writer"],
+        }),
+        writer: defineAgent({
+          model: model("did it.", { name: "write_thing", input: '{"what":"x"}' }),
+          instructions: "write",
+          tools: { write_thing: writeThing },
+          toolApproval: { write_thing: "user-approval" },
+        }),
+      },
+    });
+    // runAgent = autonomous test run: autoApprove + blockGated (default true).
+    const res = await rt.runAgent({ principal, agent: "lead", prompt: "go" });
+    expect(res.answer).toBe("delegated.");
+    expect(executed).toBe(0);
+    // The child's tool part carries the stub marker, like the parent's would.
+    const subChat = [...mem.chats.values()].find((c) => c.id !== res.threadId)!;
+    const parts = mem.messages.get(subChat.id)!.flatMap((m) => m.parts) as Array<{
+      type: string;
+      output?: { __blocked?: boolean };
+    }>;
+    expect(parts.find((p) => p.type === "tool-write_thing")?.output?.__blocked).toBe(true);
+  });
+});
+
+/**
+ * Every continuation path re-runs the model over history whose last message is
+ * the assistant turn that paused. `applyApproval` and `applyToolResult` trim
+ * that turn's trailing narration first (see trim-prefill.test.ts); the subagent
+ * resume that `applyApproval` routes a bubbled decision to must do the same, or
+ * the sub's half-written sentence reaches ITS model as an assistant prefill.
+ */
+describe("subagent approval resume", () => {
+  it("does not hand the sub's model its own trailing narration", async () => {
+    const mem = memoryStorage();
+    const prompts: Array<Array<{ role: string }>> = [];
+    const capturingWriter = new MockLanguageModelV4({
+      modelId: "mock-writer",
+      doStream: (async ({ prompt }: { prompt: Array<{ role: string }> }) => {
+        prompts.push(prompt);
+        return {
+          stream: simulateReadableStream({
+            initialDelayInMs: 0,
+            chunkDelayInMs: 0,
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "text-start", id: "0" },
+              { type: "text-delta", id: "0", delta: "written." },
+              { type: "text-end", id: "0" },
+              { type: "finish", finishReason: "stop", usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } },
+            ],
+          }),
+        };
+      }) as never,
+    });
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        lead: defineAgent({ model: model("all done."), instructions: "delegate", subagents: ["writer"] }),
+        writer: defineAgent({
+          model: capturingWriter,
+          instructions: "write",
+          tools: { write_thing: gatedTool },
+          toolApproval: { write_thing: "user-approval" },
+        }),
+      },
+    });
+    // The sub thread, paused on its gated write — and narrating after it, the
+    // way a model does ("Let me also ch…" cut off by the pause).
+    await mem.storage.createChat(principal, { id: "sub_1", agent: "writer", kind: "internal" });
+    await mem.storage.appendMessages("sub_1", [
+      { id: "su1", role: "user", parts: [{ type: "text", text: "write x" }], metadata: { visibility: "user" } },
+      {
+        id: "sa1",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          { type: "tool-write_thing", toolCallId: "wc1", state: "approval-requested", input: { what: "x" }, approval: { id: "apv_1" } },
+          { type: "step-start" },
+          { type: "text", text: "Let me also ch" },
+        ],
+        metadata: { visibility: "user" },
+      } as unknown as AppMessage,
+    ]);
+    // The parent, holding the bubbled approval for that sub.
+    await mem.storage.createChat(principal, { id: "c_parent", agent: "lead" });
+    await mem.storage.appendMessages("c_parent", [
+      { id: "pu1", role: "user", parts: [{ type: "text", text: "get x written" }], metadata: { visibility: "user" } },
+      {
+        id: "pa1",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          { type: "tool-spawn_agent", toolCallId: "tc1", state: "output-available", input: { agent: "writer", prompt: "write x" }, output: { status: "awaiting_approval" } },
+          {
+            type: "data-subagent-approval",
+            data: { approvalId: "sapv_1", subChatId: "sub_1", subApprovalIds: ["apv_1"], spawnToolCallId: "tc1", summaries: ["write_thing"] },
+          },
+        ],
+        metadata: { visibility: "user" },
+      } as unknown as AppMessage,
+    ]);
+
+    const res = await rt.applyApproval({ chatId: "c_parent", principal, decisions: [{ approvalId: "sapv_1", approved: true }] });
+    await res.text();
+
+    expect(prompts.length).toBeGreaterThanOrEqual(1);
+    const sent = prompts[0]!;
+    expect(sent[sent.length - 1]!.role).not.toBe("assistant");
+    expect(JSON.stringify(sent)).not.toContain("Let me also ch");
+    // The decision did flow through: the sub answered and the parent folded it in.
+    const parent = mem.messages.get("c_parent")!.find((m) => m.id === "pa1")!;
+    const spawn = parent.parts.find((p) => p.type === "tool-spawn_agent") as { output?: { answer?: string } };
+    expect(spawn.output?.answer).toBe("written.");
+  });
+});

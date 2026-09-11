@@ -1579,9 +1579,11 @@ export function createRuntime<P, RC = unknown>(
               write(messages);
             };
           }
-          // Propagate the PARENT turn's approval mode: interactive → the subagent
-          // gates its tools (a pending write bubbles up here); autonomous → it
-          // auto-approves.
+          // Propagate the PARENT turn's execution mode AS A SET: interactive →
+          // the subagent gates its tools (a pending write bubbles up here);
+          // autonomous → it auto-approves; a TEST run (blockGated) stays a test
+          // run all the way down, or a stubbed parent could delegate to a child
+          // whose gated tools run for real.
           const result = await runToCompletion({
             principal,
             agent,
@@ -1589,6 +1591,7 @@ export function createRuntime<P, RC = unknown>(
             chatId: subChatId,
             depth: depth + 1,
             autoApprove,
+            blockGated,
             onProgress,
             // Telemetry linkage: this turn is the parent; carry the root chat
             // down so the subagent's trace nests under this conversation.
@@ -3180,7 +3183,10 @@ export function createRuntime<P, RC = unknown>(
       run,
       admitted,
       lease,
-      uiMessages: subMessages,
+      // Resume: same prefill guard as applyApproval — the paused sub turn may
+      // have narrated after its gated call, and that text must not reach the
+      // model as an assistant prefill.
+      uiMessages: trimTrailingAssistantPrefill(subMessages),
       runtimeCtx,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
