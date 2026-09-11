@@ -144,11 +144,13 @@ describe("step checkpoints", () => {
       message: { id: "u1", role: "user", parts: [{ type: "text", text: "find x" }], metadata: { visibility: "user", createdAt: Date.now() } },
     });
     await res.text();
-    // Wait for the turn's LAST write, not a fixed delay: the final message is
-    // the only one stamped with usage, so its arrival means every earlier
-    // write has settled too (that ordering is what this test pins).
+    // Wait for every write to land, not a fixed delay: all three commits (two
+    // checkpoints and the final message, the only one stamped with usage) and
+    // the settled run. Waiting for the final write alone would return before a
+    // slow early checkpoint lands, which is the very bug this test pins.
     await vi.waitFor(
       () => {
+        expect(mem.committed.length).toBeGreaterThanOrEqual(3);
         expect(mem.committed.some((m) => m.metadata?.usage !== undefined)).toBe(true);
         expect([...mem.runs.values()][0]!.status).toBe("completed");
       },
