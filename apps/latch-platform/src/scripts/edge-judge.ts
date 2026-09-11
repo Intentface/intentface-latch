@@ -146,7 +146,9 @@ async function judgeDimension(model: LanguageModel, reference: string, cell: Cel
   const tools = cell.tool_calls.map((t) => `${t.tool}${t.blocked ? " (inert)" : ""}`).join(", ");
   const user = cellBlock({ dimension: dim, question: q.text, followup: followupFor(q), turn1: cell.turn1.answer, turn2: cell.turn2.answer, tools });
   let lastError = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Three attempts: Claude occasionally returns a verdict that misses the strict schema
+  // ("response did not match schema") — a retry, not a verdict.
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const { object } = await generateObject({
         model,

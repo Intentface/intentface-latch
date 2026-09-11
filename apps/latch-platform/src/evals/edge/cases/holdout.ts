@@ -39,6 +39,7 @@ export const holdoutPool = (): Question[] =>
 export function allocate(pool: Question[], size: number): Record<Category, number> {
   const counts = Object.fromEntries(CATEGORIES.map((c) => [c, pool.filter((x) => x.category === c).length])) as Record<Category, number>;
   const total = pool.length;
+  if (total === 0) return Object.fromEntries(CATEGORIES.map((c) => [c, 0])) as Record<Category, number>;
   const exact = CATEGORIES.map((c) => [c, (counts[c] / total) * size] as const);
   const floors = Object.fromEntries(exact.map(([c, v]) => [c, Math.floor(v)])) as Record<Category, number>;
   let remaining = size - Object.values(floors).reduce((a, b) => a + b, 0);
