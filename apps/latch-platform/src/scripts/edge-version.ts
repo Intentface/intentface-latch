@@ -5,14 +5,16 @@
  *
  *   node --import tsx src/scripts/edge-version.ts
  *
- * Re-run after any prompt edit, plane snapshot, or knowledge-plane re-capture. The
- * vertical-plane block is recorded by hand from orient/read_file (read-only scope, no bulk
- * export) — update it when edge-base changes.
+ * Re-run after any prompt edit or plane snapshot. BOTH plane blocks are read from their
+ * committed manifests (edge-plane-snapshot.ts / edge-vertical-snapshot.ts) — nothing here is
+ * maintained by hand, so a knowledge-plane edit shows up as a version fact rather than as a
+ * stale note.
  */
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { buildAllVariants } from "../evals/edge/variants";
 import { readManifest } from "./edge-plane-snapshot";
+import { readVerticalManifest, VERTICAL_FILES } from "./edge-vertical-snapshot";
 
 const sha = execSync("git rev-parse HEAD").toString().trim();
 const variants = Object.fromEntries(
@@ -42,23 +44,20 @@ const version = {
     captured_production_instructions_sha256_prefix: "2254078611ab6cb3",
     variants,
   },
-  vertical_context_version: {
-    workspace: "edge-base (ws_tRUBqZ-dKZDFalqejsUrs)",
-    endpoint: "https://app.loredex.ai/ws_tRUBqZ-dKZDFalqejsUrs/mcp/edge-v2-kn (read-only scope over edge-kn/)",
-    files: {
-      "edge-kn/kn/agent-infra/playbook.md": { fileId: "file_YKuJz9qctjgR8kUq0v7ax", version: 1, lines: 139 },
-      "edge-kn/kn/ax/playbook.md": { fileId: null, version: null, lines: 112 },
-      "edge-kn/kn/agentic-coding-practises/playbook.md": { fileId: null, version: null, lines: 56 },
-      "edge-kn/kn/insights/playbook.md": { fileId: "file_BHrCQXE5ks_mAUXfghL4J", version: 1, lines: 344 },
-      "edge-kn/examples/catalog.md": {
-        fileId: "file_Oef_qbntFZVmL3U3NKQRQ",
-        version: 2,
-        lines: 110,
-        defect: "whole catalog duplicated (second H1 at line 58) - fix pending, re-capture after",
-      },
-    },
-    note: "Recorded from orient/read_file on 2026-09-10; no content hash (read-only scope, no bulk export). Re-capture after the catalog dedupe.",
-  },
+  vertical_context_version: (() => {
+    const m = readVerticalManifest();
+    return {
+      workspace: "edge-base (ws_tRUBqZ-dKZDFalqejsUrs)",
+      endpoint: "https://app.loredex.ai/ws_tRUBqZ-dKZDFalqejsUrs/mcp/edge-v2-kn (read-only scope over edge-kn/)",
+      hashed_files: VERTICAL_FILES,
+      manifest: "src/evals/edge/fixtures/vertical-plane/manifest.json (per-file hashes, no content)",
+      sha256: m?.vertical_ctx_version ?? "run edge-vertical-snapshot.ts first",
+      capturedAt: m?.capturedAt ?? null,
+      files: m?.files ?? null,
+      fingerprint_script: "src/scripts/edge-vertical-snapshot.ts (--verify; the sweep re-checks it at start and end)",
+      note: "Hashed live through the same read-only scope the arms read it by. The catalog duplication (whole file twice) is inside this hash: a dedupe is a new vertical_ctx_version, i.e. a new cohort.",
+    };
+  })(),
   horizontal_context_version: {
     workspace: "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used exactly as it is; never written to; no content copied into the repo",
     manifest: "src/evals/edge/fixtures/client-plane/manifest.json (file ids, versions, per-file hashes)",
@@ -81,6 +80,7 @@ const version = {
     "Deliberate divergences from production, identical across arms: model gpt-5.6-sol (production gpt-5.5) per the guide's Sol Edge; exec.memory off (production on).",
     "Web tools off: production has none and the eval docs are silent (user decision 2026-09-10).",
     "Baseline captured by hand from the production agent editor (no production DB access); see v0/edge-v2-record.json.",
+    "Arm A' (AP, agent edge-eval-a-prime) is arm A's prompt and A's empty connection set; the only difference is a fixed 5-6 sentence client card the runner prefixes to every turn-1 question. The card is built once per sweep from the live client plane by the judge family and stamped (text + sha8) into that run's summary.json - it is client-plane content and is never committed.",
   ],
 };
 

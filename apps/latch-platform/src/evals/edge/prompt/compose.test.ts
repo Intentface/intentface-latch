@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { composeInstructions, parseSegments, VARIANTS, type Variant } from "./compose";
-import { approvalFor, buildAllVariants, CONNECTIONS_FOR, WRITE_TOOLS } from "../variants";
+import { agentNameFor, approvalFor, ARMS, buildAllVariants, buildVariant, CARD_ARMS, COMPOSE_AS, CONNECTIONS_FOR, WRITE_TOOLS } from "../variants";
 
 /**
  * Plan verification 2 + 4: the variant boundary is real at the instruction layer
@@ -214,8 +214,27 @@ describe("edge-v2 variants — tool surface (plan verification 2)", () => {
       expect(v.record.modelId).toBe("gpt-5.6-sol");
       expect(v.record.maxSteps).toBe(20);
       expect(v.record.exec).toBeUndefined();
-      expect(v.record.instructions).toBe(composed[v.variant]);
+      expect(v.record.instructions).toBe(composed[COMPOSE_AS[v.variant]]);
     }
+    // Four prompts across five arms: A′ is arm A's prompt, so they share a sha.
     expect(new Set(variants.map((v) => v.promptSha8)).size).toBe(4);
+  });
+
+  it("A′ differs from A in nothing but the card the runner prefixes", () => {
+    const a = buildVariant("A");
+    const ap = buildVariant("AP");
+    expect(ap.record.instructions).toBe(a.record.instructions);
+    expect(ap.promptSha8).toBe(a.promptSha8);
+    expect(ap.record.connections).toEqual([]);
+    expect(approvalFor("AP")).toEqual({});
+    expect(ap.record.modelId).toBe(a.record.modelId);
+    expect(ap.record.maxSteps).toBe(a.record.maxSteps);
+    // Distinct records under the eval principal, so the cohorts never share a thread history.
+    expect(ap.record.name).not.toBe(a.record.name);
+    expect(agentNameFor("AP")).toBe("edge-eval-a-prime");
+    // The card is what makes A′ A′ — and only A′ gets it.
+    expect([...CARD_ARMS]).toEqual(["AP"]);
+    // Every arm is buildable and named once.
+    expect(new Set(ARMS.map(agentNameFor)).size).toBe(ARMS.length);
   });
 });

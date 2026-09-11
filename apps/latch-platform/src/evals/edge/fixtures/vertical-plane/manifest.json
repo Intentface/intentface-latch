@@ -1,0 +1,41 @@
+{
+  "plane": "vertical",
+  "description": "Fingerprint of the vertical (knowledge) plane as the arms see it: the four Tier-1 pillar playbooks plus the peer-examples catalog, read through the read-only edge-v2-kn scope. Hashes only — no content is copied into the repo. Written by src/scripts/edge-vertical-snapshot.ts; --verify compares the live plane against it; the sweep re-checks it at start and end.",
+  "connection": "edge-v2-kn → edge-base (ws_tRUBqZ-dKZDFalqejsUrs), scope edge-kn/",
+  "capturedAt": "2026-09-11",
+  "vertical_ctx_version": "3dcb2c09e951ca24dd103dfba0f2600cb7c8f99c78685051410d04b433dc18fa",
+  "files": {
+    "edge-kn/kn/agent-infra/playbook.md": {
+      "chars": 30278,
+      "lines": 139,
+      "sha256": "c2b0e311a021eda9d00db061e8c5512bb24a04b401106141d0787f1779aa9514"
+    },
+    "edge-kn/kn/agentic-coding-practises/playbook.md": {
+      "chars": 5015,
+      "lines": 56,
+      "sha256": "3739864f611a679c1f8d4143f24ae84b78ca62e8bcd57c6f9fef2387cc2d1a9c"
+    },
+    "edge-kn/kn/ax/playbook.md": {
+      "chars": 19396,
+      "lines": 112,
+      "sha256": "2103f6d4a44fbd6f0d41f177603f6950096b2311a8a4c6cdf77e0ff65047ddb1"
+    },
+    "edge-kn/kn/insights/playbook.md": {
+      "chars": 19393,
+      "lines": 344,
+      "sha256": "46cc71d9c2a852a5aa14afe02c52f91f4316bc0d675fae7d2f38b57782782c8b"
+    },
+    "edge-kn/examples/catalog.md": {
+      "chars": 9357,
+      "lines": 110,
+      "sha256": "c8f88d257a8a99320c5f2a5f03ff98a5b5933a3435236c2c053ed1fd92c8297a"
+    }
+  },
+  "pillars": {
+    "INFRA": "agent-infra",
+    "AX": "ax",
+    "CODE": "agentic-coding-practises",
+    "INSIGHTS": "insights"
+  },
+  "normalization": "Loredex read_file line-number prefixes and index_terms/index_version frontmatter stripped."
+}

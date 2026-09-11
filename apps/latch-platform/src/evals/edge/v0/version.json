@@ -6,12 +6,18 @@
   "sampling": "provider default, identical in all arms",
   "system_prompt_version": {
     "source": "src/evals/edge/prompt/edge-v2.prompt.md (tagged; variants are a selection over segments)",
-    "git_commit_sha": "2fb368eaf36cea8822166f07e32dc272cb5198bc",
+    "git_commit_sha": "f08f3f7631862cc1fac4ebe0ce9bc3099f3a068d",
     "captured_production_instructions": "src/evals/edge/v0/edge-v2-instructions.md",
     "captured_production_instructions_sha256_prefix": "2254078611ab6cb3",
     "variants": {
       "A": {
         "agent": "edge-eval-a",
+        "prompt_sha8": "7e766cce",
+        "connections": [],
+        "gated_tools": []
+      },
+      "AP": {
+        "agent": "edge-eval-a-prime",
         "prompt_sha8": "7e766cce",
         "connections": [],
         "gated_tools": []
@@ -76,35 +82,45 @@
   "vertical_context_version": {
     "workspace": "edge-base (ws_tRUBqZ-dKZDFalqejsUrs)",
     "endpoint": "https://app.loredex.ai/ws_tRUBqZ-dKZDFalqejsUrs/mcp/edge-v2-kn (read-only scope over edge-kn/)",
+    "hashed_files": [
+      "edge-kn/kn/agent-infra/playbook.md",
+      "edge-kn/kn/agentic-coding-practises/playbook.md",
+      "edge-kn/kn/ax/playbook.md",
+      "edge-kn/kn/insights/playbook.md",
+      "edge-kn/examples/catalog.md"
+    ],
+    "manifest": "src/evals/edge/fixtures/vertical-plane/manifest.json (per-file hashes, no content)",
+    "sha256": "3dcb2c09e951ca24dd103dfba0f2600cb7c8f99c78685051410d04b433dc18fa",
+    "capturedAt": "2026-09-11",
     "files": {
       "edge-kn/kn/agent-infra/playbook.md": {
-        "fileId": "file_YKuJz9qctjgR8kUq0v7ax",
-        "version": 1,
-        "lines": 139
-      },
-      "edge-kn/kn/ax/playbook.md": {
-        "fileId": null,
-        "version": null,
-        "lines": 112
+        "chars": 30278,
+        "lines": 139,
+        "sha256": "c2b0e311a021eda9d00db061e8c5512bb24a04b401106141d0787f1779aa9514"
       },
       "edge-kn/kn/agentic-coding-practises/playbook.md": {
-        "fileId": null,
-        "version": null,
-        "lines": 56
+        "chars": 5015,
+        "lines": 56,
+        "sha256": "3739864f611a679c1f8d4143f24ae84b78ca62e8bcd57c6f9fef2387cc2d1a9c"
+      },
+      "edge-kn/kn/ax/playbook.md": {
+        "chars": 19396,
+        "lines": 112,
+        "sha256": "2103f6d4a44fbd6f0d41f177603f6950096b2311a8a4c6cdf77e0ff65047ddb1"
       },
       "edge-kn/kn/insights/playbook.md": {
-        "fileId": "file_BHrCQXE5ks_mAUXfghL4J",
-        "version": 1,
-        "lines": 344
+        "chars": 19393,
+        "lines": 344,
+        "sha256": "46cc71d9c2a852a5aa14afe02c52f91f4316bc0d675fae7d2f38b57782782c8b"
       },
       "edge-kn/examples/catalog.md": {
-        "fileId": "file_Oef_qbntFZVmL3U3NKQRQ",
-        "version": 2,
+        "chars": 9357,
         "lines": 110,
-        "defect": "whole catalog duplicated (second H1 at line 58) - fix pending, re-capture after"
+        "sha256": "c8f88d257a8a99320c5f2a5f03ff98a5b5933a3435236c2c053ed1fd92c8297a"
       }
     },
-    "note": "Recorded from orient/read_file on 2026-09-10; no content hash (read-only scope, no bulk export). Re-capture after the catalog dedupe."
+    "fingerprint_script": "src/scripts/edge-vertical-snapshot.ts (--verify; the sweep re-checks it at start and end)",
+    "note": "Hashed live through the same read-only scope the arms read it by. The catalog duplication (whole file twice) is inside this hash: a dedupe is a new vertical_ctx_version, i.e. a new cohort."
   },
   "horizontal_context_version": {
     "workspace": "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used exactly as it is; never written to; no content copied into the repo",
@@ -126,6 +142,7 @@
     "Pre-freeze edits vs production (guide line 84, mechanical failures): E1 deleted the two get_current_date lines (no such tool on the record); E2 rewrote the gap path around edge-v2-inbox_create into edge-inbox/inbox-twentyone (the write-only inbox scope has no orient/read_file; edit_file cannot match an empty gaps file); E3 split Tier-4/precedence clauses so no variant references a plane it lacks.",
     "Deliberate divergences from production, identical across arms: model gpt-5.6-sol (production gpt-5.5) per the guide's Sol Edge; exec.memory off (production on).",
     "Web tools off: production has none and the eval docs are silent (user decision 2026-09-10).",
-    "Baseline captured by hand from the production agent editor (no production DB access); see v0/edge-v2-record.json."
+    "Baseline captured by hand from the production agent editor (no production DB access); see v0/edge-v2-record.json.",
+    "Arm A' (AP, agent edge-eval-a-prime) is arm A's prompt and A's empty connection set; the only difference is a fixed 5-6 sentence client card the runner prefixes to every turn-1 question. The card is built once per sweep from the live client plane by the judge family and stamped (text + sha8) into that run's summary.json - it is client-plane content and is never committed."
   ]
 }

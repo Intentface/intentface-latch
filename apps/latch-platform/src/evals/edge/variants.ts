@@ -1,5 +1,5 @@
 /**
- * Edge Eval v0 — the four ablation arms as agent RECORDS.
+ * Edge Eval v0 — the ablation arms as agent RECORDS.
  *
  * Why records (upserted under the eval principal by the runner) rather than
  * code-declared agents in `src/agents/index.ts`:
@@ -17,11 +17,12 @@
  * off in all arms so cells stay independent), identical sampling (provider default).
  *
  * Variant boundary is real at BOTH layers (impl notes 231-236): connections
- * (this file) and instructions (edge-v2.prompt.md selection).
+ * (this file) and instructions (edge-v2.prompt.md selection). A′ (`AP`) is the one arm
+ * that differs at neither — see ARMS below.
  */
 import { readFileSync } from "node:fs";
 import type { AgentRecordInput } from "@intentface/latch-agent-builder";
-import { composeInstructions, promptSha8, VARIANTS, type Variant } from "./prompt/compose";
+import { composeInstructions, promptSha8, type Variant } from "./prompt/compose";
 
 /** The captured production record (src/evals/edge/v0/edge-v2-record.json). */
 interface CapturedRecord {
@@ -33,8 +34,38 @@ const record = JSON.parse(readFileSync(CAPTURED_RECORD_PATH, "utf8")) as Capture
 /** The model in every arm — the doc's "Sol Edge", reconfirmed by the user 2026-09-10. */
 export const EDGE_EVAL_MODEL = "gpt-5.6-sol";
 
+/**
+ * The ARMS of the benchmark. Four of them are the prompt variants A–D; `AP` is A′, the
+ * prompted baseline (plan, approved 2026-09-11): the SAME composed prompt as A and the same
+ * empty connection set, differing only in that the runner prefixes a fixed client card to
+ * its turn-1 question (src/evals/edge/client-card.ts). It is an arm, not a variant, because
+ * nothing about the prompt or the tool surface changes — so the tag vocabulary in
+ * `prompt/compose.ts` stays A/B/C/D and every arm composes through `COMPOSE_AS`.
+ *
+ * `AP` rather than `A'`: the letter travels through CLI args, JSONL keys and per-cell
+ * filenames. Reports and prose say A′.
+ */
+export const ARMS = ["A", "AP", "B", "C", "D"] as const;
+export type Arm = (typeof ARMS)[number];
+
+/** The prompt-composition letter behind each arm. */
+export const COMPOSE_AS: Record<Arm, Variant> = { A: "A", AP: "A", B: "B", C: "C", D: "D" };
+
+/** Arms whose turn-1 prompt carries the fixed client card. */
+export const CARD_ARMS: readonly Arm[] = ["AP"];
+
+export const ARM_LABEL: Record<Arm, string> = {
+  A: "A · prompt only",
+  AP: "A′ · prompted baseline",
+  B: "B · client plane",
+  C: "C · knowledge plane",
+  D: "D · full Edge",
+};
+
+export const isArm = (s: string): s is Arm => (ARMS as readonly string[]).includes(s);
+
 /** Agent names under the eval principal. Prefixed so they never collide with production `edge-v2`. */
-export const agentNameFor = (v: Variant) => `edge-eval-${v.toLowerCase()}` as const;
+export const agentNameFor = (a: Arm) => (a === "AP" ? "edge-eval-a-prime" : `edge-eval-${a.toLowerCase()}`);
 
 /** Connection names are production's — per-principal, so the eval principal binds them to the eval planes. */
 export const CONNECTIONS = {
@@ -43,22 +74,23 @@ export const CONNECTIONS = {
   inbox: "edge-v2-inbox",
 } as const;
 
-export const CONNECTIONS_FOR: Record<Variant, readonly string[]> = {
+export const CONNECTIONS_FOR: Record<Arm, readonly string[]> = {
   A: [],
+  AP: [], // A′ knows the client only from the card in its prompt — no plane, by construction.
   B: [CONNECTIONS.client],
   C: [CONNECTIONS.kn],
   D: [CONNECTIONS.client, CONNECTIONS.kn, CONNECTIONS.inbox],
 };
 
 /**
- * Production's approval map, filtered to the connections a variant has. `true` =
+ * Production's approval map, filtered to the connections an arm has. `true` =
  * user-approval → with `blockGated: true` the call is stubbed: present in the
  * transcript (so `required_memory_write_missing` = "did not ATTEMPT") but inert.
  */
 const PRODUCTION_APPROVAL = record.record.tools.approval;
 
-export function approvalFor(variant: Variant): Record<string, boolean> {
-  const prefixes = CONNECTIONS_FOR[variant].map((c) => `${c}_`);
+export function approvalFor(arm: Arm): Record<string, boolean> {
+  const prefixes = CONNECTIONS_FOR[arm].map((c) => `${c}_`);
   return Object.fromEntries(
     Object.entries(PRODUCTION_APPROVAL).filter(([tool]) => prefixes.some((p) => tool.startsWith(p))),
   );
@@ -68,31 +100,33 @@ export function approvalFor(variant: Variant): Record<string, boolean> {
 export const WRITE_TOOLS = ["create", "edit_file", "write_db", "add_comment", "add_link", "share_file"] as const;
 
 export interface EdgeVariant {
-  variant: Variant;
+  /** The arm (A, AP, B, C, D). Kept as `variant` — it is the cell/judgment field name. */
+  variant: Arm;
   name: string;
   promptSha8: string;
   record: AgentRecordInput;
 }
 
-export function buildVariant(variant: Variant): EdgeVariant {
-  const instructions = composeInstructions(variant);
-  const approval = approvalFor(variant);
+export function buildVariant(arm: Arm): EdgeVariant {
+  const instructions = composeInstructions(COMPOSE_AS[arm]);
+  const approval = approvalFor(arm);
   return {
-    variant,
-    name: agentNameFor(variant),
-    promptSha8: promptSha8(variant),
+    variant: arm,
+    name: agentNameFor(arm),
+    promptSha8: promptSha8(COMPOSE_AS[arm]),
     record: {
-      name: agentNameFor(variant),
-      title: `Edge eval ${variant}`,
+      name: agentNameFor(arm),
+      title: `Edge eval ${arm === "AP" ? "A′" : arm}`,
       description: {
         A: "Ablation arm A — prompt only: edge-v2 minus every context-plane section; no connections.",
+        AP: "Ablation arm A′ — the prompted baseline: arm A's prompt and no connections, with a fixed client card prefixed to the question by the runner.",
         B: "Ablation arm B — horizontal only: client context plane (edge-client) + its instructions.",
         C: "Ablation arm C — vertical only: knowledge plane (edge-v2-kn) + its instructions; no inbox.",
         D: "Ablation arm D — full edge-v2: both planes + inbox, production instructions modulo the v0 pre-freeze edits.",
-      }[variant],
+      }[arm],
       modelId: EDGE_EVAL_MODEL,
       instructions,
-      connections: [...CONNECTIONS_FOR[variant]],
+      connections: [...CONNECTIONS_FOR[arm]],
       maxSteps: record.record.maxSteps,
       // `enabled: []` = all tools of the listed connections, as production.
       ...(Object.keys(approval).length ? { tools: { enabled: [], approval } } : {}),
@@ -102,4 +136,4 @@ export function buildVariant(variant: Variant): EdgeVariant {
   };
 }
 
-export const buildAllVariants = (): EdgeVariant[] => VARIANTS.map(buildVariant);
+export const buildAllVariants = (): EdgeVariant[] => ARMS.map(buildVariant);

@@ -9,12 +9,18 @@
  *
  *   node --env-file=.env --import tsx src/scripts/edge-eval.ts --name smoke --variants A,D --cases INFRA-02,AX-01,CODE-03 --reps 1
  *   node --env-file=.env --import tsx src/scripts/edge-eval.ts --name pilot --variants A,D --cases all --reps 1 --concurrency 3
- *   node --env-file=.env --import tsx src/scripts/edge-eval.ts --name v0 --variants A,B,C,D --cases optimization --reps 3
+ *   node --env-file=.env --import tsx src/scripts/edge-eval.ts --name v0 --variants A,AP,B,C,D --cases optimization --reps 3
  *
  * Pre-sweep assertions (all fatal): the model id resolves to itself (the catalog falls
- * back silently otherwise), every connection a selected variant needs is authorized and
- * exposes the expected tool surface, the client plane matches the committed manifest, and
- * the four records upsert cleanly. Post-sweep: the plane hash is re-checked.
+ * back silently otherwise), every connection a selected arm needs is authorized and
+ * exposes the expected tool surface, BOTH context planes hash to their committed manifests
+ * (horizontal over REST, vertical through the read-only edge-v2-kn scope), and the arm
+ * records upsert cleanly. Post-sweep: both plane hashes are re-checked.
+ *
+ * Arm A′ (`AP`) additionally needs a CLIENT CARD: a fixed 5–6 sentence paragraph built once
+ * at sweep start from the live client plane (src/evals/edge/client-card.ts), cached in the
+ * run directory so `--resume` continues with the identical card, and prefixed to every
+ * turn-1 question of that arm. It is never written to the repo.
  *
  * Output dir: apps/latch-platform/edge-eval-runs/<name>/ (gitignored).
  */
@@ -25,12 +31,14 @@ import { isLangfuseConfigured, postScore } from "@intentface/latch-langfuse";
 import { getLatch } from "../lib/latch";
 import type { Principal } from "../lib/session";
 import { extractToolCalls } from "../lib/evals/run";
-import { VARIANTS, type Variant } from "../evals/edge/prompt/compose";
-import { buildVariant, CONNECTIONS, CONNECTIONS_FOR, EDGE_EVAL_MODEL, WRITE_TOOLS, type EdgeVariant } from "../evals/edge/variants";
+import { ARMS, buildVariant, CARD_ARMS, CONNECTIONS, CONNECTIONS_FOR, EDGE_EVAL_MODEL, isArm, WRITE_TOOLS, type Arm, type EdgeVariant } from "../evals/edge/variants";
+import { buildClientCard, withClientCard, type ClientCard } from "../evals/edge/client-card";
 import { QUESTIONS, byId, type Question } from "../evals/edge/cases/questions";
 import { followupFor } from "../evals/edge/cases/followup";
 import { checkSurface, evalPrincipal } from "./edge-connections";
 import { planeVersion, readLivePlane, readManifest } from "./edge-plane-snapshot";
+import { readVerticalManifest, verticalPlaneVersion } from "./edge-vertical-snapshot";
+import type { Dynamic } from "../evals/edge/judge/reference";
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -41,7 +49,7 @@ function arg(name: string, fallback?: string): string | undefined {
 const flag = (name: string) => process.argv.includes(`--${name}`);
 
 const RUN_NAME = arg("name") ?? `run-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}`;
-const VARIANT_ARG = (arg("variants", "A,D") ?? "A,D").split(",").map((v) => v.trim().toUpperCase()) as Variant[];
+const VARIANT_ARG = (arg("variants", "A,D") ?? "A,D").split(",").map((v) => v.trim().toUpperCase()) as Arm[];
 const CASES_ARG = arg("cases", "all") ?? "all";
 const REPS = Number(arg("reps", "1"));
 const CONCURRENCY = Number(arg("concurrency", "2"));
@@ -53,9 +61,13 @@ const MAX_ATTEMPTS = Number(arg("attempts", "3"));
 // The pilot runs on a cheaper sibling (gpt-5.6-luna) to rank questions by spread without
 // coupling the selection to Sol's own noise; the benchmark itself stays on EDGE_EVAL_MODEL.
 const MODEL = arg("model", EDGE_EVAL_MODEL) ?? EDGE_EVAL_MODEL;
+// The A′ card is written by the judge family, not the app model — a baseline should not be
+// primed by the model under test. Overridable; `--client-card <file>` pins an existing card.
+const CARD_MODEL = arg("card-model", "claude-sonnet-5")!;
+const CARD_FILE = arg("client-card");
 const OUT_DIR = resolve(arg("out") ?? `edge-eval-runs/${RUN_NAME}`);
 
-for (const v of VARIANT_ARG) if (!VARIANTS.includes(v)) throw new Error(`unknown variant ${v}`);
+for (const v of VARIANT_ARG) if (!isArm(v)) throw new Error(`unknown arm ${v} — one of ${ARMS.join(",")}`);
 
 function selectCases(spec: string): Question[] {
   const holdout = readHoldout();
@@ -95,12 +107,15 @@ interface CellRecord {
   category: string;
   register: string;
   split: "holdout" | "optimization" | "end-user";
-  variant: Variant;
+  variant: Arm;
   repetition: number;
   agent: string;
   prompt_sha8: string;
   model: string;
   horizontal_ctx_version: string;
+  vertical_ctx_version?: string;
+  /** A′ only: the sha8 of the client card prefixed to turn 1 (identical across all its cells). */
+  client_card_sha8?: string;
   thread_id?: string;
   turn1: TurnRecord;
   turn2: TurnRecord;
@@ -185,6 +200,28 @@ async function main() {
     console.warn(`[eval] WARNING ${msg}`);
   } else console.log(`[eval] client plane ${planeBefore.slice(0, 16)} ✓`);
 
+  // 3b. Vertical (knowledge) plane — hashed through the read-only scope the arms read it by.
+  // Every arm is graded against IF's stances, so the sweep records which stances those were
+  // even when no selected arm holds the connection; it is skipped only if the eval principal
+  // has no kn grant at all.
+  const verticalManifest = readVerticalManifest();
+  let verticalBefore: string | undefined;
+  try {
+    verticalBefore = (await verticalPlaneVersion(dynamic as unknown as Dynamic, principal)).version;
+  } catch (e) {
+    const msg = `vertical plane unreadable: ${(e as Error).message}`;
+    if (!ALLOW_DRIFT) throw new Error(`${msg} — authorize ${CONNECTIONS.kn} or pass --allow-drift`);
+    console.warn(`[eval] WARNING ${msg}`);
+  }
+  if (verticalBefore) {
+    if (!verticalManifest) throw new Error("no vertical-plane manifest — run edge-vertical-snapshot.ts");
+    if (verticalBefore !== verticalManifest.vertical_ctx_version) {
+      const msg = `knowledge plane drifted: live ${verticalBefore.slice(0, 16)} ≠ manifest ${verticalManifest.vertical_ctx_version.slice(0, 16)}`;
+      if (!ALLOW_DRIFT) throw new Error(`${msg} — re-snapshot (edge-vertical-snapshot.ts) or pass --allow-drift`);
+      console.warn(`[eval] WARNING ${msg}`);
+    } else console.log(`[eval] knowledge plane ${verticalBefore.slice(0, 16)} ✓`);
+  }
+
   // 4. Upsert the variant records (validated + normalized — upsert itself does not validate).
   const variants: Record<string, EdgeVariant> = {};
   for (const v of VARIANT_ARG) {
@@ -194,6 +231,28 @@ async function main() {
     variants[v] = built;
     console.log(`[eval] agent ${built.name} prompt:${built.promptSha8} connections=[${rec.connections.join(",")}] ${DRY_RUN ? "(dry-run, not upserted)" : "✓"}`);
   }
+  // 4b. The A′ client card: built once, cached in the run dir, identical for every case.
+  let card: ClientCard | undefined;
+  if (VARIANT_ARG.some((v) => CARD_ARMS.includes(v))) {
+    const cardPath = CARD_FILE ? resolve(CARD_FILE) : join(OUT_DIR, "client-card.json");
+    if (existsSync(cardPath)) {
+      card = JSON.parse(readFileSync(cardPath, "utf8")) as ClientCard;
+      console.log(`[eval] client card ${card.sha8} reused from ${cardPath} (${card.text.length} chars, by ${card.writer_model})`);
+    } else {
+      const cardModel = modelFor(CARD_MODEL) as { modelId?: string };
+      if (cardModel.modelId !== CARD_MODEL) throw new Error(`card model "${CARD_MODEL}" resolved to "${cardModel.modelId}" — catalog fallback; aborting`);
+      const client = await dynamic.hostFor([CONNECTIONS.client]).open(principal);
+      try {
+        card = await buildClientCard(client, modelFor(CARD_MODEL), CARD_MODEL);
+      } finally {
+        await client.close();
+      }
+      writeFileSync(cardPath, JSON.stringify(card, null, 2) + "\n");
+      console.log(`[eval] client card ${card.sha8} built by ${CARD_MODEL} → ${cardPath}`);
+    }
+    console.log(`[eval] card: ${card.text.replace(/\s+/g, " ")}`);
+  }
+
   if (DRY_RUN) return console.log("[eval] dry-run: stopping before any model call");
 
   // 5. Cells.
@@ -203,7 +262,7 @@ async function main() {
     : [];
   if (!RESUME && existsSync(cellsPath)) throw new Error(`${cellsPath} exists — pass --resume to continue it or pick another --name`);
   const doneKeys = new Set(prior.map((c) => `${c.case_id}|${c.variant}|${c.repetition}`));
-  const plan: Array<{ q: Question; v: Variant; rep: number }> = [];
+  const plan: Array<{ q: Question; v: Arm; rep: number }> = [];
   for (const q of cases) for (const v of VARIANT_ARG) for (let rep = 1; rep <= REPS; rep++) {
     if (!doneKeys.has(`${q.id}|${v}|${rep}`)) plan.push({ q, v, rep });
   }
@@ -214,10 +273,10 @@ async function main() {
   const worker = async () => {
     while (next < plan.length) {
       const { q, v, rep } = plan[next++]!;
-      const rec = await runCell({ q, v, rep, variant: variants[v]!, principal, runtime, planeBefore, holdout });
+      const rec = await runCell({ q, v, rep, variant: variants[v]!, principal, runtime, planeBefore, verticalBefore, card, holdout });
       records.push(rec);
       appendFileSync(cellsPath, JSON.stringify(rec) + "\n");
-      writeFileSync(join(OUT_DIR, `${q.id}__${v}__r${rep}.md`), renderTranscript(rec, q));
+      writeFileSync(join(OUT_DIR, `${q.id}__${v}__r${rep}.md`), renderTranscript(rec, q, card));
       const flags = [
         rec.error ? "ERROR" : "",
         rec.checks.unblocked_write.length ? "UNBLOCKED-WRITE" : "",
@@ -232,10 +291,19 @@ async function main() {
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(CONCURRENCY, plan.length)) }, worker));
 
-  // 6. Post-sweep: plane unchanged.
+  // 6. Post-sweep: both planes unchanged.
   const planeAfter = planeVersion((await readLivePlane()).files.map((f) => [f.path, f.content]));
   const planeUnchanged = planeAfter === planeBefore;
   if (!planeUnchanged) console.error(`[eval] ✗ client plane CHANGED during the sweep: ${planeBefore.slice(0, 16)} → ${planeAfter.slice(0, 16)}`);
+  let verticalAfter: string | undefined;
+  if (verticalBefore) {
+    verticalAfter = await verticalPlaneVersion(dynamic as unknown as Dynamic, principal).then((r) => r.version).catch((e) => {
+      console.warn(`[eval] knowledge plane re-hash failed: ${(e as Error).message}`);
+      return undefined;
+    });
+    if (verticalAfter && verticalAfter !== verticalBefore) console.error(`[eval] ✗ knowledge plane CHANGED during the sweep: ${verticalBefore.slice(0, 16)} → ${verticalAfter.slice(0, 16)}`);
+  }
+  const verticalUnchanged = !verticalBefore || verticalAfter === verticalBefore;
 
   const summary = {
     run_name: RUN_NAME,
@@ -244,13 +312,18 @@ async function main() {
     ended_at: new Date().toISOString(),
     model: MODEL,
     benchmark_model: EDGE_EVAL_MODEL,
-    variants: Object.fromEntries(Object.values(variants).map((x) => [x.variant, { agent: x.name, prompt_sha8: x.promptSha8 }])),
+    arms: VARIANT_ARG,
+    variants: Object.fromEntries(Object.values(variants).map((x) => [x.variant, { agent: x.name, prompt_sha8: x.promptSha8, connections: CONNECTIONS_FOR[x.variant], client_card: CARD_ARMS.includes(x.variant) }])),
+    client_card: card ? { sha8: card.sha8, writer_model: card.writer_model, chars: card.text.length, sources: card.sources, built_at: card.built_at, text: card.text } : null,
     cases: cases.map((q) => q.id),
     reps: REPS,
     cells: records.length,
     errors: records.filter((r) => r.error).length,
     unblocked_writes: records.filter((r) => r.checks.unblocked_write.length).length,
     horizontal_ctx_version: { before: planeBefore, after: planeAfter, unchanged: planeUnchanged },
+    vertical_ctx_version: verticalBefore
+      ? { before: verticalBefore, after: verticalAfter ?? null, unchanged: verticalUnchanged, matches_manifest: verticalBefore === verticalManifest?.vertical_ctx_version, manifest_captured_at: verticalManifest?.capturedAt ?? null }
+      : null,
     by_variant: Object.fromEntries(
       VARIANT_ARG.map((v) => {
         const rs = records.filter((r) => r.variant === v && !r.error);
@@ -273,8 +346,8 @@ async function main() {
     ),
   };
   writeFileSync(join(OUT_DIR, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
-  console.log(`[eval] done in ${((Date.now() - t0) / 1000).toFixed(0)}s · ${records.length} cells · ${summary.errors} errors · plane ${planeUnchanged ? "unchanged ✓" : "CHANGED ✗"} · ${OUT_DIR}/summary.json`);
-  if (!planeUnchanged || summary.unblocked_writes) process.exitCode = 1;
+  console.log(`[eval] done in ${((Date.now() - t0) / 1000).toFixed(0)}s · ${records.length} cells · ${summary.errors} errors · client plane ${planeUnchanged ? "unchanged ✓" : "CHANGED ✗"} · knowledge plane ${!verticalBefore ? "not hashed" : verticalUnchanged ? "unchanged ✓" : "CHANGED ✗"} · ${OUT_DIR}/summary.json`);
+  if (!planeUnchanged || !verticalUnchanged || summary.unblocked_writes) process.exitCode = 1;
 }
 
 // ── One cell ─────────────────────────────────────────────────────────────────
@@ -283,12 +356,14 @@ type Runtime = Awaited<ReturnType<typeof getLatch>>["runtime"];
 
 async function runCell(args: {
   q: Question;
-  v: Variant;
+  v: Arm;
   rep: number;
   variant: EdgeVariant;
   principal: Principal;
   runtime: Runtime;
   planeBefore: string;
+  verticalBefore?: string;
+  card?: ClientCard;
   holdout: Set<string>;
 }): Promise<CellRecord> {
   const { q, v, rep, variant, principal, runtime } = args;
@@ -306,6 +381,8 @@ async function runCell(args: {
     prompt_sha8: variant.promptSha8,
     model: MODEL,
     horizontal_ctx_version: args.planeBefore,
+    ...(args.verticalBefore ? { vertical_ctx_version: args.verticalBefore } : {}),
+    ...(CARD_ARMS.includes(v) && args.card ? { client_card_sha8: args.card.sha8 } : {}),
     turn1: { answer: "", answerChars: 0 },
     turn2: { answer: "", answerChars: 0 },
     tool_calls: [],
@@ -328,11 +405,16 @@ async function runCell(args: {
     // one active run per chat is a storage invariant). A transient provider failure on
     // either turn restarts the CELL on a fresh thread (up to MAX_ATTEMPTS) — a thread whose
     // turn 1 errored must not be continued, the cell would be invalid.
+    // A′ is the only arm whose turn-1 prompt is not the bare question: the fixed client card
+    // goes in front of it. Turn 2 is the same canned follow-up for every arm — the card is
+    // already in the thread.
+    const turn1Prompt = CARD_ARMS.includes(v) && args.card ? withClientCard(args.card.text, q.text) : q.text;
+    if (CARD_ARMS.includes(v) && !args.card) throw new Error(`arm ${v} needs a client card but none was built`);
     let t1!: Awaited<ReturnType<typeof runTurn>>;
     let t2!: Awaited<ReturnType<typeof runTurn>>;
     for (let attempt = 1; ; attempt++) {
       try {
-        t1 = await runTurn(runtime, principal, variant.name, q.text, undefined);
+        t1 = await runTurn(runtime, principal, variant.name, turn1Prompt, undefined);
         t2 = await runTurn(runtime, principal, variant.name, followupFor(q), t1.threadId, new Set(t1.turn.runId ? [t1.turn.runId] : []));
         break;
       } catch (e) {
@@ -455,7 +537,7 @@ async function runTurn(
   return { threadId: tid, turn };
 }
 
-function renderTranscript(c: CellRecord, q: Question): string {
+function renderTranscript(c: CellRecord, q: Question, card?: ClientCard): string {
   const calls = (turn: 1 | 2) =>
     c.tool_calls.filter((t) => t.turn === turn).map((t) => `- \`${t.tool}\`${t.blocked ? " (blocked → inert)" : ""}`).join("\n") || "- (none)";
   return `# ${c.case_id} · variant ${c.variant} · rep ${c.repetition}
@@ -469,11 +551,12 @@ function renderTranscript(c: CellRecord, q: Question): string {
 | runs | t1 ${c.turn1.runId ?? "-"} · t2 ${c.turn2.runId ?? "-"} |
 | latency | t1 ${c.turn1.latencyMs ?? "-"}ms · t2 ${c.turn2.latencyMs ?? "-"}ms |
 | tokens | t1 in ${c.turn1.usage?.inputTokens ?? "-"} / out ${c.turn1.usage?.outputTokens ?? "-"} · t2 in ${c.turn2.usage?.inputTokens ?? "-"} / out ${c.turn2.usage?.outputTokens ?? "-"} |
+| card | ${c.client_card_sha8 ? `client card ${c.client_card_sha8} prefixed to turn 1` : "-"} |
 | checks | memory_write=${c.checks.memory_write_attempted} gap_write=${c.checks.gap_write_attempted} unblocked=${c.checks.unblocked_write.join(",") || "none"} kn_write=${c.checks.kn_write_attempted.join(",") || "none"} leakage=${c.checks.leakage.join(",") || "none"} first_turn_short=${c.checks.first_turn_short} |
 ${c.error ? `| **error** | ${c.error} |\n` : ""}
-## Turn 1 — question
+## Turn 1 — question${c.client_card_sha8 ? " (prefixed with the client card)" : ""}
 
-> ${q.text}
+${c.client_card_sha8 && card ? `> _Background on us, for context:_ ${card.text.replace(/\n+/g, " ")}\n>\n` : ""}> ${q.text}
 
 ### Tool calls
 ${calls(1)}

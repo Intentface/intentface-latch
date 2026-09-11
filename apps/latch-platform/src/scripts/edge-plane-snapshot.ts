@@ -24,7 +24,7 @@ import { resolve } from "node:path";
 
 export const MANIFEST = resolve("src/evals/edge/fixtures/client-plane/manifest.json");
 const PLANE_ROOT = "edge";
-const INDEX_FRONTMATTER = /^---\n(?:index_terms:[\s\S]*?\n)?index_version:[^\n]*\n---\n/;
+export const INDEX_FRONTMATTER = /^---\n(?:index_terms:[\s\S]*?\n)?index_version:[^\n]*\n---\n/;
 
 type Folder = { id: string; name: string; isRoot?: boolean; subfolders: Folder[]; files: FileItem[] };
 type FileItem = { id: string; name: string; type: string; subtype: string | null; version: number };
