@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream, tool } from "ai";
 import { z } from "zod";
@@ -144,9 +144,16 @@ describe("step checkpoints", () => {
       message: { id: "u1", role: "user", parts: [{ type: "text", text: "find x" }], metadata: { visibility: "user", createdAt: Date.now() } },
     });
     await res.text();
-    // The held write is only ~60ms; give every write time to settle either way,
-    // so the assertion is about ORDER, not about whether the turn finished.
-    await new Promise((r) => setTimeout(r, 150));
+    // Wait for the turn's LAST write, not a fixed delay: the final message is
+    // the only one stamped with usage, so its arrival means every earlier
+    // write has settled too (that ordering is what this test pins).
+    await vi.waitFor(
+      () => {
+        expect(mem.committed.some((m) => m.metadata?.usage !== undefined)).toBe(true);
+        expect([...mem.runs.values()][0]!.status).toBe("completed");
+      },
+      { timeout: 2_000, interval: 10 },
+    );
 
     // Two checkpoints (tool step, text step) and the final write.
     expect(mem.committed.length).toBeGreaterThanOrEqual(3);
