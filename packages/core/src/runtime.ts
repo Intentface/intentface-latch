@@ -117,11 +117,32 @@ export interface ConnectionRegistry<P> {
  * just code — scoped per `Principal`. `@intentface` platforms back this with a
  * table; `resolve` builds the same `AgentConfig` a code agent would.
  */
+/**
+ * What the runtime knows about the turn a dynamic agent is being resolved for.
+ * Optional on both sides: a store that ignores it behaves exactly as before.
+ */
+export interface DynamicAgentResolveContext {
+  /**
+   * The agent that spawned this one, when the chat is a subagent thread
+   * (`ChatRecord.parentAgent`). Read on EVERY resolve of that thread — first
+   * turn, approval resume, crash recovery — so a per-parent shaping of the
+   * subagent (e.g. restricting a connector's tools to what the parent agent's
+   * record allows) can never lapse on a later turn.
+   */
+  parentAgent?: string;
+  /**
+   * The turn runs unattended (cron / `runAgent` / an autonomous parent): HITL
+   * approvals are waived. A store that would gate a tool can drop it instead.
+   */
+  autoApprove?: boolean;
+}
+
 export interface DynamicAgentStore<P> {
   /** Build an agent's config for this caller, or undefined if not found. */
   resolve(
     name: string,
     principal: P,
+    ctx?: DynamicAgentResolveContext,
   ): AgentConfig<P> | undefined | Promise<AgentConfig<P> | undefined>;
   /** The caller's dynamic agents, for the picker. */
   list(principal: P): AgentInfo[] | Promise<AgentInfo[]>;
@@ -1347,13 +1368,15 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     request?: Request,
     turnContext?: unknown,
+    /** Passed through to `dynamicAgents.resolve` (see DynamicAgentResolveContext). */
+    resolveCtx?: DynamicAgentResolveContext,
   ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
     const runtimeCtx = await config.context.build({ principal, request, turnContext });
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
     const cfg = factory
       ? await factory({ context: runtimeCtx, principal, turnContext })
-      : await config.dynamicAgents?.resolve(agentName, principal);
+      : await config.dynamicAgents?.resolve(agentName, principal, resolveCtx);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
       typeof cfg.model === "string"
@@ -1749,6 +1772,9 @@ export function createRuntime<P, RC = unknown>(
             // not recall earlier inputs or save new memory either.
             ...(memoryOn ? {} : { memory: false }),
             onProgress,
+            // Who is delegating — persisted on the sub-thread so every later
+            // resolve of it can be shaped per parent (DynamicAgentResolveContext).
+            parentAgent: run.agent,
             // Telemetry linkage: this turn is the parent; carry the root chat
             // down so the subagent's trace nests under this conversation.
             parentRunId: run.id,
@@ -2852,6 +2878,9 @@ export function createRuntime<P, RC = unknown>(
       principal,
       request,
       turnContext,
+      // A host may continue a subagent thread through the chat surface; keep
+      // resolving it the way its spawner would.
+      { parentAgent: chat.parentAgent },
     );
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
@@ -3037,7 +3066,12 @@ export function createRuntime<P, RC = unknown>(
     // reconcilable even if its (dynamic, DB-stored) agent was since deleted.
     // Before this ordering that throw also aborted `sweep`'s loop, so one such
     // run held up recovery for every other run until its attempts ran out.
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
+    // A recovered subagent run must resolve exactly as its spawner shaped it —
+    // crash recovery and `sweep` both land here.
+    const chat = await storage.getChat(principal, run.chatId);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal, undefined, undefined, {
+      parentAgent: chat?.parentAgent,
+    });
 
     // A resume was admitted when the turn first ran — never refuse it (the
     // half-done work would strand), but its tokens still settle against the
@@ -3231,6 +3265,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
       request,
       turnContext,
+      { parentAgent: chat.parentAgent },
     );
     const admitted = await admitContinuation(principal, chat.agent, "decision");
     const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
@@ -3301,6 +3336,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
       request,
       turnContext,
+      { parentAgent: chat.parentAgent },
     );
     const admitted = await admitContinuation(principal, chat.agent, "decision");
     // The result is persisted WITH the run (atomically where the adapter can):
@@ -3367,7 +3403,13 @@ export function createRuntime<P, RC = unknown>(
       );
     }
 
-    const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request, turnContext);
+    const { cfg, modelId } = await resolveAgentConfig(
+      chat.agent,
+      principal,
+      request,
+      turnContext,
+      { parentAgent: chat.parentAgent },
+    );
     // Tool definitions only affect how a recorded tool RESULT is rendered for the
     // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
     // than failing. So take every definition available without I/O — the agent's
@@ -3617,6 +3659,12 @@ export function createRuntime<P, RC = unknown>(
     /** Telemetry: the top-level conversation id (shared session across the tree). */
     rootChatId?: string;
     /**
+     * The agent delegating this run (`spawn_agent` passes its own name).
+     * Persisted on a NEW thread as `ChatRecord.parentAgent` and handed to
+     * `dynamicAgents.resolve` on this and every later turn of that thread.
+     */
+    parentAgent?: string;
+    /**
      * Per-turn request payload for THIS run, passed to `context.build` and the
      * agent factory (see `HandleChatInput.turnContext`). Ephemeral — applies to
      * this initial turn only, never to resumes.
@@ -3637,6 +3685,7 @@ export function createRuntime<P, RC = unknown>(
         // Runtime-created thread: stamp it internal so a host filtering its
         // chat list on kind never shows it (see ChatRecord.kind).
         kind: "internal",
+        ...(o.parentAgent ? { parentAgent: o.parentAgent } : {}),
       });
     }
     const prior = await storage.loadMessages(o.principal, chatId);
@@ -3654,7 +3703,12 @@ export function createRuntime<P, RC = unknown>(
     // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
     const { cfg, modelId, runtimeCtx, run, lease } = await withReservation(admitted, async () => {
-      const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext);
+      const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext, {
+        // A continued thread keeps the parent it was created under; an adapter
+        // that doesn't persist the column falls back to this call's value.
+        parentAgent: chat.parentAgent ?? o.parentAgent,
+        autoApprove: o.autoApprove,
+      });
       const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion);
       return { ...resolved, ...opened };
     });
@@ -3751,6 +3805,11 @@ export function createRuntime<P, RC = unknown>(
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
       subChat.agent,
       principal,
+      undefined,
+      undefined,
+      // Same shaping as the first sub-turn: the parent is read off the persisted
+      // sub-thread, and this path is only ever reached by a human decision.
+      { parentAgent: subChat.parentAgent, autoApprove: false },
     );
     const admitted = await admitContinuation(principal, subChat.agent, "decision");
     const { run, lease } = await openRun(principal, subChatId, subChat.agent, cfg.configVersion);
