@@ -16,6 +16,38 @@ here deletes anything.
 
 ---
 
+## First-time setup on a machine
+
+Skip to the golden path if `pnpm edge:setup` already reports all ✓.
+
+1. **Repo and dependencies** — `pnpm install` at the repo root.
+2. **`apps/latch-platform/.env`** — ask whoever set this up for the file, or copy it from
+   another checkout. What the eval needs from it:
+
+   | Variable | Why |
+   |---|---|
+   | `DATABASE_URL` | the local SQLite database (e.g. `file:./latch.db`) |
+   | `LATCH_VAULT_KEY` | connection records are encrypted with it |
+   | `OPENAI_API_KEY` | the arms run on `gpt-5.6-sol` |
+   | `ANTHROPIC_API_KEY` | the judge and A′'s card writer are Claude models |
+   | `LOREDEX_EVAL_WS_ID`, `LOREDEX_EVAL_API_KEY` | fingerprinting the client plane — GET only, a **read-only key is enough** |
+   | `EDGE_EVAL_USER_EMAIL` | optional; defaults to the repo owner's address |
+
+3. **The dev server and a user account** — `cd apps/latch-platform && pnpm dev`, then sign in
+   at `http://localhost:3000` as `EDGE_EVAL_USER_EMAIL`. That user owns the connections and
+   the arm agents. **Only one dev server may run against a given `latch.db`**: a second one
+   (typically another checkout) holds a write lock and fails every cell instantly.
+4. **`pnpm edge:setup`** — creates the connection records and the five arm agents, checks
+   everything else, and prints what still needs a human.
+5. **One Connect click per connection** — setup will report `edge-client`, `edge-v2-kn` and
+   `edge-v2-inbox` as not authorized. Open `http://localhost:3000/connections` and press
+   Connect on each (the Loredex token is user-wide, so one sign-in covers all three). Run
+   `pnpm edge:setup` again; it should be all ✓.
+6. **Langfuse — only for the human review step.** Needs Docker:
+   `cd tools/langfuse-local && docker compose up -d && bash setup-reviewers.sh` (web on
+   :3100; the script writes `apps/latch-platform/.env.langfuse-local`). Do not upgrade the
+   stack to v4 — it is pinned to v3 images because v4 breaks the reads this repo uses.
+
 ## Golden path (what to do 95% of the time)
 
 Everything runs from `apps/latch-platform`.
