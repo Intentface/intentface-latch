@@ -6,7 +6,7 @@
   "sampling": "provider default, identical in all arms",
   "system_prompt_version": {
     "source": "src/evals/edge/prompt/edge-v2.prompt.md (tagged; variants are a selection over segments)",
-    "git_commit_sha": "b39b1b73bca413d7d5208a7a6945f35754f5af5f",
+    "git_commit_sha": "2fb368eaf36cea8822166f07e32dc272cb5198bc",
     "captured_production_instructions": "src/evals/edge/v0/edge-v2-instructions.md",
     "captured_production_instructions_sha256_prefix": "2254078611ab6cb3",
     "variants": {

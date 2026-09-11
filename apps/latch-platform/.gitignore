@@ -17,3 +17,6 @@ todos.json
 
 !.env.example
 .vercel
+
+# Edge Eval v0 — raw sweep output (cells.jsonl + transcripts); benchmark docs are committed separately
+edge-eval-runs/
