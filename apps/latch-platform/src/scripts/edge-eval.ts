@@ -319,7 +319,7 @@ async function runCell(args: {
     for (let attempt = 1; ; attempt++) {
       try {
         t1 = await runTurn(runtime, principal, variant.name, q.text, undefined);
-        t2 = await runTurn(runtime, principal, variant.name, followupFor(q), t1.threadId);
+        t2 = await runTurn(runtime, principal, variant.name, followupFor(q), t1.threadId, new Set(t1.turn.runId ? [t1.turn.runId] : []));
         break;
       } catch (e) {
         if (attempt >= MAX_ATTEMPTS || !isTransient(e)) throw e;
@@ -388,6 +388,7 @@ async function runTurn(
   agent: string,
   prompt: string,
   threadId: string | undefined,
+  priorRunIds: ReadonlySet<string> = new Set(),
 ): Promise<{ threadId: string; turn: TurnRecord & { startedAt?: number } }> {
   const t0 = Date.now();
   // "simulate-success": gated writes are still stubbed (inert) but look successful to the
@@ -400,13 +401,16 @@ async function runTurn(
     | undefined;
   let runId = last?.metadata?.runId;
   // A turn that produced no assistant message (provider error after retries) leaves no
-  // runId on the history — find its run row by chat instead, so the failure is recorded
-  // rather than silently passed on as an empty answer.
-  if (!runId) {
+  // NEW runId on the history: for turn 1 there is none at all; for turn 2 the last
+  // assistant message is still turn 1's and `runAgent` hands back turn 1's answer
+  // (smoke-3 CODE-03 A: identical answers, identical runId). Either way, find the
+  // failed run row by chat so the failure is recorded rather than passed on.
+  if (!runId || priorRunIds.has(runId)) {
+    runId = undefined;
     const recent = await runtime.listRuns({ principal, limit: 50 });
     const own = recent.filter((r) => r.chatId === tid).sort((a, b) => b.startedAt - a.startedAt)[0];
     if (own) {
-      const err = own.error ?? `run ${own.id} ${own.status} with no assistant message`;
+      const err = own.error ?? `run ${own.id} ${own.status} with no new assistant message`;
       throw new TurnFailed(err, own.status);
     }
     throw new TurnFailed("turn produced no assistant message and no run row", "unknown");
