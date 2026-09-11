@@ -13,7 +13,10 @@ step's checkpoint raced the finish handler for the same row, where a late
 checkpoint clobbered the usage and cost metadata only the finish handler stamps.
 
 Checkpoints are now chained: each write starts the moment the one before it
-commits, and the finish handler awaits the chain before persisting the final
-message. The chain orders, it does not batch — a crash at step N still loses at
+commits, and the finish handler awaits the chain before it settles the run row
+and persists the final message. Recovery never revisits a completed run, so a
+row that says `completed` now always sits next to a message that already holds
+the final step — previously the last checkpoint could still be in flight at
+that moment, and a crash there lost the answer text. The chain orders, it does not batch — a crash at step N still loses at
 most the write in flight and the one queued behind it. A failed checkpoint logs
 and releases the chain, as before.

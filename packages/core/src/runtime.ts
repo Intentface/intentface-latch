@@ -2094,6 +2094,13 @@ export function createRuntime<P, RC = unknown>(
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
+        // Every step checkpoint has committed (or failed and been logged)
+        // BEFORE the row is settled. Recovery never revisits a completed run,
+        // so the moment the row says `completed` the stored message must
+        // already hold the final step — otherwise a crash between the settle
+        // and the final write below loses the answer text, not just metadata.
+        // Awaiting here also makes the final write the row's last one.
+        await checkpoints;
         // Fenced finish: settle the run FIRST. If the guarded update doesn't
         // apply (our lease was reaped + the run re-claimed elsewhere), we're
         // a stale writer — skip the final message/usage persistence so we
@@ -2113,9 +2120,6 @@ export function createRuntime<P, RC = unknown>(
           lease,
         );
         if (applied) {
-          // Every step checkpoint has committed (or failed and been logged)
-          // before the final message lands, so it is the row's last write.
-          await checkpoints;
           await storage.appendMessages(resolvedChatId, messages);
           await storage.recordUsage(principal, {
             runId: run.id,
