@@ -151,14 +151,17 @@ async function judgeDimension(model: LanguageModel, reference: string, cell: Cel
       const { object } = await generateObject({
         model,
         schema: dimensionSchema(dim.kind),
+        // This SDK version rejects system messages in `messages`; the stable reference
+        // block goes first as its own user-content part, marked cacheable (Anthropic
+        // provider option) so it is a cache hit across cells of the same category.
         messages: [
           {
-            role: "system",
-            content: reference,
-            // Stable prefix per category → cache it (Anthropic provider option).
-            providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+            role: "user",
+            content: [
+              { type: "text", text: reference, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } },
+              { type: "text", text: `\n\n${user}` },
+            ],
           },
-          { role: "user", content: user },
         ],
         abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
       });
