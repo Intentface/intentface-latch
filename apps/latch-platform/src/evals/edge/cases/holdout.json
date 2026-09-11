@@ -1,0 +1,39 @@
+{
+  "seed": "edge-eval-v0-holdout-2026-09-11",
+  "size": 10,
+  "drawnAt": "2026-09-11T07:15:53.124Z",
+  "git_commit_sha": "3f8c53d3e0bce412212b0d31d282e54714a67354",
+  "rules": [
+    "client-team register only (the 7 Finnish end-user questions are excluded from the draw)",
+    "INSIGHTS contributes 0 (3 questions total; all stay in the optimization pool)",
+    "INFRA / AX / CODE allocated proportionally to pool size, largest-remainder rounding",
+    "uniform draw within category via seeded PRNG (mulberry32 over sha256(seed))"
+  ],
+  "pool": {
+    "size": 58,
+    "byCategory": {
+      "INSIGHTS": 0,
+      "INFRA": 27,
+      "AX": 18,
+      "CODE": 13
+    }
+  },
+  "allocation": {
+    "INSIGHTS": 0,
+    "INFRA": 5,
+    "AX": 3,
+    "CODE": 2
+  },
+  "holdout": [
+    "AX-06",
+    "AX-08",
+    "AX-12",
+    "CODE-10",
+    "CODE-11",
+    "INFRA-02",
+    "INFRA-04",
+    "INFRA-09",
+    "INFRA-18",
+    "INFRA-21"
+  ]
+}
