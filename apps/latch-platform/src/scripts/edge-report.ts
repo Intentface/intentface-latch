@@ -350,6 +350,15 @@ document.getElementById("app").innerHTML = header() + background() + board() + D
   '<p class="small">Generated from edge-eval-runs/' + esc(D.run) + ' · scores are Judge v0 (uncalibrated) · answers verbatim from the agents.</p>';
 </script>
 `;
+// Guard: the page's script must at least parse — a stray apostrophe inside a JS string
+// literal once shipped a blank page (demo-3 v2). `new Function` compiles without running.
+const script = /<script>\n([\s\S]*?)<\/script>\s*$/.exec(html)?.[1];
+if (!script) throw new Error("report template: page script not found");
+try {
+  new Function(script.replace('JSON.parse(document.getElementById("data").textContent)', "{}"));
+} catch (e) {
+  throw new Error(`report template: page script does not parse — ${(e as Error).message}`);
+}
 writeFileSync(OUT, html);
 console.log(`[report] ${cells.length} cells, ${judgments.length} judgments, ${caseIds.length} cases${background ? " + background" : ""} → ${OUT}`);
 }
