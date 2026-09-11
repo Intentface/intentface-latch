@@ -392,7 +392,8 @@ class TurnFailed extends Error {
 }
 
 /** Provider-side transient failures worth a retry on a fresh thread. */
-const isTransient = (e: unknown) => /overloaded|rate limit|429|timeout|ECONNRESET|503|502|temporarily/i.test(String((e as Error)?.message ?? e));
+const isTransient = (e: unknown) =>
+  /overloaded|rate limit|429|timeout|ECONNRESET|503|502|temporarily|SQLITE_BUSY|database is locked/i.test(String((e as Error)?.message ?? e));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
