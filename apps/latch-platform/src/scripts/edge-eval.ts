@@ -392,8 +392,11 @@ class TurnFailed extends Error {
 }
 
 /** Provider-side transient failures worth a retry on a fresh thread. */
+// Drizzle wraps libsql errors as "Failed query: <sql>" and drops the SQLITE_BUSY cause, so a
+// storage write failure is treated as transient too — it is always environmental for a
+// cell (a lock on the shared local DB), never a property of the answer.
 const isTransient = (e: unknown) =>
-  /overloaded|rate limit|429|timeout|ECONNRESET|503|502|temporarily|SQLITE_BUSY|database is locked/i.test(String((e as Error)?.message ?? e));
+  /overloaded|rate limit|429|timeout|ECONNRESET|503|502|temporarily|SQLITE_BUSY|database is locked|Failed query/i.test(String((e as Error)?.message ?? e));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
