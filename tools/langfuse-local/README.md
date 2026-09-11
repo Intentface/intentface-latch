@@ -11,8 +11,9 @@ docker compose down -v        # wipe everything
 ```
 
 First boot creates, headlessly: an admin user (LANGFUSE_INIT_USER_*), the org + project, and
-fixed API keys (LANGFUSE_INIT_PROJECT_*_KEY). Reviewer accounts and their project memberships
-are created by `apps/latch-platform/src/scripts/edge-langfuse-local.ts` (run after first boot).
+fixed API keys (LANGFUSE_INIT_PROJECT_*_KEY). Reviewer accounts (Ville, Joni, Valtteri — `<name>@intentface.local`, password
+`edge-review-<name>-2026`) and their org memberships are created by `./setup-reviewers.sh`
+(run after first boot; idempotent). It also writes `EDGE_REVIEWER_IDS` for the queue assignment.
 
 The eval scripts point at this instance through `apps/latch-platform/.env.langfuse-local`
 (passed as a second `--env-file`), so the latch dev server keeps its own Langfuse settings.
