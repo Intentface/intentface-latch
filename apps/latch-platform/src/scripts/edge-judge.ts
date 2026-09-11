@@ -23,6 +23,7 @@ import type { Principal } from "../lib/session";
 import { CONNECTIONS } from "../evals/edge/variants";
 import { byId } from "../evals/edge/cases/questions";
 import { followupFor } from "../evals/edge/cases/followup";
+import { CONTRACTS, contractCriteria } from "../evals/edge/cases/contracts";
 import {
   BINARY_DIMENSIONS,
   DETERMINISTIC_HARD_FAILURES,
@@ -204,7 +205,7 @@ async function judgeDimension(model: LanguageModel, reference: string, cell: Cel
   throw new Error(lastError);
 }
 
-async function judgeCell(model: LanguageModel, references: Record<Category, string>, cell: Cell, dims: DimensionSpec[], existing?: Judgment): Promise<Judgment> {
+async function judgeCell(model: LanguageModel, referenceFor: (cat: Category, caseId: string) => string, cell: Cell, dims: DimensionSpec[], existing?: Judgment): Promise<Judgment> {
   const j: Judgment = existing
     ? { ...existing, errors: {}, hard_failures_all: [], judged_at: new Date().toISOString() }
     : {
@@ -234,7 +235,7 @@ async function judgeCell(model: LanguageModel, references: Record<Category, stri
   await Promise.all(
     dims.map(async (dim) => {
       try {
-        const { value, reason } = await judgeDimension(model, references[cell.category], cell, dim);
+        const { value, reason } = await judgeDimension(model, referenceFor(cell.category, cell.case_id), cell, dim);
         j.reasons[dim.name] = reason;
         if (dim.kind === "scaled") j.scores[dim.name as (typeof SCALED_DIMENSIONS)[number]] = value as number;
         else if (dim.kind === "binary") j.passes[dim.name as (typeof BINARY_DIMENSIONS)[number]] = value as boolean;
@@ -301,10 +302,16 @@ async function main() {
 
   console.log(`[judge] fetching reference material live (client plane + 4 pillars)…`);
   const { clientContext, stances } = await loadReference(principal, dynamic as never);
-  const references = Object.fromEntries(
-    (Object.keys(PILLAR_FOR) as Category[]).map((cat) => [cat, referenceBlock({ clientContext, expertStance: stances[cat], pillar: PILLAR_FOR[cat] })]),
-  ) as Record<Category, string>;
-  console.log(`[judge] reference: client ${clientContext.length} chars · pillars ${Object.values(stances).map((s) => s.length).join("/")} chars`);
+  // Reference per CATEGORY (cacheable prefix); the case contract, when one exists, is
+  // appended per cell as the "case-specific criteria" (guide line 343). Pilot cells for
+  // questions outside the sealed 30 have no contract and are judged on the rubric alone.
+  const referenceFor = (cat: Category, caseId: string) => {
+    const contract = CONTRACTS.find((c) => c.case_id === caseId);
+    return referenceBlock({ clientContext, expertStance: stances[cat], pillar: PILLAR_FOR[cat], caseCriteria: contract ? contractCriteria(contract) : undefined });
+  };
+  const references = Object.fromEntries((Object.keys(PILLAR_FOR) as Category[]).map((cat) => [cat, referenceFor(cat, "")])) as Record<Category, string>;
+  console.log(`[judge] reference: client ${clientContext.length} chars · pillars ${Object.values(stances).map((s) => s.length).join("/")} chars · contracts for ${CONTRACTS.length} cases`);
+  void references;
 
   mkdirSync(RUN_DIR, { recursive: true });
   const results: Judgment[] = [];
@@ -315,7 +322,7 @@ async function main() {
       const key = `${cell.case_id}|${cell.variant}|${cell.repetition}`;
       const existing = REDO_ERRORS ? existingByKey.get(key) : undefined;
       const cellDims = existing ? dims.filter((d) => d.name in existing.errors) : dims;
-      const j = await judgeCell(model, references, cell, cellDims, existing);
+      const j = await judgeCell(model, referenceFor, cell, cellDims, existing);
       results.push(j);
       if (existing) existingByKey.set(key, j);
       else appendFileSync(outPath, JSON.stringify(j) + "\n");
