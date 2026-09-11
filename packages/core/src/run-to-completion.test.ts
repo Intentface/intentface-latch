@@ -229,6 +229,39 @@ describe("runAgent (autonomous)", () => {
     expect(toolPart?.output?.__blocked).toBe(true);
   });
 
+  it("blockGated honors the SDK waiver: 'not-applicable' tools execute for real, 'user-approval' ones are stubbed", async () => {
+    // An agent record that waives a connection's READ tools stores `false`, which the
+    // store resolves to the SDK's "not-applicable" string. A truthiness check would gate
+    // it — and stub every read of that connection (seen live: edge-eval smoke-1).
+    const readTool = tool({
+      description: "read",
+      inputSchema: z.object({ what: z.string() }),
+      execute: async ({ what }) => ({ read: what }),
+    });
+    const mem = memoryStorage();
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        reader: defineAgent({
+          model: model("read it.", { name: "read_thing", input: '{"what":"x"}' }),
+          instructions: "read",
+          tools: { write_thing: gatedTool, read_thing: readTool },
+          toolApproval: { write_thing: "user-approval", read_thing: "not-applicable" },
+        }),
+      },
+    });
+    const res = await rt.runAgent({ principal, agent: "reader", prompt: "read" });
+    expect(res.answer).toBe("read it.");
+    const parts = mem.messages.get(res.threadId)!.flatMap((m) => m.parts) as Array<{
+      type: string;
+      output?: { __blocked?: boolean; read?: string };
+    }>;
+    const readPart = parts.find((p) => p.type === "tool-read_thing");
+    expect(readPart?.output?.__blocked).toBeUndefined();
+    expect(readPart?.output?.read).toBe("x");
+  });
+
   it("stamps the trigger (programmatic by default, overridable)", async () => {
     const triggers: string[] = [];
     const mem = memoryStorage();

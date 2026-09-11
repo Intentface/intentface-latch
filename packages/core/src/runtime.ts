@@ -1640,14 +1640,22 @@ export function createRuntime<P, RC = unknown>(
       // Test runs: stub the approval-gated (mutating) tools so a trial has no
       // real side effects. Gated set = connection defaults + the agent's policy.
       if (blockGated) {
+        // Mirror the SDK's per-tool approval values: `"user-approval"`, an object
+        // (approval with a reason) or a function gate; `"not-applicable"`, `false`
+        // and `undefined` waive. A truthiness check would treat the SDK's own
+        // waiver string as a gate and stub every tool an agent explicitly
+        // waived — e.g. every READ of a connection whose record lists reads as
+        // `false` (→ "not-applicable") to override the connection default.
+        const gatedBy = (v: unknown): boolean =>
+          v === true || v === "user-approval" || typeof v === "function" || (typeof v === "object" && v !== null);
         const gated = new Set<string>();
-        for (const [k, v] of Object.entries(harnessApproval)) if (v) gated.add(k);
+        for (const [k, v] of Object.entries(harnessApproval)) if (gatedBy(v)) gated.add(k);
         for (const o of opened) {
-          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
+          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (gatedBy(v)) gated.add(k);
         }
         if (cfg.toolApproval && typeof cfg.toolApproval !== "function") {
           for (const [k, v] of Object.entries(cfg.toolApproval as Record<string, unknown>)) {
-            if (v) gated.add(k);
+            if (gatedBy(v)) gated.add(k);
             else gated.delete(k);
           }
         } else if (typeof cfg.toolApproval === "function") {
