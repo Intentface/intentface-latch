@@ -6,7 +6,7 @@
   "sampling": "provider default, identical in all arms",
   "system_prompt_version": {
     "source": "src/evals/edge/prompt/edge-v2.prompt.md (tagged; variants are a selection over segments)",
-    "git_commit_sha": "ce54f0d060715bedb602ea102d1f803570aceb89",
+    "git_commit_sha": "b39b1b73bca413d7d5208a7a6945f35754f5af5f",
     "captured_production_instructions": "src/evals/edge/v0/edge-v2-instructions.md",
     "captured_production_instructions_sha256_prefix": "2254078611ab6cb3",
     "variants": {
@@ -107,10 +107,10 @@
     "note": "Recorded from orient/read_file on 2026-09-10; no content hash (read-only scope, no bulk export). Re-capture after the catalog dedupe."
   },
   "horizontal_context_version": {
-    "workspace": "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used AS IS (no wipe, no reseed)",
-    "snapshot_tree": "src/evals/edge/fixtures/client-plane/edge/ (read-only snapshot for diffing; never seeded back)",
-    "sha256": "067148cbcf9f528c1582f744ee92bef622012bb83cea534d62e248f88b75b6be",
-    "snapshot_script": "src/scripts/edge-plane-snapshot.ts (--verify at sweep start and end)",
+    "workspace": "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used exactly as it is; never written to; no content copied into the repo",
+    "manifest": "src/evals/edge/fixtures/client-plane/manifest.json (file ids, versions, per-file hashes)",
+    "sha256": "4793063037d4746fd8cd69cc7a67661bc3b1a045650a17012542d6097eb978d1",
+    "fingerprint_script": "src/scripts/edge-plane-snapshot.ts (--verify at sweep start and end)",
     "client": "TwentyOne (fictional)"
   },
   "retrieval_config": "agent-driven: Loredex MCP orient then read_file per turn; no RAG, no injected context beyond the system prompt",

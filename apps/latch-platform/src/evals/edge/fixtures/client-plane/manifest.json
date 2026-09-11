@@ -1,57 +1,66 @@
 {
   "client": "TwentyOne",
-  "description": "Read-only SNAPSHOT of the live edge-client workspace's edge/ tree (horizontal plane), taken by src/scripts/edge-plane-snapshot.ts. Used for case authoring, diffing and horizontal_ctx_version — never seeded back. The eval runs against the live workspace as it is.",
+  "description": "Fingerprint of the live edge-client workspace's edge/ tree (horizontal plane): file ids, versions and content hashes only — no content is copied into the repo. Written by src/scripts/edge-plane-snapshot.ts; --verify compares the live plane against it. The eval runs against the live workspace exactly as it is and never writes to it.",
   "workspace": {
     "name": "edge-client",
     "id": "ws_7e_rtGs6Hbd0IUAhJ_Pdf"
   },
-  "capturedAt": "2026-09-10",
-  "horizontal_ctx_version": "067148cbcf9f528c1582f744ee92bef622012bb83cea534d62e248f88b75b6be",
+  "capturedAt": "2026-09-11",
+  "horizontal_ctx_version": "4793063037d4746fd8cd69cc7a67661bc3b1a045650a17012542d6097eb978d1",
   "files": {
     "edge/ctx/placement.md": {
       "fileId": "file_DrOmRp_e4XtU2otgnA7Aq",
-      "version": 1,
-      "chars": 11433
+      "version": 2,
+      "chars": 11432,
+      "sha256": "00e2b7d4dacf31cd9b9496946a7210fc612a308b4a96a579799c5584ad81128d"
     },
     "edge/ctx/product.md": {
       "fileId": "file_nZBPy5ECfsIV0RblPRjSj",
       "version": 1,
-      "chars": 2896
+      "chars": 2896,
+      "sha256": "7dfeeff5291e373644b922cd274c8f556a897212fd674415c62ea38be472c9c0"
     },
     "edge/ctx/roadmap.md": {
       "fileId": "file_qoCHR2vawLM1mLsYFdK4A",
       "version": 1,
-      "chars": 1793
+      "chars": 1793,
+      "sha256": "8a0fa46a210719a4c35ba1e2cbd696a8235cf5c22281f57f26a65147c3d5dc11"
     },
     "edge/ctx/strategy.md": {
       "fileId": "file_OuTezh7ZObH-0DVyaGCfs",
       "version": 1,
-      "chars": 2647
+      "chars": 2647,
+      "sha256": "9d89c0573a5f78c624567b096be527dd2634c4fd51b0fa44500b47c1293c06a5"
     },
     "edge/ctx/tech-stack.md": {
       "fileId": "file_HwnnXMe-Ymo2vpkiVAvDU",
       "version": 1,
-      "chars": 3163
+      "chars": 3163,
+      "sha256": "4cdb849882b23dd51ed9cafdf43206c5447e8e5de4c976417614a41ebbfc0c4b"
     },
     "edge/memory/2026-08-22_agents-ceo-market-note.md": {
       "fileId": "file_LCmBpkJUDQGhiDXHiiTTI",
-      "version": 1,
-      "chars": 1904
+      "version": 2,
+      "chars": 1913,
+      "sha256": "a1090b78bd85a01d38c13bc1941b0be7f4c67c6efa0768607d00bbd9eca98941"
     },
     "edge/memory/2026-08-22_q3-next-steps-note.md": {
       "fileId": "file_nF1S3MZlFPi_fwyDWfaQw",
       "version": 1,
-      "chars": 1388
+      "chars": 1388,
+      "sha256": "737f37ec18dc1669714faa652cc5e1bfb6ecdcfbd8f1009826e337332b5ca0b2"
     },
     "edge/memory/2026-08-31_ceo-agents-q3-2026_market-note.md": {
       "fileId": "file_OUZf2evkSkA6-nuuyzgZU",
-      "version": 1,
-      "chars": 1776
+      "version": 2,
+      "chars": 1783,
+      "sha256": "eec97f072edab8209e54e357f6b70840c4ea4ad93a2714070eb593674e4c2fab"
     },
     "edge/memory/notes.md": {
       "fileId": "file_hrBYCOLwqfECuIHWalanC",
-      "version": 1,
-      "chars": 13065
+      "version": 2,
+      "chars": 13007,
+      "sha256": "b4adbc1df5094d25639ced60e6c6f82bd0c1f2ce67bddb5103a2e7cb17d27ccb"
     }
   },
   "normalization": "Loredex-generated index_terms/index_version frontmatter stripped; folder index.md files excluded."

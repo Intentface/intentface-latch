@@ -12,7 +12,7 @@
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { buildAllVariants } from "../evals/edge/variants";
-import { fixtureFiles, planeVersion } from "./edge-plane-snapshot";
+import { readManifest } from "./edge-plane-snapshot";
 
 const sha = execSync("git rev-parse HEAD").toString().trim();
 const variants = Object.fromEntries(
@@ -60,10 +60,10 @@ const version = {
     note: "Recorded from orient/read_file on 2026-09-10; no content hash (read-only scope, no bulk export). Re-capture after the catalog dedupe.",
   },
   horizontal_context_version: {
-    workspace: "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used AS IS (no wipe, no reseed)",
-    snapshot_tree: "src/evals/edge/fixtures/client-plane/edge/ (read-only snapshot for diffing; never seeded back)",
-    sha256: planeVersion(fixtureFiles()),
-    snapshot_script: "src/scripts/edge-plane-snapshot.ts (--verify at sweep start and end)",
+    workspace: "edge-client (ws_7e_rtGs6Hbd0IUAhJ_Pdf) - the live client workspace, used exactly as it is; never written to; no content copied into the repo",
+    manifest: "src/evals/edge/fixtures/client-plane/manifest.json (file ids, versions, per-file hashes)",
+    sha256: readManifest()?.horizontal_ctx_version ?? "run edge-plane-snapshot.ts first",
+    fingerprint_script: "src/scripts/edge-plane-snapshot.ts (--verify at sweep start and end)",
     client: "TwentyOne (fictional)",
   },
   retrieval_config: "agent-driven: Loredex MCP orient then read_file per turn; no RAG, no injected context beyond the system prompt",

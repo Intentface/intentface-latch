@@ -1,27 +1,28 @@
 /**
- * Edge Eval v0 — snapshot the horizontal (client-context) plane, READ-ONLY.
+ * Edge Eval v0 — fingerprint the horizontal (client-context) plane, READ-ONLY.
  *
- * The eval runs against the live `edge-client` workspace as it is (user decision
- * 2026-09-10): no wipe, no reseed. Every write tool is approval-gated and the sweep
- * runs `blockGated: true`, so the agent cannot change the workspace mid-sweep. What
- * we need instead is attribution: a content hash of `edge/` at sweep start
- * (`horizontal_ctx_version`), asserted unchanged at sweep end.
+ * The eval runs against the live `edge-client` workspace exactly as it is (user
+ * decision 2026-09-11): nothing in this repo may create, modify or delete anything
+ * there, and no copy of its content is kept in git. Every write tool the agents get
+ * is approval-gated and the sweep runs `blockGated: true`, so the agents cannot
+ * change it either. What the eval needs is attribution: a content hash of `edge/`
+ * at sweep start (`horizontal_ctx_version`), asserted unchanged at sweep end.
  *
- *   node --env-file=.env --import tsx src/scripts/edge-plane-snapshot.ts            # hash + write fixtures snapshot
- *   node --env-file=.env --import tsx src/scripts/edge-plane-snapshot.ts --verify   # hash live, diff against fixtures, exit 1 on drift
+ *   node --env-file=.env --import tsx src/scripts/edge-plane-snapshot.ts            # hash live, write the manifest (ids, versions, per-file hashes)
+ *   node --env-file=.env --import tsx src/scripts/edge-plane-snapshot.ts --verify   # hash live, compare with the committed manifest, exit 1 on drift
  *   node --env-file=.env --import tsx src/scripts/edge-plane-snapshot.ts --hash-only
  *
- * Env: LOREDEX_EVAL_WS_ID, LOREDEX_EVAL_API_KEY (only GET requests are made),
- * LOREDEX_BASE_URL (default https://app.loredex.ai).
+ * Env: LOREDEX_EVAL_WS_ID, LOREDEX_EVAL_API_KEY (only GET requests are ever made;
+ * a read-only key is enough), LOREDEX_BASE_URL (default https://app.loredex.ai).
  *
  * Loredex prepends an auto-generated `index_terms` frontmatter block to indexed files;
  * it is stripped before hashing so the version tracks authored content only.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-export const FIXTURES = resolve("src/evals/edge/fixtures/client-plane");
+export const MANIFEST = resolve("src/evals/edge/fixtures/client-plane/manifest.json");
 const PLANE_ROOT = "edge";
 const INDEX_FRONTMATTER = /^---\n(?:index_terms:[\s\S]*?\n)?index_version:[^\n]*\n---\n/;
 
@@ -36,18 +37,22 @@ export function planeVersion(files: Array<[string, string]>): string {
   return h.digest("hex");
 }
 
-/** The committed snapshot, as [relative path, content]. */
-export function fixtureFiles(root = FIXTURES): Array<[string, string]> {
-  const walk = (dir: string): Array<[string, string]> =>
-    readdirSync(dir)
-      .sort()
-      .flatMap((n) => {
-        const p = join(dir, n);
-        return statSync(p).isDirectory() ? walk(p) : [[relative(root, p), readFileSync(p, "utf8")] as [string, string]];
-      });
-  const planeDir = join(root, PLANE_ROOT);
-  return existsSync(planeDir) ? walk(planeDir) : []; // `relative(root, …)` already yields `edge/…`
+export interface PlaneManifest {
+  client: string;
+  description: string;
+  workspace: { name: string; id: string | undefined };
+  capturedAt: string;
+  horizontal_ctx_version: string;
+  files: Record<string, { fileId: string; version: number; chars: number; sha256: string }>;
+  normalization: string;
 }
+
+/** The committed manifest (ids, versions, hashes — never content). */
+export function readManifest(path = MANIFEST): PlaneManifest | undefined {
+  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as PlaneManifest) : undefined;
+}
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
 /** Read every authored file under `edge/` from the live workspace. GET only. */
 export async function readLivePlane(): Promise<{ workspace: string; files: PlaneFile[] }> {
@@ -94,40 +99,34 @@ async function main() {
   for (const f of files) console.log(`[snapshot]   ${f.path} (${f.content.length} chars, v${f.version})`);
   if (hashOnly) return console.log(`[snapshot] ${version}`);
 
-  if (verify) {
-    const committed = fixtureFiles();
-    const committedVersion = planeVersion(committed);
-    if (committedVersion === version) return console.log(`[snapshot] verify ✓ live plane matches the committed snapshot`);
-    const liveMap = new Map(live);
-    const commMap = new Map(committed);
-    for (const p of new Set([...liveMap.keys(), ...commMap.keys()])) {
-      if (!liveMap.has(p)) console.error(`[snapshot]   − ${p} (only in snapshot)`);
-      else if (!commMap.has(p)) console.error(`[snapshot]   + ${p} (only live)`);
-      else if (liveMap.get(p) !== commMap.get(p)) console.error(`[snapshot]   ~ ${p} (content differs)`);
-    }
-    console.error(`[snapshot] verify ✗ live ${version.slice(0, 16)} ≠ snapshot ${committedVersion.slice(0, 16)}`);
-    process.exit(1);
-  }
-
-  // Write the snapshot: replace the committed tree so deletions show up in git too.
-  rmSync(join(FIXTURES, PLANE_ROOT), { recursive: true, force: true });
-  for (const f of files) {
-    const out = join(FIXTURES, f.path);
-    mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, f.content);
-  }
-  const manifest = {
+  const manifest: PlaneManifest = {
     client: "TwentyOne",
     description:
-      "Read-only SNAPSHOT of the live edge-client workspace's edge/ tree (horizontal plane), taken by src/scripts/edge-plane-snapshot.ts. Used for case authoring, diffing and horizontal_ctx_version — never seeded back. The eval runs against the live workspace as it is.",
+      "Fingerprint of the live edge-client workspace's edge/ tree (horizontal plane): file ids, versions and content hashes only — no content is copied into the repo. Written by src/scripts/edge-plane-snapshot.ts; --verify compares the live plane against it. The eval runs against the live workspace exactly as it is and never writes to it.",
     workspace: { name: workspace, id: process.env.LOREDEX_EVAL_WS_ID },
     capturedAt: new Date().toISOString().slice(0, 10),
     horizontal_ctx_version: version,
-    files: Object.fromEntries(files.map((f) => [f.path, { fileId: f.id, version: f.version, chars: f.content.length }])),
+    files: Object.fromEntries(files.map((f) => [f.path, { fileId: f.id, version: f.version, chars: f.content.length, sha256: sha256(f.content) }])),
     normalization: "Loredex-generated index_terms/index_version frontmatter stripped; folder index.md files excluded.",
   };
-  writeFileSync(join(FIXTURES, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-  console.log(`[snapshot] wrote ${files.length} files + manifest.json to ${FIXTURES}`);
+
+  if (verify) {
+    const committed = readManifest();
+    if (!committed) throw new Error(`no committed manifest at ${MANIFEST} — run without --verify first`);
+    if (committed.horizontal_ctx_version === version) return console.log(`[snapshot] verify ✓ live plane matches the committed manifest (${committed.capturedAt})`);
+    for (const p of new Set([...Object.keys(manifest.files), ...Object.keys(committed.files)])) {
+      const live = manifest.files[p];
+      const was = committed.files[p];
+      if (!live) console.error(`[snapshot]   − ${p} (in manifest, not live)`);
+      else if (!was) console.error(`[snapshot]   + ${p} (live, not in manifest)`);
+      else if (live.sha256 !== was.sha256) console.error(`[snapshot]   ~ ${p} (content changed, v${was.version} → v${live.version})`);
+    }
+    console.error(`[snapshot] verify ✗ live ${version.slice(0, 16)} ≠ manifest ${committed.horizontal_ctx_version.slice(0, 16)}`);
+    process.exit(1);
+  }
+
+  writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
+  console.log(`[snapshot] wrote manifest (${files.length} files, no content) to ${MANIFEST}`);
 }
 
 if (process.argv[1] && /edge-plane-snapshot\.ts$/.test(process.argv[1])) {
