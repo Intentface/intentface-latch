@@ -162,7 +162,8 @@ export function extractToolCalls(history: unknown[]): EvalToolCall[] {
             : type.startsWith("tool-")
               ? type.slice(5)
               : "unknown";
-        const blocked = (p.output as { __blocked?: boolean } | undefined)?.__blocked;
+        const out = p.output as { __blocked?: boolean; __stubbed?: boolean } | undefined;
+    const blocked = out?.__blocked || out?.__stubbed; // blocked-mode stub, either shape
         calls.push({ tool, args: p.input, blocked: blocked || undefined });
       }
     }

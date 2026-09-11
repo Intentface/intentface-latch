@@ -315,14 +315,18 @@ export interface Runtime<P> {
    * thread (no streaming) — for programmatic use like the Agent Builder testing
    * an agent it just created. `blockGated` (default true) stubs approval-gated
    * (mutating) tools so a test run has no real side effects; pass false for a
-   * true end-to-end run. Returns the throwaway threadId + the final answer.
+   * true end-to-end run. `"simulate-success"` also stubs them but returns a
+   * success-shaped result (`{ ok: true, __stubbed: true }`) instead of a
+   * "blocked" one — for evals where the agent must behave as if the human had
+   * approved (a "blocked" result makes it report a failed write to the user).
+   * Returns the throwaway threadId + the final answer.
    */
   runAgent(input: {
     principal: P;
     agent: string;
     prompt: string;
     threadId?: string;
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
     /**
      * Per-turn request payload, passed to `context.build` and the agent
      * factory (see `HandleChatInput.turnContext`). Ephemeral — never persisted,
@@ -1299,7 +1303,7 @@ export function createRuntime<P, RC = unknown>(
      * to return a "blocked" result — so a trial run has no real side effects.
      * Only meaningful with `autoApprove` (an autonomous run).
      */
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
     /**
      * Per-turn prompt-caching override (defaults on when the runtime has a
      * `resolvePromptCaching` hook). `false` = set no caching options this turn
@@ -1664,17 +1668,21 @@ export function createRuntime<P, RC = unknown>(
           // (connection, authored, and harness — `connect_` is already dropped).
           for (const k of Object.keys(tools)) gated.add(k);
         }
+        const simulateSuccess = blockGated === "simulate-success";
         for (const name of gated) {
           const t = tools[name] as { execute?: unknown } | undefined;
           if (t && typeof t.execute === "function") {
             tools[name] = {
               ...(t as object),
-              execute: async (input: unknown) => ({
-                __blocked: true,
-                tool: name,
-                input,
-                reason: "approval-gated tool blocked during test run (no real side effects)",
-              }),
+              execute: async (input: unknown) =>
+                simulateSuccess
+                  ? { ok: true, __stubbed: true }
+                  : {
+                      __blocked: true,
+                      tool: name,
+                      input,
+                      reason: "approval-gated tool blocked during test run (no real side effects)",
+                    },
             };
           }
         }
@@ -3037,7 +3045,7 @@ export function createRuntime<P, RC = unknown>(
     message: AppMessage;
     chatId?: string;
     autoApprove: boolean;
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
     /** Per-turn prompt-caching override (see buildTurn). */
     promptCaching?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */

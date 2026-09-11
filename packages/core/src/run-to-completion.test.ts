@@ -229,6 +229,19 @@ describe("runAgent (autonomous)", () => {
     expect(toolPart?.output?.__blocked).toBe(true);
   });
 
+  it("blockGated 'simulate-success' stubs the gated tool with a success-shaped result", async () => {
+    const mem = memoryStorage();
+    const rt = runtimeWith(mem, model("did it.", { name: "write_thing", input: '{"what":"x"}' }));
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "write", blockGated: "simulate-success" });
+    expect(res.answer).toBe("did it.");
+    const parts = mem.messages.get(res.threadId)!.flatMap((m) => m.parts) as Array<{
+      type: string;
+      output?: { __blocked?: boolean; __stubbed?: boolean; ok?: boolean; wrote?: string };
+    }>;
+    const toolPart = parts.find((p) => p.type === "tool-write_thing");
+    expect(toolPart?.output).toEqual({ ok: true, __stubbed: true }); // never executed (no `wrote`)
+  });
+
   it("blockGated honors the SDK waiver: 'not-applicable' tools execute for real, 'user-approval' ones are stubbed", async () => {
     // An agent record that waives a connection's READ tools stores `false`, which the
     // store resolves to the SDK's "not-applicable" string. A truthiness check would gate

@@ -47,6 +47,7 @@ const REPS = Number(arg("reps", "1"));
 const CONCURRENCY = Number(arg("concurrency", "2"));
 const ALLOW_DRIFT = flag("allow-drift");
 const DRY_RUN = flag("dry-run");
+const MAX_ATTEMPTS = Number(arg("attempts", "3"));
 const OUT_DIR = resolve(arg("out") ?? `edge-eval-runs/${RUN_NAME}`);
 
 for (const v of VARIANT_ARG) if (!VARIANTS.includes(v)) throw new Error(`unknown variant ${v}`);
@@ -310,11 +311,24 @@ async function runCell(args: {
 
   try {
     // Turn 1 — the question. Turn 2 — the canned follow-up on the SAME thread (serialized:
-    // one active run per chat is a storage invariant).
-    const t1 = await runTurn(runtime, principal, variant.name, q.text, undefined);
+    // one active run per chat is a storage invariant). A transient provider failure on
+    // either turn restarts the CELL on a fresh thread (up to MAX_ATTEMPTS) — a thread whose
+    // turn 1 errored must not be continued, the cell would be invalid.
+    let t1!: Awaited<ReturnType<typeof runTurn>>;
+    let t2!: Awaited<ReturnType<typeof runTurn>>;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        t1 = await runTurn(runtime, principal, variant.name, q.text, undefined);
+        t2 = await runTurn(runtime, principal, variant.name, followupFor(q), t1.threadId);
+        break;
+      } catch (e) {
+        if (attempt >= MAX_ATTEMPTS || !isTransient(e)) throw e;
+        console.warn(`[eval] ${q.id} ${v} r${rep}: attempt ${attempt} failed (${(e as Error).message.slice(0, 120)}) — retrying on a fresh thread in ${attempt * 20}s`);
+        await sleep(attempt * 20_000);
+      }
+    }
     cell.thread_id = t1.threadId;
     cell.turn1 = t1.turn;
-    const t2 = await runTurn(runtime, principal, variant.name, followupFor(q), t1.threadId);
     cell.turn2 = t2.turn;
 
     // Tool calls, attributed to turns by run id on the assistant messages.
@@ -356,6 +370,18 @@ async function runCell(args: {
   return cell;
 }
 
+class TurnFailed extends Error {
+  constructor(message: string, public readonly runStatus: string) {
+    super(message);
+    this.name = "TurnFailed";
+  }
+}
+
+/** Provider-side transient failures worth a retry on a fresh thread. */
+const isTransient = (e: unknown) => /overloaded|rate limit|429|timeout|ECONNRESET|503|502|temporarily/i.test(String((e as Error)?.message ?? e));
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function runTurn(
   runtime: Runtime,
   principal: Principal,
@@ -364,15 +390,31 @@ async function runTurn(
   threadId: string | undefined,
 ): Promise<{ threadId: string; turn: TurnRecord & { startedAt?: number } }> {
   const t0 = Date.now();
-  const { threadId: tid, answer } = await runtime.runAgent({ principal, agent, prompt, threadId, blockGated: true });
+  // "simulate-success": gated writes are still stubbed (inert) but look successful to the
+  // agent, as they would in production once the human approves. A "blocked" result makes
+  // edge-v2 tell the client its note failed and skip the gap write (seen in smoke-2).
+  const { threadId: tid, answer } = await runtime.runAgent({ principal, agent, prompt, threadId, blockGated: "simulate-success" });
   const history = await runtime.loadHistory({ chatId: tid, principal });
   const last = [...history].reverse().find((m) => (m as { role: string }).role === "assistant") as
     | { metadata?: { runId?: string; model?: string; usage?: TurnRecord["usage"]; cost?: number } }
     | undefined;
-  const runId = last?.metadata?.runId;
+  let runId = last?.metadata?.runId;
+  // A turn that produced no assistant message (provider error after retries) leaves no
+  // runId on the history — find its run row by chat instead, so the failure is recorded
+  // rather than silently passed on as an empty answer.
+  if (!runId) {
+    const recent = await runtime.listRuns({ principal, limit: 50 });
+    const own = recent.filter((r) => r.chatId === tid).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (own) {
+      const err = own.error ?? `run ${own.id} ${own.status} with no assistant message`;
+      throw new TurnFailed(err, own.status);
+    }
+    throw new TurnFailed("turn produced no assistant message and no run row", "unknown");
+  }
   const turn: TurnRecord & { startedAt?: number } = { runId, answer, answerChars: answer.length, latencyMs: Date.now() - t0 };
   if (runId) {
     const run = await runtime.getRun({ principal, runId });
+    if (run?.status === "errored") throw new TurnFailed(run.error ?? `run ${run.id} errored`, run.status);
     if (run) {
       turn.usage = {
         inputTokens: run.usageInputTokens,
