@@ -22,6 +22,8 @@ export const chats = pgTable(
     title: text("title"),
     /** Chat kind: 'user' (default) vs 'internal' sub-threads (ChatRecord.kind). */
     kind: text("kind").notNull().default("user"),
+    /** Spawning agent of a sub-thread (ChatRecord.parentAgent); null at top level. */
+    parentAgent: text("parent_agent"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

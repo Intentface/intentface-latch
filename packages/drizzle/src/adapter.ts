@@ -88,6 +88,7 @@ export function createSqliteAdapter<P>(
     agent: r.agent,
     title: r.title ?? undefined,
     kind: r.kind,
+    parentAgent: r.parentAgent ?? undefined,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   });
@@ -153,6 +154,7 @@ export function createSqliteAdapter<P>(
         agent: input.agent,
         title: input.title ?? null,
         kind: input.kind ?? "user",
+        parentAgent: input.parentAgent ?? null,
         createdAt: now,
         updatedAt: now,
       };

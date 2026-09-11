@@ -91,11 +91,32 @@ export interface ConnectionRegistry<P> {
  * just code — scoped per `Principal`. `@intentface` platforms back this with a
  * table; `resolve` builds the same `AgentConfig` a code agent would.
  */
+/**
+ * What the runtime knows about the turn a dynamic agent is being resolved for.
+ * Optional on both sides: a store that ignores it behaves exactly as before.
+ */
+export interface DynamicAgentResolveContext {
+  /**
+   * The agent that spawned this one, when the chat is a subagent thread
+   * (`ChatRecord.parentAgent`). Read on EVERY resolve of that thread — first
+   * turn, approval resume, crash recovery — so a per-parent shaping of the
+   * subagent (e.g. restricting a connector's tools to what the parent agent's
+   * record allows) can never lapse on a later turn.
+   */
+  parentAgent?: string;
+  /**
+   * The turn runs unattended (cron / `runAgent` / an autonomous parent): HITL
+   * approvals are waived. A store that would gate a tool can drop it instead.
+   */
+  autoApprove?: boolean;
+}
+
 export interface DynamicAgentStore<P> {
   /** Build an agent's config for this caller, or undefined if not found. */
   resolve(
     name: string,
     principal: P,
+    ctx?: DynamicAgentResolveContext,
   ): AgentConfig<P> | undefined | Promise<AgentConfig<P> | undefined>;
   /** The caller's dynamic agents, for the picker. */
   list(principal: P): AgentInfo[] | Promise<AgentInfo[]>;
@@ -1205,13 +1226,15 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     request?: Request,
     turnContext?: unknown,
+    /** Passed through to `dynamicAgents.resolve` (see DynamicAgentResolveContext). */
+    resolveCtx?: DynamicAgentResolveContext,
   ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
     const runtimeCtx = await config.context.build({ principal, request, turnContext });
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
     const cfg = factory
       ? await factory({ context: runtimeCtx, runtime: runtimeCtx, principal, turnContext })
-      : await config.dynamicAgents?.resolve(agentName, principal);
+      : await config.dynamicAgents?.resolve(agentName, principal, resolveCtx);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
       typeof cfg.model === "string"
@@ -1556,6 +1579,9 @@ export function createRuntime<P, RC = unknown>(
             depth: depth + 1,
             autoApprove,
             onProgress,
+            // Who is delegating — persisted on the sub-thread so every later
+            // resolve of it can be shaped per parent (DynamicAgentResolveContext).
+            parentAgent: run.agent,
             // Telemetry linkage: this turn is the parent; carry the root chat
             // down so the subagent's trace nests under this conversation.
             parentRunId: run.id,
@@ -2223,6 +2249,9 @@ export function createRuntime<P, RC = unknown>(
       principal,
       request,
       turnContext,
+      // A host may continue a subagent thread through the chat surface; keep
+      // resolving it the way its spawner would.
+      { parentAgent: chat.parentAgent },
     );
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
@@ -2324,7 +2353,15 @@ export function createRuntime<P, RC = unknown>(
     // System op (no request): rebuild the principal from the run's identity blob.
     const principal = await reconstructPrincipal(run.identity);
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal);
+    // A recovered subagent run must resolve exactly as its spawner shaped it.
+    const chat = await storage.getChat(principal, run.chatId);
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      run.agent,
+      principal,
+      undefined,
+      undefined,
+      { parentAgent: chat?.parentAgent },
+    );
     const uiMessages = await storage.loadMessages(principal, run.chatId);
     const lease: RunLease = {
       owner: dur.instanceId,
@@ -2462,6 +2499,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
       request,
       turnContext,
+      { parentAgent: chat.parentAgent },
     );
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
@@ -2530,6 +2568,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
       request,
       turnContext,
+      { parentAgent: chat.parentAgent },
     );
     const { run, lease } = await openRun(principal, chatId, chat.agent);
 
@@ -2590,7 +2629,13 @@ export function createRuntime<P, RC = unknown>(
       );
     }
 
-    const { cfg, modelId } = await resolveAgentConfig(chat.agent, principal, request, turnContext);
+    const { cfg, modelId } = await resolveAgentConfig(
+      chat.agent,
+      principal,
+      request,
+      turnContext,
+      { parentAgent: chat.parentAgent },
+    );
     // Tool definitions only affect how a recorded tool RESULT is rendered for the
     // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
     // than failing. So take every definition available without I/O — the agent's
@@ -2844,6 +2889,7 @@ export function createRuntime<P, RC = unknown>(
     blockGated,
     autoApprove = true,
     onProgress,
+    parentAgent,
     parentRunId,
     rootChatId,
     turnContext,
@@ -2853,6 +2899,12 @@ export function createRuntime<P, RC = unknown>(
     principal: P;
     agent: string;
     prompt: string;
+    /**
+     * The agent delegating this run (`spawn_agent` passes its own name).
+     * Persisted on a NEW sub-thread as `ChatRecord.parentAgent` and handed to
+     * `dynamicAgents.resolve` on this and every later turn of that thread.
+     */
+    parentAgent?: string;
     threadId?: string;
     depth: number;
     blockGated?: boolean;
@@ -2893,6 +2945,7 @@ export function createRuntime<P, RC = unknown>(
         // Runtime-created sub-thread: stamp it internal so a host filtering
         // its chat list on kind never shows it (see ChatRecord.kind).
         kind: "internal",
+        parentAgent,
       });
     }
     const prior = await storage.loadMessages(principal, subChatId);
@@ -2904,6 +2957,9 @@ export function createRuntime<P, RC = unknown>(
       principal,
       undefined,
       turnContext,
+      // A continued thread keeps the parent it was created under; an adapter
+      // that doesn't persist the column falls back to this call's value.
+      { parentAgent: chat.parentAgent ?? parentAgent, autoApprove },
     );
     const { run, lease } = await openRun(principal, subChatId, agent);
     const res = await buildTurn({
@@ -2984,6 +3040,11 @@ export function createRuntime<P, RC = unknown>(
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
       subChat.agent,
       principal,
+      undefined,
+      undefined,
+      // Same shaping as the first sub-turn: the parent is read off the persisted
+      // sub-thread, and this path is only ever reached by a human decision.
+      { parentAgent: subChat.parentAgent, autoApprove: false },
     );
     const { run, lease } = await openRun(principal, subChatId, subChat.agent);
     const res = await buildTurn({

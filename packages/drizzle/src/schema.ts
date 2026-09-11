@@ -20,6 +20,8 @@ export const chats = sqliteTable(
     title: text("title"),
     /** Chat kind: 'user' (default) vs 'internal' sub-threads (ChatRecord.kind). */
     kind: text("kind").notNull().default("user"),
+    /** Spawning agent of a sub-thread (ChatRecord.parentAgent); null at top level. */
+    parentAgent: text("parent_agent"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },

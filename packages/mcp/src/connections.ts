@@ -27,7 +27,14 @@ import type { FetchFunction } from "./oauth-fetch.js";
 /** How a connection authenticates. Build with `none` / `bearer` / `headers` / `oauth`. */
 export type McpConnectionAuth<P> =
   | { kind: "none" }
-  | { kind: "bearer"; getToken: (principal: P) => string | Promise<string> }
+  | {
+      kind: "bearer";
+      getToken: (principal: P) => string | Promise<string>;
+      /** Header the token is sent in (default `Authorization`). */
+      header?: string;
+      /** Text before the token (default `"Bearer "`; use `""` for a bare key). */
+      prefix?: string;
+    }
   | { kind: "headers"; headers: Record<string, string> }
   | { kind: "oauth"; options: OAuthAuthOptions };
 
@@ -78,10 +85,35 @@ export interface OAuthAuthOptions {
 
 export const none = { kind: "none" } as const;
 
+/**
+ * A per-caller secret sent on every request. Defaults to
+ * `Authorization: Bearer <token>`; servers keyed on `X-API-Key: <token>` pass
+ * `{ header: "X-API-Key", prefix: "" }`.
+ */
 export function bearer<P>(opts: {
   getToken: (principal: P) => string | Promise<string>;
+  header?: string;
+  prefix?: string;
 }): McpConnectionAuth<P> {
-  return { kind: "bearer", getToken: opts.getToken };
+  return {
+    kind: "bearer",
+    getToken: opts.getToken,
+    ...(opts.header !== undefined ? { header: opts.header } : {}),
+    ...(opts.prefix !== undefined ? { prefix: opts.prefix } : {}),
+  };
+}
+
+/**
+ * The single request header a `bearer` connection sends: `Authorization:
+ * Bearer <token>` unless the connection names its own `header` / `prefix`.
+ */
+export function bearerHeader(
+  auth: { header?: string; prefix?: string },
+  token: string,
+): Record<string, string> {
+  const header = auth.header ?? "Authorization";
+  const prefix = auth.prefix ?? "Bearer ";
+  return { [header]: `${prefix}${token}` };
 }
 
 export function headers<P = unknown>(
@@ -198,6 +230,13 @@ export interface McpConnections<P> {
   status(principal: P): Promise<ConnectionStatus[]>;
   /** Open just one connection and return its namespaced tool names (a connectivity probe). */
   testTools(name: string, principal: P): Promise<string[]>;
+  /**
+   * Open just one connection and describe the tools the caller would get:
+   * server-local `name`, `description`, `annotations` — after the connection's
+   * `tools` allow/block and the caller's `visibleTools(For)` filter, exactly the
+   * set a turn would expose. For settings UIs that let a person pick tools.
+   */
+  listTools(name: string, principal: P): Promise<McpToolInfo[]>;
 }
 
 /** Build the synthetic tool that asks the user to authorize a connection. */
@@ -322,7 +361,7 @@ export function createMcpConnections<P>(
         out.push({
           name,
           url: def.url,
-          auth: { type: "headers", headers: { Authorization: `Bearer ${token}` } },
+          auth: { type: "headers", headers: bearerHeader(auth, token) },
           approval,
           visible,
           allowPrivateHost: def.allowPrivateHost,
@@ -437,6 +476,28 @@ export function createMcpConnections<P>(
       const opened = await probe.open(principal);
       try {
         return Object.keys(opened.tools);
+      } finally {
+        await opened.close();
+      }
+    },
+    async listTools(name, principal) {
+      const def = config.connections[name];
+      if (!def) throw new Error(`Unknown connection: ${name}`);
+      const probe = createMcpHost<P>({
+        secrets: config.secrets,
+        allowedHosts: config.allowedHosts,
+        onConnectionError: config.onConnectionError,
+        connections: async (p) => {
+          const all = await resolveConnections(p);
+          return all.filter((c) => c.name === name);
+        },
+      });
+      const opened = await probe.open(principal);
+      try {
+        // Same allow/block the turn applies (makeHost), on the server-local name.
+        return Object.values(opened.toolInfos).filter((info) =>
+          toolAllowed(info.name, def.tools),
+        );
       } finally {
         await opened.close();
       }

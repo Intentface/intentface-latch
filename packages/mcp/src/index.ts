@@ -41,6 +41,7 @@ export {
   defineMcpConnection,
   none,
   bearer,
+  bearerHeader,
   headers,
   oauth,
 } from "./connections.js";
