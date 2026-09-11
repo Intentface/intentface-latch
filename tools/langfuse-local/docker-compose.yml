@@ -1,5 +1,6 @@
 # Edge Eval v0 — LOCAL Langfuse for the human-review queues (Ville, Joni, Valtteri).
-# Derived from the official langfuse/langfuse docker-compose.yml (v4 images) with three changes:
+# Derived from the official langfuse/langfuse docker-compose.yml, pinned to the v3 images (v4 removed the
+# legacy ingestion + /api/public/traces reads the latch langfuse package @langfuse/client 5.9.1 still uses), with three changes:
 #   - only the web UI is exposed, on host port 3100 (3000 is the latch dev server; 3001/5432/6379
 #     are taken by other local containers) — postgres/clickhouse/redis/minio stay on the compose network;
 #   - headless init: one admin user, one org + project, fixed API keys (dev-only secrets, this machine only);
@@ -13,7 +14,7 @@
 # External connections from other machines will not be able to reach these services directly.
 services:
   langfuse-worker:
-    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    image: docker.langfuse.com/langfuse/langfuse-worker:3
     restart: always
     depends_on: &langfuse-depends-on
       postgres:
@@ -112,7 +113,7 @@ services:
       LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_REGION: ${LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_REGION:-}
 
   langfuse-web:
-    image: docker.langfuse.com/langfuse/langfuse:4
+    image: docker.langfuse.com/langfuse/langfuse:3
     restart: always
     depends_on: *langfuse-depends-on
     ports:

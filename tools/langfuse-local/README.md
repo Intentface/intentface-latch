@@ -1,6 +1,7 @@
 # Local Langfuse for Edge Eval v0 review queues
 
-Self-hosted Langfuse (v4) on this machine, used for the human-review step of the Edge
+Self-hosted Langfuse (**v3 images** — v4's default mode removes the legacy trace/score reads and
+batch ingestion that `packages/langfuse` still uses; see plan finding 13) on this machine, used for the human-review step of the Edge
 evaluation: three reviewers (Ville, Joni, Valtteri), one queue each, blinded D-vs-A pairs.
 
 ```
