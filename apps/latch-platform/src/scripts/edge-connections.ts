@@ -56,43 +56,65 @@ export function checkSurface(name: string, tools: string[]): string[] {
   return problems;
 }
 
-async function main() {
-  const probe = process.argv.includes("--probe");
+/**
+ * Ensure every connection RECORD exists (idempotent, non-destructive) and report which ones
+ * still need the human's one Connect click. `probe` additionally opens each authorized
+ * connection and asserts its tool surface. Shared with edge-setup.ts.
+ */
+export async function ensureConnections(opts: { probe?: boolean; create?: boolean } = {}): Promise<{
+  principal: Principal;
+  created: string[];
+  authorized: string[];
+  pending: string[];
+  problems: string[];
+  urlMismatch: string[];
+}> {
   const principal = await evalPrincipal();
-  console.log(`[conn] principal org=${principal.orgId} user=${principal.userId}`);
   const { connectionStore, dynamic } = await getLatch();
+  const created: string[] = [];
+  const urlMismatch: string[] = [];
 
   for (const [name, url] of Object.entries(EDGE_CONNECTION_URLS)) {
     const existing = await connectionStore.get(principal, name);
     if (!existing) {
+      if (opts.create === false) continue;
       await connectionStore.add(principal, "user", { kind: "mcp", name, mcp: { url }, auth: { kind: "oauth" } });
-      console.log(`[conn] created ${name} → ${url}`);
+      created.push(name);
     } else if (existing.mcp?.url !== url) {
-      console.warn(`[conn] ${name} exists with a DIFFERENT url: ${existing.mcp?.url} (expected ${url}) — fix it in /connections`);
-    } else {
-      console.log(`[conn] ${name} exists`);
+      urlMismatch.push(`${name}: ${existing.mcp?.url} ≠ ${url}`);
     }
   }
 
   const status = await dynamic.status(principal);
+  const authorized: string[] = [];
   const pending: string[] = [];
+  const problems: string[] = [];
   for (const name of Object.keys(EDGE_CONNECTION_URLS)) {
-    const st = status.find((c) => c.name === name);
-    const ok = st?.authorized === true;
-    console.log(`[conn] ${name}: ${ok ? "authorized ✓" : "NOT authorized — click Connect"}`);
-    if (!ok) pending.push(name);
-    if (ok && probe) {
-      const tools = await dynamic.testTools(name, principal);
-      const problems = checkSurface(name, tools);
-      console.log(`[conn]   ${tools.length} tools: ${tools.map((t) => t.replace(`${name}_`, "")).join(", ")}`);
-      if (problems.length) {
-        console.error(`[conn]   surface problems: ${problems.join("; ")}`);
-        process.exitCode = 1;
+    if (status.find((c) => c.name === name)?.authorized === true) {
+      authorized.push(name);
+      if (opts.probe) {
+        const tools = await dynamic.testTools(name, principal);
+        problems.push(...checkSurface(name, tools).map((p) => `${name}: ${p}`));
       }
-    }
+    } else pending.push(name);
   }
-  if (pending.length) {
-    console.log(`\n[conn] Open http://localhost:3000/connections and click Connect on: ${pending.join(", ")}. Then re-run with --probe.`);
+  return { principal, created, authorized, pending, problems, urlMismatch };
+}
+
+async function main() {
+  const probe = process.argv.includes("--probe");
+  const r = await ensureConnections({ probe });
+  console.log(`[conn] principal org=${r.principal.orgId} user=${r.principal.userId}`);
+  for (const n of r.created) console.log(`[conn] created ${n} → ${EDGE_CONNECTION_URLS[n]}`);
+  for (const m of r.urlMismatch) console.warn(`[conn] DIFFERENT url — fix it in /connections — ${m}`);
+  for (const n of r.authorized) console.log(`[conn] ${n}: authorized ✓`);
+  for (const n of r.pending) console.log(`[conn] ${n}: NOT authorized — click Connect`);
+  for (const p of r.problems) {
+    console.error(`[conn] surface problem — ${p}`);
+    process.exitCode = 1;
+  }
+  if (r.pending.length) {
+    console.log(`\n[conn] Open http://localhost:3000/connections and click Connect on: ${r.pending.join(", ")}. Then re-run with --probe.`);
     process.exitCode = 2;
   }
 }
