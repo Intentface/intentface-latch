@@ -43,8 +43,12 @@ export const JUDGE_HARD_FAILURES = [
 export const DETERMINISTIC_HARD_FAILURES = ["source_or_path_leakage", "required_memory_write_missing"] as const;
 export type HardFailure = (typeof JUDGE_HARD_FAILURES)[number] | (typeof DETERMINISTIC_HARD_FAILURES)[number];
 
+// Schemas are deliberately tolerant (a plain number / string) and normalized by
+// `normalizeVerdict` below: the strict `int().min().max()` / `enum` forms made ~7% of calls
+// fail with "response did not match schema" (a "2.5", a trailing period, two failures joined
+// with a slash). Rejecting those is a retry cost, not a verdict — normalize instead.
 export const ScaledVerdict = z.object({
-  score: z.number().int().min(0).max(3),
+  score: z.number().describe("An integer from 0 to 3 — the rung anchor that fits best."),
   reason: z.string().describe("Two sentences at most: the decisive evidence, quoted or paraphrased from the answer."),
 });
 export const BinaryVerdict = z.object({
@@ -52,9 +56,28 @@ export const BinaryVerdict = z.object({
   reason: z.string().describe("Two sentences at most: the decisive evidence."),
 });
 export const HardFailureVerdict = z.object({
-  failure: z.enum(JUDGE_HARD_FAILURES),
+  failure: z.string().describe(`Exactly one of: ${JUDGE_HARD_FAILURES.join(", ")}. The single most severe one present.`),
   reason: z.string().describe("Two sentences at most. For 'none', say what you checked."),
 });
+
+/** Coerce a tolerant verdict into the rubric's value space; throws on the unrecoverable. */
+export function normalizeVerdict(kind: DimensionSpec["kind"], raw: { score?: number; pass?: boolean; failure?: string }): number | boolean | (typeof JUDGE_HARD_FAILURES)[number] {
+  if (kind === "scaled") {
+    if (typeof raw.score !== "number" || Number.isNaN(raw.score)) throw new Error(`scaled verdict without a numeric score: ${JSON.stringify(raw)}`);
+    return Math.max(0, Math.min(3, Math.round(raw.score)));
+  }
+  if (kind === "binary") {
+    if (typeof raw.pass !== "boolean") throw new Error(`binary verdict without a boolean pass: ${JSON.stringify(raw)}`);
+    return raw.pass;
+  }
+  const key = String(raw.failure ?? "")
+    .toLowerCase()
+    .replace(/[^a-z_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const hit = JUDGE_HARD_FAILURES.find((h) => key === h || key.startsWith(h) || key.includes(h));
+  if (!hit) throw new Error(`unrecognized hard failure "${raw.failure}"`);
+  return hit;
+}
 
 export interface DimensionSpec {
   name: Dimension;

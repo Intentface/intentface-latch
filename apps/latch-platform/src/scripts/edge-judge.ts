@@ -31,6 +31,7 @@ import {
   SCALED_DIMENSIONS,
   cellBlock,
   dimensionSchema,
+  normalizeVerdict,
   referenceBlock,
   type Category,
   type Dimension,
@@ -118,17 +119,36 @@ async function readViaConnection(opened: Opened, tool: string, fileId: string): 
   return stripLineNumbers(raw);
 }
 
+/** The client's memory files, discovered live (orient lists edge/memory/*). */
+async function listMemoryFiles(client: Opened): Promise<string[]> {
+  const t = client.tools[`${CONNECTIONS.client}_orient`] as Executable | undefined;
+  if (!t?.execute) return [];
+  const manifest = textOf(await t.execute({}, { toolCallId: `judge_orient_${Date.now()}`, messages: [] }));
+  // Manifest lines look like `    - notes.md [notes] 238L` under a `memory/ (N files)` heading.
+  const section = manifest.split(/^\s*memory\/ \(\d+ files\)/m)[1]?.split(/^\s*\S+\/ \(\d+ files\)/m)[0] ?? "";
+  return [...section.matchAll(/^\s*- (\S+\.md) \[/gm)].map((m) => `edge/memory/${m[1]}`).filter((f) => !f.endsWith("/index.md"));
+}
+
 async function loadReference(principal: Principal, dynamic: { hostFor: (names: string[]) => { open: (p: Principal) => Promise<Opened> } }) {
   const client = await dynamic.hostFor([CONNECTIONS.client]).open(principal);
   const kn = await dynamic.hostFor([CONNECTIONS.kn]).open(principal);
   try {
+    // Tier 2 (ctx) AND Tier 3 (memory): the agent legitimately grounds in prior engagement
+    // notes, so the judge must see them too — otherwise every fact drawn from memory reads
+    // as "invented" (pilot-luna, first judge pass: 15 false invented_client_fact verdicts).
+    // The memory folder's file list is discovered live via orient.
     const ctxFiles = ["edge/ctx/placement.md", "edge/ctx/strategy.md", "edge/ctx/product.md", "edge/ctx/roadmap.md", "edge/ctx/tech-stack.md"];
     const parts: string[] = [];
-    for (const f of ctxFiles) parts.push(`--- ${f} ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
+    for (const f of ctxFiles) parts.push(`--- ${f} (Tier 2, client context) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
+    for (const f of await listMemoryFiles(client)) parts.push(`--- ${f} (Tier 3, engagement memory — prior exchanges with this client) ---\n${await readViaConnection(client, `${CONNECTIONS.client}_read_file`, f)}`);
     const clientContext = parts.join("\n\n");
+    // Expert stance = the category's pillar + the peer-examples catalog (IF's own case
+    // studies — a cited peer is house material, not an invented company).
+    const catalog = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, "edge-kn/examples/catalog.md");
     const stances: Partial<Record<Category, string>> = {};
     for (const [cat, pillar] of Object.entries(PILLAR_FOR) as Array<[Category, string]>) {
-      stances[cat] = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, `edge-kn/kn/${pillar}/playbook.md`);
+      const playbook = await readViaConnection(kn, `${CONNECTIONS.kn}_read_file`, `edge-kn/kn/${pillar}/playbook.md`);
+      stances[cat] = `--- edge-kn/kn/${pillar}/playbook.md (the pillar) ---\n${playbook}\n\n--- edge-kn/examples/catalog.md (approved peer examples the advisor may cite) ---\n${catalog}`;
     }
     return { clientContext, stances: stances as Record<Category, string> };
   } finally {
@@ -168,7 +188,7 @@ async function judgeDimension(model: LanguageModel, reference: string, cell: Cel
         abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
       });
       const o = object as { score?: number; pass?: boolean; failure?: string; reason: string };
-      return { value: dim.kind === "scaled" ? o.score : dim.kind === "binary" ? o.pass : o.failure, reason: o.reason };
+      return { value: normalizeVerdict(dim.kind, o), reason: o.reason };
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);
     }
