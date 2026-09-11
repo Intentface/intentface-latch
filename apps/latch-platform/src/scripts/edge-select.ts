@@ -11,7 +11,13 @@
  *  - INSIGHTS: all pilot-run INSIGHTS questions are taken (3 of 68; one of four Tier-1
  *    pillars — the benchmark must be able to see an insights regression);
  *  - the remaining seats are allocated to INFRA / AX / CODE proportionally to pool size
- *    (largest-remainder rounding) and filled greedily by spread;
+ *    (largest-remainder rounding) and filled STRATIFIED BY SPREAD within each category:
+ *    the category's ranking is cut into thirds (wide / middle / narrow |D−A|) and seats
+ *    rotate wide → narrow → middle, each third filled from its own end (widest first,
+ *    narrowest first, middle outwards). Rationale (user decision 2026-09-11): D hit the
+ *    12/12 ceiling on 26 of 51 pilot questions, so "top spread only" would build a set
+ *    that sits at a 100% win rate and cannot move; narrow-margin cases are where a prompt
+ *    change shows, wide-margin ones are the regression guards;
  *  - author cap: no single author supplies more than AUTHOR_CAP of the 20 (the reviewers
  *    are also the authors; nobody should dominate the set they later review). When the
  *    cap blocks a pick, the next question by spread in that category is taken instead.
@@ -97,16 +103,37 @@ export function select(ranked: Ranked[]): { picked: Ranked[]; allocation: Record
   for (const r of insights) byAuthor.set(r.author, (byAuthor.get(r.author) ?? 0) + 1);
   const skippedForCap: string[] = [];
   for (const cat of CATEGORIES.filter((c) => c !== "INSIGHTS")) {
+    const inCat = rest.filter((x) => x.category === cat); // already sorted widest → narrowest
+    const cut = Math.ceil(inCat.length / 3);
+    const wide = inCat.slice(0, cut);
+    const middle = inCat.slice(cut, inCat.length - cut);
+    const narrow = inCat.slice(inCat.length - cut).reverse(); // narrowest first
+    // Middle third filled from its centre outwards.
+    const mid = middle.length ? [...middle].sort((a, b) => Math.abs(middle.indexOf(a) - (middle.length - 1) / 2) - Math.abs(middle.indexOf(b) - (middle.length - 1) / 2)) : [];
+    const strata = [wide, narrow, mid];
+    const cursors = [0, 0, 0];
     let need = alloc[cat];
-    for (const r of rest.filter((x) => x.category === cat)) {
-      if (need <= 0) break;
-      if (r.author !== "unattributed" && (byAuthor.get(r.author) ?? 0) >= AUTHOR_CAP) {
-        skippedForCap.push(r.id);
-        continue;
+    let turn = 0;
+    let stuck = 0;
+    while (need > 0 && stuck < 3) {
+      const si = turn % 3;
+      turn++;
+      const list = strata[si]!;
+      let took = false;
+      while (cursors[si]! < list.length) {
+        const r = list[cursors[si]!++]!;
+        if (picked.includes(r)) continue;
+        if (r.author !== "unattributed" && (byAuthor.get(r.author) ?? 0) >= AUTHOR_CAP) {
+          skippedForCap.push(r.id);
+          continue;
+        }
+        picked.push(r);
+        byAuthor.set(r.author, (byAuthor.get(r.author) ?? 0) + 1);
+        need--;
+        took = true;
+        break;
       }
-      picked.push(r);
-      byAuthor.set(r.author, (byAuthor.get(r.author) ?? 0) + 1);
-      need--;
+      stuck = took ? 0 : stuck + 1;
     }
   }
   return { picked, allocation: alloc, skippedForCap };
@@ -149,7 +176,7 @@ function main() {
           "pool = client-team register minus the sealed holdout",
           "ranked by |composite(D) - composite(A)| in either direction; ties: hard failure first, then lower composite",
           "all INSIGHTS questions taken",
-          "INFRA / AX / CODE seats proportional to pool size (largest remainder), filled by spread",
+          "INFRA / AX / CODE seats proportional to pool size (largest remainder), filled stratified by spread within category: thirds wide/middle/narrow, seats rotate wide -> narrow -> middle",
           `author cap ${AUTHOR_CAP} of ${OPTIMIZATION_SIZE}`,
         ],
         allocation,

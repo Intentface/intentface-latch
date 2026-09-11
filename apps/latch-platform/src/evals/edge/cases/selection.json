@@ -1,0 +1,504 @@
+{
+  "pilot_run": "pilot-luna",
+  "selectedAt": "2026-09-11T10:23:01.008Z",
+  "git_commit_sha": "46e9e54bba4c80f14b4f2cc62c7a56297e65f06f",
+  "rules": [
+    "pool = client-team register minus the sealed holdout",
+    "ranked by |composite(D) - composite(A)| in either direction; ties: hard failure first, then lower composite",
+    "all INSIGHTS questions taken",
+    "INFRA / AX / CODE seats proportional to pool size (largest remainder), filled stratified by spread within category: thirds wide/middle/narrow, seats rotate wide -> narrow -> middle",
+    "author cap 5 of 20"
+  ],
+  "allocation": {
+    "INSIGHTS": 3,
+    "INFRA": 8,
+    "AX": 5,
+    "CODE": 4
+  },
+  "optimization": [
+    "AX-01",
+    "AX-07",
+    "AX-10",
+    "AX-11",
+    "AX-13",
+    "CODE-05",
+    "CODE-09",
+    "CODE-12",
+    "CODE-13",
+    "INFRA-01",
+    "INFRA-06",
+    "INFRA-11",
+    "INFRA-15",
+    "INFRA-19",
+    "INFRA-20",
+    "INFRA-23",
+    "INFRA-27",
+    "INSIGHTS-01",
+    "INSIGHTS-02",
+    "INSIGHTS-04"
+  ],
+  "ranking": [
+    {
+      "id": "INFRA-01",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 0,
+      "d": 12,
+      "spread": 12,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-11",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 0,
+      "d": 12,
+      "spread": 12,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-23",
+      "category": "INFRA",
+      "author": "Joonatan",
+      "a": 0,
+      "d": 12,
+      "spread": 12,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-26",
+      "category": "INFRA",
+      "author": "Klaus",
+      "a": 0,
+      "d": 12,
+      "spread": 12,
+      "hardFailure": true
+    },
+    {
+      "id": "INSIGHTS-04",
+      "category": "INSIGHTS",
+      "author": "unattributed",
+      "a": 0,
+      "d": 11,
+      "spread": 11,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-07",
+      "category": "AX",
+      "author": "Valtteri",
+      "a": 1,
+      "d": 12,
+      "spread": 11,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-05",
+      "category": "CODE",
+      "author": "Joni",
+      "a": 1,
+      "d": 11,
+      "spread": 10,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-07",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 2,
+      "d": 12,
+      "spread": 10,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-17",
+      "category": "INFRA",
+      "author": "Joni",
+      "a": 2,
+      "d": 12,
+      "spread": 10,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-22",
+      "category": "INFRA",
+      "author": "Joonatan",
+      "a": 2,
+      "d": 12,
+      "spread": 10,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-11",
+      "category": "AX",
+      "author": "Joni",
+      "a": 2,
+      "d": 12,
+      "spread": 10,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-16",
+      "category": "AX",
+      "author": "Joni",
+      "a": 2,
+      "d": 12,
+      "spread": 10,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-12",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 2,
+      "d": 12,
+      "spread": 10,
+      "hardFailure": false
+    },
+    {
+      "id": "INSIGHTS-02",
+      "category": "INSIGHTS",
+      "author": "unattributed",
+      "a": 2,
+      "d": 11,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-09",
+      "category": "CODE",
+      "author": "Jere",
+      "a": 2,
+      "d": 11,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-05",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 3,
+      "d": 12,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-24",
+      "category": "INFRA",
+      "author": "Joonatan",
+      "a": 3,
+      "d": 12,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-27",
+      "category": "INFRA",
+      "author": "Lauri",
+      "a": 3,
+      "d": 12,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-05",
+      "category": "AX",
+      "author": "unattributed",
+      "a": 3,
+      "d": 12,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-04",
+      "category": "CODE",
+      "author": "Joni",
+      "a": 3,
+      "d": 12,
+      "spread": 9,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-15",
+      "category": "AX",
+      "author": "Joni",
+      "a": 2,
+      "d": 10,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-07",
+      "category": "CODE",
+      "author": "Aleksi",
+      "a": 2,
+      "d": 10,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-06",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-08",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-13",
+      "category": "INFRA",
+      "author": "Valtteri",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-14",
+      "category": "INFRA",
+      "author": "Valtteri",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-02",
+      "category": "AX",
+      "author": "unattributed",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-04",
+      "category": "AX",
+      "author": "unattributed",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-25",
+      "category": "INFRA",
+      "author": "Jere",
+      "a": 4,
+      "d": 12,
+      "spread": 8,
+      "hardFailure": false
+    },
+    {
+      "id": "INFRA-16",
+      "category": "INFRA",
+      "author": "Joni",
+      "a": 1,
+      "d": 8,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-10",
+      "category": "AX",
+      "author": "Joni",
+      "a": 2,
+      "d": 9,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-06",
+      "category": "CODE",
+      "author": "Joni",
+      "a": 2,
+      "d": 9,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-13",
+      "category": "CODE",
+      "author": "Klaus",
+      "a": 2,
+      "d": 9,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-03",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 3,
+      "d": 10,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-02",
+      "category": "CODE",
+      "author": "Valtteri",
+      "a": 3,
+      "d": 10,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-17",
+      "category": "AX",
+      "author": "Joonatan",
+      "a": 4,
+      "d": 11,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "INSIGHTS-01",
+      "category": "INSIGHTS",
+      "author": "unattributed",
+      "a": 5,
+      "d": 12,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-03",
+      "category": "AX",
+      "author": "unattributed",
+      "a": 5,
+      "d": 12,
+      "spread": 7,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-01",
+      "category": "CODE",
+      "author": "unattributed",
+      "a": 2,
+      "d": 8,
+      "spread": 6,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-18",
+      "category": "AX",
+      "author": "Lauri",
+      "a": 3,
+      "d": 9,
+      "spread": 6,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-08",
+      "category": "CODE",
+      "author": "Joonatan",
+      "a": 3,
+      "d": 9,
+      "spread": 6,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-10",
+      "category": "INFRA",
+      "author": "unattributed",
+      "a": 4,
+      "d": 10,
+      "spread": 6,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-09",
+      "category": "AX",
+      "author": "Joni",
+      "a": 6,
+      "d": 12,
+      "spread": 6,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-14",
+      "category": "AX",
+      "author": "Joni",
+      "a": 1,
+      "d": 6,
+      "spread": 5,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-19",
+      "category": "INFRA",
+      "author": "Aleksi",
+      "a": 2,
+      "d": 7,
+      "spread": 5,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-20",
+      "category": "INFRA",
+      "author": "Aleksi",
+      "a": 2,
+      "d": 7,
+      "spread": 5,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-01",
+      "category": "AX",
+      "author": "unattributed",
+      "a": 6,
+      "d": 11,
+      "spread": 5,
+      "hardFailure": true
+    },
+    {
+      "id": "AX-13",
+      "category": "AX",
+      "author": "Joni",
+      "a": 2,
+      "d": 6,
+      "spread": 4,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-12",
+      "category": "CODE",
+      "author": "Klaus",
+      "a": 3,
+      "d": 7,
+      "spread": 4,
+      "hardFailure": true
+    },
+    {
+      "id": "INFRA-15",
+      "category": "INFRA",
+      "author": "Joni",
+      "a": 5,
+      "d": 9,
+      "spread": 4,
+      "hardFailure": true
+    },
+    {
+      "id": "CODE-03",
+      "category": "CODE",
+      "author": "Joni",
+      "a": 4,
+      "d": 7,
+      "spread": 3,
+      "hardFailure": false
+    }
+  ],
+  "skippedForCap": [
+    "CODE-03"
+  ]
+}
