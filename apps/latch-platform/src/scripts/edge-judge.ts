@@ -51,6 +51,9 @@ const JUDGE_MODEL = arg("judge-model", "claude-sonnet-5")!;
 const CONCURRENCY = Number(arg("concurrency", "4"));
 const DIMS = arg("dims") ? new Set(arg("dims")!.split(",")) : undefined;
 const FORCE = process.argv.includes("--force");
+// --redo-errors: re-judge ONLY the dimensions that errored on already-judged cells, merging
+// into the existing judgment (the default resume skips a cell as soon as it has a line).
+const REDO_ERRORS = process.argv.includes("--redo-errors");
 
 // ── Types shared with the runner's cell record (subset) ──────────────────────
 interface Cell {
@@ -185,19 +188,26 @@ async function judgeDimension(model: LanguageModel, reference: string, cell: Cel
             ],
           },
         ],
+        // Adaptive thinking shares the output budget with the JSON; a starved budget
+        // truncates the verdict mid-`reason` and surfaces as "did not match schema".
+        maxOutputTokens: 6000,
         abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
       });
       const o = object as { score?: number; pass?: boolean; failure?: string; reason: string };
       return { value: normalizeVerdict(dim.kind, o), reason: o.reason };
     } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
+      // NoObjectGeneratedError carries the raw text — keep a slice so a schema miss is diagnosable.
+      const raw = (e as { text?: string })?.text;
+      lastError = (e instanceof Error ? e.message : String(e)) + (raw ? ` | raw: ${raw.slice(0, 300).replace(/\s+/g, " ")}` : "");
     }
   }
   throw new Error(lastError);
 }
 
-async function judgeCell(model: LanguageModel, references: Record<Category, string>, cell: Cell, dims: DimensionSpec[]): Promise<Judgment> {
-  const j: Judgment = {
+async function judgeCell(model: LanguageModel, references: Record<Category, string>, cell: Cell, dims: DimensionSpec[], existing?: Judgment): Promise<Judgment> {
+  const j: Judgment = existing
+    ? { ...existing, errors: {}, hard_failures_all: [], judged_at: new Date().toISOString() }
+    : {
     run_name: cell.run_name,
     case_id: cell.case_id,
     category: cell.category,
@@ -215,6 +225,12 @@ async function judgeCell(model: LanguageModel, references: Record<Category, stri
     errors: {},
     judged_at: new Date().toISOString(),
   };
+  if (existing) {
+    // Keep the judge-assigned hard failure unless we are re-judging that dimension.
+    if (!dims.some((d) => d.name === "hard_failure") && existing.hard_failure && !DETERMINISTIC_HARD_FAILURES.includes(existing.hard_failure as never) && existing.hard_failure !== "none") {
+      j.hard_failures_all.push(existing.hard_failure);
+    }
+  }
   await Promise.all(
     dims.map(async (dim) => {
       try {
@@ -261,8 +277,18 @@ async function main() {
       done.add(`${j.case_id}|${j.variant}|${j.repetition}`);
     }
   } else if (FORCE) writeFileSync(outPath, "");
-  const todo = cells.filter((c) => !done.has(`${c.case_id}|${c.variant}|${c.repetition}`));
   const dims = DIMENSIONS.filter((d) => !DIMS || DIMS.has(d.name));
+  const existingByKey = new Map<string, Judgment>();
+  if (existsSync(outPath) && !FORCE) {
+    for (const l of readFileSync(outPath, "utf8").split("\n").filter(Boolean)) {
+      const j = JSON.parse(l) as Judgment;
+      existingByKey.set(`${j.case_id}|${j.variant}|${j.repetition}`, j);
+    }
+  }
+  const redo = REDO_ERRORS
+    ? cells.filter((c) => Object.keys(existingByKey.get(`${c.case_id}|${c.variant}|${c.repetition}`)?.errors ?? {}).length > 0)
+    : [];
+  const todo = REDO_ERRORS ? redo : cells.filter((c) => !done.has(`${c.case_id}|${c.variant}|${c.repetition}`));
   console.log(`[judge] ${RUN}: ${cells.length} cells, ${todo.length} to judge × ${dims.length} dims, model ${JUDGE_MODEL}`);
 
   const principal = await evalPrincipal();
@@ -286,9 +312,13 @@ async function main() {
   const worker = async () => {
     while (next < todo.length) {
       const cell = todo[next++]!;
-      const j = await judgeCell(model, references, cell, dims);
+      const key = `${cell.case_id}|${cell.variant}|${cell.repetition}`;
+      const existing = REDO_ERRORS ? existingByKey.get(key) : undefined;
+      const cellDims = existing ? dims.filter((d) => d.name in existing.errors) : dims;
+      const j = await judgeCell(model, references, cell, cellDims, existing);
       results.push(j);
-      appendFileSync(outPath, JSON.stringify(j) + "\n");
+      if (existing) existingByKey.set(key, j);
+      else appendFileSync(outPath, JSON.stringify(j) + "\n");
       const errs = Object.keys(j.errors).length ? ` ERR:${Object.keys(j.errors).join(",")}` : "";
       console.log(
         `[judge] ${results.length}/${todo.length} ${cell.case_id} ${cell.variant} r${cell.repetition} · dq ${j.scores.decision_quality ?? "-"} cs ${j.scores.client_specificity ?? "-"} sf ${j.scores.expert_stance_fidelity ?? "-"} sc ${j.scores.stage_calibration ?? "-"} · g${b(j.passes.grounding)} a${b(j.passes.actionability)} d${b(j.passes.decisiveness)} t1${b(j.passes.first_turn_quality)} · hf ${j.hard_failure} · ${j.overall_pass ? "PASS" : "fail"}${errs}`,
@@ -297,6 +327,7 @@ async function main() {
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(CONCURRENCY, todo.length)) }, worker));
+  if (REDO_ERRORS) writeFileSync(outPath, [...existingByKey.values()].map((j) => JSON.stringify(j)).join("\n") + "\n");
 
   // Summary over ALL judgments in the file (previous + this run).
   const all = readFileSync(outPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Judgment);

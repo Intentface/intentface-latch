@@ -49,15 +49,15 @@ export type HardFailure = (typeof JUDGE_HARD_FAILURES)[number] | (typeof DETERMI
 // with a slash). Rejecting those is a retry cost, not a verdict — normalize instead.
 export const ScaledVerdict = z.object({
   score: z.number().describe("An integer from 0 to 3 — the rung anchor that fits best."),
-  reason: z.string().describe("Two sentences at most: the decisive evidence, quoted or paraphrased from the answer."),
+  reason: z.string().describe("At most 60 words: the decisive evidence, quoted or paraphrased from the answer."),
 });
 export const BinaryVerdict = z.object({
   pass: z.boolean(),
-  reason: z.string().describe("Two sentences at most: the decisive evidence."),
+  reason: z.string().describe("At most 60 words: the decisive evidence."),
 });
 export const HardFailureVerdict = z.object({
   failure: z.string().describe(`Exactly one of: ${JUDGE_HARD_FAILURES.join(", ")}. The single most severe one present.`),
-  reason: z.string().describe("Two sentences at most. For 'none', say what you checked."),
+  reason: z.string().describe("At most 60 words. For 'none', say what you checked."),
 });
 
 /** Coerce a tolerant verdict into the rubric's value space; throws on the unrecoverable. */
