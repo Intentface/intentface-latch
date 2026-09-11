@@ -47,6 +47,8 @@ const REPS = Number(arg("reps", "1"));
 const CONCURRENCY = Number(arg("concurrency", "2"));
 const ALLOW_DRIFT = flag("allow-drift");
 const DRY_RUN = flag("dry-run");
+// --resume: skip cells already present in <out>/cells.jsonl (a killed sweep picks up where it stopped).
+const RESUME = flag("resume");
 const MAX_ATTEMPTS = Number(arg("attempts", "3"));
 // The pilot runs on a cheaper sibling (gpt-5.6-luna) to rank questions by spread without
 // coupling the selection to Sol's own noise; the benchmark itself stays on EDGE_EVAL_MODEL.
@@ -196,10 +198,18 @@ async function main() {
 
   // 5. Cells.
   const cellsPath = join(OUT_DIR, "cells.jsonl");
+  const prior: CellRecord[] = RESUME && existsSync(cellsPath)
+    ? readFileSync(cellsPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as CellRecord).filter((c) => !c.error)
+    : [];
+  if (!RESUME && existsSync(cellsPath)) throw new Error(`${cellsPath} exists — pass --resume to continue it or pick another --name`);
+  const doneKeys = new Set(prior.map((c) => `${c.case_id}|${c.variant}|${c.repetition}`));
   const plan: Array<{ q: Question; v: Variant; rep: number }> = [];
-  for (const q of cases) for (const v of VARIANT_ARG) for (let rep = 1; rep <= REPS; rep++) plan.push({ q, v, rep });
+  for (const q of cases) for (const v of VARIANT_ARG) for (let rep = 1; rep <= REPS; rep++) {
+    if (!doneKeys.has(`${q.id}|${v}|${rep}`)) plan.push({ q, v, rep });
+  }
+  if (RESUME) console.log(`[eval] resume: ${prior.length} cells already done, ${plan.length} to go`);
 
-  const records: CellRecord[] = [];
+  const records: CellRecord[] = [...prior];
   let next = 0;
   const worker = async () => {
     while (next < plan.length) {
@@ -216,7 +226,7 @@ async function main() {
         .filter(Boolean)
         .join(" ");
       console.log(
-        `[eval] ${records.length}/${plan.length} ${q.id} ${v} r${rep} · t1 ${rec.turn1.answerChars}ch t2 ${rec.turn2.answerChars}ch · tools ${rec.checks.tool_calls_total} · mem=${rec.checks.memory_write_attempted ? "y" : "n"} gap=${rec.checks.gap_write_attempted ? "y" : "n"} · ${((rec.turn1.latencyMs ?? 0) + (rec.turn2.latencyMs ?? 0)) / 1000}s ${flags}`,
+        `[eval] ${records.length}/${plan.length + prior.length} ${q.id} ${v} r${rep} · t1 ${rec.turn1.answerChars}ch t2 ${rec.turn2.answerChars}ch · tools ${rec.checks.tool_calls_total} · mem=${rec.checks.memory_write_attempted ? "y" : "n"} gap=${rec.checks.gap_write_attempted ? "y" : "n"} · ${((rec.turn1.latencyMs ?? 0) + (rec.turn2.latencyMs ?? 0)) / 1000}s ${flags}`,
       );
     }
   };

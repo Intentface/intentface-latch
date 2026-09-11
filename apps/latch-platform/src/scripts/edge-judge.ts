@@ -208,8 +208,12 @@ async function judgeCell(model: LanguageModel, references: Record<Category, stri
       }
     }),
   );
-  // Deterministic hard failures from the runner's checks.
-  if (cell.checks.leakage.length) j.hard_failures_all.push("source_or_path_leakage");
+  // Deterministic hard failures from the runner's checks. Only STRONG leakage signals
+  // (connection names, ids, internal paths, tool names, "(see …)") count as a hard failure;
+  // "playbook" / "catalog" / "*.md" are soft — legitimate English in many answers
+  // ("product catalog") — and stay recorded on the cell for the judge to weigh.
+  const STRONG_LEAKS = new Set(["connection-name", "file-id", "folder-id", "path", "tool-name", "see-ref"]);
+  if (cell.checks.leakage.some((k) => STRONG_LEAKS.has(k))) j.hard_failures_all.push("source_or_path_leakage");
   if ((cell.variant === "B" || cell.variant === "D") && !cell.checks.memory_write_attempted) j.hard_failures_all.push("required_memory_write_missing");
   j.hard_failure = j.hard_failures_all[0] ?? "none";
   j.composite = SCALED_DIMENSIONS.reduce((a, d) => a + (j.scores[d] ?? 0), 0);
