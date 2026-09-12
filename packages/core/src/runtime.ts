@@ -1835,6 +1835,18 @@ export function createRuntime<P, RC = unknown>(
     // settled as errored FIRST, and exactly one errored report follows — only
     // from the writer whose fenced update applied.
     let failed: string | undefined;
+    // Step checkpoints commit IN STEP ORDER. Each write is still fire-and-forget
+    // for the stream, but chained behind the previous one, so a slow early
+    // write can't commit after a later one and roll the row back to an older
+    // step — and `onFinish` awaits the chain before its final write, so the
+    // finished message is strictly the LAST write of the turn. Without that the
+    // final step's checkpoint races `onFinish` for the same row: the parts are
+    // equal by then, but a late checkpoint clobbers the usage/cost metadata
+    // only `onFinish` stamps. The chain orders, it does not batch: each write
+    // starts the moment the one before it commits, so a crash at step N loses
+    // at most the write in flight and the one queued behind it. A failed write
+    // logs and releases the chain — the next checkpoint still runs.
+    let checkpoints: Promise<void> = Promise.resolve();
 
     // Post-turn telemetry: fired after persistence on every terminal path
     // (completed / awaiting_input / errored). Must never fail the turn.
@@ -2018,8 +2030,13 @@ export function createRuntime<P, RC = unknown>(
       onStepEnd: dur.enabled
         ? ({ responseMessage }: { responseMessage: AppMessage }) => {
             if (abort.signal.aborted) return;
-            void storage
-              .appendMessages(resolvedChatId, [responseMessage])
+            checkpoints = checkpoints
+              .then(() => {
+                // Re-checked at write time: the lease may have gone while this
+                // checkpoint waited behind the previous one.
+                if (abort.signal.aborted) return;
+                return storage.appendMessages(resolvedChatId, [responseMessage]);
+              })
               .catch((e) =>
                 console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e),
               );
@@ -2080,6 +2097,13 @@ export function createRuntime<P, RC = unknown>(
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
         const paused = hasPendingApproval(messages);
+        // Every step checkpoint has committed (or failed and been logged)
+        // BEFORE the row is settled. Recovery never revisits a completed run,
+        // so the moment the row says `completed` the stored message must
+        // already hold the final step — otherwise a crash between the settle
+        // and the final write below loses the answer text, not just metadata.
+        // Awaiting here also makes the final write the row's last one.
+        await checkpoints;
         // Fenced finish: settle the run FIRST. If the guarded update doesn't
         // apply (our lease was reaped + the run re-claimed elsewhere), we're
         // a stale writer — skip the final message/usage persistence so we
