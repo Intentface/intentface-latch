@@ -12,8 +12,11 @@ import type { MemoryConfig } from "./memory.js";
 
 /**
  * Minimal, engine-agnostic agent config (a subset of the SDK's agent settings).
- * `tools` is kept loose (`ToolSet` is not a public AI SDK export); the concrete
- * engine constrains it at the call site when the run executes.
+ * `tools` is kept loose for now: the SDK does export `ToolSet`, but every tool
+ * source (connections, MCP, OpenAPI, the platform's dynamic connections) builds
+ * a `Record<string, unknown>` and adopting the SDK type is one typing pass
+ * across them all. Until then the concrete engine constrains it at the call
+ * site when the run executes.
  */
 /** A set of tools opened for a turn, plus the teardown to run when it ends. */
 export interface OpenToolSet {
