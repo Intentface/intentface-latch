@@ -28,7 +28,7 @@ export const INDEX_FRONTMATTER = /^---\n(?:index_terms:[\s\S]*?\n)?index_version
 
 type Folder = { id: string; name: string; isRoot?: boolean; subfolders: Folder[]; files: FileItem[] };
 type FileItem = { id: string; name: string; type: string; subtype: string | null; version: number };
-type PlaneFile = { path: string; content: string; id: string; version: number };
+export type PlaneFile = { path: string; content: string; id: string; version: number };
 
 /** sha256 over (path + content) of every file — the plane's version id. */
 export function planeVersion(files: Array<[string, string]>): string {
@@ -53,6 +53,29 @@ export function readManifest(path = MANIFEST): PlaneManifest | undefined {
 }
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+/** The per-file entries a manifest stores for a live read (ids, versions, hashes — never content). */
+export function planeFiles(files: PlaneFile[]): PlaneManifest["files"] {
+  return Object.fromEntries(files.map((f) => [f.path, { fileId: f.id, version: f.version, chars: f.content.length, sha256: sha256(f.content) }]));
+}
+
+/**
+ * WHICH files drifted, one line each — `~ edge/memory/notes.md (content changed, v2 → v4)`.
+ * Two hashes tell you that a plane moved; this tells you whether that is one note someone
+ * edited or the whole cohort changing under you, which is the difference between "carry on
+ * with --allow-drift" and "stop and ask the plane owner". Shared by --verify, setup and the runner.
+ */
+export function describeDrift(committed: PlaneManifest, live: PlaneManifest["files"]): string[] {
+  const out: string[] = [];
+  const isLive = new Set(Object.keys(live));
+  const wasThere = new Set(Object.keys(committed.files));
+  for (const path of [...new Set([...isLive, ...wasThere])].sort()) {
+    if (!isLive.has(path)) out.push(`− ${path} (in manifest, not live)`);
+    else if (!wasThere.has(path)) out.push(`+ ${path} (live, not in manifest)`);
+    else if (live[path].sha256 !== committed.files[path].sha256) out.push(`~ ${path} (content changed, v${committed.files[path].version} → v${live[path].version})`);
+  }
+  return out;
+}
 
 /** Read every authored file under `edge/` from the live workspace. GET only. */
 export async function readLivePlane(): Promise<{ workspace: string; files: PlaneFile[] }> {
@@ -106,7 +129,7 @@ async function main() {
     workspace: { name: workspace, id: process.env.LOREDEX_EVAL_WS_ID },
     capturedAt: new Date().toISOString().slice(0, 10),
     horizontal_ctx_version: version,
-    files: Object.fromEntries(files.map((f) => [f.path, { fileId: f.id, version: f.version, chars: f.content.length, sha256: sha256(f.content) }])),
+    files: planeFiles(files),
     normalization: "Loredex-generated index_terms/index_version frontmatter stripped; folder index.md files excluded.",
   };
 
@@ -114,13 +137,7 @@ async function main() {
     const committed = readManifest();
     if (!committed) throw new Error(`no committed manifest at ${MANIFEST} — run without --verify first`);
     if (committed.horizontal_ctx_version === version) return console.log(`[snapshot] verify ✓ live plane matches the committed manifest (${committed.capturedAt})`);
-    for (const p of new Set([...Object.keys(manifest.files), ...Object.keys(committed.files)])) {
-      const live = manifest.files[p];
-      const was = committed.files[p];
-      if (!live) console.error(`[snapshot]   − ${p} (in manifest, not live)`);
-      else if (!was) console.error(`[snapshot]   + ${p} (live, not in manifest)`);
-      else if (live.sha256 !== was.sha256) console.error(`[snapshot]   ~ ${p} (content changed, v${was.version} → v${live.version})`);
-    }
+    for (const line of describeDrift(committed, manifest.files)) console.error(`[snapshot]   ${line}`);
     console.error(`[snapshot] verify ✗ live ${version.slice(0, 16)} ≠ manifest ${committed.horizontal_ctx_version.slice(0, 16)}`);
     process.exit(1);
   }

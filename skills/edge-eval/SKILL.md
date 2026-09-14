@@ -10,72 +10,79 @@ plane, `edge-v2-kn`) with one client's own situation (the **horizontal** plane,
 `edge-client`). This benchmark measures whether that combination beats a good generic model,
 by asking the same questions several ways and scoring the answers.
 
-**You do not need to understand the code to run this.** Follow the golden path. Every
-command is copy-pasteable and safe: the sweep never writes to a real workspace, and nothing
-here deletes anything.
+**You do not need to understand the code to run this.** Run `pnpm edge`. Every command here
+is copy-pasteable and safe: the sweep never writes to a real workspace, and nothing here
+deletes anything.
 
 ---
 
-## First-time setup on a machine
+## Run it
 
-Skip to the golden path if `pnpm edge:setup` already reports all ✓.
+```bash
+pnpm edge
+```
 
-1. **Repo and dependencies** — `pnpm install` at the repo root.
-2. **`apps/latch-platform/.env`** — ask whoever set this up for the file, or copy it from
-   another checkout. What the eval needs from it:
+From the repo root, or from `apps/latch-platform` — either works. That one command builds the
+workspace packages, writes `.env` from `.env.example` if it is missing, creates the local
+database schema, checks the machine, states what a sweep will cost and asks before spending
+it, runs the sweep, judges it and renders the HTML bench. It echoes every command it runs, so
+you end up knowing the long form rather than depending on the wrapper.
 
-   | Variable | Why |
-   |---|---|
-   | `DATABASE_URL` | the local SQLite database (e.g. `file:./latch.db`) |
-   | `LATCH_VAULT_KEY` | connection records are encrypted with it |
-   | `OPENAI_API_KEY` | the arms run on `gpt-5.6-sol` |
-   | `ANTHROPIC_API_KEY` | the judge and A′'s card writer are Claude models |
-   | `LOREDEX_EVAL_WS_ID`, `LOREDEX_EVAL_API_KEY` | fingerprinting the client plane — GET only, a **read-only key is enough** |
-   | `EDGE_EVAL_USER_EMAIL` | optional; defaults to the repo owner's address |
+It never spends money without a `y`, and never decides for you that a drifted context plane
+is still the same cohort.
 
-3. **The dev server and a user account** — `cd apps/latch-platform && pnpm dev`, then sign in
-   at `http://localhost:3000` as `EDGE_EVAL_USER_EMAIL`. That user owns the connections and
-   the arm agents. **Only one dev server may run against a given `latch.db`**: a second one
-   (typically another checkout) holds a write lock and fails every cell instantly.
-4. **`pnpm edge:setup`** — creates the connection records and the five arm agents, checks
-   everything else, and prints what still needs a human.
-5. **One Connect click per connection** — setup will report `edge-client`, `edge-v2-kn` and
-   `edge-v2-inbox` as not authorized. Open `http://localhost:3000/connections` and press
-   Connect on each (the Loredex token is user-wide, so one sign-in covers all three). Run
-   `pnpm edge:setup` again; it should be all ✓.
-6. **Langfuse — only for the human review step.** Needs Docker:
-   `cd tools/langfuse-local && docker compose up -d && bash setup-reviewers.sh` (web on
-   :3100; the script writes `apps/latch-platform/.env.langfuse-local`). Do not upgrade the
-   stack to v4 — it is pinned to v3 images because v4 breaks the reads this repo uses.
+### The two things it cannot do for you
 
-## Golden path (what to do 95% of the time)
+On a machine that has never run this, `pnpm edge` stops twice and tells you exactly what to
+do. Both are one-time.
 
-Everything runs from `apps/latch-platform`.
+1. **Paste the secrets.** It creates `apps/latch-platform/.env` and lists the values it
+   cannot invent: `LATCH_VAULT_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+   `LOREDEX_EVAL_WS_ID`, `LOREDEX_EVAL_API_KEY` (a **read-only** key — the eval only ever
+   GETs the client workspace) and `BETTER_AUTH_SECRET`, which you generate yourself with the
+   command it prints. Ask whoever runs the benchmark for the rest. `DATABASE_URL` can stay
+   `file:./latch.db`.
+
+2. **One sign-up and three Connect clicks.** The Loredex MCP endpoints only accept
+   interactive OAuth — a script cannot authorize them (the REST key that fingerprints the
+   plane is rejected by `/mcp` with `invalid_token`), so this part is genuinely human:
+
+   ```bash
+   cd apps/latch-platform && pnpm dev          # in its own terminal
+   ```
+
+   Sign up at `http://localhost:3000/login` as `EDGE_EVAL_USER_EMAIL` (any password — it is a
+   local account), then press **Connect** on `edge-client`, `edge-v2-kn` and `edge-v2-inbox`
+   at `http://localhost:3000/connections`. One Loredex sign-in covers all three.
+
+   If :3000 is already served by **another checkout**, `pnpm edge` says so with the path and
+   pid: clicks there authorize that checkout's database, not yours.
+
+Run `pnpm edge` again and it goes all the way through.
+
+### Doing the steps yourself
+
+`pnpm edge` is only a wrapper over four commands. Any of them can be run on its own:
 
 ```bash
 cd apps/latch-platform
 
-# 0. Is the machine ready? Creates what it can, tells you what needs a human.
-pnpm edge:setup
-
-# 1. Run a sweep (start small: 3 cases × 5 arms ≈ 6 min, a few dollars)
+pnpm edge:setup    # readiness — creates what it can, prints what needs a human
 pnpm edge:run --name my-run --variants A,AP,B,C,D --cases INFRA-01,AX-01,CODE-05 --reps 1 --concurrency 3
-
-# 2. Score it (one Claude call per rubric dimension per cell)
 pnpm edge:judge --run my-run
-
-# 3. Look at it — a self-contained HTML page
-pnpm edge:report --run my-run
-open edge-eval-runs/my-run/report.html
+pnpm edge:report --run my-run     # → edge-eval-runs/my-run/report.html
 ```
+
+`pnpm edge` takes the same arguments as the sweep: `pnpm edge --name nightly --cases all --reps 3 --yes`.
 
 Every `pnpm edge:*` script is the plain `node --env-file=.env --env-file=.env.langfuse-local
 --import tsx src/scripts/edge-<x>.ts` command with the env files already attached; use the
 long form if you prefer it.
 
-If step 0 reports anything with `✗`, do exactly what it says and run it again. The most
-common one is a connection that needs one **Connect** click at
-`http://localhost:3000/connections` (the local dev server must be running: `pnpm dev`).
+**Langfuse is only for the human review step**, and needs Docker:
+`cd tools/langfuse-local && docker compose up -d && bash setup-reviewers.sh` (web on :3100;
+the script writes `apps/latch-platform/.env.langfuse-local`). Do not upgrade the stack to v4
+— it is pinned to v3 images because v4 breaks the reads this repo uses.
 
 ---
 
@@ -104,6 +111,7 @@ All of them take `--run <name>` or `--name <name>` and read/write
 
 | Command | What it does |
 |---|---|
+| `pnpm edge` | All four steps below in order, with a `y/N` before the one that costs money. Takes the sweep's arguments (`--name`, `--cases`, `--reps`, `--variants`, `--yes`) |
 | `pnpm edge:setup` | The readiness check. Creates connection records and the five arm agents; reports what needs a human. `--check` = report only |
 | `pnpm edge:run` | The sweep. `--variants A,AP,B,C,D --cases <ids\|all\|optimization\|holdout\|client-team> --reps N --concurrency 3 [--resume] [--dry-run]` |
 | `pnpm edge:judge` | Scores every cell on nine rubric dimensions. `[--judge-model claude-sonnet-5] [--dims …] [--out <file>] [--redo-errors] [--force]` |
@@ -179,11 +187,13 @@ not a result. Both numbers appear in the report.
 
 | Symptom | Cause and fix |
 |---|---|
+| `ERR_MODULE_NOT_FOUND … /dist/index.js` | The workspace packages are not built. `pnpm edge` does it for you; by hand it is `pnpm install && pnpm build` at the repo root |
+| Connect clicks never take effect — setup keeps saying "not authorized" | :3000 is served by a *different* checkout, so the grant landed in that checkout's database. `pnpm edge:setup` now names the path and pid; stop it and run `pnpm dev` in this one |
 | Every cell fails instantly with `Failed query: insert into latch_chats` | Another app holds a write lock on the local database. `lsof latch.db` finds it; stop it (usually a dev server from another checkout) |
 | Scattered `SQLITE_BUSY` failures | Concurrency too high. Re-run with `--resume --concurrency 3` |
 | `model "…" resolved to "…" — catalog fallback` | The model id is unknown to the catalog and would have silently swapped the model. Check the id and the provider key |
 | `connection … is not authorized` | One Connect click at `http://localhost:3000/connections` (dev server must be running) |
-| `client plane drifted` / `knowledge plane drifted` | The workspace genuinely changed. Ask the owner; if it is expected, re-run the matching snapshot script, and treat results before and after as different cohorts |
+| `client plane drifted` / `knowledge plane drifted` | The workspace genuinely changed — the error lists which files, `~ edge/memory/notes.md (content changed, v2 → v4)`. Ask the owner; if it is expected, run with `--allow-drift` and treat results before and after as different cohorts. Only the plane owner re-snapshots |
 | A judged dimension shows `ERR` | A schema miss, not a verdict. `--redo-errors` re-judges only those |
 | Langfuse reads fail after an upgrade | The local stack is pinned to v3 images on purpose; v4 breaks the reads this repo uses. Do not upgrade it |
 | The report page is blank | The generated page script failed to parse. `edge-report.ts` parse-checks it now — re-run it and read the error |
@@ -199,6 +209,8 @@ apps/latch-platform/
     judge/                     the rubric, the pairwise dimension, agreement maths
     client-card.ts             A′'s client card
     v0/version.json            what a result is attributable to (prompt + plane hashes)
+  scripts/edge-preflight.mjs   build + .env + schema, before any eval script is imported
+  src/scripts/edge-go.ts       `pnpm edge` — the four steps in order
   src/scripts/edge-*.ts        every command in the table above
   edge-eval-runs/<name>/       results (git-ignored): cells.jsonl, judgments.jsonl, report.html
 tools/langfuse-local/          the local Langfuse for human review

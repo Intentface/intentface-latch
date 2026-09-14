@@ -4,6 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@10.22.0",
   "scripts": {
+    "edge": "pnpm --silent --filter latch-platform edge",
     "typecheck": "turbo run typecheck",
     "typecheck:packages": "turbo run typecheck --filter=./packages/*",
     "build": "turbo run build --filter=./packages/*",

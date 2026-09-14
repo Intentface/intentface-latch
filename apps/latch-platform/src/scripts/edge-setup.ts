@@ -13,6 +13,7 @@
  * Exit code 0 = ready to sweep, 1 = something needs a human (the report says what).
  * Run it again after fixing anything; it is idempotent.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createClient } from "@libsql/client";
@@ -20,7 +21,7 @@ import { isLangfuseConfigured } from "@intentface/latch-langfuse";
 import { parseAgentRecord } from "@intentface/latch-agent-builder";
 import { getLatch } from "../lib/latch";
 import { ARMS, buildVariant, EDGE_EVAL_MODEL } from "../evals/edge/variants";
-import { planeVersion, readLivePlane, readManifest } from "./edge-plane-snapshot";
+import { describeDrift, planeFiles, planeVersion, readLivePlane, readManifest } from "./edge-plane-snapshot";
 import { readVerticalManifest, verticalPlaneVersion } from "./edge-vertical-snapshot";
 import type { Dynamic } from "../evals/edge/judge/reference";
 import { EDGE_CONNECTION_URLS, ensureConnections, evalPrincipal } from "./edge-connections";
@@ -29,8 +30,35 @@ const CHECK_ONLY = process.argv.includes("--check");
 const JUDGE_MODELS = ["claude-sonnet-5", "claude-opus-5"];
 
 type Status = "ok" | "todo" | "warn";
-const lines: Array<{ status: Status; title: string; detail: string; fix?: string }> = [];
-const add = (status: Status, title: string, detail: string, fix?: string) => lines.push({ status, title, detail, fix });
+const lines: Array<{ status: Status; title: string; detail: string; fix?: string; extra?: string[] }> = [];
+const add = (status: Status, title: string, detail: string, fix?: string, extra?: string[]) => lines.push({ status, title, detail, fix, extra });
+
+/**
+ * What is listening on :3000, and is it THIS checkout? The Connect click authorizes whatever
+ * database the dev server serving the page is on, so a server from another checkout sends the
+ * grant somewhere else and this script keeps reporting "not authorized" with nothing visibly
+ * wrong. Best-effort and POSIX-only: no answer is not an error.
+ */
+function devServer(): { pid: number; cwd: string; here: boolean } | undefined {
+  if (process.platform === "win32") return undefined;
+  const lsof = (args: string[]) => execFileSync("lsof", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    const pid = Number(lsof(["-nP", "-iTCP:3000", "-sTCP:LISTEN", "-t"]).trim().split("\n")[0]);
+    if (!pid) return undefined;
+    const cwd = lsof(["-a", "-p", String(pid), "-d", "cwd", "-Fn"]).split("\n").filter((l) => l.startsWith("n")).pop()?.slice(1) ?? "";
+    return { pid, cwd, here: cwd === process.cwd() };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The exact next move for anything that needs the local app open in a browser. */
+function devServerHint(): string {
+  const dev = devServer();
+  if (!dev) return "the dev server is not running — start it in another terminal: (cd apps/latch-platform && pnpm dev)";
+  if (dev.here) return "";
+  return `:3000 is served by ${dev.cwd} (pid ${dev.pid}), NOT this checkout — clicks there land in that checkout's database. Stop it (kill ${dev.pid}), then run \`pnpm dev\` here`;
+}
 
 async function main() {
   console.log(`\n  Edge Eval — setup check${CHECK_ONLY ? " (read-only)" : ""}\n  ${"─".repeat(60)}`);
@@ -40,7 +68,7 @@ async function main() {
   add(cwdOk ? "ok" : "todo", "working directory", cwdOk ? process.cwd() : `${process.cwd()} — wrong directory`, cwdOk ? undefined : "cd apps/latch-platform and run the command again");
   if (!cwdOk) return report();
   for (const f of [".env", ".env.langfuse-local"]) {
-    add(existsSync(f) ? "ok" : f === ".env" ? "todo" : "warn", `${f}`, existsSync(f) ? "present" : "missing", f === ".env" ? "ask whoever set this up for the .env file, or copy it from another checkout of this repo" : "only needed for the human review step (Langfuse); tools/langfuse-local/setup-reviewers.sh writes it");
+    add(existsSync(f) ? "ok" : f === ".env" ? "todo" : "warn", `${f}`, existsSync(f) ? "present" : "missing", f === ".env" ? "run `pnpm edge` — it creates .env from .env.example and lists exactly which values a human must paste" : "only needed for the human review step (Langfuse); tools/langfuse-local/setup-reviewers.sh writes it");
   }
 
   // 2. Secrets the run cannot start without.
@@ -63,7 +91,8 @@ async function main() {
     principal = await evalPrincipal();
     add("ok", "eval user", `${email} → org ${principal.orgId}`);
   } catch (e) {
-    add("todo", "eval user", (e as Error).message, `sign up as ${email} in the local app (http://localhost:3000), or set EDGE_EVAL_USER_EMAIL to a user that exists`);
+    const hint = devServerHint();
+    add("todo", "eval user", (e as Error).message, `open http://localhost:3000/login, choose Sign up and register ${email} (any password — it is a local account)${hint ? ` — but first: ${hint}` : ""}. Or point EDGE_EVAL_USER_EMAIL at a user that already exists here`);
     return report();
   }
 
@@ -79,7 +108,10 @@ async function main() {
   for (const n of conn.created) add("ok", `connection ${n}`, "record created");
   for (const m of conn.urlMismatch) add("todo", "connection url", m, "fix the url at http://localhost:3000/connections");
   for (const n of conn.authorized) add("ok", `connection ${n}`, "authorized");
-  for (const n of conn.pending) add("todo", `connection ${n}`, "not authorized", `open http://localhost:3000/connections and click Connect on ${n} (${EDGE_CONNECTION_URLS[n]})`);
+  if (conn.pending.length) {
+    const hint = devServerHint();
+    for (const n of conn.pending) add("todo", `connection ${n}`, "not authorized", `open http://localhost:3000/connections and click Connect on ${n} (${EDGE_CONNECTION_URLS[n]})${hint ? ` — but first: ${hint}` : ""}`);
+  }
   for (const p of conn.problems) add("todo", "connection surface", p, "the scope exposes the wrong tools — check the endpoint url");
 
   // 6. The arms themselves: five agent records under the eval user.
@@ -94,9 +126,11 @@ async function main() {
   // 7. Both context planes must match their committed fingerprints, or the run is not attributable.
   if (process.env.LOREDEX_EVAL_WS_ID && process.env.LOREDEX_EVAL_API_KEY) {
     try {
-      const live = planeVersion((await readLivePlane()).files.map((f) => [f.path, f.content]));
+      const read = await readLivePlane();
+      const live = planeVersion(read.files.map((f) => [f.path, f.content]));
       const m = readManifest();
-      add(m?.horizontal_ctx_version === live ? "ok" : "warn", "client plane (horizontal)", m ? (m.horizontal_ctx_version === live ? `${live.slice(0, 12)} matches the manifest` : `live ${live.slice(0, 12)} ≠ manifest ${m.horizontal_ctx_version.slice(0, 12)}`) : "no manifest yet", "the client edited their workspace: run `pnpm edge:snapshot` to re-fingerprint, and note that results before and after are different cohorts");
+      const drifted = m && m.horizontal_ctx_version !== live ? describeDrift(m, planeFiles(read.files)) : [];
+      add(m?.horizontal_ctx_version === live ? "ok" : "warn", "client plane (horizontal)", m ? (m.horizontal_ctx_version === live ? `${live.slice(0, 12)} matches the manifest` : `live ${live.slice(0, 12)} ≠ manifest ${m.horizontal_ctx_version.slice(0, 12)}`) : "no manifest yet", "the client edited their workspace — the sweep needs --allow-drift and its results are a different cohort. Only the plane owner decides whether to re-fingerprint (`pnpm edge:snapshot`)", drifted);
     } catch (e) {
       add("todo", "client plane (horizontal)", (e as Error).message, "check LOREDEX_EVAL_WS_ID / LOREDEX_EVAL_API_KEY");
     }
@@ -134,7 +168,10 @@ async function main() {
 
 function report() {
   const icon = { ok: "✓", todo: "✗", warn: "·" } as const;
-  for (const l of lines) console.log(`  ${icon[l.status]} ${l.title.padEnd(28)} ${l.detail}`);
+  for (const l of lines) {
+    console.log(`  ${icon[l.status]} ${l.title.padEnd(28)} ${l.detail}`);
+    for (const x of l.extra ?? []) console.log(`  ${" ".repeat(32)}${x}`);
+  }
   const todos = lines.filter((l) => l.status === "todo");
   console.log(`  ${"─".repeat(60)}`);
   if (todos.length) {
@@ -146,9 +183,10 @@ function report() {
   }
   const warns = lines.filter((l) => l.status === "warn");
   if (warns.length) console.log(`\n  ${warns.length} optional item${warns.length > 1 ? "s" : ""} not set up (fine unless you are doing the human review step).`);
-  console.log(`\n  Ready. Run a small sweep (3 questions × 5 arms, ~6 minutes, a few dollars):\n`);
-  console.log(`    pnpm edge:run --name my-run --variants A,AP,B,C,D --cases INFRA-01,AX-01,CODE-05 --reps 1 --concurrency 3\n`);
-  console.log(`  Then score it and look at it:\n`);
+  console.log(`\n  Ready. Sweep, judge and report in one go — it states the cost and asks first:\n`);
+  console.log(`    pnpm edge\n`);
+  console.log(`  Or the same thing by hand (3 questions × 5 arms, ~6 minutes, a few dollars):\n`);
+  console.log(`    pnpm edge:run --name my-run --variants A,AP,B,C,D --cases INFRA-01,AX-01,CODE-05 --reps 1 --concurrency 3`);
   console.log(`    pnpm edge:judge --run my-run`);
   console.log(`    pnpm edge:report --run my-run     # opens as edge-eval-runs/my-run/report.html\n`);
   console.log(`  The full runbook is skills/edge-eval/SKILL.md — or just ask Claude to "run the edge eval".\n`);

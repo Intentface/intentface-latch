@@ -36,7 +36,7 @@ import { buildClientCard, withClientCard, type ClientCard } from "../evals/edge/
 import { QUESTIONS, byId, type Question } from "../evals/edge/cases/questions";
 import { followupFor } from "../evals/edge/cases/followup";
 import { checkSurface, evalPrincipal } from "./edge-connections";
-import { planeVersion, readLivePlane, readManifest } from "./edge-plane-snapshot";
+import { describeDrift, planeFiles, planeVersion, readLivePlane, readManifest } from "./edge-plane-snapshot";
 import { readVerticalManifest, verticalPlaneVersion } from "./edge-vertical-snapshot";
 import type { Dynamic } from "../evals/edge/judge/reference";
 
@@ -193,10 +193,14 @@ async function main() {
   // 3. Client plane matches the committed manifest.
   const manifest = readManifest();
   if (!manifest) throw new Error("no client-plane manifest — run edge-plane-snapshot.ts");
-  const planeBefore = planeVersion((await readLivePlane()).files.map((f) => [f.path, f.content]));
+  const planeRead = await readLivePlane();
+  const planeBefore = planeVersion(planeRead.files.map((f) => [f.path, f.content]));
   if (planeBefore !== manifest.horizontal_ctx_version) {
-    const msg = `client plane drifted: live ${planeBefore.slice(0, 16)} ≠ manifest ${manifest.horizontal_ctx_version.slice(0, 16)}`;
-    if (!ALLOW_DRIFT) throw new Error(`${msg} — re-snapshot or pass --allow-drift`);
+    // WHICH files moved, not just that something did: one edited note is a cohort footnote,
+    // half the plane rewritten is a reason to stop and talk to the plane owner.
+    const what = describeDrift(manifest, planeFiles(planeRead.files)).map((l) => `           ${l}`).join("\n");
+    const msg = `client plane drifted: live ${planeBefore.slice(0, 16)} ≠ manifest ${manifest.horizontal_ctx_version.slice(0, 16)}\n${what}`;
+    if (!ALLOW_DRIFT) throw new Error(`${msg}\n  → pass --allow-drift to run anyway (the results are a different cohort); only the plane owner re-snapshots`);
     console.warn(`[eval] WARNING ${msg}`);
   } else console.log(`[eval] client plane ${planeBefore.slice(0, 16)} ✓`);
 
