@@ -8,8 +8,8 @@
  * 1. Workspace packages are built. `pnpm install` alone leaves packages/<x>/dist missing, and
  *    every edge:* script then dies at import with ERR_MODULE_NOT_FOUND before it can say why.
  *    Turbo answers in ~0.6s when nothing changed, so this is unconditional.
- * 2. `.env` exists. Created from .env.example if not, with the still-empty keys listed —
- *    their values are secrets and can only come from a human.
+ * 2. `.env` exists. Created from .env.example if not, with every still-empty key listed and
+ *    said where it comes from — two are the runner's own, the rest are shared secrets.
  * 3. The local database has its schema. A `file:` URL pointing at a missing or empty file is
  *    migrated (idempotent — the same `pnpm db:migrate` you would run by hand).
  *
@@ -46,24 +46,27 @@ function env() {
     copyFileSync(example, envPath);
     console.log(`\n  Created apps/latch-platform/.env from .env.example.`);
   }
-  const needed = ["DATABASE_URL", "BETTER_AUTH_SECRET", "LATCH_VAULT_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LOREDEX_EVAL_WS_ID", "LOREDEX_EVAL_API_KEY"];
+  // Every value the eval cannot start without, and where each one comes from. Two are yours,
+  // the rest are shared secrets — the distinction is the whole point of printing them.
+  const needed = {
+    DATABASE_URL: "the local database — file:./latch.db is right for a dev machine",
+    EDGE_EVAL_USER_EMAIL: "YOUR @intentface.com address — you sign up with it locally, and it owns the eval's connections and arm agents",
+    BETTER_AUTH_SECRET: "yours, generated: node -e \"console.log(crypto.randomBytes(32).toString('base64'))\"",
+    LATCH_VAULT_KEY: "shared secret — connection records are encrypted with it",
+    OPENAI_API_KEY: "shared secret — the arms run on gpt-5.6-sol",
+    ANTHROPIC_API_KEY: "shared secret — the judge and A-prime's card writer are Claude models",
+    LOREDEX_EVAL_WS_ID: "the client workspace to fingerprint — ask the plane owner",
+    LOREDEX_EVAL_API_KEY: "a READ-ONLY key for that workspace — ask the plane owner",
+  };
   const text = readFileSync(envPath, "utf8");
-  const blank = needed.filter((key) => {
+  const blank = Object.keys(needed).filter((key) => {
     const m = text.match(new RegExp(`^${key}=(.*)$`, "m"));
     return !m || !m[1].trim();
   });
   if (!blank.length) return;
   console.log(`\n  ${blank.length} value${blank.length > 1 ? "s" : ""} in apps/latch-platform/.env still need${blank.length > 1 ? "" : "s"} a human:\n`);
-  for (const key of blank) console.log(`    ${key}=`);
-  console.log(`
-  BETTER_AUTH_SECRET you generate yourself:
-
-    node -e "console.log(crypto.randomBytes(32).toString('base64'))"
-
-  DATABASE_URL can stay file:./latch.db. The rest are secrets — ask whoever runs the
-  benchmark (the two LOREDEX_EVAL_* values are a read-only key for the client workspace).
-  Paste them into apps/latch-platform/.env and run the command again.
-`);
+  for (const key of blank) console.log(`    ${key}=\n      ${needed[key]}\n`);
+  console.log(`  Paste them into apps/latch-platform/.env and run the command again.\n`);
   process.exit(1);
 }
 

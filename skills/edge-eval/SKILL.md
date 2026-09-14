@@ -51,9 +51,15 @@ do. Both are one-time.
    cd apps/latch-platform && pnpm dev          # in its own terminal
    ```
 
-   Sign up at `http://localhost:3000/login` as `EDGE_EVAL_USER_EMAIL` (any password — it is a
-   local account), then press **Connect** on `edge-client`, `edge-v2-kn` and `edge-v2-inbox`
-   at `http://localhost:3000/connections`. One Loredex sign-in covers all three.
+   Sign up at `http://localhost:3000/login` as `EDGE_EVAL_USER_EMAIL` (any password — the
+   account lives only in your own `latch.db`; sign-in is restricted to `@intentface.com`),
+   then press **Connect** on `edge-client`, `edge-v2-kn` and `edge-v2-inbox` at
+   `http://localhost:3000/connections`. One Loredex sign-in covers all three.
+
+   **Everyone runs as themselves.** `EDGE_EVAL_USER_EMAIL` is your own address, the local
+   account is yours, and the three grants come from your own Loredex sign-in — so your
+   Loredex account needs read access to both workspaces. Nobody borrows anyone's account,
+   and the only thing that travels between machines is the secrets in `.env`.
 
    If :3000 is already served by **another checkout**, `pnpm edge` says so with the path and
    pid: clicks there authorize that checkout's database, not yours.

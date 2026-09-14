@@ -92,7 +92,7 @@ async function main() {
     add("ok", "eval user", `${email} → org ${principal.orgId}`);
   } catch (e) {
     const hint = devServerHint();
-    add("todo", "eval user", (e as Error).message, `open http://localhost:3000/login, choose Sign up and register ${email} (any password — it is a local account)${hint ? ` — but first: ${hint}` : ""}. Or point EDGE_EVAL_USER_EMAIL at a user that already exists here`);
+    add("todo", "eval user", (e as Error).message, `open http://localhost:3000/login, choose Sign up and register ${email} (any password — the account is local to this machine; sign-in is restricted to @intentface.com)${hint ? ` — but first: ${hint}` : ""}. It must be YOUR address: set EDGE_EVAL_USER_EMAIL in .env if that is not it`);
     return report();
   }
 
