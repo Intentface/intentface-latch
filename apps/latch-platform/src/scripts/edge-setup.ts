@@ -31,6 +31,8 @@ const JUDGE_MODELS = ["claude-sonnet-5", "claude-opus-5"];
 
 type Status = "ok" | "todo" | "warn";
 const lines: Array<{ status: Status; title: string; detail: string; fix?: string; extra?: string[] }> = [];
+/** Warnings that change what the next command has to be — kept apart from the optional ones. */
+const attention: Array<{ what: string; files: string[] }> = [];
 const add = (status: Status, title: string, detail: string, fix?: string, extra?: string[]) => lines.push({ status, title, detail, fix, extra });
 
 /**
@@ -130,6 +132,7 @@ async function main() {
       const live = planeVersion(read.files.map((f) => [f.path, f.content]));
       const m = readManifest();
       const drifted = m && m.horizontal_ctx_version !== live ? describeDrift(m, planeFiles(read.files)) : [];
+      if (drifted.length) attention.push({ what: "the client plane (horizontal) has moved since the manifest", files: drifted });
       add(m?.horizontal_ctx_version === live ? "ok" : "warn", "client plane (horizontal)", m ? (m.horizontal_ctx_version === live ? `${live.slice(0, 12)} matches the manifest` : `live ${live.slice(0, 12)} ≠ manifest ${m.horizontal_ctx_version.slice(0, 12)}`) : "no manifest yet", "the client edited their workspace — the sweep needs --allow-drift and its results are a different cohort. Only the plane owner decides whether to re-fingerprint (`pnpm edge:snapshot`)", drifted);
     } catch (e) {
       add("todo", "client plane (horizontal)", (e as Error).message, "check LOREDEX_EVAL_WS_ID / LOREDEX_EVAL_API_KEY");
@@ -139,6 +142,7 @@ async function main() {
     try {
       const live = (await verticalPlaneVersion(dynamic as unknown as Dynamic, principal)).version;
       const m = readVerticalManifest();
+      if (m && m.vertical_ctx_version !== live) attention.push({ what: "the knowledge plane (vertical) has moved since the manifest", files: [] });
       add(m?.vertical_ctx_version === live ? "ok" : "warn", "knowledge plane (vertical)", m ? (m.vertical_ctx_version === live ? `${live.slice(0, 12)} matches the manifest` : `live ${live.slice(0, 12)} ≠ manifest ${m.vertical_ctx_version.slice(0, 12)}`) : "no manifest yet", "the playbooks changed: run `pnpm edge:snapshot:kn` to re-fingerprint");
     } catch (e) {
       add("warn", "knowledge plane (vertical)", (e as Error).message);
@@ -181,12 +185,22 @@ function report() {
     process.exitCode = 1;
     return;
   }
-  const warns = lines.filter((l) => l.status === "warn");
-  if (warns.length) console.log(`\n  ${warns.length} optional item${warns.length > 1 ? "s" : ""} not set up (fine unless you are doing the human review step).`);
-  console.log(`\n  Ready. Sweep, judge and report in one go — it states the cost and asks first:\n`);
-  console.log(`    pnpm edge\n`);
+  // Optional = the human-review extras. A moved context plane is neither optional nor
+  // review-related: it decides whether the next command can run at all, so it is said
+  // separately, and every command printed below is one that will actually work.
+  const optional = lines.filter((l) => l.status === "warn" && !l.title.includes("plane"));
+  if (optional.length) console.log(`\n  ${optional.length} optional item${optional.length > 1 ? "s" : ""} not set up (fine unless you are doing the human review step).`);
+  for (const a of attention) {
+    console.log(`\n  ⚠ ${a.what}:`);
+    for (const f of a.files) console.log(`      ${f}`);
+    console.log(`    A sweep refuses to start until you say that is expected. Results from before and after`);
+    console.log(`    the change are different cohorts, and only the plane owner re-fingerprints it.`);
+  }
+  const drift = attention.length ? " --allow-drift" : "";
+  console.log(`\n  Ready. Sweep, judge and report in one go — it states the cost and asks first${attention.length ? `.\n  \`--allow-drift\` is you accepting the plane change above; drop it and you are asked instead` : ""}:\n`);
+  console.log(`    pnpm edge${drift}\n`);
   console.log(`  Or the same thing by hand (3 questions × 5 arms, ~6 minutes, a few dollars):\n`);
-  console.log(`    pnpm edge:run --name my-run --variants A,AP,B,C,D --cases INFRA-01,AX-01,CODE-05 --reps 1 --concurrency 3`);
+  console.log(`    pnpm edge:run --name my-run --variants A,AP,B,C,D --cases INFRA-01,AX-01,CODE-05 --reps 1 --concurrency 3${drift}`);
   console.log(`    pnpm edge:judge --run my-run`);
   console.log(`    pnpm edge:report --run my-run     # opens as edge-eval-runs/my-run/report.html\n`);
   console.log(`  The full runbook is skills/edge-eval/SKILL.md — or just ask Claude to "run the edge eval".\n`);
