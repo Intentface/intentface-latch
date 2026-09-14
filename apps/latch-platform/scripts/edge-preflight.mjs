@@ -70,9 +70,21 @@ function env() {
   process.exit(1);
 }
 
-/** 3. Schema in the local database. Only for `file:` URLs — a remote db is not ours to migrate. */
+/**
+ * 3. Schema in the local database. A DATABASE_URL without a scheme is the easiest thing in
+ * the whole setup to get wrong, and libsql answers it with a stack trace from deep inside
+ * auth.ts, so it is checked here where the fix can be one sentence. Only `file:` URLs are
+ * migrated — a remote database is not ours to touch.
+ */
 function database() {
   const url = process.env.DATABASE_URL ?? "";
+  const schemes = ["file:", "libsql://", "http://", "https://", "ws://", "wss://"];
+  if (url && !schemes.some((s) => url.startsWith(s))) {
+    console.error(`\n  ✗ DATABASE_URL="${url}" has no scheme — libsql cannot parse it.\n`);
+    console.error(`  → a local database is a file: URL, relative to apps/latch-platform:\n`);
+    console.error(`      DATABASE_URL=file:${url.startsWith("./") || url.startsWith("/") ? url : `./${url}`}\n`);
+    process.exit(1);
+  }
   if (!url.startsWith("file:")) return;
   const file = resolve(APP, url.slice("file:".length));
   if (existsSync(file) && statSync(file).size > 0) return;
