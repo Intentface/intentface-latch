@@ -68,11 +68,10 @@ Run `pnpm edge` again and it goes all the way through.
 
 ### Doing the steps yourself
 
-`pnpm edge` is only a wrapper over four commands. Any of them can be run on its own:
+`pnpm edge` is only a wrapper over four commands. Any of them can be run on its own, from the
+repo root or from `apps/latch-platform` — every `edge:*` script exists in both:
 
 ```bash
-cd apps/latch-platform
-
 pnpm edge:setup    # readiness — creates what it can, prints what needs a human
 pnpm edge:run --name my-run --variants A,AP,B,C,D --cases INFRA-01,AX-01,CODE-05 --reps 1 --concurrency 3
 pnpm edge:judge --run my-run
