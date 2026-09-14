@@ -5,6 +5,7 @@
  *   pnpm edge --name my-run         # name the run (default: smoke-<date>)
  *   pnpm edge --yes                 # do not ask before spending money
  *   pnpm edge --cases all --reps 3  # anything edge:run takes
+ *   pnpm edge --model gpt-5.6-luna  # exercise the machinery on the cheap sibling
  *
  * It runs the four commands of the golden path in order — setup, run, judge, report —
  * echoing each one before it runs it, so a first-timer ends up knowing the long form rather
@@ -33,6 +34,9 @@ const CASES = opt("cases", "INFRA-01,AX-01,CODE-05");
 const VARIANTS = opt("variants", "A,AP,B,C,D");
 const REPS = opt("reps", "1");
 const CONCURRENCY = opt("concurrency", "3");
+// The benchmark model is a property of the generation (v0/version.json), not a runtime
+// choice — so this stays empty unless someone asks, and a run that sets it says so out loud.
+const MODEL = opt("model", "");
 const YES = flag("yes");
 
 /** One cell ≈ two model calls ≈ $0.30, judging adds ~$0.08 — stated before anything is spent. */
@@ -77,8 +81,11 @@ async function main() {
 
   // 2. The sweep — the only step that costs money, so the only one that asks.
   const { cells, dollars, minutes } = estimate();
-  const runArgs = ["--name", NAME, "--variants", VARIANTS, "--cases", CASES, "--reps", REPS, "--concurrency", CONCURRENCY];
-  const question = `Run ${cells} cells (${CASES.split(",").length} cases × ${VARIANTS.split(",").length} arms × ${REPS}) as "${NAME}" — about $${dollars} and ~${minutes} min?`;
+  const runArgs = ["--name", NAME, "--variants", VARIANTS, "--cases", CASES, "--reps", REPS, "--concurrency", CONCURRENCY, ...(MODEL ? ["--model", MODEL] : [])];
+  if (!MODEL) console.log(`\n  Only checking that the machinery works? \`--model gpt-5.6-luna\` runs the same sweep on the cheap\n  sibling — a pipeline test, not a benchmark result.`);
+  const question = MODEL
+    ? `Run ${cells} cells as "${NAME}" ON ${MODEL} — not the benchmark model, so the numbers are not comparable with v0. ~${minutes} min?`
+    : `Run ${cells} cells (${CASES.split(",").length} cases × ${VARIANTS.split(",").length} arms × ${REPS}) as "${NAME}" — about $${dollars} and ~${minutes} min?`;
   if (!(await ask(question))) {
     console.log(`\n  Stopped before spending anything. The sweep is:\n\n    pnpm edge:run ${runArgs.join(" ")}\n`);
     return;

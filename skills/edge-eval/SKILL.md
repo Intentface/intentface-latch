@@ -119,7 +119,7 @@ All of them take `--run <name>` or `--name <name>` and read/write
 |---|---|
 | `pnpm edge` | All four steps below in order, with a `y/N` before the one that costs money. Takes the sweep's arguments (`--name`, `--cases`, `--reps`, `--variants`, `--yes`) |
 | `pnpm edge:setup` | The readiness check. Creates connection records and the five arm agents; reports what needs a human. `--check` = report only |
-| `pnpm edge:run` | The sweep. `--variants A,AP,B,C,D --cases <ids\|all\|optimization\|holdout\|client-team> --reps N --concurrency 3 [--resume] [--dry-run]` |
+| `pnpm edge:run` | The sweep. `--variants A,AP,B,C,D --cases <ids\|all\|optimization\|holdout\|client-team> --reps N --concurrency 3 [--resume] [--dry-run] [--model <id>]` |
 | `pnpm edge:judge` | Scores every cell on nine rubric dimensions. `[--judge-model claude-sonnet-5] [--dims …] [--out <file>] [--redo-errors] [--force]` |
 | `pnpm edge:report` | The HTML bench for the run. `[--no-background]` skips the live "what the answers are grounded against" section |
 | `pnpm edge:review:export` | Sends blinded D-vs-A pairs to the human reviewers' Langfuse queues |
@@ -129,6 +129,23 @@ All of them take `--run <name>` or `--name <name>` and read/write
 | `pnpm edge:snapshot` / `pnpm edge:snapshot:kn` | Re-fingerprint a context plane after it legitimately changed (`--verify` to just check) |
 | `pnpm edge:version` | Rewrites `src/evals/edge/v0/version.json` (prompt hashes, plane hashes, git sha) — run after a prompt edit |
 | `node … src/scripts/edge-select.ts` | Re-runs the sealed case selection (only for a new benchmark generation) |
+
+### Trying the pipeline without paying benchmark prices
+
+```bash
+pnpm edge --model gpt-5.6-luna --name pipeline-check
+```
+
+`--model` swaps the model in every arm (`pnpm edge` passes it through to the sweep). Use it to
+prove a fresh machine works end to end — connections, cells, judging, report — for a fraction
+of the cost.
+
+**What comes back is not a benchmark result.** `gpt-5.6-luna` is the cheap sibling the case
+*selection* pilot ran on, deliberately not the thing being measured: `v0/version.json` pins
+the benchmark to `gpt-5.6-sol`, and every published D − A′ is that model. A run on anything
+else records its own `model` in the summary and in the report's header, so it can never be
+mistaken for one — but do not compare its numbers with v0's, and do not put them in front of
+anyone as "how good Edge is".
 
 ### Sizing a sweep
 
@@ -188,6 +205,10 @@ not a result. Both numbers appear in the report.
    explicit go-ahead, with the estimate stated first.
 5. **The sealed case sets** (`cases/holdout.json`, `cases/selection.json`) are not edited to
    make a number look better.
+6. **The benchmark model is part of the generation, not a runtime choice.** `--model` exists
+   for pilots and pipeline checks; a v0 result means `gpt-5.6-sol`. Changing what v0 runs on
+   means re-cutting `v0/version.json` (`pnpm edge:version`) and treating everything before it
+   as a different generation.
 
 ## When something goes wrong
 
