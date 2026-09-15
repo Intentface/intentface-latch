@@ -11,10 +11,6 @@
     "model-context-protocol",
     "tools"
   ],
-  "homepage": "https://github.com/Intentface/intentface-latch/tree/main/packages/mcp#readme",
-  "bugs": {
-    "url": "https://github.com/Intentface/intentface-latch/issues"
-  },
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

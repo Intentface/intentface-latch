@@ -14,12 +14,13 @@ jobs:
     permissions:
       contents: write # commit the version bump, push tags
       pull-requests: write # open/update the "Version Packages" PR
+      id-token: write # mint the OIDC token npm authenticates the publish with
     steps:
       # Pinned by commit SHA, not by tag. Tags are mutable, and
       # `changesets/action@v1` is a *branch* — `@v1` ran whatever that
       # repository pointed there on the day the job started, in the one job
-      # that holds an npm credential. The trailing comment is the human-
-      # readable version, and what Renovate/Dependabot bump.
+      # allowed to publish. The trailing comment is the human-readable
+      # version, and what Renovate/Dependabot bump.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # changesets needs history to diff against baseBranch
@@ -58,6 +59,13 @@ jobs:
       # workspace — see RELEASING.md.
       - run: pnpm verify:publish
 
+      # Trusted publishing needs npm 11.5.1 or later, and the CLI bundled with
+      # setup-node is older. Pinned, not `@latest`: npm 12 requires Node
+      # ^22.22.2 || ^24.15.0 || >=26, so a moving tag can break this job on a
+      # runner image we did not choose. 11.18.0 is the version the bootstrap
+      # was performed with.
+      - run: npm install -g npm@11.18.0
+
       # With changesets present: opens/updates a version PR.
       # With none (the version PR just merged): publishes.
       - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
@@ -68,16 +76,19 @@ jobs:
           title: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A granular npm token, scoped to @intentface with read/write and
-          # **2FA bypass** on — without the bypass this hangs on an OTP prompt.
-          # Classic/automation tokens were revoked in December 2025.
+          # No npm credential. The publish authenticates through npm's OIDC
+          # trusted publishing: this job mints a short-lived identity token
+          # (`id-token: write` above) and npm checks it against the publisher
+          # authorized on each package — repository `Intentface/intentface-latch`,
+          # workflow file `release.yml`. Nothing to rotate, nothing to leak.
           #
-          # Granular write tokens expire in 90 days or less, so this is meant to
-          # be temporary: once the packages exist on npm, authorize this
-          # workflow as a trusted publisher on each of them and switch to OIDC
-          # (add `id-token: write`, upgrade the npm CLI to >= 11.5.1, drop this
-          # secret). RELEASING.md has the steps.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # This cannot bootstrap itself: npm will not let you authorize a
+          # publisher for a package that does not exist, so the first publish of
+          # each package was done by hand. See RELEASING.md.
+          #
+          # NOT set: NPM_CONFIG_PROVENANCE. npm rejects provenance from private
+          # source repositories — the publish fails rather than degrading. If
+          # this repository goes public it is one line here.
           # NOT set: NPM_CONFIG_PROVENANCE. npm stopped accepting provenance
           # from private source repositories in July 2023 — the registry
           # rejects the bundle with "Unsupported GitHub Actions source

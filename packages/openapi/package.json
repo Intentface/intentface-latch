@@ -10,10 +10,6 @@
     "openapi",
     "tools"
   ],
-  "homepage": "https://github.com/Intentface/intentface-latch/tree/main/packages/openapi#readme",
-  "bugs": {
-    "url": "https://github.com/Intentface/intentface-latch/issues"
-  },
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

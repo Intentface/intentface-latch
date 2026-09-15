@@ -160,17 +160,26 @@ never removes a manual step, it only adds a credential to the repository.
    `verify:publish`) before `changeset publish`, so the packages that reach the
    registry are the ones that passed. It also writes a git tag per package —
    push them (`git push --follow-tags`).
-2. **Authorize the workflow on each package**: a trusted publisher pointing at
-   `Intentface/intentface-latch`, workflow `release.yml` (the filename must
-   match exactly, extension included). `npm trust github <package>` does this
-   from the terminal instead of ten trips through the web UI; it needs
-   npm@11.15.0 or later. npmjs.com offers a "skip two-factor authentication for
-   the next 5 minutes" window, which is what makes ten of these bearable.
-3. **Switch `release.yml` to OIDC**: add `id-token: write` to `permissions` and
-   a step that upgrades the npm CLI (`npm install -g npm@latest`) — OIDC needs
-   11.5.1 or later and the CLI bundled with `setup-node` is older. GitHub-hosted
-   runners only; self-hosted cannot mint the token. Delete the `NODE_AUTH_TOKEN`
-   line at the same time.
+2. **Authorize the workflow on each package.** One command per package, from a
+   terminal logged in with `npm login` (npm@11.15.0 or later):
+
+   ```bash
+   npm trust github @intentface/latch-core \
+     --repo Intentface/intentface-latch \
+     --file release.yml \
+     --allow-publish
+   ```
+
+   The workflow filename must match exactly, extension included. npmjs.com
+   offers a "skip two-factor authentication for the next 5 minutes" window,
+   which is what makes ten of these bearable. `npm trust list <package>` shows
+   what is configured; `npm trust revoke` removes it.
+3. **The workflow is already OIDC.** `id-token: write` is in `permissions`, the
+   npm CLI is upgraded to a pinned 11.18.0 before the publish step (OIDC needs
+   11.5.1 or later; the CLI bundled with `setup-node` is older, and `@latest`
+   is npm 12, which demands Node ^22.22.2 || ^24.15.0 || >=26), and no
+   `NODE_AUTH_TOKEN` is set. GitHub-hosted runners only — self-hosted cannot
+   mint the token.
 
 From then on a release is the same two merges, authenticated by the workflow's
 own identity, with nothing to rotate.
@@ -179,6 +188,15 @@ One wrinkle from that first release: the packages were already at the version
 the changesets had bumped them to, so when the version PR merged, the workflow's
 publish step found nothing to publish and `changesets/action` created no GitHub
 Releases for it. Every release after this one gets them normally.
+
+## Published metadata points at nothing, on purpose
+
+The manifests carry `repository` (npm wants it, and provenance will need it)
+but no `homepage` or `bugs`. Both would have pointed into a private repository,
+so every consumer clicking "Homepage" or "Issues" from the npm page would get a
+404. Better to advertise nothing than a door that does not open. Add them back
+the day there is a public destination — a docs site, or this repository going
+public.
 
 ## Provenance is off, and why
 
