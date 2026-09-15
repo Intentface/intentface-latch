@@ -2,6 +2,15 @@
   "name": "@intentface/latch-net",
   "version": "0.9.0",
   "description": "Network-safety primitives for Latch — SSRF guards (private-IP blocklist + DNS-rebinding backstop) and a DNS-pinned egress fetch, shared by every host that opens an outbound connection.",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "ssrf",
+    "fetch",
+    "security"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -25,7 +34,7 @@
   "sideEffects": false,
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",

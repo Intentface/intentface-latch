@@ -2,6 +2,16 @@
   "name": "@intentface/latch-channels",
   "version": "0.9.0",
   "description": "Latch channels — bring a Latch agent to chat platforms (Slack first). A generic run→render-event projection plus per-platform adapters, reusing the core runtime, storage and durability (no separate state store).",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "slack",
+    "telegram",
+    "whatsapp",
+    "chatbot"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -35,7 +45,7 @@
   "sideEffects": false,
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",

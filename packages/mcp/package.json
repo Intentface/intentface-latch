@@ -2,6 +2,15 @@
   "name": "@intentface/latch-mcp",
   "version": "0.9.0",
   "description": "Latch MCP host — connect to MCP servers as tools, with a per-tenant SSRF allowlist and vault-brokered auth.",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "mcp",
+    "model-context-protocol",
+    "tools"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +29,7 @@
   "sideEffects": false,
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",

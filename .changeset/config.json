@@ -4,7 +4,7 @@
   "commit": false,
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "access": "restricted",
+  "access": "public",
   "linked": [],
   "ignore": [],
   "fixed": [["@intentface/latch-*"]]
