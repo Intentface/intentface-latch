@@ -48,6 +48,17 @@ by invoking it directly. The workflow also runs those four as separate steps —
 for legible CI output, and so a failure lands before the changesets action starts.
 Turbo caches, so the duplication is nearly free.
 
+The same four run on every pull request (`ci.yml`), which is the point where a
+failure is still cheap. Reaching them only on `push: main` means the break is
+already on the branch the version PR is cut from, and undoing it costs another
+PR. Apps are out of scope in both workflows: they are `private: true` and never
+published, so they cannot break a consumer.
+
+Both workflows pin their actions by **commit SHA**, with the version in a
+trailing comment. Tags are mutable and `changesets/action@v1` is a branch, so
+the unpinned form let someone else's push decide what ran in the job holding an
+npm credential. Bump them like dependencies; the comment is what the bots read.
+
 ## Internal dependencies use `workspace:^`, not `workspace:*`
 
 The distinction decides what a consumer's `node_modules` looks like, so it is

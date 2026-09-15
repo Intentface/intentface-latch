@@ -1,0 +1,46 @@
+name: CI
+
+on: pull_request
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # everything this job needs; it only reads the tree
+    steps:
+      # Actions are pinned by commit SHA, not by tag. A tag is mutable and
+      # `changesets/action@v1` is not even a tag but a branch, so `@v1` means
+      # "whatever that repository points there today". The release job holds
+      # publish credentials, and this job runs on pull_request — including from
+      # a fork, where the code being checked out is untrusted. Renovate/
+      # Dependabot both read the trailing version comment and keep these moving.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The same install the release job does, for the same reason: this checks
+      # the libraries, which are the only things that get published.
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "."
+
+      # The same four gates release.yml runs, run BEFORE the merge instead of
+      # after it. Without this they first execute on push to main — by which
+      # point a failure has already reached the branch the version PR is cut
+      # from, and the fix needs its own PR.
+      #
+      # Apps are deliberately out of scope: they are `private: true` and never
+      # published, so they cannot break a consumer.
+      - run: pnpm typecheck:packages
+      - run: pnpm test
+      - run: pnpm build
+
+      # Packs every package and resolves each `exports` target inside the
+      # tarball. Publish-shape bugs are invisible in a workspace, where the
+      # `development` condition points at src that is not in the tarball.
+      - run: pnpm verify:publish
