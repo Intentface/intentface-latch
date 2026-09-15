@@ -1,0 +1,365 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadow-plugin";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  font-feature-settings:
+    "liga" 1,
+    "calt" 1;
+
+  /* ─── Seeds ─── */
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --acc: #0169cc;
+  --con: 0.3;
+
+  /* State deltas (OKLCH L offsets, scale with --con).
+     In light, signs are negative so hover/active/border sink toward
+     darker. Surfaces sit near white; a positive Δ would clamp at #fff.
+     The .dark block below flips signs so states lift toward white. */
+  --state-hover: calc(-0.08 * var(--con));
+  --state-active: calc(-0.14 * var(--con));
+  --state-border: calc(-0.2 * var(--con));
+
+  /* Surface lightness steps. Each tier offsets from --bg by step ×
+     --con. Positive lifts above bg; negative sinks below.
+
+       step   role
+       ────   ────────────────────────────────
+       0.05   subtle    near-bg, slight elevation
+       0.01   hairline  barely visible separation
+       -0.01  soft      input-strength fill
+       -0.05  moderate  clearly sunken below bg */
+  --primary-lightness: calc(0.05 * var(--con));
+  --tertiary-lightness: calc(0.01 * var(--con));
+  --quaternary-lightness: calc(-0.01 * var(--con));
+  --base-lightness: calc(-0.05 * var(--con));
+
+  /* Surface families + state variants — defined once; in .dark the deltas
+     flip sign and the surfaces redefine, so these formulas pick up both.
+     secondary is passthrough = --bg (canvas). Border states derive from the
+     border token, not the surface, so the deltas stack — a hovered border
+     keeps its separation from the hovered background instead of collapsing
+     into it. */
+  --primary-bg: oklch(from var(--bg) calc(l + var(--primary-lightness)) c h);
+  --primary-bg-hover: oklch(from var(--primary-bg) calc(l + var(--state-hover)) c h);
+  --primary-bg-active: oklch(from var(--primary-bg) calc(l + var(--state-active)) c h);
+  --primary-border: oklch(from var(--primary-bg) calc(l + var(--state-border)) c h);
+  --primary-border-hover: oklch(from var(--primary-border) calc(l + var(--state-hover)) c h);
+  --primary-border-active: oklch(from var(--primary-border) calc(l + var(--state-active)) c h);
+
+  --secondary-bg: var(--bg);
+  --secondary-bg-hover: oklch(from var(--secondary-bg) calc(l + var(--state-hover)) c h);
+  --secondary-bg-active: oklch(from var(--secondary-bg) calc(l + var(--state-active)) c h);
+  --secondary-border: oklch(from var(--secondary-bg) calc(l + var(--state-border)) c h);
+  --secondary-border-hover: oklch(from var(--secondary-border) calc(l + var(--state-hover)) c h);
+  --secondary-border-active: oklch(from var(--secondary-border) calc(l + var(--state-active)) c h);
+
+  --tertiary-bg: oklch(from var(--bg) calc(l + var(--tertiary-lightness)) c h);
+  --tertiary-bg-hover: oklch(from var(--tertiary-bg) calc(l + var(--state-hover)) c h);
+  --tertiary-bg-active: oklch(from var(--tertiary-bg) calc(l + var(--state-active)) c h);
+  --tertiary-border: oklch(from var(--tertiary-bg) calc(l + var(--state-border)) c h);
+  --tertiary-border-hover: oklch(from var(--tertiary-border) calc(l + var(--state-hover)) c h);
+  --tertiary-border-active: oklch(from var(--tertiary-border) calc(l + var(--state-active)) c h);
+
+  --quaternary-bg: oklch(from var(--bg) calc(l + var(--quaternary-lightness)) c h);
+  --quaternary-bg-hover: oklch(from var(--quaternary-bg) calc(l + var(--state-hover)) c h);
+  --quaternary-bg-active: oklch(from var(--quaternary-bg) calc(l + var(--state-active)) c h);
+  --quaternary-border: oklch(from var(--quaternary-bg) calc(l + var(--state-border)) c h);
+  --quaternary-border-hover: oklch(from var(--quaternary-border) calc(l + var(--state-hover)) c h);
+  --quaternary-border-active: oklch(from var(--quaternary-border) calc(l + var(--state-active)) c h);
+
+  --base-bg: oklch(from var(--bg) calc(l + var(--base-lightness)) c h);
+  --base-bg-hover: oklch(from var(--base-bg) calc(l + var(--state-hover)) c h);
+  --base-bg-active: oklch(from var(--base-bg) calc(l + var(--state-active)) c h);
+  --base-border: oklch(from var(--base-bg) calc(l + var(--state-border)) c h);
+  --base-border-hover: oklch(from var(--base-border) calc(l + var(--state-hover)) c h);
+  --base-border-active: oklch(from var(--base-border) calc(l + var(--state-active)) c h);
+
+  /* Accent — tinted from --acc, no surface derivation. */
+  --accent-bg: var(--acc);
+  --accent-bg-hover: oklch(from var(--accent-bg) calc(l + var(--state-hover)) c h);
+  --accent-bg-active: oklch(from var(--accent-bg) calc(l + var(--state-active)) c h);
+  --accent-border: oklch(from var(--accent-bg) calc(l + var(--state-border)) c h);
+  --accent-border-hover: oklch(from var(--accent-border) calc(l + var(--state-hover)) c h);
+  --accent-border-active: oklch(from var(--accent-border) calc(l + var(--state-active)) c h);
+
+  /* Text. Independent of --con: contrast shouldn't soften when
+     surfaces flatten. Primary = --fg verbatim. Secondary/tertiary
+     shift toward bg's lightness in OKLCH so they stay opaque and
+     keep fg's hue. Sign positive in light (fg dark, lifts toward
+     white bg); negative in dark. */
+  --text-primary: var(--fg);
+  --text-secondary: oklch(from var(--fg) calc(l + 0.3) c h);
+  --text-tertiary: oklch(from var(--fg) calc(l + 0.45) c h);
+
+  --radius: 8px;
+
+  --sidebar-width: 224px;
+  --thread-width: 672px;
+}
+
+.dark {
+  --bg: #111111;
+  --fg: #fcfcfc;
+  --acc: #4a9eed;
+
+  /* State deltas flip positive in dark — surfaces sit far from
+     white, so states lift toward white instead of sinking. */
+  --state-hover: calc(0.16 * var(--con));
+  --state-active: calc(0.18 * var(--con));
+  --state-border: calc(0.2 * var(--con));
+
+  /* Lightness steps in dark. Most tiers lift (positive) to be
+     visible above the dark canvas; base sinks slightly. */
+  --primary-lightness: calc(0.1 * var(--con));
+  --tertiary-lightness: calc(0.2 * var(--con));
+  --quaternary-lightness: calc(0.3 * var(--con));
+  --base-lightness: calc(-0.03 * var(--con));
+
+  /* Absolute L floors. The natural lift compresses below 1 sRGB
+     unit at bg=#000; floors guarantee tiers stay distinct. At
+     typical dark bgs (#111 etc.) the natural lift wins. */
+  --primary-floor: calc(0.09 + 0.106 * var(--con));
+  --tertiary-floor: calc(0.142 + 0.075 * var(--con));
+  --quaternary-floor: calc(0.194 + 0.063 * var(--con));
+
+  --primary-bg: oklch(
+    from var(--bg) max(var(--primary-floor), calc(l + var(--primary-lightness))) c h
+  );
+  --secondary-bg: var(--bg);
+  --tertiary-bg: oklch(
+    from var(--bg) max(var(--tertiary-floor), calc(l + var(--tertiary-lightness))) c h
+  );
+  --quaternary-bg: oklch(
+    from var(--bg) max(var(--quaternary-floor), calc(l + var(--quaternary-lightness))) c h
+  );
+  --base-bg: oklch(from var(--bg) max(0, calc(l + var(--base-lightness))) c h);
+
+  --text-secondary: oklch(from var(--fg) calc(l - 0.3) c h);
+  --text-tertiary: oklch(from var(--fg) calc(l - 0.45) c h);
+
+  --shadow-border-opacity: 0.06;
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --font-weight-normal: 450;
+
+  /* Borderless card edge: a 1px ring + soft drop, replacing border utilities
+     so the edge never affects layout. The ring uses the theme's primary
+     border token, so it tracks light/dark and the theme-configurator seeds;
+     the drop layers stay neutral black. */
+
+  /* 0px 0px 0px 1px oklch(from var(--primary-border) l c h / 1), */
+  --shadow-border: 0px 1px 2px -1px rgb(0 0 0 / 0.06), 0px 2px 4px 0px rgb(0 0 0 / 0.04);
+
+  /* Background */
+  --color-base-bg: var(--base-bg);
+  --color-base-bg-hover: var(--base-bg-hover);
+  --color-base-bg-active: var(--base-bg-active);
+  --color-base-border: var(--base-border);
+  --color-base-border-hover: var(--base-border-hover);
+  --color-base-border-active: var(--base-border-active);
+
+  /* Surface: secondary (panels, sidebar) */
+  --color-secondary-bg: var(--secondary-bg);
+  --color-secondary-bg-hover: var(--secondary-bg-hover);
+  --color-secondary-bg-active: var(--secondary-bg-active);
+  --color-secondary-border: var(--secondary-border);
+  --color-secondary-border-hover: var(--secondary-border-hover);
+  --color-secondary-border-active: var(--secondary-border-active);
+
+  /* Surface: primary (cards, inputs, composer) */
+  --color-primary-bg: var(--primary-bg);
+  --color-primary-bg-hover: var(--primary-bg-hover);
+  --color-primary-bg-active: var(--primary-bg-active);
+  --color-primary-border: var(--primary-border);
+  --color-primary-border-hover: var(--primary-border-hover);
+  --color-primary-border-active: var(--primary-border-active);
+
+  /* Surface: tertiary (filled controls) */
+  --color-tertiary-bg: var(--tertiary-bg);
+  --color-tertiary-bg-hover: var(--tertiary-bg-hover);
+  --color-tertiary-bg-active: var(--tertiary-bg-active);
+  --color-tertiary-border: var(--tertiary-border);
+  --color-tertiary-border-hover: var(--tertiary-border-hover);
+  --color-tertiary-border-active: var(--tertiary-border-active);
+
+  /* Surface: quaternary (filled controls) */
+  --color-quaternary-bg: var(--quaternary-bg);
+  --color-quaternary-bg-hover: var(--quaternary-bg-hover);
+  --color-quaternary-bg-active: var(--quaternary-bg-active);
+  --color-quaternary-border: var(--quaternary-border);
+  --color-quaternary-border-hover: var(--quaternary-border-hover);
+  --color-quaternary-border-active: var(--quaternary-border-active);
+
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-bg-hover: var(--accent-bg-hover);
+  --color-accent-bg-active: var(--accent-bg-active);
+  --color-accent-border: var(--accent-border);
+  --color-accent-border-hover: var(--accent-border-hover);
+  --color-accent-border-active: var(--accent-border-active);
+
+  /* Text */
+  --color-ink-primary: var(--text-primary);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-tertiary: var(--text-tertiary);
+
+  --radius-xs: calc(var(--radius) - 4px);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 15px;
+  --text-xl: 16px;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -200% 50%;
+  }
+}
+
+@layer base {
+  ::-webkit-scrollbar {
+    width: 5px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--primary-border);
+    border-radius: 5px;
+  }
+
+  * {
+    @apply border-primary-border ring-ink-primary;
+    scrollbar-width: thin;
+    scrollbar-color: var(--primary-border) transparent;
+  }
+
+  body {
+    @apply bg-base-bg font-sans font-normal text-ink-primary;
+    font-synthesis: none;
+  }
+}
+
+/* Streamdown element styles */
+[data-streamdown="heading-1"] {
+  @apply mt-6 mb-3 text-xl font-semibold text-ink-primary;
+}
+[data-streamdown="heading-2"] {
+  @apply mt-5 mb-2.5 text-lg font-semibold text-ink-primary;
+}
+[data-streamdown="heading-3"] {
+  @apply mt-4 mb-2 text-md font-semibold text-ink-primary;
+}
+[data-streamdown="heading-4"] {
+  @apply mt-3 mb-1.5 text-md font-medium text-ink-primary;
+}
+
+[data-streamdown="code-block"] {
+  @apply my-3 overflow-hidden rounded-lg border border-primary-border bg-primary-bg [corner-shape:squircle];
+}
+[data-streamdown="code-block-header"] {
+  @apply flex items-center justify-between border-b border-primary-border bg-primary-bg p-3 text-xs text-ink-primary;
+}
+[data-streamdown="code-block-body"] {
+  @apply overflow-x-auto p-3 bg-primary-bg text-sm leading-relaxed;
+}
+
+[data-streamdown="inline-code"] {
+  @apply rounded-sm bg-primary-bg px-1 py-0.5 text-sm text-ink-primary;
+}
+
+[data-streamdown="link"] {
+  @apply text-ink-primary underline underline-offset-2 decoration-primary-border hover:decoration-ink-primary;
+}
+
+[data-streamdown="blockquote"] {
+  @apply my-3 border-l-2 border-primary-border pl-3 text-ink-primary;
+}
+
+[data-streamdown="ordered-list"],
+[data-streamdown="unordered-list"] {
+  @apply my-3 list-outside space-y-0.5 pl-5;
+}
+[data-streamdown="ordered-list"] {
+  @apply list-decimal;
+}
+[data-streamdown="unordered-list"] {
+  @apply list-disc;
+}
+[data-streamdown="list-item"] {
+  @apply pl-1;
+}
+[data-streamdown="list-item"]::marker {
+  color: var(--ink-secondary);
+}
+[data-streamdown="list-item"] > [data-streamdown="paragraph"] {
+  @apply my-0;
+}
+
+[data-streamdown="horizontal-rule"] {
+  @apply my-4 border-primary-border;
+}
+
+[data-streamdown="strong"] {
+  @apply font-medium text-ink-primary;
+}
+
+[data-streamdown="table-wrapper"] {
+  @apply my-3 overflow-x-auto;
+}
+[data-streamdown="table"] {
+  @apply w-full text-sm;
+}
+[data-streamdown="table-header"] {
+  @apply border-b border-primary-border bg-primary-bg;
+}
+[data-streamdown="table-header-cell"] {
+  @apply px-3 py-1.5 text-left font-medium text-ink-primary;
+}
+[data-streamdown="table-row"] {
+  @apply border-b border-primary-border;
+}
+[data-streamdown="table-cell"] {
+  @apply px-3 py-1.5 text-ink-primary;
+}
+
+[data-streamdown="image"] {
+  @apply max-w-full rounded-md;
+}
+
+/* ─── Shiki dual-theme code blocks ───
+   CodeBlock highlights with { light: github-light, dark: github-dark } and
+   defaultColor:false, so shiki emits per-token CSS variables instead of a fixed
+   color. Activate light by default and swap to dark under the .dark class. Only
+   the text color switches — the <pre> keeps its own bg-secondary surface. */
+.shiki,
+.shiki span {
+  color: var(--shiki-light);
+}
+
+.dark .shiki,
+.dark .shiki span {
+  color: var(--shiki-dark);
+}

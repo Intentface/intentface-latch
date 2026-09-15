@@ -1,0 +1,52 @@
+{
+  "name": "agents-lab",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Temporary harness for @intentface/agents-sdk: a real chat over the custom loop, with SQLite persistence, a lease, a gated tool and slash commands. Not a product; delete when the experiment ends.",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3200",
+    "build": "next build",
+    "start": "next start --port 3200",
+    "typecheck": "tsc --noEmit",
+    "predev": "pnpm --filter @intentface/agents-sdk build && pnpm auth:migrate",
+    "prebuild": "pnpm --filter @intentface/agents-sdk build",
+    "pretypecheck": "pnpm --filter @intentface/agents-sdk build",
+    "auth:migrate": "better-auth migrate --config lib/auth.ts -y"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/react": "^4.0.2",
+    "@intentface/agents-sdk": "workspace:*",
+    "ai": "^7.0.2",
+    "better-sqlite3": "^12.11.1",
+    "next": "16.2.12",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "zod": "^4",
+    "@intentface/chat": "^0.2.1",
+    "better-auth": "^1.6.19",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.21.0",
+    "tailwind-merge": "^3.6.0",
+    "tw-animate-css": "^1.4.0",
+    "shadow-plugin": "^2.1.0",
+    "@base-ui/react": "^1.6.0",
+    "motion": "^12.42.2",
+    "next-themes": "^0.4.6",
+    "streamdown": "^2.5.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "postcss": "^8",
+    "tailwindcss": "^4",
+    "typescript": "^5.7.0",
+    "shadcn": "^4.11.0",
+    "@better-auth/cli": "^1.4.21"
+  }
+}

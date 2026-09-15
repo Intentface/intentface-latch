@@ -1,0 +1,53 @@
+{
+  "name": "@intentface/agents-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Experimental agent runtime: a tool-calling loop we own, plus an extension model where every feature is an extension. Deliberately outside the @intentface/latch-* version line so it can break freely. Not published.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "import": "./dist/sqlite.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "ai": ">=7.0.0",
+    "better-sqlite3": ">=12"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "ai": "^7.0.2",
+    "typescript": "^5.7.0",
+    "vitest": "^4",
+    "zod": "^4",
+    "better-sqlite3": "^12.11.1",
+    "@types/better-sqlite3": "^9.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Intentface/intentface-latch.git",
+    "directory": "packages/agents-sdk"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  }
+}
