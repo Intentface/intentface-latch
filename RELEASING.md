@@ -173,7 +173,8 @@ never removes a manual step, it only adds a credential to the repository.
    The workflow filename must match exactly, extension included. npmjs.com
    offers a "skip two-factor authentication for the next 5 minutes" window,
    which is what makes ten of these bearable. `npm trust list <package>` shows
-   what is configured; `npm trust revoke` removes it.
+   what is configured, including the relationship id that
+   `npm trust revoke <package> --id=<trust-id>` needs to remove one.
 3. **The workflow is already OIDC.** `id-token: write` is in `permissions`, the
    npm CLI is upgraded to a pinned 11.18.0 before the publish step (OIDC needs
    11.5.1 or later; the CLI bundled with `setup-node` is older, and `@latest`
