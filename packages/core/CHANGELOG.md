@@ -1,5 +1,97 @@
 # @intentface/latch-core
 
+## 0.9.1
+
+### Patch Changes
+
+- 4b5e9eb: Two delegation paths had drifted from the rules the rest of the runtime applies.
+  
+  A test run (`runAgent` / `test_agent`: autonomous with gated tools stubbed) that
+  delegated through `spawn_agent` handed the child only its approval mode, not
+  the stub flag — so a "side-effect-free" trial could delegate to an agent whose
+  gated tools ran for real. The child now inherits the parent's execution
+  restrictions as a set.
+  
+  Resuming a subagent after a bubbled-up approval decision re-ran its model over
+  history whose last message was the paused assistant turn, without trimming the
+  trailing narration the other continuation paths (`applyApproval`,
+  `applyToolResult`, crash recovery) already strip. Providers that refuse an
+  assistant prefill rejected that request. The subagent resume now applies the
+  same trim.
+- 8311508: Publish to the public npm registry.
+  
+  Installing no longer needs an `.npmrc`, a registry mapping or a token:
+  `pnpm add @intentface/latch-core` just works. Every tarball now ships the MIT
+  license text, and each manifest carries `keywords`, `homepage` and `bugs`.
+  
+  No code or API changes. The versions previously published to GitHub Packages
+  stay where they are; new releases go to npm only.
+- 516d8f0: Per-step checkpoints (durability on) now commit in step order, and the finish
+  handler's final write is the row's last write.
+  
+  Each checkpoint replaces the in-progress assistant message wholesale. They were
+  fire-and-forget with nothing ordering them, so a slow early write could commit
+  after a later one and roll the stored message back to an older step — a crash
+  in that window re-ran a step that had already been persisted — and the final
+  step's checkpoint raced the finish handler for the same row, where a late
+  checkpoint clobbered the usage and cost metadata only the finish handler stamps.
+  
+  Checkpoints are now chained: each write starts the moment the one before it
+  commits, and the finish handler awaits the chain before it settles the run row
+  and persists the final message. Recovery never revisits a completed run, so a
+  row that says `completed` now always sits next to a message that already holds
+  the final step — previously the last checkpoint could still be in flight at
+  that moment, and a crash there lost the answer text. The chain orders, it does not batch — a crash at step N still loses at
+  most the write in flight and the one queued behind it. A failed checkpoint logs
+  and releases the chain, as before.
+- 8fd120a: Crash recovery no longer re-runs a turn that had already finished.
+  
+  Finishing the tool loop and recording that it finished are two separate writes:
+  the per-step checkpoint lands at each step's end, while the run row becomes
+  `completed` in the finish handler. A process that dies between them leaves a
+  finished turn on an `active` row, so the reaper picks up a run whose answer is
+  already in history.
+  
+  `resume()` now reads the tail of that history first. A last step that called no
+  tool means the loop had stopped, so the row is reconciled (`completed`, or
+  `awaiting_input` when a gate is pending) without a model call — previously the
+  answer was generated a second time and, because the message id is reused,
+  appended to the message that already held the first one. A turn waiting on a
+  client-handled tool (`askUser`) is finished in the same sense: `onFinish`
+  records it as completed and the answer arrives through `applyToolResult`, so
+  recovery records the same instead of re-running and asking the question twice.
+  
+  When work genuinely remains, the resumed history now also passes through
+  `trimTrailingAssistantPrefill`, which the two human-decision resume paths
+  already did and crash recovery never did. Without it a tail ending in the
+  turn's own half-written sentence reaches the model as an assistant prefill,
+  which models that refuse one reject on the request *shape* — so every identical
+  retry fails until `maxAttempts` is spent.
+  
+  `trimTrailingAssistantPrefill` also gains an `unanchored` option (default off,
+  so the decision paths are unchanged) that trims a tail with no `tool-*` part to
+  anchor on. Crash recovery passes it as a guard: the one anchorless tail a
+  checkpoint can produce is a tool-free turn, which the classifier now settles
+  before the trim is reached.
+  
+  Recovery also checks whether the chat moved on. Reaped runs are resumed one at a
+  time, and while one waits its chat is free — so a later message can start, and
+  even finish, a whole turn first. That is read off the runs table, never inferred
+  from message shapes: a user message is only ever persisted together with its
+  run, so a later run in the same chat is the one fact that proves a later turn
+  exists. Such a run settles as errored with the same outcome `openTurn` gives a
+  stale run, rather than being classified (or re-run) against a conversation that
+  moved on. Compaction runs are summaries, not turns, and do not count.
+  
+  The runtime now also warns at startup when durability is enabled on a storage
+  adapter without `openTurn`: turn creation is then two writes, and a crash between
+  them is a shape recovery can only partly reason about. Every shipped adapter
+  implements it.
+  
+  Also exports `resumeShapeOf` for hosts that drive recovery themselves.
+- Updated dependencies [8311508]
+  - @intentface/latch-net@0.9.1
+
 ## 0.9.0
 
 ### Minor Changes
