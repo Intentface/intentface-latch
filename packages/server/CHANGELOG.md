@@ -1,5 +1,24 @@
 # @intentface/latch-server
 
+## 0.9.1
+
+### Patch Changes
+
+- 8311508: Publish to the public npm registry.
+  
+  Installing no longer needs an `.npmrc`, a registry mapping or a token:
+  `pnpm add @intentface/latch-core` just works. Every tarball now ships the MIT
+  license text, and each manifest carries `keywords`, `homepage` and `bugs`.
+  
+  No code or API changes. The versions previously published to GitHub Packages
+  stay where they are; new releases go to npm only.
+- Updated dependencies [4b5e9eb]
+- Updated dependencies [8311508]
+- Updated dependencies [516d8f0]
+- Updated dependencies [8fd120a]
+  - @intentface/latch-core@0.9.1
+  - @intentface/latch-mcp@0.9.1
+
 ## 0.9.0
 
 ### Minor Changes
