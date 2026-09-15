@@ -5,18 +5,22 @@ Everything is driven by
 [changesets](https://github.com/changesets/changesets); no one runs
 `npm publish` by hand.
 
-Publishing needs one secret: `NPM_TOKEN`, a **granular** access token for the
-`@intentface` organization with read/write on the scope and **2FA bypass**
-enabled (without that, the job hangs on a one-time-password prompt instead of
-failing). Classic tokens, including the automation tokens this kind of workflow
-used for years, were
-[revoked in December 2025](https://github.blog/changelog/2025-12-09-npm-classic-tokens-revoked-session-based-auth-and-cli-token-management-now-available/)
-and cannot be recreated.
+**Publishing stores no credential.** The workflow authenticates as itself
+through npm's OIDC [trusted publishing](https://docs.npmjs.com/trusted-publishers/),
+so there is no `NPM_TOKEN` secret, nothing to rotate and nothing to leak.
 
-**The token is a bootstrap, not the destination.** A granular write token now
-[expires after 90 days at most](https://github.blog/changelog/2025-11-05-npm-security-update-classic-token-creation-disabled-and-granular-token-changes/),
-so a token-based release breaks quarterly until someone rotates it. See
-[Trusted publishing](#trusted-publishing-the-way-off-the-token-treadmill).
+Getting there took one manual publish, because OIDC cannot create a package that
+does not exist yet — see
+[Trusted publishing](#trusted-publishing-and-the-one-manual-publish). That is
+done; nobody should need to repeat it.
+
+Tokens are not the fallback they used to be. Classic and automation tokens were
+[revoked in December 2025](https://github.blog/changelog/2025-12-09-npm-classic-tokens-revoked-session-based-auth-and-cli-token-management-now-available/).
+Their replacement, a granular token with 2FA bypass, is itself being retired:
+since early August 2026 it can no longer manage tokens or 2FA settings, and
+[around January 2027 it loses the ability to publish at all](https://github.blog/changelog/2026-07-08-npm-install-time-security-and-gat-bypass2fa-deprecation/),
+leaving only reads and staged publishes awaiting human approval. OIDC is not
+merely the tidier option; it is the one with a future.
 
 ## The flow
 
@@ -135,40 +139,46 @@ full install died on `@intentface/chat` — published from another repository,
 which this repo's `GITHUB_TOKEN` may not read. On the public registry that
 resolves like any other dependency.)
 
-## Trusted publishing, the way off the token treadmill
+## Trusted publishing, and the one manual publish
 
-npm's OIDC flow ([trusted publishing](https://docs.npmjs.com/trusted-publishers/))
-authenticates the workflow itself rather than a secret, so there is nothing to
-rotate and nothing to leak. It works from a private repository. It is where this
-should end up.
+OIDC cannot perform a package's **first** publish. You authorize a publisher in
+a package's settings on npmjs.com, and those settings do not exist until the
+package does — `npm trust` says so plainly: *"The package you're configuring
+must already exist on the npm registry."* So something has to create the ten
+packages once, and it cannot be the workflow.
 
-The catch is that it cannot perform a package's **first** publish: you authorize
-a publisher in a package's settings on npmjs.com, and those settings do not
-exist until the package does. Something else has to create the packages once.
+That something was a laptop, not a token, and the reason is worth recording so
+nobody re-litigates it: **`npm trust` does not accept a 2FA-bypass token
+either.** Its documented constraints are *"Two-factor authentication must be
+enabled at the account level"* and *"Granular Access Tokens (GAT) with the
+bypass 2FA option are not supported."* An interactive, 2FA-backed session is
+therefore unavoidable at step 2 whatever you do at step 1 — so a publish token
+never removes a manual step, it only adds a credential to the repository.
 
-1. **Bootstrap the ten packages.** Two ways, and the second stores nothing:
-
-   - `NPM_TOKEN` in CI, as described above. Simple, and the 90-day clock never
-     matters because the token is revoked at step 4.
-   - **One publish from a laptop.** `npm login` issues a two-hour session that
-     satisfies 2FA, then `pnpm release` runs the same four gates CI does
-     (typecheck, test, build, `verify:publish`) and publishes the current
-     version of every package. Nothing long-lived is created, and no secret ever
-     enters the repository.
-
+1. **Publish once by hand.** `npm login` issues a session that satisfies 2FA.
+   `pnpm release` then runs the same four gates CI does (typecheck, test, build,
+   `verify:publish`) before `changeset publish`, so the packages that reach the
+   registry are the ones that passed. It also writes a git tag per package —
+   push them (`git push --follow-tags`).
 2. **Authorize the workflow on each package**: a trusted publisher pointing at
    `Intentface/intentface-latch`, workflow `release.yml` (the filename must
-   match exactly, extension included). `npm trust github` does this from the
-   terminal instead of ten trips through the web UI.
+   match exactly, extension included). `npm trust github <package>` does this
+   from the terminal instead of ten trips through the web UI; it needs
+   npm@11.15.0 or later. npmjs.com offers a "skip two-factor authentication for
+   the next 5 minutes" window, which is what makes ten of these bearable.
 3. **Switch `release.yml` to OIDC**: add `id-token: write` to `permissions` and
    a step that upgrades the npm CLI (`npm install -g npm@latest`) — OIDC needs
    11.5.1 or later and the CLI bundled with `setup-node` is older. GitHub-hosted
-   runners only; self-hosted cannot mint the token.
-4. **Remove the credential**: delete the `NODE_AUTH_TOKEN` line, and the
-   `NPM_TOKEN` secret if you created one.
+   runners only; self-hosted cannot mint the token. Delete the `NODE_AUTH_TOKEN`
+   line at the same time.
 
 From then on a release is the same two merges, authenticated by the workflow's
 own identity, with nothing to rotate.
+
+One wrinkle from that first release: the packages were already at the version
+the changesets had bumped them to, so when the version PR merged, the workflow's
+publish step found nothing to publish and `changesets/action` created no GitHub
+Releases for it. Every release after this one gets them normally.
 
 ## Provenance is off, and why
 
