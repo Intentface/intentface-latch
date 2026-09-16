@@ -25,6 +25,64 @@ function makeDeps(): AgentBuilderDeps<P> & {
   schedules: StubSchedule[];
 } {
   const records: AgentRecord[] = [];
+  // Publish history, faithful to the drizzle store's contract: every upsert is a
+  // publish, unchanged content appends nothing, and rollback appends forward.
+  type StubVersion = {
+    scope: AgentRecord["scope"];
+    name: string;
+    version: number;
+    record: AgentRecord;
+    author?: string;
+    source?: string;
+    message?: string;
+    createdAt: number;
+  };
+  const versions: StubVersion[] = [];
+  const activations: Array<{
+    scope: AgentRecord["scope"];
+    name: string;
+    version: number;
+    actor?: string;
+    source: "publish" | "activate" | "backfill";
+    createdAt: number;
+  }> = [];
+  const drafts: Array<{
+    scope: AgentRecord["scope"];
+    name: string;
+    record: AgentRecord;
+    baseVersion?: number;
+    updatedAt: number;
+  }> = [];
+  const historyOf = (name: string, scope: AgentRecord["scope"]) =>
+    versions.filter((v) => v.name === name && v.scope === scope).sort((a, b) => b.version - a.version);
+  const publish = async (
+    rec: AgentRecord,
+    opts?: { author?: string; source?: string; message?: string },
+  ): Promise<void> => {
+    const i = records.findIndex((r) => r.name === rec.name && r.scope === rec.scope);
+    if (i >= 0) records[i] = rec;
+    else records.push(rec);
+    const head = historyOf(rec.name, rec.scope)[0];
+    if (head && JSON.stringify(head.record) === JSON.stringify(rec)) return;
+    versions.push({
+      scope: rec.scope,
+      name: rec.name,
+      version: (head?.version ?? 0) + 1,
+      record: rec,
+      author: opts?.author,
+      source: opts?.source ?? "api",
+      message: opts?.message,
+      createdAt: Date.now(),
+    });
+    activations.push({
+      scope: rec.scope,
+      name: rec.name,
+      version: (head?.version ?? 0) + 1,
+      actor: opts?.author,
+      source: "publish",
+      createdAt: Date.now(),
+    });
+  };
   const schedules: StubSchedule[] = [];
   return {
     records,
@@ -67,15 +125,78 @@ function makeDeps(): AgentBuilderDeps<P> & {
         return scope ? matches[0] : (matches.find((r) => r.scope === "user") ?? matches[0]);
       },
       listMemoryEnabledNames: async () => records.filter((r) => r.exec?.memory).map((r) => r.name),
-      upsert: async (_p, rec) => {
-        const i = records.findIndex((r) => r.name === rec.name && r.scope === rec.scope);
-        if (i >= 0) records[i] = rec;
-        else records.push(rec);
-      },
+      upsert: async (_p, rec, opts) => publish(rec, opts),
       remove: async (_p, scope, name) => {
         const i = records.findIndex((r) => r.name === name && r.scope === scope);
         if (i >= 0) records.splice(i, 1);
+        for (let j = versions.length - 1; j >= 0; j--) {
+          if (versions[j]!.name === name && versions[j]!.scope === scope) versions.splice(j, 1);
+        }
+        for (let j = activations.length - 1; j >= 0; j--) {
+          if (activations[j]!.name === name && activations[j]!.scope === scope) activations.splice(j, 1);
+        }
+        for (let j = drafts.length - 1; j >= 0; j--) {
+          if (drafts[j]!.name === name && drafts[j]!.scope === scope) drafts.splice(j, 1);
+        }
       },
+      listVersions: async (_p, name, scope) => {
+        const live = records.find((r) => r.name === name && r.scope === scope);
+        const head = historyOf(name, scope)[0];
+        return historyOf(name, scope).map((v) => ({
+          version: v.version,
+          author: v.author,
+          source: v.source as never,
+          message: v.message,
+          createdAt: v.createdAt,
+          published: !!live && v.version === head?.version,
+        }));
+      },
+      getVersion: async (_p, name, scope, version) =>
+        historyOf(name, scope).find((v) => v.version === version)?.record,
+      activateVersion: async (_p, name, scope, version, opts) => {
+        const found = historyOf(name, scope).find((v) => v.version === version);
+        if (!found) throw new Error(`No version ${version} of agent "${name}".`);
+        // Pointer move only — the stub has no pointer, so just make it live.
+        const i = records.findIndex((r) => r.name === name && r.scope === scope);
+        if (i >= 0) records[i] = found.record;
+        else records.push(found.record);
+        activations.push({
+          scope,
+          name,
+          version,
+          actor: opts?.actor,
+          source: "activate",
+          createdAt: Date.now(),
+        });
+      },
+      listActivations: async (_p, name, scope, limit) => {
+        const all = activations
+          .filter((x) => x.name === name && x.scope === scope)
+          .sort((x, y) => y.createdAt - x.createdAt)
+          .map((x) => ({
+            version: x.version,
+            actor: x.actor,
+            source: x.source,
+            createdAt: x.createdAt,
+          }));
+        return limit ? all.slice(0, limit) : all;
+      },
+      getDraft: async (_p, name, scope) => {
+        const d = drafts.find((x) => x.name === name && x.scope === scope);
+        return d ? { record: d.record, baseVersion: d.baseVersion, updatedAt: d.updatedAt } : undefined;
+      },
+      saveDraft: async (_p, name, scope, rec, baseVersion) => {
+        const next = { scope, name, record: { ...rec, name, scope }, baseVersion, updatedAt: Date.now() };
+        const i = drafts.findIndex((x) => x.name === name && x.scope === scope);
+        if (i >= 0) drafts[i] = next;
+        else drafts.push(next);
+      },
+      discardDraft: async (_p, name, scope) => {
+        const i = drafts.findIndex((x) => x.name === name && x.scope === scope);
+        if (i >= 0) drafts.splice(i, 1);
+      },
+      listDrafts: async () =>
+        drafts.map((x) => ({ name: x.name, scope: x.scope, mine: true, updatedAt: x.updatedAt })),
     },
     models: [
       { id: "m-1", label: "Model One", provider: "anthropic", reasoning: true },

@@ -134,6 +134,7 @@ export function makeStorageAdapter<P>(
     costTotal: r.costTotal ?? undefined,
     kind: r.kind,
     toolsHash: r.toolsHash,
+    agentVersion: r.agentVersion,
     error: r.error,
     startedAt: r.startedAt,
     endedAt: r.endedAt,

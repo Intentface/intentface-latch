@@ -48,6 +48,16 @@ export interface ToolSource<P> {
 }
 
 export interface AgentConfig<P> {
+  /**
+   * Which stored version of this agent's record produced this config, when it
+   * came from a store that versions them (`latch_agent_versions.version`).
+   * Absent for code-declared agents, which have no stored record.
+   *
+   * Recorded on the run and emitted as a trace tag, so a past answer can be
+   * traced back to the exact configuration that produced it — and so eval or
+   * judge scores can be compared across versions.
+   */
+  configVersion?: number;
   model: LanguageModel;
   instructions?: string;
   /** Static tools, available every turn. */

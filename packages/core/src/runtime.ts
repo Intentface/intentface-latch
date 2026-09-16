@@ -1778,6 +1778,7 @@ export function createRuntime<P, RC = unknown>(
       modelId,
       principal,
       startedAt: run.startedAt,
+      agentVersion: cfg.configVersion,
       depth,
       trigger,
       parentRunId: args.parentRunId,
@@ -2118,6 +2119,7 @@ export function createRuntime<P, RC = unknown>(
             usageCacheWriteTokens: cacheWriteTokens || undefined,
             costTotal: cost,
             toolsHash,
+            agentVersion: cfg.configVersion ?? null,
             endedAt: paused ? undefined : Date.now(),
           },
           lease,
@@ -2470,6 +2472,9 @@ export function createRuntime<P, RC = unknown>(
         modelId: ranAs(uiMessages, run.id) ?? "unknown",
         principal,
         startedAt: run.startedAt,
+        // Likewise persisted, not re-resolved: reconciling a finished run must
+        // report the version it ran on, not whatever is published now.
+        agentVersion: run.agentVersion ?? undefined,
         depth: 0,
         trigger: "resume",
         rootChatId: run.chatId,

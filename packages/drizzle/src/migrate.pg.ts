@@ -56,6 +56,32 @@ const DDL = [
      max_steps INTEGER,
      scope TEXT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS latch_agents_owner_name ON latch_agents (owner, name)`,
+  // Append-only publish history for `latch_agents`. The live row is always a
+  // copy of the version its `published_version` names; rollback appends a NEW
+  // version carrying an old record, so history is never rewritten.
+  `CREATE TABLE IF NOT EXISTS latch_agent_versions (
+     id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL,
+     record JSONB NOT NULL, author TEXT, source TEXT,
+     changed_fields JSONB, change_message TEXT, created_at BIGINT NOT NULL)`,
+  // Backstops the max(version)+1 race: a losing concurrent publish retries.
+  `CREATE UNIQUE INDEX IF NOT EXISTS latch_agent_versions_owner_name_version
+     ON latch_agent_versions (owner, name, version)`,
+  `CREATE INDEX IF NOT EXISTS latch_agent_versions_owner_name_idx
+     ON latch_agent_versions (owner, name)`,
+  // Who made which version live, and when. Activating an existing version
+  // appends no version, so without this a rollback leaves no trace.
+  `CREATE TABLE IF NOT EXISTS latch_agent_activations (
+     id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL,
+     actor TEXT, source TEXT, created_at BIGINT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS latch_agent_activations_owner_name_idx
+     ON latch_agent_activations (owner, name, created_at)`,
+  // One unpublished working copy per (agent, editor) — per PERSON, so two org
+  // admins can't overwrite each other's half-written prompt.
+  `CREATE TABLE IF NOT EXISTS latch_agent_drafts (
+     owner TEXT NOT NULL, name TEXT NOT NULL, editor TEXT NOT NULL,
+     record JSONB NOT NULL, base_version INTEGER, updated_at BIGINT NOT NULL,
+     PRIMARY KEY (owner, name, editor))`,
+  `CREATE INDEX IF NOT EXISTS latch_agent_drafts_owner_idx ON latch_agent_drafts (owner)`,
   `CREATE TABLE IF NOT EXISTS latch_schedules (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity JSONB,
      cron TEXT, timezone TEXT, prompt TEXT NOT NULL, delivery JSONB,
@@ -111,11 +137,68 @@ const ALTERS = [
   `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'`,
   `ALTER TABLE latch_memory_chat_state ADD COLUMN IF NOT EXISTS last_extracted_key TEXT`,
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS attached_evals JSONB`,
+  `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS published_version INTEGER`,
+  `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS agent_version INTEGER`,
+  `ALTER TABLE latch_agent_versions ADD COLUMN IF NOT EXISTS changed_fields JSONB`,
+  `ALTER TABLE latch_agent_versions ADD COLUMN IF NOT EXISTS change_message TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
+];
+
+/**
+ * Data backfills. Run AFTER `ALTERS` (they reference columns the ALTERs add)
+ * and written to be idempotent, so every migrate can re-run them safely.
+ */
+const BACKFILL = [
+  // Every pre-existing agent becomes v1, so the prompt that was already live is
+  // a rollback target. Without this the FIRST publish would create v1 from the
+  // NEW content and the running prompt would be lost for good — the exact
+  // failure version history exists to prevent. `WHERE NOT EXISTS` makes it a
+  // no-op once an agent has any version.
+  //
+  // `max_steps` is stored column-encoded (NULL=default, 0=unlimited, N=cap) and
+  // is decoded here to its `AgentRecord` form. `to_jsonb` on the integer keeps
+  // the numeric case a JSON number rather than a string.
+  `INSERT INTO latch_agent_versions (id, owner, name, version, record, author, source, created_at)
+     SELECT 'agv_' || replace(gen_random_uuid()::text, '-', ''), a.owner, a.name, 1,
+            jsonb_build_object(
+              'name', a.name,
+              'title', a.title,
+              'description', a.description,
+              'modelId', a.model_id,
+              'instructions', a.instructions,
+              'connections', a.connections,
+              'tools', a.tools,
+              'exec', a.exec,
+              'subagents', a.subagents,
+              'attachedEvals', a.attached_evals,
+              'maxSteps', CASE WHEN a.max_steps IS NULL THEN NULL
+                               WHEN a.max_steps = 0 THEN to_jsonb('unlimited'::text)
+                               ELSE to_jsonb(a.max_steps) END,
+              'scope', a.scope),
+            NULL, 'backfill', a.created_at
+       FROM latch_agents a
+      WHERE NOT EXISTS (SELECT 1 FROM latch_agent_versions v
+                         WHERE v.owner = a.owner AND v.name = a.name)`,
+  // Point every live row at its version. Only fills NULLs, so a row that has
+  // published since the backfill keeps its real version.
+  `UPDATE latch_agents SET published_version = (
+     SELECT MAX(v.version) FROM latch_agent_versions v
+      WHERE v.owner = latch_agents.owner AND v.name = latch_agents.name)
+   WHERE published_version IS NULL`,
+  // ...and record that activation, so the publish timeline is complete from the
+  // first row rather than starting at whenever this feature shipped.
+  `INSERT INTO latch_agent_activations (id, owner, name, version, actor, source, created_at)
+     SELECT 'aga_' || replace(gen_random_uuid()::text, '-', ''), a.owner, a.name,
+            a.published_version, NULL, 'backfill', a.created_at
+       FROM latch_agents a
+      WHERE a.published_version IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM latch_agent_activations x
+                         WHERE x.owner = a.owner AND x.name = a.name)`,
 ];
 
 export async function migratePostgres(db: PgDatabase<any, any, any>): Promise<void> {
   for (const stmt of DDL) await db.execute(sql.raw(stmt));
   for (const stmt of ALTERS) await db.execute(sql.raw(stmt));
+  for (const stmt of BACKFILL) await db.execute(sql.raw(stmt));
 }

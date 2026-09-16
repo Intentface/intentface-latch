@@ -64,6 +64,12 @@ export interface TelemetryRunMeta<P = unknown> {
    * for the same run+rubric upsert one score instead of duplicating across days.
    */
   startedAt: number;
+  /**
+   * The stored agent-record version this turn ran on, when the agent came from
+   * a versioning store. Absent for code-declared agents. Lets a tracer tag the
+   * trace with the exact configuration behind it.
+   */
+  agentVersion?: number;
   /** Delegation depth: 0 = top-level turn, >0 = a subagent turn. */
   depth: number;
   /** What started this turn — see {@link TurnTrigger}. */

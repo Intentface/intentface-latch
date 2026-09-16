@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createFileRoute,
   Link,
@@ -13,6 +13,7 @@ import {
   Check,
   Copy,
   Hash,
+  History,
   MessageCircle,
   Plug,
   RefreshCw,
@@ -33,6 +34,10 @@ import {
   listChannelBotsFn,
   registerChannelWebhookFn,
   deleteAgentFn,
+  discardAgentDraftFn,
+  getAgentDraftFn,
+  getAgentVersionFn,
+  saveAgentDraftFn,
   saveAgentFn,
   saveChannelBotCredentialsFn,
   setSlackConfigTokenFn,
@@ -44,6 +49,10 @@ import {
   updateSlackAppSettingsFn,
   unbindSlackAppFn,
 } from "@/lib/server";
+import { AgentVersionsDrawer } from "@/components/agent-versions-drawer";
+import { DiffView } from "@/components/record-diff-view";
+import { diffRecords, type RecordDiff } from "@/lib/record-diff";
+import { Dialog } from "@/components/ui/dialog";
 import { CHANNEL_KIND_UI } from "@/lib/channel-kinds-ui";
 import type { DmChannelKind } from "@/lib/channel-kinds-ui";
 import { AgentRecordSchema } from "@intentface/latch-agent-builder/record";
@@ -157,6 +166,24 @@ function AgentEditor() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Draft / publish state ────────────────────────────────────────────────
+  // The live record is `latch_agents`; what is typed here is a per-user draft
+  // that autosaves and affects nothing until Publish. `baseVersion` is the
+  // version the draft started from — compared against what is live at publish
+  // time so a colleague's work can't be silently reverted.
+  const [liveVersion, setLiveVersion] = useState<number | null>(null);
+  const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
+  const [othersEditing, setOthersEditing] = useState(0);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [message, setMessage] = useState("");
+  const [stale, setStale] = useState<{ liveVersion: number; author?: string } | null>(null);
+  const [staleDiff, setStaleDiff] = useState<RecordDiff | null>(null);
+  // Set when the editor loads a draft or restores a version, so autosave can
+  // tell "the user typed something" from "we just populated the form".
+  const suppressAutosave = useRef(true);
   const toggleExpand = (c: string) =>
     setExpanded((p) => {
       const n = new Set(p);
@@ -221,14 +248,89 @@ function AgentEditor() {
   const setTools = (fn: (t: NonNullable<AgentRecord["tools"]>) => NonNullable<AgentRecord["tools"]>) =>
     patch((r) => ({ ...r, tools: fn(r.tools ?? { enabled: [], approval: {} }) }));
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!rec.name.trim() || !rec.instructions.trim() || busy) return;
-    const payload = toSavePayload(rec, {
+  const payloadOf = (r: AgentRecord) =>
+    toSavePayload(r, {
       modelSupportsReasoning,
       visibleAuthored: visibleAuthored.map((t) => t.name),
       toolList,
     });
+
+  // On open: adopt the caller's unpublished draft if there is one, so closing
+  // the tab mid-edit loses nothing — on any device, since the draft is stored
+  // server-side rather than in this browser.
+  useEffect(() => {
+    if (!editing) return;
+    let cancelled = false;
+    if (!initial) return;
+    getAgentDraftFn({ data: { name: initial.name, scope: initial.scope } })
+      .then((status) => {
+        if (cancelled || !status) return;
+        setLiveVersion(status.liveVersion);
+        setOthersEditing(status.othersEditing);
+        setBaseVersion(status.draft?.baseVersion ?? status.liveVersion ?? undefined);
+        if (status.draft) {
+          suppressAutosave.current = true;
+          setRec(loadAgentRecord(status.draft.record as AgentRecord));
+          setHasDraft(true);
+        }
+      })
+      .catch(() => {
+        /* The editor still works on the published record without a draft. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editing, initial?.name, initial?.scope]);
+
+  // Autosave, debounced. Publishing is the deliberate act; saving is not, so it
+  // never blocks, never confirms, and never touches what is running.
+  useEffect(() => {
+    if (!editing) return;
+    if (suppressAutosave.current) {
+      suppressAutosave.current = false;
+      return;
+    }
+    const id = setTimeout(() => {
+      void saveAgentDraftFn({ data: { record: payloadOf(rec), baseVersion } })
+        .then((res) => {
+          if (res.ok) {
+            setDraftSavedAt(Date.now());
+            setHasDraft(true);
+          }
+        })
+        .catch(() => {
+          /* Autosave is best-effort; the next keystroke retries. */
+        });
+    }, 800);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rec, editing, baseVersion]);
+
+  async function discardDraft() {
+    if (!editing) return;
+    if (!confirm("Discard your unpublished changes and go back to the live version?")) return;
+    setBusy(true);
+    try {
+      await discardAgentDraftFn({ data: { name: initial.name, scope: initial.scope } });
+      suppressAutosave.current = true;
+      setRec(loadAgentRecord(initial));
+      setHasDraft(false);
+      setDraftSavedAt(null);
+      setBaseVersion(liveVersion ?? undefined);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Load a past version into the draft. Publishing stays the user's call. */
+  function restoreVersion(record: AgentRecord, version: number) {
+    suppressAutosave.current = false; // this IS a change worth autosaving
+    setRec(loadAgentRecord(record));
+    setMessage(`Restored from v${version}`);
+  }
+
+  async function publish(force: boolean) {
+    const payload = payloadOf(rec);
     // The same schema the server (and the Agent Builder) validate with — so a
     // rejection shows up inline, before the round-trip.
     const check = AgentRecordSchema.safeParse(payload);
@@ -240,18 +342,39 @@ function AgentEditor() {
     setBusy(true);
     setError(null);
     try {
-      const res = await saveAgentFn({ data: payload });
+      const res = await saveAgentFn({
+        data: { record: payload, message: message.trim() || undefined, baseVersion, force },
+      });
       if (!res.ok) {
-        setError(res.error ?? "Failed to save");
+        if ("stale" in res && res.stale) {
+          // Someone published while this draft was open. Show what they changed
+          // before offering to overwrite it.
+          const live = await getAgentVersionFn({
+            // `rec` rather than `initial`: name and scope are locked while
+            // editing, so they are the same values, and this branch is also
+            // reachable before `initial` is narrowed.
+            data: { name: rec.name, scope: rec.scope, version: res.liveVersion },
+          });
+          setStaleDiff(diffRecords((live ?? undefined) as AgentRecord, payload as AgentRecord));
+          setStale({ liveVersion: res.liveVersion, author: res.author });
+          return;
+        }
+        setError(res.error ?? "Failed to publish");
         return;
       }
       // Re-run the /agents loader so the list (and a re-open of this editor)
-      // shows the just-saved values instead of stale cached loader data.
+      // shows the just-published values instead of stale cached loader data.
       await router.invalidate();
       navigate({ to: "/agents" });
     } finally {
       setBusy(false);
     }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!rec.name.trim() || !rec.instructions.trim() || busy) return;
+    await publish(false);
   }
 
   return (
@@ -271,6 +394,37 @@ function AgentEditor() {
             ? "Update this agent. Name and scope are fixed (they identify it)."
             : "Define a name, prompt, model, and the connections it can use."}
         </p>
+
+        {editing && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            {liveVersion != null && (
+              <span className="text-ink-secondary">
+                <span className="text-ink-primary font-medium">v{liveVersion}</span> live
+              </span>
+            )}
+            {hasDraft && (
+              <span className="rounded-full bg-amber-500/15 px-2 py-0.5 font-medium text-amber-700 dark:text-amber-400">
+                Draft{draftSavedAt ? " · saved" : ""}
+              </span>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2"
+              onClick={() => setHistoryOpen(true)}
+            >
+              <History className="size-3" /> History
+            </Button>
+            {othersEditing > 0 && (
+              <span className="text-ink-secondary">
+                {othersEditing === 1
+                  ? "Someone else has an unpublished draft"
+                  : `${othersEditing} others have unpublished drafts`}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <form className="space-y-5" onSubmit={submit}>
@@ -722,14 +876,96 @@ function AgentEditor() {
               Delete agent
             </Button>
           )}
+          {editing && hasDraft && (
+            <Button type="button" variant="ghost" disabled={busy} onClick={discardDraft}>
+              Discard draft
+            </Button>
+          )}
           <Button type="button" variant="ghost" render={<Link to="/agents" />}>
             Cancel
           </Button>
           <Button type="submit" disabled={busy || !rec.name.trim() || !rec.instructions.trim()}>
-            {editing ? "Update agent" : "Create agent"}
+            {editing ? "Publish changes" : "Create agent"}
           </Button>
         </div>
+
+        {editing && (
+          <div className="space-y-1.5">
+            <FieldLabel>What changed? (optional)</FieldLabel>
+            <Input
+              value={message}
+              onChange={(e) => setMessage(e.target.value.slice(0, 500))}
+              placeholder="tightened the refund wording"
+            />
+            <p className="text-ink-secondary text-xs">
+              Shown in version history. Your edits autosave as a draft — nothing goes live until
+              you publish.
+            </p>
+          </div>
+        )}
       </form>
+
+      {editing && (
+        <AgentVersionsDrawer
+          agent={initial.name}
+          scope={initial.scope}
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          onRestore={restoreVersion}
+          onActivated={async () => {
+            // The pointer moved, so the editor's idea of what is live is stale.
+            const status = await getAgentDraftFn({
+              data: { name: initial.name, scope: initial.scope },
+            });
+            if (status) setLiveVersion(status.liveVersion);
+            await router.invalidate();
+          }}
+        />
+      )}
+
+      {stale && (
+        <Dialog open onOpenChange={(o) => !o && setStale(null)}>
+          <Dialog.Content className="max-w-lg">
+            <h2 className="text-ink-primary text-sm font-semibold">
+              Someone else published while you were away
+            </h2>
+            <p className="text-ink-secondary mt-1 text-xs">
+              {stale.author ? `${stale.author} published` : "Someone published"} v
+              {stale.liveVersion}. Your draft is based on v{baseVersion}. Publishing now would
+              replace their changes with yours.
+            </p>
+            <div className="mt-3 max-h-72 overflow-auto">
+              {staleDiff && <DiffView diff={staleDiff} />}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setStale(null)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={async () => {
+                  setStale(null);
+                  await discardDraft();
+                }}
+              >
+                Discard mine
+              </Button>
+              <Button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setStale(null);
+                  await publish(true);
+                }}
+              >
+                Publish anyway
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog>
+      )}
 
       {editing && <SlackSection agent={rec.name} />}
       {editing && <ChannelSection kind="telegram" agent={rec.name} />}

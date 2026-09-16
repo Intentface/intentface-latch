@@ -131,6 +131,18 @@ export interface RunRecord {
    * store it as variable-length text.
    */
   toolsHash?: string | null;
+  /**
+   * The stored agent-record version this run executed on
+   * (`AgentConfig.configVersion`). Null for code-declared agents, which have no
+   * stored record.
+   *
+   * Written when the turn settles, so it reflects the configuration that
+   * produced the stored answer. A run that crashes mid-turn and RESUMES after a
+   * publish therefore records the version it finished on, not the one it
+   * started with — pinning resume to its original version needs
+   * version-addressable resolution, which is a separate piece of work.
+   */
+  agentVersion?: number | null;
   error?: string | null;
   startedAt: number;
   endedAt?: number | null;
