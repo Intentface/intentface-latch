@@ -165,10 +165,17 @@ export const agents = pgTable(
 );
 
 /**
- * Append-only history of published agent records. One row per publish; the
- * `latch_agents` row is always a copy of the version its `published_version`
- * names. Rollback is a FORWARD operation — republishing an old version appends
- * a new version carrying that record — so history is never rewritten.
+ * Append-only history of published agent records — the set of distinct
+ * CONFIGURATIONS this agent has had. One row per publish, and none for a
+ * publish whose content is unchanged, so history stays a list of real changes
+ * rather than of save events.
+ *
+ * The `latch_agents` row is always a copy of the version its `published_version`
+ * names. Rolling back (`activateVersion`) moves that pointer and appends NO
+ * version, so flipping between two configurations cannot inflate history —
+ * which is why WHEN each version was live is recorded separately, in
+ * `latch_agent_activations`.
+ *
  * Deleting an agent deletes its versions (the store's `remove` cascades).
  */
 export const agentVersions = pgTable(
