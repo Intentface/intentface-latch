@@ -37,13 +37,31 @@ export interface RecordDiff {
 /**
  * Longest common subsequence over LINES, then walked back into a diff.
  *
- * O(n·m) in lines, which is the right trade for prompts: a long one is a few
- * hundred lines, and the quadratic table keeps the implementation small enough
- * to read. A word-level diff would be prettier and much easier to get wrong.
+ * O(n·m) in the lines that actually differ. Identical leading and trailing lines
+ * are peeled off first, which is what keeps this cheap in practice: the usual
+ * edit is a line or two inside an otherwise untouched prompt, so the quadratic
+ * part sees a handful of lines rather than the whole document. Without that, a
+ * 2000-line prompt would allocate four million cells to report a one-word change.
+ *
+ * A word-level diff would be prettier and much easier to get wrong.
  */
 function diffLines(before: string, after: string): DiffLine[] {
-  const a = before.split("\n");
-  const b = after.split("\n");
+  const aAll = before.split("\n");
+  const bAll = after.split("\n");
+
+  let head = 0;
+  while (head < aAll.length && head < bAll.length && aAll[head] === bAll[head]) head++;
+  let tail = 0;
+  while (
+    tail < aAll.length - head &&
+    tail < bAll.length - head &&
+    aAll[aAll.length - 1 - tail] === bAll[bAll.length - 1 - tail]
+  ) {
+    tail++;
+  }
+
+  const a = aAll.slice(head, aAll.length - tail);
+  const b = bAll.slice(head, bAll.length - tail);
   const n = a.length;
   const m = b.length;
 
@@ -55,7 +73,7 @@ function diffLines(before: string, after: string): DiffLine[] {
     }
   }
 
-  const out: DiffLine[] = [];
+  const out: DiffLine[] = aAll.slice(0, head).map((text) => ({ kind: "same", text }) as DiffLine);
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
@@ -73,6 +91,7 @@ function diffLines(before: string, after: string): DiffLine[] {
   }
   for (; i < n; i++) out.push({ kind: "removed", text: a[i]! });
   for (; j < m; j++) out.push({ kind: "added", text: b[j]! });
+  for (const text of aAll.slice(aAll.length - tail)) out.push({ kind: "same", text });
   return out;
 }
 

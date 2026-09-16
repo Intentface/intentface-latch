@@ -37,6 +37,46 @@ describe("diffRecords", () => {
     ]);
   });
 
+  // Identical head/tail lines are peeled off before the quadratic part, so the
+  // boundaries are where an off-by-one would hide.
+  it("handles a change on the very first line", () => {
+    const d = diffRecords(rec(), rec({ instructions: "ONE\ntwo\nthree" }));
+    expect(d.instructions).toEqual([
+      { kind: "removed", text: "one" },
+      { kind: "added", text: "ONE" },
+      { kind: "same", text: "two" },
+      { kind: "same", text: "three" },
+    ]);
+  });
+
+  it("handles a change on the very last line", () => {
+    const d = diffRecords(rec(), rec({ instructions: "one\ntwo\nTHREE" }));
+    expect(d.instructions).toEqual([
+      { kind: "same", text: "one" },
+      { kind: "same", text: "two" },
+      { kind: "removed", text: "three" },
+      { kind: "added", text: "THREE" },
+    ]);
+  });
+
+  it("keeps a long prompt's untouched lines intact around a one-line edit", () => {
+    const lines = Array.from({ length: 400 }, (_, i) => `line ${i}`);
+    const edited = [...lines];
+    edited[200] = "line 200 (edited)";
+    const d = diffRecords(
+      rec({ instructions: lines.join("\n") }),
+      rec({ instructions: edited.join("\n") }),
+    );
+    expect(d.instructions.filter((l) => l.kind !== "same")).toEqual([
+      { kind: "removed", text: "line 200" },
+      { kind: "added", text: "line 200 (edited)" },
+    ]);
+    // Every other line survives as context, in order.
+    expect(d.instructions.filter((l) => l.kind === "same")).toHaveLength(399);
+    expect(d.instructions[0]).toEqual({ kind: "same", text: "line 0" });
+    expect(d.instructions.at(-1)).toEqual({ kind: "same", text: "line 399" });
+  });
+
   it("handles a prompt written from empty", () => {
     const d = diffRecords(rec({ instructions: "" }), rec({ instructions: "hello" }));
     expect(d.instructions).toEqual([

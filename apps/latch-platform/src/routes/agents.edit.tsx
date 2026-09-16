@@ -270,7 +270,10 @@ function AgentEditor() {
         setBaseVersion(status.draft?.baseVersion ?? status.liveVersion ?? undefined);
         if (status.draft) {
           suppressAutosave.current = true;
-          setRec(loadAgentRecord(status.draft.record as AgentRecord));
+          // Raw, NOT through `loadAgentRecord`: a draft stores editor state, so
+          // it restores as editor state. Re-applying the load conventions to
+          // something that already went through them would corrupt it.
+          setRec(status.draft.record as AgentRecord);
           setHasDraft(true);
         }
       })
@@ -291,7 +294,12 @@ function AgentEditor() {
       return;
     }
     const id = setTimeout(() => {
-      void saveAgentDraftFn({ data: { record: payloadOf(rec), baseVersion } })
+      // The EDITOR record, not `payloadOf(rec)`. `toSavePayload` drops the whole
+      // tool selection while `ctx.toolList` is still empty, and that list loads
+      // asynchronously (it opens the connections live) — so autosaving through
+      // it would silently wipe an agent's tools for anyone who starts typing
+      // before it arrives. A draft is editor state; it round-trips as-is.
+      void saveAgentDraftFn({ data: { record: rec, baseVersion } })
         .then((res) => {
           if (res.ok) {
             setDraftSavedAt(Date.now());
@@ -303,7 +311,6 @@ function AgentEditor() {
         });
     }, 800);
     return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec, editing, baseVersion]);
 
   async function discardDraft() {
