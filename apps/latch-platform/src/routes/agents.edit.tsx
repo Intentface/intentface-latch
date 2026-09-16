@@ -123,12 +123,16 @@ function AgentEditor() {
     initial ? loadAgentRecord(initial) : newAgentRecord(defaultModelId(models)),
   );
   const patch = useCallback(
-    (fn: (r: AgentRecord) => AgentRecord) =>
+    (fn: (r: AgentRecord) => AgentRecord) => {
+      // Outside the updater: React may invoke an updater twice (StrictMode), and
+      // a state updater should stay pure.
+      dirty.current = true;
       setRec((r) => {
         const next = fn(r);
         const reasoning = !!models.find((m) => m.id === next.modelId)?.reasoning;
         return coerceRecord(next, { modelSupportsReasoning: reasoning });
-      }),
+      });
+    },
     [models],
   );
   const setField = <TKey extends keyof AgentRecord>(key: TKey, value: AgentRecord[TKey]) =>
@@ -181,9 +185,20 @@ function AgentEditor() {
   const [message, setMessage] = useState("");
   const [stale, setStale] = useState<{ liveVersion: number; author?: string } | null>(null);
   const [staleDiff, setStaleDiff] = useState<RecordDiff | null>(null);
-  // Set when the editor loads a draft or restores a version, so autosave can
-  // tell "the user typed something" from "we just populated the form".
-  const suppressAutosave = useRef(true);
+  /**
+   * Whether the form holds a change the USER made.
+   *
+   * Autosave cannot key off `rec` changing: several things rewrite the record
+   * without anyone editing it — `applyToolList` rebuilds `tools` (with a fresh
+   * object identity) once the connections finish listing, loading a draft
+   * replaces the whole record, and learning the live version moves
+   * `baseVersion`. Treating any of those as an edit would create a draft for
+   * someone who only opened the editor, which would light the "unpublished
+   * draft" badge and tell colleagues a phantom edit is in progress.
+   *
+   * So only the user-edit funnel (`patch`) and a deliberate restore set this.
+   */
+  const dirty = useRef(false);
   const toggleExpand = (c: string) =>
     setExpanded((p) => {
       const n = new Set(p);
@@ -269,7 +284,7 @@ function AgentEditor() {
         setOthersEditing(status.othersEditing);
         setBaseVersion(status.draft?.baseVersion ?? status.liveVersion ?? undefined);
         if (status.draft) {
-          suppressAutosave.current = true;
+          dirty.current = false;
           // Raw, NOT through `loadAgentRecord`: a draft stores editor state, so
           // it restores as editor state. Re-applying the load conventions to
           // something that already went through them would corrupt it.
@@ -289,10 +304,7 @@ function AgentEditor() {
   // never blocks, never confirms, and never touches what is running.
   useEffect(() => {
     if (!editing) return;
-    if (suppressAutosave.current) {
-      suppressAutosave.current = false;
-      return;
-    }
+    if (!dirty.current) return;
     const id = setTimeout(() => {
       // The EDITOR record, not `payloadOf(rec)`. `toSavePayload` drops the whole
       // tool selection while `ctx.toolList` is still empty, and that list loads
@@ -319,7 +331,7 @@ function AgentEditor() {
     setBusy(true);
     try {
       await discardAgentDraftFn({ data: { name: initial.name, scope: initial.scope } });
-      suppressAutosave.current = true;
+      dirty.current = false;
       setRec(loadAgentRecord(initial));
       setHasDraft(false);
       setDraftSavedAt(null);
@@ -331,7 +343,7 @@ function AgentEditor() {
 
   /** Load a past version into the draft. Publishing stays the user's call. */
   function restoreVersion(record: AgentRecord, version: number) {
-    suppressAutosave.current = false; // this IS a change worth autosaving
+    dirty.current = true; // a deliberate change, so it SHOULD autosave
     setRec(loadAgentRecord(record));
     setMessage(`Restored from v${version}`);
   }

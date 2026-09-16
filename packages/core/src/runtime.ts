@@ -2119,7 +2119,6 @@ export function createRuntime<P, RC = unknown>(
             usageCacheWriteTokens: cacheWriteTokens || undefined,
             costTotal: cost,
             toolsHash,
-            agentVersion: cfg.configVersion ?? null,
             endedAt: paused ? undefined : Date.now(),
           },
           lease,
@@ -2299,12 +2298,14 @@ export function createRuntime<P, RC = unknown>(
     chatId: string,
     agentName: string,
     messages: AppMessage[],
+    agentVersion?: number,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
     if (storage.openTurn) {
       const run = await storage.openTurn(principal, {
         chatId,
         agent: agentName,
         messages,
+        agentVersion: agentVersion ?? null,
         ...(dur.enabled ? { lease: { owner: dur.instanceId, ttlMs: dur.leaseTtlMs } } : {}),
       });
       return {
@@ -2312,7 +2313,7 @@ export function createRuntime<P, RC = unknown>(
         lease: dur.enabled ? { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } : undefined,
       };
     }
-    const opened = await openRun(principal, chatId, agentName);
+    const opened = await openRun(principal, chatId, agentName, agentVersion);
     if (messages.length > 0) await storage.appendMessages(chatId, messages);
     return opened;
   }
@@ -2321,6 +2322,7 @@ export function createRuntime<P, RC = unknown>(
     principal: P,
     chatId: string,
     agentName: string,
+    agentVersion?: number,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
     if (dur.enabled) {
       const run = await storage.claimRun({
@@ -2329,11 +2331,17 @@ export function createRuntime<P, RC = unknown>(
         agent: agentName,
         owner: dur.instanceId,
         ttlMs: dur.leaseTtlMs,
+        agentVersion: agentVersion ?? null,
       });
       return { run, lease: { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } };
     }
     return {
-      run: await storage.createRun(principal, { chatId, agent: agentName, kind: "turn" }),
+      run: await storage.createRun(principal, {
+        chatId,
+        agent: agentName,
+        kind: "turn",
+        agentVersion: agentVersion ?? null,
+      }),
       lease: undefined,
     };
   }
@@ -2385,7 +2393,7 @@ export function createRuntime<P, RC = unknown>(
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
     // lands in history — the client retries it (with its turn reservation released).
     const { run, lease } = await withReservation(admitted, () =>
-      openTurn(principal, resolvedChatId, agentName, [message]),
+      openTurn(principal, resolvedChatId, agentName, [message], cfg.configVersion),
     );
 
     return buildTurn({
@@ -2699,7 +2707,7 @@ export function createRuntime<P, RC = unknown>(
       turnContext,
     );
     const admitted = await admitContinuation(principal, chat.agent, "decision");
-    const { run, lease } = await openRun(principal, chatId, chat.agent);
+    const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
 
     return buildTurn({
       resolvedChatId: chatId,
@@ -2773,7 +2781,7 @@ export function createRuntime<P, RC = unknown>(
     // a busy chat refuses before anything is recorded, so the retry finds the
     // call still unanswered and resumes it — persisting first would make the
     // retry a "duplicate submit" no-op and lose the answer.
-    const { run, lease } = await openTurn(principal, chatId, chat.agent, changed);
+    const { run, lease } = await openTurn(principal, chatId, chat.agent, changed, cfg.configVersion);
 
     return buildTurn({
       resolvedChatId: chatId,
@@ -3110,7 +3118,7 @@ export function createRuntime<P, RC = unknown>(
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
     const { cfg, modelId, runtimeCtx, run, lease } = await withReservation(admitted, async () => {
       const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext);
-      const opened = await openTurn(o.principal, chatId, o.agent, [o.message]);
+      const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion);
       return { ...resolved, ...opened };
     });
     const onProgress = o.onProgress;
@@ -3203,7 +3211,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
     );
     const admitted = await admitContinuation(principal, subChat.agent, "decision");
-    const { run, lease } = await openRun(principal, subChatId, subChat.agent);
+    const { run, lease } = await openRun(principal, subChatId, subChat.agent, cfg.configVersion);
     const res = await buildTurn({
       resolvedChatId: subChatId,
       principal,

@@ -94,7 +94,7 @@ function memoryStorage(): { storage: StorageAdapter<P>; runs: Map<string, RunRec
       messages.set(chatId, list);
     },
     async createRun(_p, input) {
-      const run = { id: `run_${++n}`, chatId: input.chatId, agent: input.agent, status: "active", startedAt: Date.now() } as RunRecord;
+      const run = { id: `run_${++n}`, chatId: input.chatId, agent: input.agent, status: "active", agentVersion: input.agentVersion ?? null, startedAt: Date.now() } as RunRecord;
       runs.set(run.id, run);
       return run;
     },
@@ -179,8 +179,8 @@ describe("LatchTelemetry as the observation seam", () => {
     // The tracer needs it to tag the trace...
     expect(seen).toHaveLength(1);
     expect(seen[0]!.agentVersion).toBe(8);
-    // ...and it is persisted, so a past answer stays attributable to the exact
-    // configuration that produced it even after the agent is edited again.
+    // ...and it is persisted AT OPEN, so a run that errors or crashes before any
+    // terminal update still says which version it ran.
     const row = [...lastRuns.values()].at(-1)!;
     expect(row.agentVersion).toBe(8);
   });
@@ -242,6 +242,19 @@ describe("LatchTelemetry as the observation seam", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("errored");
     expect(rows[0]!.error).toContain("provider exploded");
+  });
+
+  it("an errored run still records the agent version it ran", async () => {
+    const rt = build({}, failingModel(), 8);
+    await (await rt.handleChat({ agent: "echo", principal, message: userMessage() })).text();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // "Which version produced these failures" is the question most worth
+    // answering, and a failing run never reaches a terminal update — so the
+    // version has to be stamped when the run is opened, not when it settles.
+    const row = [...lastRuns.values()][0]!;
+    expect(row.status).toBe("errored");
+    expect(row.agentVersion).toBe(8);
   });
 
   it("stamps the trigger for programmatic runs", async () => {
