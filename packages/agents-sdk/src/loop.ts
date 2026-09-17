@@ -152,7 +152,7 @@ export function renderTranscript(
  *                             progress chunks are collapsed. A gated tool
  *                             cannot also stream; that is the trade.
  */
-function wrapTools(tools: ToolSet, hooks: ReturnType<typeof compose>, run: RunContext): ToolSet {
+export function wrapTools(tools: ToolSet, hooks: ReturnType<typeof compose>, run: RunContext): ToolSet {
   const gating = hooks.has("tool_call");
   const hooked = gating || hooks.has("tool_result");
   if (!hooked) return tools;
@@ -223,7 +223,7 @@ function wrapTools(tools: ToolSet, hooks: ReturnType<typeof compose>, run: RunCo
  * SDK's own auto-resubmit uses — so outputs an earlier run already handled are
  * not fired again.
  */
-async function fireClientToolResults(
+export async function fireClientToolResults(
   messages: UIMessage[],
   tools: ToolSet,
   hooks: ReturnType<typeof compose>,
@@ -285,7 +285,7 @@ async function fireClientToolResults(
  * on a complete paragraph and not on the four-character fragment it arrived in.
  * A rule that hides the part drops its chunks entirely.
  */
-function coalesce(
+export function coalesce(
   chunks: UIMessageChunk[],
   hooks: ReturnType<typeof compose>,
   ctx: StepContext,
@@ -324,7 +324,7 @@ function coalesce(
 }
 
 /** Append parts produced by `step_end` onto the run's assistant message. */
-function appendParts(messages: UIMessage[], parts: Part[]): UIMessage[] {
+export function appendParts(messages: UIMessage[], parts: Part[]): UIMessage[] {
   if (!parts.length) return messages;
   const i = messages.length - 1;
   const last = messages[i];
@@ -332,7 +332,7 @@ function appendParts(messages: UIMessage[], parts: Part[]): UIMessage[] {
   return [...messages.slice(0, i), { ...last, parts: [...(last.parts as Part[]), ...parts] } as UIMessage];
 }
 
-const lastUserText = (messages: UIMessage[]): string | undefined => {
+export const lastUserText = (messages: UIMessage[]): string | undefined => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
     if (m.role !== "user") continue;
@@ -342,7 +342,7 @@ const lastUserText = (messages: UIMessage[]): string | undefined => {
   return undefined;
 };
 
-const replaceLastUserText = (messages: UIMessage[], text: string): UIMessage[] => {
+export const replaceLastUserText = (messages: UIMessage[], text: string): UIMessage[] => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
     if (m.role !== "user") continue;
