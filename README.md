@@ -120,7 +120,7 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 apps/example                 runnable example + the smoke-test suite (not published)
 ```
 
-Minimal install = **core + drizzle** (+ server if standalone). Everything else is opt-in. Packages publish to npm as `@intentface/latch-*`, every one at the same version. See [RELEASING.md](RELEASING.md).
+Minimal install = **core + drizzle** (+ server if standalone). Everything else is opt-in. Packages publish to npm as `@intentface/latch-*`, every published package at the same version (`latch-renderer` is private and stays out). See [RELEASING.md](RELEASING.md).
 
 ---
 
