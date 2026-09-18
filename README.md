@@ -96,22 +96,31 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 ## Packages
 
 ```
-@intentface/latch-core       runtime, AppMessage + projections, durability, vault,
-                             scheduler, pricing, the seams.   deps: ai, zod
-                             /models: models.dev catalog + provider hooks
-                             (optional @ai-sdk/* peers, loaded lazily)
-@intentface/latch-drizzle    StorageAdapter + SecretStore (SQLite & Postgres) + migrations
-@intentface/latch-server     one mountable Web handler (chat, approvals, lists,
-                             connection OAuth) — framework-agnostic; Hono in /hono
-@intentface/latch-mcp        MCP host: SSRF allowlist, vault auth, OAuth.   deps: @ai-sdk/mcp
-@intentface/latch-memory     agent memory: always-loaded compiled index, episodic
-                             store + search/save tools, background extraction &
-                             consolidation over a MemoryStore seam (Loredex first)
+@intentface/latch-core           runtime, AppMessage + projections, durability, vault,
+                                 scheduler, pricing, compaction, subagents, the seams.
+                                 deps: zod (ai >= 7 is a peer)
+                                 /models: models.dev catalog + provider hooks
+                                 /harness: bash/read/write/glob/grep over the sandbox
+                                 seam, web_fetch, askUser, schedule tools
+@intentface/latch-drizzle        StorageAdapter + SecretStore + limit/memory/agent
+                                 stores (SQLite & Postgres) + migrations
+@intentface/latch-server         one mountable Web handler (chat, approvals, lists,
+                                 schedules, connection OAuth, cron) — Hono in /hono
+@intentface/latch-mcp            MCP host: SSRF allowlist, vault auth, OAuth + DCR
+@intentface/latch-openapi        tools from an OpenAPI spec, same connection model
+@intentface/latch-memory         agent memory: compiled index per turn, search/save
+                                 tools, background extraction & consolidation
+@intentface/latch-channels       Slack, Telegram, WhatsApp on one turn kernel
+@intentface/latch-agent-builder  agent records as data + the builder agent
+@intentface/latch-langfuse       tracing (Langfuse over OpenTelemetry)
+@intentface/latch-net            SSRF-safe fetch for your own code
+@intentface/latch-renderer       headless-browser fetch service (private, deployed
+                                 not published)
 
 apps/example                 runnable example + the smoke-test suite (not published)
 ```
 
-Minimal install = **core + drizzle** (+ server if standalone). Everything else is opt-in. Packages publish to npm as `@intentface/latch-*`, every one at the same version. See [RELEASING.md](RELEASING.md).
+Minimal install = **core + drizzle** (+ server if standalone). Everything else is opt-in. Packages publish to npm as `@intentface/latch-*`, every published package at the same version (`latch-renderer` is private and stays out). See [RELEASING.md](RELEASING.md).
 
 ---
 
@@ -121,9 +130,11 @@ Minimal install = **core + drizzle** (+ server if standalone). Everything else i
 
 **Working today** also includes **memory** (`@intentface/latch-memory`): agents that declare `memory` get a compiled index injected per turn, `memory_search`/`memory_save` tools, and background extraction + consolidation via the cron sweep. Scopes: `agent-user` | `agent-org` | `user`. Caveat: on an org-shared connection, per-user separation is a folder convention — anyone with workspace access can read the `_memory/**` files.
 
-**Planned / not yet built:** files & attachments (`FileStore`), workspaces (Daytona/local sandboxes), code-mode (sandboxed composed tools), subagents, MCP elicitation, compaction (the projection plumbing exists; the operation doesn't), observability (OTel), OpenAPI/`/docs`, CLI, a general evals framework (the platform app already ships an eval runner plus a memory-consolidation eval set; a reusable package does not exist yet), and models.dev-backed live pricing. See [`PLAN.md`](./PLAN.md) for the roadmap.
+**Also working:** subagents (`spawn_agent`, each in its own persisted thread; approvals surface to the parent), compaction (`runtime.compactChat`, projection-only — the record is never rewritten), a sandbox seam with the harness tools, code execution in a QuickJS engine, OpenAPI tools, per org/user/agent limits, agents as data, and the models.dev catalog for pricing, reasoning and prompt caching.
 
-This is pre-1.0 and built on `ai@7.0.0-beta.*` — APIs will move.
+**Not built:** files & attachments as a seam (`FileStore`), MCP elicitation, a CLI, a reusable evals package (the platform app has an eval runner; nothing is published), and observability beyond the Langfuse/OpenTelemetry exporter. See [`PLAN.md`](./PLAN.md).
+
+Pre-1.0 on purpose, on AI SDK v7 (`ai >= 7` as a peer). Public API may still move; releases are patch-level until it settles.
 
 ---
 
