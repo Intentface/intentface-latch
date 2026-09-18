@@ -43,7 +43,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "tsx src/smoke.ts",
     "smoke:pg": "tsx src/smoke.pg.ts",
-    "smoke:agents": "tsx src/agent-store.smoke.ts"
+    "smoke:agents": "tsx src/agent-store.smoke.ts",
+    "smoke:agent-versions": "tsx src/agent-versions.smoke.ts",
+    "smoke:agent-versions:pg": "tsx src/agent-versions.smoke.pg.ts"
   },
   "dependencies": {
     "@intentface/latch-agent-builder": "workspace:^",

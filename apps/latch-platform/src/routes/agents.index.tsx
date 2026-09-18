@@ -23,7 +23,11 @@ const countLabel = (n: number) =>
   n === 0 ? "No custom agents yet" : `${n} agent${n === 1 ? "" : "s"}`;
 
 function AgentsList() {
-  const { records } = useLoaderData({ from: "/agents" });
+  const { records, drafts } = useLoaderData({ from: "/agents" });
+  // Agents this user has unpublished changes on — so a draft left for tomorrow
+  // is discoverable rather than forgotten. (No navigation blocker: leaving
+  // loses nothing, because the draft is already saved.)
+  const draftNames = new Set(drafts.map((d) => `${d.scope}:${d.name}`));
   const { slack } = Route.useSearch();
   const navigate = useNavigate();
 
@@ -100,6 +104,14 @@ function AgentsList() {
                 </Settings.Description>
               </Settings.LabelGroup>
               <Settings.Value className="text-xs">
+                {draftNames.has(`${agent.scope}:${agent.name}`) && (
+                  <span
+                    className="mr-2 rounded-full bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-700 dark:text-amber-400"
+                    title="You have unpublished changes"
+                  >
+                    draft
+                  </span>
+                )}
                 {agent.scope === "org" ? "org" : "personal"}
               </Settings.Value>
               <Settings.Chevron />

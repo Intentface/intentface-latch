@@ -131,6 +131,22 @@ export interface RunRecord {
    * store it as variable-length text.
    */
   toolsHash?: string | null;
+  /**
+   * The stored agent-record version this run STARTED on
+   * (`AgentConfig.configVersion`). Null for code-declared agents, which have no
+   * stored record.
+   *
+   * Written when the run is opened, not when it settles — a run that errors or
+   * crashes never reaches a terminal update, and "which version produced these
+   * failures" is exactly the question worth answering. It stays fixed across a
+   * resume, so it remains the anchor for pinning a resumed run to the
+   * configuration it began with.
+   *
+   * Per-execution attribution is a telemetry concern instead: each turn tags its
+   * trace with the version it actually resolved, so a run resumed after a
+   * publish shows both on one trace.
+   */
+  agentVersion?: number | null;
   error?: string | null;
   startedAt: number;
   endedAt?: number | null;
@@ -261,7 +277,7 @@ export interface StorageAdapter<P> {
    */
   createRun(
     principal: P,
-    input: { chatId: string; agent: string; kind?: string },
+    input: { chatId: string; agent: string; kind?: string; agentVersion?: number | null },
   ): Promise<RunRecord>;
   /**
    * T2 durable: create a run already leased to `owner` (fencingToken starts at 1,
@@ -274,6 +290,7 @@ export interface StorageAdapter<P> {
     agent: string;
     owner: string;
     ttlMs: number;
+    agentVersion?: number | null;
   }): Promise<RunRecord>;
   /**
    * Open a turn ATOMICALLY: the run row (the one-active-run-per-chat check) and
@@ -294,6 +311,7 @@ export interface StorageAdapter<P> {
       agent: string;
       messages: AppMessage[];
       lease?: { owner: string; ttlMs: number };
+      agentVersion?: number | null;
     },
   ): Promise<RunRecord>;
   // ↑ Same one-active-run-per-chat rule as `createRun`: a live lease on another

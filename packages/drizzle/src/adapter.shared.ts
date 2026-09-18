@@ -134,6 +134,7 @@ export function makeStorageAdapter<P>(
     costTotal: r.costTotal ?? undefined,
     kind: r.kind,
     toolsHash: r.toolsHash,
+    agentVersion: r.agentVersion,
     error: r.error,
     startedAt: r.startedAt,
     endedAt: r.endedAt,
@@ -253,7 +254,13 @@ export function makeStorageAdapter<P>(
 
   const runRow = (
     principal: P,
-    input: { chatId: string; agent: string; kind?: string; lease?: { owner: string; ttlMs: number } },
+    input: {
+      chatId: string;
+      agent: string;
+      kind?: string;
+      agentVersion?: number | null;
+      lease?: { owner: string; ttlMs: number };
+    },
     now: number,
   ): Record<string, unknown> => ({
     id: newId("run"),
@@ -262,6 +269,9 @@ export function makeStorageAdapter<P>(
     status: "active" as RunStatus,
     identity: principal,
     kind: input.kind,
+    // Stamped at OPEN, so a run that errors or crashes still says which agent
+    // version it ran — the terminal update it never reaches cannot record it.
+    agentVersion: input.agentVersion ?? null,
     startedAt: now,
     ...(input.lease
       ? {
@@ -424,7 +434,16 @@ export function makeStorageAdapter<P>(
 
     async claimRun(input) {
       const now = Date.now();
-      const row = runRow(input.principal, { chatId: input.chatId, agent: input.agent, lease: { owner: input.owner, ttlMs: input.ttlMs } }, now);
+      const row = runRow(
+        input.principal,
+        {
+          chatId: input.chatId,
+          agent: input.agent,
+          agentVersion: input.agentVersion,
+          lease: { owner: input.owner, ttlMs: input.ttlMs },
+        },
+        now,
+      );
       return rowToRun(await openRunRow(row, input.chatId, now));
     },
 

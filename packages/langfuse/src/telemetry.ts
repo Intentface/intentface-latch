@@ -141,6 +141,10 @@ export function langfuseTelemetry<P>(
       const sessionId = run.rootChatId ?? run.chatId;
       const tags = [`owner:${owner}`, `agent:${run.agent}`, `run:${run.runId}`];
       if (run.parentRunId) tags.push(`parent-run:${run.parentRunId}`, "subagent");
+      // The stored agent-record version behind this turn — the tag that makes
+      // "did v8 actually score better than v7?" a filter rather than a guess.
+      // Absent for code-declared agents, which have no stored record.
+      if (run.agentVersion != null) tags.push(`agent-version:${run.agentVersion}`);
       // `agent-owner:` is how the observability feed finds runs of the agents a
       // reader administers — including runs by OTHER users. Best-effort: a failed
       // lookup must not cost the turn its trace, it only costs that filter.
@@ -165,6 +169,7 @@ export function langfuseTelemetry<P>(
               agent: run.agent,
               model: run.modelId,
               depth: String(run.depth),
+              ...(run.agentVersion != null ? { agentVersion: String(run.agentVersion) } : {}),
               ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
             },
           },

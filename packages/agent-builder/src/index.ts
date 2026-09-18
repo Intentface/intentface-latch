@@ -7,7 +7,16 @@ export type {
   ConnectionChoice,
 } from "./agent-builder";
 export type { AgentBuilderExtension } from "./extension";
-export type { AgentBuilderStore } from "./store";
+export type {
+  AgentActivation,
+  AgentActivationSource,
+  AgentBuilderStore,
+  AgentDraft,
+  AgentDraftSummary,
+  AgentPublishOptions,
+  AgentPublishSource,
+  AgentVersionMeta,
+} from "./store";
 export {
   AgentRecordSchema,
   AgentExecSchema,

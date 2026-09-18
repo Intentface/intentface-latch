@@ -80,6 +80,9 @@ export const runs = sqliteTable(
     /** Opaque fingerprint of the sorted tool names this turn sent (see
      * `toolsetHash`) — detects toolset churn. */
     toolsHash: text("tools_hash"),
+    /** The agent-record version (`latch_agent_versions.version`) this turn ran.
+     * NULL for code-declared agents, which have no stored record. */
+    agentVersion: integer("agent_version"),
     error: text("error"),
     startedAt: integer("started_at").notNull(),
     endedAt: integer("ended_at"),
@@ -158,10 +161,119 @@ export const agents = sqliteTable(
     /** NULL=default, 0=unlimited, N=cap (AgentRecord["maxSteps"]). */
     maxSteps: integer("max_steps"),
     scope: text("scope").notNull(),
+    /** Which `latch_agent_versions.version` this live row is a copy of. */
+    publishedVersion: integer("published_version"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
   (t) => [uniqueIndex("latch_agents_owner_name").on(t.owner, t.name)],
+);
+
+/**
+ * Append-only history of published agent records — the set of distinct
+ * CONFIGURATIONS this agent has had. One row per publish, and none for a
+ * publish whose content is unchanged, so history stays a list of real changes
+ * rather than of save events.
+ *
+ * The `latch_agents` row is always a copy of the version its `published_version`
+ * names. Rolling back (`activateVersion`) moves that pointer and appends NO
+ * version, so flipping between two configurations cannot inflate history —
+ * which is why WHEN each version was live is recorded separately, in
+ * `latch_agent_activations`.
+ *
+ * Deleting an agent deletes its versions (the store's `remove` cascades).
+ */
+export const agentVersions = sqliteTable(
+  "latch_agent_versions",
+  {
+    id: text("id").primaryKey(),
+    /** Same opaque ownership key as `latch_agents.owner`. */
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    /** Monotonic per (owner, name), from 1. */
+    version: integer("version").notNull(),
+    /** The full normalized `AgentRecord` as published. */
+    record: text("record", { mode: "json" }).notNull(),
+    /** Host-supplied publisher id; NULL for the migration backfill. */
+    author: text("author"),
+    /** 'editor' | 'builder-agent' | 'api' | 'backfill'. */
+    source: text("source"),
+    /**
+     * string[] — top-level record fields that differ from the PREVIOUS version,
+     * computed at write time. NULL for v1 (nothing to differ from). Denormalized
+     * so a history list can say "instructions, model" without loading two
+     * snapshots and diffing them.
+     */
+    changedFields: text("changed_fields", { mode: "json" }),
+    /** Optional one-line note from whoever published. */
+    changeMessage: text("change_message"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    // Backstops the max(version)+1 race: a losing concurrent publish retries.
+    uniqueIndex("latch_agent_versions_owner_name_version").on(t.owner, t.name, t.version),
+    index("latch_agent_versions_owner_name_idx").on(t.owner, t.name),
+  ],
+);
+
+/**
+ * Who made which version live, and when — the publish timeline.
+ *
+ * `latch_agent_versions` is the set of distinct CONFIGURATIONS; activating an
+ * existing version moves a pointer and appends no version, so without this table
+ * a rollback would leave no trace of itself. One row per publish AND per
+ * activation, so the two together answer both "what did this agent look like"
+ * and "what was it running on Tuesday".
+ */
+export const agentActivations = sqliteTable(
+  "latch_agent_activations",
+  {
+    id: text("id").primaryKey(),
+    /** Same opaque ownership key as `latch_agents.owner`. */
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    /** The version that became live. */
+    version: integer("version").notNull(),
+    /** Host-supplied actor id; NULL for the migration backfill. */
+    actor: text("actor"),
+    /** 'publish' (new content) | 'activate' (rollback) | 'backfill'. */
+    source: text("source"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [index("latch_agent_activations_owner_name_idx").on(t.owner, t.name, t.createdAt)],
+);
+
+/**
+ * One unpublished working copy per (agent, editor).
+ *
+ * Deliberately PER EDITOR, not per agent: `owner` is an isolation boundary a
+ * whole org shares, so a single draft would let two admins silently overwrite
+ * each other's half-written prompt. Drafts never affect a running agent — the
+ * live record is `latch_agents`, and a draft becomes live only by being
+ * published, which is what `base_version` guards.
+ */
+export const agentDrafts = sqliteTable(
+  "latch_agent_drafts",
+  {
+    /** Same opaque ownership key as `latch_agents.owner`. */
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    /** The PERSON editing (see `AgentStoreOptions.editorKey`). */
+    editor: text("editor").notNull(),
+    /** The full in-progress `AgentRecord`. */
+    record: text("record", { mode: "json" }).notNull(),
+    /**
+     * The version this draft was started from. Compared against the live
+     * `published_version` at publish time: if they differ, someone else has
+     * published since, and publishing blind would silently revert them.
+     */
+    baseVersion: integer("base_version"),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.owner, t.name, t.editor] }),
+    index("latch_agent_drafts_owner_idx").on(t.owner),
+  ],
 );
 
 /**

@@ -94,7 +94,7 @@ function memoryStorage(): { storage: StorageAdapter<P>; runs: Map<string, RunRec
       messages.set(chatId, list);
     },
     async createRun(_p, input) {
-      const run = { id: `run_${++n}`, chatId: input.chatId, agent: input.agent, status: "active", startedAt: Date.now() } as RunRecord;
+      const run = { id: `run_${++n}`, chatId: input.chatId, agent: input.agent, status: "active", agentVersion: input.agentVersion ?? null, startedAt: Date.now() } as RunRecord;
       runs.set(run.id, run);
       return run;
     },
@@ -120,13 +120,18 @@ const userMessage = (): AppMessage => ({
   metadata: { visibility: "user", createdAt: Date.now() },
 });
 
-function build(telemetry: Record<string, unknown>, agentModel: MockLanguageModelV4 = mockModel()) {
+function build(
+  telemetry: Record<string, unknown>,
+  agentModel: MockLanguageModelV4 = mockModel(),
+  /** Stand-in for a store-resolved agent, which carries its record's version. */
+  configVersion?: number,
+) {
   const mem = memoryStorage();
   lastRuns = mem.runs;
   return createRuntime<P>({
     storage: mem.storage,
     context: defineContext<P, unknown>({ build: async () => ({}) }),
-    agents: { echo: defineAgent({ model: agentModel, instructions: "hi" }) },
+    agents: { echo: defineAgent({ model: agentModel, instructions: "hi", configVersion }) },
     // 1 unit per token → turn cost = 7 + 3 = 10.
     pricing: staticPricing({ "mock-model": { inputPer1M: 1_000_000, outputPer1M: 1_000_000 } }),
     telemetry: telemetry as never,
@@ -159,6 +164,37 @@ describe("LatchTelemetry as the observation seam", () => {
     expect(outcome.usage.inputTokens).toBe(7);
     expect(outcome.cost).toBe(10);
     expect((outcome.messages as AppMessage[]).some((m) => m.role === "assistant")).toBe(true);
+  });
+
+  it("carries the agent's stored version onto the run meta and the run row", async () => {
+    const seen: TelemetryRunMeta<P>[] = [];
+    const rt = build(
+      { onRunFinished: (run: TelemetryRunMeta<P>) => void seen.push(run) },
+      mockModel(),
+      8,
+    );
+    await (await rt.handleChat({ agent: "echo", principal, message: userMessage() })).text();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The tracer needs it to tag the trace...
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.agentVersion).toBe(8);
+    // ...and it is persisted AT OPEN, so a run that errors or crashes before any
+    // terminal update still says which version it ran.
+    const row = [...lastRuns.values()].at(-1)!;
+    expect(row.agentVersion).toBe(8);
+  });
+
+  it("leaves the version unset for a code-declared agent", async () => {
+    const seen: TelemetryRunMeta<P>[] = [];
+    const rt = build({ onRunFinished: (run: TelemetryRunMeta<P>) => void seen.push(run) });
+    await (await rt.handleChat({ agent: "echo", principal, message: userMessage() })).text();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // No stored record, so no version to claim — null rather than a fake 1,
+    // which would be indistinguishable from a real first version.
+    expect(seen[0]!.agentVersion).toBeUndefined();
+    expect([...lastRuns.values()].at(-1)!.agentVersion).toBeNull();
   });
 
   it("a throwing hook never breaks the turn", async () => {
@@ -206,6 +242,19 @@ describe("LatchTelemetry as the observation seam", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("errored");
     expect(rows[0]!.error).toContain("provider exploded");
+  });
+
+  it("an errored run still records the agent version it ran", async () => {
+    const rt = build({}, failingModel(), 8);
+    await (await rt.handleChat({ agent: "echo", principal, message: userMessage() })).text();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // "Which version produced these failures" is the question most worth
+    // answering, and a failing run never reaches a terminal update — so the
+    // version has to be stamped when the run is opened, not when it settles.
+    const row = [...lastRuns.values()][0]!;
+    expect(row.status).toBe("errored");
+    expect(row.agentVersion).toBe(8);
   });
 
   it("stamps the trigger for programmatic runs", async () => {
