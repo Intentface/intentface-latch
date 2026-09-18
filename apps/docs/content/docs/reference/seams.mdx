@@ -163,3 +163,57 @@ resolveReasoningOptions: (modelId, effort) =>
 
 Both exist so core carries no provider SDK. You don't have to write them: [`@intentface/latch-core/models`](/docs/reference/packages#latch-core) ships `providerDefaults(catalog)`, which supplies these two plus `pricing` and `resolvePromptCaching` from one models.dev-backed catalog. Keep the tool keys consistent across providers (`web_search`, `web_fetch`) and your prompts and rendering stay provider-agnostic.
 
+## Extensions — moments and effects
+
+Every seam above adds one capability. `extensions` is the seam for adding a capability of your own: an extension attaches handlers to the **moments** of a turn and returns **effects**, and the runtime composes any number of them with one merge rule per moment. Attach them runtime-wide or per agent; with none attached, a turn is byte-identical to a runtime without the seam.
+
+```ts
+import { defineExtension } from "@intentface/latch-core";
+
+const auditTools = defineExtension("audit", (ext) => {
+  // Refuse a tool for this tenant. First block wins.
+  ext.on("tool_call", ({ toolName }, run) =>
+    toolName === "delete_record" && plan(run.principal) === "free"
+      ? { block: true, reason: "Deleting records needs the Team plan." }
+      : undefined,
+  );
+  // Tell the customer something after each step. The model never sees it.
+  ext.notify((step) => `${step.usage.inputTokens ?? 0} tokens in`);
+  // A slash command answered without a model call.
+  ext.registerCommand("stats", { description: "Turns this month", handler: async () => `${await count()} turns` });
+});
+
+createRuntime({
+  // …
+  extensions: [auditTools],            // every turn
+});
+defineAgent({ /* … */, extensions: [x] }); // this agent's turns, after the runtime's
+```
+
+A handler returns an effect, never a rewritten world; `undefined` means no effect. The effect type per moment is the permission — you cannot do everything everywhere:
+
+| Moment | Effect | Touches |
+| --- | --- | --- |
+| `session_start`, `before_agent_start` | `{ inject }` / `{ replace }` | the stored transcript, before the model runs |
+| `input` | `{ transform }` / `{ handled, reply }` | the user's text, or answer without the model |
+| `register_tools` | a new toolset | tools — additions are capabilities, always active |
+| `tool_call` | `{ block, reason }` | a veto; the reason reaches the model as the result |
+| `tool_result` | `{ output }` | the stored result **and** what the model reads |
+| `instructions` | `{ append }` / `{ replace }` | the system prompt this turn (a lens) |
+| `context` | `{ messages }` | the model's view of history this turn (a lens) |
+| `step_start` | `{ stop, model, activeTools }` | whether and how the next step runs |
+| `step_end` | `{ append }` | parts appended to the reply — stored, and streamed live |
+| `render` | `{ hide }` / `{ replace }` | what the customer sees — every part on load, and extension-added parts live; never storage |
+| `error`, `agent_end` | — | observe |
+
+Three rules that follow from the table. **Storage keeps the truth**: `tool_result` changes what is stored, so a secret masked there is gone everywhere; `render` changes only the view, for the rarer case where the model should keep the truth and the person should not see it. **Order matters at `step_end`**: handlers run in extension order and the next model call waits for all of them, so list an extension that persists before the ones that observe. **Failure is open by default**: a throwing handler is reported and skipped, so one broken extension never breaks a turn — except one marked `critical`, which fails the run instead, because a persistence handler whose database is down has lost the step, not produced nothing.
+
+Identity reaches every moment as a trailing `run` argument (`run.principal`). Declare its shape once and every handler is typed:
+
+```ts
+declare module "@intentface/latch-core" {
+  interface Principal { orgId: string; userId: string }
+}
+```
+
+Not yet on this seam: per-step re-evaluation of `instructions`/`context` (both apply to the turn's prompt), live `render` of the model's own text, and an extension contributing routes, tables or jobs. Runtime-wide extensions also render on `loadHistory`; an agent's own do not, since no agent is resolved there.

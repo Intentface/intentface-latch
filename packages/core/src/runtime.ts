@@ -11,7 +11,7 @@ import {
   tool,
   toUIMessageStream,
 } from "ai";
-import type { Experimental_SandboxSession, LanguageModel } from "ai";
+import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
 import type { AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition } from "./context.js";
@@ -58,6 +58,22 @@ import type {
   ScheduleRecord,
   StorageAdapter,
 } from "./storage.js";
+import {
+  compose,
+  fireClientToolResults,
+  insertStepParts,
+  isNewSession,
+  lastUserTextOf,
+  renderTranscript,
+  replaceLastUserText,
+  wrapTools,
+  type Extension,
+  type Part,
+  type Principal as ExtensionPrincipal,
+  type RunContext as ExtensionRunContext,
+  type StepContext as ExtensionStepContext,
+  type StepInfo as ExtensionStepInfo,
+} from "./extensions/index.js";
 
 /**
  * The Runtime — composition root + operations facade.
@@ -283,6 +299,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * finish. Optional — without it, nothing is limited.
    */
   limits?: LatchLimits<P>;
+  /**
+   * Extensions attached to EVERY turn this runtime runs, before the agent's
+   * own (`AgentConfig.extensions`). An extension attaches handlers to the
+   * moments of a turn and returns effects — see `extensions/extension.ts`.
+   * Optional — with none attached every moment is a no-op and a turn is
+   * byte-identical to a runtime without the seam. Order matters for
+   * `step_end`: list an extension that persists before ones that observe.
+   */
+  extensions?: Extension[];
 }
 
 export interface HandleChatInput<P> {
@@ -1329,8 +1354,10 @@ export function createRuntime<P, RC = unknown>(
     /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
     admitted?: Admitted;
   }): Promise<Response> {
-    const { resolvedChatId, principal, modelId, cfg, run, lease, uiMessages, runtimeCtx } =
-      args;
+    const { resolvedChatId, principal, modelId, cfg, run, lease, runtimeCtx } = args;
+    // Mutable: the start moments below may inject, replace or rewrite history
+    // before the model runs. From here on this is the turn's transcript.
+    let uiMessages = args.uiMessages;
     const admitted = args.admitted;
     const autoApprove = args.autoApprove ?? false;
     const blockGated = args.blockGated ?? false;
@@ -1340,6 +1367,48 @@ export function createRuntime<P, RC = unknown>(
     // threaded a root down. Subagent turns spawned below inherit it, so a whole
     // delegation tree shares one telemetry session (see telemetryMeta).
     const rootChatId = args.rootChatId ?? resolvedChatId;
+
+    // --- the extension seam --------------------------------------------------
+    // Runtime-wide extensions first, then the agent's own. With none attached
+    // every moment below is a no-op and the turn is byte-identical to a runtime
+    // without the seam — `turn-snapshot.test.ts` holds it to that.
+    const hooks = compose([...(config.extensions ?? []), ...(cfg.extensions ?? [])]);
+    const xrun: ExtensionRunContext = {
+      runId: run.id,
+      principal: principal as unknown as ExtensionPrincipal,
+    };
+    const xctx = (stepNumber: number, messages: AppMessage[]): ExtensionStepContext => ({
+      ...xrun,
+      stepNumber,
+      messages,
+    });
+    // A command an extension answered without the model (see the `input` moment).
+    let handled: Part[] | undefined;
+    // The start moments run once per conversation turn. A resume replays a
+    // history they already shaped, and a decision continues a turn they
+    // already opened — running them again would inject twice.
+    const startMoments = trigger !== "resume" && trigger !== "decision";
+    if (startMoments) {
+      if (isNewSession(uiMessages))
+        uiMessages = (await hooks.messagesIn("session_start", uiMessages, xrun)) as AppMessage[];
+      uiMessages = (await hooks.messagesIn("before_agent_start", uiMessages, xrun)) as AppMessage[];
+      const text = lastUserTextOf(uiMessages);
+      if (text != null) {
+        const e = await hooks.input(text, uiMessages, xrun);
+        if (e && "handled" in e && e.handled) {
+          const reply = e.reply;
+          handled =
+            typeof reply === "string"
+              ? [{ type: "text", text: reply } as Part]
+              : Array.isArray(reply)
+                ? reply
+                : [];
+          if (e.replace) uiMessages = e.replace as AppMessage[];
+        } else if (e && "transform" in e && e.transform != null) {
+          uiMessages = replaceLastUserText(uiMessages, e.transform) as AppMessage[];
+        }
+      }
+    }
 
     const abort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -1409,7 +1478,9 @@ export function createRuntime<P, RC = unknown>(
 
     const opened: OpenToolSet[] = [];
     try {
-      for (const source of sources) {
+      // A command answered without the model needs no tools; don't open MCP
+      // connections for `/stats`.
+      for (const source of handled ? [] : sources) {
         opened.push(await source.open(principal));
       }
     } catch (error) {
@@ -1502,6 +1573,13 @@ export function createRuntime<P, RC = unknown>(
         // Memory is optional and degradable — continue without it.
       }
     }
+    // instructions: an extension's appends land after the memory block; the
+    // date line stays the tail (see the agent construction). A `replace` may
+    // hand back system message(s) carrying providerOptions — the extension then
+    // owns that shape, and the caching plan's system breakpoint steps aside.
+    const composedInstructions: Instructions | undefined = hooks.has("instructions")
+      ? await hooks.instructions(instructions, xctx(0, uiMessages))
+      : instructions;
     for (const name of cfg.disableTools ?? []) delete tools[name];
 
     // Per-agent tool description overrides — swap the resolved tool's
@@ -1636,6 +1714,24 @@ export function createRuntime<P, RC = unknown>(
       capabilityTools.push("spawn_agent");
     }
 
+    // register_tools: what extensions add are capabilities — always active, and
+    // gated by the agent's own policy like any other tool. Mutated in place so
+    // every later reference (toolsContext keys, the fingerprint) sees them.
+    if (hooks.has("register_tools")) {
+      const before = new Set(Object.keys(tools));
+      const registered = hooks.tools(tools as ToolSet, xrun) as Record<string, unknown>;
+      for (const k of Object.keys(tools)) if (!(k in registered)) delete tools[k];
+      Object.assign(tools, registered);
+      for (const name of Object.keys(tools)) if (!before.has(name)) capabilityTools.push(name);
+    }
+    // Outputs a CLIENT produced (a browser tool's answer) are already in the
+    // transcript; fire tool_result for them now that the toolset can tell a
+    // client tool from a server one.
+    // A decision turn is exactly when a client's answer has just been recorded,
+    // so it fires here too; a resume replays outputs an earlier run handled.
+    if ((startMoments || trigger === "decision") && hooks.has("tool_result"))
+      uiMessages = (await fireClientToolResults(uiMessages, tools as ToolSet, hooks, xrun)) as AppMessage[];
+
     // Subagent runs are autonomous — there's no human to authorize, so waive
     // approvals and drop the OAuth `connect_` gates (they'd pause forever).
     if (autoApprove) {
@@ -1729,7 +1825,74 @@ export function createRuntime<P, RC = unknown>(
             steps.reduce((n, st) => n + (st.usage?.inputTokens ?? 0) + (st.usage?.outputTokens ?? 0), 0) >=
             tokenBudget
         : undefined;
-    const stopWhen = budgetStop ? [stepCap ?? stepCountIs(20), budgetStop] : stepCap;
+    const baseStopWhen = budgetStop ? [stepCap ?? stepCountIs(20), budgetStop] : stepCap;
+
+    // --- step boundaries for the seam -------------------------------------------
+    // A step ends twice from here: on the model side (`agent.stream`'s
+    // onStepEnd — usage, finish reason, tool calls) and on the UI side (the
+    // stream's onStepEnd — the assembled assistant message). `step_end` needs
+    // both, so a step is SETTLED once both have arrived, and the next step's
+    // prepareStep waits for the settlement: an extension that persists has
+    // written before the model is called again. None of this runs when no
+    // extension listens to a step moment.
+    const stepHooks = hooks.has("step_start") || hooks.has("step_end");
+    type ModelSide = {
+      usage: unknown;
+      finishReason: string;
+      toolCalls: Array<{ toolName: string; toolCallId: string }>;
+      model: { provider: string; modelId: string };
+    };
+    type Slot<T> = { promise: Promise<T>; resolve: (v: T) => void };
+    const slotOf = <T,>(m: Map<number, Slot<T>>, k: number): Slot<T> => {
+      let d = m.get(k);
+      if (!d) {
+        let resolve!: (v: T) => void;
+        const promise = new Promise<T>((r) => (resolve = r));
+        d = { promise, resolve };
+        m.set(k, d);
+      }
+      return d;
+    };
+    const modelSide = new Map<number, Slot<ModelSide>>();
+    const uiSide = new Map<number, Slot<AppMessage>>();
+    const settledSteps = new Map<number, Promise<void>>();
+    const appendedByStep = new Map<number, Part[]>();
+    const stepStartedAt = new Map<number, number>();
+    type StepControl = { stop: boolean; model?: LanguageModel; activeTools?: string[] };
+    let control0: StepControl | undefined;
+    let nextControl: StepControl | undefined;
+    let stoppedBeforeStart = false;
+    let uiStepIndex = 0;
+    let stepsSeen = 0;
+    let turnWriter: TurnWriter | undefined;
+    let latestAssistant: AppMessage | undefined;
+    // A continuation reuses the assistant message the SDK merges into; its
+    // earlier step-start parts are not this run's steps.
+    const anchor = uiMessages[uiMessages.length - 1];
+    const anchorIsAssistant = anchor?.role === "assistant";
+    const priorSteps = anchorIsAssistant
+      ? (anchor!.parts as Array<{ type: string }>).filter((p) => p.type === "step-start").length
+      : 0;
+    const transcriptNow = (): AppMessage[] =>
+      latestAssistant
+        ? anchorIsAssistant
+          ? [...uiMessages.slice(0, -1), latestAssistant]
+          : [...uiMessages, latestAssistant]
+        : uiMessages;
+    // Assigned below, once the checkpoint chain exists; only ever called mid-stream.
+    let settle: (k: number) => Promise<void> = async () => {};
+    const extensionStop = stepHooks
+      ? async ({ steps }: { steps: unknown[] }) => {
+          const k = steps.length - 1;
+          await settle(k);
+          const c = await hooks.stepStart(xctx(steps.length, transcriptNow()));
+          nextControl = c;
+          return c.stop;
+        }
+      : undefined;
+    const stopWhen = extensionStop
+      ? [...(Array.isArray(baseStopWhen) ? baseStopWhen : [baseStopWhen ?? stepCountIs(20)]), extensionStop]
+      : baseStopWhen;
 
     // Reasoning/thinking effort → provider-specific options (the platform maps
     // it per provider + gates to reasoning-capable models). Called even without
@@ -1768,6 +1931,13 @@ export function createRuntime<P, RC = unknown>(
       reasoning?.providerOptions,
       caching?.requestProviderOptions,
     );
+    // tool_call / tool_result: wrap in place, after the caching marker and the
+    // test-run stubs, so every later reference sees the same names. Identity-
+    // preserving when no extension listens.
+    if (hooks.has("tool_call") || hooks.has("tool_result")) {
+      const wrapped = wrapTools(tools as ToolSet, hooks, xrun) as Record<string, unknown>;
+      for (const k of Object.keys(wrapped)) tools[k] = wrapped[k];
+    }
 
     // Telemetry seam: per-run AI SDK telemetry options + trace correlation
     // identity, resolved once per turn (undefined → nothing traced).
@@ -1803,24 +1973,46 @@ export function createRuntime<P, RC = unknown>(
       // the instructions become a MARKED system message and the date line a
       // separate unmarked one, so the daily flip lands after the breakpoint
       // instead of invalidating it at midnight UTC.
-      instructions: caching?.systemProviderOptions
-        ? [
-            ...(instructions
-              ? [
-                  {
-                    role: "system",
-                    content: instructions,
-                    providerOptions: caching.systemProviderOptions,
-                  },
-                ]
-              : []),
-            { role: "system", content: currentDateLine() },
-          ]
-        : [instructions, currentDateLine()].filter(Boolean).join("\n\n"),
+      instructions:
+        typeof composedInstructions === "object" && composedInstructions !== null
+          ? // An extension replaced the system prompt with message(s) of its own,
+            // providerOptions and all: keep them, with the date line as its own
+            // trailing message so the daily flip stays past any breakpoint.
+            [
+              ...(Array.isArray(composedInstructions) ? composedInstructions : [composedInstructions]),
+              { role: "system", content: currentDateLine() },
+            ]
+          : caching?.systemProviderOptions
+            ? [
+                ...(composedInstructions
+                  ? [
+                      {
+                        role: "system",
+                        content: composedInstructions,
+                        providerOptions: caching.systemProviderOptions,
+                      },
+                    ]
+                  : []),
+                { role: "system", content: currentDateLine() },
+              ]
+            : [composedInstructions, currentDateLine()].filter(Boolean).join("\n\n"),
       tools,
       toolApproval,
       stopWhen,
       activeTools,
+      ...(stepHooks
+        ? {
+            prepareStep: (async ({ stepNumber }: { stepNumber: number }) => {
+              if (stepNumber > 0) await settle(stepNumber - 1);
+              stepStartedAt.set(stepNumber, Date.now());
+              const c = stepNumber === 0 ? control0 : nextControl;
+              return {
+                ...(c?.model ? { model: c.model } : {}),
+                ...(c?.activeTools ? { activeTools: c.activeTools } : {}),
+              };
+            }) as never,
+          }
+        : {}),
       ...(providerOptions ? { providerOptions } : {}),
       ...(reasoning?.maxOutputTokens ? { maxOutputTokens: reasoning.maxOutputTokens } : {}),
       ...(telemetryOptions ? { telemetry: telemetryOptions } : {}),
@@ -1848,6 +2040,83 @@ export function createRuntime<P, RC = unknown>(
     // at most the write in flight and the one queued behind it. A failed write
     // logs and releases the chain — the next checkpoint still runs.
     let checkpoints: Promise<void> = Promise.resolve();
+    const checkpoint = (message: AppMessage) => {
+      if (!dur.enabled || abort.signal.aborted) return;
+      checkpoints = checkpoints
+        .then(() => {
+          // Re-checked at write time: the lease may have gone while this
+          // checkpoint waited behind the previous one.
+          if (abort.signal.aborted) return;
+          return storage.appendMessages(resolvedChatId, [message]);
+        })
+        .catch((e) => console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e));
+    };
+    if (stepHooks) {
+      const needUi = hooks.has("step_end");
+      settle = (k) => {
+        const known = settledSteps.get(k);
+        if (known) return known;
+        const p = (async () => {
+          const model = await slotOf(modelSide, k).promise;
+          const response = needUi ? await slotOf(uiSide, k).promise : undefined;
+          const raw = model.usage as
+            | {
+                inputTokens?: number;
+                outputTokens?: number;
+                totalTokens?: number;
+                inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+                outputTokenDetails?: { reasoningTokens?: number };
+              }
+            | undefined;
+          // The SDK assembles the message from chunks; our parts were streamed
+          // transient and never entered it. Fold every step's back in.
+          const assistant = response
+            ? (insertStepParts(response, appendedByStep, priorSteps) as AppMessage)
+            : undefined;
+          const messages = assistant
+            ? anchorIsAssistant
+              ? [...uiMessages.slice(0, -1), assistant]
+              : [...uiMessages, assistant]
+            : transcriptNow();
+          const info: ExtensionStepInfo = {
+            ...xctx(k, messages),
+            usage: {
+              inputTokens: raw?.inputTokens,
+              outputTokens: raw?.outputTokens,
+              totalTokens: raw?.totalTokens,
+              cacheReadTokens: raw?.inputTokenDetails?.cacheReadTokens,
+              cacheWriteTokens: raw?.inputTokenDetails?.cacheWriteTokens,
+              reasoningTokens: raw?.outputTokenDetails?.reasoningTokens,
+            },
+            finishReason: model.finishReason,
+            model: model.model,
+            durationMs: Date.now() - (stepStartedAt.get(k) ?? Date.now()),
+            toolCalls: model.toolCalls,
+          };
+          if (needUi) {
+            const appended = await hooks.stepEnd(messages, info);
+            if (appended.length) {
+              appendedByStep.set(k, appended);
+              // The client copy goes through the view rules and is TRANSIENT, so
+              // the SDK's own merge cannot persist a viewed copy over the truth,
+              // which is folded into the checkpoint and the finish below.
+              for (const part of appended) {
+                if (!part.type.startsWith("data-")) continue;
+                const view = hooks.view(part, false, xrun);
+                if (view && "hide" in view && view.hide) continue;
+                const shown = view && "replace" in view && view.replace ? view.replace : part;
+                turnWriter?.write({ type: shown.type, data: (shown as { data: unknown }).data, transient: true });
+              }
+            }
+            latestAssistant = insertStepParts(response!, appendedByStep, priorSteps) as AppMessage;
+            checkpoint(latestAssistant);
+          }
+        })();
+        settledSteps.set(k, p);
+        p.catch(() => {}); // surfaces where it is awaited: prepareStep, stopWhen, onFinish
+        return p;
+      };
+    }
 
     // Post-turn telemetry: fired after persistence on every terminal path
     // (completed / awaiting_input / errored). Must never fail the turn.
@@ -1902,10 +2171,46 @@ export function createRuntime<P, RC = unknown>(
       // turn would upsert onto the same row — see the dup-id regression test).
       generateId: generateMessageId,
       execute: async ({ writer }: { writer: TurnWriter }) => {
-        // (in-turn writer writes — e.g. a "compacting…" / compaction marker —
-        //  would go here, before the model output is merged in)
+        turnWriter = writer;
+        if (handled) {
+          // A command an extension answered without the model. Emitted as an
+          // ordinary assistant turn so the conversation reads normally and the
+          // finish hook persists it like any other.
+          writer.write({
+            type: "start",
+            messageId: generateMessageId(),
+            messageMetadata: { visibility: "user", model: modelId, createdAt: Date.now(), runId: run.id },
+          });
+          for (const p of handled) {
+            if (p.type === "text") {
+              const id = generateMessageId();
+              writer.write({ type: "text-start", id });
+              writer.write({ type: "text-delta", id, delta: (p as { text: string }).text });
+              writer.write({ type: "text-end", id });
+              continue;
+            }
+            if (!p.type.startsWith("data-")) continue;
+            const view = hooks.view(p, false, xrun);
+            if (view && "hide" in view && view.hide) continue;
+            const shown = view && "replace" in view && view.replace ? view.replace : p;
+            writer.write({ type: shown.type, data: (shown as { data: unknown }).data });
+          }
+          writer.write({ type: "finish" });
+          return;
+        }
         // Model projection: drops `sendToModel:false` messages (and data-* parts).
-        const modelMessages = await toModelMessages(uiMessages, { tools });
+        // `context` lets an extension reshape what the model reads this turn.
+        const projected = await toModelMessages(uiMessages, { tools });
+        const modelMessages = hooks.has("context")
+          ? await hooks.context(projected, xctx(0, uiMessages))
+          : projected;
+        // step_start for the first step — the SDK has no hook before its first call.
+        control0 = stepHooks ? await hooks.stepStart(xctx(0, uiMessages)) : undefined;
+        if (control0?.stop) {
+          stoppedBeforeStart = true;
+          writer.write({ type: "finish" });
+          return;
+        }
         // Per-session sandbox (one per chat) for agents that declared `sandbox`.
         // Exposed to sandbox tools as `options.experimental_sandbox`.
         const sandbox = wantSandbox
@@ -1953,6 +2258,9 @@ export function createRuntime<P, RC = unknown>(
           // generate-text step callback: accumulate usage across steps,
           // including the cached-prompt breakdown so cost reflects cache reads.
           onStepEnd: (step: {
+            stepNumber?: number;
+            model?: { provider: string; modelId: string };
+            response?: { modelId?: string };
             text?: string;
             finishReason?: string;
             usage?: {
@@ -1984,6 +2292,18 @@ export function createRuntime<P, RC = unknown>(
                 }),
               );
             }
+            stepsSeen++;
+            if (stepHooks && step.stepNumber !== undefined)
+              slotOf(modelSide, step.stepNumber).resolve({
+                usage: step.usage,
+                finishReason: step.finishReason ?? "unknown",
+                toolCalls: (step.toolCalls ?? []).map((c) => ({ toolName: c.toolName, toolCallId: c.toolCallId })),
+                // The id the PROVIDER reports; pricing keys on that.
+                model: {
+                  provider: step.model?.provider ?? "",
+                  modelId: step.response?.modelId ?? step.model?.modelId ?? modelId,
+                },
+              });
           },
         } as unknown as Parameters<typeof agent.stream>[0]);
         const result =
@@ -2028,23 +2348,21 @@ export function createRuntime<P, RC = unknown>(
       // check inside the storage write itself — an adapter interface change,
       // tracked as a follow-up. With the heartbeat now aborting within one TTL
       // of losing contact, the exposure is bounded to ~leaseTtlMs.
-      onStepEnd: dur.enabled
-        ? ({ responseMessage }: { responseMessage: AppMessage }) => {
-            if (abort.signal.aborted) return;
-            checkpoints = checkpoints
-              .then(() => {
-                // Re-checked at write time: the lease may have gone while this
-                // checkpoint waited behind the previous one.
-                if (abort.signal.aborted) return;
-                return storage.appendMessages(resolvedChatId, [responseMessage]);
-              })
-              .catch((e) =>
-                console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e),
-              );
-          }
-        : undefined,
+      onStepEnd:
+        dur.enabled || hooks.has("step_end")
+          ? ({ responseMessage }: { responseMessage: AppMessage }) => {
+              if (hooks.has("step_end")) {
+                // The step's parts are final only once `step_end` has appended
+                // its own; `settle` writes the checkpoint after that.
+                slotOf(uiSide, uiStepIndex).resolve(responseMessage);
+                void settle(uiStepIndex++);
+                return;
+              }
+              checkpoint(responseMessage);
+            }
+          : undefined,
       onFinish: async ({
-        messages,
+        messages: finishedMessages,
         isAborted,
       }: {
         messages: AppMessage[];
@@ -2052,6 +2370,46 @@ export function createRuntime<P, RC = unknown>(
       }) => {
         stopHeartbeat();
         await closeSources();
+        let messages = finishedMessages;
+        if (stepHooks && failed === undefined && !isAborted) {
+          // Every step's `step_end` has run before the record is settled. A
+          // critical extension's throw on an EARLIER step surfaced through the
+          // stream (prepareStep rethrows it); on the LAST step nothing awaited
+          // it yet, so it lands here — and fails the run just the same.
+          try {
+            await Promise.all([...settledSteps.values()]);
+          } catch (e) {
+            failed = clientErrorMessage(e);
+          }
+          if (appendedByStep.size) {
+            const i = messages.length - 1;
+            const last = messages[i];
+            if (last?.role === "assistant")
+              messages = [...messages.slice(0, i), insertStepParts(last, appendedByStep, priorSteps) as AppMessage];
+          }
+        }
+        if (stoppedBeforeStart || handled)
+          // Nothing (or nothing but a command with no reply) was said: the SDK
+          // still assembles an empty assistant message from the bare `finish`,
+          // and there is no reason to store a blank turn.
+          messages = messages.filter((m) => !(m.role === "assistant" && (m.parts as unknown[]).length === 0));
+        const agentEnd = (error?: unknown) =>
+          hooks.has("agent_end")
+            ? hooks.agentEnd({
+                runId: run.id,
+                principal: xrun.principal,
+                messages,
+                stepCount: stepsSeen,
+                isAborted: isAborted === true,
+                ...(error !== undefined ? { error } : {}),
+                usage: {
+                  inputTokens,
+                  outputTokens,
+                  ...(cacheReadTokens ? { cacheReadTokens } : {}),
+                  ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+                },
+              })
+            : Promise.resolve();
         // Cost for this turn (0 if no pricing configured). Stamp usage + cost
         // onto the assistant message — the message is complete; this is metadata.
         const cost = computeCost(config.pricing?.(modelId), {
@@ -2092,6 +2450,7 @@ export function createRuntime<P, RC = unknown>(
           if (settled) {
             await settleLimits(admitted, { tokens: inputTokens + outputTokens, cost });
             await reportRunFinished("errored", messages, failed ?? "aborted");
+            await agentEnd(failed ?? "aborted");
           }
           return;
         }
@@ -2140,13 +2499,17 @@ export function createRuntime<P, RC = unknown>(
         // reaped and the run re-claimed elsewhere (`!applied`), that node will
         // finish it — a stale writer must not re-run the judge or emit a
         // duplicate "completed"/"awaiting_input" trace.
-        if (applied)
+        if (applied) {
           await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
+          await agentEnd();
+        }
       },
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
         const message = clientErrorMessage(error);
+        if (hooks.has("error"))
+          void hooks.error({ error, stepNumber: stepsSeen, messages: transcriptNow() }, xrun);
         // Record only — the first error wins; later onError calls for the same
         // stream are noise. The SDK's onError must return the client string
         // synchronously and still runs onFinish afterwards, so that is where
@@ -2955,7 +3318,11 @@ export function createRuntime<P, RC = unknown>(
     principal: P;
   }): Promise<AppMessage[]> {
     const messages = await storage.loadMessages(principal, chatId);
-    return toClientMessages(messages);
+    // `render` rules apply on load as they do live. Runtime-wide extensions
+    // only: an agent's own would need the chat's agent resolved here.
+    return renderTranscript(config.extensions ?? [], toClientMessages(messages), {
+      principal: principal as unknown as ExtensionPrincipal,
+    }) as AppMessage[];
   }
 
   async function listChats({

@@ -1,5 +1,6 @@
 import type { LanguageModel } from "ai";
 import type { MemoryConfig } from "./memory.js";
+import type { Extension } from "./extensions/extension.js";
 
 /**
  * Agent definitions.
@@ -167,6 +168,12 @@ export interface AgentConfig<P> {
    * background jobs handle extraction and consolidation out of band.
    */
   memory?: MemoryConfig;
+  /**
+   * Extensions attached to this agent's turns, after the runtime-wide ones
+   * (`RuntimeConfig.extensions`). See `extensions/extension.ts` for the
+   * moments and effects. Omitted → the agent's turns are unchanged.
+   */
+  extensions?: Extension[];
 }
 
 /** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */
