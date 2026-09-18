@@ -121,7 +121,7 @@ createRuntime({
 
 A prompt in a database is a prompt someone can overwrite. `@intentface/latch-drizzle`'s agent store keeps every published configuration, so editing one never destroys the one that was running.
 
-**Publishing appends a version.** `upsert` writes the live record *and* appends a snapshot of it — unless the content is unchanged, in which case it appends nothing, so history stays a list of real changes rather than of save events. The whole record is snapshotted, not just the instructions: a version is therefore always a configuration that actually ran together, and restoring one can't resurrect a prompt that references a tool removed two edits ago.
+**Publishing appends a version.** `upsert` writes the live record *and* appends a snapshot of it — unless the content is unchanged, in which case it appends nothing, so history stays a list of real changes rather than of save events. The whole record is snapshotted, not just the instructions: a version is therefore always a configuration that actually ran *together*, so restoring one never produces a combination that never existed — a prompt paired with a tool selection or model it was never written for. What a snapshot cannot promise is the world around it: it records the tools an agent selected, not the ones the host still provides, so a rollback can restore a reference to a connection or harness tool that has since gone away.
 
 ```ts
 await store.upsert(principal, record, {
@@ -155,7 +155,7 @@ const others = await store.listDrafts(principal); // metadata only — a colleag
 **Runs record the version behind them.** The resolved config carries `configVersion`, the runtime stamps it on the run as `agentVersion` — when the run *opens*, so a run that errors or crashes still says what it ran — and a tracer can tag the trace with it (`@intentface/latch-langfuse` emits `agent-version:<n>`). A past answer stays attributable to an exact configuration, and eval scores can be compared across versions.
 
 <Callout title="Migrating an existing database">
-`migrate()` backfills every existing agent as v1 and points its live row at it. Without that, the first publish after upgrading would create v1 from the *new* content and the prompt that had been running would be gone — the exact failure versioning exists to prevent. The backfill is idempotent, so re-running `migrate()` is safe.
+`migrate()` (SQLite/libSQL) and `migratePostgres()` (Postgres) each backfill every existing agent as v1 and point its live row at it. Without that, the first publish after upgrading would create v1 from the *new* content and the prompt that had been running would be gone — the exact failure versioning exists to prevent. The backfill is idempotent, so re-running either is safe.
 </Callout>
 
 ## Metadata
