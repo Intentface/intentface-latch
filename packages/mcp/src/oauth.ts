@@ -43,7 +43,19 @@ export interface McpOAuthConfig<P = unknown> {
   clientInformation?:
     | OAuthClientInformation
     | ((principal: P) => OAuthClientInformation | undefined | Promise<OAuthClientInformation | undefined>);
-  /** Allowed OAuth authorization-server origins. Empty/undefined = allow any. */
+  /**
+   * Origins permitted to act as this connection's OAuth authorization server.
+   *
+   * DEFAULT: the MCP server's own origin. The authorization server is named by
+   * the MCP server's own protected-resource metadata, so without a bound this
+   * is "fetch, register a client with, and send a code to whatever address the
+   * server operator writes down" — an SSRF whose errors carry the response
+   * body back to the user who added the connection.
+   *
+   * A server that genuinely delegates to a separate IdP is the exception, and
+   * an exception should be declared: list its origin here. An empty array is
+   * NOT "allow any" — it allows nothing.
+   */
   allowedAuthorizationServers?: string[];
   /**
    * Requested scope string, if the server expects one.
@@ -228,12 +240,17 @@ export function createVaultOAuthProvider<P>(opts: {
       : undefined,
 
     validateAuthorizationServerURL(serverUrl, authorizationServerUrl) {
-      const allow = config.allowedAuthorizationServers;
-      if (!allow || allow.length === 0) return; // not configured → allow
+      // Undefined → the server's own origin, not "anything". `serverUrl` is the
+      // one the SDK resolved for this flow, so a per-principal `serverUrl`
+      // function is honoured without resolving it twice.
+      const allow = config.allowedAuthorizationServers ?? [new URL(serverUrl).origin];
       const origin = new URL(authorizationServerUrl).origin;
       if (!allow.includes(origin)) {
         throw new Error(
-          `MCP OAuth "${config.name}": authorization server ${origin} is not allowed`,
+          `MCP OAuth "${config.name}": authorization server ${origin} is not allowed` +
+            ` (permitted: ${allow.join(", ") || "none"}).` +
+            " Set allowedAuthorizationServers on the connection's oauth() options" +
+            " if this server delegates authorization elsewhere.",
         );
       }
     },

@@ -391,3 +391,73 @@ describe("subagent approval resume", () => {
     expect(spawn.output?.answer).toBe("written.");
   });
 });
+
+/**
+ * An unattended run waives the agent's own approval policy — that is what makes
+ * it autonomous. It must not waive the gates a TOOL SOURCE contributed: those
+ * are the end user's choice about a connector, or the host's about a harness
+ * tool, and executing them with nobody watching is exactly what they were set
+ * to prevent.
+ */
+describe("unattended runs and source-contributed gates", () => {
+  /** A tool source that gates its own tool, the way an MCP connection does. */
+  const gatedSource = (executed: string[]) => ({
+    async open() {
+      return {
+        tools: {
+          crm_delete: tool({
+            description: "delete a record",
+            inputSchema: z.object({ id: z.string() }),
+            execute: async ({ id }: { id: string }) => {
+              executed.push(id);
+              return { deleted: id };
+            },
+          }),
+        },
+        toolApproval: { crm_delete: "user-approval" },
+        async close() {},
+      };
+    },
+  });
+
+  function runtimeFor(mem: ReturnType<typeof memoryStorage>, executed: string[], model: MockLanguageModelV4) {
+    return createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        writer: defineAgent({
+          model,
+          instructions: "write",
+          toolSources: [gatedSource(executed) as never],
+        }),
+      },
+    });
+  }
+
+  it("a real autonomous run parks on a connection's gate instead of executing it", async () => {
+    const executed: string[] = [];
+    const mem = memoryStorage();
+    const rt = runtimeFor(mem, executed, model("never reached", { name: "crm_delete", input: '{"id":"c_1"}' }));
+
+    // `blockGated: false` — the caller asked for a real end-to-end run. That
+    // waives the AGENT's policy, not the end user's per-connector choice.
+    await rt.runAgent({ principal, agent: "writer", prompt: "clean up", blockGated: false });
+
+    expect(executed).toEqual([]);
+    expect([...mem.runs.values()].at(-1)!.status).toBe("awaiting_input");
+  });
+
+  it("a trial run still stubs them and completes, rather than parking", async () => {
+    const executed: string[] = [];
+    const mem = memoryStorage();
+    const rt = runtimeFor(mem, executed, model("did it.", { name: "crm_delete", input: '{"id":"c_1"}' }));
+
+    // The default. `blockGated` has already neutralized the tool, so gating it
+    // as well would park a run whose whole point is to finish.
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "clean up" });
+
+    expect(executed).toEqual([]);
+    expect(res.answer).toBe("did it.");
+    expect([...mem.runs.values()].at(-1)!.status).toBe("completed");
+  });
+});

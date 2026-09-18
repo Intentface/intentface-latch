@@ -32,6 +32,8 @@ export {
 } from "./oauth.js";
 export type { McpOAuth, McpOAuthConfig, StartResult } from "./oauth.js";
 export { createOAuthDiscoveryFetch } from "./oauth-fetch.js";
+export { createGuardedFetch, composeGuardedFetch } from "./guarded-fetch.js";
+export type { GuardedFetch, GuardedFetchOptions } from "./guarded-fetch.js";
 export type {
   OAuthDiscoveryFetchOptions,
   FetchFunction,
