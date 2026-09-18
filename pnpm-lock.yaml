@@ -139,6 +139,9 @@ importers:
       '@ai-sdk/react':
         specifier: ^4.0.109
         version: 4.0.109(react@19.2.7)(zod@4.4.3)
+      '@ai-sdk/typesafe-ai':
+        specifier: ^3.0.3
+        version: 3.0.3(zod@4.4.3)
       '@base-ui/react':
         specifier: ^1.6.0
         version: 1.6.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -680,6 +683,12 @@ packages:
     engines: {node: '>=22'}
     peerDependencies:
       react: ^18 || ~19.0.1 || ~19.1.2 || ^19.2.1
+
+  '@ai-sdk/typesafe-ai@3.0.3':
+    resolution: {integrity: sha512-pgoqSBqnabTfZwXF7zlEFCbksLLuI3iauZf4FrFioFIRY1YMFnoufLEG1kGQDVQCk8GvxG4gMti8kXYOE2lT1w==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
 
   '@alloc/quick-lru@5.2.0':
     resolution: {integrity: sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw==}
@@ -8909,6 +8918,12 @@ snapshots:
       throttleit: 2.1.0
     transitivePeerDependencies:
       - zod
+
+  '@ai-sdk/typesafe-ai@3.0.3(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.17
+      '@ai-sdk/provider-utils': 5.0.44(zod@4.4.3)
+      zod: 4.4.3
 
   '@alloc/quick-lru@5.2.0': {}
 
