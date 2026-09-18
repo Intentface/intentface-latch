@@ -218,7 +218,7 @@ export function compose(extensions: Extension[], options: ComposeOptions = {}) {
     },
 
     /** hide wins outright; otherwise replacements layer */
-    view(part: Part, stored: boolean, run?: RunContext): ViewEffect {
+    view(part: Part, stored: boolean, run?: Partial<RunContext>): ViewEffect {
       let current = part;
       let replaced = false;
       for (const h of handlers("render")) {
@@ -306,8 +306,8 @@ export type Composed = ReturnType<typeof compose>;
 export function renderTranscript(
   extensions: Extension[],
   messages: UIMessage[],
-  /** Supply it when the caller knows it — an authenticated load route does. */
-  run?: RunContext,
+  /** Supply what the caller knows — an authenticated load route has the principal but no run. */
+  run?: Partial<RunContext>,
 ): UIMessage[] {
   const hooks = compose(extensions);
   if (!hooks.has("render")) return messages;

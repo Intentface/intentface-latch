@@ -170,6 +170,36 @@ export function appendParts(messages: UIMessage[], parts: Part[]): UIMessage[] {
   return [...messages.slice(0, i), { ...last, parts: [...(last.parts as Part[]), ...parts] } as UIMessage];
 }
 
+/**
+ * Fold `step_end` parts into an assistant message the SDK assembled without
+ * them: each step's appended parts go before the NEXT `step-start`, the last
+ * step's at the end — exactly where an append at that step boundary would have
+ * landed. `priorSteps` skips step-start parts the message already carried
+ * before this run (a continuation reuses the assistant message).
+ */
+export function insertStepParts(
+  message: UIMessage,
+  appendedByStep: Map<number, Part[]>,
+  priorSteps = 0,
+): UIMessage {
+  if (!appendedByStep.size) return message;
+  const out: Part[] = [];
+  let seen = 0;
+  let step = -1;
+  for (const p of message.parts as Part[]) {
+    if (p.type === "step-start") {
+      seen++;
+      if (seen > priorSteps) {
+        if (step >= 0) out.push(...(appendedByStep.get(step) ?? []));
+        step++;
+      }
+    }
+    out.push(p);
+  }
+  if (step >= 0) out.push(...(appendedByStep.get(step) ?? []));
+  return { ...message, parts: out } as UIMessage;
+}
+
 /** The text of the newest user message, if any. */
 export const lastUserTextOf = (messages: UIMessage[]): string | undefined => {
   for (let i = messages.length - 1; i >= 0; i--) {
