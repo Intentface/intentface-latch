@@ -117,6 +117,47 @@ createRuntime({
 
 `runtime.listAgents(principal)` returns both sets, so a picker shows code-declared and user-created agents together. This is what makes "agents are data" work: one deploy serves any number of agents per tenant, and changing a prompt is a row update rather than a release.
 
+### Versions, drafts and rollback
+
+A prompt in a database is a prompt someone can overwrite. `@intentface/latch-drizzle`'s agent store keeps every published configuration, so editing one never destroys the one that was running.
+
+**Publishing appends a version.** `upsert` writes the live record *and* appends a snapshot of it — unless the content is unchanged, in which case it appends nothing, so history stays a list of real changes rather than of save events. The whole record is snapshotted, not just the instructions: a version is therefore always a configuration that actually ran *together*, so restoring one never produces a combination that never existed — a prompt paired with a tool selection or model it was never written for. What a snapshot cannot promise is the world around it: it records the tools an agent selected, not the ones the host still provides, so a rollback can restore a reference to a connection or harness tool that has since gone away.
+
+```ts
+await store.upsert(principal, record, {
+  author: userId,
+  source: "editor",
+  message: "Tightened the refund wording",
+});
+
+const history = await store.listVersions(principal, "support", "org");
+// → [{ version: 3, author, message, changedFields: ["instructions"], published: true, createdAt }, …]
+```
+
+**Rolling back moves a pointer.** `activateVersion` makes an existing version live and appends *no* version, so flipping between two configurations can't inflate history. Because of that, who made what live and when is recorded separately:
+
+```ts
+await store.activateVersion(principal, "support", "org", 2);
+await store.listActivations(principal, "support", "org");
+// → [{ version: 2, actor, source: "activate", createdAt }, …]
+```
+
+The version list answers *what did this agent look like*; the activation log answers *what was it running on Tuesday*.
+
+**Drafts are per editor, not per agent.** An owner key is an isolation boundary a whole org shares, so one draft per agent would let two admins silently overwrite each other's half-written prompt. A draft never affects a running agent, and carries the version it started from — compare that against the live `publishedVersion` before publishing and a stale publish becomes detectable rather than a silent revert.
+
+```ts
+await store.saveDraft(principal, "support", "org", record, baseVersion);
+const draft = await store.getDraft(principal, "support", "org");
+const others = await store.listDrafts(principal); // metadata only — a colleague's text isn't yours to read
+```
+
+**Runs record the version behind them.** The resolved config carries `configVersion`, the runtime stamps it on the run as `agentVersion` — when the run *opens*, so a run that errors or crashes still says what it ran — and a tracer can tag the trace with it (`@intentface/latch-langfuse` emits `agent-version:<n>`). A past answer stays attributable to an exact configuration, and eval scores can be compared across versions.
+
+<Callout title="Migrating an existing database">
+`migrate()` (SQLite/libSQL) and `migratePostgres()` (Postgres) each backfill every existing agent as v1 and point its live row at it. Without that, the first publish after upgrading would create v1 from the *new* content and the prompt that had been running would be gone — the exact failure versioning exists to prevent. The backfill is idempotent, so re-running either is safe.
+</Callout>
+
 ## Metadata
 
 `AgentMeta` (`title`, `description`) is display-only and surfaced by `listAgents`. Set it wherever a human picks an agent from a list.
