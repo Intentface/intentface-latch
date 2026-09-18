@@ -1,5 +1,12 @@
 # @intentface/latch-langfuse
 
+## 0.11.0
+
+### Patch Changes
+
+- Updated dependencies [ae91f9c]
+  - @intentface/latch-core@0.11.0
+
 ## 0.10.0
 
 ### Minor Changes
