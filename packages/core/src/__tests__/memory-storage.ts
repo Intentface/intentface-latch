@@ -9,15 +9,20 @@ import type { ChatRecord, RunRecord, StorageAdapter } from "../storage.js";
  * Shared by the tests that drive a whole turn through `createRuntime`. Kept
  * out of `dist` by the build tsconfig's `src/__tests__` exclusion.
  */
+// Process-wide, not per instance: real adapters mint random ids, so two stores
+// never share a run id. A per-instance counter would let two runtimes in one
+// test both open `run_1` and collide on anything keyed by run id.
+let seq = 0;
+
 export function memoryStorage<P = { orgId: string }>() {
   const chats = new Map<string, ChatRecord>();
   const messages = new Map<string, AppMessage[]>();
   const runs = new Map<string, RunRecord>();
-  let n = 0;
+  const n = { get next() { return ++seq; } };
   const impl: Partial<StorageAdapter<P>> = {
     async createChat(_p, input) {
       const chat: ChatRecord = {
-        id: input.id ?? `chat_${++n}`,
+        id: input.id ?? `chat_${n.next}`,
         owner: "org_a",
         agent: input.agent,
         title: input.title,
@@ -46,7 +51,7 @@ export function memoryStorage<P = { orgId: string }>() {
     },
     async createRun(_p, input) {
       const run: RunRecord = {
-        id: `run_${++n}`,
+        id: `run_${n.next}`,
         chatId: input.chatId,
         agent: input.agent,
         status: "active",

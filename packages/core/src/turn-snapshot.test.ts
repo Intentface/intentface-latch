@@ -20,7 +20,6 @@ import { z } from "zod";
 import { createRuntime, type Runtime } from "./runtime.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
-import { currentDateLine } from "./current-date.js";
 import type { AppMessage } from "./message.js";
 import type { MemoryProvider } from "./memory.js";
 import { memoryStorage } from "./__tests__/memory-storage.js";
@@ -94,7 +93,9 @@ const ID_KEYS = new Set([
 ]);
 const TS_KEYS = new Set(["createdAt", "updatedAt", "startedAt", "endedAt", "timestamp", "at", "leaseExpiresAt"]);
 const RANDOM_ID = /^(msg|run|chat|sub|sapv|inst)_[A-Za-z0-9_-]+$|^[A-Za-z0-9_-]{16,}$/;
-const DATE_LINE = currentDateLine();
+// By shape, not by the value captured at module load: a suite that crosses UTC
+// midnight would otherwise write a real date into the snapshot.
+const DATE_LINE = /Today's date is (?:Sun|Mon|Tues|Wednes|Thurs|Fri|Satur)day, \d{4}-\d{2}-\d{2} \(UTC\)\./g;
 
 function normalise(v: unknown, key?: string): unknown {
   if (typeof v === "function") return undefined;
@@ -112,7 +113,7 @@ function normalise(v: unknown, key?: string): unknown {
   }
   if (typeof v === "string") {
     if (key && ID_KEYS.has(key) && RANDOM_ID.test(v)) return "<id>";
-    return v.split(DATE_LINE).join("<date-line>");
+    return v.replace(DATE_LINE, "<date-line>");
   }
   if (typeof v === "number" && key && TS_KEYS.has(key)) return "<ts>";
   return v;
@@ -131,9 +132,12 @@ const user = (id: string, t: string): AppMessage =>
   ({ id, role: "user", parts: [{ type: "text", text: t }], metadata: { visibility: "user" } }) as AppMessage;
 
 function snapshotOf(mem: ReturnType<typeof memoryStorage<P>>, models: MockLanguageModelV4[], chunks: unknown) {
+  // Storage mints ids from a process-wide counter, so a chat's id depends on
+  // how many tests ran before it. Explicit ids (the approval fixture's
+  // "chat_g") are kept; minted ones are named by kind.
   const stored = Object.fromEntries(
     [...mem.messages.entries()].map(([chatId, msgs]) => [
-      chatId.startsWith("sub_") ? "<sub>" : chatId,
+      chatId.startsWith("sub_") ? "<sub>" : /^chat_\d+$/.test(chatId) ? "<chat>" : chatId,
       msgs.map((m) => ({
         ...m,
         parts: (m.parts as Array<{ type: string; data?: { messages?: unknown[] } }>).map((p) =>

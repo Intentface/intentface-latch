@@ -2388,9 +2388,10 @@ export function createRuntime<P, RC = unknown>(
               messages = [...messages.slice(0, i), insertStepParts(last, appendedByStep, priorSteps) as AppMessage];
           }
         }
-        if (stoppedBeforeStart)
-          // Nothing was said: the SDK still assembles an empty assistant message
-          // from the bare `finish`, and there is no reason to store it.
+        if (stoppedBeforeStart || handled)
+          // Nothing (or nothing but a command with no reply) was said: the SDK
+          // still assembles an empty assistant message from the bare `finish`,
+          // and there is no reason to store a blank turn.
           messages = messages.filter((m) => !(m.role === "assistant" && (m.parts as unknown[]).length === 0));
         const agentEnd = (error?: unknown) =>
           hooks.has("agent_end")

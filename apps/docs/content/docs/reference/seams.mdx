@@ -203,7 +203,7 @@ A handler returns an effect, never a rewritten world; `undefined` means no effec
 | `context` | `{ messages }` | the model's view of history this turn (a lens) |
 | `step_start` | `{ stop, model, activeTools }` | whether and how the next step runs |
 | `step_end` | `{ append }` | parts appended to the reply — stored, and streamed live |
-| `render` | `{ hide }` / `{ replace }` | what the customer sees, live and on load — never storage |
+| `render` | `{ hide }` / `{ replace }` | what the customer sees — every part on load, and extension-added parts live; never storage |
 | `error`, `agent_end` | — | observe |
 
 Three rules that follow from the table. **Storage keeps the truth**: `tool_result` changes what is stored, so a secret masked there is gone everywhere; `render` changes only the view, for the rarer case where the model should keep the truth and the person should not see it. **Order matters at `step_end`**: handlers run in extension order and the next model call waits for all of them, so list an extension that persists before the ones that observe. **Failure is open by default**: a throwing handler is reported and skipped, so one broken extension never breaks a turn — except one marked `critical`, which fails the run instead, because a persistence handler whose database is down has lost the step, not produced nothing.

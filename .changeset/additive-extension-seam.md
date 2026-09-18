@@ -4,7 +4,7 @@
 
 A new seam: `extensions`, on `RuntimeConfig` (every turn) and `AgentConfig`
 (that agent's turns). An extension attaches handlers to the moments of a turn —
-`before_agent_start`, `input`, `register_tools`, `tool_call`, `tool_result`,
+`session_start`, `before_agent_start`, `input`, `register_tools`, `tool_call`, `tool_result`,
 `instructions`, `context`, `step_start`, `step_end`, `render`, `error`,
 `agent_end` — and returns effects; the runtime composes any number of them with
 one merge rule per moment. `defineExtension`, `compose`, `renderTranscript` and

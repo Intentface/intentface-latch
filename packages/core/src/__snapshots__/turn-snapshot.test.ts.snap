@@ -275,7 +275,7 @@ exports[`turn snapshot oracle > a memory-enabled agent on a caching provider 1`]
     },
   ],
   "stored": {
-    "chat_1": [
+    "<chat>": [
       {
         "id": "u1",
         "metadata": {
@@ -411,7 +411,7 @@ exports[`turn snapshot oracle > a plain text turn 1`] = `
     },
   ],
   "stored": {
-    "chat_1": [
+    "<chat>": [
       {
         "id": "u1",
         "metadata": {
@@ -773,48 +773,7 @@ Omit threadId to start a new conversation; pass the threadId returned by a previ
     },
   ],
   "stored": {
-    "<sub>": [
-      {
-        "id": "<id>",
-        "metadata": {
-          "createdAt": "<ts>",
-          "visibility": "user",
-        },
-        "parts": [
-          {
-            "text": "do it",
-            "type": "text",
-          },
-        ],
-        "role": "user",
-      },
-      {
-        "id": "<id>",
-        "metadata": {
-          "cost": 0.0006000000000000001,
-          "createdAt": "<ts>",
-          "model": "mock",
-          "runId": "<id>",
-          "usage": {
-            "inputTokens": 100,
-            "outputTokens": 20,
-          },
-          "visibility": "user",
-        },
-        "parts": [
-          {
-            "type": "step-start",
-          },
-          {
-            "state": "done",
-            "text": "ok",
-            "type": "text",
-          },
-        ],
-        "role": "assistant",
-      },
-    ],
-    "chat_1": [
+    "<chat>": [
       {
         "id": "u1",
         "metadata": {
@@ -874,6 +833,47 @@ Omit threadId to start a new conversation; pass the threadId returned by a previ
           {
             "state": "done",
             "text": "The child said ok.",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+    "<sub>": [
+      {
+        "id": "<id>",
+        "metadata": {
+          "createdAt": "<ts>",
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "do it",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0006000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "ok",
             "type": "text",
           },
         ],
@@ -1070,7 +1070,7 @@ exports[`turn snapshot oracle > a tool call then an answer 1`] = `
     },
   ],
   "stored": {
-    "chat_1": [
+    "<chat>": [
       {
         "id": "u1",
         "metadata": {
@@ -1624,7 +1624,7 @@ exports[`turn snapshot oracle > maxSteps caps a loop that never stops calling to
     },
   ],
   "stored": {
-    "chat_1": [
+    "<chat>": [
       {
         "id": "u1",
         "metadata": {
@@ -1769,7 +1769,7 @@ exports[`turn snapshot oracle > smoothStream on 1`] = `
     },
   ],
   "stored": {
-    "chat_1": [
+    "<chat>": [
       {
         "id": "u1",
         "metadata": {

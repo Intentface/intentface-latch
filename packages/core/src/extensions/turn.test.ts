@@ -346,3 +346,72 @@ describe("failure", () => {
     expect(String(bad.run.error)).toContain("connection reset");
   });
 });
+
+describe("review findings", () => {
+  it("a run-scoped context is per run: two overlapping turns never see each other's", async () => {
+    // One runtime, one extension object, two chats in flight at once. The
+    // provider reads the newest user text so each turn's context is
+    // distinguishable, and sleeps so the two start moments interleave.
+    const who = defineExtension("who", (ext) =>
+      ext.context(async ({ messages }) => {
+        await new Promise((r) => setTimeout(r, 15));
+        const last = messages.at(-1)!.parts.find((p) => p.type === "text") as { text: string };
+        return `Context for: ${last.text}`;
+      }),
+    ) as Extension;
+    const model = scripted([text("ok")]);
+    const h = harness({ model, extensions: [who] });
+    await Promise.all([h.turn(user("alice's question", "ua"), "chat_a"), h.turn(user("bob's question", "ub"), "chat_b")]);
+    const prompts = promptsOf(model).map((p) => JSON.stringify(p));
+    const alice = prompts.find((p) => p.includes('"alice\'s question"'))!;
+    const bob = prompts.find((p) => p.includes('"bob\'s question"'))!;
+    expect(alice).toContain("Context for: alice's question");
+    expect(alice).not.toContain("bob");
+    expect(bob).toContain("Context for: bob's question");
+    expect(bob).not.toContain("alice");
+  });
+
+  it("a failed tool execution reaches tool_result with isError, and can be rescued", async () => {
+    const seen: Array<{ isError: boolean; output: unknown }> = [];
+    const rescue = defineExtension("rescue", (ext) =>
+      ext.on("tool_result", ({ isError, output }) => {
+        seen.push({ isError, output });
+        return isError ? { output: { fallback: true }, isError: false } : undefined;
+      }),
+    ) as Extension;
+    const { stored } = await runTurn({
+      model: scripted([call("flaky"), text("ok")]),
+      tools: {
+        flaky: tool({
+          inputSchema: z.object({}),
+          execute: async (): Promise<{ ok: boolean }> => {
+            throw new Error("upstream down");
+          },
+        }),
+      },
+      extensions: [rescue],
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.isError).toBe(true);
+    expect((seen[0]!.output as Error).message).toBe("upstream down");
+    const part = stored[1]!.parts.find((p) => p.type === "tool-flaky") as { state: string; output: unknown };
+    expect(part.state).toBe("output-available");
+    expect(part.output).toEqual({ fallback: true });
+  });
+
+  it("a handled command with no reply stores no blank assistant turn", async () => {
+    const quiet = defineExtension("quiet", (ext) =>
+      ext.registerCommand("mark", { description: "mark", handler: async () => ({ reply: undefined }) }),
+    ) as Extension;
+    const { stored, prompts, run } = await runTurn({ model: scripted([text("never")]), extensions: [quiet], message: user("/mark") });
+    expect(prompts).toHaveLength(0);
+    expect(stored.map((m) => m.role)).toEqual(["user"]);
+    expect(run.status).toBe("completed");
+  });
+
+  it("a command with neither handler nor expand is refused at registration", () => {
+    expect(() =>
+      defineExtension("bad", (ext) => ext.registerCommand("nothing", { description: "does nothing" })),
+    ).toThrow(/needs a handler or an expand/);
+  });
+});

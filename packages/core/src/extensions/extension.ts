@@ -328,9 +328,13 @@ export interface ExtensionAPI {
    * or the model's view. To hide a value from everyone, use `tool_result`.
    */
   registerRenderer(fn: Handler<"render">): void;
-  /** Intent: give the model information. Assembles the moments for you. */
+  /**
+   * Intent: give the model information. Assembles the moments for you. The
+   * provider sees the transcript and the run — `run.principal` is how a
+   * per-tenant context is derived.
+   */
   context(
-    provider: (ctx: { messages: UIMessage[] }) => string | undefined | Promise<string | undefined>,
+    provider: (ctx: { messages: UIMessage[]; run: RunContext }) => string | undefined | Promise<string | undefined>,
     options?: ContextOptions,
   ): void;
   /** Intent: tell the customer something. The model never sees it. */
@@ -373,6 +377,11 @@ export function defineExtension(
       registered[n] = d;
     },
     registerCommand: (cmdName, opts) => {
+      // Caught here, at registration, rather than as a throw the moment a user
+      // types the command — which a non-critical extension would swallow,
+      // sending the raw `/name` to the model as if nothing had matched.
+      if (!opts.handler && !opts.expand)
+        throw new Error(`Command "/${cmdName}" on extension "${name}" needs a handler or an expand.`);
       commands.push({ ...opts, name: cmdName, extension: name });
       on("input", async ({ text, messages }) => {
         if (text !== `/${cmdName}` && !text.startsWith(`/${cmdName} `)) return;
@@ -408,9 +417,9 @@ export function defineExtension(
       };
 
       if (scope === "session") {
-        on("before_agent_start", async (msgs) => {
+        on("before_agent_start", async (msgs, run) => {
           if (find(msgs)) return;
-          const text = await provider({ messages: msgs });
+          const text = await provider({ messages: msgs, run });
           if (text == null) return;
           // Injected BEFORE the final message by `compose.messagesIn`, so this
           // never becomes the assistant message the run streams into.
@@ -436,21 +445,38 @@ export function defineExtension(
         return;
       }
 
-      let cached: string | undefined;
-      if (scope === "run")
-        on("before_agent_start", async (msgs) => {
-          cached = await provider({ messages: msgs });
+      // One extension object serves every turn of a runtime, concurrently. A
+      // run-scoped value is therefore keyed by run id — a single variable would
+      // let an overlapping turn's context reach the wrong model call. Populated
+      // at the start moment when there is one; a continuation (resume, decision)
+      // skips those and fills its entry on first use. Released at the end.
+      const perRun = new Map<string, Promise<string | undefined>>();
+      const valueFor = (msgs: UIMessage[], run: RunContext) => {
+        let p = perRun.get(run.runId);
+        if (!p) {
+          p = Promise.resolve(provider({ messages: msgs, run }));
+          perRun.set(run.runId, p);
+        }
+        return p;
+      };
+      if (scope === "run") {
+        on("before_agent_start", (msgs, run) => {
+          perRun.set(run.runId, Promise.resolve(provider({ messages: msgs, run })));
         });
-      const get = async (msgs: UIMessage[]) =>
-        scope === "run" ? cached : await provider({ messages: msgs });
+        on("agent_end", ({ runId }) => {
+          perRun.delete(runId);
+        });
+      }
+      const get = (msgs: UIMessage[], run: RunContext) =>
+        scope === "run" ? valueFor(msgs, run) : provider({ messages: msgs, run });
       if (position === "system")
         on("instructions", async (_, ctx) => {
-          const t = await get(ctx.messages);
+          const t = await get(ctx.messages, ctx);
           return t ? { append: t } : undefined;
         });
       else
         on("context", async (m, ctx) => {
-          const t = await get(ctx.messages);
+          const t = await get(ctx.messages, ctx);
           return t ? place(m, t) : undefined;
         });
     },

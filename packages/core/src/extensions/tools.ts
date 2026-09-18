@@ -47,10 +47,21 @@ export function wrapTools(tools: ToolSet, hooks: Composed, run: RunContext): Too
       out[toolName] = t;
       continue;
     }
+    /**
+     * Run `tool_result` over an outcome and return what the SDK should see.
+     * An `isError` override flips the outcome: a failure a handler marks
+     * `isError: false` is returned as a result, a result it marks `isError:
+     * true` is thrown so the SDK records a tool error — the model then sees
+     * whatever `output` the handler left, as it would any thrown value.
+     */
     const settle = async (input: unknown, toolCallId: string, output: unknown, isError: boolean) => {
       const e = await hooks.toolResult({ toolName, toolCallId, input, output, isError, source: "server" }, run);
-      return e ? e.output : output;
+      const finalOutput = e && e.output !== undefined ? e.output : output;
+      const finalIsError = e?.isError ?? isError;
+      if (finalIsError) throw finalOutput;
+      return finalOutput;
     };
+    const attempt = <T,>(fn: () => Promise<T>): Promise<T> => fn();
 
     out[toolName] = {
       ...t,
@@ -65,29 +76,48 @@ export function wrapTools(tools: ToolSet, hooks: Composed, run: RunContext): Too
               };
               return settle(input, o.toolCallId, denial, false);
             }
-            const r = execute.call(t, input, o);
-            if (r != null && typeof (r as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
-              let held: { v: unknown } | undefined;
-              for await (const v of r as AsyncIterable<unknown>) held = { v };
-              return settle(input, o.toolCallId, held?.v, false);
+            try {
+              const r = execute.call(t, input, o);
+              if (r != null && typeof (r as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+                let held: { v: unknown } | undefined;
+                for await (const v of r as AsyncIterable<unknown>) held = { v };
+                return await settle(input, o.toolCallId, held?.v, false);
+              }
+              return await settle(input, o.toolCallId, await r, false);
+            } catch (error) {
+              // A rejected execute is a tool result too — the failed kind. Let
+              // the hook see it; it may rescue it or rewrite the error.
+              return settle(input, o.toolCallId, error, true);
             }
-            return settle(input, o.toolCallId, await r, false);
           })();
         }
 
         // Streaming-safe path: no await before `execute`, no await before the sniff.
-        const result = execute.call(t, input, o);
+        let result: unknown;
+        try {
+          result = execute.call(t, input, o);
+        } catch (error) {
+          return settle(input, o.toolCallId, error, true);
+        }
         if (result != null && typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
           return (async function* () {
             let held: { v: unknown } | undefined;
-            for await (const v of result as AsyncIterable<unknown>) {
-              if (held) yield held.v;
-              held = { v };
+            try {
+              for await (const v of result as AsyncIterable<unknown>) {
+                if (held) yield held.v;
+                held = { v };
+              }
+            } catch (error) {
+              yield await settle(input, o.toolCallId, error, true);
+              return;
             }
             if (held) yield await settle(input, o.toolCallId, held.v, false);
           })();
         }
-        return Promise.resolve(result).then((v) => settle(input, o.toolCallId, v, false));
+        return attempt(() => Promise.resolve(result)).then(
+          (v) => settle(input, o.toolCallId, v, false),
+          (error) => settle(input, o.toolCallId, error, true),
+        );
       },
     };
   }
