@@ -1,12 +1,12 @@
-export { createAgentBuilder } from "./agent-builder";
+export { createAgentBuilder } from "./agent-builder.js";
 export type {
   AgentBuilderConfig,
   AgentBuilderDeps,
   CapabilitySupport,
   ModelChoice,
   ConnectionChoice,
-} from "./agent-builder";
-export type { AgentBuilderExtension } from "./extension";
+} from "./agent-builder.js";
+export type { AgentBuilderExtension } from "./extension.js";
 export type {
   AgentActivation,
   AgentActivationSource,
@@ -16,7 +16,7 @@ export type {
   AgentPublishOptions,
   AgentPublishSource,
   AgentVersionMeta,
-} from "./store";
+} from "./store.js";
 export {
   AgentRecordSchema,
   AgentExecSchema,
@@ -30,7 +30,7 @@ export {
   normalizeAgentRecord,
   parseAgentRecord,
   parseAgentRef,
-} from "./record";
-export type { AgentRecord, AgentRecordInput, AgentScope, AttachedEval } from "./record";
-export { sharedReadTools } from "./shared-read-tools";
-export type { SharedReadDeps } from "./shared-read-tools";
+} from "./record.js";
+export type { AgentRecord, AgentRecordInput, AgentScope, AttachedEval } from "./record.js";
+export { sharedReadTools } from "./shared-read-tools.js";
+export type { SharedReadDeps } from "./shared-read-tools.js";

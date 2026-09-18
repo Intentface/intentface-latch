@@ -5,7 +5,7 @@ import {
   normalizeAgentRecord,
   parseAgentRecord,
   parseAgentRef,
-} from "./record";
+} from "./record.js";
 
 const BASE = {
   name: "helper",

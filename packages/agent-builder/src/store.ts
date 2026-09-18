@@ -1,5 +1,5 @@
 import type { DynamicAgentStore } from "@intentface/latch-core";
-import type { AgentRecord, AgentScope } from "./record";
+import type { AgentRecord, AgentScope } from "./record.js";
 
 /**
  * The store seam for agent records.
@@ -11,8 +11,8 @@ import type { AgentRecord, AgentScope } from "./record";
  * `AgentConfig` a code-declared agent would.
  */
 
-export type { AgentRecord, AgentScope, AttachedEval, AgentRecordInput } from "./record";
-export { normalizeAgentName, parseAgentRef } from "./record";
+export type { AgentRecord, AgentScope, AttachedEval, AgentRecordInput } from "./record.js";
+export { normalizeAgentName, parseAgentRef } from "./record.js";
 
 /** How a version came to be published — provenance only, never behaviour. */
 export type AgentPublishSource = "editor" | "builder-agent" | "api" | "backfill";

@@ -19,10 +19,11 @@
  *
  * Run: `pnpm verify:publish`
  */
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { readdirSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const REGISTRY = "https://registry.npmjs.org";
 /**
@@ -105,6 +106,32 @@ try {
         problems.push(`exports → ${target} is not in the tarball`);
       }
     }
+    // Existing is not the same as loadable. A `.js` target whose own relative
+    // imports lack the `.js` extension compiles clean (`moduleResolution:
+    // "Bundler"` accepts them, and tsc never rewrites specifiers) and then
+    // fails at import in Node ESM with ERR_MODULE_NOT_FOUND — which is how
+    // latch-agent-builder 0.9.1 shipped unimportable. So import every JS
+    // target for real, from the built `dist` the tarball is packed from (the
+    // package's dependencies resolve there; they would not inside the tarball).
+    for (const target of new Set(exportTargets(shipped.exports))) {
+      if (!target.startsWith("./") || !target.endsWith(".js")) continue;
+      const file = pathToFileURL(resolve(`packages/${dir}`, target)).href;
+      try {
+        // An argument array, not a shell string: the URL carries quotes.
+        execFileSync(
+          process.execPath,
+          ["--input-type=module", "-e", `await import(${JSON.stringify(file)})`],
+          { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8" },
+        );
+      } catch (error) {
+        const stderr = String(error.stderr ?? "");
+        const code = stderr.match(/code: '([A-Z_]+)'/)?.[1] ?? "import failed";
+        const what = stderr.match(/Cannot find module '([^']+)'/)?.[1];
+        problems.push(
+          `exports → ${target} does not load in Node ESM (${code}${what ? `: ${what.replace(process.cwd(), ".")}` : ""})`,
+        );
+      }
+    }
     for (const field of ["main", "module", "types"]) {
       const value = shipped[field];
       if (
@@ -164,10 +191,11 @@ try {
     if (problems.length > 0) {
       failures++;
       console.log(`✗ ${pkg.name}`);
-      for (const problem of problems) console.log(`    ${problem}`);
+      // One target can sit under several conditions; report each problem once.
+      for (const problem of new Set(problems)) console.log(`    ${problem}`);
     } else {
       console.log(
-        `✓ ${pkg.name} — ${files.length} files, ${exportTargets(shipped.exports).length} export targets resolve`,
+        `✓ ${pkg.name} — ${files.length} files, ${exportTargets(shipped.exports).length} export targets resolve and load`,
       );
     }
   }

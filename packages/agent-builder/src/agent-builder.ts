@@ -3,11 +3,11 @@ import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
 import type { AgentFactory, AgentMeta, Runtime, TurnWriter } from "@intentface/latch-core";
 import type { LanguageModel } from "ai";
-import type { AgentBuilderExtension } from "./extension";
-import { AgentRecordSchema, AgentScopeSchema, normalizeAgentName, normalizeAgentRecord } from "./record";
-import type { AgentRecord } from "./record";
-import type { AgentBuilderStore } from "./store";
-import { sharedReadTools } from "./shared-read-tools";
+import type { AgentBuilderExtension } from "./extension.js";
+import { AgentRecordSchema, AgentScopeSchema, normalizeAgentName, normalizeAgentRecord } from "./record.js";
+import type { AgentRecord } from "./record.js";
+import type { AgentBuilderStore } from "./store.js";
+import { sharedReadTools } from "./shared-read-tools.js";
 
 /**
  * The Agent Builder — a meta-agent that designs, creates, and updates other

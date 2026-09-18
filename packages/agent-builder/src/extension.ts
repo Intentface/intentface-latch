@@ -1,4 +1,4 @@
-import type { AgentRecord } from "./record";
+import type { AgentRecord } from "./record.js";
 
 /**
  * The extension seam.
