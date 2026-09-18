@@ -70,6 +70,10 @@ async function unpack(
       method: request.method,
       headers,
       ...(body && body.byteLength > 0 ? { body } : {}),
+      // The Request's own signal, or nothing survives cancellation: an aborted
+      // MCP call would keep its socket until the server answered. `init` still
+      // wins, so a caller passing both replaces it deliberately.
+      signal: request.signal,
       ...init,
     },
   ];

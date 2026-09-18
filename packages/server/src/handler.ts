@@ -44,6 +44,24 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  * a read-back channel for internal HTTP responses. The full error goes to the
  * host's logger; the caller gets a stable code and, at most, a status.
  */
+/**
+ * Hand an error to the host's logger without letting the logger break the
+ * response. A throwing hook would replace the sanitized 400/502 with a 500
+ * carrying whatever it threw — the opposite of the point.
+ */
+function notifyError(
+  hook: ((error: unknown, info: { route: string; name?: string }) => void | Promise<void>) | undefined,
+  error: unknown,
+  info: { route: string; name?: string },
+): void {
+  if (!hook) return;
+  try {
+    void Promise.resolve(hook(error, info)).catch(() => {});
+  } catch {
+    /* a logger that throws is not the caller's problem */
+  }
+}
+
 function connectionFailure(
   error: unknown,
   fallback: string,
@@ -115,7 +133,7 @@ export interface LatchHandlerConfig<P> {
    * and at most an HTTP status, and hand the real error here. Without this the
    * detail is simply lost; wire it to your logger.
    */
-  onError?: (error: unknown, info: { route: string; name?: string }) => void;
+  onError?: (error: unknown, info: { route: string; name?: string }) => void | Promise<void>;
   /**
    * Query param appended to the post-callback redirect signalling which
    * connection just connected (`?<connectedParam>=<name>`). Default "connected".
@@ -363,7 +381,7 @@ export function createLatchHandler<P>(
         try {
           res = await oauth.start(principal, { state });
         } catch (e) {
-          config.onError?.(e, { route: "connections.authorize", name });
+          notifyError(config.onError, e, { route: "connections.authorize", name });
           return json(connectionFailure(e, "authorize failed"), 400);
         }
         if (res.status !== "redirect") {
@@ -426,7 +444,7 @@ export function createLatchHandler<P>(
         try {
           return json({ tools: await conns.testTools(name, principal) });
         } catch (e) {
-          config.onError?.(e, { route: "connections.test", name });
+          notifyError(config.onError, e, { route: "connections.test", name });
           return json(connectionFailure(e, "test failed"), 502);
         }
       }

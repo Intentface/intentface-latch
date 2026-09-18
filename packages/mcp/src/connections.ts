@@ -206,6 +206,18 @@ export interface McpConnections<P> {
   status(principal: P): Promise<ConnectionStatus[]>;
   /** Open just one connection and return its namespaced tool names (a connectivity probe). */
   testTools(name: string, principal: P): Promise<string[]>;
+  /**
+   * Release the registry's own resources — one address-guarded fetch per
+   * connection, each holding a keep-alive agent. These live for the registry's
+   * lifetime by design (a per-turn agent would discard every pooled socket), so
+   * a long-lived server never needs this; a test or a short-lived process does,
+   * or the sockets keep the event loop alive. Opening tool sets is unaffected —
+   * `OpenToolSet.close()` still releases a turn's clients.
+   *
+   * Optional: a host that hand-builds something satisfying this interface (the
+   * platform composes several) owns no such resources and need not implement it.
+   */
+  close?(): Promise<void>;
 }
 
 /** Build the synthetic tool that asks the user to authorize a connection. */
@@ -439,6 +451,9 @@ export function createMcpConnections<P>(
     hostFor: (names) => makeHost(new Set(names)),
     names: entries.map(([name]) => name),
     oauth: (name) => oauthByName.get(name),
+    async close() {
+      await Promise.all([...guardedByName.values()].map((f) => f.close().catch(() => {})));
+    },
     async status(principal) {
       const out: ConnectionStatus[] = [];
       for (const [name, def] of entries) {

@@ -37,6 +37,10 @@ layer it over `createGuardedFetch` rather than over `globalThis.fetch`.
 `allowPrivateHost` relaxes both, per connection, so a trusted in-cluster server
 or a developer's `http://localhost:3999/mcp` is unaffected.
 
+`createMcpConnections` gains an optional `close()` that releases those fetches'
+keep-alive agents — a long-lived server never needs it; a test or short-lived
+process does.
+
 **Connection errors no longer quote the remote response.** The `authorize` and
 `test` routes returned `error.message`, which for OAuth failures embeds
 `Raw body: …`. They now return a stable code and at most an HTTP status; the

@@ -118,6 +118,44 @@ describe("what the wrapper adds", () => {
     ).toMatch(/redirect/i);
   });
 
+  it("carries the Request's abort signal, so a cancelled call releases its socket", async () => {
+    // Without this the reconstruction drops `signal` and an aborted MCP or
+    // OAuth call keeps its socket until the server finally answers.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    cleanups.push(() => release());
+    const port = await listen(
+      createServer(async (_req, res) => {
+        await held; // never answers until the test lets it
+        res.writeHead(200);
+        res.end("late");
+      }),
+    );
+    const f = guarded({ allowPrivateHost: true });
+    const controller = new AbortController();
+    const inflight = f(
+      new Request(`http://127.0.0.1:${port}/slow`, { signal: controller.signal }),
+    );
+    controller.abort();
+    expect(await rejection(inflight)).toMatch(/abort/i);
+  });
+
+  it("an explicit init signal replaces the Request's", async () => {
+    const port = await listen(
+      createServer((_req, res) => {
+        res.writeHead(200);
+        res.end("ok");
+      }),
+    );
+    const f = guarded({ allowPrivateHost: true });
+    const requestSide = new AbortController();
+    requestSide.abort(); // already aborted — must NOT decide the outcome
+    const res = await f(new Request(`http://127.0.0.1:${port}/`, { signal: requestSide.signal }), {
+      signal: new AbortController().signal,
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("unpacks a Request rather than handing it to undici", async () => {
     // undici rejects a Request built by another fetch implementation
     // (cross-realm brand check), so a caller passing one must not silently
