@@ -39,7 +39,7 @@ const usage = (cacheRead = 0) => ({
 });
 
 function streamFor(step: Step, cacheRead: number) {
-  const finish = (reason: string) => ({ type: "finish", finishReason: reason, usage: usage(cacheRead) });
+  const finish = (reason: string) => ({ type: "finish", finishReason: { unified: reason, raw: reason }, usage: usage(cacheRead) });
   const chunks =
     step.kind === "text"
       ? [

@@ -44,10 +44,10 @@
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:^",
-    "@langfuse/client": "^5.9.1",
-    "@langfuse/otel": "^5.9.1",
-    "@langfuse/tracing": "^5.9.1",
-    "@langfuse/vercel-ai-sdk": "^5.9.1",
+    "@langfuse/client": "^5.11.1",
+    "@langfuse/otel": "^5.11.1",
+    "@langfuse/tracing": "^5.11.1",
+    "@langfuse/vercel-ai-sdk": "^5.11.1",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/sdk-trace-node": "^2.0.0"
   },
@@ -56,7 +56,7 @@
   },
   "devDependencies": {
     "@types/node": "^22",
-    "ai": "^7.0.2",
+    "ai": "^7.0.106",
     "typescript": "^5.7.0",
     "vitest": "^4"
   },

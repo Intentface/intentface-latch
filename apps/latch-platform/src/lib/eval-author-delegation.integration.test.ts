@@ -39,7 +39,7 @@ const textStream = (text: string) =>
     { type: "text-start", id: "t1" },
     { type: "text-delta", id: "t1", delta: text },
     { type: "text-end", id: "t1" },
-    { type: "finish", finishReason: "stop", usage },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
   ]);
 
 const toolCallStream = (toolCallId: string, input: unknown) =>
@@ -47,7 +47,7 @@ const toolCallStream = (toolCallId: string, input: unknown) =>
     { type: "stream-start", warnings: [] },
     { type: "response-metadata", id: "r", modelId: "mock", timestamp: new Date(0) },
     { type: "tool-call", toolCallId, toolName: "spawn_agent", input: JSON.stringify(input) },
-    { type: "finish", finishReason: "tool-calls", usage },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
   ]);
 
 const CASES_JSON = '```json\n[{"name":"greets","input":"hi","expected":{"assertions":{"contains":["hello"]}}}]\n```';

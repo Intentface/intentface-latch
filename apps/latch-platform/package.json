@@ -16,10 +16,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.0",
-    "@ai-sdk/google": "^4.0.0",
-    "@ai-sdk/openai": "^4.0.0",
-    "@ai-sdk/react": "^4.0.2",
+    "@ai-sdk/anthropic": "^4.0.57",
+    "@ai-sdk/google": "^4.0.75",
+    "@ai-sdk/openai": "^4.0.70",
+    "@ai-sdk/react": "^4.0.109",
     "@base-ui/react": "^1.6.0",
     "@codemirror/lang-javascript": "^6.2.5",
     "@daytonaio/sdk": "^0.189.0",
@@ -47,7 +47,7 @@
     "@tanstack/router-plugin": "^1.168.23",
     "@uiw/react-codemirror": "^4.25.10",
     "@vercel/functions": "^3.7.3",
-    "ai": "^7.0.2",
+    "ai": "^7.0.106",
     "better-auth": "^1.6.19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

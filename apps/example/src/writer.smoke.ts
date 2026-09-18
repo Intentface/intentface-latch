@@ -30,14 +30,14 @@ function toolThenText() {
         { type: "tool-input-delta", id: "c1", delta: "{}" },
         { type: "tool-input-end", id: "c1" },
         { type: "tool-call", toolCallId: "c1", toolName: "annotate", input: "{}" },
-        { type: "finish", finishReason: "tool-calls", usage: { inputTokens: { total: 4 }, outputTokens: { total: 2 } } },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage: { inputTokens: { total: 4 }, outputTokens: { total: 2 } } },
       ]),
       step([
         { type: "stream-start", warnings: [] },
         { type: "text-start", id: "0" },
         { type: "text-delta", id: "0", delta: "annotated." },
         { type: "text-end", id: "0" },
-        { type: "finish", finishReason: "stop", usage: { inputTokens: { total: 5 }, outputTokens: { total: 3 } } },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 5 }, outputTokens: { total: 3 } } },
       ]),
     ] as never,
   });

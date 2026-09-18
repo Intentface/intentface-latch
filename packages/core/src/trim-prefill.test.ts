@@ -129,9 +129,16 @@ describe("the converted projection after trimming", () => {
     expect((modelMsgs[modelMsgs.length - 1] as { role: string }).role).toBe("assistant");
   });
 
-  it("near-miss: keeping step-start ends it on an EMPTY assistant message", async () => {
-    // What a trim that keeps step-start produces for this shape — the reason
-    // step-start is in the drop set.
+  it("keeping step-start no longer strands an empty assistant message", async () => {
+    // This shape USED to convert to a trailing assistant message with no
+    // content — the original reason step-start is in the drop set. The AI SDK
+    // now drops the empty message itself, so the conversion ends on the tool
+    // result either way.
+    //
+    // step-start stays in the drop set regardless: the tests above cover what
+    // the trim is actually for (a trailing assistant PREFILL), and a drop set
+    // that relies on the SDK's conversion to clean up after it is a worse
+    // contract than one that never emits the part.
     const keptStepStart = [
       paused[0],
       msg("assistant", [
@@ -143,7 +150,6 @@ describe("the converted projection after trimming", () => {
     ];
     const modelMsgs = await toModelMessages(keptStepStart);
     const last = modelMsgs[modelMsgs.length - 1] as { role: string; content: unknown[] };
-    expect(last.role).toBe("assistant");
-    expect(last.content).toEqual([]);
+    expect(last.role).toBe("tool");
   });
 });

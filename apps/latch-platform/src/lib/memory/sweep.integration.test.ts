@@ -162,14 +162,14 @@ const textStream = (text: string) =>
     { type: "text-start", id: "t1" },
     { type: "text-delta", id: "t1", delta: text },
     { type: "text-end", id: "t1" },
-    { type: "finish", finishReason: "stop", usage },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
   ]);
 const toolCallStream = (toolName: string, input: unknown) =>
   streamFrom([
     { type: "stream-start", warnings: [] },
     meta,
     { type: "tool-call", toolCallId: "c1", toolName, input: JSON.stringify(input) },
-    { type: "finish", finishReason: "tool-calls", usage },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
   ]);
 
 /**

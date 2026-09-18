@@ -44,3 +44,4 @@ pnpm-debug.log*
 STRATEGY.md
 .vercel
 tasks/
+.tanstack/

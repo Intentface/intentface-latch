@@ -64,6 +64,7 @@ exports[`turn snapshot oracle > a memory-enabled agent on a caching provider 1`]
       "type": "finish-step",
     },
     {
+      "finishReason": "stop",
       "type": "finish",
     },
   ],
@@ -365,6 +366,7 @@ exports[`turn snapshot oracle > a plain text turn 1`] = `
       "type": "finish-step",
     },
     {
+      "finishReason": "stop",
       "type": "finish",
     },
   ],
@@ -569,6 +571,7 @@ exports[`turn snapshot oracle > a subagent delegation 1`] = `
       "type": "finish-step",
     },
     {
+      "finishReason": "stop",
       "type": "finish",
     },
   ],
@@ -948,6 +951,7 @@ exports[`turn snapshot oracle > a tool call then an answer 1`] = `
       "type": "finish-step",
     },
     {
+      "finishReason": "stop",
       "type": "finish",
     },
   ],
@@ -1171,6 +1175,7 @@ exports[`turn snapshot oracle > an approval gate, then the decision continues th
         "type": "finish-step",
       },
       {
+        "finishReason": "tool-calls",
         "type": "finish",
       },
     ],
@@ -1213,6 +1218,7 @@ exports[`turn snapshot oracle > an approval gate, then the decision continues th
         "type": "finish-step",
       },
       {
+        "finishReason": "stop",
         "type": "finish",
       },
     ],
@@ -1502,6 +1508,7 @@ exports[`turn snapshot oracle > maxSteps caps a loop that never stops calling to
       "type": "finish-step",
     },
     {
+      "finishReason": "tool-calls",
       "type": "finish",
     },
   ],
@@ -1667,6 +1674,15 @@ exports[`turn snapshot oracle > maxSteps caps a loop that never stops calling to
           {
             "type": "step-start",
           },
+          {
+            "input": {},
+            "output": {
+              "time": "12:00",
+            },
+            "state": "output-available",
+            "toolCallId": "call_1",
+            "type": "tool-get_time",
+          },
         ],
         "role": "assistant",
       },
@@ -1723,6 +1739,7 @@ exports[`turn snapshot oracle > smoothStream on 1`] = `
       "type": "finish-step",
     },
     {
+      "finishReason": "stop",
       "type": "finish",
     },
   ],

@@ -35,7 +35,7 @@ const mockModel = () =>
           { type: "text-end", id: "0" },
           {
             type: "finish",
-            finishReason: "stop",
+            finishReason: { unified: "stop", raw: "stop" },
             usage: { inputTokens: { total: 7 }, outputTokens: { total: 3 } },
           },
         ],

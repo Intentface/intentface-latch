@@ -60,7 +60,7 @@ const sayText = (text: string) => [
   { type: "text-start", id: "t1" },
   { type: "text-delta", id: "t1", delta: text },
   { type: "text-end", id: "t1" },
-  { type: "finish", finishReason: "stop", usage },
+  { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
 ];
 
 const callAskUser = (toolCallId: string, question: string) => [
@@ -74,7 +74,7 @@ const callAskUser = (toolCallId: string, question: string) => [
       questions: [{ question, options: [{ label: "Yes", description: "y" }] }],
     }),
   },
-  { type: "finish", finishReason: "tool-calls", usage },
+  { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
 ];
 
 const model = new MockLanguageModelV3({

@@ -27,7 +27,7 @@ const principal: P = { orgId: "org_a" };
 function twoStepModel() {
   const finish = (reason: string) => ({
     type: "finish",
-    finishReason: reason,
+    finishReason: { unified: reason, raw: reason },
     usage: { inputTokens: { total: 5 }, outputTokens: { total: 3 } },
   });
   const step = (chunks: unknown[]) => ({

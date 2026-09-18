@@ -32,14 +32,14 @@ function approvalMock() {
         { type: "tool-input-delta", id: "call_1", delta: '{"target":"data"}' },
         { type: "tool-input-end", id: "call_1" },
         { type: "tool-call", toolCallId: "call_1", toolName: "dangerousAction", input: '{"target":"data"}' },
-        { type: "finish", finishReason: "tool-calls", usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } },
       ]),
       step([
         { type: "stream-start", warnings: [] },
         { type: "text-start", id: "0" },
         { type: "text-delta", id: "0", delta: "Done." },
         { type: "text-end", id: "0" },
-        { type: "finish", finishReason: "stop", usage: { inputTokens: { total: 6 }, outputTokens: { total: 3 } } },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 6 }, outputTokens: { total: 3 } } },
       ]),
     ] as never,
   });

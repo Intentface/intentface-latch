@@ -40,7 +40,7 @@ export function mockModel(text = "Hello, world!") {
           { type: "text-end", id: "0" },
           {
             type: "finish",
-            finishReason: "stop",
+            finishReason: { unified: "stop", raw: "stop" },
             usage: { inputTokens: { total: 7 }, outputTokens: { total: 3 } },
           },
         ],
@@ -73,7 +73,7 @@ export function toolCallMock() {
         },
         {
           type: "finish",
-          finishReason: "tool-calls",
+          finishReason: { unified: "tool-calls", raw: "tool-calls" },
           usage: { inputTokens: { total: 10 }, outputTokens: { total: 5 } },
         },
       ],
@@ -90,7 +90,7 @@ export function toolCallMock() {
         { type: "text-end", id: "0" },
         {
           type: "finish",
-          finishReason: "stop",
+          finishReason: { unified: "stop", raw: "stop" },
           usage: { inputTokens: { total: 12 }, outputTokens: { total: 6 } },
         },
       ],
