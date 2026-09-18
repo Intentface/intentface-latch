@@ -24,15 +24,39 @@ export interface TranscriptMessage {
   toolCalls: { tool: string; args?: unknown; blocked?: boolean; output?: string }[];
 }
 
-/** Per-message view of a stored transcript: text plus every tool call it made. */
-export function transcriptOf(messages: unknown[]): TranscriptMessage[] {
+/** How much of each field survives. Truncation is always MARKED — see below. */
+export interface TranscriptLimits {
+  /** Assistant/user text per message. */
+  text?: number;
+  /** Serialized tool result per call. */
+  toolOutput?: number;
+}
+
+/**
+ * Per-message view of a stored transcript: text plus every tool call it made.
+ *
+ * Truncation is marked with `…[truncated]` rather than silently cutting. A
+ * reader — an agent diagnosing a failure, or a judge asked whether an answer
+ * was grounded in what the agent retrieved — cannot otherwise tell a short
+ * result from a long one that was cut, and will confidently conclude the
+ * evidence was missing when it was merely clipped.
+ *
+ * The defaults suit diagnosis, where the point is a compact overview. Callers
+ * that need to READ the evidence (grounding checks) should raise `toolOutput`.
+ */
+export function transcriptOf(
+  messages: unknown[],
+  limits: TranscriptLimits = {},
+): TranscriptMessage[] {
+  const maxText = limits.text ?? 4000;
+  const maxToolOutput = limits.toolOutput ?? 500;
+  const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…[truncated]` : s);
   return messages.map((m) => {
     const parts = (((m as { parts?: unknown[] }).parts ?? []) as Record<string, unknown>[]);
     const text = parts
       .filter((p) => p.type === "text" && p.text)
       .map((p) => p.text)
-      .join("\n")
-      .slice(0, 4000);
+      .join("\n");
     const toolCalls: TranscriptMessage["toolCalls"] = [];
     for (const p of parts) {
       const type = p.type as string | undefined;
@@ -49,11 +73,11 @@ export function transcriptOf(messages: unknown[]): TranscriptMessage[] {
           tool: toolName,
           args: p.input,
           blocked: blocked || undefined,
-          output: p.output === undefined ? undefined : JSON.stringify(p.output).slice(0, 500),
+          output: p.output === undefined ? undefined : clip(JSON.stringify(p.output), maxToolOutput),
         });
       }
     }
-    return { role: (m as { role?: string }).role ?? "unknown", text, toolCalls };
+    return { role: (m as { role?: string }).role ?? "unknown", text: clip(text, maxText), toolCalls };
   });
 }
 
