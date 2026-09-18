@@ -1,0 +1,1814 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`turn snapshot oracle > a memory-enabled agent on a caching provider 1`] = `
+{
+  "chunks": [
+    {
+      "messageId": "<id>",
+      "messageMetadata": {
+        "createdAt": "<ts>",
+        "model": "claude-mock",
+        "runId": "<id>",
+        "visibility": "user",
+      },
+      "type": "start",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "dynamic": false,
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-start",
+    },
+    {
+      "inputTextDelta": "{}",
+      "toolCallId": "call_1",
+      "type": "tool-input-delta",
+    },
+    {
+      "input": {},
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-available",
+    },
+    {
+      "dynamic": false,
+      "output": {
+        "time": "12:00",
+      },
+      "toolCallId": "call_1",
+      "type": "tool-output-available",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "id": "t0",
+      "type": "text-start",
+    },
+    {
+      "delta": "Noted.",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "id": "t0",
+      "type": "text-end",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "finish",
+    },
+  ],
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Remember things.
+
+## What I remember
+- Prefers tea.",
+            "providerOptions": {
+              "anthropic": {
+                "cacheControl": {
+                  "type": "ephemeral",
+                },
+              },
+            },
+            "role": "system",
+          },
+          {
+            "content": "<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "what do I like?",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "providerOptions": {
+          "anthropic": {
+            "cacheControl": {
+              "type": "ephemeral",
+            },
+          },
+        },
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "The current time.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object",
+            },
+            "name": "get_time",
+            "type": "function",
+          },
+          {
+            "description": "Search memory.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {
+                "q": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "q",
+              ],
+              "type": "object",
+            },
+            "name": "memory_search",
+            "providerOptions": {
+              "anthropic": {
+                "cacheControl": {
+                  "type": "ephemeral",
+                },
+              },
+            },
+            "type": "function",
+          },
+        ],
+      },
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Remember things.
+
+## What I remember
+- Prefers tea.",
+            "providerOptions": {
+              "anthropic": {
+                "cacheControl": {
+                  "type": "ephemeral",
+                },
+              },
+            },
+            "role": "system",
+          },
+          {
+            "content": "<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "what do I like?",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+          {
+            "content": [
+              {
+                "input": {},
+                "toolCallId": "call_1",
+                "toolName": "get_time",
+                "type": "tool-call",
+              },
+            ],
+            "role": "assistant",
+          },
+          {
+            "content": [
+              {
+                "output": {
+                  "type": "json",
+                  "value": {
+                    "time": "12:00",
+                  },
+                },
+                "toolCallId": "call_1",
+                "toolName": "get_time",
+                "type": "tool-result",
+              },
+            ],
+            "role": "tool",
+          },
+        ],
+        "providerOptions": {
+          "anthropic": {
+            "cacheControl": {
+              "type": "ephemeral",
+            },
+          },
+        },
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "The current time.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object",
+            },
+            "name": "get_time",
+            "type": "function",
+          },
+          {
+            "description": "Search memory.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {
+                "q": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "q",
+              ],
+              "type": "object",
+            },
+            "name": "memory_search",
+            "providerOptions": {
+              "anthropic": {
+                "cacheControl": {
+                  "type": "ephemeral",
+                },
+              },
+            },
+            "type": "function",
+          },
+        ],
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "mem",
+      "chatId": "<id>",
+      "costTotal": 0.000768,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "7e09fdc64e28f5c1",
+      "usageCacheReadTokens": 160,
+      "usageInputTokens": 200,
+      "usageOutputTokens": 40,
+    },
+  ],
+  "stored": {
+    "chat_1": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "what do I like?",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.000768,
+          "createdAt": "<ts>",
+          "model": "claude-mock",
+          "runId": "<id>",
+          "usage": {
+            "cacheReadTokens": 160,
+            "inputTokens": 200,
+            "outputTokens": 40,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "input": {},
+            "output": {
+              "time": "12:00",
+            },
+            "state": "output-available",
+            "toolCallId": "call_1",
+            "type": "tool-get_time",
+          },
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "Noted.",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
+
+exports[`turn snapshot oracle > a plain text turn 1`] = `
+{
+  "chunks": [
+    {
+      "messageId": "<id>",
+      "messageMetadata": {
+        "createdAt": "<ts>",
+        "model": "mock",
+        "runId": "<id>",
+        "visibility": "user",
+      },
+      "type": "start",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "id": "t0",
+      "type": "text-start",
+    },
+    {
+      "delta": "hello there",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "id": "t0",
+      "type": "text-end",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "finish",
+    },
+  ],
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Echo the user.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "hi",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "echo",
+      "chatId": "<id>",
+      "costTotal": 0.0006000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "cbf29ce484222325",
+      "usageInputTokens": 100,
+      "usageOutputTokens": 20,
+    },
+  ],
+  "stored": {
+    "chat_1": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "hi",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0006000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "hello there",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
+
+exports[`turn snapshot oracle > a subagent delegation 1`] = `
+{
+  "chunks": [
+    {
+      "messageId": "<id>",
+      "messageMetadata": {
+        "createdAt": "<ts>",
+        "model": "mock",
+        "runId": "<id>",
+        "visibility": "user",
+      },
+      "type": "start",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "dynamic": false,
+      "toolCallId": "call_1",
+      "toolName": "spawn_agent",
+      "type": "tool-input-start",
+    },
+    {
+      "inputTextDelta": "{"agent":"child","prompt":"do it"}",
+      "toolCallId": "call_1",
+      "type": "tool-input-delta",
+    },
+    {
+      "input": {
+        "agent": "child",
+        "prompt": "do it",
+      },
+      "toolCallId": "call_1",
+      "toolName": "spawn_agent",
+      "type": "tool-input-available",
+    },
+    {
+      "data": {
+        "agent": "child",
+        "messages": [],
+        "threadId": "<id>",
+        "toolCallId": "call_1",
+      },
+      "id": "subagent_call_1",
+      "type": "data-subagent-progress",
+    },
+    {
+      "data": {
+        "agent": "child",
+        "messages": [
+          {
+            "id": "<id>",
+            "metadata": {
+              "createdAt": "<ts>",
+              "visibility": "user",
+            },
+            "parts": [
+              {
+                "text": "do it",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+          {
+            "id": "<id>",
+            "metadata": {
+              "createdAt": "<ts>",
+              "model": "mock",
+              "runId": "<id>",
+              "visibility": "user",
+            },
+            "parts": [],
+            "role": "assistant",
+          },
+        ],
+        "threadId": "<id>",
+        "toolCallId": "call_1",
+      },
+      "id": "subagent_call_1",
+      "type": "data-subagent-progress",
+    },
+    {
+      "dynamic": false,
+      "output": {
+        "answer": "ok",
+        "threadId": "<id>",
+      },
+      "toolCallId": "call_1",
+      "type": "tool-output-available",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "id": "t0",
+      "type": "text-start",
+    },
+    {
+      "delta": "The child said ok.",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "id": "t0",
+      "type": "text-end",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "finish",
+    },
+  ],
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Delegate.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "delegate",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "Delegate a sub-task to one of your agents and get its final answer.
+Available agents:
+- child: (no description)
+
+Omit threadId to start a new conversation; pass the threadId returned by a previous call to continue with the SAME agent (it keeps full context). Returns { threadId, answer }.",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "agent": {
+                  "description": "One of the available agent names above.",
+                  "type": "string",
+                },
+                "prompt": {
+                  "description": "The task / message for the subagent.",
+                  "type": "string",
+                },
+                "threadId": {
+                  "description": "Continue an existing subagent thread.",
+                  "type": "string",
+                },
+              },
+              "required": [
+                "agent",
+                "prompt",
+              ],
+              "type": "object",
+            },
+            "name": "spawn_agent",
+            "type": "function",
+          },
+        ],
+      },
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Delegate.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "delegate",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+          {
+            "content": [
+              {
+                "input": {
+                  "agent": "child",
+                  "prompt": "do it",
+                },
+                "toolCallId": "call_1",
+                "toolName": "spawn_agent",
+                "type": "tool-call",
+              },
+            ],
+            "role": "assistant",
+          },
+          {
+            "content": [
+              {
+                "output": {
+                  "type": "json",
+                  "value": {
+                    "answer": "ok",
+                    "threadId": "<id>",
+                  },
+                },
+                "toolCallId": "call_1",
+                "toolName": "spawn_agent",
+                "type": "tool-result",
+              },
+            ],
+            "role": "tool",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "Delegate a sub-task to one of your agents and get its final answer.
+Available agents:
+- child: (no description)
+
+Omit threadId to start a new conversation; pass the threadId returned by a previous call to continue with the SAME agent (it keeps full context). Returns { threadId, answer }.",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "agent": {
+                  "description": "One of the available agent names above.",
+                  "type": "string",
+                },
+                "prompt": {
+                  "description": "The task / message for the subagent.",
+                  "type": "string",
+                },
+                "threadId": {
+                  "description": "Continue an existing subagent thread.",
+                  "type": "string",
+                },
+              },
+              "required": [
+                "agent",
+                "prompt",
+              ],
+              "type": "object",
+            },
+            "name": "spawn_agent",
+            "type": "function",
+          },
+        ],
+      },
+    ],
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Do the task.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "do it",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "parent",
+      "chatId": "<id>",
+      "costTotal": 0.0012000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "ed34416a52dcf5e6",
+      "usageInputTokens": 200,
+      "usageOutputTokens": 40,
+    },
+    {
+      "agent": "child",
+      "chatId": "<id>",
+      "costTotal": 0.0006000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "cbf29ce484222325",
+      "usageInputTokens": 100,
+      "usageOutputTokens": 20,
+    },
+  ],
+  "stored": {
+    "<sub>": [
+      {
+        "id": "<id>",
+        "metadata": {
+          "createdAt": "<ts>",
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "do it",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0006000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "ok",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+    "chat_1": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "delegate",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0012000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "input": {
+              "agent": "child",
+              "prompt": "do it",
+            },
+            "output": {
+              "answer": "ok",
+              "threadId": "<id>",
+            },
+            "state": "output-available",
+            "toolCallId": "call_1",
+            "type": "tool-spawn_agent",
+          },
+          {
+            "data": {
+              "agent": "child",
+              "messages": "<2 messages>",
+              "threadId": "<id>",
+              "toolCallId": "call_1",
+            },
+            "id": "subagent_call_1",
+            "type": "data-subagent-progress",
+          },
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "The child said ok.",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
+
+exports[`turn snapshot oracle > a tool call then an answer 1`] = `
+{
+  "chunks": [
+    {
+      "messageId": "<id>",
+      "messageMetadata": {
+        "createdAt": "<ts>",
+        "model": "mock",
+        "runId": "<id>",
+        "visibility": "user",
+      },
+      "type": "start",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "dynamic": false,
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-start",
+    },
+    {
+      "inputTextDelta": "{}",
+      "toolCallId": "call_1",
+      "type": "tool-input-delta",
+    },
+    {
+      "input": {},
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-available",
+    },
+    {
+      "dynamic": false,
+      "output": {
+        "time": "12:00",
+      },
+      "toolCallId": "call_1",
+      "type": "tool-output-available",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "id": "t0",
+      "type": "text-start",
+    },
+    {
+      "delta": "It is noon.",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "id": "t0",
+      "type": "text-end",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "finish",
+    },
+  ],
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Use tools.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "time?",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "The current time.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object",
+            },
+            "name": "get_time",
+            "type": "function",
+          },
+        ],
+      },
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Use tools.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "time?",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+          {
+            "content": [
+              {
+                "input": {},
+                "toolCallId": "call_1",
+                "toolName": "get_time",
+                "type": "tool-call",
+              },
+            ],
+            "role": "assistant",
+          },
+          {
+            "content": [
+              {
+                "output": {
+                  "type": "json",
+                  "value": {
+                    "time": "12:00",
+                  },
+                },
+                "toolCallId": "call_1",
+                "toolName": "get_time",
+                "type": "tool-result",
+              },
+            ],
+            "role": "tool",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "The current time.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object",
+            },
+            "name": "get_time",
+            "type": "function",
+          },
+        ],
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "tooler",
+      "chatId": "<id>",
+      "costTotal": 0.0012000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "43ae1e8010bf2011",
+      "usageInputTokens": 200,
+      "usageOutputTokens": 40,
+    },
+  ],
+  "stored": {
+    "chat_1": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "time?",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0012000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "input": {},
+            "output": {
+              "time": "12:00",
+            },
+            "state": "output-available",
+            "toolCallId": "call_1",
+            "type": "tool-get_time",
+          },
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "It is noon.",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
+
+exports[`turn snapshot oracle > an approval gate, then the decision continues the turn 1`] = `
+{
+  "chunks": {
+    "first": [
+      {
+        "messageId": "<id>",
+        "messageMetadata": {
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "visibility": "user",
+        },
+        "type": "start",
+      },
+      {
+        "type": "start-step",
+      },
+      {
+        "dynamic": false,
+        "toolCallId": "call_1",
+        "toolName": "write_thing",
+        "type": "tool-input-start",
+      },
+      {
+        "inputTextDelta": "{"what":"x"}",
+        "toolCallId": "call_1",
+        "type": "tool-input-delta",
+      },
+      {
+        "input": {
+          "what": "x",
+        },
+        "toolCallId": "call_1",
+        "toolName": "write_thing",
+        "type": "tool-input-available",
+      },
+      {
+        "approvalId": "<id>",
+        "toolCallId": "call_1",
+        "type": "tool-approval-request",
+      },
+      {
+        "type": "finish-step",
+      },
+      {
+        "type": "finish",
+      },
+    ],
+    "second": [
+      {
+        "messageId": "<id>",
+        "messageMetadata": {
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "visibility": "user",
+        },
+        "type": "start",
+      },
+      {
+        "dynamic": false,
+        "output": {
+          "wrote": "x",
+        },
+        "toolCallId": "call_1",
+        "type": "tool-output-available",
+      },
+      {
+        "type": "start-step",
+      },
+      {
+        "id": "t0",
+        "type": "text-start",
+      },
+      {
+        "delta": "Wrote it.",
+        "id": "t0",
+        "type": "text-delta",
+      },
+      {
+        "id": "t0",
+        "type": "text-end",
+      },
+      {
+        "type": "finish-step",
+      },
+      {
+        "type": "finish",
+      },
+    ],
+  },
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Write carefully.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "write x",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "Writes something.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {
+                "what": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "what",
+              ],
+              "type": "object",
+            },
+            "name": "write_thing",
+            "type": "function",
+          },
+        ],
+      },
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Write carefully.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "write x",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+          {
+            "content": [
+              {
+                "input": {
+                  "what": "x",
+                },
+                "toolCallId": "call_1",
+                "toolName": "write_thing",
+                "type": "tool-call",
+              },
+            ],
+            "role": "assistant",
+          },
+          {
+            "content": [
+              {
+                "output": {
+                  "type": "json",
+                  "value": {
+                    "wrote": "x",
+                  },
+                },
+                "toolCallId": "call_1",
+                "toolName": "write_thing",
+                "type": "tool-result",
+              },
+            ],
+            "role": "tool",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "Writes something.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {
+                "what": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "what",
+              ],
+              "type": "object",
+            },
+            "name": "write_thing",
+            "type": "function",
+          },
+        ],
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "gated",
+      "chatId": "<id>",
+      "costTotal": 0.0006000000000000001,
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "awaiting_input",
+      "toolsHash": "43f3bfdb25239773",
+      "usageInputTokens": 100,
+      "usageOutputTokens": 20,
+    },
+    {
+      "agent": "gated",
+      "chatId": "<id>",
+      "costTotal": 0.0006000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "43f3bfdb25239773",
+      "usageInputTokens": 100,
+      "usageOutputTokens": 20,
+    },
+  ],
+  "stored": {
+    "chat_g": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "write x",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0006000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "approval": {
+              "approved": true,
+              "id": "<id>",
+            },
+            "input": {
+              "what": "x",
+            },
+            "output": {
+              "wrote": "x",
+            },
+            "state": "output-available",
+            "toolCallId": "call_1",
+            "type": "tool-write_thing",
+          },
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "Wrote it.",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
+
+exports[`turn snapshot oracle > maxSteps caps a loop that never stops calling tools 1`] = `
+{
+  "chunks": [
+    {
+      "messageId": "<id>",
+      "messageMetadata": {
+        "createdAt": "<ts>",
+        "model": "mock",
+        "runId": "<id>",
+        "visibility": "user",
+      },
+      "type": "start",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "dynamic": false,
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-start",
+    },
+    {
+      "inputTextDelta": "{}",
+      "toolCallId": "call_1",
+      "type": "tool-input-delta",
+    },
+    {
+      "input": {},
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-available",
+    },
+    {
+      "dynamic": false,
+      "output": {
+        "time": "12:00",
+      },
+      "toolCallId": "call_1",
+      "type": "tool-output-available",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "dynamic": false,
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-start",
+    },
+    {
+      "inputTextDelta": "{}",
+      "toolCallId": "call_1",
+      "type": "tool-input-delta",
+    },
+    {
+      "input": {},
+      "toolCallId": "call_1",
+      "toolName": "get_time",
+      "type": "tool-input-available",
+    },
+    {
+      "dynamic": false,
+      "output": {
+        "time": "12:00",
+      },
+      "toolCallId": "call_1",
+      "type": "tool-output-available",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "finish",
+    },
+  ],
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Loop.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "loop",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "The current time.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object",
+            },
+            "name": "get_time",
+            "type": "function",
+          },
+        ],
+      },
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Loop.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "loop",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+          {
+            "content": [
+              {
+                "input": {},
+                "toolCallId": "call_1",
+                "toolName": "get_time",
+                "type": "tool-call",
+              },
+            ],
+            "role": "assistant",
+          },
+          {
+            "content": [
+              {
+                "output": {
+                  "type": "json",
+                  "value": {
+                    "time": "12:00",
+                  },
+                },
+                "toolCallId": "call_1",
+                "toolName": "get_time",
+                "type": "tool-result",
+              },
+            ],
+            "role": "tool",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+        "tools": [
+          {
+            "description": "The current time.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object",
+            },
+            "name": "get_time",
+            "type": "function",
+          },
+        ],
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "capped",
+      "chatId": "<id>",
+      "costTotal": 0.0012000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "43ae1e8010bf2011",
+      "usageInputTokens": 200,
+      "usageOutputTokens": 40,
+    },
+  ],
+  "stored": {
+    "chat_1": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "loop",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0012000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "input": {},
+            "output": {
+              "time": "12:00",
+            },
+            "state": "output-available",
+            "toolCallId": "call_1",
+            "type": "tool-get_time",
+          },
+          {
+            "type": "step-start",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
+
+exports[`turn snapshot oracle > smoothStream on 1`] = `
+{
+  "chunks": [
+    {
+      "messageId": "<id>",
+      "messageMetadata": {
+        "createdAt": "<ts>",
+        "model": "mock",
+        "runId": "<id>",
+        "visibility": "user",
+      },
+      "type": "start",
+    },
+    {
+      "type": "start-step",
+    },
+    {
+      "id": "t0",
+      "type": "text-start",
+    },
+    {
+      "delta": "one ",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "delta": "two ",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "delta": "three ",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "delta": "four",
+      "id": "t0",
+      "type": "text-delta",
+    },
+    {
+      "id": "t0",
+      "type": "text-end",
+    },
+    {
+      "type": "finish-step",
+    },
+    {
+      "type": "finish",
+    },
+  ],
+  "requests": [
+    [
+      {
+        "includeRawChunks": false,
+        "prompt": [
+          {
+            "content": "Be smooth.
+
+<date-line>",
+            "role": "system",
+          },
+          {
+            "content": [
+              {
+                "text": "go",
+                "type": "text",
+              },
+            ],
+            "role": "user",
+          },
+        ],
+        "toolChoice": {
+          "type": "auto",
+        },
+      },
+    ],
+  ],
+  "runs": [
+    {
+      "agent": "smooth",
+      "chatId": "<id>",
+      "costTotal": 0.0006000000000000001,
+      "endedAt": "<ts>",
+      "id": "<id>",
+      "kind": "turn",
+      "startedAt": "<ts>",
+      "status": "completed",
+      "toolsHash": "cbf29ce484222325",
+      "usageInputTokens": 100,
+      "usageOutputTokens": 20,
+    },
+  ],
+  "stored": {
+    "chat_1": [
+      {
+        "id": "u1",
+        "metadata": {
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "text": "go",
+            "type": "text",
+          },
+        ],
+        "role": "user",
+      },
+      {
+        "id": "<id>",
+        "metadata": {
+          "cost": 0.0006000000000000001,
+          "createdAt": "<ts>",
+          "model": "mock",
+          "runId": "<id>",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+          },
+          "visibility": "user",
+        },
+        "parts": [
+          {
+            "type": "step-start",
+          },
+          {
+            "state": "done",
+            "text": "one two three four",
+            "type": "text",
+          },
+        ],
+        "role": "assistant",
+      },
+    ],
+  },
+}
+`;
