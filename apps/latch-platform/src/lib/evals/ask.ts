@@ -1,6 +1,6 @@
 import { experimental_evaluate } from "ai";
 import type { Experimental_EvaluationModel, Experimental_EvaluationQuestion } from "ai";
-import { transcriptOf } from "@/agents/eval-author";
+import { sliceTrace, type Slice, type SliceOptions } from "./slice";
 
 /**
  * Ask plain-English questions ABOUT a stored conversation.
@@ -15,17 +15,30 @@ import { transcriptOf } from "@/agents/eval-author";
  * Answers come back as probabilities from an `EvaluationModel`: one forward
  * pass for ALL questions against ONE state, no prose generated. Which model
  * answers them is a caller's choice — `anthropic.evaluationModel(...)` needs
- * no new dependency, `typeSafeAi.evaluationModel("jev-latest")` is ~17x
- * cheaper. Nothing else in this file changes when that swaps.
- *
- * What this deliberately does NOT do yet: slice long runs into windows (a
- * 200-step trace is rendered whole and will overflow a small judge), pair
- * results across agent versions, or decide whether a difference is real.
- * Those are the next pieces; this is the one they all sit on.
+ * no new dependency, `typeSafeAi.evaluationModel("jev-latest")` is the same
+ * call. Nothing else in this file changes when that swaps, which is what makes
+ * "is that judge better here" a measurement rather than a bet.
  */
 
-/** JSON, structurally — the shape an evaluation model accepts as its state. */
-type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+/**
+ * How per-slice answers become one verdict, and the sharpest trap in the whole
+ * design.
+ *
+ *   "any"   — the run fails if ANY slice fails. Right for a question about a
+ *             property every part should have ("every claim is supported by a
+ *             document it opened"), and for spotting something bad that
+ *             happened once.
+ *
+ *   "every" — the run fails only if EVERY slice fails. Right for an EXISTENCE
+ *             question ("did it open a document?"). Under "any" such a
+ *             question fails the moment one window happens to contain no tool
+ *             calls, which is most windows, so a perfectly good run is marked
+ *             broken by the slicing rather than by the agent.
+ *
+ * It only matters for a run long enough to need slicing; a conversation that
+ * fits is one slice and both rules agree.
+ */
+export type Aggregation = "any" | "every";
 
 /** A yes/no judgment. The common case: "did it do the right thing?" */
 export interface BooleanQuestion {
@@ -37,6 +50,8 @@ export interface BooleanQuestion {
    * phrased so that "yes" is good — keep it that way and `bad` stays implicit.
    */
   bad?: "true" | "false";
+  /** How answers combine when a run had to be sliced. Defaults to "any". */
+  agg?: Aggregation;
 }
 
 /** A pick-one judgment, for when "no" hides two different behaviours. */
@@ -47,79 +62,54 @@ export interface ChoiceQuestion {
   options: Record<string, string>;
   /** The options that count as a failure. */
   bad: string[];
+  /** How answers combine when a run had to be sliced. Defaults to "any". */
+  agg?: Aggregation;
 }
 
 export type Question = BooleanQuestion | ChoiceQuestion;
 
-export interface Verdict {
-  /** The key the question was registered under. */
+/** One question's answer about one slice. */
+export interface SliceVerdict {
   id: string;
+  /** Which slice this came from. */
+  slice: number;
   /** "true"/"false" for a boolean; the selected option for a choice. */
   answer: string;
   /**
-   * P(true) for a boolean, P(selected option) for a choice. Keep it: a
-   * verdict at 0.51 and one at 0.99 are not the same evidence, and the
-   * difference is what tells you which questions the judge is good at.
+   * Confidence in the answer GIVEN. Keep it: a verdict at 0.51 and one at 0.99
+   * are not the same evidence, and the difference is what eventually tells you
+   * which questions this judge is good at.
    */
   confidence: number;
-  /** Whether `answer` is on the side the question calls a failure. */
   failed: boolean;
 }
 
-/**
- * Caps. A judge with a small context window is the norm — the cheap ones are
- * cheap partly BECAUSE they are small — so the renderer bounds what it emits
- * rather than trusting the trace to be short.
- *
- * Tool results are the EVIDENCE a grounding question is asked about, so they
- * get far more room than a diagnostic transcript gives them: 500 chars is a
- * paragraph, and a judge asked "is this claim supported by what it read" would
- * see a clipped document and answer "no" about a perfectly correct answer.
- */
-const MAX_TOOL_OUTPUT = 2_000;
-const MAX_TOOL_ARGS = 400;
-const MAX_MESSAGE_TEXT = 3_000;
+/** One question's verdict about the whole run, after aggregation. */
+export interface Verdict {
+  id: string;
+  /** The aggregated call. */
+  failed: boolean;
+  /** The answer from the slice that decided it. */
+  answer: string;
+  confidence: number;
+  /** How many slices the run needed (1 when it fit whole). */
+  slices: number;
+  /** Slice indices that failed — where to look first. */
+  failedSlices: number[];
+}
 
-const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…[truncated]` : s);
+export interface AskUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Judge calls made. One per slice; the honest unit of cost. */
+  calls: number;
+}
 
-const compact = (v: unknown, n: number): string => {
-  if (v === undefined) return "";
-  try {
-    return clip(typeof v === "string" ? v : JSON.stringify(v), n);
-  } catch {
-    return "[unserializable]";
-  }
-};
-
-/**
- * Stored messages → the state the judge reads.
- *
- * Tool calls come FIRST in each message and the assistant's own text last,
- * because a judge shown the narration first tends to grade the narration. What
- * the agent DID is the evidence; what it said about what it did is a claim.
- */
-export function renderTrace(messages: unknown[]): { conversation: Json[] } {
-  const transcript = transcriptOf(messages, {
-    text: MAX_MESSAGE_TEXT,
-    toolOutput: MAX_TOOL_OUTPUT,
-  });
-  const conversation = transcript.map((m): Json => {
-    // Key insertion order IS the order the judge reads them in.
-    const entry: { [key: string]: Json } = { role: m.role };
-    if (m.toolCalls.length) {
-      entry.tools = m.toolCalls.map((tc): Json => {
-        const t: { [key: string]: Json } = { name: tc.tool };
-        if (tc.blocked) t.blocked = true;
-        t.args = compact(tc.args, MAX_TOOL_ARGS);
-        // Already clipped (and marked) by `transcriptOf`.
-        t.result = tc.output ?? "";
-        return t;
-      });
-    }
-    entry.said = m.text;
-    return entry;
-  });
-  return { conversation };
+export interface AskResult {
+  verdicts: Verdict[];
+  /** Every per-slice answer, for debugging a surprising verdict. */
+  perSlice: SliceVerdict[];
+  usage: AskUsage;
 }
 
 /** Our question shape → the SDK's. */
@@ -141,20 +131,83 @@ export interface AskOptions {
    * question that gates a release, so a coin-flip verdict doesn't block one.
    */
   threshold?: number;
+  /** Passed through to `sliceTrace`. */
+  slicing?: SliceOptions;
+  /** Judge calls in flight at once, when a run needed slicing. */
+  concurrency?: number;
   abortSignal?: AbortSignal;
 }
 
-export interface AskResult {
-  verdicts: Verdict[];
-  usage: { inputTokens?: number; outputTokens?: number };
+/** Ask every question of one slice, in one call. */
+async function askSlice(
+  model: Experimental_EvaluationModel,
+  slice: Slice,
+  questions: Record<string, Question>,
+  threshold: number,
+  abortSignal: AbortSignal | undefined,
+): Promise<{ verdicts: SliceVerdict[]; inputTokens: number; outputTokens: number }> {
+  const sdkQuestions: Record<string, Experimental_EvaluationQuestion> = {};
+  for (const [id, q] of Object.entries(questions)) sdkQuestions[id] = toSdkQuestion(q);
+
+  const { answers, usage } = await experimental_evaluate({
+    model,
+    state: slice.state,
+    questions: sdkQuestions,
+    abortSignal,
+  });
+
+  const verdicts = Object.entries(questions).map(([id, q]): SliceVerdict => {
+    const a = answers[id] as
+      | { type: "boolean"; probability: number }
+      | { type: "choice"; choice: string; probabilities?: Record<string, number> };
+
+    if (a.type === "choice") {
+      return {
+        id,
+        slice: slice.index,
+        answer: a.choice,
+        confidence: a.probabilities?.[a.choice] ?? 1,
+        failed: (q as ChoiceQuestion).bad.includes(a.choice),
+      };
+    }
+    const isTrue = a.probability >= threshold;
+    const answer = isTrue ? "true" : "false";
+    return {
+      id,
+      slice: slice.index,
+      answer,
+      // Confidence in the answer GIVEN, not in "true" — otherwise a firm
+      // "definitely not" reads as 0.02 confidence when it is the opposite.
+      confidence: isTrue ? a.probability : 1 - a.probability,
+      failed: answer === ((q as BooleanQuestion).bad ?? "false"),
+    };
+  });
+
+  return {
+    verdicts,
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+  };
+}
+
+/** Run `jobs` with at most `limit` in flight, preserving order. */
+async function pooled<T>(jobs: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const out = new Array<T>(jobs.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < jobs.length; i = next++) out[i] = await jobs[i]!();
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker));
+  return out;
 }
 
 /**
- * Ask every question of one conversation, in a single call.
+ * Ask every question of a whole conversation, slicing it first if it is too
+ * long for the judge to read at once.
  *
  * Throws only on an infrastructure failure. A judge that answers is always
  * believed here — deciding WHETHER to believe a given question is a separate
- * job done against human-corrected labels, and conflating the two is how an
+ * job, done against human-corrected labels, and conflating the two is how an
  * unvalidated question ends up gating a deploy.
  */
 export async function askOfTrace({
@@ -162,52 +215,57 @@ export async function askOfTrace({
   messages,
   questions,
   threshold = 0.5,
+  slicing,
+  concurrency = 4,
   abortSignal,
 }: AskOptions): Promise<AskResult> {
+  const empty: AskResult = {
+    verdicts: [],
+    perSlice: [],
+    usage: { inputTokens: 0, outputTokens: 0, calls: 0 },
+  };
   const ids = Object.keys(questions);
-  if (ids.length === 0 || messages.length === 0) {
-    return { verdicts: [], usage: {} };
-  }
+  if (ids.length === 0 || messages.length === 0) return empty;
 
-  const sdkQuestions: Record<string, Experimental_EvaluationQuestion> = {};
-  for (const id of ids) sdkQuestions[id] = toSdkQuestion(questions[id]!);
+  const slices = sliceTrace(messages, slicing);
+  if (slices.length === 0) return empty;
 
-  const { answers, usage } = await experimental_evaluate({
-    model,
-    state: renderTrace(messages),
-    questions: sdkQuestions,
-    abortSignal,
-  });
+  const results = await pooled(
+    slices.map((s) => () => askSlice(model, s, questions, threshold, abortSignal)),
+    concurrency,
+  );
 
+  const perSlice = results.flatMap((r) => r.verdicts);
   const verdicts = ids.map((id): Verdict => {
-    const q = questions[id]!;
-    const a = answers[id] as
-      | { type: "boolean"; probability: number }
-      | { type: "choice"; choice: string; probabilities?: Record<string, number> };
+    const mine = perSlice.filter((v) => v.id === id);
+    const agg = questions[id]!.agg ?? "any";
+    const failedSlices = mine.filter((v) => v.failed);
+    const failed =
+      agg === "every" ? failedSlices.length === mine.length : failedSlices.length > 0;
 
-    if (a.type === "choice") {
-      const q2 = q as ChoiceQuestion;
-      return {
-        id,
-        answer: a.choice,
-        confidence: a.probabilities?.[a.choice] ?? 1,
-        failed: q2.bad.includes(a.choice),
-      };
-    }
-    const isTrue = a.probability >= threshold;
-    const bad = (q as BooleanQuestion).bad ?? "false";
+    // Report the answer from the slice that DECIDED the verdict, so a failure
+    // points at the evidence rather than at slice 0 by accident.
+    const deciding = failed
+      ? (failedSlices[0] ?? mine[0]!)
+      : (mine.find((v) => !v.failed) ?? mine[0]!);
+
     return {
       id,
-      answer: isTrue ? "true" : "false",
-      // Confidence in the answer GIVEN, not in "true" — otherwise a firm
-      // "definitely not" reads as 0.02 confidence when it is the opposite.
-      confidence: isTrue ? a.probability : 1 - a.probability,
-      failed: (isTrue ? "true" : "false") === bad,
+      failed,
+      answer: deciding.answer,
+      confidence: deciding.confidence,
+      slices: slices.length,
+      failedSlices: failedSlices.map((v) => v.slice),
     };
   });
 
   return {
     verdicts,
-    usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+    perSlice,
+    usage: {
+      inputTokens: results.reduce((n, r) => n + r.inputTokens, 0),
+      outputTokens: results.reduce((n, r) => n + r.outputTokens, 0),
+      calls: results.length,
+    },
   };
 }
