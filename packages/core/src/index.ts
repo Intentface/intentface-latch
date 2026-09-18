@@ -22,3 +22,4 @@ export * from "./pricing.js";
 export * from "./prompt-caching.js";
 export * from "./telemetry.js";
 export * from "./limits.js";
+export * from "./extensions/index.js";
