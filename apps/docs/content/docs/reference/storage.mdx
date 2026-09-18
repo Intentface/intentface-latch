@@ -16,12 +16,14 @@ Five record types. The adapter owns the **owner key** — an opaque string it de
 | Record | Holds |
 | --- | --- |
 | `ChatRecord` | id, owner, agent, title, `kind`, timestamps |
-| `RunRecord` | status, identity blob, lease fields, attempt count, token usage, cost, error |
+| `RunRecord` | status, identity blob, lease fields, attempt count, token usage, cost, error, the agent version it ran |
 | `RunLease` | `{ owner, fencingToken }` — proof of single-writer ownership |
 | `UsageRecord` | per-run token/cost row for billing rollups |
 | `ScheduleRecord` | cron, timezone, prompt, opaque `delivery`, `nextRunAt`, lease fields |
 
 Two fields are **opaque and must round-trip byte-for-byte**: `RunRecord.identity` (the serialized principal) and `ScheduleRecord.delivery` (the host's delivery target). Core never interprets either.
+
+`RunRecord.agentVersion` is the stored agent-record version this run started on (null for code-declared agents, which have no stored record). It is written when the run is **opened**, not when it settles: a run that errors or crashes never reaches a terminal update, and "which version produced these failures" is exactly the question worth answering. It stays fixed across a resume.
 
 `ChatRecord.kind` is an open vocabulary: `"user"` for conversations, `"internal"` for runtime-created sub-threads (the `sub_…` chats `spawn_agent` mints). `listChats(principal, { kind: "user" })` is how a sidebar hides the machinery.
 

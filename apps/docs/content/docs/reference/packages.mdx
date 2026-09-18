@@ -65,6 +65,8 @@ It takes the `db`, not a connection string — your app owns the connection and 
 
 Beyond the core adapter it also provides the **secret store** (envelope-encrypted rows behind `createVault`), the **memory job store**, and an **agent-builder store** so DB-defined agents work without you writing that table.
 
+The agent-builder store is versioned: `upsert` publishes (appending a snapshot unless the content is unchanged), `activateVersion` rolls back by moving a pointer, `listVersions` / `getVersion` / `listActivations` read the history, and `getDraft` / `saveDraft` / `discardDraft` / `listDrafts` hold one unpublished working copy **per editor**. See [Agents → Versions, drafts and rollback](/docs/agents#versions-drafts-and-rollback).
+
 Key exports: `createSqliteAdapter` · `createPostgresAdapter` · `migrate` / `migratePostgres` · `createSqliteSecretStore` · `createPostgresSecretStore` · `createMemoryJobStore` · `createSqliteAgentBuilderStore` · `schema`.
 
 <Callout title="Writing your own adapter?">
