@@ -12,6 +12,7 @@ import {
   isHostAllowed,
 } from "@intentface/latch-net";
 import type { FetchFunction } from "./oauth-fetch.js";
+import { createGuardedFetch, type GuardedFetch } from "./guarded-fetch.js";
 
 /**
  * The MCP host — connect to MCP servers and expose their tools to an agent,
@@ -281,6 +282,12 @@ export type McpConnection =
        * Custom fetch for this connection's requests AND the transport's on-401
        * re-auth/refresh. Pass the same fetch used by the OAuth flow (e.g.
        * `createOAuthDiscoveryFetch`) so discovery normalization is consistent.
+       *
+       * It REPLACES the address-guarded fetch the host would otherwise build,
+       * so layer it over `createGuardedFetch` rather than over `globalThis.fetch`
+       * — otherwise the transport resolves the hostname a second time and the
+       * open-time address check can be defeated by a name that changes answer.
+       * `createMcpConnections` does this composition for you.
        */
       fetch?: FetchFunction;
       /**
@@ -399,13 +406,17 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
           : config.connections;
 
       const clients: MCPClient[] = [];
+      // Fetches built here (not supplied by the caller) are ours to close —
+      // their keep-alive sockets would otherwise outlive the turn.
+      const ownedFetches: GuardedFetch[] = [];
       const tools: Record<string, unknown> = {};
       const toolApproval: Record<string, McpToolApprovalValue> = {};
       const toolInfos: Record<string, McpToolInfo> = {};
       const closeAll = () =>
-        Promise.all(clients.map((c) => c.close().catch(() => {}))).then(
-          () => undefined,
-        );
+        Promise.all([
+          ...clients.map((c) => c.close().catch(() => {})),
+          ...ownedFetches.map((f) => f.close().catch(() => {})),
+        ]).then(() => undefined);
 
       for (const conn of connections) {
         // SSRF guard is a HARD failure (security): an unlisted host throws,
@@ -442,6 +453,21 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
             } as Parameters<typeof createMCPClient>[0]);
           } else {
             const headers = await buildAuthHeaders(conn, principal, config.secrets);
+            // The check above resolved the hostname; `fetch` would resolve it
+            // AGAIN when the socket opens, and a name that answers public to
+            // the first and private to the second reaches an internal service
+            // carrying this connection's credentials. A guarded fetch vets
+            // inside the lookup the socket uses, closing that gap. A
+            // caller-supplied `fetch` wins — `createMcpConnections` passes one
+            // that is already guarded.
+            let connFetch = conn.fetch;
+            if (!connFetch) {
+              const guarded = createGuardedFetch({
+                allowPrivateHost: conn.allowPrivateHost,
+              });
+              ownedFetches.push(guarded);
+              connFetch = guarded;
+            }
             client = await createMCPClient({
               transport: {
                 type: "http",
@@ -449,7 +475,7 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
                 headers,
                 authProvider: conn.authProvider, // OAuth (auto-refresh) if present
                 redirect: "error", // no redirect-based SSRF
-                fetch: conn.fetch, // normalizing fetch for on-401 re-auth, if set
+                fetch: connFetch, // address-guarded; normalizing on top, if set
               },
             } as Parameters<typeof createMCPClient>[0]);
           }

@@ -1676,8 +1676,19 @@ export function createRuntime<P, RC = unknown>(
       harnessApproval,
       ...opened.map((o) => o.toolApproval ?? {}),
     ) as Record<string, unknown>;
+    // An unattended run waives the AGENT's own policy — that is what makes a
+    // delegated or programmatic turn autonomous. It does NOT waive the gates a
+    // TOOL SOURCE contributed: a connection's gates are the end user's choice
+    // about that connector ("deletes here must ask me"), and a harness gate is
+    // the host's about that tool. Dropping those was the one thing they were
+    // set to prevent, so they survive and the turn parks instead — a first-class
+    // outcome (`runDue` reports `parked`; a subagent's gate bubbles to its
+    // parent). `blockGated` is the opt-out: it has already stubbed those tools,
+    // so gating them too would park a trial run that is meant to complete.
     const toolApproval = autoApprove
-      ? undefined
+      ? blockGated || Object.keys(sourceApproval).length === 0
+        ? undefined
+        : sourceApproval
       : cfg.toolApproval && typeof cfg.toolApproval !== "function"
         ? { ...sourceApproval, ...(cfg.toolApproval as Record<string, unknown>) }
         : Object.keys(sourceApproval).length > 0 && !cfg.toolApproval

@@ -34,6 +34,45 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   POST connections/:name/disconnect   drop the tenant's stored credentials
  *   POST connections/:name/test         open the connection, list its tools
  */
+/**
+ * What a connection failure may tell the caller.
+ *
+ * A connection's URL is chosen by whoever added it, and the OAuth legs then
+ * follow addresses the MCP server itself names. The SDK's errors quote the
+ * remote response — `Raw body: …`, `HTTP 403 trying to load OAuth metadata
+ * from …` — so returning `error.message` turns "add a custom MCP server" into
+ * a read-back channel for internal HTTP responses. The full error goes to the
+ * host's logger; the caller gets a stable code and, at most, a status.
+ */
+/**
+ * Hand an error to the host's logger without letting the logger break the
+ * response. A throwing hook would replace the sanitized 400/502 with a 500
+ * carrying whatever it threw — the opposite of the point.
+ */
+function notifyError(
+  hook: ((error: unknown, info: { route: string; name?: string }) => void | Promise<void>) | undefined,
+  error: unknown,
+  info: { route: string; name?: string },
+): void {
+  if (!hook) return;
+  try {
+    void Promise.resolve(hook(error, info)).catch(() => {});
+  } catch {
+    /* a logger that throws is not the caller's problem */
+  }
+}
+
+function connectionFailure(
+  error: unknown,
+  fallback: string,
+): { error: string; status?: number } {
+  const message = error instanceof Error ? error.message : String(error);
+  // The one detail worth returning: a status tells the user whether their
+  // credentials or the server are at fault, and leaks nothing about the body.
+  const status = /\b(?:HTTP|status)\s(\d{3})\b/.exec(message)?.[1];
+  return { error: fallback, ...(status ? { status: Number(status) } : {}) };
+}
+
 export interface LatchHandlerConfig<P> {
   /**
    * The runtime, or a per-principal resolver. A resolver enables DB-per-tenant
@@ -90,6 +129,15 @@ export interface LatchHandlerConfig<P> {
    * it to flip its own catalog/connector state to active.
    */
   onConnected?: (principal: P, connectionName: string) => void | Promise<void>;
+  /**
+   * Observe a failure the caller is deliberately not shown in full.
+   *
+   * A connection's OAuth errors quote the remote response, and the remote is an
+   * address the MCP server operator chose — so the routes return a stable code
+   * and at most an HTTP status, and hand the real error here. Without this the
+   * detail is simply lost; wire it to your logger.
+   */
+  onError?: (error: unknown, info: { route: string; name?: string }) => void | Promise<void>;
   /**
    * Query param appended to the post-callback redirect signalling which
    * connection just connected (`?<connectedParam>=<name>`). Default "connected".
@@ -317,7 +365,8 @@ export function createLatchHandler<P>(
         try {
           res = await oauth.start(principal, { state });
         } catch (e) {
-          return json({ error: e instanceof Error ? e.message : "authorize failed" }, 400);
+          notifyError(config.onError, e, { route: "connections.authorize", name });
+          return json(connectionFailure(e, "authorize failed"), 400);
         }
         if (res.status !== "redirect") {
           // Already authorized (tokens live in the Vault) — start()
@@ -379,10 +428,8 @@ export function createLatchHandler<P>(
         try {
           return json({ tools: await conns.testTools(name, principal) });
         } catch (e) {
-          return json(
-            { error: e instanceof Error ? e.message : "test failed" },
-            502,
-          );
+          notifyError(config.onError, e, { route: "connections.test", name });
+          return json(connectionFailure(e, "test failed"), 502);
         }
       }
     }
