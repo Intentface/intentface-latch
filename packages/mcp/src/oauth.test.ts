@@ -243,3 +243,81 @@ describe("invalidateCredentials", () => {
     expect(await vault.get(theirs, "mcp_oauth:loredex:tokens")).toBe("theirs");
   });
 });
+
+/**
+ * The authorization-server allowlist.
+ *
+ * An MCP server's protected-resource metadata NAMES its authorization server,
+ * and Latch then fetches that server's metadata, registers a client with it and
+ * posts the code to it. Unbounded, that is "connect to whatever address the
+ * server operator writes down" — an SSRF whose errors carry the response back
+ * to whoever added the connection. So the bound defaults to the MCP server's
+ * own origin, and delegating elsewhere has to be declared.
+ */
+describe("authorization-server allowlist", () => {
+  const principal: P = { userId: "u1" };
+  const serverUrl = "https://loredex.example/ws/mcp";
+
+  function providerFor(allowedAuthorizationServers?: string[]) {
+    const vault = fakeVault();
+    return createMcpOAuth<P>({
+      vault: vault as never,
+      config: {
+        name: "loredex",
+        serverUrl,
+        redirectUrl: "https://latch.example/cb",
+        clientMetadata: {
+          client_name: "Latch (loredex)",
+          redirect_uris: ["https://latch.example/cb"],
+        } as never,
+        ...(allowedAuthorizationServers ? { allowedAuthorizationServers } : {}),
+      },
+    }).provider(principal) as unknown as {
+      validateAuthorizationServerURL: (s: string, a: string) => unknown;
+    };
+  }
+
+  const validate = (p: ReturnType<typeof providerFor>, as: string) =>
+    p.validateAuthorizationServerURL(serverUrl, as);
+
+  it("undeclared, an authorization server on another origin is refused", () => {
+    // The whole attack in one line: the metadata names an internal address.
+    expect(() => validate(providerFor(), "http://10.0.0.7:8500/register")).toThrow(
+      /authorization server http:\/\/10\.0\.0\.7:8500 is not allowed/,
+    );
+  });
+
+  it("undeclared, the MCP server's own origin is allowed", () => {
+    // The common case — a server that is its own authorization server — keeps
+    // working with no host configuration at all.
+    expect(() => validate(providerFor(), "https://loredex.example/oauth/authorize")).not.toThrow();
+  });
+
+  it("a declared third-party authorization server is allowed", () => {
+    const p = providerFor(["https://accounts.google.com"]);
+    expect(() => validate(p, "https://accounts.google.com/o/oauth2/v2/auth")).not.toThrow();
+    // …and declaring one does not re-admit everything else.
+    expect(() => validate(p, "http://169.254.169.254/")).toThrow(/is not allowed/);
+  });
+
+  it("an empty list allows nothing, rather than everything", () => {
+    // The old reading of `[]` was "not configured → allow any", which is how
+    // the guard came to be dead code.
+    expect(() => validate(providerFor([]), "https://loredex.example/oauth/authorize")).toThrow(
+      /is not allowed/,
+    );
+  });
+
+  it("the refusal names the origin and quotes no response body", () => {
+    let message = "";
+    try {
+      validate(providerFor(), "http://10.0.0.7:8500/register");
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("http://10.0.0.7:8500");
+    expect(message).toContain("allowedAuthorizationServers");
+    // The SDK's own errors embed `Raw body: …`; ours must never grow one.
+    expect(message).not.toMatch(/raw body|<html|\{"error"/i);
+  });
+});

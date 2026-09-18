@@ -12,6 +12,7 @@ import { createMcpOAuth } from "./oauth.js";
 import type { McpOAuth } from "./oauth.js";
 import { createOAuthDiscoveryFetch } from "./oauth-fetch.js";
 import type { FetchFunction } from "./oauth-fetch.js";
+import { createGuardedFetch, type GuardedFetch } from "./guarded-fetch.js";
 
 /**
  * Declarative MCP connections — the developer-facing surface.
@@ -74,6 +75,13 @@ export interface OAuthAuthOptions {
   authorizationParams?: Record<string, string>;
   /** Extra client-metadata passthrough (merged into the generated metadata). */
   clientMetadata?: Partial<OAuthClientMetadata>;
+  /**
+   * Origins permitted to act as this connection's authorization server.
+   * Defaults to the MCP server's own origin — set this only when the server
+   * genuinely delegates authorization to a separate IdP, and list that IdP's
+   * origin. See `McpOAuthConfig.allowedAuthorizationServers`.
+   */
+  allowedAuthorizationServers?: string[];
 }
 
 export const none = { kind: "none" } as const;
@@ -233,19 +241,38 @@ export function createMcpConnections<P>(
 ): McpConnections<P> {
   const entries = Object.entries(config.connections);
 
-  // One McpOAuth + normalizing fetch per OAuth connection, built up front.
+  // One McpOAuth + address-guarded fetch per connection, built up front.
   const oauthByName = new Map<string, McpOAuth<P>>();
   const fetchByName = new Map<string, FetchFunction>();
+  const guardedByName = new Map<string, GuardedFetch>();
+
+  // EVERY connection gets a fetch that vets addresses inside the lookup its own
+  // socket uses — the transport's requests and, for OAuth connections, every
+  // leg of the flow. Checking a hostname and then handing it to `fetch` leaves
+  // the name free to resolve somewhere else when the socket opens, which would
+  // carry the caller's credentials to whatever answers. `allowPrivateHost`
+  // relaxes it per connection, so a developer's loopback server still works.
+  for (const [name, def] of entries) {
+    const guarded = createGuardedFetch({ allowPrivateHost: def.allowPrivateHost });
+    guardedByName.set(name, guarded);
+    const normalize = def.auth?.kind === "oauth" ? def.auth.options.normalize : undefined;
+    // Discovery normalization, when the host asked for it, sits ON TOP: it sees
+    // the documents, the guarded fetch still opens the sockets.
+    fetchByName.set(
+      name,
+      normalize
+        ? createOAuthDiscoveryFetch({ ...normalize, baseFetch: guarded })
+        : (guarded as FetchFunction),
+    );
+  }
+
   for (const [name, def] of entries) {
     if (def.auth?.kind !== "oauth") continue;
     const opts = def.auth.options;
     const redirectUrl = config.callbackBaseUrl
       ? `${config.callbackBaseUrl.replace(/\/$/, "")}/${name}/callback`
       : undefined;
-    const normFetch = opts.normalize
-      ? createOAuthDiscoveryFetch(opts.normalize)
-      : undefined;
-    if (normFetch) fetchByName.set(name, normFetch);
+    const normFetch = fetchByName.get(name);
     if (!redirectUrl) {
       // Without a callback base we can't run the redirect flow; skip building
       // the OAuth client (status will still report it as an OAuth connection).
@@ -275,6 +302,8 @@ export function createMcpConnections<P>(
             : undefined,
           scope: opts.scopes?.join(" "),
           fetch: normFetch,
+          // Undefined → the MCP server's own origin (see the option's doc).
+          allowedAuthorizationServers: opts.allowedAuthorizationServers,
           // `undefined` keeps the SDK default (exact origin match on the
           // advertised resource); a defined hook returning undefined omits the
           // resource parameter from the authorize + exchange requests.
@@ -323,6 +352,7 @@ export function createMcpConnections<P>(
           name,
           url: def.url,
           auth: { type: "headers", headers: { Authorization: `Bearer ${token}` } },
+          fetch: fetchByName.get(name),
           approval,
           visible,
           allowPrivateHost: def.allowPrivateHost,
@@ -332,6 +362,7 @@ export function createMcpConnections<P>(
           name,
           url: def.url,
           auth: { type: "headers", headers: auth.headers },
+          fetch: fetchByName.get(name),
           approval,
           visible,
           allowPrivateHost: def.allowPrivateHost,
@@ -340,6 +371,7 @@ export function createMcpConnections<P>(
         out.push({
           name,
           url: def.url,
+          fetch: fetchByName.get(name),
           approval,
           visible,
           allowPrivateHost: def.allowPrivateHost,
