@@ -27,7 +27,7 @@ const principal: P = { orgId: "org_a" };
 function model(text: string, toolCall?: { name: string; input: string }) {
   const finish = (reason: string) => ({
     type: "finish",
-    finishReason: reason,
+    finishReason: { unified: reason, raw: reason },
     usage: { inputTokens: { total: 5 }, outputTokens: { total: 3 } },
   });
   const textStep = () => ({
@@ -323,7 +323,7 @@ describe("subagent approval resume", () => {
               { type: "text-start", id: "0" },
               { type: "text-delta", id: "0", delta: "written." },
               { type: "text-end", id: "0" },
-              { type: "finish", finishReason: "stop", usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } },
+              { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } },
             ],
           }),
         };

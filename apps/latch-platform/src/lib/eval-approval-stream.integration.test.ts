@@ -44,7 +44,7 @@ const model = new MockLanguageModelV3({
           { type: "stream-start", warnings: [] },
           { type: "response-metadata", id: "r1", modelId: "mock", timestamp: new Date(0) },
           { type: "tool-call", toolCallId: "call_slow", toolName: "slow_evals", input: JSON.stringify({ n: 3 }) },
-          { type: "finish", finishReason: "tool-calls", usage },
+          { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
         ]),
       };
     }
@@ -55,7 +55,7 @@ const model = new MockLanguageModelV3({
         { type: "text-start", id: "t1" },
         { type: "text-delta", id: "t1", delta: "All done." },
         { type: "text-end", id: "t1" },
-        { type: "finish", finishReason: "stop", usage },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
       ]),
     };
   },

@@ -32,21 +32,21 @@ const textStream = (text: string) =>
     { type: "text-start", id: "t1" },
     { type: "text-delta", id: "t1", delta: text },
     { type: "text-end", id: "t1" },
-    { type: "finish", finishReason: "stop", usage },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
   ]);
 const spawnStream = (input: unknown) =>
   streamFrom([
     { type: "stream-start", warnings: [] },
     { type: "response-metadata", id: "r", modelId: "mock", timestamp: new Date(0) },
     { type: "tool-call", toolCallId: "c1", toolName: "spawn_agent", input: JSON.stringify(input) },
-    { type: "finish", finishReason: "tool-calls", usage },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
   ]);
 const gatedToolStream = () =>
   streamFrom([
     { type: "stream-start", warnings: [] },
     { type: "response-metadata", id: "r", modelId: "mock", timestamp: new Date(0) },
     { type: "tool-call", toolCallId: "g1", toolName: "gated_tool", input: JSON.stringify({}) },
-    { type: "finish", finishReason: "tool-calls", usage },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
   ]);
 
 let parentCalls = 0;

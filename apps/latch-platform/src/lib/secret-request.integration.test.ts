@@ -63,7 +63,7 @@ const sayText = (text: string) => [
   { type: "text-start", id: "t1" },
   { type: "text-delta", id: "t1", delta: text },
   { type: "text-end", id: "t1" },
-  { type: "finish", finishReason: "stop", usage },
+  { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
 ];
 
 const callRequestSecret = (toolCallId: string) => [
@@ -82,7 +82,7 @@ const callRequestSecret = (toolCallId: string) => [
       ],
     }),
   },
-  { type: "finish", finishReason: "tool-calls", usage },
+  { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
 ];
 
 /** No `execute` — the SDK parks the call and the turn pauses, as in production. */

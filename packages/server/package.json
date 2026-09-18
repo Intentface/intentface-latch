@@ -57,7 +57,7 @@
     "croner": "^10.0.1"
   },
   "peerDependencies": {
-    "ai": ">=7.0.0-beta.178",
+    "ai": ">=7.0.0",
     "hono": ">=4"
   },
   "peerDependenciesMeta": {
@@ -66,7 +66,7 @@
     }
   },
   "devDependencies": {
-    "ai": "7.0.0-beta.178",
+    "ai": "^7.0.106",
     "hono": "^4.6.0",
     "typescript": "^5.7.0",
     "vitest": "^4"

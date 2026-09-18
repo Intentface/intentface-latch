@@ -40,7 +40,7 @@ function shoutMock() {
         },
         {
           type: "finish",
-          finishReason: "tool-calls",
+          finishReason: { unified: "tool-calls", raw: "tool-calls" },
           usage: { inputTokens: { total: 8 }, outputTokens: { total: 4 } },
         },
       ],
@@ -57,7 +57,7 @@ function shoutMock() {
         { type: "text-end", id: "0" },
         {
           type: "finish",
-          finishReason: "stop",
+          finishReason: { unified: "stop", raw: "stop" },
           usage: { inputTokens: { total: 9 }, outputTokens: { total: 5 } },
         },
       ],

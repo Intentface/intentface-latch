@@ -301,7 +301,7 @@ const workingModel = () =>
           { type: "text-end", id: "0" },
           {
             type: "finish",
-            finishReason: "stop",
+            finishReason: { unified: "stop", raw: "stop" },
             usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } },
           },
         ],
@@ -440,7 +440,7 @@ describe("resumeRun", () => {
               { type: "text-end", id: "0" },
               {
                 type: "finish",
-                finishReason: "stop",
+                finishReason: { unified: "stop", raw: "stop" },
                 usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } },
               },
             ],

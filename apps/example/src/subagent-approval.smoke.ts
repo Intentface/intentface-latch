@@ -24,7 +24,7 @@ const step = (chunks: unknown[]) => ({
 });
 const finish = (reason: string) => ({
   type: "finish",
-  finishReason: reason,
+  finishReason: { unified: reason, raw: reason },
   usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } },
 });
 

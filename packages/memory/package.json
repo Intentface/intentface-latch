@@ -54,7 +54,7 @@
   "devDependencies": {
     "@intentface/latch-mcp": "workspace:*",
     "@types/node": "^22",
-    "ai": "^7.0.2",
+    "ai": "^7.0.106",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4"

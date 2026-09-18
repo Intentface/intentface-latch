@@ -27,7 +27,7 @@ const usage = {
 };
 
 function streamFor(step: Step) {
-  const finish = (reason: string) => ({ type: "finish", finishReason: reason, usage });
+  const finish = (reason: string) => ({ type: "finish", finishReason: { unified: reason, raw: reason }, usage });
   const chunks =
     step.kind === "text"
       ? [

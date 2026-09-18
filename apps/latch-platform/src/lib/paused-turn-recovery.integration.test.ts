@@ -64,7 +64,7 @@ const sayText = (text: string) => [
   { type: "text-start", id: "t1" },
   { type: "text-delta", id: "t1", delta: text },
   { type: "text-end", id: "t1" },
-  { type: "finish", finishReason: "stop", usage },
+  { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
 ];
 
 const callAskUser = (toolCallId: string, question: string) => [
@@ -78,7 +78,7 @@ const callAskUser = (toolCallId: string, question: string) => [
       questions: [{ question, options: [{ label: "Yes", description: "y" }] }],
     }),
   },
-  { type: "finish", finishReason: "tool-calls", usage },
+  { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
 ];
 
 /** Two parked client-tool calls in ONE step — only the second submit may resume. */
@@ -97,14 +97,14 @@ const callAskUserTwice = () => [
     toolName: "askUser",
     input: JSON.stringify({ questions: [{ question: "B?", options: [{ label: "Yes", description: "y" }] }] }),
   },
-  { type: "finish", finishReason: "tool-calls", usage },
+  { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
 ];
 
 const callGated = (toolCallId: string) => [
   { type: "stream-start", warnings: [] },
   meta("r_gate"),
   { type: "tool-call", toolCallId, toolName: "gated", input: JSON.stringify({ n: 1 }) },
-  { type: "finish", finishReason: "tool-calls", usage },
+  { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
 ];
 
 /** `askUser` has no execute — the SDK parks the call and the turn pauses. */
@@ -155,7 +155,7 @@ async function subagentRuntime(): Promise<Runtime<P>> {
                 toolName: "spawn_agent",
                 input: JSON.stringify({ agent: "helper", prompt: "do a gated side job" }),
               },
-              { type: "finish", finishReason: "tool-calls", usage },
+              { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
             ]
           : subParentCalls === 2
             ? sayText("Waiting on that approval.")

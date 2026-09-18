@@ -47,7 +47,7 @@ const mockModel = () =>
           { type: "text-start", id: "0" },
           { type: "text-delta", id: "0", delta: "Hello!" },
           { type: "text-end", id: "0" },
-          { type: "finish", finishReason: "stop", usage: { inputTokens: { total: 7 }, outputTokens: { total: 3 } } },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 7 }, outputTokens: { total: 3 } } },
         ],
       }),
     })) as never,

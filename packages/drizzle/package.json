@@ -55,11 +55,11 @@
     "@intentface/latch-memory": "workspace:^"
   },
   "peerDependencies": {
-    "ai": ">=7.0.0-beta.178"
+    "ai": ">=7.0.0"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.0",
-    "ai": "7.0.0-beta.178",
+    "ai": "^7.0.106",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },
