@@ -44,6 +44,7 @@ Every field below is a seam. Omit it and the corresponding capability simply doe
 | `telemetry` | Nothing is traced; no step/finish hooks fire. |
 | `limits` | Nothing is limited — no turn, token or cost budgets. |
 | `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is. |
+| `extensions` | No moments have handlers; a turn is byte-identical to a runtime without the seam. See [Extensions](/docs/reference/seams#extensions--moments-and-effects). |
 
 <Callout title="Why so many seams are functions">
 Core carries no provider SDK, no sandbox backend, no OTel dependency and no cron library. Anything that would drag one in is a function you supply — which is also what keeps core installable in a serverless function.
