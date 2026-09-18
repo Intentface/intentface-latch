@@ -185,10 +185,14 @@ never removes a manual step, it only adds a credential to the repository.
 From then on a release is the same two merges, authenticated by the workflow's
 own identity, with nothing to rotate.
 
-One wrinkle from that first release: the packages were already at the version
-the changesets had bumped them to, so when the version PR merged, the workflow's
-publish step found nothing to publish and `changesets/action` created no GitHub
-Releases for it. Every release after this one gets them normally.
+Two wrinkles from the first releases. 0.9.1 was published by hand before its
+version PR merged, so the workflow found nothing to publish and created no tags
+or GitHub Releases for it. 0.10.0 was published by the workflow — the first OIDC
+publish — but `changesets/action` v1 detected published packages by parsing
+`New tag:` lines out of stdout, which `@changesets/cli` v3 no longer prints, so
+it pushed no tags and created no releases either; those tags were pushed by
+hand. The workflow now runs v2, which reads an output file, and every release
+from here gets tags and releases from the workflow itself.
 
 ## Published metadata points at nothing, on purpose
 
