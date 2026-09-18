@@ -10,6 +10,7 @@
     "channels",
     "connections",
     "memory",
+    "extensions",
     "hosting",
     "reference",
     "cookbook"
