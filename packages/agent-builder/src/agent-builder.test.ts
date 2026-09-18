@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAgentBuilder } from "./agent-builder";
-import type { AgentBuilderDeps } from "./agent-builder";
-import type { AgentBuilderExtension } from "./extension";
-import { normalizeAgentName, parseAgentRef } from "./store";
-import type { AgentRecord } from "./store";
+import { createAgentBuilder } from "./agent-builder.js";
+import type { AgentBuilderDeps } from "./agent-builder.js";
+import type { AgentBuilderExtension } from "./extension.js";
+import { normalizeAgentName, parseAgentRef } from "./store.js";
+import type { AgentRecord } from "./store.js";
 
 type P = { orgId: string; userId: string };
 const principal: P = { orgId: "org1", userId: "u1" };

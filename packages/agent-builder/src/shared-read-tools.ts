@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
-import type { AgentBuilderStore } from "./store";
+import type { AgentBuilderStore } from "./store.js";
 
 /**
  * Read-only discovery tools the builder shares with delegate agents (e.g. an
