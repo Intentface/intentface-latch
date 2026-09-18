@@ -77,6 +77,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@ai-sdk/provider": "^4.0.17",
     "@better-auth/cli": "^1.4.21",
     "@tanstack/devtools-vite": "^0.8.3",
     "@tanstack/eslint-config": "^0.4.0",
