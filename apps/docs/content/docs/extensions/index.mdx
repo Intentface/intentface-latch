@@ -39,7 +39,7 @@ createRuntime({ storage, context, agents, extensions: [guardrails] });
 defineAgent({ model, instructions, extensions: [guardrails] });
 ```
 
-Runtime-wide extensions run first, then the agent's own. A handler that returns `undefined` has no effect; a handler that throws is reported and skipped, so one broken extension never breaks a turn.
+Runtime-wide extensions run first, then the agent's own. A handler that returns `undefined` has no effect. A handler that throws is reported and skipped, so one broken extension never breaks a turn — unless its extension is marked `critical`, in which case the throw fails the run (see the third rule below).
 
 ## Moments and effects
 
@@ -64,7 +64,7 @@ Three moments touch the stored record: `before_agent_start` (inject or replace b
 
 ## The three rules
 
-**Storage keeps the truth.** `tool_result` changes what is stored, so a secret masked there is gone for the model and the customer alike. `render` changes only what the customer sees — live for parts an extension added, and every part on load — for the rarer case where the model should keep the truth and the person should not see it. Nothing an extension does rewrites history; the transcript only grows.
+**Storage keeps the truth.** `tool_result` changes what is stored, so a secret masked there is gone for the model and the customer alike. `render` changes only what the customer sees — live for parts an extension added, and every part on load — for the rarer case where the model should keep the truth and the person should not see it. Only the start moments can rewrite what is already stored, and only deliberately, through `replace`: `step_end` is append-only, and `render` never touches storage.
 
 **Order matters at `step_end`.** Handlers run in extension order, and the next model call waits for all of them. List an extension that persists before the ones that merely observe, and a persisting extension has always written before the model is asked again.
 
