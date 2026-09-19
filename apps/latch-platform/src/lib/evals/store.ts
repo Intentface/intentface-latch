@@ -170,6 +170,13 @@ export interface EvalRun {
   failCount: number;
   /** The pinned judge model used for rubric criteria (null when the set has none). */
   judgeModelId?: string | null;
+  /**
+   * The agent reference this run used — "hn-digest", "hn-digest@7",
+   * "hn-digest@draft". The column a comparison is read along: without it two
+   * runs are just two timestamps, and which configuration produced which set
+   * of results is guesswork.
+   */
+  configRef?: string | null;
   createdAt: number;
 }
 
@@ -258,6 +265,7 @@ export async function migrateEvals(client: Client): Promise<void> {
   await client
     .execute(`ALTER TABLE latch_eval_runs ADD COLUMN judge_model_id TEXT`)
     .catch(() => {});
+  await client.execute(`ALTER TABLE latch_eval_runs ADD COLUMN config_ref TEXT`).catch(() => {});
   await client.execute(
     `CREATE INDEX IF NOT EXISTS latch_eval_runs_owner_agent ON latch_eval_runs (owner, agent_name, created_at)`,
   );
@@ -298,6 +306,7 @@ const rowToRun = (r: Record<string, unknown>): EvalRun => ({
   passCount: Number(r.pass_count),
   failCount: Number(r.fail_count),
   judgeModelId: r.judge_model_id == null ? null : String(r.judge_model_id),
+  configRef: r.config_ref == null ? null : String(r.config_ref),
   createdAt: Number(r.created_at),
 });
 
@@ -351,8 +360,8 @@ export function createEvalStore(client: Client): EvalStore {
     async saveRun(run) {
       const full: EvalRun = { ...run, id: newRunId(), createdAt: Date.now() };
       await client.execute({
-        sql: `INSERT INTO latch_eval_runs (id, owner, agent_name, set_name, agent_snapshot, results, pass_count, fail_count, judge_model_id, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO latch_eval_runs (id, owner, agent_name, set_name, agent_snapshot, results, pass_count, fail_count, judge_model_id, config_ref, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           full.id,
           full.owner,
@@ -363,6 +372,7 @@ export function createEvalStore(client: Client): EvalStore {
           full.passCount,
           full.failCount,
           full.judgeModelId ?? null,
+          full.configRef ?? null,
           full.createdAt,
         ],
       });

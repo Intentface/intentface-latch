@@ -186,12 +186,6 @@ function EvalsPage() {
     toast.success("Deleted");
   };
 
-  /** Which configuration produced a run — the label a comparison hangs on. */
-  const runLabel = (r: EvalRun): string => {
-    const snap = r.agentSnapshot as { name?: string } | null;
-    return snap?.name ? `${r.passCount}/${r.passCount + r.failCount}` : "—";
-  };
-
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">
       <div className="flex items-center gap-2">
@@ -368,21 +362,145 @@ function EvalsPage() {
         </div>
       )}
 
-      {runs.length > 0 && (
-        <div className="space-y-1">
-          <h2 className="text-sm font-medium">Recent runs</h2>
-          <div className="border-secondary-border divide-secondary-border divide-y rounded border text-xs">
-            {runs.map((r) => (
-              <div key={r.id} className="flex items-center justify-between px-3 py-2">
-                <span className="text-ink-tertiary">
-                  {new Date(r.createdAt).toLocaleString()} · {r.setName}
-                </span>
-                <span className={r.failCount ? "text-red-500" : "text-ink-primary"}>
-                  {runLabel(r)} passed
-                </span>
-              </div>
+      {runs.length > 0 && <ResultsGrid runs={runs} />}
+    </div>
+  );
+}
+
+/**
+ * Cases down, runs across — one table that is a result view, a comparison and
+ * a drift view depending on how many columns you have.
+ *
+ * Built this way because they are the same question. "How did this run go" is
+ * one column; "did v7 break anything" is two columns read side by side; "when
+ * did this start failing" is all of them. Three separate screens would have
+ * shown the same data three times and made the comparison a special case.
+ *
+ * Columns are labelled by the CONFIGURATION that produced them, not by time:
+ * two runs of the same version are a flakiness signal, and two runs of
+ * different versions are a comparison, and a timestamp alone cannot tell you
+ * which you are looking at.
+ */
+function ResultsGrid({ runs }: { runs: EvalRun[] }) {
+  // Oldest → newest left to right, so a regression reads as a change moving
+  // rightwards rather than one you have to scan backwards for.
+  const columns = [...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-6);
+  const [open, setOpen] = useState<{ run: string; caseId: string } | null>(null);
+
+  const caseIds = [...new Set(columns.flatMap((r) => r.results.map((x) => x.caseId)))];
+  const resultFor = (run: EvalRun, caseId: string) => run.results.find((r) => r.caseId === caseId);
+
+  /** A row whose verdict is not the same in every column — read these first. */
+  const changed = (caseId: string) => {
+    const seen = columns
+      .map((r) => resultFor(r, caseId))
+      .filter(Boolean)
+      .map((r) => r!.pass);
+    return seen.length > 1 && new Set(seen).size > 1;
+  };
+  const rows = [...caseIds].sort((a, b) => Number(changed(b)) - Number(changed(a)));
+
+  const detail = open
+    ? resultFor(columns.find((c) => c.id === open.run)!, open.caseId)
+    : undefined;
+
+  return (
+    <div className="space-y-2">
+      <h2 className="text-sm font-medium">Results</h2>
+      <div className="border-secondary-border overflow-x-auto rounded border">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-secondary-border border-b">
+              <th className="text-ink-tertiary p-2 text-left font-normal">case</th>
+              {columns.map((r) => (
+                <th key={r.id} className="p-2 text-left font-normal">
+                  <div className="text-ink-primary">{r.configRef ?? "live"}</div>
+                  <div className="text-ink-tertiary">
+                    {r.passCount}/{r.passCount + r.failCount} ·{" "}
+                    {new Date(r.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((caseId) => (
+              <tr key={caseId} className="border-secondary-border border-b last:border-0">
+                <td className="text-ink-primary p-2">
+                  {caseId}
+                  {changed(caseId) && (
+                    <span className="ml-1 rounded bg-amber-500/15 px-1 text-[10px] text-amber-600">
+                      changed
+                    </span>
+                  )}
+                </td>
+                {columns.map((r) => {
+                  const res = resultFor(r, caseId);
+                  return (
+                    <td key={r.id} className="p-2">
+                      {!res ? (
+                        // A case added after this run existed — absent, which
+                        // is not the same as failed and must not read as it.
+                        <span className="text-ink-tertiary">·</span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setOpen({ run: r.id, caseId })}
+                          className={res.pass ? "text-emerald-600" : "text-red-500"}
+                          title={res.reasons.join("\n") || "passed"}
+                        >
+                          {res.pass ? "✓" : "✗"}
+                        </button>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+
+      {detail && (
+        <div className="border-secondary-border space-y-2 rounded border p-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-ink-primary font-medium">{detail.caseName || detail.caseId}</span>
+            <button type="button" onClick={() => setOpen(null)} className="text-ink-tertiary">
+              close
+            </button>
           </div>
+          {detail.reasons.length > 0 && (
+            <ul className="list-disc space-y-0.5 pl-4 text-red-500">
+              {detail.reasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+          {detail.checks?.length ? (
+            <div className="space-y-0.5">
+              {detail.checks.map((c) => (
+                <div key={c.id} className="flex items-center gap-2">
+                  <span className={c.failed ? "text-red-500" : "text-emerald-600"}>
+                    {c.failed ? "✗" : "✓"}
+                  </span>
+                  <span className="text-ink-primary">{c.id}</span>
+                  {/* The answer, not just pass/fail: on a choice question WHICH
+                      option was selected is the diagnosis. */}
+                  <span className="text-ink-tertiary">
+                    {c.answer} ({(c.confidence * 100).toFixed(0)}%)
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {detail.toolCalls.length > 0 && (
+            <div className="text-ink-tertiary">
+              tools: {detail.toolCalls.map((t) => t.tool).join(", ")}
+            </div>
+          )}
+          {detail.answerPreview && (
+            <p className="text-ink-tertiary whitespace-pre-wrap">{detail.answerPreview}</p>
+          )}
         </div>
       )}
     </div>

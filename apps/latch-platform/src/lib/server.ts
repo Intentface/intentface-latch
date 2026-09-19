@@ -2464,6 +2464,7 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
       passCount: results.filter((r) => r.pass).length,
       failCount: results.filter((r) => !r.pass).length,
       judgeModelId: needsJudge ? EXPLAIN_MODEL_ID : null,
+      configRef: ref,
     });
     return { ok: true as const, run, ref };
   });
