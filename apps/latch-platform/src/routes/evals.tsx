@@ -368,41 +368,61 @@ function EvalsPage() {
 }
 
 /**
- * Cases down, runs across — one table that is a result view, a comparison and
- * a drift view depending on how many columns you have.
+ * CHECKS down, runs across.
  *
- * Built this way because they are the same question. "How did this run go" is
- * one column; "did v7 break anything" is two columns read side by side; "when
- * did this start failing" is all of them. Three separate screens would have
- * shown the same data three times and made the comparison a special case.
+ * The first version put cases on the rows, which quietly asserted that a case
+ * is one test. It is not: a case is one input with as many checks as the
+ * behaviour needs, and collapsing them to a single tick threw away the only
+ * thing worth reading. "grounded-in-fetch regressed between v6 and v7" is
+ * actionable; "case 2 failed" sends you clicking.
  *
- * Columns are labelled by the CONFIGURATION that produced them, not by time:
- * two runs of the same version are a flakiness signal, and two runs of
- * different versions are a comparison, and a timestamp alone cannot tell you
- * which you are looking at.
+ * A check is also the right unit for a COMPARISON, because it is the thing
+ * with a stable identity across versions. The input can be rewritten and the
+ * question still means what it meant.
+ *
+ * One table serves three jobs: one column is a result view, two are a
+ * comparison, six are drift over time.
  */
 function ResultsGrid({ runs }: { runs: EvalRun[] }) {
-  // Oldest → newest left to right, so a regression reads as a change moving
-  // rightwards rather than one you have to scan backwards for.
+  // Oldest → newest, so a regression reads as a change moving rightwards.
   const columns = [...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-6);
   const [open, setOpen] = useState<{ run: string; caseId: string } | null>(null);
 
-  const caseIds = [...new Set(columns.flatMap((r) => r.results.map((x) => x.caseId)))];
   const resultFor = (run: EvalRun, caseId: string) => run.results.find((r) => r.caseId === caseId);
 
-  /** A row whose verdict is not the same in every column — read these first. */
-  const changed = (caseId: string) => {
-    const seen = columns
-      .map((r) => resultFor(r, caseId))
-      .filter(Boolean)
-      .map((r) => r!.pass);
+  /** Every (case, check) pair seen in any column, plus the case-level verdict. */
+  type Row = { caseId: string; caseName?: string; checkId?: string };
+  const rows: Row[] = [];
+  for (const caseId of [...new Set(columns.flatMap((r) => r.results.map((x) => x.caseId)))]) {
+    const any = columns.map((r) => resultFor(r, caseId)).find(Boolean);
+    rows.push({ caseId, caseName: any?.caseName });
+    for (const checkId of [
+      ...new Set(
+        columns.flatMap((r) => (resultFor(r, caseId)?.checks ?? []).map((c) => c.id)),
+      ),
+    ]) {
+      rows.push({ caseId, checkId });
+    }
+  }
+
+  /** The verdict in one column: the check's, or the whole case's. */
+  const cell = (run: EvalRun, row: Row) => {
+    const res = resultFor(run, row.caseId);
+    if (!res) return undefined;
+    if (!row.checkId) return { failed: !res.pass, label: res.pass ? "✓" : "✗", title: res.reasons.join("\n") };
+    const chk = res.checks?.find((c) => c.id === row.checkId);
+    if (!chk) return undefined;
+    // The ANSWER, not a tick: on a choice question which option was selected
+    // IS the diagnosis, and it is the same width as a tick anyway.
+    return { failed: chk.failed, label: chk.answer, title: `${(chk.confidence * 100).toFixed(0)}% confident` };
+  };
+
+  const changed = (row: Row) => {
+    const seen = columns.map((r) => cell(r, row)).filter(Boolean).map((c) => c!.label);
     return seen.length > 1 && new Set(seen).size > 1;
   };
-  const rows = [...caseIds].sort((a, b) => Number(changed(b)) - Number(changed(a)));
 
-  const detail = open
-    ? resultFor(columns.find((c) => c.id === open.run)!, open.caseId)
-    : undefined;
+  const detail = open ? resultFor(columns.find((c) => c.id === open.run)!, open.caseId) : undefined;
 
   return (
     <div className="space-y-2">
@@ -411,7 +431,7 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-secondary-border border-b">
-              <th className="text-ink-tertiary p-2 text-left font-normal">case</th>
+              <th className="text-ink-tertiary p-2 text-left font-normal">case / check</th>
               {columns.map((r) => (
                 <th key={r.id} className="p-2 text-left font-normal">
                   <div className="text-ink-primary">{r.configRef ?? "live"}</div>
@@ -424,32 +444,35 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((caseId) => (
-              <tr key={caseId} className="border-secondary-border border-b last:border-0">
-                <td className="text-ink-primary p-2">
-                  {caseId}
-                  {changed(caseId) && (
+            {rows.map((row) => (
+              <tr
+                key={`${row.caseId}/${row.checkId ?? ""}`}
+                className="border-secondary-border border-b last:border-0"
+              >
+                <td className={row.checkId ? "text-ink-tertiary py-1 pl-6 pr-2" : "text-ink-primary p-2"}>
+                  {row.checkId ?? row.caseName ?? row.caseId}
+                  {changed(row) && (
                     <span className="ml-1 rounded bg-amber-500/15 px-1 text-[10px] text-amber-600">
                       changed
                     </span>
                   )}
                 </td>
                 {columns.map((r) => {
-                  const res = resultFor(r, caseId);
+                  const c = cell(r, row);
                   return (
-                    <td key={r.id} className="p-2">
-                      {!res ? (
-                        // A case added after this run existed — absent, which
-                        // is not the same as failed and must not read as it.
+                    <td key={r.id} className={row.checkId ? "py-1 px-2" : "p-2"}>
+                      {!c ? (
+                        // Absent is not failed: the case or check did not exist
+                        // when this run happened, and must not look like a loss.
                         <span className="text-ink-tertiary">·</span>
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setOpen({ run: r.id, caseId })}
-                          className={res.pass ? "text-emerald-600" : "text-red-500"}
-                          title={res.reasons.join("\n") || "passed"}
+                          onClick={() => setOpen({ run: r.id, caseId: row.caseId })}
+                          className={c.failed ? "text-red-500" : "text-emerald-600"}
+                          title={c.title || "passed"}
                         >
-                          {res.pass ? "✓" : "✗"}
+                          {c.label}
                         </button>
                       )}
                     </td>
@@ -476,23 +499,6 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
               ))}
             </ul>
           )}
-          {detail.checks?.length ? (
-            <div className="space-y-0.5">
-              {detail.checks.map((c) => (
-                <div key={c.id} className="flex items-center gap-2">
-                  <span className={c.failed ? "text-red-500" : "text-emerald-600"}>
-                    {c.failed ? "✗" : "✓"}
-                  </span>
-                  <span className="text-ink-primary">{c.id}</span>
-                  {/* The answer, not just pass/fail: on a choice question WHICH
-                      option was selected is the diagnosis. */}
-                  <span className="text-ink-tertiary">
-                    {c.answer} ({(c.confidence * 100).toFixed(0)}%)
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
           {detail.toolCalls.length > 0 && (
             <div className="text-ink-tertiary">
               tools: {detail.toolCalls.map((t) => t.tool).join(", ")}
