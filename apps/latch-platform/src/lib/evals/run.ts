@@ -28,6 +28,7 @@ export async function runEvalCases({
   judgeModel,
   judge,
   sharedChecks,
+  onJudgeUsage,
   onResult,
   onAttempt,
   promptCaching,
@@ -50,6 +51,8 @@ export async function runEvalCases({
    * for its own input instead of colliding with it.
    */
   sharedChecks?: Record<string, Question>;
+  /** Fires per judged attempt, so a caller can total what judging cost. */
+  onJudgeUsage?: (u: { calls: number; inputTokens: number; outputTokens: number }) => void;
   /** Fires as each CASE finishes all its attempts (completion order). */
   onResult?: (result: EvalCaseResult, completedCases: number, totalCases: number) => void;
   /** Fires as each ATTEMPT finishes — the finer-grained progress tick. */
@@ -109,11 +112,12 @@ export async function runEvalCases({
       let checks: EvalAttemptResult["checks"];
       const questions = { ...sharedChecks, ...c.checks };
       if (judge && Object.keys(questions).length) {
-        const { verdicts } = await askOfTrace({
+        const { verdicts, usage } = await askOfTrace({
           model: judge,
           messages: history,
           questions,
         });
+        onJudgeUsage?.(usage);
         checks = verdicts.map((v) => ({
           id: v.id,
           answer: v.answer,

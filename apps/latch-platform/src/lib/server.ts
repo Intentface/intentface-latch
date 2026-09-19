@@ -2442,6 +2442,8 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
           : rec;
     if (!snapshot) return { ok: false as const, error: `No configuration "${ref}".` };
 
+    const startedAt = Date.now();
+    const judgeUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
     const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
     const needsChecks =
       Object.keys(set.checks ?? {}).length > 0 ||
@@ -2457,7 +2459,18 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
       // A case's typed `checks` go to the same evaluation judge that answers
       // questions about live traffic — one judge, one vocabulary.
       ...(needsChecks ? { judge: judgeModel(JUDGE_MODEL_ID), sharedChecks: set.checks } : {}),
+      onJudgeUsage: (u) => {
+        judgeUsage.calls += u.calls;
+        judgeUsage.inputTokens += u.inputTokens;
+        judgeUsage.outputTokens += u.outputTokens;
+      },
     });
+
+    // What the AGENT cost: the eval threads are real runs, so their rows carry
+    // usage and cost already. Judging is billed separately and is usually
+    // rounding error beside it — which is itself worth being able to see.
+    const threadIds = [...new Set(results.map((r) => r.threadId).filter(Boolean) as string[])];
+    const agent = await evalStore.costOfThreads(threadIds);
 
     const run = await evalStore.saveRun({
       owner,
@@ -2472,6 +2485,15 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
       failCount: results.filter((r) => !r.pass).length,
       judgeModelId: needsJudge ? EXPLAIN_MODEL_ID : null,
       configRef: ref,
+      metrics: {
+        durationMs: Date.now() - startedAt,
+        agentCost: agent.cost,
+        agentTokensIn: agent.tokensIn,
+        agentTokensOut: agent.tokensOut,
+        judgeCalls: judgeUsage.calls,
+        judgeTokensIn: judgeUsage.inputTokens,
+        judgeTokensOut: judgeUsage.outputTokens,
+      },
     });
     return { ok: true as const, run, ref };
   });

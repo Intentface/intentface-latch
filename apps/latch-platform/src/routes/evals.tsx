@@ -22,6 +22,7 @@ import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
 import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
+import { EvalBenchmark } from "@/components/eval-benchmark";
 
 /**
  * EXPERIMENTAL. The per-input tier of evals, which has had no page until now.
@@ -623,6 +624,7 @@ function EvalsPage() {
         </div>
       )}
 
+      {runs.length > 0 && <EvalBenchmark runs={runs} />}
       {runs.length > 0 && <ResultsGrid runs={runs} agent={agent} onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))} />}
       {runs.length > 1 && (
         <CompareStrip

@@ -227,6 +227,19 @@ export function runPassRate(results: Pick<EvalCaseResult, "pass" | "passes" | "r
   return sum / results.length;
 }
 
+export interface EvalRunMetrics {
+  /** Wall clock for the whole set, including judging. */
+  durationMs: number;
+  /** What running the AGENT cost — the expensive half. */
+  agentCost: number;
+  agentTokensIn: number;
+  agentTokensOut: number;
+  /** What JUDGING cost, in calls and tokens — usually rounding error beside it. */
+  judgeCalls: number;
+  judgeTokensIn: number;
+  judgeTokensOut: number;
+}
+
 export interface EvalRun {
   id: string;
   owner: string;
@@ -246,6 +259,15 @@ export interface EvalRun {
    * of results is guesswork.
    */
   configRef?: string | null;
+  /**
+   * What the run cost and how long it took.
+   *
+   * Quality alone ranks nothing: a configuration that scores two points higher
+   * for four times the money is a different decision from one that scores the
+   * same for half. Recorded per run so the two can be read on one axis pair,
+   * the way a model benchmark is read.
+   */
+  metrics?: EvalRunMetrics | null;
   createdAt: number;
 }
 
@@ -313,6 +335,17 @@ export interface EvalStore {
    * own table: a correction has no meaning apart from the verdict it disputes,
    * and splitting them would let one be deleted without the other.
    */
+  /**
+   * What the agent cost across these threads.
+   *
+   * An eval case runs the agent for real, so each thread already has a run row
+   * carrying usage and cost — this totals them rather than re-deriving a price.
+   * Lives here because this is where the eval SQL lives; the composition root
+   * does not need to hand out a raw client for it.
+   */
+  costOfThreads: (
+    threadIds: string[],
+  ) => Promise<{ cost: number; tokensIn: number; tokensOut: number }>;
   correctCheck: (
     owner: string,
     runId: string,
@@ -351,6 +384,7 @@ export async function migrateEvals(client: Client): Promise<void> {
     .execute(`ALTER TABLE latch_eval_runs ADD COLUMN judge_model_id TEXT`)
     .catch(() => {});
   await client.execute(`ALTER TABLE latch_eval_runs ADD COLUMN config_ref TEXT`).catch(() => {});
+  await client.execute(`ALTER TABLE latch_eval_runs ADD COLUMN metrics TEXT`).catch(() => {});
   await client.execute(
     `CREATE INDEX IF NOT EXISTS latch_eval_runs_owner_agent ON latch_eval_runs (owner, agent_name, created_at)`,
   );
@@ -396,6 +430,7 @@ const rowToRun = (r: Record<string, unknown>): EvalRun => ({
   failCount: Number(r.fail_count),
   judgeModelId: r.judge_model_id == null ? null : String(r.judge_model_id),
   configRef: r.config_ref == null ? null : String(r.config_ref),
+  metrics: safeParse<EvalRunMetrics | null>(r.metrics, null),
   createdAt: Number(r.created_at),
 });
 
@@ -458,8 +493,8 @@ export function createEvalStore(client: Client): EvalStore {
     async saveRun(run) {
       const full: EvalRun = { ...run, id: newRunId(), createdAt: Date.now() };
       await client.execute({
-        sql: `INSERT INTO latch_eval_runs (id, owner, agent_name, set_name, agent_snapshot, results, pass_count, fail_count, judge_model_id, config_ref, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO latch_eval_runs (id, owner, agent_name, set_name, agent_snapshot, results, pass_count, fail_count, judge_model_id, config_ref, metrics, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           full.id,
           full.owner,
@@ -471,6 +506,7 @@ export function createEvalStore(client: Client): EvalStore {
           full.failCount,
           full.judgeModelId ?? null,
           full.configRef ?? null,
+          full.metrics ? JSON.stringify(full.metrics) : null,
           full.createdAt,
         ],
       });
@@ -484,6 +520,23 @@ export function createEvalStore(client: Client): EvalStore {
       });
       const r = res.rows[0] as Record<string, unknown> | undefined;
       return r ? rowToRun(r) : null;
+    },
+
+    async costOfThreads(threadIds) {
+      const zero = { cost: 0, tokensIn: 0, tokensOut: 0 };
+      // `IN ()` is a syntax error in SQLite, so an empty list short-circuits.
+      if (threadIds.length === 0) return zero;
+      const res = await client.execute({
+        sql: `SELECT cost_total, usage_input_tokens, usage_output_tokens FROM latch_runs
+              WHERE chat_id IN (${threadIds.map(() => "?").join(",")})`,
+        args: threadIds,
+      });
+      for (const row of res.rows as unknown as Record<string, unknown>[]) {
+        zero.cost += Number(row.cost_total ?? 0);
+        zero.tokensIn += Number(row.usage_input_tokens ?? 0);
+        zero.tokensOut += Number(row.usage_output_tokens ?? 0);
+      }
+      return zero;
     },
 
     async correctCheck(owner, runId, caseId, checkId, failed, by) {
