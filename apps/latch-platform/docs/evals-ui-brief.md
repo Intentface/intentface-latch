@@ -6,6 +6,11 @@ could not see it render. This brief is for a designer to make it usable.
 **Read this whole file before touching anything.** The domain is unusual and the
 mistakes are not the obvious ones.
 
+There is a second brief — `evals-ui-brief-2-shared-checks.md` — covering one
+idea that changes the shape of the page (checks that belong to the whole set
+versus to one input). Read this one first, then that one; §4.3 below is
+superseded by it.
+
 ---
 
 ## 1. What this page is for
@@ -124,6 +129,8 @@ here is exactly the object the judge receives** — there is no translation laye
 so the shape cannot be simplified away, only presented better.
 
 ### 4.3 The results grid
+
+**See brief 2 before designing this — shared checks break the current shape.**
 
 Checks down the side, runs across the top. Rows whose verdict changed between
 runs sort to the top and are badged. Three cell states that must look different:
