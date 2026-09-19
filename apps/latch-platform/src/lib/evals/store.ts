@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import type { Question } from "./ask";
 
 /**
  * Evals: named sets of test cases for an agent, plus the persisted results of
@@ -75,6 +76,21 @@ export interface EvalCase {
   input: string;
   expected: EvalExpectation;
   /**
+   * Typed questions asked of the trace this case produces — the same
+   * `boolean` / `choice` / `score` primitives used on live traffic.
+   *
+   * This is the open half of a case. `expected` is a fixed vocabulary someone
+   * has to fit an intention into; `checks` lets the author COMPOSE the
+   * judgment: a choice where a failure has several shapes, a score where the
+   * quality is a matter of degree, a boolean where it really is a line. The
+   * two coexist — a deterministic tool assertion is still exact and free, and
+   * no question should be paid for that a comparison can answer.
+   *
+   * Keyed by a stable id, like every other question, because that id is what a
+   * later comparison pairs on.
+   */
+  checks?: Record<string, Question>;
+  /**
    * Opt-in flakiness measurement: run the case N times (2–5); it passes on a
    * majority of attempts and the result records the pass rate. Only for
    * behaviors observed to be nondeterministic — repeats multiply run cost.
@@ -112,6 +128,8 @@ export interface EvalAttemptResult {
   error?: string;
   /** Judge verdicts, one per rubric criterion (only when the case has a rubric). */
   rubric?: RubricVerdict[];
+  /** Verdicts for the case's typed `checks`, if it declared any. */
+  checks?: { id: string; answer: string; confidence: number; failed: boolean }[];
 }
 
 export interface EvalCaseResult extends EvalAttemptResult {

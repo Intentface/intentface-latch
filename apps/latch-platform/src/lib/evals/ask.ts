@@ -66,7 +66,22 @@ export interface ChoiceQuestion {
   agg?: Aggregation;
 }
 
-export type Question = BooleanQuestion | ChoiceQuestion;
+/**
+ * A graded judgment, for a quality that is a matter of degree rather than a
+ * line. `levels` are the rungs, worst first; `bad` is the highest rung that
+ * still counts as a failure.
+ */
+export interface ScoreQuestion {
+  ask: string;
+  type: "score";
+  /** At least two, ordered worst → best. */
+  levels: string[];
+  /** Scores at or below this index fail. Default 0 — only the worst rung fails. */
+  bad?: number;
+  agg?: Aggregation;
+}
+
+export type Question = BooleanQuestion | ChoiceQuestion | ScoreQuestion;
 
 /** One question's answer about one slice. */
 export interface SliceVerdict {
@@ -117,6 +132,9 @@ function toSdkQuestion(q: Question): Experimental_EvaluationQuestion {
   if (q.type === "choice") {
     return { type: "choice", instructions: q.ask, criteria: q.options };
   }
+  if (q.type === "score") {
+    return { type: "score", instructions: q.ask, criteria: q.levels };
+  }
   return { type: "boolean", instructions: q.ask };
 }
 
@@ -159,8 +177,22 @@ async function askSlice(
   const verdicts = Object.entries(questions).map(([id, q]): SliceVerdict => {
     const a = answers[id] as
       | { type: "boolean"; probability: number }
-      | { type: "choice"; choice: string; probabilities?: Record<string, number> };
+      | { type: "choice"; choice: string; probabilities?: Record<string, number> }
+      | { type: "score"; score: number };
 
+    if (a.type === "score") {
+      const q2 = q as ScoreQuestion;
+      const worst = q2.bad ?? 0;
+      return {
+        id,
+        slice: slice.index,
+        answer: q2.levels[Math.round(a.score)] ?? String(a.score),
+        // Position on the ladder, normalized — comparable across questions
+        // with different numbers of rungs.
+        confidence: q2.levels.length > 1 ? a.score / (q2.levels.length - 1) : 1,
+        failed: a.score <= worst,
+      };
+    }
     if (a.type === "choice") {
       return {
         id,

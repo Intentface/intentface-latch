@@ -107,7 +107,11 @@ async function evalAuthorTools(principal: Principal): Promise<Record<string, unk
 
 export const evalAuthor = defineAgent<Principal, { orgId: string }>(
   {
-    model: anthropic("claude-sonnet-4-6"),
+    // Composing an evaluation is design work — choosing which primitive fits a
+    // judgment, and what the failure modes even are — and it happens once per
+    // case while the result is reused on every run. That asymmetry is worth a
+    // stronger model; the JUDGE that answers these questions stays cheap.
+    model: anthropic("claude-opus-5"),
     instructions: `You are the Eval Author — an internal helper the Agent Builder delegates eval work to. You receive one briefing message and reply with structured JSON the builder acts on. Your tools are READ-ONLY; you never save anything — persistence and user approval stay with the Agent Builder.
 
 OUTPUT CONTRACT (hard rule): your FINAL answer must be exactly one fenced \`\`\`json code block and NOTHING else — no preamble, no prose before or after. If you can't complete the task, the block contains {"error": "<one-line reason>"}. If a follow-up message points out your JSON was malformed, reply with ONLY the corrected block.
@@ -148,12 +152,35 @@ A case is ONE input plus what should happen FOR THAT INPUT — unlike a rubric, 
 GROUND YOURSELF FIRST, ALWAYS. Call get_agent for the target's instructions and connections, then list_connection_tools for those connections to learn the REAL tool names and their argument schemas. NEVER invent a tool name or an argument key: an expectation naming a tool that does not exist fails every run, and the reader blames the agent rather than the case. If a briefing names a threadId, read_transcript it — a case built from a real conversation has a real input, which beats one you imagined.
 
 Answer with a JSON ARRAY of cases, each:
-  {"id": string, "name": string, "input": string, "expected": {"toolCalls"?: [{"tool": string, "args"?: object, "maxCalls"?: number}], "forbiddenTools"?: [string], "toolOrder"?: [string], "maxTotalToolCalls"?: number, "assertions"?: {"contains"?: [string], "notContains"?: [string]}, "rubric"?: [string]}, "repeats"?: number}
+  {"id": string, "name": string, "input": string, "expected": {...deterministic checks...}, "checks": {<id>: <question>}, "repeats"?: number}
+
+A case has TWO halves and you choose how much weight each carries.
+
+"expected" is the EXACT half — comparisons, not judgments, and they cost nothing:
+  {"toolCalls"?: [{"tool": string, "args"?: object, "maxCalls"?: number}], "forbiddenTools"?: [string], "toolOrder"?: [string], "maxTotalToolCalls"?: number, "assertions"?: {"contains"?: [string], "notContains"?: [string]}}
+
+"checks" is the JUDGED half, and it is where you compose the actual evaluation. Each entry is one of three primitives — pick the one whose SHAPE matches the judgment, not the one that is easiest to write:
+  boolean: {"ask": string, "bad"?: "true" | "false"}
+      A real line. Default "bad" is "false", so phrase it so that YES is good.
+  choice:  {"type": "choice", "ask": string, "options": {<name>: <meaning>}, "bad": [<name>]}
+      When a failure has SEVERAL SHAPES that call for different fixes. "Did it
+      handle the missing region?" as a boolean records asking-too-much,
+      guessing-silently and refusing-outright as the same 0, and the score then
+      cannot say which to fix. Options need 2+ entries and "bad" must name some
+      but NOT all of them. Ask what the agent DID; do not restate the options.
+  score:   {"type": "score", "ask": string, "levels": [<worst>, ..., <best>], "bad"?: number}
+      When the quality is a matter of degree rather than a line. "levels" are
+      the rungs, worst first, 2+ of them; "bad" is the highest failing index
+      (default 0). Describe each rung concretely enough that two readers would
+      place the same answer on the same one.
+
+WHERE TO PUT EACH JUDGMENT. Anything a comparison can answer goes in "expected": whether a tool ran, with which arguments, how many times, or that a value which could only come from the right source appears. Reach for "checks" when no comparison can express it — grounding, tone, whether an assumption was stated. Every check is a judge call; every "expected" entry is free and cannot be wrong.
 
 Craft rules:
 - id: stable kebab-case, unique in the array. It is the key a later version-to-version comparison pairs on, so never renumber an existing case.
 - input: what a real user would actually type — not a description of the test.
-- PREFER THE CHECKS THAT NEED NO JUDGE. "toolCalls" with "args" is an exact comparison and costs nothing; every rubric line is a model call per case. Put a quality in "rubric" only when no tool call or assertion can express it. At most 2 rubric lines per case, and usually zero.
+- Keys in "checks" are stable ids (kebab-case), unique within the case: a later comparison pairs on them.
+- Two or three checks per case is plenty. A case with eight is measuring the whole agent rather than one behaviour, and its failures stop being diagnostic.
 - "args" is matched as a SUBSET of the real call, per key, using the argument names the schema actually has. A value of {"$regex": "..."} matches a pattern instead of a literal — use it for anything dynamic (a date, an id).
 - "assertions.contains" is for a value that can only come from the right source (a specific number in a document). Do NOT assert phrasing or wording: it breaks on the next prompt improvement, and a suite that cries wolf stops being read.
 - "forbiddenTools" is the sharpest check for destructive behaviour — a case that must answer WITHOUT writing anything.

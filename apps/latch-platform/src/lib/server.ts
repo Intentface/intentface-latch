@@ -34,7 +34,8 @@ import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
 import { runEvalCases } from "./evals/run";
 import type { EvalCase, JsonValue } from "./evals/store";
-import { EXPLAIN_MODEL_ID } from "./evals/judge";
+import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "./evals/judge";
+import { judgeModel } from "./evals/judge-model";
 import { isGradedScale } from "./evals/evaluate-rubrics";
 import { rejudgeRun } from "./observability/judge-run";
 import {
@@ -2437,6 +2438,7 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
     if (!snapshot) return { ok: false as const, error: `No configuration "${ref}".` };
 
     const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
+    const needsChecks = set.cases.some((c) => c.checks && Object.keys(c.checks).length > 0);
     const results = await runEvalCases({
       runtime,
       principal,
@@ -2445,6 +2447,9 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
       // The case tier's plain-language criteria still use a TEXT judge: it
       // returns a reason per criterion, which the results card shows.
       ...(needsJudge ? { judgeModel: modelFor(EXPLAIN_MODEL_ID) } : {}),
+      // A case's typed `checks` go to the same evaluation judge that answers
+      // questions about live traffic — one judge, one vocabulary.
+      ...(needsChecks ? { judge: judgeModel(JUDGE_MODEL_ID) } : {}),
     });
 
     const run = await evalStore.saveRun({
