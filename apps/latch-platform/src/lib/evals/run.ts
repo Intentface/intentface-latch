@@ -109,6 +109,8 @@ export async function runEvalCases({
           answer: v.answer,
           confidence: v.confidence,
           failed: v.failed,
+          slices: v.slices,
+          ...(v.failedSlices.length ? { failedSlices: v.failedSlices } : {}),
         }));
         for (const v of checks) {
           if (v.failed) reasons.push(`check "${v.id}": answered ${v.answer}`);

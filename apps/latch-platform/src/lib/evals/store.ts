@@ -73,6 +73,18 @@ export interface CheckVerdict {
   confidence: number;
   /** The judge's call. */
   failed: boolean;
+  /**
+   * How many windows the conversation was cut into for judging. 1 means the
+   * judge saw the whole thing.
+   *
+   * Carried so a reader can tell whether the transcript beside a verdict is the
+   * evidence the judge actually had. Showing a full conversation next to a
+   * verdict drawn from window 3 of 5 is worse than showing nothing: it invites
+   * a confident correction based on evidence the judge never saw.
+   */
+  slices?: number;
+  /** Which windows failed — where to look first in a long run. */
+  failedSlices?: number[];
   /** A human's call, when someone disagreed or confirmed. */
   human?: {
     failed: boolean;

@@ -38,6 +38,7 @@ import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "./evals/judge";
 import { judgeModel } from "./evals/judge-model";
 import { askOfTrace } from "./evals/ask";
 import { agents as codeAgents } from "@/agents";
+import { transcriptOf } from "@/agents/eval-author";
 import type { Question } from "./evals/ask";
 import { isGradedScale } from "./evals/evaluate-rubrics";
 import { rejudgeRun } from "./observability/judge-run";
@@ -2737,5 +2738,42 @@ export const auditAgentFn = createServerFn({ method: "POST" })
       // Handed back so a promise worth keeping can become a real check without
       // being written again.
       questions,
+    };
+  });
+
+/**
+ * The conversation behind one eval verdict — the evidence for judging the judge.
+ *
+ * Without this a verdict is a coloured mark with a tooltip, and the "should
+ * pass / should fail" ruling is made blind. Tool RESULTS are included and given
+ * far more room than a diagnostic transcript allows: most checks are about
+ * whether an answer came from a tool result, so a reader shown only tool names
+ * has strictly less evidence than the judge had and cannot referee it.
+ */
+export const getEvalTranscriptFn = createServerFn({ method: "POST" })
+  .validator((data: { threadId: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { runtime } = await getLatch();
+    // Scoped read: an unknown or unowned thread comes back empty, never
+    // another tenant's conversation.
+    const messages = await runtime.loadHistory({ chatId: data.threadId, principal });
+    if (messages.length === 0) return null;
+    // Args are serialized here rather than passed through: `unknown` cannot
+    // cross a server-function boundary, and the view only ever displays them.
+    return {
+      threadId: data.threadId,
+      messages: transcriptOf(messages, { text: 12_000, toolOutput: 8_000 }).map((m) => ({
+        role: m.role,
+        text: m.text,
+        toolCalls: m.toolCalls.map((tc) => ({
+          tool: tc.tool,
+          blocked: tc.blocked ?? false,
+          args: tc.args === undefined ? "" : JSON.stringify(tc.args),
+          /** Already clipped and marked by `transcriptOf` — do not style the marker away. */
+          result: tc.output ?? "",
+        })),
+      })),
     };
   });
