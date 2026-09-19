@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { anthropic } from "@ai-sdk/anthropic";
 import { JUDGE_MODEL_ID } from "./judge";
+import { judgeModel } from "./judge-model";
 import { scoreRubrics, type JudgeEvidence } from "./evaluate-rubrics";
 
 /**
- * The production rubric path against a REAL judge. The hermetic tests prove the
+ * The production rubric path against the REAL DEFAULT judge. The hermetic tests prove the
  * wiring; only this proves the framing works — that the instruction frame and
  * the score ladder actually separate a good answer from a bad one.
  *
@@ -43,7 +43,9 @@ const BAD: JudgeEvidence = {
 };
 
 describe.skipIf(!live)("rubric judging against a real evaluation model (LIVE)", () => {
-  const model = anthropic.evaluationModel(JUDGE_MODEL_ID);
+  // The DEFAULT judge, whatever it currently is — so switching the default is
+  // a change this test votes on rather than one it sails past.
+  const model = judgeModel(JUDGE_MODEL_ID);
 
   it("separates a tool-backed formatted digest from an unsourced summary", async () => {
     const good = await scoreRubrics({ model, rubrics: RUBRICS, evidence: GOOD });

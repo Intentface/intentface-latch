@@ -11,7 +11,7 @@ import { evalOwnerOfRecord } from "../agent-store";
 import type { CredentialScope } from "../credentials";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
-import { JUDGE_MODEL_ID } from "../evals/judge";
+import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "../evals/judge";
 import { scoreRubrics } from "../evals/evaluate-rubrics";
 import { judgeModel } from "../evals/judge-model";
 import {
@@ -81,8 +81,12 @@ export async function evaluateRubrics(opts: {
       try {
         const outcomes = await scoreRubrics({
           model: (opts.evaluationModelFor ?? judgeModel)(modelId),
-          // Same judge, as a text model, used only to explain what failed.
-          explainModel: opts.modelFor(modelId),
+          // NOT the judge: an evaluation model has no prose to give, and
+          // `modelFor` silently falls back to the default chat model for an id
+          // it does not know — so asking it for "jev-latest" would quietly
+          // explain failures with whatever model the host happens to default
+          // to. A pinned text model keeps that honest.
+          explainModel: opts.modelFor(EXPLAIN_MODEL_ID),
           rubrics,
           evidence: {
             input: opts.input,

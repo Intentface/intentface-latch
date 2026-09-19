@@ -14,7 +14,18 @@ import type { EvalToolCall, RubricVerdict } from "./store";
  * catalog with an explicit existence check (run_evals errors loudly instead
  * of silently judging with a fallback model), and recorded on the run row.
  */
-export const JUDGE_MODEL_ID = "claude-haiku-4-5";
+export const JUDGE_MODEL_ID = "jev-latest";
+
+/**
+ * The model that writes the one-line reason for a FAILED criterion.
+ *
+ * Deliberately not `JUDGE_MODEL_ID`: an evaluation model returns typed values
+ * and no prose — that is the whole point of it — so the explanation needs a
+ * text model, and the catalog only knows text models anyway. Keeping the two
+ * ids separate is also what lets the judge move to a different provider
+ * without the explanation silently falling back to the default chat model.
+ */
+export const EXPLAIN_MODEL_ID = "claude-haiku-4-5";
 
 const VERDICT = z.object({
   pass: z.boolean(),

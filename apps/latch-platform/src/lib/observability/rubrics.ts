@@ -1,5 +1,6 @@
 import type { AttachedEval } from "../agent-store";
 import { JUDGE_MODEL_ID } from "../evals/judge";
+import { providerOf } from "../evals/judge-model";
 import { validateTrigger } from "./trigger";
 
 /** Context scopes a rubric may ask the judge to see. */
@@ -63,12 +64,16 @@ export function validateRubrics(
       };
     }
   }
-  // The judge model must exist in the catalog — modelFor() silently falls back
-  // to the default model, which would silently change the judge.
+  // A judge must be an id the judge resolver can route to a provider. This is
+  // NOT the agent-model catalog any more: judges live in their own namespace
+  // (`jev-*` is an evaluation model and will never appear in a catalog of chat
+  // models), and validating against the catalog would reject the default.
+  // Unknown ids are still rejected, because `modelFor`-style silent fallback is
+  // how a judge changes without anyone noticing.
   const judgeIds = new Set(evals.map((e) => e.judgeModelId ?? JUDGE_MODEL_ID));
-  const missing = [...judgeIds].filter((id) => !knownModelId(id));
+  const missing = [...judgeIds].filter((id) => !providerOf(id) && !knownModelId(id));
   if (missing.length) {
-    return { ok: false, error: `Judge model(s) not in the catalog: ${missing.join(", ")}.` };
+    return { ok: false, error: `Unknown judge model(s): ${missing.join(", ")}.` };
   }
   return {
     ok: true,
