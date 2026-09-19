@@ -3,7 +3,7 @@ import type {
   TelemetryRunOutcome,
 } from "@intentface/latch-core";
 import { postScore } from "@intentface/latch-langfuse";
-import type { LanguageModel } from "ai";
+import type { Experimental_EvaluationModel, LanguageModel } from "ai";
 import type { Principal } from "../session";
 import { rubricsOf } from "../agent-store";
 import type { AttachedEval } from "../agent-store";
@@ -11,7 +11,9 @@ import { evalOwnerOfRecord } from "../agent-store";
 import type { CredentialScope } from "../credentials";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
-import { JUDGE_MODEL_ID, judgeOnce } from "../evals/judge";
+import { JUDGE_MODEL_ID } from "../evals/judge";
+import { scoreRubrics } from "../evals/evaluate-rubrics";
+import { judgeModel } from "../evals/judge-model";
 import {
   allAssistantText,
   extractRunView,
@@ -48,6 +50,12 @@ export interface RubricVerdictResult {
 export async function evaluateRubrics(opts: {
   runId: string;
   modelFor: (id: string) => LanguageModel;
+  /**
+   * Resolves a judge id to an EVALUATION model. Injectable for the same reason
+   * `modelFor` is: a test must be able to hand in a stand-in judge rather than
+   * reach a provider. Defaults to the id-to-provider routing.
+   */
+  evaluationModelFor?: (id: string) => Experimental_EvaluationModel;
   rubrics: AttachedEval[];
   input: string;
   answer: string;
@@ -56,27 +64,47 @@ export async function evaluateRubrics(opts: {
   conversation?: string;
   sink: (v: RubricVerdictResult) => Promise<void>;
 }): Promise<void> {
+  // Group by judge model, then ONE evaluation call per group. Rubrics may each
+  // pin their own judge, so "one call" is per model rather than per run — and
+  // in the overwhelmingly common case (every rubric on the default judge) that
+  // is one call for the whole set, where it used to be one per rubric.
+  const byModel = new Map<string, AttachedEval[]>();
+  for (const ev of opts.rubrics) {
+    const id = ev.judgeModelId ?? JUDGE_MODEL_ID;
+    const group = byModel.get(id);
+    if (group) group.push(ev);
+    else byModel.set(id, [ev]);
+  }
+
   await Promise.all(
-    opts.rubrics.map(async (ev) => {
+    [...byModel].map(async ([modelId, rubrics]) => {
       try {
-        const model = opts.modelFor(ev.judgeModelId ?? JUDGE_MODEL_ID);
-        const verdict = await judgeOnce(model, {
-          input: opts.input,
-          answer: opts.answer,
-          tools: opts.tools,
-          conversation: opts.conversation,
-          criterion: ev.prompt,
-          scale: ev.scale,
+        const outcomes = await scoreRubrics({
+          model: (opts.evaluationModelFor ?? judgeModel)(modelId),
+          // Same judge, as a text model, used only to explain what failed.
+          explainModel: opts.modelFor(modelId),
+          rubrics,
+          evidence: {
+            input: opts.input,
+            answer: opts.answer,
+            tools: opts.tools,
+            conversation: opts.conversation,
+          },
         });
-        if (verdict.error) {
-          console.warn(`judge "${ev.name}" (run ${opts.runId}): ${verdict.error}`);
-          return; // infra error → no score, mirroring the batch tier
+        const byName = new Map(rubrics.map((r) => [r.name, r]));
+        for (const o of outcomes) {
+          const ev = byName.get(o.name);
+          if (!ev) continue;
+          if (o.error) {
+            // Infra error → no score, mirroring the batch tier. A judge that
+            // could not run must never read as an agent that misbehaved.
+            console.warn(`judge "${ev.name}" (run ${opts.runId}): ${o.error}`);
+            continue;
+          }
+          await opts.sink({ rubric: ev, value: o.value, comment: o.comment });
         }
-        const value =
-          ev.scale === "binary" ? (verdict.pass ? 1 : 0) : (verdict.score ?? 0);
-        await opts.sink({ rubric: ev, value, comment: verdict.reason });
       } catch (e) {
-        console.warn(`judge "${ev.name}" (run ${opts.runId}) failed:`, e);
+        console.warn(`judge group "${modelId}" (run ${opts.runId}) failed:`, e);
       }
     }),
   );
@@ -103,6 +131,8 @@ export interface TurnEvidence {
 export async function judgeScopeGroups(opts: {
   runId: string;
   modelFor: (id: string) => LanguageModel;
+  /** Injectable judge resolver (tests); defaults to id-to-provider routing. */
+  evaluationModelFor?: (id: string) => Experimental_EvaluationModel;
   rubrics: AttachedEval[];
   evidence: TurnEvidence;
   sink: (v: RubricVerdictResult) => Promise<void>;
@@ -120,6 +150,7 @@ export async function judgeScopeGroups(opts: {
       evaluateRubrics({
         runId: opts.runId,
         modelFor: opts.modelFor,
+        evaluationModelFor: opts.evaluationModelFor,
         rubrics,
         input,
         // "loop" sees every assistant text part of the turn (not just the last)
@@ -262,6 +293,7 @@ export async function judgeLiveRun({
   await judgeScopeGroups({
     runId: meta.runId,
     modelFor: latch.modelFor,
+    evaluationModelFor: latch.evaluationModelFor,
     rubrics: due,
     evidence,
     sink: async (v) => {
@@ -363,6 +395,7 @@ export async function rejudgeRun(args: {
   await judgeScopeGroups({
     runId: args.runId,
     modelFor: latch.modelFor,
+    evaluationModelFor: latch.evaluationModelFor,
     rubrics: due,
     evidence: {
       input,

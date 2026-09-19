@@ -29,7 +29,7 @@ export function useEvalsDrawerToggle(agent: string) {
 const blankRubric = (): AttachedEval => ({
   name: "",
   prompt: "",
-  scale: "binary",
+  scale: "boolean",
   enabled: true,
 });
 
@@ -273,11 +273,16 @@ export function EvalsDrawer({
                 className="border-secondary-border text-ink-primary min-w-0 flex-1 rounded border bg-transparent px-2 py-1 text-xs"
               />
               <select
-                value={r.scale}
-                onChange={(e) => update(i, { scale: e.target.value as "binary" | "score" })}
+                // A rubric stored before the rename carries "binary", which is
+                // the same thing and has no <option> of its own — show it as
+                // its synonym rather than letting the select fall blank.
+                value={r.scale === "binary" ? "boolean" : r.scale}
+                onChange={(e) =>
+                  update(i, { scale: e.target.value as "boolean" | "score" })
+                }
                 className="border-secondary-border rounded border bg-transparent px-1 py-1 text-xs"
               >
-                <option value="binary">binary</option>
+                <option value="boolean">boolean</option>
                 <option value="score">score</option>
               </select>
               <button

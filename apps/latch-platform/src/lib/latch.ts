@@ -8,7 +8,8 @@ import {
   mergeConnections,
   mergeToolSources,
 } from "@intentface/latch-core";
-import type { LanguageModel } from "ai";
+import type { Experimental_EvaluationModel, LanguageModel } from "ai";
+import { judgeModel } from "./evals/judge-model";
 import type {Runtime, ConnectionRegistry} from "@intentface/latch-core";
 import {
   createMemoryJobStore,
@@ -110,6 +111,7 @@ let cached:
       runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
+      evaluationModelFor: (id: string) => Experimental_EvaluationModel;
       /** Per-agent prompt-cache stats + lint for /caching. */
       cachingStats: ReturnType<typeof createCachingStats>;
       /** The adapter's serialized owner key for a principal (raw-SQL scoping). */
@@ -139,6 +141,13 @@ export async function getLatch(): Promise<{
   runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
+  /**
+   * A judge id resolved to an EVALUATION model. Lives here for the same reason
+   * `modelFor` does: this is the one place that knows how an id becomes a
+   * provider, so a test substitutes the whole root instead of reaching past it.
+   * `claude-*`, `jev-*`, `gpt-*` and `gemini-*` all resolve here.
+   */
+  evaluationModelFor: (id: string) => Experimental_EvaluationModel;
   cachingStats: ReturnType<typeof createCachingStats>;
   ownerKeyFor: (p: Principal) => string;
   handler: LatchHandler;
@@ -673,6 +682,7 @@ export async function getLatch(): Promise<{
     runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
+    evaluationModelFor: judgeModel,
     cachingStats: createCachingStats({ client, pricing: catalog.pricing }),
     ownerKeyFor: ownerKeyStr,
     handler,

@@ -22,7 +22,8 @@ export interface RunScore {
   /** 1/0 for binary, 0–1 for graded. The human value when source="human". */
   value: number;
   comment?: string;
-  scale: "binary" | "score";
+  /** As written. "binary" and "boolean" are synonyms — read with `isGradedScale`. */
+  scale: "binary" | "boolean" | "score";
   source: "live" | "rejudge" | "human";
   /** When a human corrected it: the judge's original value/reason, preserved. */
   aiValue?: number;

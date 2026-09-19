@@ -80,7 +80,21 @@ export const AttachedEvalSchema = z.object({
   name: z.string().min(1).describe("Kebab-case id — becomes the score name."),
   prompt: z.string().max(1000).describe("The judging instructions: one observable quality of a good response."),
   judgeModelId: z.string().optional().describe("Judge model override (default: the host judge model)."),
-  scale: z.enum(["binary", "score"]).default("binary").describe("binary → pass/fail; score → graded 0–1."),
+  /**
+   * `"boolean"` is the spelling the AI SDK's evaluation contract uses, and the
+   * one new clients should write. `"binary"` is the same thing under the name
+   * this field shipped with.
+   *
+   * Both are accepted and the DEFAULT stays `"binary"`, deliberately: this
+   * schema is published, and a host that branches on `scale === "binary"`
+   * would silently take its graded path for every rubric that omitted the
+   * field if the default moved. Accepting a synonym costs nothing; changing
+   * what absence means is a breaking change wearing a rename's clothes.
+   */
+  scale: z
+    .enum(["binary", "boolean", "score"])
+    .default("binary")
+    .describe("boolean → pass/fail (alias: binary); score → graded 0–1."),
   enabled: z.boolean().default(true),
   trigger: z.unknown().optional().describe("When the judge runs — host-defined predicate; absent → every completed turn."),
   context: z.enum(["turn", "chat", "loop"]).optional().describe("What the judge sees: turn (default), chat, or loop."),

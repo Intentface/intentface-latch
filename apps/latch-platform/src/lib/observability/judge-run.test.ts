@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
+import type { Experimental_EvaluationModelV4 } from "@ai-sdk/provider";
 import type { AttachedEval } from "../agent-store";
 import { postScore } from "@intentface/latch-langfuse";
 import { judgeLiveRun, judgeScopeGroups, rejudgeRun } from "./judge-run";
@@ -16,24 +17,40 @@ vi.mock("@intentface/latch-langfuse", () => ({
   postScore: vi.fn(async () => {}),
 }));
 
-/** Mock judge that always passes, capturing every prompt it was shown. */
+/**
+ * Mock judge that always passes, capturing every STATE it was shown.
+ *
+ * Scoring goes through the evaluation contract now, so what the judge sees is
+ * a state object rather than a prompt string. `prompts` keeps its name and its
+ * job — the serialized evidence, which is what every scope assertion below is
+ * actually about.
+ */
 function mockJudge() {
   const prompts: string[] = [];
-  const model = new MockLanguageModelV3({
-    doGenerate: async (options) => {
-      prompts.push(JSON.stringify(options.prompt));
+  const model: Experimental_EvaluationModelV4 = {
+    specificationVersion: "v4",
+    provider: "test",
+    modelId: "mock-judge",
+    supportedQuestionTypes: ["boolean", "choice", "score"],
+    doEvaluate: async (options) => {
+      prompts.push(JSON.stringify({ state: options.state, questions: options.questions }));
       return {
-        content: [{ type: "text" as const, text: '{"pass": true, "reason": "ok"}' }],
-        finishReason: { unified: "stop" as const, raw: undefined },
-        usage: {
-          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-          outputTokens: { total: 1, text: 1, reasoning: undefined },
-        },
+        answers: Object.fromEntries(
+          Object.keys(options.questions).map((name) => [name, { type: "boolean", probability: 1 }]),
+        ) as never,
         warnings: [],
+        usage: { inputTokens: 1, outputTokens: 1 },
       };
     },
+  };
+  // Explanations are only requested for FAILED rubrics; this judge passes
+  // everything, so the text model is never reached.
+  const textModel = new MockLanguageModelV3({
+    doGenerate: async () => {
+      throw new Error("explainer must not be called when nothing failed");
+    },
   });
-  return { model, prompts };
+  return { model, textModel, prompts };
 }
 
 const rubric = (name: string, context?: AttachedEval["context"]): AttachedEval => ({
@@ -67,11 +84,12 @@ const evidence: TurnEvidence = {
 };
 
 async function run(rubrics: AttachedEval[]) {
-  const { model, prompts } = mockJudge();
+  const { model, textModel, prompts } = mockJudge();
   const verdicts: RubricVerdictResult[] = [];
   await judgeScopeGroups({
     runId: "r1",
-    modelFor: () => model,
+    modelFor: () => textModel,
+    evaluationModelFor: () => model,
     rubrics,
     evidence,
     sink: async (v) => {
@@ -101,8 +119,10 @@ describe("judgeScopeGroups", () => {
     expect(turn).not.toContain("TOOL-OUTPUT-BODY");
     expect(turn).not.toContain("CONVERSATION SO FAR");
 
-    // chat: same view plus the conversation so far.
-    expect(chat).toContain("CONVERSATION SO FAR");
+    // chat: same view plus the conversation so far. The evidence is a state
+    // object now, so the scope shows up as a KEY rather than a prose header —
+    // same contract, different surface.
+    expect(chat).toContain("conversation_so_far");
     expect(chat).toContain("earlier reply");
     expect(chat).not.toContain("TOOL-OUTPUT-BODY");
 
@@ -113,11 +133,12 @@ describe("judgeScopeGroups", () => {
   });
 
   it("a loop rubric still judges a turn with tool calls but no final text", async () => {
-    const { model, prompts } = mockJudge();
+    const { model, textModel, prompts } = mockJudge();
     const verdicts: RubricVerdictResult[] = [];
     await judgeScopeGroups({
       runId: "r2",
-      modelFor: () => model,
+      modelFor: () => textModel,
+      evaluationModelFor: () => model,
       rubrics: [rubric("loop-r", "loop")],
       evidence: {
         ...evidence,
@@ -166,7 +187,7 @@ function fakeLatch(
    */
   scope: "org" | "user" | null = "user",
 ) {
-  const { model, prompts } = mockJudge();
+  const { model, textModel, prompts } = mockJudge();
   const puts: {
     owner: string;
     rubricName: string;
@@ -183,7 +204,8 @@ function fakeLatch(
       // rejudgeRun derives the agent (and so the eval owner) from the run itself.
       getRun: async ({ runId }: { runId: string }) => ({ id: runId, agent: "my-agent" }),
     },
-    modelFor: () => model,
+    modelFor: () => textModel,
+    evaluationModelFor: () => model,
     runScores: {
       put: async (
         owner: string,

@@ -32,6 +32,7 @@ import { normalizeAgentName, evalOwnerKeysOf, rubricsOf } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
 import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
+import { isGradedScale } from "./evals/evaluate-rubrics";
 import { rejudgeRun } from "./observability/judge-run";
 import {
   slackVaultKeys,
@@ -1364,7 +1365,7 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
             name: c.rubricName,
             value: c.value,
             comment: c.comment,
-            dataType: c.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+            dataType: isGradedScale(c.scale) ? "NUMERIC" : "BOOLEAN",
           });
         }
         row.scores = Array.from(byName.values());
@@ -1460,7 +1461,7 @@ export interface AttachedEvalScore {
   name: string;
   value: number;
   comment?: string;
-  scale: "binary" | "score";
+  scale: "binary" | "boolean" | "score";
   source: "live" | "rejudge" | "human";
   /** Present when source="human": the judge's original value/reason. */
   aiValue?: number;
@@ -1530,10 +1531,11 @@ export const correctScoreFn = createServerFn({ method: "POST" })
     if (!existing) return { ok: false as const, error: "no score to correct" };
     // Binary → 1/0; graded → clamp to [0,1]. Never persist an out-of-range or
     // NaN value (it would skew /observability aggregates and poison averages).
-    const value =
-      existing.scale === "binary"
-        ? (data.value >= 0.5 ? 1 : 0)
-        : Math.max(0, Math.min(1, data.value));
+    const value = isGradedScale(existing.scale)
+      ? Math.max(0, Math.min(1, data.value))
+      : data.value >= 0.5
+        ? 1
+        : 0;
     // Preserve the judge's original verdict (unless already a human correction).
     const aiValue = existing.source === "human" ? existing.aiValue : existing.value;
     const aiComment = existing.source === "human" ? existing.aiComment : existing.comment;
@@ -1561,7 +1563,7 @@ export const correctScoreFn = createServerFn({ method: "POST" })
           name: data.rubricName,
           value,
           comment: data.comment.trim(),
-          dataType: existing.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+          dataType: isGradedScale(existing.scale) ? "NUMERIC" : "BOOLEAN",
           // Same timestamp as the original live verdict (the run's start) so this
           // correction overwrites it in Langfuse instead of adding a second score.
           timestamp: run.startedAt,
@@ -1609,21 +1611,50 @@ export const draftRubricFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const quality = data.quality.trim();
     if (!quality) return { ok: false as const, error: "describe the quality to measure" };
-    const { runtime } = await getLatch();
+    const { runtime, models } = await getLatch();
+    // Ask for one rubric PER DISTINCT QUALITY rather than one rubric flat: a
+    // request like "uses the tool and follows the style" is two measurements,
+    // and demanding a single rubric forces them into one prompt whose score
+    // nobody can act on — a 0 no longer says which half broke.
     const brief =
-      `Agent: ${normalizeAgentName(data.agent)}. Author ONE online-eval rubric that measures this quality: ` +
-      `"${quality}". Return the JSON array (a single rubric) per your output contract.`;
-    const { answer } = await runtime.runAgent({
-      principal,
-      agent: "eval-author",
-      prompt: brief,
-    });
-    const parsed = parseFencedJson<AttachedEval[] | { error: string }>(answer);
+      `Agent: ${normalizeAgentName(data.agent)}. Author online-eval rubric(s) measuring this quality: ` +
+      `"${quality}". Usually ONE rubric — but if the description bundles several separable qualities, ` +
+      `return one rubric per quality. Return the JSON array per your output contract.`;
+
+    const draft = async (prompt: string) => {
+      const { answer } = await runtime.runAgent({ principal, agent: "eval-author", prompt });
+      return parseFencedJson<AttachedEval[] | { error: string }>(answer);
+    };
+
+    const knownModelId = (id: string) => models.some((m) => m.id === id);
+    let parsed = await draft(brief);
     if (!parsed) return { ok: false as const, error: "eval-author returned no valid JSON" };
     if (!Array.isArray(parsed)) {
       return { ok: false as const, error: parsed.error ?? "eval-author could not draft a rubric" };
     }
-    return { ok: true as const, rubrics: parsed };
+
+    // Validate with the SAME gate the save will apply. Without this the drawer
+    // happily shows a draft (over-long prompt, bad name) that cannot be
+    // stored, and the user meets the rule only as a red error under work they
+    // did not write. One corrective retry, because the usual break — a prompt
+    // over 1000 chars — is one the author can fix if simply told.
+    let valid = validateRubrics(parsed, knownModelId);
+    if (!valid.ok) {
+      const retry = await draft(
+        `${brief}\n\nYour previous draft was REJECTED by the save validator with: "${valid.error}". ` +
+          `Return a corrected JSON array. If a prompt ran over 1000 characters, SPLIT it into ` +
+          `separate rubrics rather than compressing it.`,
+      );
+      if (Array.isArray(retry)) {
+        const revalidated = validateRubrics(retry, knownModelId);
+        if (revalidated.ok) {
+          parsed = retry;
+          valid = revalidated;
+        }
+      }
+    }
+    if (!valid.ok) return { ok: false as const, error: valid.error };
+    return { ok: true as const, rubrics: valid.rubrics };
   });
 
 // ── Slack channel: per-agent app onboarding ─────────────────────────────────

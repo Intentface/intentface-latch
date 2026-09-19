@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { isGradedScale } from "@/lib/evals/evaluate-rubrics";
 import { correctScoreFn, getRunScoresFn } from "@/lib/server";
 import type { AttachedEvalScore } from "@/lib/server";
 import { Button } from "@/components/ui/button";
@@ -79,12 +80,12 @@ export function ScoreBadges({
     <div className="mt-1 flex flex-wrap gap-1">
       {scores.map((s) => {
         const pass = s.value >= 0.5;
-        const label = s.scale === "binary" ? (pass ? "✓" : "✗") : s.value.toFixed(2);
+        const label = isGradedScale(s.scale) ? s.value.toFixed(2) : pass ? "✓" : "✗";
         const tip =
           s.source === "human"
             ? `${s.comment ?? ""}${
                 s.aiValue != null
-                  ? `\n(judge said ${s.scale === "binary" ? (s.aiValue >= 0.5 ? "✓" : "✗") : s.aiValue.toFixed(2)}${s.aiComment ? `: ${s.aiComment}` : ""})`
+                  ? `\n(judge said ${isGradedScale(s.scale) ? s.aiValue.toFixed(2) : s.aiValue >= 0.5 ? "✓" : "✗"}${s.aiComment ? `: ${s.aiComment}` : ""})`
                   : ""
               }`
             : s.comment;
@@ -137,7 +138,7 @@ function CorrectionDialog({
   onClose: () => void;
   onSaved: (score: AttachedEvalScore) => void;
 }) {
-  const binary = score.scale === "binary";
+  const binary = !isGradedScale(score.scale);
   const [value, setValue] = useState<number>(score.value);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
