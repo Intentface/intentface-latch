@@ -303,12 +303,12 @@ function EvalsPage() {
                   <Trash2 className="size-3.5" />
                 </button>
               </div>
-              <textarea
-                value={c.input}
-                onChange={(e) => update(i, { input: e.target.value })}
-                placeholder="The user message to send"
-                rows={2}
-                className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
+              <Turns
+                input={c.input}
+                followUps={c.followUps ?? []}
+                onChange={(input, followUps) =>
+                  update(i, { input, followUps: followUps.length ? followUps : undefined })
+                }
               />
               <div className="grid gap-2 md:grid-cols-2">
                 <label className="text-ink-tertiary text-xs">
@@ -838,6 +838,70 @@ function ScoreFields({
           ))}
         </select>
       </label>
+    </div>
+  );
+}
+
+/**
+ * The conversation a case sends, one message per turn.
+ *
+ * A single box said a case is one question, and the author duly worked around
+ * it by packing two requests into one message — which tests whether the agent
+ * can juggle a compound instruction, not whether it keeps its footing across a
+ * conversation. Those are different behaviours and the second is where the
+ * interesting failures are.
+ */
+function Turns({
+  input,
+  followUps,
+  onChange,
+}: {
+  input: string;
+  followUps: string[];
+  onChange: (input: string, followUps: string[]) => void;
+}) {
+  const all = [input, ...followUps];
+  const set = (i: number, text: string) => {
+    const next = all.map((t, j) => (j === i ? text : t));
+    onChange(next[0] ?? "", next.slice(1));
+  };
+  const remove = (i: number) => {
+    const next = all.filter((_, j) => j !== i);
+    onChange(next[0] ?? "", next.slice(1));
+  };
+  return (
+    <div className="space-y-1">
+      {all.map((text, i) => (
+        <div key={i} className="flex items-start gap-2">
+          <span className="text-ink-tertiary w-10 shrink-0 pt-2 text-xs">
+            {i === 0 ? "user" : "then"}
+          </span>
+          <textarea
+            value={text}
+            onChange={(e) => set(i, e.target.value)}
+            placeholder={i === 0 ? "The user message to send" : "…and then they say"}
+            rows={2}
+            className="border-secondary-border text-ink-primary min-w-0 flex-1 resize-none rounded border bg-transparent p-2 text-xs"
+          />
+          {i > 0 && (
+            <button
+              type="button"
+              aria-label="Remove turn"
+              onClick={() => remove(i)}
+              className="text-ink-tertiary hover:text-ink-primary pt-2"
+            >
+              <Trash2 className="size-3.5" />
+            </button>
+          )}
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange(input, [...followUps, ""])}
+        className="text-ink-tertiary hover:text-ink-primary ml-12 text-xs underline"
+      >
+        + follow-up turn
+      </button>
     </div>
   );
 }

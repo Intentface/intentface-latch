@@ -72,8 +72,21 @@ export interface EvalCase {
   id: string;
   /** Short human label ("refund question escalates"). */
   name: string;
-  /** The user message sent to the agent. */
+  /** The user message sent to the agent — the first turn. */
   input: string;
+  /**
+   * Further user messages, sent into the SAME thread after the first answer.
+   *
+   * Most real failures are not in the opening question. An agent that fetches
+   * correctly and then answers a follow-up from memory, or loses the thread of
+   * what "it" refers to, passes every single-turn case ever written. Without
+   * this the only way to test a follow-up is to cram two requests into one
+   * message, which tests a different thing.
+   *
+   * Checks see the WHOLE conversation, so a question can be about the arc
+   * ("did it keep using the fetched data?") rather than one reply.
+   */
+  followUps?: string[];
   expected: EvalExpectation;
   /**
    * Typed questions asked of the trace this case produces — the same

@@ -48,16 +48,36 @@ export async function runEvalCases({
 }): Promise<EvalCaseResult[]> {
   const attempt = async (c: EvalCase): Promise<EvalAttemptResult> => {
     try {
-      const { threadId, answer } = await runtime.runAgent({
+      const first = await runtime.runAgent({
         principal,
         agent,
         prompt: c.input,
         blockGated: true,
         ...(promptCaching !== undefined ? { promptCaching } : {}),
       });
+      const threadId = first.threadId;
+      const answers = [first.answer];
+      // Follow-ups go into the SAME thread, in order, each one seeing every
+      // reply before it — which is the only way a case can test whether the
+      // agent keeps its footing across a conversation.
+      for (const followUp of c.followUps ?? []) {
+        const next = await runtime.runAgent({
+          principal,
+          agent,
+          prompt: followUp,
+          threadId,
+          blockGated: true,
+          ...(promptCaching !== undefined ? { promptCaching } : {}),
+        });
+        answers.push(next.answer);
+      }
+      const answer = answers[answers.length - 1]!;
       const history = await runtime.loadHistory({ chatId: threadId, principal });
       const toolCalls = extractToolCalls(history);
-      const { reasons } = await gradeCase(c, answer, toolCalls);
+      // Assertions read EVERY answer, not just the last: a promise kept in the
+      // first reply and broken in the third is still broken, and a format rule
+      // that only applies to the opening turn would otherwise go unchecked.
+      const { reasons } = await gradeCase(c, answers.join("\n\n"), toolCalls);
       // Judge tier: a failed criterion fails the attempt like any check; a
       // judge INFRA error (v.error) surfaces in the verdicts but never fails.
       let rubric;
@@ -98,7 +118,7 @@ export async function runEvalCases({
         pass: reasons.length === 0,
         reasons,
         threadId,
-        answerPreview: answer.slice(0, 400),
+        answerPreview: answers.join("\n\n").slice(0, 400),
         toolCalls,
         rubric,
         checks,

@@ -152,7 +152,7 @@ A case is ONE input plus what should happen FOR THAT INPUT — unlike a rubric, 
 GROUND YOURSELF FIRST, ALWAYS. Call get_agent for the target's instructions and connections, then list_connection_tools for those connections to learn the REAL tool names and their argument schemas. NEVER invent a tool name or an argument key: an expectation naming a tool that does not exist fails every run, and the reader blames the agent rather than the case. If a briefing names a threadId, read_transcript it — a case built from a real conversation has a real input, which beats one you imagined.
 
 Answer with a JSON ARRAY of cases, each:
-  {"id": string, "name": string, "input": string, "expected": {...deterministic checks...}, "checks": {<id>: <question>}, "repeats"?: number}
+  {"id": string, "name": string, "input": string, "followUps"?: [string], "expected": {...deterministic checks...}, "checks": {<id>: <question>}, "repeats"?: number}
 
 A case has TWO halves and you choose how much weight each carries.
 
@@ -179,6 +179,7 @@ WHERE TO PUT EACH JUDGMENT. Anything a comparison can answer goes in "expected":
 Craft rules:
 - id: stable kebab-case, unique in the array. It is the key a later version-to-version comparison pairs on, so never renumber an existing case.
 - input: what a real user would actually type — not a description of the test.
+- "followUps" makes the case a CONVERSATION: each string is the next user message in the same thread, sent after the previous answer. Reach for it whenever the behaviour only appears on the second turn — answering a follow-up from memory instead of the fetched data, losing what "it" refers to, dropping a constraint agreed earlier. Do NOT pack two requests into one input to avoid this; that tests whether the agent can juggle a compound instruction, which is a different thing. Checks see the whole conversation, so a question may be about the arc rather than one reply.
 - Keys in "checks" are stable ids (kebab-case), unique within the case: a later comparison pairs on them.
 - Two or three checks per case is plenty. A case with eight is measuring the whole agent rather than one behaviour, and its failures stop being diagnostic.
 - "args" is matched as a SUBSET of the real call, per key, using the argument names the schema actually has. A value of {"$regex": "..."} matches a pattern instead of a literal — use it for anything dynamic (a date, an id).
