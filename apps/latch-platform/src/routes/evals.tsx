@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { FlaskConical, Play, Plus, Trash2 } from "lucide-react";
+import { FlaskConical, Play, Plus, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   currentPrincipalFn,
@@ -12,8 +12,10 @@ import {
   listEvalSetsFn,
   runEvalSetFn,
   saveEvalSetFn,
+  connectionToolsFn,
+  draftEvalCasesFn,
 } from "@/lib/server";
-import type { EvalCase, EvalRun } from "@/lib/evals/store";
+import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -55,9 +57,13 @@ const parseList = (text: string): string[] =>
   [...new Set(text.split(",").map((s) => s.trim()).filter(Boolean))];
 
 /**
- * One "must open" line: `tool` or `tool path/to/doc.md`. The path becomes an
- * arg matcher, which is what makes "this input should read that document" a
- * free deterministic check rather than a judgement call.
+ * One expected call per line: `tool` or `tool key=value, key=value`.
+ *
+ * Deliberately not tied to any particular argument name. An earlier version of
+ * this form assumed `path`, which quietly encoded one example agent's document
+ * tool into the UI — every other agent's tools (`fetch_top_hn_posts({limit:5})`)
+ * could not be expressed at all. Args are matched as a SUBSET of the real call,
+ * so naming one key is enough.
  */
 function parseExpectedTools(text: string): EvalCase["expected"]["toolCalls"] {
   const rows = text
@@ -66,8 +72,16 @@ function parseExpectedTools(text: string): EvalCase["expected"]["toolCalls"] {
     .filter(Boolean)
     .map((line) => {
       const [tool, ...rest] = line.split(/\s+/);
-      const arg = rest.join(" ").trim();
-      return arg ? { tool: tool!, args: { path: arg } } : { tool: tool! };
+      const args: Record<string, JsonValue> = {};
+      for (const pair of rest.join(" ").split(",")) {
+        const [k, ...v] = pair.split("=");
+        const key = k?.trim();
+        const raw = v.join("=").trim();
+        if (!key || !raw) continue;
+        // Numbers and booleans compare as themselves; everything else is text.
+        args[key] = raw === "true" ? true : raw === "false" ? false : Number.isFinite(Number(raw)) ? Number(raw) : raw;
+      }
+      return Object.keys(args).length ? { tool: tool!, args } : { tool: tool! };
     });
   return rows.length ? rows : undefined;
 }
@@ -75,8 +89,10 @@ function parseExpectedTools(text: string): EvalCase["expected"]["toolCalls"] {
 const renderExpectedTools = (calls: EvalCase["expected"]["toolCalls"]): string =>
   (calls ?? [])
     .map((c) => {
-      const path = (c.args as { path?: unknown } | undefined)?.path;
-      return typeof path === "string" ? `${c.tool} ${path}` : c.tool;
+      const args = Object.entries(c.args ?? {})
+        .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+        .join(", ");
+      return args ? `${c.tool} ${args}` : c.tool;
     })
     .join("\n");
 
@@ -94,28 +110,50 @@ function EvalsPage() {
   const [versions, setVersions] = useState<{ version: number; createdAt: number }[]>([]);
   const [pin, setPin] = useState<string>("live");
   const [runs, setRuns] = useState<EvalRun[]>([]);
+  const [tools, setTools] = useState<string[]>([]);
+  const [brief, setBrief] = useState("");
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     if (!agent) return;
     setLoaded(false);
-    const [set, vs, rs] = await Promise.all([
+    const [set, vs, rs, ts] = await Promise.all([
       getEvalSetFn({ data: { agent, name: setName } }),
       listAgentVersionsFn({ data: { name: agent, scope: scopeOf.get(agent) ?? "user" } }).catch(
         () => [],
       ),
       listEvalRunsFn({ data: { agent, name: setName, limit: 10 } }),
+      // The agent's REAL tools, so the editor's hints describe this agent
+      // rather than whichever one the form was first written against.
+      connectionToolsFn({ data: agents.find((a) => a.name === agent)?.connections ?? [] }).catch(
+        () => [],
+      ),
     ]);
     setCases(set?.cases ?? []);
     setVersions(vs as { version: number; createdAt: number }[]);
     setRuns(rs as EvalRun[]);
+    setTools((ts as { name: string }[]).map((t) => t.name));
     setLoaded(true);
-  }, [agent, setName, scopeOf]);
+  }, [agent, setName, scopeOf, agents]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Hints come from the agent in front of you, never from an example.
+  const toolHint = tools.length ? `${tools[0]} key=value` : "tool_name key=value";
+  const forbidHint = tools.length > 1 ? tools[1]! : "tool_name";
+
+  const generate = async () => {
+    setBusy(true);
+    const res = await draftEvalCasesFn({ data: { agent, brief } });
+    setBusy(false);
+    if (!res.ok) return toast.error(res.error);
+    // Drafts land UNSAVED, appended: reviewing and cutting is the job.
+    setCases((cs) => [...cs, ...res.cases]);
+    toast.success(`Drafted ${res.cases.length} case${res.cases.length === 1 ? "" : "s"} — review and save`);
+  };
 
   const update = (i: number, patch: Partial<EvalCase>) =>
     setCases((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
@@ -219,6 +257,28 @@ function EvalsPage() {
         </Button>
       </div>
 
+      <div className="border-secondary-border space-y-2 rounded border border-dashed p-3">
+        <label className="text-ink-tertiary block text-xs">
+          Describe what to test — the agent writes the cases, grounded in its real tools
+          <textarea
+            value={brief}
+            onChange={(e) => setBrief(e.target.value)}
+            placeholder="It should always fetch before summarising, ask which region when the question is ambiguous, and never act on a destructive request without confirming."
+            rows={2}
+            className="border-secondary-border text-ink-primary mt-1 w-full resize-none rounded border bg-transparent p-2"
+          />
+        </label>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={generate} disabled={busy || !agent} className="gap-1">
+            <Sparkles className="size-3.5" />
+            Generate cases
+          </Button>
+          <span className="text-ink-tertiary text-xs">
+            {tools.length ? `${tools.length} tools available to this agent` : "no connection tools"}
+          </span>
+        </div>
+      </div>
+
       {!loaded && <p className="text-ink-tertiary text-sm">Loading…</p>}
 
       {loaded && (
@@ -256,11 +316,11 @@ function EvalsPage() {
               />
               <div className="grid gap-2 md:grid-cols-2">
                 <label className="text-ink-tertiary text-xs">
-                  Must open — one per line, <code>tool path/to/doc.md</code>
+                  Must call — one per line, <code>tool key=value</code>
                   <textarea
                     value={renderExpectedTools(c.expected.toolCalls)}
                     onChange={(e) => updateExpected(i, { toolCalls: parseExpectedTools(e.target.value) })}
-                    placeholder={"read_file docs/networking/vpc-limits.md"}
+                    placeholder={toolHint}
                     rows={2}
                     className="border-secondary-border text-ink-primary mt-1 w-full resize-none rounded border bg-transparent p-2"
                   />
@@ -276,7 +336,7 @@ function EvalsPage() {
                           : undefined,
                       })
                     }
-                    placeholder="delete_stack"
+                    placeholder={forbidHint}
                     className="border-secondary-border text-ink-primary mt-1 w-full rounded border bg-transparent p-2"
                   />
                 </label>
@@ -289,7 +349,7 @@ function EvalsPage() {
                     const rubric = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean);
                     updateExpected(i, { rubric: rubric.length ? rubric.slice(0, 5) : undefined });
                   }}
-                  placeholder="Every number in the answer appears in a document the agent opened."
+                  placeholder="Only when no tool check can express it — each line costs a judge call."
                   rows={2}
                   className="border-secondary-border text-ink-primary mt-1 w-full resize-none rounded border bg-transparent p-2"
                 />

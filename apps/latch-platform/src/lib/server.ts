@@ -2480,3 +2480,60 @@ export const listEvalRunsFn = createServerFn({ method: "POST" })
     ).flat();
     return runs.sort((a, b) => b.createdAt - a.createdAt);
   });
+
+/**
+ * Draft eval CASES from a description, or from a conversation that went wrong.
+ *
+ * The form is the wrong place to author these. A case's value is in its
+ * GROUND TRUTH — the real tool name, the real argument key — and that is
+ * exactly what a person should not be looking up by hand. So the human
+ * describes intent and the Eval Author produces the concrete expectations,
+ * having first read the agent's connections and their actual tool schemas.
+ *
+ * Whatever comes back is a DRAFT: it lands in the editor unsaved, for the
+ * reviewer to cut down. Generated cases are cheap and a fair share are
+ * trivial or accidentally unanswerable — deleting them is the job, not
+ * authoring from scratch.
+ */
+export const draftEvalCasesFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; brief: string; threadId?: string; count?: number }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const brief = data.brief.trim();
+    if (!brief && !data.threadId) {
+      return { ok: false as const, error: "describe what to test, or name a conversation" };
+    }
+    const { runtime } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const count = Math.min(Math.max(data.count ?? 5, 1), 15);
+
+    const prompt =
+      `Agent: ${agentName}. Author up to ${count} EVAL CASES.` +
+      (brief ? ` What to cover: "${brief}".` : "") +
+      (data.threadId
+        ? ` Build them from the conversation in thread ${data.threadId}: read_transcript it, ` +
+          `use what the user actually asked as the input, and make the expectations describe what ` +
+          `SHOULD have happened.`
+        : "") +
+      ` Ground every tool name and argument key in the agent's real tools before writing them. ` +
+      `Return the JSON array per your output contract.`;
+
+    const { answer } = await runtime.runAgent({ principal, agent: "eval-author", prompt });
+    const parsed = parseFencedJson<EvalCase[] | { error: string }>(answer);
+    if (!parsed) return { ok: false as const, error: "eval-author returned no valid JSON" };
+    if (!Array.isArray(parsed)) {
+      return { ok: false as const, error: parsed.error ?? "eval-author could not draft cases" };
+    }
+
+    // Shape-check rather than trust: a case with no input runs nothing, and a
+    // duplicate id silently merges two cases into one column in a comparison.
+    const seen = new Set<string>();
+    const cases = parsed.filter((c) => {
+      const ok = !!c?.id?.trim() && !!c?.input?.trim() && !seen.has(c.id);
+      if (ok) seen.add(c.id);
+      return ok;
+    });
+    if (cases.length === 0) return { ok: false as const, error: "no usable cases were drafted" };
+    return { ok: true as const, cases };
+  });
