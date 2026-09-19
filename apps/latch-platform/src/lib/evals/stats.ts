@@ -164,11 +164,26 @@ export function compare(
     means[i] = sum / n;
   }
   means.sort((a, b) => a - b);
-  const ci: [number, number] = [percentile(means, 0.025), percentile(means, 0.975)];
+  let ci: [number, number] = [percentile(means, 0.025), percentile(means, 0.975)];
+
+  // ZERO-VARIANCE GUARD. When every pair agreed, every resample is identical
+  // and the bootstrap reports an interval of zero width — which reads as
+  // "certainly no difference" when it means "these n observations were the
+  // same". With seven pairs that is nothing like certainty.
+  //
+  // The rule of three gives the honest bound: observing no differences in n
+  // trials leaves a 95% upper bound of about 3/n on the rate of difference.
+  // At n=7 that is 43 percentage points — the opposite of what [0,0] implies.
+  if (ci[0] === ci[1]) {
+    const bound = 3 / n;
+    ci = [delta - bound, delta + bound];
+  }
 
   const se = Math.sqrt(mean(means.map((m) => (m - mean(means)) ** 2)));
-  // ~80% power at α=0.05 is about 2.8 standard errors.
-  const mde = 2.8 * se;
+  // ~80% power at α=0.05 is about 2.8 standard errors. A zero-variance sample
+  // has no standard error to speak of, so fall back to the same rule-of-three
+  // bound rather than reporting that an effect of zero would be detectable.
+  const mde = se > 0 ? 2.8 * se : 3 / n;
 
   const excludesZero = ci[0] > 0 || ci[1] < 0;
   const halfWidth = (ci[1] - ci[0]) / 2;

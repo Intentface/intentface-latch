@@ -16,6 +16,7 @@ import {
   draftEvalCasesFn,
 } from "@/lib/server";
 import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
+import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -363,6 +364,12 @@ function EvalsPage() {
       )}
 
       {runs.length > 0 && <ResultsGrid runs={runs} />}
+      {runs.length > 1 && (
+        <CompareStrip
+          base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
+          head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
+        />
+      )}
     </div>
   );
 }
@@ -509,6 +516,106 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Two columns, per check: the difference, and how sure we are of it.
+ *
+ * This is the one thing the table above communicates badly. A reader sees
+ * "0.14 better" and acts on it; the same reader shown an interval that plainly
+ * straddles zero does not. So the interval is the drawing and the number is
+ * the caption, rather than the other way round.
+ *
+ * It will usually say UNDERPOWERED, and that is the feature. A handful of
+ * cases cannot separate a real change from a coin flip, and a view that
+ * rendered a confident bar over six observations would be a more convincing
+ * way to be wrong than the table it replaced.
+ */
+function CompareStrip({ base, head }: { base: EvalRun; head: EvalRun }) {
+  const observations: Observation[] = [];
+  for (const run of [base, head]) {
+    for (const res of run.results) {
+      for (const chk of res.checks ?? []) {
+        observations.push({
+          // A check within a case is the pairing key: it keeps its meaning
+          // across versions even when the input is reworded.
+          task: `${res.caseId}/${chk.id}`,
+          agent: run.id,
+          value: chk.failed ? 1 : 0,
+        });
+      }
+      // The case-level verdict too, so a case with no typed checks still
+      // contributes something to the comparison.
+      observations.push({ task: res.caseId, agent: run.id, value: res.pass ? 0 : 1 });
+    }
+  }
+  const overall = compare(observations, base.id, head.id);
+
+  const checks = [...new Set(observations.map((o) => o.task))].filter((t) => t.includes("/"));
+  const rows = checks
+    .map((task) => ({ task, r: compare(observations.filter((o) => o.task === task), base.id, head.id) }))
+    // A per-check comparison over one task is never conclusive; sort the ones
+    // that at least moved to the top rather than pretending otherwise.
+    .sort((a, b) => Math.abs(b.r.delta) - Math.abs(a.r.delta));
+
+  const tone: Record<string, string> = {
+    regressed: "text-red-500",
+    improved: "text-emerald-600",
+    flat: "text-ink-tertiary",
+    underpowered: "text-amber-600",
+  };
+
+  /** The interval, drawn across a track centred on zero. */
+  const Interval = ({ lo, hi, delta }: { lo: number; hi: number; delta: number }) => {
+    const pos = (v: number) => `${((Math.max(-1, Math.min(1, v)) + 1) / 2) * 100}%`;
+    const crossesZero = lo <= 0 && hi >= 0;
+    return (
+      <div className="bg-secondary-border/40 relative h-2 w-36 rounded">
+        <div className="bg-ink-tertiary/40 absolute inset-y-0 w-px" style={{ left: "50%" }} />
+        <div
+          className={`absolute inset-y-0 rounded ${crossesZero ? "bg-amber-500/40" : delta > 0 ? "bg-red-500/50" : "bg-emerald-500/50"}`}
+          style={{ left: pos(lo), right: `calc(100% - ${pos(hi)})` }}
+        />
+        <div className="bg-ink-primary absolute inset-y-0 w-0.5" style={{ left: pos(delta) }} />
+      </div>
+    );
+  };
+
+  const pp = (n: number) => `${n >= 0 ? "+" : ""}${(n * 100).toFixed(0)}pp`;
+
+  return (
+    <div className="space-y-2">
+      <h2 className="text-sm font-medium">
+        {base.configRef ?? "live"} → {head.configRef ?? "live"}
+      </h2>
+      <div className="border-secondary-border space-y-1 rounded border p-3 text-xs">
+        <div className="flex items-center gap-3">
+          <span className="w-44 font-medium">overall failure rate</span>
+          <Interval lo={overall.ci[0]} hi={overall.ci[1]} delta={overall.delta} />
+          <span className="w-16 text-right">{pp(overall.delta)}</span>
+          <span className={tone[overall.verdict]}>{overall.verdict}</span>
+          <span className="text-ink-tertiary">n={overall.n}</span>
+        </div>
+        {rows.map(({ task, r }) => (
+          <div key={task} className="text-ink-tertiary flex items-center gap-3">
+            <span className="w-44 truncate" title={task}>
+              {task.split("/")[1]}
+            </span>
+            <Interval lo={r.ci[0]} hi={r.ci[1]} delta={r.delta} />
+            <span className="w-16 text-right">{pp(r.delta)}</span>
+            <span className={tone[r.verdict]}>{r.verdict}</span>
+          </div>
+        ))}
+        {overall.verdict === "underpowered" && (
+          <p className="text-ink-tertiary pt-1">
+            Too few observations to separate a real change from noise. At this spread you would
+            need a difference of about {pp(overall.mde)} to see it — add cases, or accept that
+            this comparison cannot answer the question.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

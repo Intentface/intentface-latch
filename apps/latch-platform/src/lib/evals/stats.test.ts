@@ -189,3 +189,32 @@ describe("survivingFdr", () => {
     expect(survivingFdr([], 0.1).size).toBe(0);
   });
 });
+
+describe("compare — the zero-variance trap", () => {
+  it("does not report certainty from a handful of identical observations", () => {
+    // Seven pairs that all agreed. Every bootstrap resample is identical, so
+    // the raw percentile interval has zero width and reads as "certainly no
+    // difference" — which is the single most dangerous thing this module
+    // could say. Observing no differences in 7 trials leaves a ~43pp effect
+    // perfectly possible.
+    const same = [0, 0, 0, 1, 0, 0, 1];
+    const r = compare([...obs("v12", same), ...obs("v13", same)], "v12", "v13");
+
+    expect(r.delta).toBe(0);
+    expect(r.ci[0]).toBeLessThan(0);
+    expect(r.ci[1]).toBeGreaterThan(0);
+    expect(r.ci[1]).toBeCloseTo(3 / 7, 5);
+    expect(r.verdict).toBe("underpowered");
+    expect(r.mde).toBeGreaterThan(0);
+  });
+
+  it("still calls a LARGE identical sample flat", () => {
+    // The guard must not make every agreement underpowered forever: at n=400
+    // the rule-of-three bound is under a percentage point, which genuinely is
+    // "no meaningful change".
+    const same = Array.from({ length: 400 }, (_, i) => (i % 3 === 0 ? 1 : 0));
+    const r = compare([...obs("v12", same), ...obs("v13", same)], "v12", "v13");
+    expect(r.verdict).toBe("flat");
+    expect(r.ci[1]).toBeLessThan(0.01);
+  });
+});
