@@ -219,12 +219,34 @@ export const normalizeAgentName = (s: string): string =>
 
 /**
  * Channel bindings and run records pin an agent to one scope with an
- * `org:`/`user:` prefix (stored names never contain `:` — normalizeAgentName
- * strips it). Split a possibly-pinned reference.
+ * `org:`/`user:` prefix, and an evaluation can pin it to one CONFIGURATION
+ * with a trailing `@<version>` or `@draft`. Stored names never contain `:` or
+ * `@` — `normalizeAgentName` strips both — so neither pin can collide with a
+ * real name. Split a possibly-pinned reference.
+ *
+ *   "support"              → live config, either scope
+ *   "org:support"          → live config, org scope
+ *   "support@7"            → exactly version 7
+ *   "support@draft"        → the caller's unpublished draft
+ *
+ * The version pin is what lets an eval run measure a configuration WITHOUT
+ * making it live: comparing two versions by activating each in turn would move
+ * production traffic between them mid-comparison.
  */
-export function parseAgentRef(ref: string): { name: string; scope?: AgentScope } {
-  const m = /^(org|user):(.+)$/.exec(ref);
-  return m ? { name: m[2]!, scope: m[1] as AgentScope } : { name: ref };
+export function parseAgentRef(ref: string): {
+  name: string;
+  scope?: AgentScope;
+  /** Pinned configuration: a published version number, or the caller's draft. */
+  at?: number | "draft";
+} {
+  const scoped = /^(org|user):(.+)$/.exec(ref);
+  const scope = scoped ? (scoped[1] as AgentScope) : undefined;
+  const rest = scoped ? scoped[2]! : ref;
+
+  const pinned = /^(.+)@(draft|\d+)$/.exec(rest);
+  if (!pinned) return scope ? { name: rest, scope } : { name: rest };
+  const at = pinned[2] === "draft" ? ("draft" as const) : Number(pinned[2]);
+  return scope ? { name: pinned[1]!, scope, at } : { name: pinned[1]!, at };
 }
 
 const blankToUndefined = (s: string | undefined): string | undefined => {

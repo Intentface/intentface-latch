@@ -175,3 +175,41 @@ describe("names and refs", () => {
     expect(parseAgentRef("team:x")).toEqual({ name: "team:x" });
   });
 });
+
+describe("parseAgentRef — pinning a configuration", () => {
+  it("reads a bare name as the live config", () => {
+    expect(parseAgentRef("support")).toEqual({ name: "support" });
+  });
+
+  it("reads a scope pin", () => {
+    expect(parseAgentRef("org:support")).toEqual({ name: "support", scope: "org" });
+  });
+
+  it("reads a version pin, with and without a scope", () => {
+    expect(parseAgentRef("support@7")).toEqual({ name: "support", at: 7 });
+    expect(parseAgentRef("user:support@7")).toEqual({ name: "support", scope: "user", at: 7 });
+  });
+
+  it("reads a draft pin", () => {
+    expect(parseAgentRef("support@draft")).toEqual({ name: "support", at: "draft" });
+  });
+
+  it("leaves an unparseable suffix as part of the name", () => {
+    // Stored names cannot contain "@" (normalizeAgentName strips it), so this
+    // only arises from a typo. Treating "@v7" as a pin would silently resolve
+    // the live agent instead of erroring, which is the worse failure.
+    expect(parseAgentRef("support@v7")).toEqual({ name: "support@v7" });
+    expect(parseAgentRef("support@")).toEqual({ name: "support@" });
+  });
+
+  it("pins on the LAST @, so a name is never split on an earlier one", () => {
+    expect(parseAgentRef("a@b@3")).toEqual({ name: "a@b", at: 3 });
+  });
+
+  it("round-trips what normalizeAgentName produces", () => {
+    // The pin separators are exactly the characters the normalizer removes,
+    // which is what makes them unambiguous.
+    expect(normalizeAgentName("My Agent@7")).toBe("my-agent-7");
+    expect(normalizeAgentName("a:b")).toBe("a-b");
+  });
+});

@@ -78,6 +78,31 @@ async function main() {
   assert(after.filter((r) => r.name === "helper").length === 1, "upsert dedupes");
   assert(after.find((r) => r.name === "helper")!.modelId === "m-2", "upsert updates");
 
+  // Pinned configurations: `@<version>` and `@draft` resolve a DIFFERENT
+  // config of the same agent without making it live. This is what lets an
+  // eval measure a version — activating each in turn to compare them would
+  // move real traffic between them mid-comparison.
+  await store.upsert(p, { name: "pinned", modelId: "m-1", instructions: "v1", connections: [], scope: "user" });
+  await store.upsert(p, { name: "pinned", modelId: "m-2", instructions: "v2", connections: [], scope: "user" });
+  const versions = await store.listVersions(p, "pinned", "user");
+  assert(versions.length === 2, `two versions recorded (got ${versions.length})`);
+
+  const livePin = await store.resolve("pinned", p);
+  assert(livePin?.instructions === "v2", "bare name resolves the LIVE config");
+  const v1 = await store.resolve("pinned@1", p);
+  assert(v1?.instructions === "v1", `@1 resolves version 1 (got ${String(v1?.instructions)})`);
+  const stillLive = await store.resolve("pinned", p);
+  assert(stillLive?.instructions === "v2", "resolving a version did not make it live");
+
+  await store.saveDraft(p, "pinned", "user", { name: "pinned", modelId: "m-3", instructions: "draft only", connections: [], scope: "user" }, 2);
+  const draft = await store.resolve("pinned@draft", p);
+  assert(draft?.instructions === "draft only", "@draft resolves the unpublished edit");
+  assert((await store.resolve("pinned", p))?.instructions === "v2", "a draft never affects the live agent");
+
+  assert(!(await store.resolve("pinned@99", p)), "an unknown version resolves to nothing");
+  assert(!(await store.resolve("absent@1", p)), "a pin cannot resolve an agent you cannot see");
+  assert((await store.resolve("user:pinned@1", p))?.instructions === "v1", "scope + version pin together");
+
   // remove
   await store.remove(p, "user", "helper");
   assert(!(await store.resolve("helper", p)), "removed record no longer resolves");

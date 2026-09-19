@@ -332,7 +332,40 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
       const ref = parseAgentRef(name);
       const row = await findRow(principal, ref.name, ref.scope);
       if (!row) return undefined;
-      const rec = recordOf(row);
+      const live = recordOf(row);
+
+      // A `@version` / `@draft` pin resolves a DIFFERENT configuration of the
+      // same agent, without making it live. That is the only honest way to
+      // measure one: activating each version in turn to compare them would
+      // move real traffic between them mid-comparison.
+      //
+      // The live row is still looked up first, and deliberately: it is what
+      // decides the scope and proves the caller may see this agent at all, so
+      // a pin can never widen access to a configuration of an agent they
+      // could not otherwise resolve.
+      let rec = live;
+      let configVersion = row.publishedVersion ?? undefined;
+      if (ref.at !== undefined) {
+        const scope = ref.scope ?? live.scope;
+        // Read through `queries` rather than the sibling methods: `this` in an
+        // object literal breaks the moment anyone destructures the store, and
+        // the runtime holds `dynamicAgents` as a plain value.
+        const owner = ownerKey(principal, scope);
+        if (ref.at === "draft") {
+          const draftRow = await queries.draft(owner, ref.name, editorKey(principal));
+          if (!draftRow) return undefined;
+          // Pin identity to the live record's: a draft carries whatever name
+          // and scope were in the editor, and resolving under those would let
+          // an in-progress rename resolve as a different agent.
+          rec = { ...recordFromJson(draftRow.record), name: live.name, scope: live.scope };
+          configVersion = undefined; // unpublished — there is no version to cite
+        } else {
+          const versionRow = await queries.versionAt(owner, ref.name, ref.at);
+          if (!versionRow) return undefined;
+          rec = { ...recordFromJson(versionRow.record), name: live.name, scope: live.scope };
+          configVersion = ref.at;
+        }
+      }
       const decorate = opts.decorateResolve ?? ((cfg: AgentConfig<P>) => cfg);
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
@@ -365,7 +398,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
           // Which stored version this config is a copy of — recorded on the run
           // and emitted as a trace tag, so an answer can be traced back to the
           // configuration that produced it.
-          configVersion: row.publishedVersion ?? undefined,
+          configVersion,
           model: opts.modelFor(rec.modelId),
           instructions: rec.instructions,
           connections: rec.connections,
