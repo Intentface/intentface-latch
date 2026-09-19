@@ -15,6 +15,7 @@ import {
   connectionToolsFn,
   draftEvalCasesFn,
   correctEvalCheckFn,
+  auditAgentFn,
 } from "@/lib/server";
 import { effectiveFailed, reliabilityOf } from "@/lib/evals/reliability";
 import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
@@ -116,6 +117,9 @@ function EvalsPage() {
   const [runs, setRuns] = useState<EvalRun[]>([]);
   const [tools, setTools] = useState<string[]>([]);
   const [brief, setBrief] = useState("");
+  const [audit, setAudit] = useState<
+    { judged: number; promises: { id: string; ask: string; type: string; broken: number; rate: number; examples: string[] }[] } | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
@@ -148,6 +152,14 @@ function EvalsPage() {
   // Hints come from the agent in front of you, never from an example.
   const toolHint = tools.length ? `${tools[0]} key=value` : "tool_name key=value";
   const forbidHint = tools.length > 1 ? tools[1]! : "tool_name";
+
+  const runAudit = async () => {
+    setBusy(true);
+    const res = await auditAgentFn({ data: { agent } });
+    setBusy(false);
+    if (!res.ok) return toast.error(res.error);
+    setAudit({ judged: res.judged, promises: res.promises });
+  };
 
   const generate = async () => {
     setBusy(true);
@@ -253,6 +265,50 @@ function EvalsPage() {
         <Button variant="ghost" onClick={remove} disabled={busy || !cases.length}>
           <Trash2 className="size-3.5" />
         </Button>
+      </div>
+
+      {/* FIRST, and before anything is authored: the agent's instructions already
+          list what it promises, and its conversations are already stored. So
+          the first number costs a few cents and no decision to start. Asking
+          someone to write a suite before they have seen one is how eval tooling
+          goes unused. */}
+      <div className="border-secondary-border space-y-2 rounded border p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={runAudit} disabled={busy || !agent} className="gap-1">
+            <Sparkles className="size-3.5" />
+            What does this agent promise?
+          </Button>
+          <span className="text-ink-tertiary text-xs">
+            Reads its instructions, asks those questions of conversations it already had. No setup,
+            nothing re-run.
+          </span>
+        </div>
+
+        {audit && (
+          <div className="space-y-1 pt-1">
+            <div className="text-ink-tertiary text-xs">
+              {audit.promises.length} promises, checked against {audit.judged} stored conversation
+              {audit.judged === 1 ? "" : "s"}
+              {audit.judged < 10 && " — too few to conclude anything; treat these as a first look"}
+            </div>
+            {audit.promises.map((p) => (
+              <div key={p.id} className="flex items-start gap-2 text-xs">
+                <span className={p.broken ? "text-red-500" : "text-emerald-600"}>
+                  {p.broken ? "✗" : "✓"}
+                </span>
+                <span className="text-ink-primary w-56 shrink-0 truncate" title={p.ask}>
+                  {p.id}
+                </span>
+                <span className="text-ink-tertiary w-24 shrink-0">
+                  {p.broken}/{audit.judged} broken
+                </span>
+                <span className="text-ink-tertiary min-w-0 flex-1 truncate" title={p.ask}>
+                  {p.ask}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="border-secondary-border space-y-2 rounded border border-dashed p-3">

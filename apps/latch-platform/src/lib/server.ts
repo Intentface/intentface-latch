@@ -36,6 +36,8 @@ import { runEvalCases } from "./evals/run";
 import type { EvalCase, JsonValue } from "./evals/store";
 import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "./evals/judge";
 import { judgeModel } from "./evals/judge-model";
+import { askOfTrace } from "./evals/ask";
+import type { Question } from "./evals/ask";
 import { isGradedScale } from "./evals/evaluate-rubrics";
 import { rejudgeRun } from "./observability/judge-run";
 import {
@@ -2607,4 +2609,107 @@ export const correctEvalCheckFn = createServerFn({ method: "POST" })
     );
     if (!run) return { ok: false as const, error: "no such run" };
     return { ok: true as const, run };
+  });
+
+/**
+ * What does this agent promise, and does it keep them?
+ *
+ * ONE call, NO setup. It reads the agent's own instructions for the promises
+ * they make, then asks those questions of conversations that already happened.
+ * Nothing is authored, nothing is re-run, and no agent is invoked — so the
+ * first eval signal costs a few cents and arrives before anyone has decided to
+ * start doing evals.
+ *
+ * That ordering is the point. Asking someone to write a suite before they have
+ * seen one number is how eval tooling goes unused; the promises are already in
+ * the prompt and the conversations are already in the database, so there is
+ * nothing to set up and no reason to put it off.
+ *
+ * What comes back is a starting point, not a suite: questions nobody chose,
+ * over traffic nobody curated. Keep the ones that say something.
+ */
+export const auditAgentFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; limit?: number; scan?: number }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime, agentStore } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, agentName);
+    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
+    if (!rec.instructions?.trim()) {
+      return { ok: false as const, error: "This agent has no instructions to derive promises from." };
+    }
+
+    const limit = Math.min(Math.max(data.limit ?? 25, 1), 100);
+    // Scan wider than we judge: `listChats` limits before we can filter by
+    // agent, so a caller whose recent chats belong elsewhere would otherwise
+    // see "no conversations" for an agent with hundreds.
+    const scanned = await runtime.listChats({ principal, limit: data.scan ?? 300 });
+    const chats = scanned
+      .filter((c) => c.agent === agentName && c.kind !== "internal" && !c.id.startsWith("sub_"))
+      .slice(0, limit);
+    if (chats.length === 0) {
+      return { ok: false as const, error: `No stored conversations for "${agentName}" yet.` };
+    }
+
+    const { answer } = await runtime.runAgent({
+      principal,
+      agent: "eval-author",
+      prompt:
+        `Agent: ${agentName}. AUDIT THE PROMISES: give me questions to ask of conversations this ` +
+        `agent has already had. Read its instructions below and name the promises a reader could ` +
+        `check afterwards from one conversation alone. Return the JSON object per your output ` +
+        `contract.\n\nTHE AGENT'S OWN INSTRUCTIONS:\n${rec.instructions.slice(0, 6000)}`,
+    });
+    const questions = parseFencedJson<Record<string, Question> | { error: string }>(answer);
+    if (!questions || Array.isArray(questions) || "error" in questions) {
+      return {
+        ok: false as const,
+        error: (questions as { error?: string } | null)?.error ?? "could not derive promises",
+      };
+    }
+
+    const ids = Object.keys(questions);
+    if (ids.length === 0) return { ok: false as const, error: "no checkable promises found" };
+
+    const model = judgeModel(JUDGE_MODEL_ID);
+    const failures: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
+    const examples: Record<string, string[]> = Object.fromEntries(ids.map((id) => [id, []]));
+    let judged = 0;
+    let calls = 0;
+
+    for (const chat of chats) {
+      const messages = await runtime.loadHistory({ chatId: chat.id, principal });
+      if (messages.length === 0) continue;
+      try {
+        const { verdicts, usage } = await askOfTrace({ model, messages, questions });
+        judged++;
+        calls += usage.calls;
+        for (const v of verdicts) {
+          if (!v.failed) continue;
+          failures[v.id]!++;
+          if (examples[v.id]!.length < 3) examples[v.id]!.push(chat.id);
+        }
+      } catch {
+        // One unreadable conversation must not lose the whole audit.
+      }
+    }
+
+    return {
+      ok: true as const,
+      judged,
+      calls,
+      promises: ids.map((id) => ({
+        id,
+        ask: questions[id]!.ask,
+        type: (questions[id] as { type?: string }).type ?? "boolean",
+        broken: failures[id]!,
+        rate: judged ? failures[id]! / judged : 0,
+        examples: examples[id]!,
+      })),
+      // Handed back so a promise worth keeping can become a real check without
+      // being written again.
+      questions,
+    };
   });
