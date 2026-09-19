@@ -37,6 +37,7 @@ import type { EvalCase, JsonValue } from "./evals/store";
 import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "./evals/judge";
 import { judgeModel } from "./evals/judge-model";
 import { askOfTrace } from "./evals/ask";
+import { agents as codeAgents } from "@/agents";
 import type { Question } from "./evals/ask";
 import { isGradedScale } from "./evals/evaluate-rubrics";
 import { rejudgeRun } from "./observability/judge-run";
@@ -2635,10 +2636,35 @@ export const auditAgentFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "unauthorized" };
     const { runtime, agentStore } = await getLatch();
     const agentName = normalizeAgentName(data.agent);
+    // DB-stored agent first; otherwise a CODE-DECLARED one. The richest prompts
+    // in a mature deployment live in code — the agents someone sat down and
+    // wrote rules for — and an audit that could only see the ones built in the
+    // UI would miss exactly the agents worth auditing.
     const rec = await agentStore.getRecord(principal, agentName);
-    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
-    if (!rec.instructions?.trim()) {
-      return { ok: false as const, error: "This agent has no instructions to derive promises from." };
+    let instructions = rec?.instructions?.trim() ?? "";
+    if (!instructions) {
+      const factory = (codeAgents as Record<string, unknown>)[agentName];
+      if (typeof factory === "function") {
+        try {
+          const cfg = (await (factory as (ctx: unknown) => unknown)({
+            principal,
+            context: undefined,
+            turnContext: undefined,
+          })) as { instructions?: unknown } | undefined;
+          // `instructions` may be a string or the SDK's message form; only the
+          // plain-string case can be read as a list of promises.
+          if (typeof cfg?.instructions === "string") instructions = cfg.instructions.trim();
+        } catch {
+          // A factory that needs a real request context cannot be audited from
+          // here; that is a missing capability, not an error worth throwing.
+        }
+      }
+    }
+    if (!instructions) {
+      return {
+        ok: false as const,
+        error: `No instructions found for "${agentName}" — nothing to derive promises from.`,
+      };
     }
 
     const limit = Math.min(Math.max(data.limit ?? 25, 1), 100);
@@ -2660,7 +2686,7 @@ export const auditAgentFn = createServerFn({ method: "POST" })
         `Agent: ${agentName}. AUDIT THE PROMISES: give me questions to ask of conversations this ` +
         `agent has already had. Read its instructions below and name the promises a reader could ` +
         `check afterwards from one conversation alone. Return the JSON object per your output ` +
-        `contract.\n\nTHE AGENT'S OWN INSTRUCTIONS:\n${rec.instructions.slice(0, 6000)}`,
+        `contract.\n\nTHE AGENT'S OWN INSTRUCTIONS:\n${instructions.slice(0, 8000)}`,
     });
     const questions = parseFencedJson<Record<string, Question> | { error: string }>(answer);
     if (!questions || Array.isArray(questions) || "error" in questions) {
