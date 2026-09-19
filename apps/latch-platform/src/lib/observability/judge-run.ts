@@ -12,7 +12,7 @@ import type { CredentialScope } from "../credentials";
 import { ownerTagOf } from "../latch";
 import type { getLatch } from "../latch";
 import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "../evals/judge";
-import { scoreRubrics } from "../evals/evaluate-rubrics";
+import { isGradedScale, scoreRubrics } from "../evals/evaluate-rubrics";
 import { judgeModel } from "../evals/judge-model";
 import {
   allAssistantText,
@@ -36,7 +36,10 @@ type Latch = Awaited<ReturnType<typeof getLatch>>;
 /** One rubric's verdict, normalized to a numeric value + the judge's reason. */
 export interface RubricVerdictResult {
   rubric: AttachedEval;
+  /** Pass/fail projection for every scale — see `RunScore.value`. */
   value: number;
+  /** Choice rubrics: the option selected. */
+  choice?: string;
   comment?: string;
 }
 
@@ -105,7 +108,7 @@ export async function evaluateRubrics(opts: {
             console.warn(`judge "${ev.name}" (run ${opts.runId}): ${o.error}`);
             continue;
           }
-          await opts.sink({ rubric: ev, value: o.value, comment: o.comment });
+          await opts.sink({ rubric: ev, value: o.value, choice: o.choice, comment: o.comment });
         }
       } catch (e) {
         console.warn(`judge group "${modelId}" (run ${opts.runId}) failed:`, e);
@@ -191,6 +194,7 @@ async function putLocal(
     runId,
     rubricName: v.rubric.name,
     value: v.value,
+    choice: v.choice,
     comment: v.comment,
     scale: v.rubric.scale,
     source,
@@ -309,9 +313,15 @@ export async function judgeLiveRun({
       await postScore({
         runId: meta.runId,
         name: v.rubric.name,
-        value: v.value,
+        // A choice posts its LABEL; every other scale posts its number.
+        value: v.rubric.scale === "choice" ? (v.choice ?? "") : v.value,
         comment: v.comment,
-        dataType: v.rubric.scale === "binary" ? "BOOLEAN" : "NUMERIC",
+        dataType:
+          v.rubric.scale === "choice"
+            ? "CATEGORICAL"
+            : isGradedScale(v.rubric.scale)
+              ? "NUMERIC"
+              : "BOOLEAN",
         timestamp: meta.startedAt,
       }).catch((e) =>
         console.warn(`postScore "${v.rubric.name}" (run ${meta.runId}) failed:`, e),

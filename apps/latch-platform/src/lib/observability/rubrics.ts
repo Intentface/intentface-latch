@@ -49,6 +49,40 @@ export function validateRubrics(
   if (tooLong.length) {
     return { ok: false, error: `Rubric prompt over 1000 chars: ${tooLong.map((e) => e.name).join(", ")}.` };
   }
+  // A choice rubric without options cannot be asked at all, and options on a
+  // boolean are silently ignored — both are save-time errors rather than
+  // surprises at judge time.
+  for (const e of evals) {
+    const isChoice = e.scale === "choice";
+    const options = Object.keys(e.options ?? {});
+    if (isChoice && options.length < 2) {
+      return { ok: false, error: `Choice rubric "${e.name}" needs at least 2 options.` };
+    }
+    if (!isChoice && options.length) {
+      return { ok: false, error: `Only a choice rubric takes options: "${e.name}".` };
+    }
+    const bad = e.bad ?? [];
+    if (!isChoice && bad.length) {
+      return { ok: false, error: `Only a choice rubric takes "bad": "${e.name}".` };
+    }
+    const unknown = bad.filter((b) => !options.includes(b));
+    if (unknown.length) {
+      return {
+        ok: false,
+        error: `"${e.name}" marks unknown option(s) as bad: ${unknown.join(", ")}.`,
+      };
+    }
+    // Every option bad means the rubric can never pass; none means it can
+    // never fail. Either way it measures nothing and will read as a broken
+    // agent or a useless score.
+    if (isChoice && (bad.length === 0 || bad.length === options.length)) {
+      return {
+        ok: false,
+        error: `Choice rubric "${e.name}" must mark some — not all — options as bad.`,
+      };
+    }
+  }
+
   // Trigger/context arrive as untrusted JSON (drawer's advanced field, tool
   // calls, eval-author output) — validate the AST shape and scope enum here so
   // a malformed condition is a save-time error, never a silent judge-time skip.
@@ -82,6 +116,8 @@ export function validateRubrics(
       prompt: e.prompt.trim(),
       judgeModelId: e.judgeModelId,
       scale: e.scale,
+      ...(e.options ? { options: e.options } : {}),
+      ...(e.bad ? { bad: e.bad } : {}),
       enabled: e.enabled,
       ...(e.trigger !== undefined ? { trigger: e.trigger } : {}),
       ...(e.context !== undefined ? { context: e.context } : {}),

@@ -26,6 +26,20 @@ export function useEvalsDrawerToggle(agent: string) {
   return [on, set] as const;
 }
 
+/**
+ * `name: meaning` per line → the options map. Lines without a colon are
+ * dropped rather than becoming an option named after the whole line, which
+ * would then be un-selectable as "bad" and fail the save with no hint why.
+ */
+function parseOptions(text: string): Record<string, string> | undefined {
+  const entries = text
+    .split("\n")
+    .map((line) => line.split(/:(.*)/s))
+    .filter((parts) => parts.length > 1 && parts[0]!.trim())
+    .map(([name, meaning]) => [name!.trim(), (meaning ?? "").trim()] as const);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 const blankRubric = (): AttachedEval => ({
   name: "",
   prompt: "",
@@ -277,13 +291,18 @@ export function EvalsDrawer({
                 // the same thing and has no <option> of its own — show it as
                 // its synonym rather than letting the select fall blank.
                 value={r.scale === "binary" ? "boolean" : r.scale}
-                onChange={(e) =>
-                  update(i, { scale: e.target.value as "boolean" | "score" })
-                }
+                onChange={(e) => {
+                  const scale = e.target.value as "boolean" | "score" | "choice";
+                  // Options only mean anything on a choice, and the validator
+                  // rejects them elsewhere — so clear them on the way out
+                  // rather than letting an invisible leftover block the save.
+                  update(i, scale === "choice" ? { scale } : { scale, options: undefined, bad: undefined });
+                }}
                 className="border-secondary-border rounded border bg-transparent px-1 py-1 text-xs"
               >
                 <option value="boolean">boolean</option>
                 <option value="score">score</option>
+                <option value="choice">choice</option>
               </select>
               <button
                 type="button"
@@ -301,6 +320,41 @@ export function EvalsDrawer({
               rows={3}
               className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
             />
+            {r.scale === "choice" && (
+              <div className="border-secondary-border mt-2 space-y-1 rounded border border-dashed p-2">
+                <div className="text-ink-tertiary text-xs">
+                  Options — one per line as <code>name: what it means</code>. Tick the ones that
+                  count as a failure.
+                </div>
+                <textarea
+                  value={Object.entries(r.options ?? {})
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join("\n")}
+                  onChange={(e) => update(i, { options: parseOptions(e.target.value) })}
+                  placeholder={"asked: Asked which region first\nguessed: Answered without saying which"}
+                  rows={3}
+                  className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
+                />
+                <div className="flex flex-wrap gap-2">
+                  {Object.keys(r.options ?? {}).map((name) => (
+                    <label key={name} className="text-ink-tertiary flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={(r.bad ?? []).includes(name)}
+                        onChange={(e) =>
+                          update(i, {
+                            bad: e.target.checked
+                              ? [...(r.bad ?? []), name]
+                              : (r.bad ?? []).filter((b) => b !== name),
+                          })
+                        }
+                      />
+                      fails on <code>{name}</code>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="text-ink-tertiary mt-2 flex flex-wrap items-center gap-2 text-xs">
               <span>When</span>
               <select

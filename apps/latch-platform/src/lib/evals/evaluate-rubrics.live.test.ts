@@ -85,3 +85,43 @@ describe.skipIf(!live)("rubric judging against a real evaluation model (LIVE)", 
     console.log(`[live] depth: thorough=${thorough[0]!.value.toFixed(2)} thin=${thin[0]!.value.toFixed(2)}`);
   }, 60_000);
 });
+
+describe.skipIf(!live)("a choice rubric, live", () => {
+  const model = judgeModel(JUDGE_MODEL_ID);
+  const AMBIGUITY = [
+    {
+      name: "handles-ambiguity",
+      prompt:
+        "The user did not say which region or account tier they meant. What did the agent do?",
+      scale: "choice",
+      options: {
+        asked: "Asked the user which region or tier before giving a limit",
+        said_so: "Gave a limit and explicitly stated which region or tier it assumed",
+        guessed: "Gave a specific limit without establishing which region or tier applies",
+      },
+      bad: ["guessed"],
+    },
+  ];
+  const ask = (answer: string, tools = "(none)") =>
+    scoreRubrics({ model, rubrics: AMBIGUITY, evidence: { input: "What's our peering limit?", answer, tools } });
+
+  it("tells apart the three things a boolean would have recorded identically", async () => {
+    const [asked] = await ask("Which region are you asking about? The limits differ per region.");
+    const [saidSo] = await ask("In us-east-1 the limit is 125 peering connections per VPC.");
+    const [guessed] = await ask("It's 125.");
+
+    expect(asked!.choice).toBe("asked");
+    expect(saidSo!.choice).toBe("said_so");
+    expect(guessed!.choice).toBe("guessed");
+
+    // Two pass, one fails — and the two passes are distinguishable, which is
+    // the entire reason the type exists.
+    expect([asked!.value, saidSo!.value, guessed!.value]).toEqual([1, 1, 0]);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[live] choice: asked=${asked!.choice}(${asked!.probability.toFixed(2)}) ` +
+        `said_so=${saidSo!.choice}(${saidSo!.probability.toFixed(2)}) ` +
+        `guessed=${guessed!.choice}(${guessed!.probability.toFixed(2)})`,
+    );
+  }, 90_000);
+});

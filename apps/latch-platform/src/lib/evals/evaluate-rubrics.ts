@@ -34,7 +34,7 @@ import { z } from "zod";
  */
 
 /** Which kind of judgment a rubric asks for. */
-export type RubricScale = "boolean" | "score";
+export type RubricScale = "boolean" | "score" | "choice";
 
 /**
  * Stored rubrics predate the rename and say `"binary"`. Both spellings mean
@@ -42,7 +42,9 @@ export type RubricScale = "boolean" | "score";
  * and a rubric written by an older client keeps working.
  */
 export function normalizeScale(scale: string | undefined): RubricScale {
-  return scale === "score" ? "score" : "boolean";
+  if (scale === "score") return "score";
+  if (scale === "choice") return "choice";
+  return "boolean";
 }
 
 /**
@@ -64,12 +66,21 @@ export interface RubricSpec {
   /** The plain-English criterion. */
   prompt: string;
   scale?: string;
+  /** Choice rubrics: option name → what it means. */
+  options?: Record<string, string>;
+  /** Choice rubrics: which options count as a failure. */
+  bad?: string[];
 }
 
 export interface RubricOutcome {
   name: string;
-  /** 1/0 for a boolean, 0–1 for a score. What gets stored. */
+  /**
+   * 1/0 for a boolean, 0–1 for a score, and for a choice the pass/fail
+   * projection — so an aggregate over any scale is still a pass rate.
+   */
   value: number;
+  /** The option a choice rubric selected. Absent for the other scales. */
+  choice?: string;
   /**
    * The judge's raw calibrated number: P(true) for a boolean, the position
    * within the scale for a score. Kept because `value` throws away the
@@ -131,9 +142,12 @@ const INSTRUCTION_FRAME =
 
 function toQuestion(r: RubricSpec): Experimental_EvaluationQuestion {
   const instructions = `${INSTRUCTION_FRAME}\n\nCRITERION: ${r.prompt}`;
-  return normalizeScale(r.scale) === "score"
-    ? { type: "score", instructions, criteria: SCORE_LEVELS }
-    : { type: "boolean", instructions };
+  const scale = normalizeScale(r.scale);
+  if (scale === "score") return { type: "score", instructions, criteria: SCORE_LEVELS };
+  if (scale === "choice") {
+    return { type: "choice", instructions, criteria: r.options ?? {} };
+  }
+  return { type: "boolean", instructions };
 }
 
 const EXPLANATIONS = z.object({
@@ -242,9 +256,22 @@ export async function scoreRubrics({
     const a = answers[r.name] as
       | { type: "boolean"; probability: number }
       | { type: "score"; score: number }
+      | { type: "choice"; choice: string; probabilities?: Record<string, number> }
       | undefined;
     if (!a) {
       return { name: r.name, value: 0, probability: 0, error: "judge returned no answer" };
+    }
+    if (a.type === "choice") {
+      const bad = r.bad ?? [];
+      return {
+        name: r.name,
+        // The stored number is the pass/fail projection; the label is the
+        // detail. Aggregates keep meaning a pass rate across every scale.
+        value: bad.includes(a.choice) ? 0 : 1,
+        choice: a.choice,
+        // Confidence in the option actually selected, not in "true".
+        probability: a.probabilities?.[a.choice] ?? 1,
+      };
     }
     if (a.type === "score") {
       // The contract reports a position among the levels; store it as 0–1 so

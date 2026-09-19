@@ -19,14 +19,26 @@ import type { Client } from "@libsql/client";
 export interface RunScore {
   runId: string;
   rubricName: string;
-  /** 1/0 for binary, 0–1 for graded. The human value when source="human". */
+  /**
+   * 1/0 for boolean, 0–1 for graded, and for a CHOICE the pass/fail projection
+   * (1 unless the selected option is one the rubric calls bad).
+   *
+   * Projecting rather than storing the label here is what keeps every existing
+   * aggregate correct: a choice rubric's average is still its pass rate, and
+   * `/observability` needs no special case to chart it. The label itself lives
+   * in `choice`, where it is detail rather than arithmetic.
+   */
   value: number;
+  /** The option a choice rubric selected. Absent for boolean and score. */
+  choice?: string;
   comment?: string;
   /** As written. "binary" and "boolean" are synonyms — read with `isGradedScale`. */
-  scale: "binary" | "boolean" | "score";
+  scale: "binary" | "boolean" | "score" | "choice";
   source: "live" | "rejudge" | "human";
   /** When a human corrected it: the judge's original value/reason, preserved. */
   aiValue?: number;
+  /** A corrected choice rubric's original selected option. */
+  aiChoice?: string;
   aiComment?: string;
   /**
    * The `ownerTagOf` of the principal that ran the judged turn. Absent on rows
@@ -79,6 +91,10 @@ export async function migrateRunScores(client: Client): Promise<void> {
     ["ai_value", "ai_value REAL"],
     ["ai_comment", "ai_comment TEXT"],
     ["run_owner", "run_owner TEXT"],
+    // A choice verdict's selected option. Nullable: `value` stays the
+    // NOT NULL pass/fail projection for every scale.
+    ["choice", "choice TEXT"],
+    ["ai_choice", "ai_choice TEXT"],
   ] as const) {
     if (existing.has(name)) continue;
     try {
@@ -120,10 +136,17 @@ const rowToScore = (r: Record<string, unknown>): RunScore => ({
   runId: String(r.run_id),
   rubricName: String(r.rubric_name),
   value: Number(r.value),
+  choice: (r.choice as string) ?? undefined,
   comment: (r.comment as string) ?? undefined,
-  scale: String(r.scale) === "score" ? "score" : "binary",
+  scale:
+    String(r.scale) === "score"
+      ? "score"
+      : String(r.scale) === "choice"
+        ? "choice"
+        : "binary",
   source: asSource(r.source),
   aiValue: r.ai_value == null ? undefined : Number(r.ai_value),
+  aiChoice: (r.ai_choice as string) ?? undefined,
   aiComment: (r.ai_comment as string) ?? undefined,
   runOwner: (r.run_owner as string) ?? undefined,
   owner: String(r.owner),
@@ -143,12 +166,13 @@ export function createRunScoresStore(client: Client): RunScoresStore {
     async put(owner, score) {
       await client.execute({
         sql: `INSERT INTO latch_run_scores
-          (owner, run_id, rubric_name, value, comment, scale, source, ai_value, ai_comment, run_owner, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (owner, run_id, rubric_name, value, choice, comment, scale, source, ai_value, ai_choice, ai_comment, run_owner, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(owner, run_id, rubric_name) DO UPDATE SET
-            value=excluded.value, comment=excluded.comment, scale=excluded.scale,
+            value=excluded.value, choice=excluded.choice,
+            comment=excluded.comment, scale=excluded.scale,
             source=excluded.source, ai_value=excluded.ai_value,
-            ai_comment=excluded.ai_comment,
+            ai_choice=excluded.ai_choice, ai_comment=excluded.ai_comment,
             -- A human correction carries no runner (it isn't a run); keep the
             -- attribution the live judge recorded instead of nulling it out.
             run_owner=COALESCE(excluded.run_owner, run_owner),
@@ -158,10 +182,12 @@ export function createRunScoresStore(client: Client): RunScoresStore {
           score.runId,
           score.rubricName,
           score.value,
+          score.choice ?? null,
           score.comment ?? null,
           score.scale,
           score.source,
           score.aiValue ?? null,
+          score.aiChoice ?? null,
           score.aiComment ?? null,
           score.runOwner ?? null,
           score.updatedAt,

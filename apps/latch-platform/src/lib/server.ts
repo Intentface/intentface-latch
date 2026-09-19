@@ -1365,7 +1365,8 @@ export const listObservabilityFn = createServerFn({ method: "GET" })
             name: c.rubricName,
             value: c.value,
             comment: c.comment,
-            dataType: isGradedScale(c.scale) ? "NUMERIC" : "BOOLEAN",
+            dataType:
+              c.scale === "choice" ? "CATEGORICAL" : isGradedScale(c.scale) ? "NUMERIC" : "BOOLEAN",
           });
         }
         row.scores = Array.from(byName.values());
@@ -1461,7 +1462,9 @@ export interface AttachedEvalScore {
   name: string;
   value: number;
   comment?: string;
-  scale: "binary" | "boolean" | "score";
+  scale: "binary" | "boolean" | "score" | "choice";
+  /** Choice rubrics: the option selected. */
+  choice?: string;
   source: "live" | "rejudge" | "human";
   /** Present when source="human": the judge's original value/reason. */
   aiValue?: number;
@@ -1563,7 +1566,12 @@ export const correctScoreFn = createServerFn({ method: "POST" })
           name: data.rubricName,
           value,
           comment: data.comment.trim(),
-          dataType: isGradedScale(existing.scale) ? "NUMERIC" : "BOOLEAN",
+          dataType:
+            existing.scale === "choice"
+              ? "CATEGORICAL"
+              : isGradedScale(existing.scale)
+                ? "NUMERIC"
+                : "BOOLEAN",
           // Same timestamp as the original live verdict (the run's start) so this
           // correction overwrites it in Langfuse instead of adding a second score.
           timestamp: run.startedAt,

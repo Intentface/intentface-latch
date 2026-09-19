@@ -236,3 +236,75 @@ describe("infrastructure failures", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe("choice rubrics", () => {
+  const AMBIGUITY = {
+    name: "handles-ambiguity",
+    prompt: "The request did not say which region. What did the agent do?",
+    scale: "choice",
+    options: {
+      asked: "Asked which region before answering",
+      said_so: "Answered but stated which region it assumed",
+      guessed: "Answered without saying which region it assumed",
+    },
+    bad: ["guessed"],
+  };
+
+  it("asks the options as a choice question", async () => {
+    const calls: { questions: Record<string, { type: string; criteria?: unknown }> }[] = [];
+    const model = fakeJudge(
+      { "handles-ambiguity": { type: "choice", choice: "asked", probabilities: { asked: 0.8, said_so: 0.15, guessed: 0.05 } } },
+      (o) => calls.push(o as never),
+    );
+    await scoreRubrics({ model, rubrics: [AMBIGUITY], evidence });
+    expect(calls[0]!.questions["handles-ambiguity"]!.type).toBe("choice");
+    expect(calls[0]!.questions["handles-ambiguity"]!.criteria).toEqual(AMBIGUITY.options);
+  });
+
+  it("keeps the label AND projects it to pass/fail", async () => {
+    // The projection is what lets an aggregate over a choice rubric still mean
+    // a pass rate; the label is the part a boolean would have destroyed.
+    const good = fakeJudge({
+      "handles-ambiguity": { type: "choice", choice: "said_so", probabilities: { asked: 0.2, said_so: 0.7, guessed: 0.1 } },
+    });
+    const [ok] = await scoreRubrics({ model: good, rubrics: [AMBIGUITY], evidence });
+    expect(ok).toMatchObject({ value: 1, choice: "said_so", probability: 0.7 });
+
+    const bad = fakeJudge({
+      "handles-ambiguity": { type: "choice", choice: "guessed", probabilities: { asked: 0.05, said_so: 0.05, guessed: 0.9 } },
+    });
+    const [nope] = await scoreRubrics({ model: bad, rubrics: [AMBIGUITY], evidence });
+    expect(nope).toMatchObject({ value: 0, choice: "guessed", probability: 0.9 });
+  });
+
+  it("distinguishes two failures a boolean would have merged", async () => {
+    // The whole reason the type exists: "didn't handle ambiguity" is not one
+    // bug. Guessing silently and refusing outright need different fixes.
+    const withRefused = { ...AMBIGUITY, options: { ...AMBIGUITY.options, refused: "Declined" }, bad: ["guessed", "refused"] };
+    const dist = (pick: string) =>
+      Object.fromEntries(["asked", "said_so", "guessed", "refused"].map((k) => [k, k === pick ? 0.7 : 0.1]));
+    const guessed = fakeJudge({ "handles-ambiguity": { type: "choice", choice: "guessed", probabilities: dist("guessed") } });
+    const refused = fakeJudge({ "handles-ambiguity": { type: "choice", choice: "refused", probabilities: dist("refused") } });
+
+    const [a] = await scoreRubrics({ model: guessed, rubrics: [withRefused], evidence });
+    const [b] = await scoreRubrics({ model: refused, rubrics: [withRefused], evidence });
+    expect(a!.value).toBe(0);
+    expect(b!.value).toBe(0);
+    expect(a!.choice).not.toBe(b!.choice); // same score, different diagnosis
+  });
+
+  it("mixes scales in one call", async () => {
+    const model = fakeJudge({
+      "uses-hn-tool": { type: "boolean", probability: 0.9 },
+      depth: { type: "score", score: 3 },
+      "handles-ambiguity": { type: "choice", choice: "asked", probabilities: { asked: 0.8, said_so: 0.15, guessed: 0.05 } },
+    });
+    const out = await scoreRubrics({
+      model,
+      rubrics: [RUBRICS[0]!, { name: "depth", prompt: "d", scale: "score" }, AMBIGUITY],
+      evidence,
+    });
+    expect(out.map((o) => o.value)).toEqual([1, 1, 1]);
+    expect(out[2]!.choice).toBe("asked");
+  });
+});

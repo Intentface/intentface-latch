@@ -7,7 +7,12 @@ export interface PostScoreInput {
   runId: string;
   /** Score name — e.g. a rubric name, or "user-feedback". */
   name: string;
-  value: number;
+  /**
+   * The score. A string is only meaningful alongside `dataType: "CATEGORICAL"`,
+   * where the value IS the selected label — a numeric projection of it would
+   * throw away the thing the score exists to record.
+   */
+  value: number | string;
   /** Free-text rationale (judge reason / user comment). */
   comment?: string;
   dataType?: "NUMERIC" | "BOOLEAN" | "CATEGORICAL";

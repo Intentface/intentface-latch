@@ -112,3 +112,48 @@ describe("validateRubrics — the bundled-quality draft", () => {
     expect(validateRubrics([rubric({ name: "a", prompt: "x".repeat(1000) })], anyModel).ok).toBe(true);
   });
 });
+
+describe("validateRubrics — choice rubrics", () => {
+  const choice = (over: Partial<AttachedEval> = {}): AttachedEval =>
+    rubric({
+      name: "handles-ambiguity",
+      scale: "choice",
+      options: { asked: "Asked first", guessed: "Answered anyway" },
+      bad: ["guessed"],
+      ...over,
+    });
+
+  it("accepts a well-formed choice", () => {
+    const res = validateRubrics([choice()], anyModel);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.rubrics[0]!.options).toEqual({ asked: "Asked first", guessed: "Answered anyway" });
+      expect(res.rubrics[0]!.bad).toEqual(["guessed"]);
+    }
+  });
+
+  it("rejects a choice with nothing to choose between", () => {
+    expect(validateRubrics([choice({ options: { only: "one" }, bad: ["only"] })], anyModel).ok).toBe(false);
+  });
+
+  it("rejects options on a scale that cannot use them", () => {
+    // They would be silently ignored at judge time, which is worse than a
+    // save-time error: the rubric looks configured and is not.
+    const res = validateRubrics([choice({ scale: "binary" })], anyModel);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toMatch(/Only a choice rubric takes options/);
+  });
+
+  it("rejects a bad option that is not one of the options", () => {
+    const res = validateRubrics([choice({ bad: ["typo"] })], anyModel);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toMatch(/unknown option/);
+  });
+
+  it("rejects a choice that can never fail, or never pass", () => {
+    // All-bad is a rubric that reads as a permanently broken agent; none-bad
+    // is a score that never moves. Both look configured and measure nothing.
+    expect(validateRubrics([choice({ bad: [] })], anyModel).ok).toBe(false);
+    expect(validateRubrics([choice({ bad: ["asked", "guessed"] })], anyModel).ok).toBe(false);
+  });
+});

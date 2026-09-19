@@ -92,9 +92,18 @@ export const AttachedEvalSchema = z.object({
    * what absence means is a breaking change wearing a rename's clothes.
    */
   scale: z
-    .enum(["binary", "boolean", "score"])
+    .enum(["binary", "boolean", "score", "choice"])
     .default("binary")
-    .describe("boolean → pass/fail (alias: binary); score → graded 0–1."),
+    .describe("boolean → pass/fail (alias: binary); score → graded 0–1; choice → pick one option."),
+  /**
+   * Choice rubrics only: the options the judge picks between, as
+   * `name → what it means`. A choice exists to stop one "fail" from hiding
+   * several different behaviours — "asked", "guessed silently" and "refused"
+   * need different fixes and a boolean folds them together.
+   */
+  options: z.record(z.string(), z.string()).optional().describe("choice only: option name → meaning."),
+  /** Choice rubrics only: which options count as a failure. */
+  bad: z.array(z.string()).optional().describe("choice only: the options that fail."),
   enabled: z.boolean().default(true),
   trigger: z.unknown().optional().describe("When the judge runs — host-defined predicate; absent → every completed turn."),
   context: z.enum(["turn", "chat", "loop"]).optional().describe("What the judge sees: turn (default), chat, or loop."),
