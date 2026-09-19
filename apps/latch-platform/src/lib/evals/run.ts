@@ -3,7 +3,7 @@ import type { Runtime } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import { gradeCase } from "./grade";
 import { judgeRubric } from "./judge";
-import type { EvalAttemptResult, EvalCase, EvalCaseResult, EvalToolCall } from "./store";
+import type { EvalAttemptResult, EvalCase, EvalCaseResult, EvalToolCall, JsonValue } from "./store";
 
 /** Attempts a case runs: its opt-in `repeats` (bounded), default 1. */
 export const repeatsOf = (c: EvalCase): number => Math.max(1, Math.min(c.repeats ?? 1, 5));
@@ -163,7 +163,8 @@ export function extractToolCalls(history: unknown[]): EvalToolCall[] {
               ? type.slice(5)
               : "unknown";
         const blocked = (p.output as { __blocked?: boolean } | undefined)?.__blocked;
-        calls.push({ tool, args: p.input, blocked: blocked || undefined });
+        // Parsed from a stored JSON part, so JSON by construction.
+        calls.push({ tool, args: p.input as JsonValue, blocked: blocked || undefined });
       }
     }
   }

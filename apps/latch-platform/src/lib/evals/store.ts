@@ -10,6 +10,13 @@ import type { Client } from "@libsql/client";
  * comparisons stay honest even though `latch_agents` upserts in place.
  */
 
+/**
+ * These structures are stored as JSON columns and cross the server-function
+ * boundary, so they are typed as JSON rather than `unknown`: `unknown` cannot
+ * be proven serializable, and the honest type is the one the column can hold.
+ */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
 export interface EvalAssertions {
   /** Substrings the answer must include (case-insensitive). */
   contains?: string[];
@@ -27,7 +34,7 @@ export interface EvalToolExpectation {
    * value of `{"$regex": "..."}` is a matcher instead of a literal — it tests
    * the actual value against the pattern (for dynamic values like dates).
    */
-  args?: Record<string, unknown>;
+  args?: Record<string, JsonValue>;
   /** Max times the tool may be called (catches tool loops). */
   maxCalls?: number;
 }
@@ -87,7 +94,7 @@ export interface EvalSet {
 /** One tool invocation observed in a case's transcript. */
 export interface EvalToolCall {
   tool: string;
-  args?: unknown;
+  args?: JsonValue;
   /** True when safe mode stubbed this approval-gated tool. */
   blocked?: boolean;
 }
@@ -139,7 +146,7 @@ export interface EvalRun {
   agentName: string;
   setName: string;
   /** The agent's stored config at run time (null for code-declared agents). */
-  agentSnapshot: unknown | null;
+  agentSnapshot: JsonValue | null;
   results: EvalCaseResult[];
   passCount: number;
   failCount: number;
@@ -265,7 +272,7 @@ const rowToRun = (r: Record<string, unknown>): EvalRun => ({
   owner: String(r.owner),
   agentName: String(r.agent_name),
   setName: String(r.set_name),
-  agentSnapshot: safeParse<unknown | null>(r.agent_snapshot, null),
+  agentSnapshot: safeParse<JsonValue | null>(r.agent_snapshot, null),
   results: (() => {
     const v = safeParse<unknown>(r.results, []);
     return Array.isArray(v) ? (v as EvalCaseResult[]) : [];

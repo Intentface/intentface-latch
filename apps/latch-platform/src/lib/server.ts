@@ -28,10 +28,13 @@ import { getLatch, ownerTagOf } from "./latch";
 import { AgentRecordSchema, normalizeAgentRecord } from "@intentface/latch-agent-builder";
 import type { AgentRecord, AgentRecordInput } from "@intentface/latch-agent-builder";
 import type { AgentScope } from "./agent-store";
-import { normalizeAgentName, evalOwnerKeysOf, rubricsOf } from "./agent-store";
+import { normalizeAgentName, evalOwnerKeysOf, evalOwnerOfRecord, rubricsOf } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
 import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
+import { runEvalCases } from "./evals/run";
+import type { EvalCase, JsonValue } from "./evals/store";
+import { EXPLAIN_MODEL_ID } from "./evals/judge";
 import { isGradedScale } from "./evals/evaluate-rubrics";
 import { rejudgeRun } from "./observability/judge-run";
 import {
@@ -2315,4 +2318,165 @@ export const deleteChannelBotFn = createServerFn({ method: "POST" })
     }
     await m.channelStore.removeBot(data.kind, data.botId);
     return { ok: true as const };
+  });
+
+// ── Eval sets: per-input cases, run against a pinned configuration ──────────
+//
+// The other tier. A RUBRIC is one question asked of every input ("is every
+// claim grounded?"); a CASE is one input with expectations for THAT input
+// ("asked about VPC limits → must open docs/networking/vpc-limits.md").
+// Only the case tier can express "different questions should read different
+// documents", because only it knows what was asked.
+//
+// EXPERIMENTAL. These back the /evals page and are expected to change shape.
+
+/** Every set the caller can see, newest agent first. */
+export const listEvalSetsFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [] as { agentName: string; name: string; cases: number; updatedAt: number }[];
+  const { evalStore } = await getLatch();
+  const sets = (
+    await Promise.all(evalOwnerKeysOf(principal).map((owner) => evalStore.listSets(owner)))
+  ).flat();
+  return sets.map((s) => ({
+    agentName: s.agentName,
+    name: s.name,
+    cases: s.cases.length,
+    updatedAt: s.updatedAt,
+  }));
+});
+
+export const getEvalSetFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; name: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { evalStore } = await getLatch();
+    for (const owner of evalOwnerKeysOf(principal)) {
+      const set = await evalStore.getSet(owner, normalizeAgentName(data.agent), data.name);
+      if (set) return set;
+    }
+    return null;
+  });
+
+export const saveEvalSetFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; name: string; cases: EvalCase[] }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore, evalStore } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, agentName);
+    // Sets are owned by the AGENT's owner, like its rubrics — so a colleague
+    // who can administer the agent sees them, and someone who merely runs it
+    // does not.
+    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
+    const ids = data.cases.map((c) => c.id);
+    const dupe = ids.find((id, i) => ids.indexOf(id) !== i);
+    if (dupe) {
+      // Case ids are the pairing key for a version comparison; duplicates would
+      // silently merge two cases into one column.
+      return { ok: false as const, error: `Duplicate case id "${dupe}".` };
+    }
+    const blank = data.cases.find((c) => !c.id.trim() || !c.input.trim());
+    if (blank) return { ok: false as const, error: "Every case needs an id and an input." };
+
+    await evalStore.saveSet({
+      owner: evalOwnerOfRecord(principal, rec),
+      agentName,
+      name: data.name,
+      cases: data.cases,
+    });
+    return { ok: true as const };
+  });
+
+export const deleteEvalSetFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; name: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore, evalStore } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, agentName);
+    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
+    await evalStore.deleteSet(evalOwnerOfRecord(principal, rec), agentName, data.name);
+    return { ok: true as const };
+  });
+
+/**
+ * Run a set against ONE configuration of the agent.
+ *
+ * `version` pins which: a published version number, `"draft"`, or omitted for
+ * whatever is live. The pin is a reference (`name@7`), resolved read-only —
+ * running a version never makes it live, which is what allows two versions to
+ * be compared while neither is serving different traffic than the other.
+ */
+export const runEvalSetFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; name: string; version?: number | "draft" }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { runtime, agentStore, evalStore, modelFor } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, agentName);
+    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
+
+    const owner = evalOwnerOfRecord(principal, rec);
+    const set = await evalStore.getSet(owner, agentName, data.name);
+    if (!set?.cases.length) return { ok: false as const, error: `Eval set "${data.name}" is empty.` };
+
+    const ref = data.version === undefined ? agentName : `${agentName}@${data.version}`;
+    // Snapshot what ACTUALLY ran, not what is live: a run compared later is
+    // only interpretable next to the configuration that produced it.
+    const snapshot =
+      typeof data.version === "number"
+        ? ((await agentStore.getVersion(principal, agentName, rec.scope ?? "user", data.version)) ?? null)
+        : data.version === "draft"
+          ? ((await agentStore.getDraft(principal, agentName, rec.scope ?? "user"))?.record ?? null)
+          : rec;
+    if (!snapshot) return { ok: false as const, error: `No configuration "${ref}".` };
+
+    const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
+    const results = await runEvalCases({
+      runtime,
+      principal,
+      agent: ref,
+      cases: set.cases,
+      // The case tier's plain-language criteria still use a TEXT judge: it
+      // returns a reason per criterion, which the results card shows.
+      ...(needsJudge ? { judgeModel: modelFor(EXPLAIN_MODEL_ID) } : {}),
+    });
+
+    const run = await evalStore.saveRun({
+      owner,
+      agentName,
+      setName: data.name,
+      // An AgentRecord is JSON by construction — it round-trips through the
+      // agents table as a JSON column — but it is not provably so to the type
+      // checker, because `trigger` is deliberately opaque there.
+      agentSnapshot: snapshot as unknown as JsonValue,
+      results,
+      passCount: results.filter((r) => r.pass).length,
+      failCount: results.filter((r) => !r.pass).length,
+      judgeModelId: needsJudge ? EXPLAIN_MODEL_ID : null,
+    });
+    return { ok: true as const, run, ref };
+  });
+
+/** Recent runs of a set, newest first — one row per (version, run). */
+export const listEvalRunsFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; name?: string; limit?: number }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const { evalStore } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const runs = (
+      await Promise.all(
+        evalOwnerKeysOf(principal).map((owner) =>
+          evalStore.listRuns(owner, agentName, data.name, data.limit ?? 20),
+        ),
+      )
+    ).flat();
+    return runs.sort((a, b) => b.createdAt - a.createdAt);
   });
