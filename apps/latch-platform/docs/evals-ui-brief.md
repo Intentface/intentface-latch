@@ -6,6 +6,10 @@ could not see it render. This brief is for a designer to make it usable.
 **Read this whole file before touching anything.** The domain is unusual and the
 mistakes are not the obvious ones.
 
+`evals-concepts.md` is the reasoning behind all of this — why there are three
+kinds of check, why most belong to the set, what the numbers mean. Read it if a
+decision here seems arbitrary; it probably has a reason.
+
 There is a second brief — `evals-ui-brief-2-shared-checks.md` — covering one
 idea that changes the shape of the page (checks that belong to the whole set
 versus to one input). Read this one first, then that one; §4.3 below is

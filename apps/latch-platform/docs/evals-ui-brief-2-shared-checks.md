@@ -1,6 +1,10 @@
 # Evals UI — brief 2: shared vs per-case checks
 
-Read `evals-ui-brief.md` first. This one covers a single idea that changes the
+Read `evals-ui-brief.md` first.
+
+`evals-concepts.md` is the reasoning behind all of this — why there are three
+kinds of check, why most belong to the set, what the numbers mean. Read it if a
+decision here seems arbitrary; it probably has a reason. This one covers a single idea that changes the
 shape of the whole page, and it is the part most likely to be designed wrong.
 
 ---
