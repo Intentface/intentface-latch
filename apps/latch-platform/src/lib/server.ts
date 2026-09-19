@@ -2510,9 +2510,41 @@ export const draftEvalCasesFn = createServerFn({ method: "POST" })
     if (!brief && !data.threadId) {
       return { ok: false as const, error: "describe what to test, or name a conversation" };
     }
-    const { runtime } = await getLatch();
+    const { runtime, agentStore, allConnections } = await getLatch();
     const agentName = normalizeAgentName(data.agent);
     const count = Math.min(Math.max(data.count ?? 5, 1), 15);
+
+    // GROUND THE BRIEF DIRECTLY rather than instructing the author to go and
+    // look. It can still call get_agent and list_connection_tools for more,
+    // but the three things every case depends on — what the agent is told to
+    // do, what it can actually call, and what the human asked for — are in
+    // front of it from the first token. An instruction to fetch them is a
+    // suggestion; a prompt that contains them is a fact.
+    const rec = await agentStore.getRecord(principal, agentName);
+    const connections = rec?.connections ?? [];
+    let toolLines = "";
+    if (connections.length) {
+      const opened = await allConnections.hostFor(connections).open(principal);
+      try {
+        toolLines = Object.keys(opened.tools)
+          .filter((k) => !k.startsWith("connect_"))
+          .map((name) => {
+            const d = (opened.tools[name] as { description?: string } | undefined)?.description;
+            return `- ${name}${d ? `: ${d.slice(0, 160)}` : ""}`;
+          })
+          .join("\n");
+      } finally {
+        await opened.close();
+      }
+    }
+
+    const grounding =
+      (rec?.instructions
+        ? `\n\nTHE AGENT'S OWN INSTRUCTIONS (its system prompt — the behaviour a case is measuring against):\n${rec.instructions.slice(0, 6000)}`
+        : "") +
+      (toolLines
+        ? `\n\nTOOLS IT CAN ACTUALLY CALL (use these names EXACTLY; call list_connection_tools if you need a tool's argument schema):\n${toolLines}`
+        : "\n\nThis agent has no connection tools.");
 
     const prompt =
       `Agent: ${agentName}. Author up to ${count} EVAL CASES.` +
@@ -2522,8 +2554,11 @@ export const draftEvalCasesFn = createServerFn({ method: "POST" })
           `use what the user actually asked as the input, and make the expectations describe what ` +
           `SHOULD have happened.`
         : "") +
-      ` Ground every tool name and argument key in the agent's real tools before writing them. ` +
-      `Return the JSON array per your output contract.`;
+      ` Derive the cases from the agent's own instructions below: the behaviours it PROMISES are ` +
+      `the behaviours worth testing, and a promise it makes that nothing checks is the gap to ` +
+      `close first. Use the tool names exactly as given. Return the JSON array per your output ` +
+      `contract.` +
+      grounding;
 
     const { answer } = await runtime.runAgent({ principal, agent: "eval-author", prompt });
     const parsed = parseFencedJson<EvalCase[] | { error: string }>(answer);
