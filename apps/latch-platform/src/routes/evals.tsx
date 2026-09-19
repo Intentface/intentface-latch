@@ -167,6 +167,32 @@ function EvalsPage() {
     setAudit({ judged: res.judged, promises: res.promises });
   };
 
+  /**
+   * The harvest rung: a conversation that broke a promise becomes a case.
+   *
+   * This is the step that stops case-writing being an act of imagination. The
+   * input is one a real person sent, and what it SHOULD have done is already
+   * known — that is why the promise came back broken.
+   */
+  const caseFromChat = async (threadId: string, promise: string) => {
+    setBusy(true);
+    const res = await draftEvalCasesFn({
+      data: {
+        agent,
+        threadId,
+        count: 1,
+        brief: `This conversation broke the promise "${promise}". Build a case from it that would catch the same failure again.`,
+      },
+    });
+    setBusy(false);
+    if (!res.ok) return toast.error(res.error);
+    setCases((cs) => {
+      setOpenCase(cs.length);
+      return [...cs, ...res.cases];
+    });
+    toast.success("Drafted from that conversation — review and save");
+  };
+
   const generate = async () => {
     setBusy(true);
     const res = await draftEvalCasesFn({ data: { agent, brief } });
@@ -317,6 +343,20 @@ function EvalsPage() {
                 <span className="text-ink-tertiary min-w-0 flex-1 truncate" title={p.ask}>
                   {p.ask}
                 </span>
+                {/* One click from "this promise broke" to a case that guards
+                    it. Without this the next step is retyping an input you
+                    already have. */}
+                {p.examples.slice(0, 1).map((chatId) => (
+                  <button
+                    key={chatId}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void caseFromChat(chatId, p.id)}
+                    className="text-ink-tertiary hover:text-ink-primary shrink-0 underline"
+                  >
+                    make a case from it
+                  </button>
+                ))}
               </div>
             ))}
           </div>
@@ -409,10 +449,41 @@ function EvalsPage() {
               open it — and nothing more. */}
           <div className="border-secondary-border divide-secondary-border divide-y rounded border">
             {cases.length === 0 && (
-              <p className="text-ink-tertiary p-3 text-xs">
-                No cases yet. Describe what to test above and let the agent draft them, or add one
-                by hand.
-              </p>
+              /* The empty state is the most important screen here. "Add case"
+                 is the obvious action and the HARDEST one — a blank form asks
+                 you to invent an input, and you will only invent the cases you
+                 have already thought of. So the order is stated explicitly,
+                 cheapest and most real first. */
+              <div className="text-ink-tertiary space-y-2 p-3 text-xs">
+                <p className="text-ink-primary">
+                  You do not have to invent test data. Take it from something that already exists:
+                </p>
+                <ol className="ml-4 list-decimal space-y-1">
+                  <li>
+                    <span className="text-ink-primary">Audit first</span> — the button above asks
+                    the agent&apos;s own promises of conversations it already had. No cases, no
+                    runs, a number in under a minute.
+                  </li>
+                  <li>
+                    <span className="text-ink-primary">Turn a real conversation into a case</span>{" "}
+                    when one goes wrong. The input is real, and you already know what it should
+                    have done — that is why you noticed.
+                  </li>
+                  <li>
+                    <span className="text-ink-primary">Describe what to test</span> above, and let
+                    the agent draft cases grounded in the real tools.
+                  </li>
+                  <li>
+                    <span className="text-ink-primary">Write one by hand</span> — last, and only
+                    for a scenario you fear but have not seen.
+                  </li>
+                </ol>
+                <p>
+                  A case needs an input. It does <em>not</em> need an expected answer: most checks
+                  read the conversation against its own tool results, so there is nothing to look
+                  up. Start with one.
+                </p>
+              </div>
             )}
             {cases.map((c, i) => {
               const open = openCase === i;
