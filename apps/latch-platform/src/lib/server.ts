@@ -2578,3 +2578,33 @@ export const draftEvalCasesFn = createServerFn({ method: "POST" })
     if (cases.length === 0) return { ok: false as const, error: "no usable cases were drafted" };
     return { ok: true as const, cases };
   });
+
+/**
+ * Record a human verdict on one check of one stored eval run.
+ *
+ * The judge's answer is kept beside it, never replaced. The PAIR is the only
+ * thing that can say whether this question is one you may gate a release on —
+ * a table of corrected verdicts looks tidier and answers nothing.
+ */
+export const correctEvalCheckFn = createServerFn({ method: "POST" })
+  .validator((data: { agent: string; runId: string; caseId: string; checkId: string; failed: boolean }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { agentStore, evalStore } = await getLatch();
+    const agentName = normalizeAgentName(data.agent);
+    const rec = await agentStore.getRecord(principal, agentName);
+    // Only someone who administers the agent may rule on its evals — the same
+    // boundary its rubrics use.
+    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
+    const run = await evalStore.correctCheck(
+      evalOwnerOfRecord(principal, rec),
+      data.runId,
+      data.caseId,
+      data.checkId,
+      data.failed,
+      ownerTagOf(principal),
+    );
+    if (!run) return { ok: false as const, error: "no such run" };
+    return { ok: true as const, run };
+  });

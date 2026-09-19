@@ -14,7 +14,9 @@ import {
   saveEvalSetFn,
   connectionToolsFn,
   draftEvalCasesFn,
+  correctEvalCheckFn,
 } from "@/lib/server";
+import { effectiveFailed, reliabilityOf } from "@/lib/evals/reliability";
 import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
 import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
@@ -363,7 +365,7 @@ function EvalsPage() {
         </div>
       )}
 
-      {runs.length > 0 && <ResultsGrid runs={runs} />}
+      {runs.length > 0 && <ResultsGrid runs={runs} agent={agent} onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))} />}
       {runs.length > 1 && (
         <CompareStrip
           base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
@@ -390,7 +392,15 @@ function EvalsPage() {
  * One table serves three jobs: one column is a result view, two are a
  * comparison, six are drift over time.
  */
-function ResultsGrid({ runs }: { runs: EvalRun[] }) {
+function ResultsGrid({
+  runs,
+  agent,
+  onCorrected,
+}: {
+  runs: EvalRun[];
+  agent: string;
+  onCorrected: (run: EvalRun) => void;
+}) {
   // Oldest → newest, so a regression reads as a change moving rightwards.
   const columns = [...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-6);
   const [open, setOpen] = useState<{ run: string; caseId: string } | null>(null);
@@ -416,12 +426,22 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
   const cell = (run: EvalRun, row: Row) => {
     const res = resultFor(run, row.caseId);
     if (!res) return undefined;
-    if (!row.checkId) return { failed: !res.pass, label: res.pass ? "✓" : "✗", title: res.reasons.join("\n") };
+    if (!row.checkId)
+      return { failed: !res.pass, label: res.pass ? "✓" : "✗", overruled: false, title: res.reasons.join("\n") };
     const chk = res.checks?.find((c) => c.id === row.checkId);
     if (!chk) return undefined;
     // The ANSWER, not a tick: on a choice question which option was selected
-    // IS the diagnosis, and it is the same width as a tick anyway.
-    return { failed: chk.failed, label: chk.answer, title: `${(chk.confidence * 100).toFixed(0)}% confident` };
+    // IS the diagnosis, and it is the same width as a tick anyway. Where a
+    // human has ruled, THAT is the verdict — otherwise a correction would be
+    // cosmetic and the grid would keep showing an answer already overruled.
+    return {
+      failed: effectiveFailed(chk),
+      label: chk.answer,
+      overruled: chk.human !== undefined && chk.human.failed !== chk.failed,
+      title: chk.human
+        ? `human says ${chk.human.failed ? "fail" : "pass"} · judge said ${chk.failed ? "fail" : "pass"} (${(chk.confidence * 100).toFixed(0)}%)`
+        : `${(chk.confidence * 100).toFixed(0)}% confident`,
+    };
   };
 
   const changed = (row: Row) => {
@@ -476,7 +496,7 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
                         <button
                           type="button"
                           onClick={() => setOpen({ run: r.id, caseId: row.caseId })}
-                          className={c.failed ? "text-red-500" : "text-emerald-600"}
+                          className={`${c.failed ? "text-red-500" : "text-emerald-600"} ${c.overruled ? "underline decoration-dotted" : ""}`}
                           title={c.title || "passed"}
                         >
                           {c.label}
@@ -490,6 +510,8 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
           </tbody>
         </table>
       </div>
+
+      <Reliability runs={runs} />
 
       {detail && (
         <div className="border-secondary-border space-y-2 rounded border p-3 text-xs">
@@ -506,6 +528,52 @@ function ResultsGrid({ runs }: { runs: EvalRun[] }) {
               ))}
             </ul>
           )}
+          {/* Ruling on a verdict is the only way to learn whether this question
+              is one you may ever gate a release on, so it is one click from
+              the failure itself rather than a separate review screen. */}
+          {detail.checks?.length ? (
+            <div className="space-y-1">
+              {detail.checks.map((c) => (
+                <div key={c.id} className="flex items-center gap-2">
+                  <span className={effectiveFailed(c) ? "text-red-500" : "text-emerald-600"}>
+                    {effectiveFailed(c) ? "✗" : "✓"}
+                  </span>
+                  <span className="text-ink-primary">{c.id}</span>
+                  <span className="text-ink-tertiary">
+                    {c.answer} ({(c.confidence * 100).toFixed(0)}%)
+                  </span>
+                  {c.human && (
+                    <span className="text-amber-600">
+                      {c.human.failed === c.failed ? "confirmed" : "corrected"}
+                    </span>
+                  )}
+                  <span className="flex-1" />
+                  <span className="text-ink-tertiary">judge right?</span>
+                  {([false, true] as const).map((failed) => (
+                    <button
+                      key={String(failed)}
+                      type="button"
+                      onClick={async () => {
+                        const res = await correctEvalCheckFn({
+                          data: { agent, runId: open!.run, caseId: detail.caseId, checkId: c.id, failed },
+                        });
+                        if (!res.ok) return toast.error(res.error);
+                        onCorrected(res.run as EvalRun);
+                      }}
+                      className={`rounded border px-1 ${
+                        c.human?.failed === failed
+                          ? "border-amber-500 text-amber-600"
+                          : "border-secondary-border text-ink-tertiary hover:text-ink-primary"
+                      }`}
+                    >
+                      {failed ? "should fail" : "should pass"}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
           {detail.toolCalls.length > 0 && (
             <div className="text-ink-tertiary">
               tools: {detail.toolCalls.map((t) => t.tool).join(", ")}
@@ -902,6 +970,40 @@ function Turns({
       >
         + follow-up turn
       </button>
+    </div>
+  );
+}
+
+/**
+ * What the corrections have bought so far.
+ *
+ * Worst agreement first, because those are the questions to rewrite. A check
+ * that nobody has ruled on does not appear at all: silence is not evidence in
+ * either direction, and listing it at 100% would invent confidence.
+ */
+function Reliability({ runs }: { runs: EvalRun[] }) {
+  const rows = reliabilityOf(runs);
+  if (rows.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <h3 className="text-ink-tertiary text-xs">
+        Judge agreement — a check may only gate a release once it has earned it
+      </h3>
+      <div className="border-secondary-border divide-secondary-border divide-y rounded border text-xs">
+        {rows.map((r) => (
+          <div key={`${r.caseId}/${r.checkId}`} className="flex items-center gap-2 px-2 py-1">
+            <span className="text-ink-primary w-56 truncate">{r.checkId}</span>
+            <span className="text-ink-tertiary w-40 truncate">{r.caseId}</span>
+            <span className={r.gating ? "text-emerald-600" : "text-ink-tertiary"}>
+              {((r.agreement ?? 0) * 100).toFixed(0)}% over {r.labelled}
+            </span>
+            <span className="flex-1" />
+            <span className={r.gating ? "text-emerald-600" : "text-amber-600"}>
+              {r.gating ? "can gate" : "reports only"}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -57,6 +57,31 @@ export interface EvalExpectation {
   rubric?: string[];
 }
 
+/**
+ * One typed check's verdict, and the human's if someone disagreed.
+ *
+ * The judge's answer is never overwritten. A correction is a SECOND opinion
+ * recorded beside the first, because the pair is the only thing that can
+ * answer the question that matters: is this judge reliable on THIS question?
+ * Overwriting would leave a tidy table of verdicts and no way to know which of
+ * them to believe.
+ */
+export interface CheckVerdict {
+  id: string;
+  /** The judge's answer — "true"/"false", or the option it chose. */
+  answer: string;
+  confidence: number;
+  /** The judge's call. */
+  failed: boolean;
+  /** A human's call, when someone disagreed or confirmed. */
+  human?: {
+    failed: boolean;
+    at: number;
+    /** Who, for attribution — never used to filter. */
+    by?: string;
+  };
+}
+
 /** The judge's verdict on one rubric criterion. */
 export interface RubricVerdict {
   criterion: string;
@@ -142,7 +167,7 @@ export interface EvalAttemptResult {
   /** Judge verdicts, one per rubric criterion (only when the case has a rubric). */
   rubric?: RubricVerdict[];
   /** Verdicts for the case's typed `checks`, if it declared any. */
-  checks?: { id: string; answer: string; confidence: number; failed: boolean }[];
+  checks?: CheckVerdict[];
 }
 
 export interface EvalCaseResult extends EvalAttemptResult {
@@ -250,6 +275,21 @@ export interface EvalStore {
   saveRun: (run: Omit<EvalRun, "id" | "createdAt">) => Promise<EvalRun>;
   getRun: (owner: string, id: string) => Promise<EvalRun | null>;
   listRuns: (owner: string, agentName: string, setName?: string, limit?: number) => Promise<EvalRun[]>;
+  /**
+   * Record a human verdict on one check of one case in a stored run.
+   *
+   * Rewrites that run's results blob rather than keeping corrections in their
+   * own table: a correction has no meaning apart from the verdict it disputes,
+   * and splitting them would let one be deleted without the other.
+   */
+  correctCheck: (
+    owner: string,
+    runId: string,
+    caseId: string,
+    checkId: string,
+    failed: boolean,
+    by?: string,
+  ) => Promise<EvalRun | null>;
 }
 
 export async function migrateEvals(client: Client): Promise<void> {
@@ -399,6 +439,36 @@ export function createEvalStore(client: Client): EvalStore {
       });
       const r = res.rows[0] as Record<string, unknown> | undefined;
       return r ? rowToRun(r) : null;
+    },
+
+    async correctCheck(owner, runId, caseId, checkId, failed, by) {
+      const res = await client.execute({
+        sql: `SELECT * FROM latch_eval_runs WHERE owner = ? AND id = ?`,
+        args: [owner, runId],
+      });
+      const row = res.rows[0] as Record<string, unknown> | undefined;
+      if (!row) return null;
+      const run = rowToRun(row);
+
+      let touched = false;
+      const results = run.results.map((r) => {
+        if (r.caseId !== caseId) return r;
+        const checks = (r.checks ?? []).map((c) => {
+          if (c.id !== checkId) return c;
+          touched = true;
+          // The judge's own fields are left exactly as they were: the PAIR is
+          // the evidence, not the human answer on its own.
+          return { ...c, human: { failed, at: Date.now(), ...(by ? { by } : {}) } };
+        });
+        return { ...r, checks };
+      });
+      if (!touched) return run;
+
+      await client.execute({
+        sql: `UPDATE latch_eval_runs SET results = ? WHERE owner = ? AND id = ?`,
+        args: [JSON.stringify(results), owner, runId],
+      });
+      return { ...run, results };
     },
 
     async listRuns(owner, agentName, setName, limit) {
