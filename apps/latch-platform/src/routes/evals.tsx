@@ -16,6 +16,7 @@ import {
   draftEvalCasesFn,
 } from "@/lib/server";
 import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
+import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
 
@@ -311,7 +312,7 @@ function EvalsPage() {
               />
               <div className="grid gap-2 md:grid-cols-2">
                 <label className="text-ink-tertiary text-xs">
-                  Must call — one per line, <code>tool key=value</code>
+                  Exact — must call, <code>tool key=value</code> per line (free, no judge)
                   <textarea
                     value={renderExpectedTools(c.expected.toolCalls)}
                     onChange={(e) => updateExpected(i, { toolCalls: parseExpectedTools(e.target.value) })}
@@ -321,7 +322,7 @@ function EvalsPage() {
                   />
                 </label>
                 <label className="text-ink-tertiary text-xs">
-                  Must NOT call — comma separated
+                  Exact — must NOT call, comma separated
                   <input
                     value={(c.expected.forbiddenTools ?? []).join(", ")}
                     onChange={(e) =>
@@ -336,19 +337,18 @@ function EvalsPage() {
                   />
                 </label>
               </div>
-              <label className="text-ink-tertiary block text-xs">
-                Criteria in plain English — one per line, judged by a model
-                <textarea
-                  value={(c.expected.rubric ?? []).join("\n")}
-                  onChange={(e) => {
-                    const rubric = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean);
-                    updateExpected(i, { rubric: rubric.length ? rubric.slice(0, 5) : undefined });
-                  }}
-                  placeholder="Only when no tool check can express it — each line costs a judge call."
-                  rows={2}
-                  className="border-secondary-border text-ink-primary mt-1 w-full resize-none rounded border bg-transparent p-2"
-                />
-              </label>
+              {(c.expected.rubric?.length ?? 0) > 0 && (
+                <p className="text-ink-tertiary text-xs">
+                  Also carries {c.expected.rubric!.length} legacy plain-text criteri
+                  {c.expected.rubric!.length === 1 ? "on" : "a"}, still judged on every run. Rewrite
+                  them as checks below when convenient — they are boolean questions either way, and
+                  as checks they can be a choice or a score instead.
+                </p>
+              )}
+              <CheckBuilder
+                checks={c.checks ?? {}}
+                onChange={(checks) => update(i, { checks: Object.keys(checks).length ? checks : undefined })}
+              />
             </div>
           ))}
 
@@ -616,6 +616,228 @@ function CompareStrip({ base, head }: { base: EvalRun; head: EvalRun }) {
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A builder for the three evaluation primitives, rather than a box of prose.
+ *
+ * The previous editor offered "criteria in plain English, one per line", which
+ * is a boolean question wearing a disguise: every line became a yes/no
+ * judgment, and neither of the other two shapes could be expressed at all. A
+ * failure with several distinct forms had to be flattened into one, which is
+ * the exact loss the choice primitive exists to prevent.
+ *
+ * So the editor now mirrors the contract: pick the shape of the judgment, then
+ * fill in what that shape needs. What you build here is the same object the
+ * judge receives — no translation layer to get wrong, and the same questions
+ * work unchanged on live traffic.
+ */
+function CheckBuilder({
+  checks,
+  onChange,
+}: {
+  checks: Record<string, Question>;
+  onChange: (checks: Record<string, Question>) => void;
+}) {
+  const entries = Object.entries(checks);
+
+  const setKey = (oldId: string, newId: string) => {
+    if (!newId.trim() || (newId !== oldId && checks[newId])) return;
+    // Rebuild in order so renaming an id does not reorder the list under the
+    // cursor — ids are the pairing key for a comparison, so they get edited.
+    onChange(Object.fromEntries(entries.map(([k, v]) => [k === oldId ? newId : k, v])));
+  };
+  const setQuestion = (id: string, q: Question) => onChange({ ...checks, [id]: q });
+  const remove = (id: string) =>
+    onChange(Object.fromEntries(entries.filter(([k]) => k !== id)));
+
+  const add = (type: "boolean" | "choice" | "score") => {
+    let n = entries.length + 1;
+    while (checks[`check-${n}`]) n++;
+    const id = `check-${n}`;
+    const q: Question =
+      type === "choice"
+        ? { type: "choice", ask: "", options: { ok: "", not_ok: "" }, bad: ["not_ok"] }
+        : type === "score"
+          ? { type: "score", ask: "", levels: ["Clearly fails", "Partly", "Fully"], bad: 0 }
+          : { ask: "" };
+    onChange({ ...checks, [id]: q });
+  };
+
+  const field =
+    "border-secondary-border text-ink-primary rounded border bg-transparent px-2 py-1 text-xs";
+
+  return (
+    <div className="space-y-2">
+      <div className="text-ink-tertiary flex items-center gap-2 text-xs">
+        <span>Checks — judged questions, one per behaviour</span>
+        <span className="flex-1" />
+        {(["boolean", "choice", "score"] as const).map((t) => (
+          <button key={t} type="button" onClick={() => add(t)} className="hover:text-ink-primary underline">
+            + {t}
+          </button>
+        ))}
+      </div>
+
+      {entries.map(([id, q]) => {
+        const type = q.type ?? "boolean";
+        return (
+          <div key={id} className="border-secondary-border space-y-1 rounded border border-dashed p-2">
+            <div className="flex items-center gap-2">
+              <input
+                value={id}
+                onChange={(e) => setKey(id, e.target.value)}
+                className={`${field} w-44`}
+                placeholder="stable-check-id"
+              />
+              <span className="text-ink-tertiary text-xs">{type}</span>
+              {type === "boolean" && (
+                <label className="text-ink-tertiary flex items-center gap-1 text-xs">
+                  fails when
+                  <select
+                    value={(q as { bad?: string }).bad ?? "false"}
+                    onChange={(e) => setQuestion(id, { ...(q as object), ask: q.ask, bad: e.target.value as "true" | "false" } as Question)}
+                    className={field}
+                  >
+                    <option value="false">no</option>
+                    <option value="true">yes</option>
+                  </select>
+                </label>
+              )}
+              <span className="flex-1" />
+              <button type="button" aria-label="Remove check" onClick={() => remove(id)} className="text-ink-tertiary hover:text-ink-primary">
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
+
+            <textarea
+              value={q.ask}
+              onChange={(e) => setQuestion(id, { ...(q as object), ask: e.target.value } as Question)}
+              rows={2}
+              placeholder={
+                type === "choice"
+                  ? "Describe the situation and ask what the agent did — do not restate the options."
+                  : type === "score"
+                    ? "Ask how well it did the thing; the rungs below say what each level looks like."
+                    : "Ask so that YES is the good answer."
+              }
+              className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
+            />
+
+            {type === "choice" && (
+              <ChoiceFields
+                q={q as Extract<Question, { type: "choice" }>}
+                onChange={(next) => setQuestion(id, next)}
+              />
+            )}
+            {type === "score" && (
+              <ScoreFields
+                q={q as Extract<Question, { type: "score" }>}
+                onChange={(next) => setQuestion(id, next)}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** `name: meaning` per line; lines without a colon are dropped, not guessed. */
+function parseOptionLines(text: string): Record<string, string> {
+  const rows = text
+    .split("\n")
+    .map((l) => l.split(/:(.*)/s))
+    .filter((parts) => parts.length > 1 && parts[0]!.trim())
+    .map(([k, v]) => [k!.trim(), (v ?? "").trim()] as const);
+  return Object.fromEntries(rows);
+}
+
+function ChoiceFields({
+  q,
+  onChange,
+}: {
+  q: Extract<Question, { type: "choice" }>;
+  onChange: (q: Question) => void;
+}) {
+  const names = Object.keys(q.options);
+  return (
+    <div className="space-y-1">
+      <textarea
+        value={Object.entries(q.options).map(([k, v]) => `${k}: ${v}`).join("\n")}
+        onChange={(e) => {
+          const options = parseOptionLines(e.target.value);
+          // Drop any "bad" naming an option that no longer exists, or the save
+          // fails on a rule the editor could simply have kept true.
+          onChange({ ...q, options, bad: q.bad.filter((b) => options[b] !== undefined) });
+        }}
+        rows={3}
+        placeholder={"asked: Asked which region first\nguessed: Answered without saying which"}
+        className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
+      />
+      <div className="text-ink-tertiary flex flex-wrap items-center gap-2 text-xs">
+        <span>fails on</span>
+        {names.length === 0 && <span>— add at least two options</span>}
+        {names.map((name) => (
+          <label key={name} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={q.bad.includes(name)}
+              onChange={(e) =>
+                onChange({
+                  ...q,
+                  bad: e.target.checked ? [...q.bad, name] : q.bad.filter((b) => b !== name),
+                })
+              }
+            />
+            <code>{name}</code>
+          </label>
+        ))}
+      </div>
+      {names.length > 1 && (q.bad.length === 0 || q.bad.length === names.length) && (
+        // All-bad can never pass and none-bad can never fail; either way the
+        // check measures nothing, and it is cheaper to say so here.
+        <p className="text-amber-600">Mark some — but not all — options as failures.</p>
+      )}
+    </div>
+  );
+}
+
+function ScoreFields({
+  q,
+  onChange,
+}: {
+  q: Extract<Question, { type: "score" }>;
+  onChange: (q: Question) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <textarea
+        value={q.levels.join("\n")}
+        onChange={(e) => {
+          const levels = e.target.value.split("\n").map((l) => l.trim()).filter(Boolean);
+          onChange({ ...q, levels, bad: Math.min(q.bad ?? 0, Math.max(0, levels.length - 2)) });
+        }}
+        rows={3}
+        placeholder={"Clearly fails\nPartly satisfies\nFully satisfies"}
+        className="border-secondary-border text-ink-primary w-full resize-none rounded border bg-transparent p-2 text-xs"
+      />
+      <label className="text-ink-tertiary flex items-center gap-1 text-xs">
+        rungs worst → best; fails at or below
+        <select
+          value={String(q.bad ?? 0)}
+          onChange={(e) => onChange({ ...q, bad: Number(e.target.value) })}
+          className="border-secondary-border text-ink-primary rounded border bg-transparent px-2 py-1 text-xs"
+        >
+          {q.levels.slice(0, -1).map((l, i) => (
+            <option key={i} value={String(i)}>
+              {l || `level ${i}`}
+            </option>
+          ))}
+        </select>
+      </label>
     </div>
   );
 }
