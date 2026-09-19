@@ -4,6 +4,7 @@ import type { Principal } from "@/lib/session";
 import { gradeCase } from "./grade";
 import { judgeRubric } from "./judge";
 import { askOfTrace } from "./ask";
+import type { Question } from "./ask";
 import type { EvalAttemptResult, EvalCase, EvalCaseResult, EvalToolCall, JsonValue } from "./store";
 
 /** Attempts a case runs: its opt-in `repeats` (bounded), default 1. */
@@ -26,6 +27,7 @@ export async function runEvalCases({
   concurrency = 4,
   judgeModel,
   judge,
+  sharedChecks,
   onResult,
   onAttempt,
   promptCaching,
@@ -39,8 +41,15 @@ export async function runEvalCases({
   promptCaching?: boolean;
   /** Pinned judge for rubric criteria — required iff any case declares a rubric. */
   judgeModel?: LanguageModel;
-  /** Evaluation model for a case's typed `checks`. Required iff any case has them. */
+  /** Evaluation model for typed `checks`. Required iff any case has them. */
   judge?: Experimental_EvaluationModel;
+  /**
+   * Checks asked of EVERY case — the set-level questions.
+   *
+   * Merged case-last, so a case that reuses an id sharpens the shared question
+   * for its own input instead of colliding with it.
+   */
+  sharedChecks?: Record<string, Question>;
   /** Fires as each CASE finishes all its attempts (completion order). */
   onResult?: (result: EvalCaseResult, completedCases: number, totalCases: number) => void;
   /** Fires as each ATTEMPT finishes — the finer-grained progress tick. */
@@ -98,11 +107,12 @@ export async function runEvalCases({
       // is a question with a synthetic input; nothing else about it differs,
       // so a question written for one works unchanged on the other.
       let checks: EvalAttemptResult["checks"];
-      if (judge && c.checks && Object.keys(c.checks).length) {
+      const questions = { ...sharedChecks, ...c.checks };
+      if (judge && Object.keys(questions).length) {
         const { verdicts } = await askOfTrace({
           model: judge,
           messages: history,
-          questions: c.checks,
+          questions,
         });
         checks = verdicts.map((v) => ({
           id: v.id,

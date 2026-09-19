@@ -2365,7 +2365,7 @@ export const getEvalSetFn = createServerFn({ method: "POST" })
   });
 
 export const saveEvalSetFn = createServerFn({ method: "POST" })
-  .validator((data: { agent: string; name: string; cases: EvalCase[] }) => data)
+  .validator((data: { agent: string; name: string; cases: EvalCase[]; checks?: Record<string, Question> }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
@@ -2391,6 +2391,7 @@ export const saveEvalSetFn = createServerFn({ method: "POST" })
       agentName,
       name: data.name,
       cases: data.cases,
+      ...(data.checks && Object.keys(data.checks).length ? { checks: data.checks } : {}),
     });
     return { ok: true as const };
   });
@@ -2442,7 +2443,9 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
     if (!snapshot) return { ok: false as const, error: `No configuration "${ref}".` };
 
     const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
-    const needsChecks = set.cases.some((c) => c.checks && Object.keys(c.checks).length > 0);
+    const needsChecks =
+      Object.keys(set.checks ?? {}).length > 0 ||
+      set.cases.some((c) => c.checks && Object.keys(c.checks).length > 0);
     const results = await runEvalCases({
       runtime,
       principal,
@@ -2453,7 +2456,7 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
       ...(needsJudge ? { judgeModel: modelFor(EXPLAIN_MODEL_ID) } : {}),
       // A case's typed `checks` go to the same evaluation judge that answers
       // questions about live traffic — one judge, one vocabulary.
-      ...(needsChecks ? { judge: judgeModel(JUDGE_MODEL_ID) } : {}),
+      ...(needsChecks ? { judge: judgeModel(JUDGE_MODEL_ID), sharedChecks: set.checks } : {}),
     });
 
     const run = await evalStore.saveRun({

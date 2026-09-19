@@ -119,6 +119,9 @@ function EvalsPage() {
   const [brief, setBrief] = useState("");
   /** One case open at a time — a page of expanded forms cannot be scanned. */
   const [openCase, setOpenCase] = useState<number | null>(null);
+  /** Checks asked of every case — most questions belong here, not on a case. */
+  const [shared, setShared] = useState<Record<string, Question>>({});
+  const [sharedOpen, setSharedOpen] = useState(false);
   const [audit, setAudit] = useState<
     { judged: number; promises: { id: string; ask: string; type: string; broken: number; rate: number; examples: string[] }[] } | null
   >(null);
@@ -141,6 +144,7 @@ function EvalsPage() {
       ),
     ]);
     setCases(set?.cases ?? []);
+    setShared(set?.checks ?? {});
     setVersions(vs as { version: number; createdAt: number }[]);
     setRuns(rs as EvalRun[]);
     setTools((ts as { name: string }[]).map((t) => t.name));
@@ -186,7 +190,7 @@ function EvalsPage() {
 
   const save = async () => {
     setBusy(true);
-    const res = await saveEvalSetFn({ data: { agent, name: setName, cases } });
+    const res = await saveEvalSetFn({ data: { agent, name: setName, cases, checks: shared } });
     setBusy(false);
     if (!res.ok) return toast.error(res.error);
     toast.success(`Saved ${cases.length} case${cases.length === 1 ? "" : "s"}`);
@@ -345,6 +349,42 @@ function EvalsPage() {
 
       {loaded && (
         <div className="space-y-2">
+          {/* SHARED first, and deliberately: most questions do not depend on the
+              input, and a set where every case repeats the same five checks is
+              five questions maintained a hundred times. It is also the only
+              shape a comparison can resolve — a shared check gets one
+              observation per case, a per-case check gets exactly one. */}
+          <div className="border-secondary-border rounded border">
+            <button
+              type="button"
+              onClick={() => setSharedOpen((o) => !o)}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left"
+            >
+              {sharedOpen ? (
+                <ChevronDown className="text-ink-tertiary size-3.5" />
+              ) : (
+                <ChevronRight className="text-ink-tertiary size-3.5" />
+              )}
+              <span className="text-ink-primary text-xs">
+                Shared checks — asked of every case
+              </span>
+              <span className="text-ink-tertiary text-xs">
+                {Object.keys(shared).length || "none"}
+              </span>
+              <span className="flex-1" />
+              <span className="text-ink-tertiary text-xs">
+                {cases.length
+                  ? `${Object.keys(shared).length * cases.length} verdicts per run`
+                  : ""}
+              </span>
+            </button>
+            {sharedOpen && (
+              <div className="border-t border-dashed px-3 py-3">
+                <CheckBuilder checks={shared} onChange={setShared} />
+              </div>
+            )}
+          </div>
+
           <div className="text-ink-tertiary flex items-center gap-2 text-xs">
             <span>
               {cases.length} case{cases.length === 1 ? "" : "s"}

@@ -152,6 +152,25 @@ export interface EvalSet {
   owner: string;
   agentName: string;
   name: string;
+  /**
+   * Checks asked of EVERY case in the set.
+   *
+   * Most questions do not depend on the input. "Is every claim supported by a
+   * tool result?" means the same thing whether the user asked about networking
+   * or billing, so it belongs to the set, not to one case. Only a question that
+   * needs ground truth the question itself cannot know — WHICH document, WHICH
+   * number — has to live on a case.
+   *
+   * The split is not a convenience. A shared check gets one observation per
+   * case, so a set of 100 inputs gives it n=100 and a comparison between two
+   * versions can actually resolve it. A per-case check gets n=1 and can never
+   * be conclusive on its own, however carefully it is written. Sharing is what
+   * makes the statistics work at all.
+   *
+   * A case may add its own on top; ids collide toward the CASE, so one input
+   * can sharpen a shared question without rewriting it for the other 99.
+   */
+  checks?: Record<string, Question>;
   cases: EvalCase[];
   createdAt: number;
   updatedAt: number;
@@ -314,6 +333,7 @@ export async function migrateEvals(client: Client): Promise<void> {
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (owner, agent_name, name)
   )`);
+  await client.execute(`ALTER TABLE latch_eval_sets ADD COLUMN checks TEXT`).catch(() => {});
   await client.execute(`CREATE TABLE IF NOT EXISTS latch_eval_runs (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
@@ -350,6 +370,10 @@ const rowToSet = (r: Record<string, unknown>): EvalSet => ({
   owner: String(r.owner),
   agentName: String(r.agent_name),
   name: String(r.name),
+  checks: (() => {
+    const v = safeParse<unknown>(r.checks, undefined);
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, Question>) : undefined;
+  })(),
   cases: (() => {
     const v = safeParse<unknown>(r.cases, []);
     return Array.isArray(v) ? (v as EvalCase[]) : [];
@@ -382,12 +406,21 @@ export function createEvalStore(client: Client): EvalStore {
     async saveSet(rec) {
       const now = Date.now();
       await client.execute({
-        sql: `INSERT INTO latch_eval_sets (owner, agent_name, name, cases, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?)
+        sql: `INSERT INTO latch_eval_sets (owner, agent_name, name, cases, checks, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(owner, agent_name, name) DO UPDATE SET
                 cases = excluded.cases,
+                checks = excluded.checks,
                 updated_at = excluded.updated_at`,
-        args: [rec.owner, rec.agentName, rec.name, JSON.stringify(rec.cases), now, now],
+        args: [
+          rec.owner,
+          rec.agentName,
+          rec.name,
+          JSON.stringify(rec.cases),
+          rec.checks ? JSON.stringify(rec.checks) : null,
+          now,
+          now,
+        ],
       });
     },
 
