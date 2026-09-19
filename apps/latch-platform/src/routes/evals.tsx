@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { FlaskConical, Play, Plus, Sparkles, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FlaskConical, Play, Plus, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   currentPrincipalFn,
@@ -117,6 +117,8 @@ function EvalsPage() {
   const [runs, setRuns] = useState<EvalRun[]>([]);
   const [tools, setTools] = useState<string[]>([]);
   const [brief, setBrief] = useState("");
+  /** One case open at a time — a page of expanded forms cannot be scanned. */
+  const [openCase, setOpenCase] = useState<number | null>(null);
   const [audit, setAudit] = useState<
     { judged: number; promises: { id: string; ask: string; type: string; broken: number; rate: number; examples: string[] }[] } | null
   >(null);
@@ -169,6 +171,12 @@ function EvalsPage() {
     // Drafts land UNSAVED, appended: reviewing and cutting is the job.
     setCases((cs) => [...cs, ...res.cases]);
     toast.success(`Drafted ${res.cases.length} case${res.cases.length === 1 ? "" : "s"} — review and save`);
+  };
+
+  /** How this case did the last time the set ran — the reason to open a row. */
+  const lastResultFor = (caseId: string) => {
+    const newest = [...runs].sort((a, b) => b.createdAt - a.createdAt)[0];
+    return newest?.results.find((r) => r.caseId === caseId);
   };
 
   const update = (i: number, patch: Partial<EvalCase>) =>
@@ -336,88 +344,171 @@ function EvalsPage() {
       {!loaded && <p className="text-ink-tertiary text-sm">Loading…</p>}
 
       {loaded && (
-        <div className="space-y-3">
-          {cases.map((c, i) => (
-            <div key={i} className="border-secondary-border space-y-2 rounded border p-3">
-              <div className="flex items-center gap-2">
-                <input
-                  value={c.id}
-                  onChange={(e) => update(i, { id: e.target.value })}
-                  placeholder="stable-case-id"
-                  className="border-secondary-border text-ink-primary w-48 rounded border bg-transparent px-2 py-1 text-xs"
-                />
-                <input
-                  value={c.name}
-                  onChange={(e) => update(i, { name: e.target.value })}
-                  placeholder="what this checks"
-                  className="border-secondary-border text-ink-primary min-w-0 flex-1 rounded border bg-transparent px-2 py-1 text-xs"
-                />
-                <button
-                  type="button"
-                  aria-label="Remove case"
-                  onClick={() => setCases((cs) => cs.filter((_, j) => j !== i))}
-                  className="text-ink-tertiary hover:text-ink-primary"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
-              </div>
-              <Turns
-                input={c.input}
-                followUps={c.followUps ?? []}
-                onChange={(input, followUps) =>
-                  update(i, { input, followUps: followUps.length ? followUps : undefined })
-                }
-              />
-              <div className="grid gap-2 md:grid-cols-2">
-                <label className="text-ink-tertiary text-xs">
-                  Exact — must call, <code>tool key=value</code> per line (free, no judge)
-                  <textarea
-                    value={renderExpectedTools(c.expected.toolCalls)}
-                    onChange={(e) => updateExpected(i, { toolCalls: parseExpectedTools(e.target.value) })}
-                    placeholder={toolHint}
-                    rows={2}
-                    className="border-secondary-border text-ink-primary mt-1 w-full resize-none rounded border bg-transparent p-2"
-                  />
-                </label>
-                <label className="text-ink-tertiary text-xs">
-                  Exact — must NOT call, comma separated
-                  <input
-                    value={(c.expected.forbiddenTools ?? []).join(", ")}
-                    onChange={(e) =>
-                      updateExpected(i, {
-                        forbiddenTools: parseList(e.target.value).length
-                          ? parseList(e.target.value)
-                          : undefined,
-                      })
-                    }
-                    placeholder={forbidHint}
-                    className="border-secondary-border text-ink-primary mt-1 w-full rounded border bg-transparent p-2"
-                  />
-                </label>
-              </div>
-              {(c.expected.rubric?.length ?? 0) > 0 && (
-                <p className="text-ink-tertiary text-xs">
-                  Also carries {c.expected.rubric!.length} legacy plain-text criteri
-                  {c.expected.rubric!.length === 1 ? "on" : "a"}, still judged on every run. Rewrite
-                  them as checks below when convenient — they are boolean questions either way, and
-                  as checks they can be a choice or a score instead.
-                </p>
-              )}
-              <CheckBuilder
-                checks={c.checks ?? {}}
-                onChange={(checks) => update(i, { checks: Object.keys(checks).length ? checks : undefined })}
-              />
-            </div>
-          ))}
+        <div className="space-y-2">
+          <div className="text-ink-tertiary flex items-center gap-2 text-xs">
+            <span>
+              {cases.length} case{cases.length === 1 ? "" : "s"}
+            </span>
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => {
+                setCases((cs) => [...cs, newCase(cs.length + 1)]);
+                setOpenCase(cases.length);
+              }}
+              className="hover:text-ink-primary flex items-center gap-1 underline"
+            >
+              <Plus className="size-3.5" /> Add case
+            </button>
+          </div>
 
-          <Button
-            variant="secondary"
-            onClick={() => setCases((cs) => [...cs, newCase(cs.length + 1)])}
-            className="gap-1"
-          >
-            <Plus className="size-3.5" />
-            Add case
-          </Button>
+          {/* A LIST, with one case open at a time. Every case expanded at once
+              made the page a wall of identical forms: you could not see how
+              many cases there were, which of them failed, or where one ended
+              and the next began. A row has to say enough to decide whether to
+              open it — and nothing more. */}
+          <div className="border-secondary-border divide-secondary-border divide-y rounded border">
+            {cases.length === 0 && (
+              <p className="text-ink-tertiary p-3 text-xs">
+                No cases yet. Describe what to test above and let the agent draft them, or add one
+                by hand.
+              </p>
+            )}
+            {cases.map((c, i) => {
+              const open = openCase === i;
+              const checkCount = Object.keys(c.checks ?? {}).length;
+              const turns = 1 + (c.followUps?.length ?? 0);
+              const exact =
+                (c.expected.toolCalls?.length ?? 0) +
+                (c.expected.forbiddenTools?.length ?? 0) +
+                (c.expected.rubric?.length ?? 0);
+              const last = lastResultFor(c.id);
+              return (
+                <div key={i}>
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    <button
+                      type="button"
+                      onClick={() => setOpenCase(open ? null : i)}
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    >
+                      {open ? (
+                        <ChevronDown className="text-ink-tertiary size-3.5 shrink-0" />
+                      ) : (
+                        <ChevronRight className="text-ink-tertiary size-3.5 shrink-0" />
+                      )}
+                      {/* Last verdict first: the reason to open a row is
+                          usually that it failed. */}
+                      {last && (
+                        <span className={last.pass ? "text-emerald-600" : "text-red-500"}>
+                          {last.pass ? "✓" : "✗"}
+                        </span>
+                      )}
+                      <span className="text-ink-primary truncate text-xs">{c.id || "untitled"}</span>
+                      <span className="text-ink-tertiary min-w-0 flex-1 truncate text-xs">
+                        {c.name || c.input.slice(0, 60)}
+                      </span>
+                      <span className="text-ink-tertiary shrink-0 text-xs">
+                        {turns} turn{turns === 1 ? "" : "s"} · {checkCount} check
+                        {checkCount === 1 ? "" : "s"}
+                        {exact ? ` · ${exact} exact` : ""}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Remove case"
+                      onClick={() => {
+                        setCases((cs) => cs.filter((_, j) => j !== i));
+                        setOpenCase(null);
+                      }}
+                      className="text-ink-tertiary hover:text-ink-primary shrink-0"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+
+                  {open && (
+                    <div className="space-y-3 border-t border-dashed px-3 py-3">
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={c.id}
+                          onChange={(e) => update(i, { id: e.target.value })}
+                          placeholder="stable-case-id"
+                          className="border-secondary-border text-ink-primary w-48 rounded border bg-transparent px-2 py-1 text-xs"
+                        />
+                        <input
+                          value={c.name}
+                          onChange={(e) => update(i, { name: e.target.value })}
+                          placeholder="what this checks"
+                          className="border-secondary-border text-ink-primary min-w-0 flex-1 rounded border bg-transparent px-2 py-1 text-xs"
+                        />
+                      </div>
+
+                      <Turns
+                        input={c.input}
+                        followUps={c.followUps ?? []}
+                        onChange={(input, followUps) =>
+                          update(i, { input, followUps: followUps.length ? followUps : undefined })
+                        }
+                      />
+
+                      <CheckBuilder
+                        checks={c.checks ?? {}}
+                        onChange={(checks) =>
+                          update(i, { checks: Object.keys(checks).length ? checks : undefined })
+                        }
+                      />
+
+                      {/* Folded away: most cases use none of these, and two
+                          empty boxes at full weight made the judged checks —
+                          the part that matters — look optional. */}
+                      <details className="text-ink-tertiary text-xs">
+                        <summary className="cursor-pointer">
+                          Exact checks{exact ? ` (${exact})` : ""} — comparisons, free, no judge
+                        </summary>
+                        <div className="grid gap-2 pt-2 md:grid-cols-2">
+                          <label>
+                            must call — <code>tool key=value</code> per line
+                            <textarea
+                              value={renderExpectedTools(c.expected.toolCalls)}
+                              onChange={(e) =>
+                                updateExpected(i, { toolCalls: parseExpectedTools(e.target.value) })
+                              }
+                              placeholder={toolHint}
+                              rows={2}
+                              className="border-secondary-border text-ink-primary mt-1 w-full resize-none rounded border bg-transparent p-2"
+                            />
+                          </label>
+                          <label>
+                            must NOT call — comma separated
+                            <input
+                              value={(c.expected.forbiddenTools ?? []).join(", ")}
+                              onChange={(e) =>
+                                updateExpected(i, {
+                                  forbiddenTools: parseList(e.target.value).length
+                                    ? parseList(e.target.value)
+                                    : undefined,
+                                })
+                              }
+                              placeholder={forbidHint}
+                              className="border-secondary-border text-ink-primary mt-1 w-full rounded border bg-transparent p-2"
+                            />
+                          </label>
+                        </div>
+                        {(c.expected.rubric?.length ?? 0) > 0 && (
+                          <p className="pt-2">
+                            Also carries {c.expected.rubric!.length} legacy plain-text criteri
+                            {c.expected.rubric!.length === 1 ? "on" : "a"}, still judged on every
+                            run. They are boolean questions either way — as checks they could be a
+                            choice or a score instead.
+                          </p>
+                        )}
+                      </details>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
