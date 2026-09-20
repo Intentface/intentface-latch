@@ -2432,6 +2432,10 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
     if (!set?.cases.length) return { ok: false as const, error: `Eval set "${data.name}" is empty.` };
 
     const ref = data.version === undefined ? agentName : `${agentName}@${data.version}`;
+    // What the column SAYS. The bare agent name is what the resolver needs and
+    // useless as a label: five runs of the live config all read "hn-digest"
+    // and nothing distinguishes them.
+    const label = data.version === undefined ? "live" : `@${data.version}`;
     // Snapshot what ACTUALLY ran, not what is live: a run compared later is
     // only interpretable next to the configuration that produced it.
     const snapshot =
@@ -2484,7 +2488,7 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
       passCount: results.filter((r) => r.pass).length,
       failCount: results.filter((r) => !r.pass).length,
       judgeModelId: needsJudge ? EXPLAIN_MODEL_ID : null,
-      configRef: ref,
+      configRef: label,
       metrics: {
         durationMs: Date.now() - startedAt,
         agentCost: agent.cost,
@@ -2551,21 +2555,24 @@ export const draftEvalCasesFn = createServerFn({ method: "POST" })
     // suggestion; a prompt that contains them is a fact.
     const rec = await agentStore.getRecord(principal, agentName);
     const connections = rec?.connections ?? [];
-    let toolLines = "";
+    const lines: string[] = [];
     if (connections.length) {
       const opened = await allConnections.hostFor(connections).open(principal);
       try {
-        toolLines = Object.keys(opened.tools)
-          .filter((k) => !k.startsWith("connect_"))
-          .map((name) => {
-            const d = (opened.tools[name] as { description?: string } | undefined)?.description;
-            return `- ${name}${d ? `: ${d.slice(0, 160)}` : ""}`;
-          })
-          .join("\n");
+        for (const name of Object.keys(opened.tools)) {
+          if (name.startsWith("connect_")) continue;
+          const d = (opened.tools[name] as { description?: string } | undefined)?.description;
+          lines.push(`- ${name}${d ? `: ${d.slice(0, 160)}` : ""}`);
+        }
       } finally {
         await opened.close();
       }
     }
+    // Authored tools are tools too. Looking only at `connections` told the
+    // author that an agent whose ONLY tool is an authored one had none at all —
+    // it happened to recover by calling get_agent, which is luck, not design.
+    for (const name of rec?.exec?.authoredTools ?? []) lines.push(`- ${name} (authored tool)`);
+    const toolLines = lines.join("\n");
 
     const grounding =
       (rec?.instructions

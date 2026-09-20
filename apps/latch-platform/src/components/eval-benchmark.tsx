@@ -49,6 +49,10 @@ export function EvalBenchmark({ runs }: { runs: EvalRun[] }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const points = pointsOf([...runs].sort((a, b) => a.createdAt - b.createdAt));
   if (points.length === 0) return null;
+  // Runs recorded before cost was captured have nothing to show. A column of
+  // em-dashes reads as broken rather than as "not measured yet", so the
+  // columns appear only once something can fill them.
+  const measured = points.some((p) => p.run.metrics);
 
   const best = Math.max(...points.map((p) => p.rate));
   const cheapest = Math.min(...points.filter((p) => p.cost > 0).map((p) => p.cost), Infinity);
@@ -63,15 +67,18 @@ export function EvalBenchmark({ runs }: { runs: EvalRun[] }) {
         </span>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)]">
-        <BenchTable points={points} best={best} cheapest={cheapest} hovered={hovered} onHover={setHovered} />
+      <div className={`grid gap-3 ${plottable.length >= 2 ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)]" : ""}`}>
+        <BenchTable
+          points={points}
+          best={best}
+          cheapest={cheapest}
+          measured={measured}
+          hovered={hovered}
+          onHover={setHovered}
+        />
         {plottable.length >= 2 ? (
           <TradeoffPlot points={plottable} hovered={hovered} onHover={setHovered} />
-        ) : (
-          <div className="border-secondary-border text-ink-tertiary flex items-center rounded border border-dashed p-3 text-xs">
-            Run a second configuration to see the quality-against-cost tradeoff.
-          </div>
-        )}
+        ) : null}
       </div>
     </section>
   );
@@ -81,12 +88,14 @@ function BenchTable({
   points,
   best,
   cheapest,
+  measured,
   hovered,
   onHover,
 }: {
   points: Point[];
   best: number;
   cheapest: number;
+  measured: boolean;
   hovered: string | null;
   onHover: (id: string | null) => void;
 }) {
@@ -97,9 +106,13 @@ function BenchTable({
           <tr className="border-secondary-border text-ink-tertiary border-b text-left">
             <th className="p-2 font-normal">configuration</th>
             <th className="p-2 text-right font-normal">passed</th>
-            <th className="p-2 text-right font-normal">agent cost</th>
-            <th className="p-2 text-right font-normal">judging</th>
-            <th className="p-2 text-right font-normal">time</th>
+            {measured && (
+              <>
+                <th className="p-2 text-right font-normal">agent cost</th>
+                <th className="p-2 text-right font-normal">judging</th>
+                <th className="p-2 text-right font-normal">time</th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -117,9 +130,11 @@ function BenchTable({
                 <td className="text-ink-primary p-2">
                   {p.label}
                   <span className="text-ink-tertiary ml-2">
-                    {new Date(p.run.createdAt).toLocaleDateString(undefined, {
+                    {new Date(p.run.createdAt).toLocaleString(undefined, {
                       month: "short",
                       day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
                     })}
                   </span>
                 </td>
@@ -133,17 +148,23 @@ function BenchTable({
                     {p.run.passCount}/{p.total}
                   </span>
                 </td>
-                <td className="p-2 text-right">
-                  <span className={p.cost > 0 && p.cost <= cheapest ? "text-emerald-600" : "text-ink-primary"}>
-                    {p.cost > 0 ? money(p.cost) : "—"}
-                  </span>
-                </td>
-                <td className="text-ink-tertiary p-2 text-right">
-                  {m ? `${m.judgeCalls} calls · ${compact(m.judgeTokensIn)} tok` : "—"}
-                </td>
-                <td className="text-ink-tertiary p-2 text-right">
-                  {m ? secs(m.durationMs) : "—"}
-                </td>
+                {measured && (
+                  <>
+                    <td className="p-2 text-right">
+                      <span
+                        className={
+                          p.cost > 0 && p.cost <= cheapest ? "text-emerald-600" : "text-ink-primary"
+                        }
+                      >
+                        {p.cost > 0 ? money(p.cost) : "—"}
+                      </span>
+                    </td>
+                    <td className="text-ink-tertiary p-2 text-right">
+                      {m ? `${m.judgeCalls} calls · ${compact(m.judgeTokensIn)} tok` : "—"}
+                    </td>
+                    <td className="text-ink-tertiary p-2 text-right">{m ? secs(m.durationMs) : "—"}</td>
+                  </>
+                )}
               </tr>
             );
           })}

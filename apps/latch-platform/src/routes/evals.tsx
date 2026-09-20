@@ -148,7 +148,13 @@ function EvalsPage() {
     setShared(set?.checks ?? {});
     setVersions(vs as { version: number; createdAt: number }[]);
     setRuns(rs as EvalRun[]);
-    setTools((ts as { name: string }[]).map((t) => t.name));
+    // Authored tools are tools: an agent whose only tool is authored would
+    // otherwise show "no connection tools" and hint at nothing.
+    const rec = agents.find((a) => a.name === agent);
+    setTools([
+      ...(ts as { name: string }[]).map((t) => t.name),
+      ...((rec?.exec?.authoredTools ?? []) as string[]),
+    ]);
     setLoaded(true);
   }, [agent, setName, scopeOf, agents]);
 
@@ -364,6 +370,15 @@ function EvalsPage() {
         )}
       </div>
 
+      {runs.length > 0 && <EvalBenchmark runs={runs} />}
+      {runs.length > 1 && (
+        <CompareStrip
+          base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
+          head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
+          sharedIds={Object.keys(shared)}
+        />
+      )}
+
       <div className="border-secondary-border space-y-2 rounded border border-dashed p-3">
         <label className="text-ink-tertiary block text-xs">
           Describe what to test — the agent writes the cases, grounded in its real tools
@@ -381,7 +396,9 @@ function EvalsPage() {
             Generate cases
           </Button>
           <span className="text-ink-tertiary text-xs">
-            {tools.length ? `${tools.length} tools available to this agent` : "no connection tools"}
+            {tools.length
+              ? `${tools.length} tool${tools.length === 1 ? "" : "s"} available to this agent`
+              : "this agent has no tools"}
           </span>
         </div>
       </div>
@@ -624,14 +641,7 @@ function EvalsPage() {
         </div>
       )}
 
-      {runs.length > 0 && <EvalBenchmark runs={runs} />}
       {runs.length > 0 && <ResultsGrid runs={runs} agent={agent} onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))} />}
-      {runs.length > 1 && (
-        <CompareStrip
-          base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
-          head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
-        />
-      )}
     </div>
   );
 }
@@ -861,14 +871,28 @@ function ResultsGrid({
  * rendered a confident bar over six observations would be a more convincing
  * way to be wrong than the table it replaced.
  */
-function CompareStrip({ base, head }: { base: EvalRun; head: EvalRun }) {
+function CompareStrip({
+  base,
+  head,
+  sharedIds,
+}: {
+  base: EvalRun;
+  head: EvalRun;
+  sharedIds: string[];
+}) {
+  // A SHARED check is one measurement across every case, not one per case.
+  // Listing it per case produced three identical rows reading "grounded-in-
+  // tools" and split its evidence three ways — which is the one thing sharing
+  // exists to prevent.
+  const shared = new Set(sharedIds);
   const observations: Observation[] = [];
   for (const run of [base, head]) {
     for (const res of run.results) {
       for (const chk of res.checks ?? []) {
         observations.push({
-          // A check within a case is the pairing key: it keeps its meaning
-          // across versions even when the input is reworded.
+          // The pairing key. A shared check keeps the CASE in the key so each
+          // case is still one paired observation of it — but it is reported as
+          // one row, because it is one question.
           task: `${res.caseId}/${chk.id}`,
           agent: run.id,
           value: chk.failed ? 1 : 0,
@@ -881,12 +905,30 @@ function CompareStrip({ base, head }: { base: EvalRun; head: EvalRun }) {
   }
   const overall = compare(observations, base.id, head.id);
 
-  const checks = [...new Set(observations.map((o) => o.task))].filter((t) => t.includes("/"));
-  const rows = checks
-    .map((task) => ({ task, r: compare(observations.filter((o) => o.task === task), base.id, head.id) }))
-    // A per-check comparison over one task is never conclusive; sort the ones
-    // that at least moved to the top rather than pretending otherwise.
-    .sort((a, b) => Math.abs(b.r.delta) - Math.abs(a.r.delta));
+  const tasks = [...new Set(observations.map((o) => o.task))].filter((t) => t.includes("/"));
+  // Group by the QUESTION for shared checks (every case is an observation of
+  // it), and by case+question for per-case ones (there is only ever one).
+  const groups = new Map<string, { label: string; tasks: string[]; n: number }>();
+  for (const task of tasks) {
+    const [caseId, checkId] = [task.slice(0, task.indexOf("/")), task.slice(task.indexOf("/") + 1)];
+    const key = shared.has(checkId) ? checkId : task;
+    const g = groups.get(key) ?? {
+      label: shared.has(checkId) ? checkId : `${checkId} · ${caseId}`,
+      tasks: [],
+      n: 0,
+    };
+    g.tasks.push(task);
+    groups.set(key, g);
+  }
+  const rows = [...groups.values()]
+    .map((g) => {
+      const obs = observations.filter((o) => g.tasks.includes(o.task));
+      return { label: g.label, shared: g.tasks.length > 1, r: compare(obs, base.id, head.id) };
+    })
+    // A check no run has answered yet pairs nothing. Listing it at n=0 is a row
+    // that can never say anything, next to rows that can.
+    .filter((row) => row.r.n > 0)
+    .sort((a, b) => Math.abs(b.r.delta) - Math.abs(a.r.delta) || b.r.n - a.r.n);
 
   const tone: Record<string, string> = {
     regressed: "text-red-500",
@@ -926,14 +968,22 @@ function CompareStrip({ base, head }: { base: EvalRun; head: EvalRun }) {
           <span className={tone[overall.verdict]}>{overall.verdict}</span>
           <span className="text-ink-tertiary">n={overall.n}</span>
         </div>
-        {rows.map(({ task, r }) => (
-          <div key={task} className="text-ink-tertiary flex items-center gap-3">
-            <span className="w-44 truncate" title={task}>
-              {task.split("/")[1]}
+        {rows.map(({ label, shared: isShared, r }) => (
+          <div key={label} className="text-ink-tertiary flex items-center gap-3">
+            <span className="w-52 truncate" title={label}>
+              {label}
             </span>
-            <Interval lo={r.ci[0]} hi={r.ci[1]} delta={r.delta} />
+            {/* One observation cannot have an interval worth drawing. A bar
+                there is a picture of nothing, and at this width it is a loud
+                one — so the row says what it has instead. */}
+            {r.n >= 3 ? (
+              <Interval lo={r.ci[0]} hi={r.ci[1]} delta={r.delta} />
+            ) : (
+              <span className="w-36 text-[10px]">{r.n} observation{r.n === 1 ? "" : "s"}</span>
+            )}
             <span className="w-16 text-right">{pp(r.delta)}</span>
             <span className={tone[r.verdict]}>{r.verdict}</span>
+            {isShared && <span className="text-[10px]">shared · n={r.n}</span>}
           </div>
         ))}
         {overall.verdict === "underpowered" && (
