@@ -37,6 +37,18 @@ export interface CheckReliability {
   disputedRuns: string[];
 }
 
+/**
+ * The bar a check must clear before it may fail a build. Exported because the
+ * UI states it to the reader, and a rule the page describes differently from
+ * the one it applies is worse than no rule.
+ *
+ * Both conditions are necessary. Three labels out of three is not evidence,
+ * and a judge right four times in five fires a false alarm on a fifth of runs
+ * — which is how a suite stops being read.
+ */
+export const MIN_LABELS = 10;
+export const MIN_AGREEMENT = 0.9;
+
 export interface ReliabilityOptions {
   /** Labels needed before a check may gate. */
   minLabels?: number;
@@ -55,7 +67,7 @@ export function reliabilityOf(
   runs: EvalRun[],
   options: ReliabilityOptions = {},
 ): CheckReliability[] {
-  const { minLabels = 10, minAgreement = 0.9 } = options;
+  const { minLabels = MIN_LABELS, minAgreement = MIN_AGREEMENT } = options;
   const byKey = new Map<string, CheckReliability>();
 
   for (const run of runs) {

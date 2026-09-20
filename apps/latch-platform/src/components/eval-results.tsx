@@ -27,10 +27,12 @@ interface Props {
   runs: EvalRun[];
   cases: EvalCase[];
   shared: Shared;
+  /** When set, everything this ONE input was judged on. */
+  focusCase?: string | null;
   onOpenEvidence: (caseId: string, checkId: string, runId: string) => void;
 }
 
-export function EvalResults({ runs, cases, shared, onOpenEvidence }: Props) {
+export function EvalResults({ runs, cases, shared, focusCase, onOpenEvidence }: Props) {
   // Oldest → newest, so a regression reads as a change moving rightwards.
   const columns = [...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-6);
   const sharedIds = Object.keys(shared);
@@ -58,6 +60,22 @@ export function EvalResults({ runs, cases, shared, onOpenEvidence }: Props) {
   }
 
   const cols = `minmax(240px, 1.6fr) repeat(${columns.length}, minmax(92px, 1fr))`;
+
+  const focused = focusCase ? cases.find((c) => c.id === focusCase) : undefined;
+  if (focusCase) {
+    return (
+      <OneCase
+        caseId={focusCase}
+        name={focused?.name || focusCase}
+        shared={shared}
+        own={focused?.checks ?? {}}
+        columns={columns}
+        cols={cols}
+        verdictOf={verdictOf}
+        onOpenEvidence={onOpenEvidence}
+      />
+    );
+  }
 
   return (
     <div className="border-secondary-border overflow-hidden rounded-lg border">
@@ -164,6 +182,93 @@ export function EvalResults({ runs, cases, shared, onOpenEvidence }: Props) {
           </div>
         </>
       )}
+
+      <Legend />
+    </div>
+  );
+}
+
+/**
+ * One input, everything it is judged on.
+ *
+ * Here every check is a TICK, shared ones included — inside a single case a
+ * shared check has exactly one observation, same as a per-case one. What has to
+ * survive is which is which, because editing the shared one changes every other
+ * case in the set and editing the case's own changes nothing else. So the scope
+ * tag stays on every row even though the cells look alike.
+ */
+function OneCase({
+  caseId,
+  name,
+  shared,
+  own,
+  columns,
+  cols,
+  verdictOf,
+  onOpenEvidence,
+}: {
+  caseId: string;
+  name: string;
+  shared: Shared;
+  own: Record<string, Question>;
+  columns: EvalRun[];
+  cols: string;
+  verdictOf: (run: EvalRun, caseId: string, checkId: string) => CheckVerdict | undefined;
+  onOpenEvidence: (caseId: string, checkId: string, runId: string) => void;
+}) {
+  // Case-last, exactly as the runner merges them.
+  const merged = { ...shared, ...own };
+  const rows = Object.entries(merged).map(([id, q]) => ({
+    id,
+    q,
+    scope: (id in own ? (id in shared ? "override" : "case") : "shared") as
+      | "shared"
+      | "case"
+      | "override",
+  }));
+
+  return (
+    <div>
+      <div className="border-secondary-border grid items-end border-b" style={{ gridTemplateColumns: cols }}>
+        <div className="text-ink-tertiary px-3 py-2.5 text-[11px] font-medium uppercase tracking-wide">
+          {name}
+        </div>
+        {columns.map((r) => (
+          <div key={r.id} className="space-y-1 px-2.5 py-2">
+            <ConfigBadge label={r.configRef ?? "live"} />
+          </div>
+        ))}
+      </div>
+
+      <div className="divide-secondary-border divide-y">
+        {rows.map((row) => (
+          <div key={row.id} className="grid items-stretch" style={{ gridTemplateColumns: cols }}>
+            <div className="flex flex-col justify-center gap-1.5 px-3 py-2.5">
+              <span className="text-ink-primary text-[13px] font-medium leading-snug">
+                {row.q.ask}
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <ScopeTag scope={row.scope} />
+                <KindTag q={row.q} />
+                <span className="text-ink-tertiary font-mono text-[10px]">{row.id}</span>
+              </div>
+            </div>
+            {columns.map((r) => {
+              const v = verdictOf(r, caseId, row.id);
+              if (!v) return <NotApplicable key={r.id} />;
+              return (
+                <TickCell key={r.id} v={v} onClick={() => onOpenEvidence(caseId, row.id, r.id)} />
+              );
+            })}
+          </div>
+        ))}
+        {rows.length === 0 && (
+          <p className="text-ink-tertiary px-3 py-4 text-xs">
+            This case has no checks of its own and the set has no shared ones, so nothing was
+            judged.
+          </p>
+        )}
+      </div>
 
       <Legend />
     </div>

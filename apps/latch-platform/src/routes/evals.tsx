@@ -16,13 +16,14 @@ import {
   draftEvalCasesFn,
   auditAgentFn,
 } from "@/lib/server";
-import { reliabilityOf } from "@/lib/evals/reliability";
+import { MIN_AGREEMENT, MIN_LABELS, reliabilityOf } from "@/lib/evals/reliability";
 import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
 import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
 import { EvalBenchmark } from "@/components/eval-benchmark";
 import { EvalResults } from "@/components/eval-results";
+import { PanelHeader } from "@/components/eval-primitives";
 import { EvalEvidence } from "@/components/eval-evidence";
 
 /**
@@ -134,6 +135,8 @@ function EvalsPage() {
   >(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [lens, setLens] = useState<Lens>("results");
+  const [focusCase, setFocusCase] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!agent) return;
@@ -432,29 +435,88 @@ function EvalsPage() {
         )}
       </section>
 
-      {/* READING results and AUTHORING the suite are two different sittings,
-          so they are two sections rather than six boxes of equal weight. */}
+      {/* One panel, three lenses. Results / comparison / grader trust are three
+          questions asked at different moments — "is it working", "did my change
+          break it", "can I believe this red mark" — and stacking all three made
+          the page long enough that the third was never reached. */}
       {runs.length > 0 && (
-        <section className="space-y-5">
-          <SectionHead
-            title="Results"
-            sub="What each configuration scored, what it cost, and which questions moved."
+        <section className="border-secondary-border overflow-hidden rounded-xl border">
+          <PanelHeader
+            title="Analysis"
+            hint={LENS_HINT[lens]}
+            right={
+              <Segmented
+                value={lens}
+                onChange={(v) => setLens(v as Lens)}
+                options={[
+                  { value: "results", label: "Results" },
+                  { value: "compare", label: "Compare versions" },
+                  { value: "trust", label: "Grader trust" },
+                ]}
+              />
+            }
           />
-          <EvalBenchmark runs={runs} />
-          {runs.length > 1 && (
-            <CompareStrip
-              base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
-              head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
-              sharedIds={Object.keys(shared)}
-            />
+
+          {lens === "results" && (
+            <>
+              {/* The whole suite, or one input. A shared check reads as a rate
+                  across cases and as a tick inside one, because those are
+                  genuinely different measurements of the same question. */}
+              <div className="border-secondary-border flex flex-wrap items-center gap-2 border-b px-4 py-2.5 text-xs">
+                <span className="text-ink-tertiary">Showing</span>
+                <select
+                  value={focusCase ?? ""}
+                  onChange={(e) => setFocusCase(e.target.value || null)}
+                  className="border-secondary-border text-ink-primary rounded-md border bg-transparent px-2 py-1"
+                >
+                  <option value="">the whole suite — {cases.length} cases</option>
+                  {cases.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name || c.id}
+                    </option>
+                  ))}
+                </select>
+                {focusCase && (
+                  <span className="text-ink-tertiary min-w-0 flex-1 truncate">
+                    {cases.find((c) => c.id === focusCase)?.input}
+                  </span>
+                )}
+              </div>
+              <ResultsGrid
+                runs={runs}
+                cases={cases}
+                shared={shared}
+                focusCase={focusCase}
+                agent={agent}
+                onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))}
+              />
+            </>
           )}
-          <ResultsGrid
-            runs={runs}
-            cases={cases}
-            shared={shared}
-            agent={agent}
-            onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))}
-          />
+
+          {lens === "compare" && (
+            <div className="space-y-5 p-4">
+              <EvalBenchmark runs={runs} />
+              {runs.length > 1 ? (
+                <CompareStrip
+                  base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
+                  head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
+                  sharedIds={Object.keys(shared)}
+                />
+              ) : (
+                <p className="text-ink-tertiary text-xs">
+                  One run cannot be compared to anything. Run the set against a second
+                  configuration — the <span className="text-ink-primary">against</span> control
+                  above picks it.
+                </p>
+              )}
+            </div>
+          )}
+
+          {lens === "trust" && (
+            <div className="p-4">
+              <Reliability runs={runs} />
+            </div>
+          )}
         </section>
       )}
 
@@ -613,7 +675,7 @@ function EvalsPage() {
                       {/* Last verdict first: the reason to open a row is
                           usually that it failed. */}
                       {last && (
-                        <span className={last.pass ? "text-emerald-600" : "text-red-500"}>
+                        <span className={last.pass ? "text-pass-ink" : "text-fail-ink"}>
                           {last.pass ? "✓" : "✗"}
                         </span>
                       )}
@@ -748,6 +810,53 @@ function EvalsPage() {
  * One table serves three jobs: one column is a result view, two are a
  * comparison, six are drift over time.
  */
+type Lens = "results" | "compare" | "trust";
+
+/**
+ * What each lens is for, said in the words of the question someone arrived
+ * with. "Reliability" is the domain's name for the third one and tells a
+ * first-time reader nothing.
+ */
+const LENS_HINT: Record<Lens, string> = {
+  results:
+    "What was checked and how each configuration did. Green passed, red is a problem, striped means the judge was not sure. Click any verdict to read the conversation behind it.",
+  compare:
+    "Every configuration side by side — what it scored against what it cost — then, per question, whether a change is real or just noise.",
+  trust:
+    "Can the judge be believed? How often it agreed with a person, and whether a question has earned the right to fail a release.",
+};
+
+/** A small tab group. Three lenses is too few to justify anything larger. */
+function Segmented({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+}) {
+  return (
+    <div className="border-secondary-border bg-secondary-bg/50 inline-flex rounded-lg border p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(o.value)}
+          aria-pressed={value === o.value}
+          className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+            value === o.value
+              ? "bg-primary-bg text-ink-primary shadow-sm"
+              : "text-ink-tertiary hover:text-ink-primary"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Results, plus the drawer that makes a verdict rulable.
  *
@@ -760,12 +869,14 @@ function ResultsGrid({
   runs,
   cases,
   shared,
+  focusCase,
   agent,
   onCorrected,
 }: {
   runs: EvalRun[];
   cases: EvalCase[];
   shared: Record<string, Question>;
+  focusCase: string | null;
   agent: string;
   onCorrected: (run: EvalRun) => void;
 }) {
@@ -779,15 +890,14 @@ function ResultsGrid({
     : {};
 
   return (
-    <div className="space-y-3">
+    <div>
       <EvalResults
         runs={runs}
         cases={cases}
         shared={shared}
+        focusCase={focusCase}
         onOpenEvidence={(caseId, checkId, runId) => setOpen({ runId, caseId, checkId })}
       />
-
-      <Reliability runs={runs} />
 
       {open && run && (
         <EvalEvidence
@@ -878,10 +988,10 @@ function CompareStrip({
     .sort((a, b) => Math.abs(b.r.delta) - Math.abs(a.r.delta) || b.r.n - a.r.n);
 
   const tone: Record<string, string> = {
-    regressed: "text-red-500",
-    improved: "text-emerald-600",
+    regressed: "text-fail-ink",
+    improved: "text-pass-ink",
     flat: "text-ink-tertiary",
-    underpowered: "text-amber-600",
+    underpowered: "text-uncertain-ink",
   };
 
   /** The interval, drawn across a track centred on zero. */
@@ -892,7 +1002,7 @@ function CompareStrip({
       <div className="bg-secondary-border/40 relative h-2 w-36 rounded">
         <div className="bg-ink-tertiary/40 absolute inset-y-0 w-px" style={{ left: "50%" }} />
         <div
-          className={`absolute inset-y-0 rounded ${crossesZero ? "bg-amber-500/40" : delta > 0 ? "bg-red-500/50" : "bg-emerald-500/50"}`}
+          className={`absolute inset-y-0 rounded ${crossesZero ? "bg-uncertain/50" : delta > 0 ? "bg-fail/60" : "bg-pass/60"}`}
           style={{ left: pos(lo), right: `calc(100% - ${pos(hi)})` }}
         />
         <div className="bg-ink-primary absolute inset-y-0 w-0.5" style={{ left: pos(delta) }} />
@@ -1124,7 +1234,7 @@ function ChoiceFields({
       {names.length > 1 && (q.bad.length === 0 || q.bad.length === names.length) && (
         // All-bad can never pass and none-bad can never fail; either way the
         // check measures nothing, and it is cheaper to say so here.
-        <p className="text-amber-600">Mark some — but not all — options as failures.</p>
+        <p className="text-uncertain-ink">Mark some — but not all — options as failures.</p>
       )}
     </div>
   );
@@ -1238,24 +1348,64 @@ function Turns({
  * that nobody has ruled on does not appear at all: silence is not evidence in
  * either direction, and listing it at 100% would invent confidence.
  */
+/**
+ * How often this judge agreed with a person, per question.
+ *
+ * A question nobody has ruled on does not get a row: silence is not evidence,
+ * and a table of unvalidated checks reading "100%" would be worse than no
+ * table. But an empty panel is a dead end, so the empty state says how a row
+ * gets here — the whole point is that the path is two clicks from a red mark.
+ */
 function Reliability({ runs }: { runs: EvalRun[] }) {
   const rows = reliabilityOf(runs);
-  if (rows.length === 0) return null;
+  if (rows.length === 0)
+    return (
+      <div className="text-ink-tertiary max-w-prose space-y-2 text-xs leading-relaxed">
+        <p className="text-ink-primary">Nobody has ruled on a verdict yet, so there is nothing to report.</p>
+        <p>
+          An unvalidated question is a vibe with a decimal point: it may be measuring the behaviour
+          you meant, or how the answer happened to be phrased, and the run cannot tell the
+          difference. So a check may <span className="text-ink-primary">report</span> from the
+          start, and may only <span className="text-ink-primary">gate</span> a release once it has
+          earned it — {MIN_LABELS} rulings at {Math.round(MIN_AGREEMENT * 100)}% agreement.
+        </p>
+        <p>
+          To start: open <span className="text-ink-primary">Results</span>, click a verdict you
+          doubt, read the conversation, and say whether the judge was right. Striped cells are the
+          ones where a ruling is worth the most.
+        </p>
+      </div>
+    );
   return (
-    <div className="space-y-1">
-      <h3 className="text-ink-tertiary text-xs">
-        Judge agreement — a check may only gate a release once it has earned it
-      </h3>
-      <div className="border-secondary-border divide-secondary-border divide-y rounded border text-xs">
+    <div className="space-y-2">
+      <p className="text-ink-tertiary max-w-prose text-xs">
+        The judge&apos;s answer and the human&apos;s, kept side by side. A check may only fail a
+        release once it has agreed often enough, over enough rulings, to be believed.
+      </p>
+      <div className="border-secondary-border divide-secondary-border divide-y rounded-lg border text-xs">
         {rows.map((r) => (
-          <div key={`${r.caseId}/${r.checkId}`} className="flex items-center gap-2 px-2 py-1">
-            <span className="text-ink-primary w-56 truncate">{r.checkId}</span>
+          <div key={`${r.caseId}/${r.checkId}`} className="flex items-center gap-3 px-3 py-2">
+            <span className="text-ink-primary w-56 truncate font-mono">{r.checkId}</span>
             <span className="text-ink-tertiary w-40 truncate">{r.caseId}</span>
-            <span className={r.gating ? "text-emerald-600" : "text-ink-tertiary"}>
+            {/* Agreement as a bar: "80% over 5" and "80% over 50" are not the
+                same evidence, and the count is the half people skip. */}
+            <span className="bg-secondary-bg h-1.5 w-24 shrink-0 overflow-hidden rounded-full">
+              <span
+                className={r.gating ? "bg-pass block h-full" : "bg-uncertain block h-full"}
+                style={{ width: `${(r.agreement ?? 0) * 100}%` }}
+              />
+            </span>
+            <span className="text-ink-secondary w-28 shrink-0 tabular-nums">
               {((r.agreement ?? 0) * 100).toFixed(0)}% over {r.labelled}
             </span>
             <span className="flex-1" />
-            <span className={r.gating ? "text-emerald-600" : "text-amber-600"}>
+            <span
+              className={
+                r.gating
+                  ? "border-pass/40 bg-pass-muted text-pass-ink rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+                  : "border-uncertain/40 bg-uncertain-muted text-uncertain-ink rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+              }
+            >
               {r.gating ? "can gate" : "reports only"}
             </span>
           </div>
@@ -1290,9 +1440,9 @@ function Stat({
       <dd
         className={`text-2xl font-semibold tabular-nums leading-none ${
           tone === "good"
-            ? "text-emerald-600"
+            ? "text-pass-ink"
             : tone === "bad"
-              ? "text-red-500"
+              ? "text-fail-ink"
               : "text-ink-primary"
         }`}
       >
