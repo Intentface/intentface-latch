@@ -125,7 +125,12 @@ function EvalsPage() {
   const [shared, setShared] = useState<Record<string, Question>>({});
   const [sharedOpen, setSharedOpen] = useState(false);
   const [audit, setAudit] = useState<
-    { judged: number; promises: { id: string; ask: string; type: string; broken: number; rate: number; examples: string[] }[] } | null
+    {
+      judged: number;
+      promises: { id: string; ask: string; type: string; broken: number; rate: number; examples: string[] }[];
+      /** The full questions, so a promise worth keeping is never retyped. */
+      questions: Record<string, Question>;
+    } | null
   >(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -172,7 +177,7 @@ function EvalsPage() {
     const res = await auditAgentFn({ data: { agent } });
     setBusy(false);
     if (!res.ok) return toast.error(res.error);
-    setAudit({ judged: res.judged, promises: res.promises });
+    setAudit({ judged: res.judged, promises: res.promises, questions: res.questions });
   };
 
   /**
@@ -377,33 +382,52 @@ function EvalsPage() {
               {audit.judged === 1 ? "" : "s"}
               {audit.judged < 10 && " — too few to conclude anything; treat these as a first look"}
             </div>
-            {audit.promises.map((pr) => (
-              <div key={pr.id} className="flex items-start gap-2 text-xs">
-                <span className={pr.broken ? "text-red-500" : "text-emerald-600"}>
-                  {pr.broken ? "✗" : "✓"}
-                </span>
-                <span className="text-ink-primary w-56 shrink-0 truncate" title={pr.ask}>
-                  {pr.id}
-                </span>
-                <span className="text-ink-tertiary w-24 shrink-0">
-                  {pr.broken}/{audit.judged} broken
-                </span>
-                <span className="text-ink-tertiary min-w-0 flex-1 truncate" title={pr.ask}>
-                  {pr.ask}
-                </span>
-                {pr.examples.slice(0, 1).map((chatId) => (
+            {/* These questions are ALREADY shared-shaped: derived from the
+                instructions, carrying no per-input ground truth, asked of every
+                conversation. So the bridge from "one click, a first number" to
+                a real suite is one more click, not retyping the question. */}
+            {audit.promises.map((pr) => {
+              const already = pr.id in shared;
+              return (
+                <div key={pr.id} className="flex items-start gap-2 text-xs">
+                  <span className={pr.broken ? "text-fail-ink" : "text-pass-ink"}>
+                    {pr.broken ? "✗" : "✓"}
+                  </span>
+                  <span className="text-ink-primary w-56 shrink-0 truncate" title={pr.ask}>
+                    {pr.id}
+                  </span>
+                  <span className="text-ink-tertiary w-24 shrink-0 tabular-nums">
+                    {pr.broken}/{audit.judged} broken
+                  </span>
+                  <span className="text-ink-tertiary min-w-0 flex-1 truncate" title={pr.ask}>
+                    {pr.ask}
+                  </span>
+                  {pr.examples.slice(0, 1).map((chatId) => (
+                    <button
+                      key={chatId}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void caseFromChat(chatId, pr.id)}
+                      className="text-ink-tertiary hover:text-ink-primary shrink-0 underline"
+                    >
+                      make a case from it
+                    </button>
+                  ))}
                   <button
-                    key={chatId}
                     type="button"
-                    disabled={busy}
-                    onClick={() => void caseFromChat(chatId, pr.id)}
-                    className="text-ink-tertiary hover:text-ink-primary shrink-0 underline"
+                    disabled={already || !audit.questions[pr.id]}
+                    onClick={() => {
+                      setShared((sh) => ({ ...sh, [pr.id]: audit.questions[pr.id]! }));
+                      setSharedOpen(true);
+                      toast.success(`"${pr.id}" added to shared checks — Save to keep it`);
+                    }}
+                    className="shrink-0 underline disabled:no-underline disabled:opacity-50"
                   >
-                    make a case from it
+                    {already ? "already shared" : "keep as shared check"}
                   </button>
-                ))}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
       </section>

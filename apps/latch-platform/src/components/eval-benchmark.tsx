@@ -31,10 +31,23 @@ interface Point {
   rate: number;
   cost: number;
   total: number;
+  /** Nothing scores as well for as little — worth considering. */
+  frontier: boolean;
+  /** The configuration that beats it on BOTH quality and cost, if one does. */
+  beatenBy?: string;
 }
 
-const pointsOf = (runs: EvalRun[]): Point[] =>
-  runs.map((run) => {
+/**
+ * Dominance, which is the verdict a two-axis benchmark exists to produce.
+ *
+ * A reader can rank a column. What they cannot do by eye is answer "is this
+ * one worth it?", and the answer is often simply no: a configuration another
+ * one beats on quality AND cost is not a tradeoff, it is a mistake, and saying
+ * so beats leaving it as an exercise. Everything not dominated is on the
+ * frontier — those are the real choices, and they are genuine tradeoffs.
+ */
+const pointsOf = (runs: EvalRun[]): Point[] => {
+  const base = runs.map((run) => {
     const total = run.passCount + run.failCount;
     return {
       run,
@@ -42,8 +55,26 @@ const pointsOf = (runs: EvalRun[]): Point[] =>
       rate: total ? run.passCount / total : 0,
       cost: run.metrics?.agentCost ?? 0,
       total,
+      frontier: false,
     };
   });
+  return base.map((p) => {
+    // Only meaningful once cost was measured; without it nothing dominates.
+    const beats =
+      p.cost > 0
+        ? base.filter(
+            (o) =>
+              o !== p &&
+              o.cost > 0 &&
+              o.rate >= p.rate &&
+              o.cost <= p.cost &&
+              (o.rate > p.rate || o.cost < p.cost),
+          )
+        : [];
+    const best = [...beats].sort((a, b) => b.rate - a.rate || a.cost - b.cost)[0];
+    return { ...p, frontier: p.cost > 0 && beats.length === 0, beatenBy: best?.label };
+  });
+};
 
 export function EvalBenchmark({ runs }: { runs: EvalRun[] }) {
   const [hovered, setHovered] = useState<string | null>(null);
@@ -105,12 +136,18 @@ function BenchTable({
         <thead>
           <tr className="border-secondary-border text-ink-tertiary border-b text-left">
             <th className="p-2 font-normal">configuration</th>
-            <th className="p-2 text-right font-normal">passed</th>
+            <th className="p-2 text-right font-normal">
+              passed <Higher />
+            </th>
             {measured && (
               <>
-                <th className="p-2 text-right font-normal">agent cost</th>
+                <th className="p-2 text-right font-normal">
+                  agent cost <Lower />
+                </th>
                 <th className="p-2 text-right font-normal">judging</th>
-                <th className="p-2 text-right font-normal">time</th>
+                <th className="p-2 text-right font-normal">
+                  time <Lower />
+                </th>
               </>
             )}
           </tr>
@@ -129,6 +166,14 @@ function BenchTable({
               >
                 <td className="text-ink-primary p-2">
                   {p.label}
+                  {p.beatenBy && (
+                    <span
+                      className="border-uncertain/50 bg-uncertain-muted text-uncertain-ink ml-2 rounded border px-1 py-px text-[9px] font-semibold uppercase tracking-wide"
+                      title={`${p.beatenBy} passed at least as many checks for no more money`}
+                    >
+                      beaten by {p.beatenBy}
+                    </span>
+                  )}
                   <span className="text-ink-tertiary ml-2">
                     {new Date(p.run.createdAt).toLocaleString(undefined, {
                       month: "short",
@@ -149,13 +194,13 @@ function BenchTable({
                     <div className="bg-secondary-bg h-2 w-24 shrink-0 overflow-hidden rounded-sm">
                       <div
                         className={`h-full rounded-sm ${
-                          p.rate >= best ? "bg-emerald-600/70" : "bg-ink-tertiary/50"
+                          p.rate >= best ? "bg-pass" : "bg-ink-tertiary/40"
                         }`}
                         style={{ width: `${Math.max(p.rate * 100, p.rate > 0 ? 2 : 0)}%` }}
                       />
                     </div>
                     <span
-                      className={`w-9 text-right ${p.rate >= best ? "text-emerald-600" : "text-ink-primary"}`}
+                      className={`w-9 text-right ${p.rate >= best ? "text-pass-ink" : "text-ink-primary"}`}
                     >
                       {pct(p.rate)}
                     </span>
@@ -169,7 +214,7 @@ function BenchTable({
                     <td className="p-2 text-right">
                       <span
                         className={
-                          p.cost > 0 && p.cost <= cheapest ? "text-emerald-600" : "text-ink-primary"
+                          p.cost > 0 && p.cost <= cheapest ? "text-pass-ink" : "text-ink-primary"
                         }
                       >
                         {p.cost > 0 ? money(p.cost) : "—"}
@@ -283,6 +328,23 @@ function TradeoffPlot({
           {money(xMax)}
         </text>
 
+        {/* The frontier: everything on it is a real choice, everything below
+            is beaten outright. Drawn once so the reader does not have to
+            recompute it per point. */}
+        {(() => {
+          const f = points.filter((p) => p.frontier).sort((a, b) => a.cost - b.cost);
+          if (f.length < 2) return null;
+          return (
+            <polyline
+              points={f.map((p) => `${x(p.cost)},${y(p.rate)}`).join(" ")}
+              fill="none"
+              className="stroke-pass"
+              strokeWidth={1.5}
+              strokeDasharray="3 2"
+            />
+          );
+        })()}
+
         {laid.map(({ p, cx, cy, ly }) => {
           const on = hovered === p.run.id;
           const flip = cx > W * 0.62;
@@ -310,7 +372,7 @@ function TradeoffPlot({
                 cx={cx}
                 cy={cy}
                 r={on ? 6 : 4.5}
-                className="fill-accent stroke-card"
+                className={p.frontier ? "fill-pass stroke-card" : "fill-card stroke-ink-tertiary"}
                 strokeWidth={2}
               />
               <text
@@ -326,8 +388,22 @@ function TradeoffPlot({
         })}
       </svg>
       <figcaption className="text-ink-tertiary px-1 pb-1 text-[10px]">
-        pass rate vs agent cost · axis fitted to the data · judging excluded, it is rounding error here
+        pass rate vs agent cost · axis fitted to the data · filled marks are on the frontier, hollow
+        ones are beaten by a cheaper, better configuration
       </figcaption>
     </figure>
   );
 }
+
+
+/** Which direction is good, said once in the header rather than per row. */
+const Higher = () => (
+  <span className="text-ink-tertiary/70 text-[9px]" title="higher is better" aria-label="higher is better">
+    ▲
+  </span>
+);
+const Lower = () => (
+  <span className="text-ink-tertiary/70 text-[9px]" title="lower is better" aria-label="lower is better">
+    ▼
+  </span>
+);
