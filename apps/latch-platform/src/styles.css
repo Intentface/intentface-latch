@@ -310,6 +310,26 @@
   --color-sidebar-border: var(--primary-border);
   --color-sidebar-accent: var(--tertiary-bg);
   --color-sidebar-accent-foreground: var(--text-primary);
+
+  /* ─── Verdict tier ───
+     A judged answer is pass, fail, or the judge was not sure. These are STATUS
+     colours and deliberately separate from the accent hue: the accent means
+     "you can interact with this", and a verdict is not an interaction. Each
+     comes as a fill (`-muted`), an ink that reads on that fill (`-ink`), and a
+     solid for marks and bars.
+
+     Never used alone. Every verdict also carries a glyph, and `uncertain` also
+     carries a hatch, so the state survives greyscale, a colourblind reader and
+     a screenshot pasted into a ticket. */
+  --color-pass: var(--pass);
+  --color-pass-muted: var(--pass-muted);
+  --color-pass-ink: var(--pass-ink);
+  --color-fail: var(--fail);
+  --color-fail-muted: var(--fail-muted);
+  --color-fail-ink: var(--fail-ink);
+  --color-uncertain: var(--uncertain);
+  --color-uncertain-muted: var(--uncertain-muted);
+  --color-uncertain-ink: var(--uncertain-ink);
 }
 
 :root {
@@ -321,6 +341,16 @@
      dark-on-accent flash before that effect runs. */
   --accent-foreground: oklch(0.985 0 0);
   --primary-foreground: oklch(0.18 0 0);
+
+  --pass: oklch(0.6 0.13 155);
+  --pass-muted: oklch(0.96 0.04 155);
+  --pass-ink: oklch(0.42 0.11 155);
+  --fail: oklch(0.58 0.21 25);
+  --fail-muted: oklch(0.96 0.035 25);
+  --fail-ink: oklch(0.47 0.2 25);
+  --uncertain: oklch(0.74 0.14 75);
+  --uncertain-muted: oklch(0.96 0.05 80);
+  --uncertain-ink: oklch(0.52 0.11 65);
 }
 
 .dark {
@@ -329,6 +359,19 @@
   /* Dark mode flips: the lighter dark-accent takes dark ink, dark surface white. */
   --accent-foreground: oklch(0.18 0 0);
   --primary-foreground: oklch(0.985 0 0);
+
+  /* Not an inversion: on a dark surface the fills have to come UP in lightness
+     to stay distinguishable from the ground, and the inks come up further to
+     stay legible on them. Each pair was picked against the dark surface. */
+  --pass: oklch(0.68 0.14 155);
+  --pass-muted: oklch(0.25 0.025 155);
+  --pass-ink: oklch(0.8 0.13 155);
+  --fail: oklch(0.65 0.2 25);
+  --fail-muted: oklch(0.26 0.04 25);
+  --fail-ink: oklch(0.78 0.15 25);
+  --uncertain: oklch(0.78 0.14 80);
+  --uncertain-muted: oklch(0.26 0.035 80);
+  --uncertain-ink: oklch(0.86 0.12 85);
 }
 
 @keyframes shimmer {
@@ -469,4 +512,29 @@
 .dark .shiki,
 .dark .shiki span {
   color: var(--shiki-dark);
+}
+
+/* ─── Verdict texture ───
+   `uncertain` and `not applicable` are states, not values, and a reader should
+   be able to tell them from a verdict without reading the colour. A diagonal
+   hatch says "this cell is not a result" in form. */
+@layer utilities {
+  .hatch-uncertain {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      var(--uncertain-muted),
+      var(--uncertain-muted) 5px,
+      transparent 5px,
+      transparent 10px
+    );
+  }
+  .hatch-neutral {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      var(--secondary-bg),
+      var(--secondary-bg) 5px,
+      transparent 5px,
+      transparent 10px
+    );
+  }
 }

@@ -14,15 +14,16 @@ import {
   saveEvalSetFn,
   connectionToolsFn,
   draftEvalCasesFn,
-  correctEvalCheckFn,
   auditAgentFn,
 } from "@/lib/server";
-import { effectiveFailed, reliabilityOf } from "@/lib/evals/reliability";
+import { reliabilityOf } from "@/lib/evals/reliability";
 import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
 import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
 import { EvalBenchmark } from "@/components/eval-benchmark";
+import { EvalResults } from "@/components/eval-results";
+import { EvalEvidence } from "@/components/eval-evidence";
 
 /**
  * EXPERIMENTAL. The per-input tier of evals, which has had no page until now.
@@ -425,6 +426,8 @@ function EvalsPage() {
           )}
           <ResultsGrid
             runs={runs}
+            cases={cases}
+            shared={shared}
             agent={agent}
             onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))}
           />
@@ -721,197 +724,58 @@ function EvalsPage() {
  * One table serves three jobs: one column is a result view, two are a
  * comparison, six are drift over time.
  */
+/**
+ * Results, plus the drawer that makes a verdict rulable.
+ *
+ * Grid and evidence are one component because the interaction is one motion:
+ * see a red mark, read the conversation that caused it, say whether the judge
+ * was right. Splitting them put the ruling buttons on a screen away from the
+ * only thing that could inform them.
+ */
 function ResultsGrid({
   runs,
+  cases,
+  shared,
   agent,
   onCorrected,
 }: {
   runs: EvalRun[];
+  cases: EvalCase[];
+  shared: Record<string, Question>;
   agent: string;
   onCorrected: (run: EvalRun) => void;
 }) {
-  // Oldest → newest, so a regression reads as a change moving rightwards.
-  const columns = [...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-6);
-  const [open, setOpen] = useState<{ run: string; caseId: string } | null>(null);
-
-  const resultFor = (run: EvalRun, caseId: string) => run.results.find((r) => r.caseId === caseId);
-
-  /** Every (case, check) pair seen in any column, plus the case-level verdict. */
-  type Row = { caseId: string; caseName?: string; checkId?: string };
-  const rows: Row[] = [];
-  for (const caseId of [...new Set(columns.flatMap((r) => r.results.map((x) => x.caseId)))]) {
-    const any = columns.map((r) => resultFor(r, caseId)).find(Boolean);
-    rows.push({ caseId, caseName: any?.caseName });
-    for (const checkId of [
-      ...new Set(
-        columns.flatMap((r) => (resultFor(r, caseId)?.checks ?? []).map((c) => c.id)),
-      ),
-    ]) {
-      rows.push({ caseId, checkId });
-    }
-  }
-
-  /** The verdict in one column: the check's, or the whole case's. */
-  const cell = (run: EvalRun, row: Row) => {
-    const res = resultFor(run, row.caseId);
-    if (!res) return undefined;
-    if (!row.checkId)
-      return { failed: !res.pass, label: res.pass ? "✓" : "✗", overruled: false, title: res.reasons.join("\n") };
-    const chk = res.checks?.find((c) => c.id === row.checkId);
-    if (!chk) return undefined;
-    // The ANSWER, not a tick: on a choice question which option was selected
-    // IS the diagnosis, and it is the same width as a tick anyway. Where a
-    // human has ruled, THAT is the verdict — otherwise a correction would be
-    // cosmetic and the grid would keep showing an answer already overruled.
-    return {
-      failed: effectiveFailed(chk),
-      label: chk.answer,
-      overruled: chk.human !== undefined && chk.human.failed !== chk.failed,
-      title: chk.human
-        ? `human says ${chk.human.failed ? "fail" : "pass"} · judge said ${chk.failed ? "fail" : "pass"} (${(chk.confidence * 100).toFixed(0)}%)`
-        : `${(chk.confidence * 100).toFixed(0)}% confident`,
-    };
-  };
-
-  const changed = (row: Row) => {
-    const seen = columns.map((r) => cell(r, row)).filter(Boolean).map((c) => c!.label);
-    return seen.length > 1 && new Set(seen).size > 1;
-  };
-
-  const detail = open ? resultFor(columns.find((c) => c.id === open.run)!, open.caseId) : undefined;
+  const [open, setOpen] = useState<{ runId: string; caseId: string; checkId: string } | null>(null);
+  const run = open ? runs.find((r) => r.id === open.runId) : undefined;
+  // Case-last, exactly as the runner merges them, so the drawer shows the
+  // question the judge was actually asked rather than the shared one it
+  // overrode.
+  const questions = open
+    ? { ...shared, ...(cases.find((c) => c.id === open.caseId)?.checks ?? {}) }
+    : {};
 
   return (
-    <div className="space-y-2">
-      <h3 className="text-ink-secondary text-[11px] font-medium uppercase tracking-wide">Every verdict</h3>
-      <div className="border-secondary-border overflow-x-auto rounded border">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-secondary-border border-b">
-              <th className="text-ink-tertiary p-2 text-left font-normal">case / check</th>
-              {columns.map((r) => (
-                <th key={r.id} className="p-2 text-left font-normal">
-                  <div className="text-ink-primary">{r.configRef ?? "live"}</div>
-                  <div className="text-ink-tertiary">
-                    {r.passCount}/{r.passCount + r.failCount} ·{" "}
-                    {new Date(r.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr
-                key={`${row.caseId}/${row.checkId ?? ""}`}
-                className="border-secondary-border border-b last:border-0"
-              >
-                <td className={row.checkId ? "text-ink-tertiary py-1 pl-6 pr-2" : "text-ink-primary p-2"}>
-                  {row.checkId ?? row.caseName ?? row.caseId}
-                  {changed(row) && (
-                    <span className="ml-1 rounded bg-amber-500/15 px-1 text-[10px] text-amber-600">
-                      changed
-                    </span>
-                  )}
-                </td>
-                {columns.map((r) => {
-                  const c = cell(r, row);
-                  return (
-                    <td key={r.id} className={row.checkId ? "py-1 px-2" : "p-2"}>
-                      {!c ? (
-                        // Absent is not failed: the case or check did not exist
-                        // when this run happened, and must not look like a loss.
-                        <span className="text-ink-tertiary">·</span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setOpen({ run: r.id, caseId: row.caseId })}
-                          className={`${c.failed ? "text-red-500" : "text-emerald-600"} ${c.overruled ? "underline decoration-dotted" : ""}`}
-                          title={c.title || "passed"}
-                        >
-                          {c.label}
-                        </button>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <div className="space-y-3">
+      <EvalResults
+        runs={runs}
+        cases={cases}
+        shared={shared}
+        onOpenEvidence={(caseId, checkId, runId) => setOpen({ runId, caseId, checkId })}
+      />
 
       <Reliability runs={runs} />
 
-      {detail && (
-        <div className="border-secondary-border space-y-2 rounded border p-3 text-xs">
-          <div className="flex items-center justify-between">
-            <span className="text-ink-primary font-medium">{detail.caseName || detail.caseId}</span>
-            <button type="button" onClick={() => setOpen(null)} className="text-ink-tertiary">
-              close
-            </button>
-          </div>
-          {detail.reasons.length > 0 && (
-            <ul className="list-disc space-y-0.5 pl-4 text-red-500">
-              {detail.reasons.map((r, i) => (
-                <li key={i}>{r}</li>
-              ))}
-            </ul>
-          )}
-          {/* Ruling on a verdict is the only way to learn whether this question
-              is one you may ever gate a release on, so it is one click from
-              the failure itself rather than a separate review screen. */}
-          {detail.checks?.length ? (
-            <div className="space-y-1">
-              {detail.checks.map((c) => (
-                <div key={c.id} className="flex items-center gap-2">
-                  <span className={effectiveFailed(c) ? "text-red-500" : "text-emerald-600"}>
-                    {effectiveFailed(c) ? "✗" : "✓"}
-                  </span>
-                  <span className="text-ink-primary">{c.id}</span>
-                  <span className="text-ink-tertiary">
-                    {c.answer} ({(c.confidence * 100).toFixed(0)}%)
-                  </span>
-                  {c.human && (
-                    <span className="text-amber-600">
-                      {c.human.failed === c.failed ? "confirmed" : "corrected"}
-                    </span>
-                  )}
-                  <span className="flex-1" />
-                  <span className="text-ink-tertiary">judge right?</span>
-                  {([false, true] as const).map((failed) => (
-                    <button
-                      key={String(failed)}
-                      type="button"
-                      onClick={async () => {
-                        const res = await correctEvalCheckFn({
-                          data: { agent, runId: open!.run, caseId: detail.caseId, checkId: c.id, failed },
-                        });
-                        if (!res.ok) return toast.error(res.error);
-                        onCorrected(res.run as EvalRun);
-                      }}
-                      className={`rounded border px-1 ${
-                        c.human?.failed === failed
-                          ? "border-amber-500 text-amber-600"
-                          : "border-secondary-border text-ink-tertiary hover:text-ink-primary"
-                      }`}
-                    >
-                      {failed ? "should fail" : "should pass"}
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          {detail.toolCalls.length > 0 && (
-            <div className="text-ink-tertiary">
-              tools: {detail.toolCalls.map((t) => t.tool).join(", ")}
-            </div>
-          )}
-          {detail.answerPreview && (
-            <p className="text-ink-tertiary whitespace-pre-wrap">{detail.answerPreview}</p>
-          )}
-        </div>
+      {open && run && (
+        <EvalEvidence
+          run={run}
+          caseId={open.caseId}
+          checkId={open.checkId}
+          questions={questions}
+          agent={agent}
+          onFocusCheck={(checkId) => setOpen((o) => (o ? { ...o, checkId } : o))}
+          onCorrected={onCorrected}
+          onClose={() => setOpen(null)}
+        />
       )}
     </div>
   );
