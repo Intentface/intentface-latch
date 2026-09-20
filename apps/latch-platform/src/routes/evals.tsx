@@ -247,27 +247,31 @@ function EvalsPage() {
     toast.success("Deleted");
   };
 
+  const latest = [...runs].sort((a, b) => b.createdAt - a.createdAt)[0];
+  const latestTotal = latest ? latest.passCount + latest.failCount : 0;
+  const checksPerRun =
+    Object.keys(shared).length * cases.length +
+    cases.reduce((n, c) => n + Object.keys(c.checks ?? {}).length, 0);
+  const since = (t: number) => {
+    const m = Math.round((Date.now() - t) / 60000);
+    if (m < 60) return `${m}m ago`;
+    if (m < 1440) return `${Math.round(m / 60)}h ago`;
+    return `${Math.round(m / 1440)}d ago`;
+  };
+
   return (
-    <div className="mx-auto max-w-5xl space-y-4 p-6">
-      <div className="flex items-center gap-2">
-        <FlaskConical className="size-5" />
-        <h1 className="text-lg font-semibold">Evals</h1>
-        <span className="text-ink-tertiary text-xs">experimental</span>
-      </div>
-
-      <p className="text-ink-tertiary max-w-2xl text-sm">
-        A case is one input plus what should happen for <em>that</em> input — which documents it
-        should open, which tools it must not call. Runs are pinned to a configuration and never
-        make it live.
-      </p>
-
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="text-ink-tertiary text-xs">
-          Agent
+    <div className="mx-auto max-w-6xl space-y-8 p-6 pb-24">
+      {/* The page's subject is the AGENT, so it belongs in the title rather
+          than in a label three controls along. */}
+      <header className="space-y-4">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <FlaskConical className="text-ink-tertiary size-5" />
+          <h1 className="text-ink-primary text-2xl font-semibold tracking-tight">Evals</h1>
           <select
             value={agent}
             onChange={(e) => setAgent(e.target.value)}
-            className="border-secondary-border text-ink-primary ml-2 rounded border bg-transparent px-2 py-1 text-xs"
+            aria-label="Agent"
+            className="border-secondary-border text-ink-primary rounded-md border bg-transparent px-2 py-1 text-sm"
           >
             {editable.map((a) => (
               <option key={a.name} value={a.name}>
@@ -275,90 +279,123 @@ function EvalsPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="text-ink-tertiary text-xs">
-          Set
-          <input
-            value={setName}
-            onChange={(e) => setSetName(e.target.value)}
-            className="border-secondary-border text-ink-primary ml-2 rounded border bg-transparent px-2 py-1 text-xs"
-          />
-        </label>
-        <label className="text-ink-tertiary text-xs">
-          Run against
-          <select
-            value={pin}
-            onChange={(e) => setPin(e.target.value)}
-            className="border-secondary-border text-ink-primary ml-2 rounded border bg-transparent px-2 py-1 text-xs"
-          >
-            <option value="live">live</option>
-            <option value="draft">draft</option>
-            {versions.map((v) => (
-              <option key={v.version} value={String(v.version)}>
-                v{v.version}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Button onClick={run} disabled={busy || !cases.length} className="gap-1">
-          <Play className="size-3.5" />
-          Run
-        </Button>
-        <Button variant="secondary" onClick={save} disabled={busy}>
-          Save
-        </Button>
-        <Button variant="ghost" onClick={remove} disabled={busy || !cases.length}>
-          <Trash2 className="size-3.5" />
-        </Button>
-      </div>
-
-      {/* FIRST, and before anything is authored: the agent's instructions already
-          list what it promises, and its conversations are already stored. So
-          the first number costs a few cents and no decision to start. Asking
-          someone to write a suite before they have seen one is how eval tooling
-          goes unused. */}
-      <div className="border-secondary-border space-y-2 rounded border p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={runAudit} disabled={busy || !agent} className="gap-1">
-            <Sparkles className="size-3.5" />
-            What does this agent promise?
-          </Button>
-          <span className="text-ink-tertiary text-xs">
-            Reads its instructions, asks those questions of conversations it already had. No setup,
-            nothing re-run.
+          <span className="text-ink-tertiary rounded border border-dashed px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+            experimental
           </span>
+
+          <span className="flex-1" />
+
+          <label className="text-ink-tertiary flex items-center gap-1.5 text-xs">
+            set
+            <input
+              value={setName}
+              onChange={(e) => setSetName(e.target.value)}
+              className="border-secondary-border text-ink-primary w-28 rounded-md border bg-transparent px-2 py-1"
+            />
+          </label>
+          <label className="text-ink-tertiary flex items-center gap-1.5 text-xs">
+            against
+            <select
+              value={pin}
+              onChange={(e) => setPin(e.target.value)}
+              className="border-secondary-border text-ink-primary rounded-md border bg-transparent px-2 py-1"
+            >
+              <option value="live">live</option>
+              <option value="draft">draft</option>
+              {versions.map((v) => (
+                <option key={v.version} value={String(v.version)}>
+                  v{v.version}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button onClick={run} disabled={busy || !cases.length} size="sm" className="gap-1">
+            <Play className="size-3.5" />
+            Run
+          </Button>
+          <Button variant="secondary" size="sm" onClick={save} disabled={busy}>
+            Save
+          </Button>
+          <button
+            type="button"
+            aria-label="Delete set"
+            onClick={remove}
+            disabled={busy || !cases.length}
+            className="text-ink-tertiary hover:text-ink-primary disabled:opacity-40"
+          >
+            <Trash2 className="size-4" />
+          </button>
         </div>
 
+        {/* The headline facts, at a size that admits they are the headline. A
+            rate without its denominator is the easiest number to misread here:
+            100% of three cases is not a claim about an agent. */}
+        <dl className="grid grid-cols-2 gap-x-8 gap-y-4 sm:grid-cols-4">
+          <Stat
+            label="last run passed"
+            value={latest && latestTotal ? `${Math.round((latest.passCount / latestTotal) * 100)}%` : "—"}
+            sub={latest ? `${latest.passCount} of ${latestTotal} cases · ${latest.configRef ?? "live"}` : "never run"}
+            tone={latest && latest.failCount > 0 ? "bad" : latest ? "good" : "muted"}
+          />
+          <Stat
+            label="cases"
+            value={String(cases.length)}
+            sub={`${Object.keys(shared).length} shared check${Object.keys(shared).length === 1 ? "" : "s"}`}
+          />
+          <Stat
+            label="verdicts per run"
+            value={String(checksPerRun)}
+            sub={checksPerRun === 0 ? "add a check" : "judged questions"}
+          />
+          <Stat
+            label="last run"
+            value={latest ? since(latest.createdAt) : "—"}
+            sub={
+              latest?.metrics
+                ? `${(latest.metrics.agentCost * 100).toFixed(1)}¢ · ${(latest.metrics.durationMs / 1000).toFixed(0)}s`
+                : "cost recorded from the next run"
+            }
+          />
+        </dl>
+      </header>
+
+      <section className="border-secondary-border flex flex-wrap items-center gap-3 rounded-lg border p-4">
+        <Button onClick={runAudit} disabled={busy || !agent} className="gap-1.5">
+          <Sparkles className="size-3.5" />
+          What does this agent promise?
+        </Button>
+        <p className="text-ink-tertiary max-w-md text-xs">
+          Reads its instructions, asks those questions of conversations it already had. No setup,
+          nothing re-run.
+        </p>
+
         {audit && (
-          <div className="space-y-1 pt-1">
+          <div className="w-full space-y-1 pt-2">
             <div className="text-ink-tertiary text-xs">
               {audit.promises.length} promises, checked against {audit.judged} stored conversation
               {audit.judged === 1 ? "" : "s"}
               {audit.judged < 10 && " — too few to conclude anything; treat these as a first look"}
             </div>
-            {audit.promises.map((p) => (
-              <div key={p.id} className="flex items-start gap-2 text-xs">
-                <span className={p.broken ? "text-red-500" : "text-emerald-600"}>
-                  {p.broken ? "✗" : "✓"}
+            {audit.promises.map((pr) => (
+              <div key={pr.id} className="flex items-start gap-2 text-xs">
+                <span className={pr.broken ? "text-red-500" : "text-emerald-600"}>
+                  {pr.broken ? "✗" : "✓"}
                 </span>
-                <span className="text-ink-primary w-56 shrink-0 truncate" title={p.ask}>
-                  {p.id}
+                <span className="text-ink-primary w-56 shrink-0 truncate" title={pr.ask}>
+                  {pr.id}
                 </span>
                 <span className="text-ink-tertiary w-24 shrink-0">
-                  {p.broken}/{audit.judged} broken
+                  {pr.broken}/{audit.judged} broken
                 </span>
-                <span className="text-ink-tertiary min-w-0 flex-1 truncate" title={p.ask}>
-                  {p.ask}
+                <span className="text-ink-tertiary min-w-0 flex-1 truncate" title={pr.ask}>
+                  {pr.ask}
                 </span>
-                {/* One click from "this promise broke" to a case that guards
-                    it. Without this the next step is retyping an input you
-                    already have. */}
-                {p.examples.slice(0, 1).map((chatId) => (
+                {pr.examples.slice(0, 1).map((chatId) => (
                   <button
                     key={chatId}
                     type="button"
                     disabled={busy}
-                    onClick={() => void caseFromChat(chatId, p.id)}
+                    onClick={() => void caseFromChat(chatId, pr.id)}
                     className="text-ink-tertiary hover:text-ink-primary shrink-0 underline"
                   >
                     make a case from it
@@ -368,18 +405,39 @@ function EvalsPage() {
             ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {runs.length > 0 && <EvalBenchmark runs={runs} />}
-      {runs.length > 1 && (
-        <CompareStrip
-          base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
-          head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
-          sharedIds={Object.keys(shared)}
-        />
+      {/* READING results and AUTHORING the suite are two different sittings,
+          so they are two sections rather than six boxes of equal weight. */}
+      {runs.length > 0 && (
+        <section className="space-y-5">
+          <SectionHead
+            title="Results"
+            sub="What each configuration scored, what it cost, and which questions moved."
+          />
+          <EvalBenchmark runs={runs} />
+          {runs.length > 1 && (
+            <CompareStrip
+              base={[...runs].sort((a, b) => a.createdAt - b.createdAt)[0]!}
+              head={[...runs].sort((a, b) => a.createdAt - b.createdAt).slice(-1)[0]!}
+              sharedIds={Object.keys(shared)}
+            />
+          )}
+          <ResultsGrid
+            runs={runs}
+            agent={agent}
+            onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))}
+          />
+        </section>
       )}
 
-      <div className="border-secondary-border space-y-2 rounded border border-dashed p-3">
+      <section className="space-y-4">
+        <SectionHead
+          title="The suite"
+          sub="Questions asked of every case, then the inputs to send. Most questions belong to the set, not to one input — that is what makes a comparison able to resolve anything."
+        />
+
+      <div className="bg-secondary-bg/40 space-y-2 rounded-lg p-4">
         <label className="text-ink-tertiary block text-xs">
           Describe what to test — the agent writes the cases, grounded in its real tools
           <textarea
@@ -537,8 +595,10 @@ function EvalsPage() {
                         {c.name || c.input.slice(0, 60)}
                       </span>
                       <span className="text-ink-tertiary shrink-0 text-xs">
-                        {turns} turn{turns === 1 ? "" : "s"} · {checkCount} check
-                        {checkCount === 1 ? "" : "s"}
+                        {turns} turn{turns === 1 ? "" : "s"} ·{" "}
+                        {checkCount + Object.keys(shared).length} check
+                        {checkCount + Object.keys(shared).length === 1 ? "" : "s"}
+                        {Object.keys(shared).length ? ` (${Object.keys(shared).length} shared)` : ""}
                         {exact ? ` · ${exact} exact` : ""}
                       </span>
                     </button>
@@ -640,8 +700,7 @@ function EvalsPage() {
           </div>
         </div>
       )}
-
-      {runs.length > 0 && <ResultsGrid runs={runs} agent={agent} onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))} />}
+      </section>
     </div>
   );
 }
@@ -723,7 +782,7 @@ function ResultsGrid({
 
   return (
     <div className="space-y-2">
-      <h2 className="text-sm font-medium">Results</h2>
+      <h3 className="text-ink-secondary text-[11px] font-medium uppercase tracking-wide">Every verdict</h3>
       <div className="border-secondary-border overflow-x-auto rounded border">
         <table className="w-full text-xs">
           <thead>
@@ -957,9 +1016,9 @@ function CompareStrip({
 
   return (
     <div className="space-y-2">
-      <h2 className="text-sm font-medium">
+      <h3 className="text-ink-secondary text-[11px] font-medium uppercase tracking-wide">
         {base.configRef ?? "live"} → {head.configRef ?? "live"}
-      </h2>
+      </h3>
       <div className="border-secondary-border space-y-1 rounded border p-3 text-xs">
         <div className="flex items-center gap-3">
           <span className="w-44 font-medium">overall failure rate</span>
@@ -1314,6 +1373,54 @@ function Reliability({ runs }: { runs: EvalRun[] }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * One headline figure.
+ *
+ * A rate belongs next to its denominator, always. "100%" at the size these are
+ * drawn is a claim about an agent; "100% — 3 of 3 cases" is a claim about three
+ * conversations, which is the true one. The sub-line is not optional detail, it
+ * is what keeps the big number from lying.
+ */
+function Stat({
+  label,
+  value,
+  sub,
+  tone = "muted",
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  tone?: "good" | "bad" | "muted";
+}) {
+  return (
+    <div className="space-y-0.5">
+      <dt className="text-ink-tertiary text-[11px] uppercase tracking-wide">{label}</dt>
+      <dd
+        className={`text-2xl font-semibold tabular-nums leading-none ${
+          tone === "good"
+            ? "text-emerald-600"
+            : tone === "bad"
+              ? "text-red-500"
+              : "text-ink-primary"
+        }`}
+      >
+        {value}
+      </dd>
+      <dd className="text-ink-tertiary text-xs">{sub}</dd>
+    </div>
+  );
+}
+
+/** A section's name and its one-line reason for existing. */
+function SectionHead({ title, sub }: { title: string; sub: string }) {
+  return (
+    <div className="border-secondary-border space-y-1 border-b pb-2">
+      <h2 className="text-ink-primary text-base font-medium">{title}</h2>
+      <p className="text-ink-tertiary max-w-2xl text-xs">{sub}</p>
     </div>
   );
 }

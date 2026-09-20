@@ -61,7 +61,7 @@ export function EvalBenchmark({ runs }: { runs: EvalRun[] }) {
   return (
     <section className="space-y-3">
       <div className="flex items-baseline gap-2">
-        <h2 className="text-ink-primary text-sm font-medium">Configurations</h2>
+        <h3 className="text-ink-secondary text-[11px] font-medium uppercase tracking-wide">Configurations</h3>
         <span className="text-ink-tertiary text-xs">
           what each one scored, and what it cost to find out
         </span>
@@ -100,7 +100,7 @@ function BenchTable({
   onHover: (id: string | null) => void;
 }) {
   return (
-    <div className="border-secondary-border overflow-x-auto rounded border">
+    <div className={`border-secondary-border overflow-x-auto rounded border ${measured ? "" : "max-w-2xl"}`}>
       <table className="w-full text-xs tabular-nums">
         <thead>
           <tr className="border-secondary-border text-ink-tertiary border-b text-left">
@@ -138,15 +138,31 @@ function BenchTable({
                     })}
                   </span>
                 </td>
-                <td className="p-2 text-right">
-                  {/* Rate and count together: 100% of three cases and 91% of a
-                      hundred are not the same claim. */}
-                  <span className={p.rate >= best ? "text-emerald-600" : "text-ink-primary"}>
-                    {pct(p.rate)}
-                  </span>
-                  <span className="text-ink-tertiary ml-1">
-                    {p.run.passCount}/{p.total}
-                  </span>
+                <td className="p-2">
+                  {/* A bar, because the column's job is comparison and a
+                      column of percentages makes the eye do arithmetic. It
+                      runs from zero — this is a rate, and a fitted axis on a
+                      bar is the lie the scatter is allowed to avoid.
+                      Rate and count stay together: 100% of three cases and
+                      91% of a hundred are not the same claim. */}
+                  <div className="flex items-center justify-end gap-2">
+                    <div className="bg-secondary-bg h-2 w-24 shrink-0 overflow-hidden rounded-sm">
+                      <div
+                        className={`h-full rounded-sm ${
+                          p.rate >= best ? "bg-emerald-600/70" : "bg-ink-tertiary/50"
+                        }`}
+                        style={{ width: `${Math.max(p.rate * 100, p.rate > 0 ? 2 : 0)}%` }}
+                      />
+                    </div>
+                    <span
+                      className={`w-9 text-right ${p.rate >= best ? "text-emerald-600" : "text-ink-primary"}`}
+                    >
+                      {pct(p.rate)}
+                    </span>
+                    <span className="text-ink-tertiary w-10 text-right">
+                      {p.run.passCount}/{p.total}
+                    </span>
+                  </div>
                 </td>
                 {measured && (
                   <>
