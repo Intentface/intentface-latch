@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight, FlaskConical, Play, Plus, Sparkles, Trash2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  FlaskConical,
+  Loader2,
+  Play,
+  Plus,
+  Sparkles,
+  Trash2,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   currentPrincipalFn,
@@ -10,20 +21,19 @@ import {
   listAgentVersionsFn,
   listEvalRunsFn,
   listEvalSetsFn,
-  runEvalSetFn,
   saveEvalSetFn,
   connectionToolsFn,
   draftEvalCasesFn,
   auditAgentFn,
 } from "@/lib/server";
 import { MIN_AGREEMENT, MIN_LABELS, reliabilityOf } from "@/lib/evals/reliability";
-import type { EvalCase, EvalRun, JsonValue } from "@/lib/evals/store";
+import type { EvalCase, EvalCaseResult, EvalRun, JsonValue } from "@/lib/evals/store";
 import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
 import { EvalBenchmark } from "@/components/eval-benchmark";
 import { EvalResults } from "@/components/eval-results";
-import { PanelHeader } from "@/components/eval-primitives";
+import { ConfigBadge, PanelHeader } from "@/components/eval-primitives";
 import { EvalEvidence } from "@/components/eval-evidence";
 
 /**
@@ -136,6 +146,12 @@ function EvalsPage() {
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [lens, setLens] = useState<Lens>("results");
+  const [live, setLive] = useState<LiveRun | null>(null);
+  // Separate from `busy` so each slow action can say what IT is doing: these
+  // take tens of seconds and one shared flag greys out the whole page without
+  // explaining which part is working.
+  const [auditing, setAuditing] = useState(false);
+  const [drafting, setDrafting] = useState(false);
   const [focusCase, setFocusCase] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -176,9 +192,12 @@ function EvalsPage() {
   const forbidHint = tools.length > 1 ? tools[1]! : "tool_name";
 
   const runAudit = async () => {
-    setBusy(true);
-    const res = await auditAgentFn({ data: { agent } });
-    setBusy(false);
+    setAuditing(true);
+    const res = await auditAgentFn({ data: { agent } }).catch((e: unknown) => ({
+      ok: false as const,
+      error: e instanceof Error ? e.message : String(e),
+    }));
+    setAuditing(false);
     if (!res.ok) return toast.error(res.error);
     setAudit({ judged: res.judged, promises: res.promises, questions: res.questions });
   };
@@ -210,9 +229,12 @@ function EvalsPage() {
   };
 
   const generate = async () => {
-    setBusy(true);
-    const res = await draftEvalCasesFn({ data: { agent, brief } });
-    setBusy(false);
+    setDrafting(true);
+    const res = await draftEvalCasesFn({ data: { agent, brief } }).catch((e: unknown) => ({
+      ok: false as const,
+      error: e instanceof Error ? e.message : String(e),
+    }));
+    setDrafting(false);
     if (!res.ok) return toast.error(res.error);
     // Drafts land UNSAVED, appended: reviewing and cutting is the job.
     setCases((cs) => [...cs, ...res.cases]);
@@ -238,14 +260,59 @@ function EvalsPage() {
     toast.success(`Saved ${cases.length} case${cases.length === 1 ? "" : "s"}`);
   };
 
+  /**
+   * Run the set, showing each case as it lands.
+   *
+   * A set of three cases on a real model is the better part of a minute, and a
+   * greyed-out button for a minute cannot say whether the run is working,
+   * wedged, or nearly done. Worse, the first case's verdict — usually the one
+   * someone is waiting for — was held back until the last case also finished.
+   * The stream is NDJSON from /api/evals/run; the run row is still written
+   * server-side at the end, so a closed tab costs the live view and nothing
+   * more.
+   */
   const run = async () => {
     setBusy(true);
     const version = pin === "live" ? undefined : pin === "draft" ? ("draft" as const) : Number(pin);
-    const res = await runEvalSetFn({ data: { agent, name: setName, version } });
-    setBusy(false);
-    if (!res.ok) return toast.error(res.error);
-    toast.success(`${res.ref}: ${res.run.passCount} passed, ${res.run.failCount} failed`);
-    setRuns((r) => [res.run as EvalRun, ...r]);
+    setLive({ label: pin === "live" ? "live" : pin === "draft" ? "draft" : `@${pin}`, pending: [], done: [] });
+    try {
+      const res = await fetch("/api/evals/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent, name: setName, version }),
+      });
+      if (!res.ok || !res.body) throw new Error(`run failed (${res.status})`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // A chunk boundary can land mid-line, so only whole lines are parsed
+        // and the remainder waits for the next read.
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const ev = JSON.parse(line) as LiveEvent;
+          if (ev.type === "start") setLive((l) => (l ? { ...l, pending: ev.cases } : l));
+          else if (ev.type === "case")
+            setLive((l) => (l ? { ...l, done: [...l.done, ev.result] } : l));
+          else if (ev.type === "error") throw new Error(ev.error);
+          else if (ev.type === "done") {
+            toast.success(`${ev.ref}: ${ev.run.passCount} passed, ${ev.run.failCount} failed`);
+            setRuns((r) => [ev.run, ...r]);
+          }
+        }
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+      setLive(null);
+    }
   };
 
   const remove = async () => {
@@ -340,6 +407,19 @@ function EvalsPage() {
             rate without its denominator is the easiest number to misread here:
             100% of three cases is not a claim about an agent. */}
         <dl className="grid grid-cols-2 gap-x-8 gap-y-4 sm:grid-cols-4">
+          {!loaded ? (
+            // "0 cases" and "—" are CLAIMS about the agent, and both are wrong
+            // before the fetch lands. A placeholder says "not yet", which is
+            // the only true thing at this point.
+            [0, 1, 2, 3].map((i) => (
+              <div key={i} className="space-y-2">
+                <Skeleton className="h-2.5 w-20" />
+                <Skeleton className="h-6 w-16" />
+                <Skeleton className="h-2.5 w-24" />
+              </div>
+            ))
+          ) : (
+          <>
           <Stat
             label="last run passed"
             value={latest && latestTotal ? `${Math.round((latest.passCount / latestTotal) * 100)}%` : "—"}
@@ -365,17 +445,24 @@ function EvalsPage() {
                 : "cost recorded from the next run"
             }
           />
+          </>
+          )}
         </dl>
       </header>
 
       <section className="border-secondary-border flex flex-wrap items-center gap-3 rounded-lg border p-4">
-        <Button onClick={runAudit} disabled={busy || !agent} className="gap-1.5">
-          <Sparkles className="size-3.5" />
+        <Button onClick={runAudit} disabled={auditing || busy || !agent} className="gap-1.5">
+          {auditing ? (
+            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Sparkles className="size-3.5" />
+          )}
           What does this agent promise?
         </Button>
         <p className="text-ink-tertiary max-w-md text-xs">
-          Reads its instructions, asks those questions of conversations it already had. No setup,
-          nothing re-run.
+          {auditing
+            ? "Reading its instructions for promises, then asking each one of the conversations it already had. Half a minute or so."
+            : "Reads its instructions, asks those questions of conversations it already had. No setup, nothing re-run."}
         </p>
 
         {audit && (
@@ -435,11 +522,25 @@ function EvalsPage() {
         )}
       </section>
 
+      {live && <LivePanel live={live} />}
+
+      {!loaded && (
+        <section className="border-secondary-border space-y-3 rounded-xl border p-4">
+          <div className="flex items-center justify-between">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-7 w-64" />
+          </div>
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </section>
+      )}
+
       {/* One panel, three lenses. Results / comparison / grader trust are three
           questions asked at different moments — "is it working", "did my change
           break it", "can I believe this red mark" — and stacking all three made
           the page long enough that the third was never reached. */}
-      {runs.length > 0 && (
+      {loaded && runs.length > 0 && (
         <section className="border-secondary-border overflow-hidden rounded-xl border">
           <PanelHeader
             title="Analysis"
@@ -538,19 +639,39 @@ function EvalsPage() {
           />
         </label>
         <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={generate} disabled={busy || !agent} className="gap-1">
-            <Sparkles className="size-3.5" />
-            Generate cases
+          <Button
+            variant="secondary"
+            onClick={generate}
+            disabled={drafting || busy || !agent}
+            className="gap-1"
+          >
+            {drafting ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Sparkles className="size-3.5" />
+            )}
+            {drafting ? "Writing cases…" : "Generate cases"}
           </Button>
           <span className="text-ink-tertiary text-xs">
-            {tools.length
-              ? `${tools.length} tool${tools.length === 1 ? "" : "s"} available to this agent`
-              : "this agent has no tools"}
+            {drafting
+              ? "Grounding them in this agent's real prompt and tool names — a generic case is worse than none."
+              : !loaded
+                ? "Reading this agent's tools…"
+                : tools.length
+                  ? `${tools.length} tool${tools.length === 1 ? "" : "s"} available to this agent`
+                  : "this agent has no tools"}
           </span>
         </div>
       </div>
 
-      {!loaded && <p className="text-ink-tertiary text-sm">Loading…</p>}
+      {!loaded && (
+        <div className="space-y-2">
+          <Skeleton className="h-9 w-full" />
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      )}
 
       {loaded && (
         <div className="space-y-2">
@@ -811,6 +932,106 @@ function EvalsPage() {
  * comparison, six are drift over time.
  */
 type Lens = "results" | "compare" | "trust";
+
+/** One line of the run stream. */
+type LiveEvent =
+  | { type: "start"; cases: { id: string; name: string }[] }
+  | { type: "case"; result: EvalCaseResult; done: number; total: number }
+  | { type: "done"; run: EvalRun; ref: string }
+  | { type: "error"; error: string };
+
+interface LiveRun {
+  /** Which configuration is being measured — the same label the run will keep. */
+  label: string;
+  pending: { id: string; name: string }[];
+  done: EvalCaseResult[];
+}
+
+/**
+ * A run in progress.
+ *
+ * Cases finish out of order and at wildly different speeds, so a percentage
+ * bar would be a lie dressed as precision. What a reader actually wants is
+ * which case is still out and what the finished ones said — a failure is worth
+ * knowing about immediately, not after the other four have also run.
+ *
+ * Deliberately not a skeleton of the results table: this is a different view of
+ * different information, and pretending the final layout is "loading" would
+ * promise a shape that only arrives once every case is in.
+ */
+function LivePanel({ live }: { live: LiveRun }) {
+  const byId = new Map(live.done.map((r) => [r.caseId, r]));
+  const rows = live.pending.length
+    ? live.pending
+    : live.done.map((r) => ({ id: r.caseId, name: r.caseName }));
+  const done = live.done.length;
+  const total = rows.length || 1;
+
+  return (
+    <section className="border-secondary-border overflow-hidden rounded-xl border">
+      <div className="border-secondary-border flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
+        <Loader2 className="text-ink-tertiary size-3.5 animate-spin" aria-hidden />
+        <h2 className="text-ink-primary text-sm font-semibold">Running</h2>
+        <ConfigBadge label={live.label} />
+        <span className="text-ink-tertiary text-xs tabular-nums">
+          {done} of {rows.length || "…"} cases
+        </span>
+        <span className="flex-1" />
+        <span className="text-ink-tertiary text-[11px]">
+          each case is a real agent run — this costs money and takes about as long as a chat
+        </span>
+      </div>
+      {/* One track, filled by case, so the unit of progress is the unit of
+          work rather than an invented percentage. */}
+      <div className="bg-secondary-bg h-1">
+        <div
+          className="bg-accent h-full transition-[width] duration-500"
+          style={{ width: `${(done / total) * 100}%` }}
+        />
+      </div>
+      <div className="divide-secondary-border divide-y">
+        {rows.map((c) => {
+          const r = byId.get(c.id);
+          return (
+            <div key={c.id} className="flex items-center gap-2 px-4 py-2 text-xs">
+              {r ? (
+                <span className={r.pass ? "text-pass-ink" : "text-fail-ink"}>
+                  {r.pass ? <Check className="size-3.5" /> : <X className="size-3.5" />}
+                </span>
+              ) : (
+                <Loader2 className="text-ink-tertiary size-3.5 animate-spin" aria-hidden />
+              )}
+              <span className={r ? "text-ink-primary" : "text-ink-tertiary"}>{c.id}</span>
+              <span className="text-ink-tertiary min-w-0 flex-1 truncate">{c.name}</span>
+              {r && (
+                <span className="text-ink-tertiary shrink-0">
+                  {r.checks?.length
+                    ? `${r.checks.filter((k) => !k.failed).length}/${r.checks.length} checks`
+                    : r.reasons[0] || ""}
+                </span>
+              )}
+            </div>
+          );
+        })}
+        {rows.length === 0 && (
+          <div className="text-ink-tertiary px-4 py-3 text-xs">Resolving the configuration…</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * A placeholder shaped like the thing that is coming, never a spinner alone.
+ *
+ * `secondary-bg` was the obvious token and is invisible here: on this theme it
+ * sits a hair off the page ground, so the placeholders rendered as nothing and
+ * the page looked broken rather than loading. `quaternary-bg` is the first
+ * surface that actually reads against it.
+ */
+function Skeleton({ className }: { className?: string }) {
+  return <div className={`bg-quaternary-bg animate-pulse rounded ${className ?? ""}`} />;
+}
 
 /**
  * What each lens is for, said in the words of the question someone arrived

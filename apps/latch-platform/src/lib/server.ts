@@ -32,10 +32,10 @@ import { normalizeAgentName, evalOwnerKeysOf, evalOwnerOfRecord, rubricsOf } fro
 import type { AttachedEval } from "./agent-store";
 import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
-import { runEvalCases } from "./evals/run";
-import type { EvalCase, JsonValue } from "./evals/store";
-import { EXPLAIN_MODEL_ID, JUDGE_MODEL_ID } from "./evals/judge";
+import type { EvalCase } from "./evals/store";
+import { JUDGE_MODEL_ID } from "./evals/judge";
 import { judgeModel } from "./evals/judge-model";
+import { runEvalSet } from "./evals/run-set";
 import { askOfTrace } from "./evals/ask";
 import { agents as codeAgents } from "@/agents";
 import { transcriptOf } from "@/agents/eval-author";
@@ -2422,84 +2422,10 @@ export const runEvalSetFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    const { runtime, agentStore, evalStore, modelFor } = await getLatch();
-    const agentName = normalizeAgentName(data.agent);
-    const rec = await agentStore.getRecord(principal, agentName);
-    if (!rec) return { ok: false as const, error: `No editable agent "${agentName}".` };
-
-    const owner = evalOwnerOfRecord(principal, rec);
-    const set = await evalStore.getSet(owner, agentName, data.name);
-    if (!set?.cases.length) return { ok: false as const, error: `Eval set "${data.name}" is empty.` };
-
-    const ref = data.version === undefined ? agentName : `${agentName}@${data.version}`;
-    // What the column SAYS. The bare agent name is what the resolver needs and
-    // useless as a label: five runs of the live config all read "hn-digest"
-    // and nothing distinguishes them.
-    const label = data.version === undefined ? "live" : `@${data.version}`;
-    // Snapshot what ACTUALLY ran, not what is live: a run compared later is
-    // only interpretable next to the configuration that produced it.
-    const snapshot =
-      typeof data.version === "number"
-        ? ((await agentStore.getVersion(principal, agentName, rec.scope ?? "user", data.version)) ?? null)
-        : data.version === "draft"
-          ? ((await agentStore.getDraft(principal, agentName, rec.scope ?? "user"))?.record ?? null)
-          : rec;
-    if (!snapshot) return { ok: false as const, error: `No configuration "${ref}".` };
-
-    const startedAt = Date.now();
-    const judgeUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
-    const needsJudge = set.cases.some((c) => c.expected.rubric?.length);
-    const needsChecks =
-      Object.keys(set.checks ?? {}).length > 0 ||
-      set.cases.some((c) => c.checks && Object.keys(c.checks).length > 0);
-    const results = await runEvalCases({
-      runtime,
-      principal,
-      agent: ref,
-      cases: set.cases,
-      // The case tier's plain-language criteria still use a TEXT judge: it
-      // returns a reason per criterion, which the results card shows.
-      ...(needsJudge ? { judgeModel: modelFor(EXPLAIN_MODEL_ID) } : {}),
-      // A case's typed `checks` go to the same evaluation judge that answers
-      // questions about live traffic — one judge, one vocabulary.
-      ...(needsChecks ? { judge: judgeModel(JUDGE_MODEL_ID), sharedChecks: set.checks } : {}),
-      onJudgeUsage: (u) => {
-        judgeUsage.calls += u.calls;
-        judgeUsage.inputTokens += u.inputTokens;
-        judgeUsage.outputTokens += u.outputTokens;
-      },
-    });
-
-    // What the AGENT cost: the eval threads are real runs, so their rows carry
-    // usage and cost already. Judging is billed separately and is usually
-    // rounding error beside it — which is itself worth being able to see.
-    const threadIds = [...new Set(results.map((r) => r.threadId).filter(Boolean) as string[])];
-    const agent = await evalStore.costOfThreads(threadIds);
-
-    const run = await evalStore.saveRun({
-      owner,
-      agentName,
-      setName: data.name,
-      // An AgentRecord is JSON by construction — it round-trips through the
-      // agents table as a JSON column — but it is not provably so to the type
-      // checker, because `trigger` is deliberately opaque there.
-      agentSnapshot: snapshot as unknown as JsonValue,
-      results,
-      passCount: results.filter((r) => r.pass).length,
-      failCount: results.filter((r) => !r.pass).length,
-      judgeModelId: needsJudge ? EXPLAIN_MODEL_ID : null,
-      configRef: label,
-      metrics: {
-        durationMs: Date.now() - startedAt,
-        agentCost: agent.cost,
-        agentTokensIn: agent.tokensIn,
-        agentTokensOut: agent.tokensOut,
-        judgeCalls: judgeUsage.calls,
-        judgeTokensIn: judgeUsage.inputTokens,
-        judgeTokensOut: judgeUsage.outputTokens,
-      },
-    });
-    return { ok: true as const, run, ref };
+    const res = await runEvalSet({ principal, ...data });
+    return res.ok
+      ? { ok: true as const, run: res.run, ref: res.ref }
+      : { ok: false as const, error: res.error };
   });
 
 /** Recent runs of a set, newest first — one row per (version, run). */
