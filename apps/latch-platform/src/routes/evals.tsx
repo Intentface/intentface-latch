@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import {
-  Check,
   ChevronDown,
   ChevronRight,
   FlaskConical,
@@ -10,7 +9,6 @@ import {
   Plus,
   Sparkles,
   Trash2,
-  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -32,7 +30,7 @@ import type { Question } from "@/lib/evals/ask";
 import { compare, type Observation } from "@/lib/evals/stats";
 import { Button } from "@/components/ui/button";
 import { EvalBenchmark } from "@/components/eval-benchmark";
-import { EvalResults } from "@/components/eval-results";
+import { EvalResults, type LiveColumn } from "@/components/eval-results";
 import { ConfigBadge, PanelHeader } from "@/components/eval-primitives";
 import { EvalEvidence } from "@/components/eval-evidence";
 
@@ -303,6 +301,9 @@ function EvalsPage() {
           else if (ev.type === "error") throw new Error(ev.error);
           else if (ev.type === "done") {
             toast.success(`${ev.ref}: ${ev.run.passCount} passed, ${ev.run.failCount} failed`);
+            // Clear the live column in the same update as the saved one
+            // arrives, or the same run is briefly two columns.
+            setLive(null);
             setRuns((r) => [ev.run, ...r]);
           }
         }
@@ -522,7 +523,7 @@ function EvalsPage() {
         )}
       </section>
 
-      {live && <LivePanel live={live} />}
+      {live && <LiveStrip live={live} />}
 
       {!loaded && (
         <section className="border-secondary-border space-y-3 rounded-xl border p-4">
@@ -540,7 +541,7 @@ function EvalsPage() {
           questions asked at different moments — "is it working", "did my change
           break it", "can I believe this red mark" — and stacking all three made
           the page long enough that the third was never reached. */}
-      {loaded && runs.length > 0 && (
+      {loaded && (runs.length > 0 || live) && (
         <section className="border-secondary-border overflow-hidden rounded-xl border">
           <PanelHeader
             title="Analysis"
@@ -588,6 +589,7 @@ function EvalsPage() {
                 cases={cases}
                 shared={shared}
                 focusCase={focusCase}
+                live={live ? { label: live.label, done: live.done, total: live.pending.length } : null}
                 agent={agent}
                 onCorrected={(r) => setRuns((rs) => rs.map((x) => (x.id === r.id ? r : x)))}
               />
@@ -948,34 +950,29 @@ interface LiveRun {
 }
 
 /**
- * A run in progress.
+ * A run in progress, as a strip.
  *
- * Cases finish out of order and at wildly different speeds, so a percentage
- * bar would be a lie dressed as precision. What a reader actually wants is
- * which case is still out and what the finished ones said — a failure is worth
- * knowing about immediately, not after the other four have also run.
- *
- * Deliberately not a skeleton of the results table: this is a different view of
- * different information, and pretending the final layout is "loading" would
- * promise a shape that only arrives once every case is in.
+ * The per-case detail lives in the grid now — the run gets its own column and
+ * fills in — so this is only what that column cannot say: that something is
+ * running at all when you are on another lens, and what it is costing.
  */
-function LivePanel({ live }: { live: LiveRun }) {
-  const byId = new Map(live.done.map((r) => [r.caseId, r]));
-  const rows = live.pending.length
-    ? live.pending
-    : live.done.map((r) => ({ id: r.caseId, name: r.caseName }));
+function LiveStrip({ live }: { live: LiveRun }) {
   const done = live.done.length;
-  const total = rows.length || 1;
-
+  const total = live.pending.length;
   return (
     <section className="border-secondary-border overflow-hidden rounded-xl border">
-      <div className="border-secondary-border flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
         <Loader2 className="text-ink-tertiary size-3.5 animate-spin" aria-hidden />
         <h2 className="text-ink-primary text-sm font-semibold">Running</h2>
         <ConfigBadge label={live.label} />
         <span className="text-ink-tertiary text-xs tabular-nums">
-          {done} of {rows.length || "…"} cases
+          {done} of {total || "…"} cases
         </span>
+        {live.done.some((r) => !r.pass) && (
+          <span className="text-fail-ink text-xs">
+            {live.done.filter((r) => !r.pass).length} failing so far
+          </span>
+        )}
         <span className="flex-1" />
         <span className="text-ink-tertiary text-[11px]">
           each case is a real agent run — this costs money and takes about as long as a chat
@@ -986,36 +983,8 @@ function LivePanel({ live }: { live: LiveRun }) {
       <div className="bg-secondary-bg h-1">
         <div
           className="bg-accent h-full transition-[width] duration-500"
-          style={{ width: `${(done / total) * 100}%` }}
+          style={{ width: `${total ? (done / total) * 100 : 4}%` }}
         />
-      </div>
-      <div className="divide-secondary-border divide-y">
-        {rows.map((c) => {
-          const r = byId.get(c.id);
-          return (
-            <div key={c.id} className="flex items-center gap-2 px-4 py-2 text-xs">
-              {r ? (
-                <span className={r.pass ? "text-pass-ink" : "text-fail-ink"}>
-                  {r.pass ? <Check className="size-3.5" /> : <X className="size-3.5" />}
-                </span>
-              ) : (
-                <Loader2 className="text-ink-tertiary size-3.5 animate-spin" aria-hidden />
-              )}
-              <span className={r ? "text-ink-primary" : "text-ink-tertiary"}>{c.id}</span>
-              <span className="text-ink-tertiary min-w-0 flex-1 truncate">{c.name}</span>
-              {r && (
-                <span className="text-ink-tertiary shrink-0">
-                  {r.checks?.length
-                    ? `${r.checks.filter((k) => !k.failed).length}/${r.checks.length} checks`
-                    : r.reasons[0] || ""}
-                </span>
-              )}
-            </div>
-          );
-        })}
-        {rows.length === 0 && (
-          <div className="text-ink-tertiary px-4 py-3 text-xs">Resolving the configuration…</div>
-        )}
       </div>
     </section>
   );
@@ -1091,6 +1060,7 @@ function ResultsGrid({
   cases,
   shared,
   focusCase,
+  live,
   agent,
   onCorrected,
 }: {
@@ -1098,6 +1068,7 @@ function ResultsGrid({
   cases: EvalCase[];
   shared: Record<string, Question>;
   focusCase: string | null;
+  live: LiveColumn | null;
   agent: string;
   onCorrected: (run: EvalRun) => void;
 }) {
@@ -1117,6 +1088,7 @@ function ResultsGrid({
         cases={cases}
         shared={shared}
         focusCase={focusCase}
+        live={live}
         onOpenEvidence={(caseId, checkId, runId) => setOpen({ runId, caseId, checkId })}
       />
 
