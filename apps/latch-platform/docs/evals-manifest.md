@@ -158,6 +158,44 @@ If that looks expensive, remember what is actually expensive. Judging is
 asking questions of traffic you have already paid for, and replaying only when
 you must know before a customer sees it.
 
+### Should I write the same input several ways?
+
+Only if robustness to phrasing is what you are measuring — and then it is a
+different question, not more data.
+
+Ten paraphrases of one input are not ten observations. They share the required
+tool, the document, the right answer. The bootstrap resamples over tasks and
+assumes they are exchangeable; feed it 300 inputs that are really 30 intents ×
+10 rewordings and the interval comes back roughly √10 too narrow.
+`UNDERPOWERED` goes away without the measurement improving, which is worse than
+being underpowered, because now someone ships on it.
+
+Three axes, and only one of them grows n:
+
+| Vary | Hold fixed | Measures | Grows n? |
+|---|---|---|---|
+| Sampling (`repeats`) | the input | model nondeterminism — pass^k | no |
+| Wording | the intent | phrasing sensitivity | no |
+| Intent | — | coverage | **yes** |
+
+**A new input earns its place if it can fail for a different reason than the
+ones you already have.** That is what separates a reword from a variation:
+the key detail buried in the third sentence, arriving as a follow-up rather
+than an opener, typos, another language, or an intent phrased the way a user
+would — *"I don't want to pay anymore"* rather than *"cancel my
+subscription"*. Those exercise different failure modes. "What's on HN today"
+instead of "give me today's digest" does not.
+
+Writing paraphrases is also writing test data from imagination, the weakest
+rung of the ladder: you only produce the rewordings you thought of, and real
+users are stranger than that. Thirty real inputs beat three hundred synthetic
+variants of thirty. If you do not have thirty real inputs, that is the thing to
+fix rather than the thing to paper over.
+
+One use that is genuinely good: paraphrase as a check on the **judge**. If the
+agent's behaviour is equivalent across two phrasings and the verdict flips,
+the question is measuring how the answer happened to be worded.
+
 ---
 
 ## Three questions to ask of every question, before you write it
@@ -183,6 +221,8 @@ you must know before a customer sees it.
   deploys on an unvalidated opinion.
 - **Nobody can write five promises for the agent.** That is not an eval problem
   surfacing. That is a product problem surfacing *as* an eval problem.
+- **The suite grew tenfold and the intervals narrowed beautifully.** Check that
+  the new inputs are new intents and not rewordings of the old ones.
 
 ---
 
