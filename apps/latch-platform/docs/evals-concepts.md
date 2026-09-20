@@ -4,9 +4,11 @@ Written after building it. Everything here was either measured or learned by
 getting it wrong first; where there is a number, it came from a real run against
 a real agent.
 
-This is the *thinking*. For how the page should look, see `evals-ui-brief.md`
-and `evals-ui-brief-2-shared-checks.md`. For what the code does, read the files
-— they are commented.
+This is the *thinking*. **If you want the frame rather than the reasoning, read
+`evals-manifest.md` first** — it is one page and this one is the argument behind
+it. For how the page should look, see `evals-ui-brief.md` and
+`evals-ui-brief-2-shared-checks.md`. For what the code does, read the files —
+they are commented.
 
 ---
 
