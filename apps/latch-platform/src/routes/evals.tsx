@@ -449,6 +449,13 @@ function EvalsPage() {
           </>
           )}
         </dl>
+
+        {/* The page showed results without ever saying what a run IS. Three
+            nouns do all the work here — input, question, verdict — and none of
+            them was ever defined on screen, so the numbers had nothing to
+            attach to. Stated with this suite's real arithmetic, because a
+            worked example teaches and a definition does not. */}
+        {loaded && <HowItWorks agent={agent} pin={pin} cases={cases} shared={shared} />}
       </header>
 
       <section className="border-secondary-border flex flex-wrap items-center gap-3 rounded-lg border p-4">
@@ -1645,6 +1652,70 @@ function Stat({
     </div>
   );
 }
+
+/**
+ * What a run is, in one sentence, with this suite's own numbers in it.
+ */
+function HowItWorks({
+  agent,
+  pin,
+  cases,
+  shared,
+}: {
+  agent: string;
+  pin: string;
+  cases: EvalCase[];
+  shared: Record<string, Question>;
+}) {
+  const sharedN = Object.keys(shared).length;
+  const ownN = cases.reduce((n, c) => n + Object.keys(c.checks ?? {}).length, 0);
+  const total = sharedN * cases.length + ownN;
+  const config = pin === "live" ? "the version running live" : pin === "draft" ? "your unpublished draft" : `version ${pin}`;
+
+  if (cases.length === 0)
+    return (
+      <p className="text-ink-tertiary max-w-3xl text-xs leading-relaxed">
+        A run sends each <Term>input</Term> you write to{" "}
+        <span className="text-ink-primary font-mono">{agent}</span>, then asks{" "}
+        <Term>questions</Term> about the conversation that comes back. Each answer is one{" "}
+        <Term>verdict</Term>. You have no inputs yet — start below.
+      </p>
+    );
+
+  return (
+    <p className="text-ink-tertiary max-w-3xl text-xs leading-relaxed">
+      A run sends each of these{" "}
+      <span className="text-ink-primary">
+        {cases.length} <Term>input{cases.length === 1 ? "" : "s"}</Term>
+      </span>{" "}
+      to <span className="text-ink-primary font-mono">{agent}</span> as {config}, then asks{" "}
+      <Term>questions</Term> about each conversation that comes back —{" "}
+      <span className="text-ink-primary">
+        {sharedN} asked of every input
+      </span>
+      {ownN > 0 && (
+        <>
+          {" "}
+          and{" "}
+          <span className="text-ink-primary">{ownN} written for a single input</span>
+        </>
+      )}
+      . Every answer is one <Term>verdict</Term>:{" "}
+      <span className="text-ink-primary tabular-nums">
+        {sharedN} × {cases.length}
+        {ownN > 0 ? ` + ${ownN}` : ""} = {total}
+      </span>{" "}
+      a run.
+    </p>
+  );
+}
+
+/** The three nouns the whole page is built from. */
+const Term = ({ children }: { children: React.ReactNode }) => (
+  <span className="decoration-ink-tertiary/60 underline decoration-dotted underline-offset-2">
+    {children}
+  </span>
+);
 
 /** A section's name and its one-line reason for existing. */
 function SectionHead({ title, sub }: { title: string; sub: string }) {

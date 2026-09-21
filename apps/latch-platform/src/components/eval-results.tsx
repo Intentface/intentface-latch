@@ -82,10 +82,16 @@ export function EvalResults({ runs, cases, shared, focusCase, live, onOpenEviden
     col.kind === "live" && !col.live.done.some((r) => r.caseId === caseId);
 
   /** Per-case rows: every (case, check) pair that is not a shared id. */
-  const perCase: { caseId: string; caseName: string; checkId: string; q?: Question }[] = [];
+  const perCase: {
+    caseId: string;
+    caseName: string;
+    input?: string;
+    checkId: string;
+    q?: Question;
+  }[] = [];
   for (const c of cases) {
     for (const [id, q] of Object.entries(c.checks ?? {})) {
-      perCase.push({ caseId: c.id, caseName: c.name || c.id, checkId: id, q });
+      perCase.push({ caseId: c.id, caseName: c.name || c.id, input: c.input, checkId: id, q });
     }
   }
   // Checks that ran but are no longer authored anywhere still have to appear,
@@ -125,13 +131,24 @@ export function EvalResults({ runs, cases, shared, focusCase, live, onOpenEviden
         className="border-secondary-border bg-secondary-bg/40 grid items-end border-b"
         style={{ gridTemplateColumns: cols }}
       >
-        <div className="text-ink-tertiary px-3 py-2.5 text-[11px] font-medium uppercase tracking-wide">
-          Check
+        <div className="space-y-0.5 px-3 py-2">
+          <div className="text-ink-tertiary text-[11px] font-medium uppercase tracking-wide">
+            Question
+          </div>
+          <div className="text-ink-tertiary text-[10px]">
+            one row per question · one column per configuration · a cell is one verdict
+          </div>
         </div>
         {columns.map((c) => (
           <ColumnHead key={c.id} col={c} />
         ))}
       </div>
+
+      {/* Six columns all reading "live" are six runs of ONE configuration.
+          That is a flakiness measurement, not a comparison, and the page never
+          said so — a reader sees six columns and assumes six things were
+          compared. */}
+      <SameConfigNote columns={columns} />
 
       {sharedIds.length > 0 && (
         <>
@@ -163,7 +180,21 @@ export function EvalResults({ runs, cases, shared, focusCase, live, onOpenEviden
             sub="ground truth for one input — a tick, not a rate, because n=1 can never separate a real change from noise"
           />
           <div className="divide-secondary-border divide-y">
-            {perCase.map((row) => {
+            {groupByCase(perCase).map(({ caseId, caseName, input, rows }) => (
+              <div key={caseId}>
+                {/* The input, once per case rather than once per row. Four
+                    questions about one conversation is one thing being tested,
+                    and repeating the input on each row made it read as four. */}
+                <div className="bg-secondary-bg/20 flex flex-wrap items-baseline gap-x-2 px-3 py-1.5">
+                  <span className="text-ink-secondary text-[11px] font-medium">{caseName}</span>
+                  <span className="text-ink-tertiary min-w-0 flex-1 truncate text-[11px]" title={input}>
+                    sends &ldquo;{input}&rdquo;
+                  </span>
+                  <span className="text-ink-tertiary text-[10px]">
+                    {rows.length} question{rows.length === 1 ? "" : "s"} of its own
+                  </span>
+                </div>
+                {rows.map((row) => {
               const overrides = sharedIds.includes(row.checkId);
               const labels = new Set(
                 columns
@@ -179,12 +210,11 @@ export function EvalResults({ runs, cases, shared, focusCase, live, onOpenEviden
                 >
                   <div className="flex flex-col justify-center gap-1.5 px-3 py-2.5">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-ink-tertiary font-mono text-[10px]">{row.caseName}</span>
-                      <span className="text-ink-tertiary/50" aria-hidden>
-                        ›
-                      </span>
+                      {/* The QUESTION, exactly as the shared rows show theirs.
+                          A row that reads `states-recency` tells you the name
+                          of the thing and nothing about what it asks. */}
                       <span className="text-ink-primary text-[13px] font-medium leading-snug">
-                        {row.checkId}
+                        {row.q?.ask ?? row.checkId}
                       </span>
                       {labels.size > 1 && (
                         <Chip className="border-accent-border bg-accent-bg/15 text-ink-primary">
@@ -195,6 +225,7 @@ export function EvalResults({ runs, cases, shared, focusCase, live, onOpenEviden
                     <div className="flex flex-wrap items-center gap-2">
                       <ScopeTag scope={overrides ? "override" : "case"} />
                       {row.q && <KindTag q={row.q} />}
+                      <span className="text-ink-tertiary font-mono text-[10px]">{row.checkId}</span>
                     </div>
                   </div>
                   {columns.map((c) => {
@@ -214,6 +245,8 @@ export function EvalResults({ runs, cases, shared, focusCase, live, onOpenEviden
                 </div>
               );
             })}
+              </div>
+            ))}
           </div>
         </>
       )}
@@ -315,6 +348,52 @@ function OneCase({
       <Legend />
     </div>
   );
+}
+
+/**
+ * What the columns actually are.
+ *
+ * Two runs of the same configuration tell you how consistent the agent is.
+ * Two runs of different configurations tell you whether a change helped. They
+ * look identical in a table, and reading one as the other is the easiest
+ * mistake this page invites.
+ */
+function SameConfigNote({ columns }: { columns: Column[] }) {
+  const labels = columns.map((c) => (c.kind === "run" ? (c.run.configRef ?? "live") : c.live.label));
+  const distinct = [...new Set(labels)];
+  if (columns.length < 2) return null;
+  return (
+    <div className="border-secondary-border text-ink-tertiary border-b px-3 py-2 text-[11px]">
+      {distinct.length === 1 ? (
+        <>
+          All {columns.length} columns ran the same configuration (
+          <span className="text-ink-primary font-mono">{distinct[0]}</span>). Differences between
+          them are the agent being inconsistent, not a change you made — to compare versions, pick
+          another one in <span className="text-ink-primary">against</span> and run again.
+        </>
+      ) : (
+        <>
+          {distinct.length} configurations compared:{" "}
+          <span className="text-ink-primary font-mono">{distinct.join(", ")}</span>. Columns
+          sharing a label are repeat runs of one configuration — differences there are
+          inconsistency, not a change.
+        </>
+      )}
+    </div>
+  );
+}
+
+type PerCaseRow = { caseId: string; caseName: string; input?: string; checkId: string; q?: Question };
+
+/** Per-case rows, gathered under the input they are asked about. */
+function groupByCase(rows: PerCaseRow[]) {
+  const out: { caseId: string; caseName: string; input?: string; rows: PerCaseRow[] }[] = [];
+  for (const r of rows) {
+    const hit = out.find((g) => g.caseId === r.caseId);
+    if (hit) hit.rows.push(r);
+    else out.push({ caseId: r.caseId, caseName: r.caseName, input: r.input, rows: [r] });
+  }
+  return out;
 }
 
 function SectionLabel({ title, sub }: { title: string; sub: string }) {
