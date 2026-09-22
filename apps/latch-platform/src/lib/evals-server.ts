@@ -12,8 +12,11 @@ import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Principal } from "./session";
 import type { Check, Rubric, ThreadRef } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
+import { CONFIRM_TWICE_ABOVE, MAX_UNITS, estimateRun } from "./evals/v2/jobs";
+import type { EvalJob } from "./evals/v2/jobs";
+import { kickJob, resolveVersions } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
-import { compareVersions, summarize } from "./evals/v2/runner";
+import { compareVersions, configFingerprint, summarize } from "./evals/v2/runner";
 import { thresholdFor, trustOf } from "./evals/v2/alignment";
 import { describeCounted } from "./evals/v2/counted";
 import { finalAnswer, viewOf } from "./evals/v2/thread";
@@ -284,4 +287,220 @@ export const saveChecksFn = createServerFn({ method: "POST" })
       checks: valid.value,
     });
     return { ok: true as const, version: r.version };
+  });
+
+// ─── Running and judging ───────────────────────────────────────────────────
+
+/** What a new run can be made of: the versions that exist, and the questions. */
+export const getRunOptionsFn = createServerFn({ method: "GET" })
+  .validator((d: { agent: string; datasetId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return null;
+    const { evals, agentStore } = await getLatch();
+    const rec = await agentStore.getRecord(principal, o.name);
+    if (!rec) return null;
+    const [draft, history, inputs] = await Promise.all([
+      agentStore.getDraft(principal, o.name, rec.scope),
+      agentStore.listVersions(principal, o.name, rec.scope),
+      evals.listInputs(data.datasetId),
+    ]);
+    // Say which listed version IS live: picking both compares a configuration with itself.
+    const livePrint = configFingerprint(rec);
+    const recent = history.slice().sort((a, b) => b.version - a.version).slice(0, 12);
+    const prints = await Promise.all(
+      recent.map(async (v) => {
+        const r = await agentStore.getVersion(principal, o.name, rec.scope, v.version);
+        return r ? configFingerprint(r) : null;
+      }),
+    );
+    const sameAsLive = (print: string | null) => print === livePrint;
+    return {
+      versions: [
+        { label: "live", note: "what users get now" },
+        ...(draft
+          ? [{ label: "@draft", note: sameAsLive(configFingerprint(draft.record)) ? "same as live — no changes yet" : "unpublished changes" }]
+          : []),
+        ...recent.map((v, i) => ({
+          label: `@${v.version}`,
+          note: sameAsLive(prints[i] ?? null)
+            ? "same as live"
+            : (v.message ?? (v.changedFields?.length ? `changed ${v.changedFields.join(", ")}` : "")),
+        })),
+      ],
+      questions: inputs.map((i) => ({ id: i.id, prompt: i.prompt })),
+    };
+  });
+
+type RunRequest = { agent: string; datasetId: string; rubricId: string; versions: string[]; inputIds: string[]; repeats: number };
+
+/** Price a run from what this set's earlier threads actually cost. */
+async function priced(principal: Principal, d: RunRequest) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit can be run." };
+  const { evals, agentStore } = await getLatch();
+  const rubric = await evals.getRubric(o.owner, d.rubricId);
+  if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
+  const repeats = Math.max(1, Math.min(5, Math.floor(d.repeats)));
+  const inputs = new Set((await evals.listInputs(d.datasetId)).map((i) => i.id));
+  const inputIds = [...new Set(d.inputIds)].filter((id) => inputs.has(id));
+  if (!d.versions.length) return { ok: false as const, error: "Pick at least one version." };
+  if (!inputIds.length) return { ok: false as const, error: "Pick at least one question." };
+  let versions;
+  try {
+    versions = await resolveVersions(agentStore, principal, o.name, [...new Set(d.versions)]);
+  } catch (e) {
+    return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+  }
+  const units = versions.length * inputIds.length * repeats;
+  if (units > MAX_UNITS) return { ok: false as const, error: `That is ${units} threads; one run is capped at ${MAX_UNITS}.` };
+  const past = await evals.listThreads(o.owner, { datasetId: d.datasetId, limit: 400 });
+  const costs = await evals.threadCosts(past.filter((t) => !t.error).map((t) => t.threadId));
+  const estimate = estimateRun({
+    units,
+    askedChecks: rubric.checks.filter((c) => c.kind === "asked").length,
+    history: [...costs.values()].filter((c) => c > 0),
+  });
+  // Two labels for one configuration measure noise, not a change.
+  const same = versions.filter((v, i) => versions.findIndex((w) => w.fingerprint === v.fingerprint) !== i).map((v) => v.label);
+  return { ok: true as const, owner: o.owner, name: o.name, versions, inputIds, repeats, estimate, same };
+}
+
+export const estimateRunFn = createServerFn({ method: "POST" })
+  .validator((d: RunRequest) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const p = await priced(principal, data);
+    if (!p.ok) return p;
+    return { ok: true as const, estimate: p.estimate, same: p.same, confirmTwiceAbove: CONFIRM_TWICE_ABOVE };
+  });
+
+/**
+ * Start a run. The caller sends back the cost it was shown; if the price has
+ * risen since (more history, a pricier thread), the run does not start — a
+ * person confirms the number that will be spent, not an earlier one.
+ */
+export const startRunFn = createServerFn({ method: "POST" })
+  .validator((d: RunRequest & { confirmedCost: number | null }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const p = await priced(principal, data);
+    if (!p.ok) return p;
+    const cost = p.estimate.cost;
+    if (cost !== null && (data.confirmedCost === null || cost > data.confirmedCost * 1.05 + 0.01))
+      return { ok: false as const, error: `The estimate changed to about $${cost.toFixed(2)}. Check it and start again.` };
+    const { evals } = await getLatch();
+    const now = Date.now();
+    const id = `run_${new Date(now).toISOString().replace(/[-:]/g, "").slice(0, 15)}_${Math.random().toString(36).slice(2, 6)}`;
+    const job: EvalJob = {
+      owner: p.owner,
+      id,
+      runId: id,
+      kind: "run",
+      agentName: p.name,
+      datasetId: data.datasetId,
+      rubricId: data.rubricId,
+      principal: { orgId: principal.orgId, ...(principal.userId ? { userId: principal.userId } : {}) },
+      versions: p.versions,
+      inputIds: p.inputIds,
+      repeats: p.repeats,
+      status: "running",
+      total: p.estimate.agentRuns,
+      done: 0,
+      failed: 0,
+      estimate: p.estimate,
+      createdAt: now,
+      updatedAt: now,
+      leaseUntil: 0,
+    };
+    await evals.saveJob(job);
+    await kickJob(p.owner, id);
+    return { ok: true as const, id };
+  });
+
+/** Re-score an existing run under the latest checks. No agent runs, so no confirmation. */
+export const startJudgeFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; rubricId: string; runId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const, error: "Only agents you can edit can be judged." };
+    const { evals } = await getLatch();
+    const threads = await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId });
+    if (!threads.length) return { ok: false as const, error: "That run has no threads." };
+    const now = Date.now();
+    const id = `judge_${now.toString(36)}`;
+    const ok = threads.filter((t) => !t.error).length;
+    await evals.saveJob({
+      owner: o.owner,
+      id,
+      runId: data.runId,
+      kind: "judge",
+      agentName: o.name,
+      datasetId: data.datasetId,
+      rubricId: data.rubricId,
+      principal: { orgId: principal.orgId, ...(principal.userId ? { userId: principal.userId } : {}) },
+      versions: [],
+      inputIds: [],
+      repeats: 1,
+      status: "running",
+      total: ok,
+      done: 0,
+      failed: 0,
+      estimate: { agentRuns: 0, judgeCalls: ok, cost: null, basis: "Judging only: the agent does not run." },
+      createdAt: now,
+      updatedAt: now,
+      leaseUntil: 0,
+    });
+    await kickJob(o.owner, id);
+    return { ok: true as const, id };
+  });
+
+/** Recent jobs for a question set, newest first — what the progress bar reads. */
+export const listJobsFn = createServerFn({ method: "GET" })
+  .validator((d: { agent: string; datasetId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return [];
+    const { evals } = await getLatch();
+    return (await evals.listJobs(o.owner, data.datasetId, 10)).map((j) => ({
+      id: j.id,
+      runId: j.runId,
+      kind: j.kind,
+      status: j.status,
+      total: j.total,
+      done: j.done,
+      failed: j.failed,
+      versions: j.versions.map((v) => v.label),
+      questions: j.inputIds.length,
+      repeats: j.repeats,
+      cost: j.estimate.cost,
+      error: j.error ?? null,
+      createdAt: j.createdAt,
+      updatedAt: j.updatedAt,
+    }));
+  });
+
+export type JobRow = Awaited<ReturnType<typeof listJobsFn>>[number];
+
+export const cancelJobFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; id: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const };
+    const { evals } = await getLatch();
+    const j = await evals.getJob(o.owner, data.id);
+    if (!j || (j.status !== "running" && j.status !== "judging")) return { ok: false as const };
+    // Threads already in flight finish and are kept; nothing new starts.
+    await evals.updateJob(data.id, { status: "cancelled", updatedAt: Date.now() });
+    return { ok: true as const };
   });

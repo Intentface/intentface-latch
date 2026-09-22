@@ -67,46 +67,64 @@ export async function runDataset(opts: {
   );
   const out: ThreadRef[] = new Array(units.length);
   let done = 0;
-  await pool(units, opts.concurrency ?? 4, async ({ v, input, attempt }, i) => {
-    const started = Date.now();
-    const base = {
-      owner: opts.owner,
-      agentName: opts.dataset.agentName,
-      datasetId: opts.dataset.id,
-      inputId: input.id,
-      runId,
-      attempt,
-      version: v.label,
-      configFingerprint: v.fingerprint,
-      origin: "run" as const,
-      createdAt: started,
-    };
-    let threadId = "";
-    try {
-      let res = await opts.deps.runAgent({ agent: v.ref, prompt: input.prompt });
-      threadId = res.threadId;
-      // Follow-ups go into the SAME thread: the failures worth catching are
-      // usually on turn two, after the agent has something to lose track of.
-      for (const f of input.followUps ?? []) {
-        res = await opts.deps.runAgent({ agent: v.ref, prompt: f, threadId });
-      }
-      // An empty answer is an outage, not a result. A provider that refuses
-      // can come back as a completed turn with no text; judging that yields a
-      // full set of confident verdicts about nothing, with no error in sight.
-      if (!res.answer.trim()) throw new Error("the agent produced no answer — not judged");
-      out[i] = { ...base, threadId, answer: res.answer, durationMs: Date.now() - started };
-    } catch (e) {
-      out[i] = {
-        ...base,
-        threadId: threadId || `failed:${runId}:${v.label}:${input.id}:${attempt}`,
-        answer: "",
-        error: e instanceof Error ? e.message : String(e),
-        durationMs: Date.now() - started,
-      };
-    }
-    opts.onThread?.(out[i]!, ++done, units.length);
+  await pool(units, opts.concurrency ?? 4, async (u, i) => {
+    out[i] = await runUnit({ owner: opts.owner, dataset: opts.dataset, runId, deps: opts.deps, ...u });
+    opts.onThread?.(out[i], ++done, units.length);
   });
   return out;
+}
+
+/**
+ * One input, once, against one version: the unit a run is made of. Never
+ * throws — a failure is a ThreadRef with `error`, so a job can record it and
+ * move on, and never re-runs it.
+ */
+export async function runUnit(opts: {
+  owner: string;
+  dataset: Pick<Dataset, "id" | "agentName">;
+  runId: string;
+  v: Version & { fingerprint: string };
+  input: Input;
+  attempt: number;
+  deps: RunDeps;
+}): Promise<ThreadRef> {
+  const { v, input, attempt, runId } = opts;
+  const started = Date.now();
+  const base = {
+    owner: opts.owner,
+    agentName: opts.dataset.agentName,
+    datasetId: opts.dataset.id,
+    inputId: input.id,
+    runId,
+    attempt,
+    version: v.label,
+    configFingerprint: v.fingerprint,
+    origin: "run" as const,
+    createdAt: started,
+  };
+  let threadId = "";
+  try {
+    let res = await opts.deps.runAgent({ agent: v.ref, prompt: input.prompt });
+    threadId = res.threadId;
+    // Follow-ups go into the SAME thread: the failures worth catching are
+    // usually on turn two, after the agent has something to lose track of.
+    for (const f of input.followUps ?? []) {
+      res = await opts.deps.runAgent({ agent: v.ref, prompt: f, threadId });
+    }
+    // An empty answer is an outage, not a result. A provider that refuses
+    // can come back as a completed turn with no text; judging that yields a
+    // full set of confident verdicts about nothing, with no error in sight.
+    if (!res.answer.trim()) throw new Error("the agent produced no answer — not judged");
+    return { ...base, threadId, answer: res.answer, durationMs: Date.now() - started };
+  } catch (e) {
+    return {
+      ...base,
+      threadId: threadId || `failed:${runId}:${v.label}:${input.id}:${attempt}`,
+      answer: "",
+      error: e instanceof Error ? e.message : String(e),
+      durationMs: Date.now() - started,
+    };
+  }
 }
 
 export interface JudgeDeps {
@@ -391,7 +409,7 @@ export function consistency(passes: Verdict[][]): { checkId: string; agreement: 
   });
 }
 
-async function pool<T>(items: T[], limit: number, fn: (item: T, i: number) => Promise<void>): Promise<void> {
+export async function pool<T>(items: T[], limit: number, fn: (item: T, i: number) => Promise<void>): Promise<void> {
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {

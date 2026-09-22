@@ -671,6 +671,15 @@ export async function getLatch(): Promise<{
       },
       onError: (e) => console.warn("memory sweep failed:", e),
     }).start();
+    // Eval runs interrupted by a dev-server restart. Lazy import — evals-jobs imports this module back.
+    createIntervalScheduler({
+      intervalMs: 30_000,
+      onTick: async () => {
+        const m = await import("./evals-jobs");
+        await m.evalJobsTick();
+      },
+      onError: (e) => console.warn("eval jobs tick failed:", e),
+    }).start();
   }
 
   cached = {

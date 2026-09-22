@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createFileRoute, redirect } from "@tanstack/react-router"
-import { ChevronDown, ChevronUp, Loader2, X } from "lucide-react"
+import { ChevronDown, ChevronUp, Loader2, Play, X } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
 import {
   getEvalGridFn,
   getEvalThreadFn,
   getEvalsIndexFn,
+  listJobsFn,
+  cancelJobFn,
+  startJudgeFn,
   saveEvalRulingFn,
 } from "@/lib/evals-server"
-import type { EvalGrid } from "@/lib/evals-server"
+import type { EvalGrid, JobRow } from "@/lib/evals-server"
+import { RunDrawer } from "@/components/evals/run-drawer"
 import Drawer from "@/components/ui/drawer"
 import { Markdown } from "@/components/ui/markdown"
 import {
@@ -56,9 +60,10 @@ function EvalsPage() {
   const set = useSetSearch()
 
   const agent = search.agent ?? index[0]?.agent
-  const [overview] = useOverview(agent)
+  const [overview, reloadOverview] = useOverview(agent)
   const [grid, setGrid] = useState<EvalGrid | null>(null)
   const [loading, setLoading] = useState(false)
+  const [runOpen, setRunOpen] = useState(false)
 
   const dataset =
     overview?.datasets.find((d) => d.id === search.dataset) ??
@@ -79,6 +84,21 @@ function EvalsPage() {
   }, [agent, dataset, rubricId, runId])
   useEffect(reload, [reload])
 
+  const jobs = useJobs(agent, dataset?.id, (finished) => {
+    // A run that just finished is the one worth looking at.
+    reloadOverview()
+    if (finished.kind === "run")
+      set({ run: finished.runId, check: undefined, version: undefined })
+    else reload()
+  })
+  const judgeAgain = async () => {
+    if (!agent || !dataset || !rubricId || !runId) return
+    const r = await startJudgeFn({
+      data: { agent, datasetId: dataset.id, rubricId, runId },
+    })
+    if (r.ok) jobs.refresh()
+  }
+
   const open: Cell | null =
     search.check && search.version
       ? { checkId: search.check, version: search.version }
@@ -98,7 +118,23 @@ function EvalsPage() {
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-5 p-6">
-      <EvalsShell page="results" index={index} search={search}>
+      <EvalsShell
+        page="results"
+        index={index}
+        search={search}
+        actions={
+          dataset &&
+          rubricId && (
+            <button
+              type="button"
+              onClick={() => setRunOpen(true)}
+              className="flex h-8 items-center gap-1.5 rounded-lg bg-ink-primary px-3 text-sm font-medium text-primary-bg"
+            >
+              <Play className="size-3.5" /> New run
+            </button>
+          )
+        }
+      >
         <Picker label="Questions">
           <Select
             id="evals-dataset"
@@ -156,17 +192,44 @@ function EvalsPage() {
         )}
       </EvalsShell>
 
-      {overview && dataset && !dataset.runs.length && (
-        <p className="text-sm text-ink-secondary">
-          {dataset.name} has {dataset.inputs} questions but no runs yet. Start
-          one with <code>pnpm evals run</code>.
-        </p>
+      {agent && (
+        <JobBanner agent={agent} jobs={jobs.rows} onChanged={jobs.refresh} />
       )}
+
+      {overview &&
+        dataset &&
+        !dataset.runs.length &&
+        !jobs.rows.some(isActive) && (
+          <p className="text-sm text-ink-secondary">
+            {dataset.name} has {dataset.inputs} questions but no runs yet.{" "}
+            <button
+              type="button"
+              onClick={() => setRunOpen(true)}
+              className="text-ink-primary underline"
+            >
+              Start the first one
+            </button>
+            .
+          </p>
+        )}
       {grid && grid.rubricVersion < grid.latestVersion && (
-        <p className="text-sm text-ink-secondary">
+        <p className="flex flex-wrap items-center gap-x-2 text-sm text-ink-secondary">
           Showing checks v{grid.rubricVersion}. Version {grid.latestVersion} has
-          not been judged on this run yet; run <code>pnpm evals judge</code> to
-          score it.
+          not been judged on this run yet.
+          {!jobs.rows.some(
+            (j) => isActive(j) && j.kind === "judge" && j.runId === runId
+          ) && (
+            <button
+              type="button"
+              onClick={() => void judgeAgain()}
+              className="font-medium text-ink-primary underline"
+            >
+              Judge it with v{grid.latestVersion}
+            </button>
+          )}
+          <span className="text-ink-tertiary">
+            Only the judge runs; the agent does not.
+          </span>
         </p>
       )}
 
@@ -175,6 +238,20 @@ function EvalsPage() {
           <Verdict grid={grid} questions={dataset?.inputs ?? 0} />
           <Grid grid={grid} open={open} onOpen={toggle} />
         </div>
+      )}
+
+      {agent && dataset && rubricId && (
+        <RunDrawer
+          open={runOpen}
+          agent={agent}
+          datasetId={dataset.id}
+          rubricId={rubricId}
+          onClose={() => setRunOpen(false)}
+          onStarted={() => {
+            setRunOpen(false)
+            jobs.refresh()
+          }}
+        />
       )}
 
       <Drawer
@@ -196,6 +273,132 @@ function EvalsPage() {
           )}
         </Drawer.Content>
       </Drawer>
+    </div>
+  )
+}
+
+const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
+
+/** Recent jobs for this set, polled while any is running; `onFinished` fires once per job that completes. */
+function useJobs(
+  agent: string | undefined,
+  datasetId: string | undefined,
+  onFinished: (j: JobRow) => void
+) {
+  const [rows, setRows] = useState<JobRow[]>([])
+  const seen = useRef(new Map<string, JobRow["status"]>())
+  const finished = useRef(onFinished)
+  finished.current = onFinished
+  const [tick, setTick] = useState(0)
+  const refresh = useCallback(() => setTick((t) => t + 1), [])
+
+  useEffect(() => {
+    if (!agent || !datasetId) return setRows([])
+    let stop = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const load = async () => {
+      const next = await listJobsFn({ data: { agent, datasetId } })
+      if (stop) return
+      for (const j of next) {
+        const was = seen.current.get(j.id)
+        if (was && was !== "done" && j.status === "done") finished.current(j)
+        seen.current.set(j.id, j.status)
+      }
+      setRows(next)
+      if (next.some(isActive)) timer = setTimeout(() => void load(), 2500)
+    }
+    void load()
+    return () => {
+      stop = true
+      clearTimeout(timer)
+    }
+  }, [agent, datasetId, tick])
+
+  return { rows, refresh }
+}
+
+/** What is running now, and what went wrong recently. Finished runs speak through the Run picker. */
+function JobBanner({
+  agent,
+  jobs,
+  onChanged,
+}: {
+  agent: string
+  jobs: JobRow[]
+  onChanged: () => void
+}) {
+  const recent = Date.now() - 30 * 60_000
+  const shown = jobs.filter(
+    (j) => isActive(j) || (j.status === "failed" && j.updatedAt > recent)
+  )
+  if (!shown.length) return null
+  return (
+    <div className="space-y-2">
+      {shown.map((j) => {
+        const pctDone = j.total ? Math.round((100 * j.done) / j.total) : 0
+        const what =
+          j.kind === "judge"
+            ? `Judging ${j.total} threads`
+            : `${j.versions.join(" vs ")} · ${j.questions} question${j.questions === 1 ? "" : "s"}${j.repeats > 1 ? ` × ${j.repeats} tries` : ""}`
+        return (
+          <div
+            key={j.id}
+            className="rounded-lg bg-primary-bg px-4 py-3 text-sm smooth-shadow-ring-xs smooth-ring-primary-border"
+          >
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              {isActive(j) && (
+                <Loader2 className="size-4 animate-spin text-ink-secondary" />
+              )}
+              <span className="font-medium text-ink-primary">
+                {j.status === "failed"
+                  ? "Run failed"
+                  : j.status === "judging"
+                    ? "Judging"
+                    : j.kind === "judge"
+                      ? "Judging"
+                      : "Running"}
+              </span>
+              <span className="text-ink-secondary">{what}</span>
+              <span className="text-ink-tertiary tabular-nums">
+                {j.status === "judging"
+                  ? `${j.total} threads run`
+                  : `${j.done} of ${j.total}`}
+                {j.failed > 0 && ` · ${j.failed} failed to run`}
+                {j.cost !== null && ` · about $${j.cost.toFixed(2)}`}
+              </span>
+              {isActive(j) && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void cancelJobFn({ data: { agent, id: j.id } }).then(
+                      onChanged
+                    )
+                  }
+                  className="ml-auto text-ink-secondary hover:text-ink-primary"
+                >
+                  Stop
+                </button>
+              )}
+            </div>
+            {isActive(j) && (
+              <div className="mt-2 h-1 overflow-hidden rounded-full bg-primary-border">
+                <div
+                  className={cn(
+                    "h-full rounded-full bg-ink-secondary transition-[width] duration-500",
+                    j.status === "judging" && "animate-pulse"
+                  )}
+                  style={{
+                    width: `${j.status === "judging" ? 100 : pctDone}%`,
+                  }}
+                />
+              </div>
+            )}
+            {j.error && (
+              <p className="mt-1 text-red-600 dark:text-red-400">{j.error}</p>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict } from "./model";
+import type { EvalJob } from "./jobs";
 
 /**
  * Storage for evals v2.
@@ -12,39 +13,51 @@ import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict }
  */
 
 export interface EvalsStore {
-  saveDataset(d: Omit<Dataset, "createdAt" | "updatedAt">): Promise<void>;
-  getDataset(owner: Owner, id: string): Promise<Dataset | null>;
-  listDatasets(owner: Owner, agentName?: string): Promise<Dataset[]>;
-  deleteDataset(owner: Owner, id: string): Promise<void>;
+  saveDataset: (d: Omit<Dataset, "createdAt" | "updatedAt">) => Promise<void>;
+  getDataset: (owner: Owner, id: string) => Promise<Dataset | null>;
+  listDatasets: (owner: Owner, agentName?: string) => Promise<Dataset[]>;
+  deleteDataset: (owner: Owner, id: string) => Promise<void>;
 
   /** Replace a dataset's inputs wholesale — the editor saves the list. */
-  setInputs(datasetId: string, inputs: Input[]): Promise<void>;
-  listInputs(datasetId: string): Promise<Input[]>;
+  setInputs: (datasetId: string, inputs: Input[]) => Promise<void>;
+  listInputs: (datasetId: string) => Promise<Input[]>;
   /** For a thread dataset: the threads it holds. */
-  setMembers(datasetId: string, threadIds: string[]): Promise<void>;
-  listMembers(datasetId: string): Promise<string[]>;
+  setMembers: (datasetId: string, threadIds: string[]) => Promise<void>;
+  listMembers: (datasetId: string) => Promise<string[]>;
 
   /** Append a new rubric version; returns it. */
-  saveRubric(r: { owner: Owner; id: string; agentName: string; defaultJudge: string; checks: Check[] }): Promise<Rubric>;
-  getRubric(owner: Owner, id: string, version?: number): Promise<Rubric | null>;
-  listRubrics(owner: Owner, agentName: string): Promise<Rubric[]>;
+  saveRubric: (r: { owner: Owner; id: string; agentName: string; defaultJudge: string; checks: Check[] }) => Promise<Rubric>;
+  getRubric: (owner: Owner, id: string, version?: number) => Promise<Rubric | null>;
+  listRubrics: (owner: Owner, agentName: string) => Promise<Rubric[]>;
 
-  saveThread(t: ThreadRef): Promise<void>;
-  getThread(owner: Owner, threadId: string): Promise<ThreadRef | null>;
-  listThreads(owner: Owner, q: { agentName?: string; datasetId?: string; runId?: string; limit?: number }): Promise<ThreadRef[]>;
+  saveThread: (t: ThreadRef) => Promise<void>;
+  getThread: (owner: Owner, threadId: string) => Promise<ThreadRef | null>;
+  listThreads: (owner: Owner, q: { agentName?: string; datasetId?: string; runId?: string; limit?: number }) => Promise<ThreadRef[]>;
   /** The most recent run of a dataset — what `judge` reads by default. */
-  latestRunId(owner: Owner, datasetId: string): Promise<string | null>;
+  latestRunId: (owner: Owner, datasetId: string) => Promise<string | null>;
   /** Runs of a dataset, newest first — what the results view offers to pick from. */
-  listRuns(owner: Owner, datasetId: string): Promise<{ runId: string; threads: number; versions: string[]; createdAt: number }[]>;
+  listRuns: (owner: Owner, datasetId: string) => Promise<{ runId: string; threads: number; versions: string[]; createdAt: number }[]>;
 
-  saveVerdicts(vs: Verdict[]): Promise<void>;
+  saveVerdicts: (vs: Verdict[]) => Promise<void>;
   /** Latest verdict per (thread, check) for one rubric version. */
-  listVerdicts(q: { threadIds: string[]; rubricVersion?: number }): Promise<Verdict[]>;
+  listVerdicts: (q: { threadIds: string[]; rubricVersion?: number }) => Promise<Verdict[]>;
 
-  saveRuling(r: Ruling): Promise<void>;
+  saveJob: (j: EvalJob) => Promise<void>;
+  getJob: (owner: Owner, id: string) => Promise<EvalJob | null>;
+  listJobs: (owner: Owner, datasetId: string, limit?: number) => Promise<EvalJob[]>;
+  /** Merge a patch into a job; a cancelled job is never un-cancelled. Returns it as stored. */
+  updateJob: (id: string, patch: Partial<EvalJob>) => Promise<EvalJob | null>;
+  /** Take the lease if nobody holds it; true when this caller now does. */
+  claimJob: (id: string, now: number, leaseMs: number) => Promise<boolean>;
+  /** Unfinished jobs whose lease has lapsed — what the cron picks up. */
+  claimableJobs: (now: number) => Promise<{ owner: Owner; id: string }[]>;
+  /** What each thread cost, summed over its runs — what an estimate is made from. */
+  threadCosts: (threadIds: string[]) => Promise<Map<string, number>>;
+
+  saveRuling: (r: Ruling) => Promise<void>;
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
-  deleteRuling(threadId: string, checkId: string): Promise<void>;
-  listRulings(q: { threadIds?: string[]; checkIds?: string[] }): Promise<Ruling[]>;
+  deleteRuling: (threadId: string, checkId: string) => Promise<void>;
+  listRulings: (q: { threadIds?: string[]; checkIds?: string[] }) => Promise<Ruling[]>;
 }
 
 export async function migrateEvalsV2(client: Client): Promise<void> {
@@ -79,6 +92,12 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       judge_id TEXT NOT NULL, answer TEXT NOT NULL, confidence REAL, score REAL,
       failed INTEGER NOT NULL, escalated_to TEXT, created_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS latch_eval_verdicts_thread ON latch_eval_verdicts (thread_id, rubric_version, check_id, created_at)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_jobs (
+      owner TEXT NOT NULL, id TEXT NOT NULL PRIMARY KEY, dataset_id TEXT NOT NULL,
+      status TEXT NOT NULL, lease_until INTEGER NOT NULL, data TEXT NOT NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_jobs_dataset ON latch_eval_jobs (owner, dataset_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_jobs_open ON latch_eval_jobs (status, lease_until)`,
     `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
       thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
       by TEXT, created_at INTEGER NOT NULL,
@@ -386,6 +405,69 @@ export function createEvalsStore(client: Client): EvalsStore {
         args: [r.threadId, r.checkId, r.failed ? 1 : 0, r.by ?? null, r.createdAt],
       });
     },
+    async saveJob(j) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_jobs (owner, id, dataset_id, status, lease_until, data, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [j.owner, j.id, j.datasetId, j.status, j.leaseUntil, JSON.stringify(j), j.createdAt, j.updatedAt],
+      });
+    },
+    async getJob(owner, id) {
+      const [r] = await rows(`SELECT data FROM latch_eval_jobs WHERE owner = ? AND id = ?`, [owner, id]);
+      return r ? (JSON.parse(String(r.data)) as EvalJob) : null;
+    },
+    async listJobs(owner, datasetId, limit = 20) {
+      return (
+        await rows(`SELECT data FROM latch_eval_jobs WHERE owner = ? AND dataset_id = ? ORDER BY created_at DESC LIMIT ?`, [
+          owner,
+          datasetId,
+          limit,
+        ])
+      ).map((r) => JSON.parse(String(r.data)) as EvalJob);
+    },
+    async updateJob(id, patch) {
+      // One statement, so two holders never lose each other's writes, and a
+      // cancel is final: SET reads the row's OLD status, which wins if cancelled.
+      const status = `CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE COALESCE(json_extract(?1, '$.status'), status) END`;
+      await client.execute({
+        sql: `UPDATE latch_eval_jobs SET
+                status = ${status},
+                lease_until = COALESCE(json_extract(?1, '$.leaseUntil'), lease_until),
+                updated_at = COALESCE(json_extract(?1, '$.updatedAt'), updated_at),
+                data = json_set(json_patch(data, ?1), '$.status', ${status})
+              WHERE id = ?2`,
+        args: [JSON.stringify(patch), id],
+      });
+      const [r] = await rows(`SELECT data FROM latch_eval_jobs WHERE id = ?`, [id]);
+      return r ? (JSON.parse(String(r.data)) as EvalJob) : null;
+    },
+    async claimJob(id, now, leaseMs) {
+      const until = now + leaseMs;
+      const r = await client.execute({
+        sql: `UPDATE latch_eval_jobs SET lease_until = ?1, data = json_set(data, '$.leaseUntil', ?1)
+              WHERE id = ?2 AND status IN ('running', 'judging') AND lease_until < ?3`,
+        args: [until, id, now],
+      });
+      return r.rowsAffected === 1;
+    },
+    async claimableJobs(now) {
+      return (
+        await rows(`SELECT owner, id FROM latch_eval_jobs WHERE status IN ('running', 'judging') AND lease_until < ? LIMIT 5`, [now])
+      ).map((r) => ({ owner: String(r.owner), id: String(r.id) }));
+    },
+    async threadCosts(threadIds) {
+      const out = new Map<string, number>();
+      for (let i = 0; i < threadIds.length; i += 500) {
+        const ids = threadIds.slice(i, i + 500);
+        for (const r of await rows(
+          `SELECT chat_id, SUM(COALESCE(cost_total, 0)) AS c FROM latch_runs WHERE chat_id IN (${placeholders(ids.length)}) GROUP BY chat_id`,
+          ids,
+        ))
+          out.set(String(r.chat_id), Number(r.c));
+      }
+      return out;
+    },
+
     async deleteRuling(threadId, checkId) {
       await client.execute({ sql: `DELETE FROM latch_eval_rulings WHERE thread_id = ? AND check_id = ?`, args: [threadId, checkId] });
     },
