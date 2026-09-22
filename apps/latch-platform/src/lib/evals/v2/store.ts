@@ -34,12 +34,16 @@ export interface EvalsStore {
   listThreads(owner: Owner, q: { agentName?: string; datasetId?: string; runId?: string; limit?: number }): Promise<ThreadRef[]>;
   /** The most recent run of a dataset — what `judge` reads by default. */
   latestRunId(owner: Owner, datasetId: string): Promise<string | null>;
+  /** Runs of a dataset, newest first — what the results view offers to pick from. */
+  listRuns(owner: Owner, datasetId: string): Promise<{ runId: string; threads: number; versions: string[]; createdAt: number }[]>;
 
   saveVerdicts(vs: Verdict[]): Promise<void>;
   /** Latest verdict per (thread, check) for one rubric version. */
   listVerdicts(q: { threadIds: string[]; rubricVersion?: number }): Promise<Verdict[]>;
 
   saveRuling(r: Ruling): Promise<void>;
+  /** Take a ruling back — a misclick must not stay in the alignment numbers. */
+  deleteRuling(threadId: string, checkId: string): Promise<void>;
   listRulings(q: { threadIds?: string[]; checkIds?: string[] }): Promise<Ruling[]>;
 }
 
@@ -325,6 +329,21 @@ export function createEvalsStore(client: Client): EvalsStore {
       return r ? String(r.run_id) : null;
     },
 
+    async listRuns(owner, datasetId) {
+      const rs = await rows(
+        `SELECT run_id, COUNT(*) AS n, GROUP_CONCAT(DISTINCT version) AS versions, MIN(created_at) AS at
+           FROM latch_eval_threads WHERE owner = ? AND dataset_id = ? AND run_id IS NOT NULL
+          GROUP BY run_id ORDER BY at DESC LIMIT 50`,
+        [owner, datasetId],
+      );
+      return rs.map((r) => ({
+        runId: String(r.run_id),
+        threads: Number(r.n),
+        versions: String(r.versions ?? "").split(",").filter(Boolean),
+        createdAt: Number(r.at),
+      }));
+    },
+
     async saveVerdicts(vs) {
       if (!vs.length) return;
       await client.batch(
@@ -366,6 +385,9 @@ export function createEvalsStore(client: Client): EvalsStore {
                 created_at = excluded.created_at`,
         args: [r.threadId, r.checkId, r.failed ? 1 : 0, r.by ?? null, r.createdAt],
       });
+    },
+    async deleteRuling(threadId, checkId) {
+      await client.execute({ sql: `DELETE FROM latch_eval_rulings WHERE thread_id = ? AND check_id = ?`, args: [threadId, checkId] });
     },
     async listRulings(q) {
       const where: string[] = [];

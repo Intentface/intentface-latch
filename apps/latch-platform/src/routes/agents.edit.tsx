@@ -76,6 +76,7 @@ import { RichSelect } from "@/components/ui/rich-select";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { CodeEditor } from "@/components/code-editor";
+import { EvalsSection } from "@/components/evals-section";
 import type { ToolInfo } from "./agents";
 
 export const Route = createFileRoute("/agents/edit")({
@@ -986,6 +987,7 @@ function AgentEditor() {
         </Dialog>
       )}
 
+      {editing && <EvalsSection agent={rec.name} />}
       {editing && <SlackSection agent={rec.name} />}
       {editing && <ChannelSection kind="telegram" agent={rec.name} />}
       {editing && <ChannelSection kind="whatsapp" agent={rec.name} />}
