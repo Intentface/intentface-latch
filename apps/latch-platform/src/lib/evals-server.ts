@@ -78,7 +78,7 @@ export const getEvalGridFn = createServerFn({ method: "GET" })
     const versions = summaries.map((s) => s.version);
     const comparison =
       versions.length >= 2
-        ? compareVersions(threads, verdicts, rubric.checks.map((c) => c.id), versions[0]!, versions[1]!)
+        ? compareVersions(threads, verdicts, rubric.checks.map((c) => c.id), versions[0], versions[1])
         : [];
     const trust = trustOf(allVerdicts, rulings);
     const rulingOf = new Map(rulings.map((r) => [`${r.threadId}|${r.checkId}`, r.failed]));
@@ -139,7 +139,7 @@ export const getEvalThreadFn = createServerFn({ method: "GET" })
     const input = t.datasetId && t.inputId ? (await evals.listInputs(t.datasetId)).find((i) => i.id === t.inputId) : undefined;
     return {
       version: t.version,
-      prompt: input?.prompt ?? view.inputs[0] ?? "",
+      prompt: input?.prompt ?? view.inputs[0],
       followUps: input?.followUps ?? [],
       tools: view.calls.map((c) => ({ tool: c.tool, stubbed: c.gated })),
       answer: finalAnswer(view),

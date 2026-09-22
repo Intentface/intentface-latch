@@ -1,13 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { FlaskConical, Loader2 } from "lucide-react";
-import {
-  getEvalGridFn,
-  getEvalThreadFn,
-  getEvalsOverviewFn,
-  saveEvalRulingFn,
-  type EvalGrid,
-  type EvalsOverview,
-} from "@/lib/evals-server";
+import { getEvalGridFn, getEvalThreadFn, getEvalsOverviewFn, saveEvalRulingFn } from "@/lib/evals-server";
+import type { EvalGrid, EvalsOverview } from "@/lib/evals-server";
 import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui/select";
 
@@ -177,7 +171,7 @@ function Grid({
         </thead>
         <tbody>
           {grid.checks.map((c) => {
-            const trust = TRUST_COPY[c.trust?.level ?? "unknown"]!;
+            const trust = TRUST_COPY[c.trust?.level ?? "unknown"];
             return (
               <tr key={c.id} className="align-top">
                 <td className="border-primary-border border-t py-2 pr-3">
@@ -188,7 +182,7 @@ function Grid({
                   <div className="text-ink-tertiary mt-0.5">{c.kind === "counted" ? "read from the tool log" : `asked of ${c.judge}`}</div>
                 </td>
                 {c.cells.map((cell, i) => {
-                  const version = grid.versions[i]!;
+                  const version = grid.versions[i];
                   const active = open?.checkId === c.id && open.version === version;
                   const rate = pct(cell.passed, cell.total);
                   return (
