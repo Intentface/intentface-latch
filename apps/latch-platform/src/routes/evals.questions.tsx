@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Plus, Search, Trash2 } from "lucide-react";
 import { currentPrincipalFn } from "@/lib/server";
@@ -39,19 +39,22 @@ function QuestionsPage() {
   const datasetId = search.dataset ?? overview?.datasets[0]?.id;
   const [data, setData] = useState<Loaded | null>(null);
   const [filter, setFilter] = useState("");
-  const [editing, setEditing] = useState<Editing | null>(null);
+  // An existing question is open when the URL names it — the URL is the only
+  // record, so closing cannot race a second copy. Local state holds only what
+  // has no id in the URL yet: a new question, or the set's details.
+  const [local, setLocal] = useState<Editing | null>(null);
 
   useEffect(() => {
     setData(null);
     if (agent && datasetId) void getQuestionsFn({ data: { agent, datasetId } }).then(setData);
   }, [agent, datasetId]);
 
-  // A selected question is in the URL, so a link can open it.
-  useEffect(() => {
-    if (!data || !search.q || editing) return;
-    const q = data.questions.find((x) => x.id === search.q);
-    if (q) setEditing({ kind: "question", draft: q, isNew: false });
-  }, [data, search.q, editing]);
+  const selected = search.q ? data?.questions.find((x) => x.id === search.q) : undefined;
+  const editing: Editing | null = local ?? (selected ? { kind: "question", draft: selected, isNew: false } : null);
+  // Keep the last content while the drawer animates shut.
+  const last = useRef(editing);
+  if (editing) last.current = editing;
+  const inDrawer = editing ?? last.current;
 
   const shown = useMemo(() => {
     const f = filter.trim().toLowerCase();
@@ -60,8 +63,8 @@ function QuestionsPage() {
   }, [data, filter]);
 
   const close = () => {
-    setEditing(null);
-    set({ q: undefined });
+    setLocal(null);
+    if (search.q) set({ q: undefined });
   };
 
   /** Save the whole set with one question replaced, added or removed. */
@@ -97,7 +100,7 @@ function QuestionsPage() {
             <>
               <button
                 type="button"
-                onClick={() => setEditing({ kind: "set" })}
+                onClick={() => setLocal({ kind: "set" })}
                 className="text-ink-secondary hover:text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border h-8 rounded-lg px-3 text-sm"
               >
                 About this set
@@ -105,7 +108,7 @@ function QuestionsPage() {
               <button
                 type="button"
                 onClick={() =>
-                  setEditing({
+                  setLocal({
                     kind: "question",
                     isNew: true,
                     draft: { id: nextInputId(data.questions), prompt: "", followUps: [], answer: "", mustNot: [], docs: [], extra: "{}" },
@@ -161,7 +164,7 @@ function QuestionsPage() {
                 {shown.map((q) => (
                   <tr
                     key={q.id}
-                    onClick={() => (setEditing({ kind: "question", draft: q, isNew: false }), set({ q: q.id }))}
+                    onClick={() => set({ q: q.id })}
                     className="hover:bg-primary-bg-hover cursor-pointer align-top"
                   >
                     <td className="border-primary-border text-ink-tertiary border-t px-4 py-2.5 tabular-nums">{q.id}</td>
@@ -201,17 +204,17 @@ function QuestionsPage() {
 
       <Drawer open={!!editing} onOpenChange={(o) => !o && close()}>
         <Drawer.Content className={EDITOR_DRAWER}>
-          {editing?.kind === "question" && data && (
+          {inDrawer?.kind === "question" && data && (
             <QuestionEditor
-              key={editing.draft.id}
-              initial={editing.draft}
-              isNew={editing.isNew}
+              key={inDrawer.draft.id}
+              initial={inDrawer.draft}
+              isNew={inDrawer.isNew}
               onCancel={close}
-              onSave={(q) => save(editing.isNew ? [...data.questions, q] : data.questions.map((x) => (x.id === editing.draft.id ? q : x)))}
-              onDelete={() => save(data.questions.filter((x) => x.id !== editing.draft.id))}
+              onSave={(q) => save(inDrawer.isNew ? [...data.questions, q] : data.questions.map((x) => (x.id === inDrawer.draft.id ? q : x)))}
+              onDelete={() => save(data.questions.filter((x) => x.id !== inDrawer.draft.id))}
             />
           )}
-          {editing?.kind === "set" && data && (
+          {inDrawer?.kind === "set" && data && (
             <SetEditor initial={data.dataset} onCancel={close} onSave={(meta) => save(data.questions, meta)} />
           )}
         </Drawer.Content>

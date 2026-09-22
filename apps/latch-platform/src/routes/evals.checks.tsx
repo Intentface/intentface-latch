@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { MessageSquareText, Plus, ScrollText, Trash2, X } from "lucide-react";
 import { currentPrincipalFn } from "@/lib/server";
@@ -44,7 +44,8 @@ function ChecksPage() {
   const [overview] = useOverview(agent);
   const rubricId = search.rubric ?? overview?.rubrics[0]?.id;
   const [data, setData] = useState<Loaded | null>(null);
-  const [editing, setEditing] = useState<Editing | null>(null);
+  // An existing check is open when the URL names it; local state holds only a new one.
+  const [adding, setAdding] = useState<Editing | null>(null);
   const [saved, setSaved] = useState<number | null>(null);
 
   useEffect(() => {
@@ -56,15 +57,16 @@ function ChecksPage() {
       );
   }, [agent, rubricId]);
 
-  useEffect(() => {
-    if (!data || !search.check || editing) return;
-    const c = data.checks.find((x) => x.id === search.check);
-    if (c) setEditing({ draft: c, isNew: false });
-  }, [data, search.check, editing]);
+  const selected = search.check ? data?.checks.find((x) => x.id === search.check) : undefined;
+  const editing: Editing | null = adding ?? (selected ? { draft: selected, isNew: false } : null);
+  // Keep the last content while the drawer animates shut.
+  const last = useRef(editing);
+  if (editing) last.current = editing;
+  const inDrawer = editing ?? last.current;
 
   const close = () => {
-    setEditing(null);
-    set({ check: undefined });
+    setAdding(null);
+    if (search.check) set({ check: undefined });
   };
 
   const save = async (checks: Check[]) => {
@@ -84,7 +86,7 @@ function ChecksPage() {
       kind === "asked"
         ? { kind: "asked", id: checkIdFor("new check", taken), label: "", ask: "", shape: { type: "boolean" } }
         : { kind: "counted", id: checkIdFor("new rule", taken), label: "", spec: { op: "called", tool: "" } };
-    setEditing({ draft, isNew: true });
+    setAdding({ draft, isNew: true });
   };
 
   if (!index.length) return <EvalsEmpty />;
@@ -126,7 +128,7 @@ function ChecksPage() {
             addLabel="Ask the judge"
           >
             {asked.map((c) => (
-              <CheckRow key={c.id} onOpen={() => (setEditing({ draft: c, isNew: false }), set({ check: c.id }))}>
+              <CheckRow key={c.id} onOpen={() => set({ check: c.id })}>
                 <div className="text-ink-primary font-medium">{c.label}</div>
                 <div className="text-ink-secondary mt-0.5 line-clamp-2">{c.ask}</div>
                 <div className="text-ink-tertiary mt-1 text-xs">
@@ -144,7 +146,7 @@ function ChecksPage() {
             addLabel="Add a rule"
           >
             {counted.map((c) => (
-              <CheckRow key={c.id} onOpen={() => (setEditing({ draft: c, isNew: false }), set({ check: c.id }))}>
+              <CheckRow key={c.id} onOpen={() => set({ check: c.id })}>
                 <div className="text-ink-primary font-medium">{c.label}</div>
                 <div className="text-ink-secondary mt-0.5 font-mono text-xs">{readable(c)}</div>
                 {c.because && <div className="text-ink-tertiary mt-1 text-xs">Because {c.because}</div>}
@@ -156,18 +158,18 @@ function ChecksPage() {
 
       <Drawer open={!!editing} onOpenChange={(o) => !o && close()}>
         <Drawer.Content className={EDITOR_DRAWER}>
-          {editing && data && (
+          {inDrawer && data && (
             <CheckEditor
-              key={editing.draft.id}
-              initial={editing.draft}
-              isNew={editing.isNew}
+              key={inDrawer.draft.id}
+              initial={inDrawer.draft}
+              isNew={inDrawer.isNew}
               judges={data.judges}
               defaultJudge={data.defaultJudge}
               version={data.version}
-              taken={data.checks.map((c) => c.id).filter((id) => id !== editing.draft.id)}
+              taken={data.checks.map((c) => c.id).filter((id) => id !== inDrawer.draft.id)}
               onCancel={close}
-              onSave={(c) => save(editing.isNew ? [...data.checks, c] : data.checks.map((x) => (x.id === editing.draft.id ? c : x)))}
-              onDelete={() => save(data.checks.filter((x) => x.id !== editing.draft.id))}
+              onSave={(c) => save(inDrawer.isNew ? [...data.checks, c] : data.checks.map((x) => (x.id === inDrawer.draft.id ? c : x)))}
+              onDelete={() => save(data.checks.filter((x) => x.id !== inDrawer.draft.id))}
             />
           )}
         </Drawer.Content>
