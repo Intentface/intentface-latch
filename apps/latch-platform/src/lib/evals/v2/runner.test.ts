@@ -156,6 +156,47 @@ describe("evals v2 end to end (fake agent, fake judge, real store)", () => {
     expect(stored).toHaveLength(verdicts.length);
   });
 
+  it("repeats: each input becomes a rate, and pass^k asks whether it passes every time", async () => {
+    // A flaky agent: `@flaky` looks first on attempts 0 and 1, not on 2.
+    let calls = 0;
+    const flaky = (o: { agent: string; prompt: string; threadId?: string }) =>
+      fakeAgent({ ...o, agent: o.agent.endsWith("@flaky") && calls++ % 3 !== 2 ? `${o.agent}@good` : o.agent });
+    const threads = await runDataset({
+      owner,
+      dataset,
+      inputs: [inputs[0]!, inputs[2]!],
+      versions: [
+        { label: "live", ref: "linear-bot", fingerprint: "A" },
+        { label: "@flaky", ref: "linear-bot@flaky", fingerprint: "C" },
+      ],
+      repeats: 3,
+      runId: "run_rep",
+      deps: { runAgent: flaky },
+      concurrency: 1,
+    });
+    expect(threads).toHaveLength(12);
+    expect(new Set(threads.map((t) => t.runId))).toEqual(new Set(["run_rep"]));
+    expect(threads.filter((t) => t.inputId === "i1" && t.version === "live").map((t) => t.attempt).sort()).toEqual([0, 1, 2]);
+    for (const t of threads) await store.saveThread(t);
+    expect(await store.latestRunId(owner, dataset.id)).toBe("run_rep");
+    expect(await store.listThreads(owner, { runId: "run_rep" })).toHaveLength(12);
+
+    const looked = rubric.checks.filter((c) => c.id === "looked");
+    const verdicts = await judgeThreads({
+      rubric: { ...rubric, checks: looked },
+      threads,
+      inputsById: new Map(inputs.map((i) => [i.id, i])),
+      deps: { loadHistory: (id) => Promise.resolve(histories.get(id) ?? []), judgeFor: () => judge },
+    });
+    const [, fl] = summarize(threads, verdicts, { ...rubric, checks: looked });
+    // 4 of 6 attempts looked first, but no input did it every time.
+    expect(fl!.checks[0]).toMatchObject({ passed: 4, total: 6, allPassed: 0, inputs: 2 });
+
+    const [cmp] = compareVersions(threads, verdicts, ["looked"], "live", "@flaky");
+    expect(cmp).toMatchObject({ pairs: 2, improved: 2, regressed: 0, rateA: 0 });
+    expect(cmp!.rateB).toBeCloseTo(2 / 3);
+  });
+
   it("an empty answer is an error, not a verdict", async () => {
     const threads = await runDataset({
       owner,

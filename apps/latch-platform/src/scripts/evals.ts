@@ -3,11 +3,13 @@
  *
  *   pnpm evals import  --org O --user U --agent A --name N --file ax.json
  *   pnpm evals rubric  --org O --user U --agent A --file advisory.json
- *   pnpm evals run     --org O --user U --dataset ID --versions live,@draft [--concurrency 4]
- *   pnpm evals judge   --org O --user U --dataset ID --rubric ID [--times 3] [--judge jev-latest]
+ *   pnpm evals run     --org O --user U --dataset ID --versions live,@draft [--repeats 3] [--concurrency 4]
+ *   pnpm evals judge   --org O --user U --dataset ID --rubric ID [--run ID] [--times 3] [--judge jev-latest]
  *
  * `run` only produces threads; `judge` can be repeated as often as the rubric
- * changes, for seconds and pennies, against byte-identical behaviour.
+ * changes, for seconds and pennies, against byte-identical behaviour. `judge`
+ * reads one run — the latest unless `--run` names another — because threads
+ * from different runs were produced under different conditions.
  */
 import { readFileSync } from "node:fs";
 import { typeSafeAi } from "@ai-sdk/typesafe-ai";
@@ -120,6 +122,9 @@ async function main() {
     for (const same of byPrint.values())
       if (same.length > 1) console.log(`! ${same.join(" and ")} are the same configuration`);
 
+    const repeats = Math.max(1, Number(flag("repeats") ?? 1));
+    const runId = `run_${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`;
+    console.log(`${runId}: ${inputs.length} inputs × ${versions.length} versions × ${repeats} attempts`);
     const started = Date.now();
     const threads = await runDataset({
       owner: dataset.owner,
@@ -127,6 +132,8 @@ async function main() {
       inputs,
       versions,
       concurrency: Number(flag("concurrency") ?? 4),
+      repeats,
+      runId,
       deps: {
         runAgent: ({ agent, prompt, threadId }) =>
           runtime.runAgent({
@@ -142,10 +149,10 @@ async function main() {
       },
       onThread: async (t, done, total) => {
         await evals.saveThread(t);
-        console.log(`[${String(done).padStart(3)}/${total}] ${t.error ? "!" : "·"} ${t.version.padEnd(8)} ${t.inputId}${t.error ? `  ${t.error}` : ""}`);
+        console.log(`[${String(done).padStart(3)}/${total}] ${t.error ? "!" : "·"} ${t.version.padEnd(8)} ${t.inputId}${repeats > 1 ? `#${t.attempt}` : ""}${t.error ? `  ${t.error}` : ""}`);
       },
     });
-    console.log(`\n${threads.filter((t) => !t.error).length}/${threads.length} threads in ${Math.round((Date.now() - started) / 1000)}s`);
+    console.log(`\n${threads.filter((t) => !t.error).length}/${threads.length} threads in ${Math.round((Date.now() - started) / 1000)}s — judge with --run ${runId}`);
     return;
   }
 
@@ -156,12 +163,10 @@ async function main() {
     const override = flag("judge");
     if (override) rubric = { ...rubric, defaultJudge: override, checks: rubric.checks.map((c) => (c.kind === "asked" ? { ...c, judge: undefined } : c)) as Check[] };
 
-    const threads = (await evals.listThreads(dataset.owner, { datasetId: dataset.id })).reverse();
-    // The latest thread per (input, version) — an old run of the same pair
-    // must not double-count.
-    const latest = new Map<string, (typeof threads)[number]>();
-    for (const t of threads) latest.set(`${t.inputId}|${t.version}`, t);
-    const current = [...latest.values()];
+    const runId = flag("run") ?? (await evals.latestRunId(dataset.owner, dataset.id));
+    if (!runId) throw new Error(`no runs of ${dataset.id} yet — pnpm evals run first`);
+    const current = await evals.listThreads(dataset.owner, { datasetId: dataset.id, runId });
+    const attempts = Math.max(...current.map((t) => (t.attempt ?? 0) + 1));
     const inputsById = new Map(inputs.map((i) => [i.id, i]));
     const judges = new Map<string, ReturnType<typeof evaluationModelFor>>();
     const judgeFor = (id: string) => judges.get(id) ?? judges.set(id, evaluationModelFor(id, modelFor, typeSafeAi)).get(id)!;
@@ -186,11 +191,15 @@ async function main() {
 
     const summaries = summarize(current, verdicts, rubric);
     const width = Math.max(...rubric.checks.map((c) => c.label.length), 10);
-    console.log(`\n${"".padEnd(width)}  ${summaries.map((s) => s.version.padStart(12)).join("")}`);
+    // With repeats, each cell also says on how many inputs it passed EVERY time.
+    const col = attempts > 1 ? 22 : 12;
+    console.log(`\n${runId} · ${attempts} attempt${attempts > 1 ? "s" : ""} per input${attempts > 1 ? " · cell = rate  (every time)" : ""}`);
+    console.log(`${"".padEnd(width)}  ${summaries.map((s) => s.version.padStart(col)).join("")}`);
     for (const c of rubric.checks) {
       const cells = summaries.map((s) => {
         const x = s.checks.find((k) => k.checkId === c.id)!;
-        return `${pct(x.passed, x.total)} ${x.passed}/${x.total}`.padStart(12);
+        const rate = `${pct(x.passed, x.total)} ${x.passed}/${x.total}`;
+        return (attempts > 1 ? `${rate}  (${x.allPassed}/${x.inputs})` : rate).padStart(col);
       });
       console.log(`${c.label.padEnd(width)}  ${cells.join("")}  ${c.kind === "counted" ? "counted" : (c.judge ?? rubric.defaultJudge)}`);
     }
@@ -198,10 +207,11 @@ async function main() {
 
     if (summaries.length >= 2) {
       const [a, b] = summaries;
-      console.log(`\npaired, ${a!.version} → ${b!.version} (same inputs):`);
+      console.log(`\npaired, ${a!.version} → ${b!.version} (same inputs${attempts > 1 ? ", per-input rates" : ""}):`);
       for (const r of compareVersions(current, verdicts, rubric.checks.map((c) => c.id), a!.version, b!.version)) {
         const label = rubric.checks.find((c) => c.id === r.checkId)!.label;
-        console.log(`  ${label.padEnd(width)}  +${r.improved} −${r.regressed} of ${r.pairs}  p=${r.p.toFixed(4)}${r.p < 0.05 ? "  real" : ""}`);
+        const rates = `${Math.round(r.rateA * 100)}% → ${Math.round(r.rateB * 100)}%`.padEnd(12);
+        console.log(`  ${label.padEnd(width)}  ${rates}  +${r.improved} −${r.regressed} of ${r.pairs}  p=${r.p.toFixed(4)}${r.p < 0.05 ? "  real" : ""}`);
       }
     }
     if (times > 1) {

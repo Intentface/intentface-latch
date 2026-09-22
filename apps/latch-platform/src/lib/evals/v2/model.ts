@@ -176,6 +176,14 @@ export interface ThreadRef {
   agentName: string;
   datasetId?: string;
   inputId?: string;
+  /**
+   * The run this thread came from. Every thread of one run was produced
+   * under the same conditions; threads from different runs must never be
+   * mixed in one comparison — the same agent swung 17%→30% between runs.
+   */
+  runId?: string;
+  /** Which repeat of this (input, version) — 0-based. */
+  attempt?: number;
   /** What the column says: `live`, `@3`, `@draft`. */
   version: string;
   /** Hash of everything behaviour can turn on — see `configFingerprint`. */

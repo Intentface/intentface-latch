@@ -49,18 +49,33 @@ export async function runDataset(opts: {
   versions: (Version & { fingerprint: string })[];
   deps: RunDeps;
   concurrency?: number;
+  /**
+   * Run each (input, version) this many times. One attempt per input cannot
+   * separate a change from the agent's own variance: the same configuration
+   * scored 17%, 26%, 30% and 30% on one check across four single-attempt
+   * runs. Repeats turn each input into a rate, which is what can be compared.
+   */
+  repeats?: number;
+  /** Groups the threads of this run. Generated when omitted. */
+  runId?: string;
   onThread?: (t: ThreadRef, done: number, total: number) => void;
 }): Promise<ThreadRef[]> {
-  const units = opts.versions.flatMap((v) => opts.inputs.map((input) => ({ v, input })));
+  const repeats = Math.max(1, opts.repeats ?? 1);
+  const runId = opts.runId ?? `run_${Date.now().toString(36)}`;
+  const units = opts.versions.flatMap((v) =>
+    opts.inputs.flatMap((input) => Array.from({ length: repeats }, (_, attempt) => ({ v, input, attempt }))),
+  );
   const out: ThreadRef[] = new Array(units.length);
   let done = 0;
-  await pool(units, opts.concurrency ?? 4, async ({ v, input }, i) => {
+  await pool(units, opts.concurrency ?? 4, async ({ v, input, attempt }, i) => {
     const started = Date.now();
     const base = {
       owner: opts.owner,
       agentName: opts.dataset.agentName,
       datasetId: opts.dataset.id,
       inputId: input.id,
+      runId,
+      attempt,
       version: v.label,
       configFingerprint: v.fingerprint,
       origin: "run" as const,
@@ -83,7 +98,7 @@ export async function runDataset(opts: {
     } catch (e) {
       out[i] = {
         ...base,
-        threadId: threadId || `failed:${v.label}:${input.id}:${started}`,
+        threadId: threadId || `failed:${runId}:${v.label}:${input.id}:${attempt}`,
         answer: "",
         error: e instanceof Error ? e.message : String(e),
         durationMs: Date.now() - started,
@@ -170,8 +185,16 @@ export async function judgeThreads(opts: {
 
 export interface CheckSummary {
   checkId: string;
+  /** Verdicts that passed / verdicts given — the mean rate across attempts. */
   passed: number;
   total: number;
+  /**
+   * Inputs where EVERY attempt passed, over inputs with a verdict. With one
+   * attempt this equals the rate; with several it is pass^k — can it do it
+   * every time, which is what a user gets, not whether it can do it at all.
+   */
+  allPassed: number;
+  inputs: number;
   /** Answer → count. For a pick-one check this is the diagnosis a rate discards. */
   answers: Record<string, number>;
 }
@@ -184,11 +207,11 @@ export interface VersionSummary {
 }
 
 export function summarize(threads: ThreadRef[], verdicts: Verdict[], rubric: Rubric): VersionSummary[] {
-  const versionOf = new Map(threads.map((t) => [t.threadId, t.version]));
+  const byThread = new Map(threads.map((t) => [t.threadId, t]));
   const labels = [...new Set(threads.map((t) => t.version))];
   return labels.map((version) => {
     const ts = threads.filter((t) => t.version === version);
-    const mine = verdicts.filter((v) => versionOf.get(v.threadId) === version);
+    const mine = verdicts.filter((v) => byThread.get(v.threadId)?.version === version);
     return {
       version,
       threads: ts.length,
@@ -196,8 +219,20 @@ export function summarize(threads: ThreadRef[], verdicts: Verdict[], rubric: Rub
       checks: rubric.checks.map((c) => {
         const vs = mine.filter((v) => v.checkId === c.id);
         const answers: Record<string, number> = {};
-        for (const v of vs) answers[v.answer] = (answers[v.answer] ?? 0) + 1;
-        return { checkId: c.id, passed: vs.filter((v) => !v.failed).length, total: vs.length, answers };
+        const perInput = new Map<string, boolean>();
+        for (const v of vs) {
+          answers[v.answer] = (answers[v.answer] ?? 0) + 1;
+          const key = byThread.get(v.threadId)?.inputId ?? v.threadId;
+          perInput.set(key, (perInput.get(key) ?? true) && !v.failed);
+        }
+        return {
+          checkId: c.id,
+          passed: vs.filter((v) => !v.failed).length,
+          total: vs.length,
+          allPassed: [...perInput.values()].filter(Boolean).length,
+          inputs: perInput.size,
+          answers,
+        };
       }),
     };
   });
@@ -205,24 +240,30 @@ export function summarize(threads: ThreadRef[], verdicts: Verdict[], rubric: Rub
 
 export interface PairedComparison {
   checkId: string;
-  /** Inputs where both versions produced a verdict. */
+  /** Inputs where both versions produced at least one verdict. */
   pairs: number;
-  /** Passed on B, failed on A. */
+  /** Inputs whose pass rate went up from A to B. */
   improved: number;
-  /** Passed on A, failed on B. */
+  /** Inputs whose pass rate went down. */
   regressed: number;
-  /** Exact two-sided McNemar. Small n makes this conservative, which is the honest direction. */
+  /** Mean per-input rate on A and B, over the paired inputs. */
+  rateA: number;
+  rateB: number;
+  /**
+   * Exact two-sided sign test over the inputs that moved. With one attempt
+   * per input this is McNemar; with several, it compares rates rather than
+   * single draws. Conservative at small n, which is the honest direction.
+   */
   p: number;
 }
 
 /**
  * Two versions over the SAME inputs, compared input by input.
  *
- * Pairing is what makes 23 inputs informative: it removes how hard each
- * question is from the comparison. Only the inputs whose verdict flipped
- * carry information, and McNemar tests exactly those. The same agent swung
- * from 30% to 17% between two sweeps on one check — an unpaired before/after
- * would have read noise that size as a finding.
+ * Pairing removes how hard each question is from the comparison; only the
+ * inputs that moved carry information. Threads should come from one run —
+ * mixing runs mixes conditions, and the agent's variance between runs is
+ * larger than most changes worth measuring.
  */
 export function compareVersions(
   threads: ThreadRef[],
@@ -233,25 +274,41 @@ export function compareVersions(
 ): PairedComparison[] {
   const byThread = new Map(threads.map((t) => [t.threadId, t]));
   return checkIds.map((checkId) => {
-    const byInput = new Map<string, { a?: boolean; b?: boolean }>();
+    const tally = new Map<string, { a: [number, number]; b: [number, number] }>();
     for (const v of verdicts) {
       if (v.checkId !== checkId) continue;
       const t = byThread.get(v.threadId);
       if (!t?.inputId || (t.version !== a && t.version !== b)) continue;
-      const slot = byInput.get(t.inputId) ?? {};
-      slot[t.version === a ? "a" : "b"] = !v.failed;
-      byInput.set(t.inputId, slot);
+      const slot = tally.get(t.inputId) ?? { a: [0, 0], b: [0, 0] };
+      const side = t.version === a ? slot.a : slot.b;
+      side[0] += v.failed ? 0 : 1;
+      side[1] += 1;
+      tally.set(t.inputId, slot);
     }
     let improved = 0;
     let regressed = 0;
     let pairs = 0;
-    for (const s of byInput.values()) {
-      if (s.a === undefined || s.b === undefined) continue;
+    let sumA = 0;
+    let sumB = 0;
+    for (const s of tally.values()) {
+      if (!s.a[1] || !s.b[1]) continue;
       pairs += 1;
-      if (!s.a && s.b) improved += 1;
-      if (s.a && !s.b) regressed += 1;
+      const ra = s.a[0] / s.a[1];
+      const rb = s.b[0] / s.b[1];
+      sumA += ra;
+      sumB += rb;
+      if (rb > ra) improved += 1;
+      if (rb < ra) regressed += 1;
     }
-    return { checkId, pairs, improved, regressed, p: mcnemar(improved, regressed) };
+    return {
+      checkId,
+      pairs,
+      improved,
+      regressed,
+      rateA: pairs ? sumA / pairs : 0,
+      rateB: pairs ? sumB / pairs : 0,
+      p: mcnemar(improved, regressed),
+    };
   });
 }
 

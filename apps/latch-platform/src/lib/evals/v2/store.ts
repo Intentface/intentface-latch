@@ -31,7 +31,9 @@ export interface EvalsStore {
 
   saveThread(t: ThreadRef): Promise<void>;
   getThread(owner: Owner, threadId: string): Promise<ThreadRef | null>;
-  listThreads(owner: Owner, q: { agentName?: string; datasetId?: string; limit?: number }): Promise<ThreadRef[]>;
+  listThreads(owner: Owner, q: { agentName?: string; datasetId?: string; runId?: string; limit?: number }): Promise<ThreadRef[]>;
+  /** The most recent run of a dataset — what `judge` reads by default. */
+  latestRunId(owner: Owner, datasetId: string): Promise<string | null>;
 
   saveVerdicts(vs: Verdict[]): Promise<void>;
   /** Latest verdict per (thread, check) for one rubric version. */
@@ -61,7 +63,8 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       PRIMARY KEY (owner, id, version))`,
     `CREATE TABLE IF NOT EXISTS latch_eval_threads (
       owner TEXT NOT NULL, thread_id TEXT NOT NULL, agent_name TEXT NOT NULL,
-      dataset_id TEXT, input_id TEXT, version TEXT NOT NULL, config_fingerprint TEXT NOT NULL,
+      dataset_id TEXT, input_id TEXT, run_id TEXT, attempt INTEGER,
+      version TEXT NOT NULL, config_fingerprint TEXT NOT NULL,
       origin TEXT NOT NULL, answer TEXT NOT NULL, error TEXT, duration_ms INTEGER,
       created_at INTEGER NOT NULL,
       PRIMARY KEY (owner, thread_id))`,
@@ -78,6 +81,10 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       PRIMARY KEY (thread_id, check_id))`,
   ];
   for (const sql of ddl) await client.execute(sql);
+  // Tables created before repeats existed; ADD COLUMN fails once present.
+  for (const col of ["run_id TEXT", "attempt INTEGER"])
+    await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
+  await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
 }
 
 const parse = <T>(v: unknown, fallback: T): T => {
@@ -120,6 +127,8 @@ const toThread = (r: Row): ThreadRef => ({
   agentName: String(r.agent_name),
   ...(r.dataset_id ? { datasetId: String(r.dataset_id) } : {}),
   ...(r.input_id ? { inputId: String(r.input_id) } : {}),
+  ...(r.run_id ? { runId: String(r.run_id) } : {}),
+  ...(r.attempt != null ? { attempt: Number(r.attempt) } : {}),
   version: String(r.version),
   configFingerprint: String(r.config_fingerprint),
   origin: r.origin === "production" ? "production" : "run",
@@ -268,9 +277,9 @@ export function createEvalsStore(client: Client): EvalsStore {
 
     async saveThread(t) {
       await client.execute({
-        sql: `INSERT INTO latch_eval_threads (owner, thread_id, agent_name, dataset_id, input_id, version,
-                config_fingerprint, origin, answer, error, duration_ms, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        sql: `INSERT INTO latch_eval_threads (owner, thread_id, agent_name, dataset_id, input_id, run_id, attempt,
+                version, config_fingerprint, origin, answer, error, duration_ms, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(owner, thread_id) DO UPDATE SET dataset_id = excluded.dataset_id,
                 input_id = excluded.input_id, answer = excluded.answer, error = excluded.error`,
         args: [
@@ -279,6 +288,8 @@ export function createEvalsStore(client: Client): EvalsStore {
           t.agentName,
           t.datasetId ?? null,
           t.inputId ?? null,
+          t.runId ?? null,
+          t.attempt ?? null,
           t.version,
           t.configFingerprint,
           t.origin,
@@ -298,10 +309,20 @@ export function createEvalsStore(client: Client): EvalsStore {
       const args: unknown[] = [owner];
       if (q.agentName) (where.push("agent_name = ?"), args.push(q.agentName));
       if (q.datasetId) (where.push("dataset_id = ?"), args.push(q.datasetId));
-      args.push(q.limit ?? 500);
+      if (q.runId) (where.push("run_id = ?"), args.push(q.runId));
+      args.push(q.limit ?? 5000);
       return (
         await rows(`SELECT * FROM latch_eval_threads WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ?`, args)
       ).map(toThread);
+    },
+
+    async latestRunId(owner, datasetId) {
+      const [r] = await rows(
+        `SELECT run_id FROM latch_eval_threads WHERE owner = ? AND dataset_id = ? AND run_id IS NOT NULL
+          ORDER BY created_at DESC LIMIT 1`,
+        [owner, datasetId],
+      );
+      return r ? String(r.run_id) : null;
     },
 
     async saveVerdicts(vs) {
