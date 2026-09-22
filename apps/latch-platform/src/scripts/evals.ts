@@ -3,7 +3,7 @@
  *
  *   pnpm evals import  --org O --user U --agent A --name N --file ax.json
  *   pnpm evals rubric  --org O --user U --agent A --file advisory.json
- *   pnpm evals run     --org O --user U --dataset ID --versions live,@draft [--repeats 3] [--concurrency 4]
+ *   pnpm evals run     --org O --user U --dataset ID --versions live,@draft [--repeats 3] [--only id,id] [--concurrency 4]
  *   pnpm evals judge   --org O --user U --dataset ID --rubric ID [--run ID] [--times 3] [--judge jev-latest] [--escalate MODEL]
  *   pnpm evals review  --org O --user U --dataset ID --rubric ID [--run ID] [--n 15] [--by NAME]
  *   pnpm evals trust   --org O --user U --dataset ID --rubric ID
@@ -103,7 +103,9 @@ async function main() {
   let dataset: Dataset | null = null;
   for (const o of owners) dataset ??= await evals.getDataset(o, datasetId);
   if (!dataset) throw new Error(`no dataset ${datasetId}`);
-  const inputs = await evals.listInputs(dataset.id);
+  const only = flag("only")?.split(",").map((x) => x.trim());
+  // --only narrows a run to a few inputs: a cheap check before a full one.
+  const inputs = (await evals.listInputs(dataset.id)).filter((i) => !only || only.includes(i.id));
 
   if (cmd === "run") {
     const labels = (flag("versions") ?? "live").split(",").map((s) => s.trim());
@@ -276,7 +278,9 @@ async function main() {
     }
     const verdicts = passes[0]!;
 
-    const summaries = summarize(current, verdicts, rubric);
+    // Baseline first, so the comparison reads live → candidate.
+    const order = (v: string) => (v === "live" ? "" : v);
+    const summaries = summarize(current, verdicts, rubric).sort((a, b) => order(a.version).localeCompare(order(b.version)));
     // With repeats, each cell also says on how many inputs it passed EVERY time.
     const col = attempts > 1 ? 22 : 12;
     console.log(`\n${runId} · ${attempts} attempt${attempts > 1 ? "s" : ""} per input${attempts > 1 ? " · cell = rate  (every time)" : ""}`);
