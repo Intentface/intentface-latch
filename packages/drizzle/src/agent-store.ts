@@ -309,6 +309,29 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
     return personal ?? rows[0];
   }
 
+  /**
+   * The record as of a published version, or the editor's draft.
+   *
+   * Reads through `queries` rather than the store's own methods: those take a
+   * principal and re-derive the owner key, and the row in hand already knows
+   * which owner matched — personal or org — so re-deriving could resolve the
+   * other one.
+   */
+  async function pinnedRecord(
+    row: AgentRow,
+    at: number | "draft",
+    principal: P,
+  ): Promise<AgentRecord | undefined> {
+    if (at === "draft") {
+      // A draft belongs to an EDITOR, not to the owner: two admins of one org
+      // have different half-written prompts, and `@draft` means the caller's.
+      const draft = await queries.draft(row.owner, row.name, editorKey(principal));
+      return draft ? recordFromJson(draft.record) : undefined;
+    }
+    const version = await queries.versionAt(row.owner, row.name, at);
+    return version ? recordFromJson(version.record) : undefined;
+  }
+
   async function find(p: P, name: string, scope?: AgentScope): Promise<AgentRecord | undefined> {
     // Personal wins over org on a name clash — unless pinned to one scope.
     const owners =
@@ -332,7 +355,12 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
       const ref = parseAgentRef(name);
       const row = await findRow(principal, ref.name, ref.scope);
       if (!row) return undefined;
-      const rec = recordOf(row);
+      // `name@7` / `name@draft` resolves a PINNED configuration, read-only.
+      // Measuring an old version must never make it live, and without this the
+      // only way to run one is to publish it first — which turns a comparison
+      // into two runs of whatever happened to be current.
+      const rec = ref.at === undefined ? recordOf(row) : await pinnedRecord(row, ref.at, principal);
+      if (!rec) return undefined;
       const decorate = opts.decorateResolve ?? ((cfg: AgentConfig<P>) => cfg);
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});

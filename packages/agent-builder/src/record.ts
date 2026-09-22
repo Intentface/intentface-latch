@@ -199,9 +199,22 @@ export const normalizeAgentName = (s: string): string =>
  * `org:`/`user:` prefix (stored names never contain `:` — normalizeAgentName
  * strips it). Split a possibly-pinned reference.
  */
-export function parseAgentRef(ref: string): { name: string; scope?: AgentScope } {
-  const m = /^(org|user):(.+)$/.exec(ref);
-  return m ? { name: m[2]!, scope: m[1] as AgentScope } : { name: ref };
+export function parseAgentRef(ref: string): {
+  name: string;
+  scope?: AgentScope;
+  /** A published version, or the author's draft. Omitted → whatever is live. */
+  at?: number | "draft";
+} {
+  const scoped = /^(org|user):(.+)$/.exec(ref);
+  const scope = scoped ? (scoped[1] as AgentScope) : undefined;
+  const rest = scoped ? scoped[2]! : ref;
+  // `name@7` / `name@draft` pins the CONFIGURATION. Without it, measuring an
+  // old version means publishing it first, which nobody does — so a
+  // comparison quietly becomes two runs of whatever happened to be live.
+  const pinned = /^(.+)@(draft|\d+)$/.exec(rest);
+  if (!pinned) return scope ? { name: rest, scope } : { name: rest };
+  const at = pinned[2] === "draft" ? ("draft" as const) : Number(pinned[2]);
+  return scope ? { name: pinned[1]!, scope, at } : { name: pinned[1]!, at };
 }
 
 const blankToUndefined = (s: string | undefined): string | undefined => {

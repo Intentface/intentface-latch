@@ -347,7 +347,27 @@ export interface Runtime<P> {
     agent: string;
     prompt: string;
     threadId?: string;
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
+    /**
+     * Per-turn memory override. `false` = no recall and no memory tools this
+     * run, whatever the agent's `exec.memory` says.
+     *
+     * For measurement. A sweep runs one agent over many inputs under one
+     * principal, so agent-scoped memory written on row 1 is in context by row
+     * 20 — the rows stop being independent observations, the arm that ran
+     * first advantages or poisons the one after it, and a re-run gives
+     * different numbers. Turning it off costs a caveat (production has it on)
+     * and buys a comparison that means something.
+     */
+    memory?: boolean;
+    /**
+     * Per-turn model override.
+     *
+     * For measurement, and the cheapest ablation there is: same prompt, same
+     * tools, same inputs, one variable. It also unblocks a sweep when the
+     * agent's own provider is unavailable, without editing the agent.
+     */
+    model?: LanguageModel;
     /**
      * Per-turn request payload, passed to `context.build` and the agent
      * factory (see `HandleChatInput.turnContext`). Ephemeral — never persisted,
@@ -1324,7 +1344,11 @@ export function createRuntime<P, RC = unknown>(
      * to return a "blocked" result — so a trial run has no real side effects.
      * Only meaningful with `autoApprove` (an autonomous run).
      */
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
+    /** Per-turn memory override; `false` disables recall and memory tools. */
+    memory?: boolean;
+    /** Per-turn model override — replaces the agent's own for this turn. */
+    model?: LanguageModel;
     /**
      * Per-turn prompt-caching override (defaults on when the runtime has a
      * `resolvePromptCaching` hook). `false` = set no caching options this turn
@@ -1354,7 +1378,16 @@ export function createRuntime<P, RC = unknown>(
     /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
     admitted?: Admitted;
   }): Promise<Response> {
-    const { resolvedChatId, principal, modelId, cfg, run, lease, runtimeCtx } = args;
+    const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
+    // A per-turn model override replaces the agent's own, and the telemetry id
+    // with it — a run row that says the agent's model while a different one
+    // answered makes every later comparison a lie.
+    const cfg = args.model ? { ...args.cfg, model: args.model } : args.cfg;
+    const modelId = args.model
+      ? typeof args.model === "string"
+        ? args.model
+        : ((args.model as { modelId?: string }).modelId ?? "unknown")
+      : args.modelId;
     // Mutable: the start moments below may inject, replace or rewrite history
     // before the model runs. From here on this is the turn's transcript.
     let uiMessages = args.uiMessages;
@@ -1557,7 +1590,8 @@ export function createRuntime<P, RC = unknown>(
     // append the provider's compiled-index block to the instructions. A
     // provider failure degrades to a turn without memory, never a dead turn.
     let instructions = cfg.instructions;
-    if (cfg.memory && config.memory) {
+    const memoryOn = args.memory ?? true;
+    if (memoryOn && cfg.memory && config.memory) {
       const memArgs = { principal, agent: run.agent, memory: cfg.memory };
       try {
         // Resolve both hooks BEFORE mutating the toolset, so a failure in
@@ -1739,14 +1773,34 @@ export function createRuntime<P, RC = unknown>(
       // Test runs: stub the approval-gated (mutating) tools so a trial has no
       // real side effects. Gated set = connection defaults + the agent's policy.
       if (blockGated) {
+        /**
+         * Does this approval value actually gate the tool?
+         *
+         * NOT a truthiness check. The SDK spells a waiver as the STRING
+         * `"not-applicable"` — which is truthy — so `if (v)` treated every
+         * tool an agent had explicitly waived as gated and stubbed it. On an
+         * agent whose reads are waived to override a connection default, that
+         * is every read tool: the agent could not retrieve anything, and an
+         * eval run measured a model with no access to its own corpus.
+         *
+         * Gated: `true`, `"user-approval"`, an object (approval with a
+         * reason), a function. Waived: `false`, `undefined`,
+         * `"not-applicable"`.
+         */
+        const gatedBy = (v: unknown): boolean =>
+          v === true ||
+          v === "user-approval" ||
+          typeof v === "function" ||
+          (typeof v === "object" && v !== null);
+
         const gated = new Set<string>();
-        for (const [k, v] of Object.entries(harnessApproval)) if (v) gated.add(k);
+        for (const [k, v] of Object.entries(harnessApproval)) if (gatedBy(v)) gated.add(k);
         for (const o of opened) {
-          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
+          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (gatedBy(v)) gated.add(k);
         }
         if (cfg.toolApproval && typeof cfg.toolApproval !== "function") {
           for (const [k, v] of Object.entries(cfg.toolApproval as Record<string, unknown>)) {
-            if (v) gated.add(k);
+            if (gatedBy(v)) gated.add(k);
             else gated.delete(k);
           }
         } else if (typeof cfg.toolApproval === "function") {
@@ -1760,12 +1814,21 @@ export function createRuntime<P, RC = unknown>(
           if (t && typeof t.execute === "function") {
             tools[name] = {
               ...(t as object),
-              execute: async (input: unknown) => ({
-                __blocked: true,
-                tool: name,
-                input,
-                reason: "approval-gated tool blocked during test run (no real side effects)",
-              }),
+              execute: async (input: unknown) =>
+                blockGated === "simulate-success"
+                  ? {
+                      ok: true,
+                      __stubbed: true,
+                      tool: name,
+                      input,
+                    }
+                  : {
+                      __blocked: true,
+                      tool: name,
+                      input,
+                      reason:
+                        "approval-gated tool blocked during test run (no real side effects)",
+                    },
             };
           }
         }
@@ -1923,7 +1986,7 @@ export function createRuntime<P, RC = unknown>(
         : config.resolvePromptCaching
           ? config.resolvePromptCaching(modelId, {
               agent: run.agent,
-              memoryScoped: !!(cfg.memory && config.memory),
+              memoryScoped: !!(memoryOn && cfg.memory && config.memory),
               principal,
             })
           : // No hook → caching is ON by default for first-party Anthropic /
@@ -3447,7 +3510,11 @@ export function createRuntime<P, RC = unknown>(
     message: AppMessage;
     chatId?: string;
     autoApprove: boolean;
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
+    /** Per-turn memory override (see buildTurn) — `false` disables recall. */
+    memory?: boolean;
+    /** Per-turn model override (see buildTurn). */
+    model?: LanguageModel;
     /** Per-turn prompt-caching override (see buildTurn). */
     promptCaching?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
@@ -3512,6 +3579,8 @@ export function createRuntime<P, RC = unknown>(
       admitted,
       autoApprove: o.autoApprove,
       blockGated: o.blockGated,
+      memory: o.memory,
+      model: o.model,
       promptCaching: o.promptCaching,
       depth: o.depth ?? 0,
       parentRunId: o.parentRunId,
@@ -3815,6 +3884,8 @@ export function createRuntime<P, RC = unknown>(
       prompt,
       threadId,
       blockGated = true,
+      memory,
+      model,
       turnContext,
       promptCaching,
       // No client stream: assume unattended unless the host says otherwise, so
@@ -3830,6 +3901,8 @@ export function createRuntime<P, RC = unknown>(
         // Autonomous: no human to authorize (blockGated stubs the gated tools).
         autoApprove: true,
         blockGated,
+        memory,
+        model,
         turnContext,
         promptCaching,
         trigger,

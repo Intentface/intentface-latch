@@ -149,10 +149,24 @@ export async function getLatch(): Promise<{
   if (cached) return cached;
 
   // Local dev → a file DB; prod → a hosted libsql (Turso) URL + auth token.
-  const client = createClient({
-    url: process.env.DATABASE_URL ?? "file:./latch.db",
-    authToken: process.env.TURSO_AUTH_TOKEN,
-  });
+  const url = process.env.DATABASE_URL ?? "file:./latch.db";
+  const client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN });
+  // A local SQLite file defaults to the rollback journal and, worse, to
+  // `busy_timeout = 0`: a second writer gets SQLITE_BUSY immediately instead of
+  // waiting its turn. Any concurrent work then fails rather than queues, and a
+  // durable runtime writes a checkpoint per step — so four agents in parallel
+  // lost checkpoints, which is not a crash but a silently truncated transcript.
+  //
+  // WAL lets readers run while one writer commits; the timeout makes the second
+  // writer wait rather than give up. Remote libsql handles its own concurrency,
+  // so this applies only to a file.
+  if (url.startsWith("file:")) {
+    await client.execute("PRAGMA journal_mode = WAL");
+    await client.execute("PRAGMA busy_timeout = 10000");
+    // NORMAL is the recommended pairing with WAL: durable across process
+    // crashes, and does not fsync on every single commit.
+    await client.execute("PRAGMA synchronous = NORMAL");
+  }
   await migrate(client); // creates latch_* tables (incl. latch_agents) alongside the auth tables
   await migrateSlack(client); // latch_slack_app + latch_slack_thread (Slack-only state)
   await migrateChannels(client); // shared channel tables (bots, identities, pendings, dedupe, turn/ask/thread) + legacy carry-over
