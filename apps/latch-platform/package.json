@@ -13,7 +13,8 @@
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx}\"",
     "check": "prettier --check \"**/*.{ts,tsx,js,jsx}\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "evals": "node --env-file-if-exists=.env --import tsx src/scripts/evals.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.57",

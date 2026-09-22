@@ -1,0 +1,365 @@
+import type { Client } from "@libsql/client";
+import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict } from "./model";
+
+/**
+ * Storage for evals v2.
+ *
+ * Threads are never copied — `latch_eval_threads` annotates `latch_chats`
+ * with why the thread matters to evals and which configuration produced it.
+ * Verdicts key on the rubric version, so re-judging appends: rewording a
+ * check no longer destroys the numbers it replaced, and rubric versions can
+ * be compared the way agent versions are.
+ */
+
+export interface EvalsStore {
+  saveDataset(d: Omit<Dataset, "createdAt" | "updatedAt">): Promise<void>;
+  getDataset(owner: Owner, id: string): Promise<Dataset | null>;
+  listDatasets(owner: Owner, agentName?: string): Promise<Dataset[]>;
+  deleteDataset(owner: Owner, id: string): Promise<void>;
+
+  /** Replace a dataset's inputs wholesale — the editor saves the list. */
+  setInputs(datasetId: string, inputs: Input[]): Promise<void>;
+  listInputs(datasetId: string): Promise<Input[]>;
+  /** For a thread dataset: the threads it holds. */
+  setMembers(datasetId: string, threadIds: string[]): Promise<void>;
+  listMembers(datasetId: string): Promise<string[]>;
+
+  /** Append a new rubric version; returns it. */
+  saveRubric(r: { owner: Owner; id: string; agentName: string; defaultJudge: string; checks: Check[] }): Promise<Rubric>;
+  getRubric(owner: Owner, id: string, version?: number): Promise<Rubric | null>;
+  listRubrics(owner: Owner, agentName: string): Promise<Rubric[]>;
+
+  saveThread(t: ThreadRef): Promise<void>;
+  getThread(owner: Owner, threadId: string): Promise<ThreadRef | null>;
+  listThreads(owner: Owner, q: { agentName?: string; datasetId?: string; limit?: number }): Promise<ThreadRef[]>;
+
+  saveVerdicts(vs: Verdict[]): Promise<void>;
+  /** Latest verdict per (thread, check) for one rubric version. */
+  listVerdicts(q: { threadIds: string[]; rubricVersion?: number }): Promise<Verdict[]>;
+
+  saveRuling(r: Ruling): Promise<void>;
+  listRulings(q: { threadIds?: string[]; checkIds?: string[] }): Promise<Ruling[]>;
+}
+
+export async function migrateEvalsV2(client: Client): Promise<void> {
+  const ddl = [
+    `CREATE TABLE IF NOT EXISTS latch_eval_datasets (
+      owner TEXT NOT NULL, id TEXT NOT NULL, agent_name TEXT NOT NULL, name TEXT NOT NULL,
+      kind TEXT NOT NULL, audience TEXT, note TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (owner, id))`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_inputs (
+      dataset_id TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
+      prompt TEXT NOT NULL, follow_ups TEXT, facts TEXT,
+      PRIMARY KEY (dataset_id, id))`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_members (
+      dataset_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+      PRIMARY KEY (dataset_id, thread_id))`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_rubrics (
+      owner TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, agent_name TEXT NOT NULL,
+      default_judge TEXT NOT NULL, checks TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (owner, id, version))`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_threads (
+      owner TEXT NOT NULL, thread_id TEXT NOT NULL, agent_name TEXT NOT NULL,
+      dataset_id TEXT, input_id TEXT, version TEXT NOT NULL, config_fingerprint TEXT NOT NULL,
+      origin TEXT NOT NULL, answer TEXT NOT NULL, error TEXT, duration_ms INTEGER,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (owner, thread_id))`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_threads_dataset ON latch_eval_threads (dataset_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_threads_agent ON latch_eval_threads (owner, agent_name, created_at)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_verdicts (
+      thread_id TEXT NOT NULL, check_id TEXT NOT NULL, rubric_version INTEGER NOT NULL,
+      judge_id TEXT NOT NULL, answer TEXT NOT NULL, confidence REAL, score REAL,
+      failed INTEGER NOT NULL, escalated_to TEXT, created_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_verdicts_thread ON latch_eval_verdicts (thread_id, rubric_version, check_id, created_at)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
+      thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
+      by TEXT, created_at INTEGER NOT NULL,
+      PRIMARY KEY (thread_id, check_id))`,
+  ];
+  for (const sql of ddl) await client.execute(sql);
+}
+
+const parse = <T>(v: unknown, fallback: T): T => {
+  if (v == null) return fallback;
+  try {
+    return JSON.parse(String(v)) as T;
+  } catch {
+    return fallback;
+  }
+};
+const str = (v: unknown) => (v == null ? undefined : String(v));
+const num = (v: unknown) => (v == null ? undefined : Number(v));
+type Row = Record<string, unknown>;
+
+const toDataset = (r: Row): Dataset => ({
+  owner: String(r.owner),
+  id: String(r.id),
+  agentName: String(r.agent_name),
+  name: String(r.name),
+  kind: r.kind === "threads" ? "threads" : "inputs",
+  ...(r.audience ? { audience: String(r.audience) } : {}),
+  ...(r.note ? { note: String(r.note) } : {}),
+  createdAt: Number(r.created_at),
+  updatedAt: Number(r.updated_at),
+});
+
+const toRubric = (r: Row): Rubric => ({
+  owner: String(r.owner),
+  id: String(r.id),
+  agentName: String(r.agent_name),
+  version: Number(r.version),
+  defaultJudge: String(r.default_judge),
+  checks: parse<Check[]>(r.checks, []),
+  createdAt: Number(r.created_at),
+});
+
+const toThread = (r: Row): ThreadRef => ({
+  owner: String(r.owner),
+  threadId: String(r.thread_id),
+  agentName: String(r.agent_name),
+  ...(r.dataset_id ? { datasetId: String(r.dataset_id) } : {}),
+  ...(r.input_id ? { inputId: String(r.input_id) } : {}),
+  version: String(r.version),
+  configFingerprint: String(r.config_fingerprint),
+  origin: r.origin === "production" ? "production" : "run",
+  answer: String(r.answer),
+  ...(r.error ? { error: String(r.error) } : {}),
+  ...(r.duration_ms != null ? { durationMs: Number(r.duration_ms) } : {}),
+  createdAt: Number(r.created_at),
+});
+
+const toVerdict = (r: Row): Verdict => ({
+  threadId: String(r.thread_id),
+  checkId: String(r.check_id),
+  rubricVersion: Number(r.rubric_version),
+  judgeId: String(r.judge_id),
+  answer: String(r.answer),
+  ...(r.confidence != null ? { confidence: Number(r.confidence) } : {}),
+  ...(r.score != null ? { score: Number(r.score) } : {}),
+  failed: Number(r.failed) === 1,
+  ...(r.escalated_to ? { escalatedTo: String(r.escalated_to) } : {}),
+  createdAt: Number(r.created_at),
+});
+
+const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(",");
+
+export function createEvalsStore(client: Client): EvalsStore {
+  const rows = async (sql: string, args: unknown[] = []) =>
+    (await client.execute({ sql, args: args as never })).rows as unknown as Row[];
+
+  return {
+    async saveDataset(d) {
+      const now = Date.now();
+      await client.execute({
+        sql: `INSERT INTO latch_eval_datasets (owner, id, agent_name, name, kind, audience, note, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(owner, id) DO UPDATE SET name = excluded.name, audience = excluded.audience,
+                note = excluded.note, updated_at = excluded.updated_at`,
+        args: [d.owner, d.id, d.agentName, d.name, d.kind, d.audience ?? null, d.note ?? null, now, now],
+      });
+    },
+    async getDataset(owner, id) {
+      const [r] = await rows(`SELECT * FROM latch_eval_datasets WHERE owner = ? AND id = ?`, [owner, id]);
+      return r ? toDataset(r) : null;
+    },
+    async listDatasets(owner, agentName) {
+      return (
+        agentName
+          ? await rows(`SELECT * FROM latch_eval_datasets WHERE owner = ? AND agent_name = ? ORDER BY name`, [owner, agentName])
+          : await rows(`SELECT * FROM latch_eval_datasets WHERE owner = ? ORDER BY agent_name, name`, [owner])
+      ).map(toDataset);
+    },
+    async deleteDataset(owner, id) {
+      await client.batch(
+        [
+          { sql: `DELETE FROM latch_eval_inputs WHERE dataset_id = ?`, args: [id] },
+          { sql: `DELETE FROM latch_eval_members WHERE dataset_id = ?`, args: [id] },
+          { sql: `DELETE FROM latch_eval_datasets WHERE owner = ? AND id = ?`, args: [owner, id] },
+        ],
+        "write",
+      );
+    },
+
+    async setInputs(datasetId, inputs) {
+      const seen = new Set<string>();
+      for (const i of inputs) {
+        // A duplicate id collapses two inputs into one across runs, and a
+        // regression on the second disappears rather than reporting.
+        if (seen.has(i.id)) throw new Error(`duplicate input id "${i.id}"`);
+        seen.add(i.id);
+      }
+      await client.batch(
+        [
+          { sql: `DELETE FROM latch_eval_inputs WHERE dataset_id = ?`, args: [datasetId] },
+          ...inputs.map((i, position) => ({
+            sql: `INSERT INTO latch_eval_inputs (dataset_id, id, position, prompt, follow_ups, facts) VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [
+              datasetId,
+              i.id,
+              position,
+              i.prompt,
+              i.followUps?.length ? JSON.stringify(i.followUps) : null,
+              i.facts && Object.keys(i.facts).length ? JSON.stringify(i.facts) : null,
+            ],
+          })),
+        ],
+        "write",
+      );
+    },
+    async listInputs(datasetId) {
+      return (await rows(`SELECT * FROM latch_eval_inputs WHERE dataset_id = ? ORDER BY position`, [datasetId])).map(
+        (r): Input => ({
+          id: String(r.id),
+          prompt: String(r.prompt),
+          ...(r.follow_ups ? { followUps: parse<string[]>(r.follow_ups, []) } : {}),
+          ...(r.facts ? { facts: parse(r.facts, {}) } : {}),
+        }),
+      );
+    },
+    async setMembers(datasetId, threadIds) {
+      await client.batch(
+        [
+          { sql: `DELETE FROM latch_eval_members WHERE dataset_id = ?`, args: [datasetId] },
+          ...[...new Set(threadIds)].map((t) => ({
+            sql: `INSERT INTO latch_eval_members (dataset_id, thread_id) VALUES (?, ?)`,
+            args: [datasetId, t],
+          })),
+        ],
+        "write",
+      );
+    },
+    async listMembers(datasetId) {
+      return (await rows(`SELECT thread_id FROM latch_eval_members WHERE dataset_id = ?`, [datasetId])).map((r) =>
+        String(r.thread_id),
+      );
+    },
+
+    async saveRubric(r) {
+      const [top] = await rows(`SELECT MAX(version) AS v FROM latch_eval_rubrics WHERE owner = ? AND id = ?`, [r.owner, r.id]);
+      const version = (num(top?.v) ?? 0) + 1;
+      const createdAt = Date.now();
+      await client.execute({
+        sql: `INSERT INTO latch_eval_rubrics (owner, id, version, agent_name, default_judge, checks, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [r.owner, r.id, version, r.agentName, r.defaultJudge, JSON.stringify(r.checks), createdAt],
+      });
+      return { ...r, version, createdAt };
+    },
+    async getRubric(owner, id, version) {
+      const [r] =
+        version === undefined
+          ? await rows(`SELECT * FROM latch_eval_rubrics WHERE owner = ? AND id = ? ORDER BY version DESC LIMIT 1`, [owner, id])
+          : await rows(`SELECT * FROM latch_eval_rubrics WHERE owner = ? AND id = ? AND version = ?`, [owner, id, version]);
+      return r ? toRubric(r) : null;
+    },
+    async listRubrics(owner, agentName) {
+      // Latest version of each rubric for the agent.
+      return (
+        await rows(
+          `SELECT r.* FROM latch_eval_rubrics r
+             JOIN (SELECT id, MAX(version) AS v FROM latch_eval_rubrics WHERE owner = ? AND agent_name = ? GROUP BY id) m
+               ON r.id = m.id AND r.version = m.v
+            WHERE r.owner = ? ORDER BY r.id`,
+          [owner, agentName, owner],
+        )
+      ).map(toRubric);
+    },
+
+    async saveThread(t) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_threads (owner, thread_id, agent_name, dataset_id, input_id, version,
+                config_fingerprint, origin, answer, error, duration_ms, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(owner, thread_id) DO UPDATE SET dataset_id = excluded.dataset_id,
+                input_id = excluded.input_id, answer = excluded.answer, error = excluded.error`,
+        args: [
+          t.owner,
+          t.threadId,
+          t.agentName,
+          t.datasetId ?? null,
+          t.inputId ?? null,
+          t.version,
+          t.configFingerprint,
+          t.origin,
+          t.answer,
+          t.error ?? null,
+          t.durationMs ?? null,
+          t.createdAt,
+        ],
+      });
+    },
+    async getThread(owner, threadId) {
+      const [r] = await rows(`SELECT * FROM latch_eval_threads WHERE owner = ? AND thread_id = ?`, [owner, threadId]);
+      return r ? toThread(r) : null;
+    },
+    async listThreads(owner, q) {
+      const where = ["owner = ?"];
+      const args: unknown[] = [owner];
+      if (q.agentName) (where.push("agent_name = ?"), args.push(q.agentName));
+      if (q.datasetId) (where.push("dataset_id = ?"), args.push(q.datasetId));
+      args.push(q.limit ?? 500);
+      return (
+        await rows(`SELECT * FROM latch_eval_threads WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ?`, args)
+      ).map(toThread);
+    },
+
+    async saveVerdicts(vs) {
+      if (!vs.length) return;
+      await client.batch(
+        vs.map((v) => ({
+          sql: `INSERT INTO latch_eval_verdicts (thread_id, check_id, rubric_version, judge_id, answer,
+                  confidence, score, failed, escalated_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            v.threadId,
+            v.checkId,
+            v.rubricVersion,
+            v.judgeId,
+            v.answer,
+            v.confidence ?? null,
+            v.score ?? null,
+            v.failed ? 1 : 0,
+            v.escalatedTo ?? null,
+            v.createdAt,
+          ],
+        })),
+        "write",
+      );
+    },
+    async listVerdicts(q) {
+      if (!q.threadIds.length) return [];
+      const args: unknown[] = [...q.threadIds];
+      let where = `thread_id IN (${placeholders(q.threadIds.length)})`;
+      if (q.rubricVersion !== undefined) (where += ` AND rubric_version = ?`, args.push(q.rubricVersion));
+      const all = (await rows(`SELECT * FROM latch_eval_verdicts WHERE ${where} ORDER BY created_at`, args)).map(toVerdict);
+      // Re-judging appends; the report reads the latest per (thread, check, version).
+      const latest = new Map<string, Verdict>();
+      for (const v of all) latest.set(`${v.threadId}|${v.checkId}|${v.rubricVersion}`, v);
+      return [...latest.values()];
+    },
+
+    async saveRuling(r) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_rulings (thread_id, check_id, failed, by, created_at) VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(thread_id, check_id) DO UPDATE SET failed = excluded.failed, by = excluded.by,
+                created_at = excluded.created_at`,
+        args: [r.threadId, r.checkId, r.failed ? 1 : 0, r.by ?? null, r.createdAt],
+      });
+    },
+    async listRulings(q) {
+      const where: string[] = [];
+      const args: unknown[] = [];
+      if (q.threadIds?.length) (where.push(`thread_id IN (${placeholders(q.threadIds.length)})`), args.push(...q.threadIds));
+      if (q.checkIds?.length) (where.push(`check_id IN (${placeholders(q.checkIds.length)})`), args.push(...q.checkIds));
+      return (
+        await rows(`SELECT * FROM latch_eval_rulings${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`, args)
+      ).map((r) => ({
+        threadId: String(r.thread_id),
+        checkId: String(r.check_id),
+        failed: Number(r.failed) === 1,
+        ...(str(r.by) ? { by: str(r.by) } : {}),
+        createdAt: Number(r.created_at),
+      }));
+    },
+  };
+}

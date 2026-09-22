@@ -52,6 +52,7 @@ import type { ChannelStore } from "./channel-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
 import { createEvalStore, migrateEvals } from "./evals/store";
+import { createEvalsStore, migrateEvalsV2, type EvalsStore } from "./evals/v2/store";
 import type {EvalStore} from "./evals/store";
 import { createRunScoresStore, migrateRunScores } from "./observability/run-scores-store";
 import type {RunScoresStore} from "./observability/run-scores-store";
@@ -107,6 +108,7 @@ let cached:
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
+      evals: EvalsStore;
       runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
@@ -136,6 +138,7 @@ export async function getLatch(): Promise<{
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
+  evals: EvalsStore;
   runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
@@ -172,6 +175,7 @@ export async function getLatch(): Promise<{
   await migrateChannels(client); // shared channel tables (bots, identities, pendings, dedupe, turn/ask/thread) + legacy carry-over
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
+  await migrateEvalsV2(client); // datasets, inputs, rubrics, threads, verdicts, rulings (evals v2)
   await migrateRunScores(client); // latch_run_scores (fast local mirror for the chat evals panel)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
@@ -222,6 +226,7 @@ export async function getLatch(): Promise<{
   const channelStore = createChannelStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
   const evalStore = createEvalStore(client);
+  const evals = createEvalsStore(client);
   // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
   const runScores = createRunScoresStore(client);
 
@@ -684,6 +689,7 @@ export async function getLatch(): Promise<{
     toolStore,
     authoredTools,
     evalStore,
+    evals,
     runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
