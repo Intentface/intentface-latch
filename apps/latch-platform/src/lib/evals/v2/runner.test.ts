@@ -197,6 +197,45 @@ describe("evals v2 end to end (fake agent, fake judge, real store)", () => {
     expect(cmp!.rateB).toBeCloseTo(2 / 3);
   });
 
+  it("the cascade re-asks a bigger judge only below a threshold rulings produced", async () => {
+    const unsure = (p: number, id: string): EvaluationModel => ({
+      ...judge,
+      modelId: id,
+      async doEvaluate(o) {
+        return {
+          answers: Object.fromEntries(Object.keys(o.questions).map((k) => [k, { type: "boolean", probability: p }])),
+          usage: { inputTokens: 10, outputTokens: 1 },
+          warnings: [],
+        };
+      },
+    });
+    const small = unsure(0.3, "small"); // answers "no", 70% sure
+    const big = unsure(0.95, "big"); // answers "yes", 95% sure
+    const threads = await runDataset({
+      owner,
+      dataset,
+      inputs: [inputs[0]!],
+      versions: [{ label: "live", ref: "linear-bot", fingerprint: "A" }],
+      deps: { runAgent: fakeAgent },
+    });
+    const asked = { ...rubric, checks: rubric.checks.filter((c) => c.kind === "asked") };
+    const judgeFor = (id: string) => (id === "big" ? big : small);
+    const run = (below: Map<string, number>) =>
+      judgeThreads({
+        rubric: asked,
+        threads,
+        deps: { loadHistory: (id) => Promise.resolve(histories.get(id) ?? []), judgeFor },
+        escalate: { judge: "big", below },
+      });
+    // No threshold for the check: the cheap verdict stands.
+    const [plain] = await run(new Map());
+    expect(plain).toMatchObject({ failed: true, judgeId: "jev-latest" });
+    expect(plain!.escalatedTo).toBeUndefined();
+    // Rulings said verdicts below 0.8 cannot be trusted: 0.7 goes up.
+    const [escalated] = await run(new Map([["did-it", 0.8]]));
+    expect(escalated).toMatchObject({ failed: false, judgeId: "big", escalatedTo: "big" });
+  });
+
   it("an empty answer is an error, not a verdict", async () => {
     const threads = await runDataset({
       owner,

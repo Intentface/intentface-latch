@@ -1,7 +1,7 @@
 import type { Experimental_EvaluationModelV4 as EvaluationModel } from "@ai-sdk/provider";
 import type { AskedCheck, CountedCheck, Dataset, Input, Rubric, ThreadRef, Verdict, Version } from "./model";
 import { evaluateBound } from "./counted";
-import { judgeAsked, stateOf, type JudgeUsage } from "./judge";
+import { judgeAsked, stateOf, type AskedAnswer, type JudgeUsage } from "./judge";
 import { finalAnswer, viewOf } from "./thread";
 
 /**
@@ -127,6 +127,14 @@ export async function judgeThreads(opts: {
   dataset?: Pick<Dataset, "audience" | "note">;
   deps: JudgeDeps;
   concurrency?: number;
+  /**
+   * The cascade. A check with a threshold (derived from rulings — see
+   * `thresholdFor`) re-asks every verdict below it of `judge`, and the
+   * bigger judge's answer stands, marked `escalatedTo`. Checks without a
+   * threshold are never escalated: with no rulings there is no evidence that
+   * the cheap judge is wrong where it is unsure, only that it is unsure.
+   */
+  escalate?: { judge: string; below: Map<string, number> };
   onUsage?: (u: JudgeUsage) => void;
   onThread?: (threadId: string, verdicts: Verdict[], done: number, total: number) => void;
 }): Promise<Verdict[]> {
@@ -154,14 +162,33 @@ export async function judgeThreads(opts: {
       });
     }
     if (asked.length && finalAnswer(view)) {
-      const answers = await judgeAsked({
-        checks: asked,
-        state: stateOf({ view, ...(facts ? { facts } : {}), ...(opts.dataset ? { dataset: opts.dataset } : {}) }),
-        defaultJudge: opts.rubric.defaultJudge,
-        judgeFor: opts.deps.judgeFor,
-        ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
-      });
-      for (const a of answers) {
+      const state = stateOf({ view, ...(facts ? { facts } : {}), ...(opts.dataset ? { dataset: opts.dataset } : {}) });
+      const ask = (checks: AskedCheck[], defaultJudge: string) =>
+        judgeAsked({
+          checks,
+          state,
+          defaultJudge,
+          judgeFor: opts.deps.judgeFor,
+          ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
+        });
+      let answers = await ask(asked, opts.rubric.defaultJudge);
+      const esc = opts.escalate;
+      const unsure = esc
+        ? answers.filter((a) => {
+            const cut = esc.below.get(a.checkId);
+            return cut !== undefined && a.judgeId !== esc.judge && (a.confidence ?? 1) < cut;
+          })
+        : [];
+      if (esc && unsure.length) {
+        const ids = new Set(unsure.map((a) => a.checkId));
+        const again = await ask(
+          asked.filter((c) => ids.has(c.id)).map((c) => ({ ...c, judge: esc.judge })),
+          esc.judge,
+        );
+        const byCheck = new Map(again.map((a) => [a.checkId, { ...a, escalatedTo: esc.judge }]));
+        answers = answers.map((a) => byCheck.get(a.checkId) ?? a);
+      }
+      for (const a of answers as (AskedAnswer & { escalatedTo?: string })[]) {
         vs.push({
           threadId: t.threadId,
           checkId: a.checkId,
@@ -171,6 +198,7 @@ export async function judgeThreads(opts: {
           ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
           ...(a.score !== undefined ? { score: a.score } : {}),
           failed: a.failed,
+          ...(a.escalatedTo ? { escalatedTo: a.escalatedTo } : {}),
           createdAt: now,
         });
       }
