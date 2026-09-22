@@ -10,7 +10,9 @@ import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Principal } from "./session";
-import type { Rubric, ThreadRef } from "./evals/v2/model";
+import type { Check, Rubric, ThreadRef } from "./evals/v2/model";
+import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
+import type { EditableQuestion } from "./evals/v2/validate";
 import { compareVersions, summarize } from "./evals/v2/runner";
 import { thresholdFor, trustOf } from "./evals/v2/alignment";
 import { describeCounted } from "./evals/v2/counted";
@@ -74,11 +76,20 @@ export const getEvalGridFn = createServerFn({ method: "GET" })
     const o = await ownerFor(principal, data.agent);
     if (!o) return null;
     const { evals } = await getLatch();
-    const rubric = await evals.getRubric(o.owner, data.rubricId);
-    if (!rubric) return null;
+    const latest = await evals.getRubric(o.owner, data.rubricId);
+    if (!latest) return null;
     const threads = await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId });
     const ids = threads.map((t) => t.threadId);
-    const verdicts = await evals.listVerdicts({ threadIds: ids, rubricVersion: rubric.version });
+    // Editing the checks saves a new version that nothing has judged yet.
+    // Show the newest version that HAS verdicts on this run, and say so.
+    let rubric = latest;
+    let verdicts = await evals.listVerdicts({ threadIds: ids, rubricVersion: latest.version });
+    for (let v = latest.version - 1; !verdicts.length && v >= 1; v--) {
+      const older = await evals.getRubric(o.owner, data.rubricId, v);
+      if (!older) continue;
+      const vs = await evals.listVerdicts({ threadIds: ids, rubricVersion: v });
+      if (vs.length) (rubric = older, verdicts = vs);
+    }
     // Trust reads every ruled thread of this dataset, not just this run.
     const all = await evals.listThreads(o.owner, { datasetId: data.datasetId });
     const allVerdicts = await evals.listVerdicts({ threadIds: all.map((t) => t.threadId), rubricVersion: rubric.version });
@@ -99,6 +110,7 @@ export const getEvalGridFn = createServerFn({ method: "GET" })
     return {
       runId: data.runId,
       rubricVersion: rubric.version,
+      latestVersion: latest.version,
       versions,
       attempts: Math.max(1, ...threads.map((t) => (t.attempt ?? 0) + 1)),
       errors: summaries.map((s) => ({ version: s.version, errors: s.errors })),
@@ -179,4 +191,97 @@ export const saveEvalRulingFn = createServerFn({ method: "POST" })
         createdAt: Date.now(),
       });
     return { ok: true as const };
+  });
+
+// ─── Editing the tests ─────────────────────────────────────────────────────
+
+/** A question set's questions, for the editor. */
+export const getQuestionsFn = createServerFn({ method: "GET" })
+  .validator((d: { agent: string; datasetId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return null;
+    const { evals } = await getLatch();
+    const d = await evals.getDataset(o.owner, data.datasetId);
+    if (!d) return null;
+    return { dataset: { id: d.id, name: d.name, audience: d.audience ?? "", note: d.note ?? "" }, questions: (await evals.listInputs(d.id)).map(toEditable) };
+  });
+
+/**
+ * Replace a question set's questions. Ids are what past results hang on, so
+ * a question keeps its id when edited; a removed id's old results stay in
+ * old runs and simply stop appearing in new ones.
+ */
+export const saveQuestionsFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; audience: string; note: string; questions: EditableQuestion[] }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again to save." };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const, error: "Only agents you can edit have editable questions." };
+    const { evals } = await getLatch();
+    const d = await evals.getDataset(o.owner, data.datasetId);
+    if (!d) return { ok: false as const, error: "This question set no longer exists." };
+    const valid = fromEditable(data.questions);
+    if (!valid.ok) return valid;
+    await evals.saveDataset({
+      owner: d.owner,
+      id: d.id,
+      agentName: d.agentName,
+      name: d.name,
+      kind: d.kind,
+      ...(data.audience.trim() ? { audience: data.audience.trim() } : {}),
+      ...(data.note.trim() ? { note: data.note.trim() } : {}),
+    });
+    await evals.setInputs(d.id, valid.value);
+    return { ok: true as const, questions: valid.value.map(toEditable) };
+  });
+
+/** The latest version of a set of checks, plus the judges a check may name. */
+export const getChecksFn = createServerFn({ method: "GET" })
+  .validator((d: { agent: string; rubricId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return null;
+    const { evals, models } = await getLatch();
+    const r = await evals.getRubric(o.owner, data.rubricId);
+    if (!r) return null;
+    return {
+      // As JSON: a matcher's value can be anything, which a server function cannot type.
+      rubric: { id: r.id, version: r.version, defaultJudge: r.defaultJudge, checks: JSON.stringify(r.checks) },
+      judges: ["jev-latest", ...models.map((m) => m.id)],
+    };
+  });
+
+/** Save checks as a NEW version: old verdicts stay attached to the version that produced them. */
+export const saveChecksFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; rubricId: string; defaultJudge: string; checks: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again to save." };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const, error: "Only agents you can edit have editable checks." };
+    const { evals } = await getLatch();
+    const prev = await evals.getRubric(o.owner, data.rubricId);
+    if (!prev) return { ok: false as const, error: "These checks no longer exist." };
+    let parsed: Check[];
+    try {
+      parsed = JSON.parse(data.checks) as Check[];
+    } catch {
+      return { ok: false as const, error: "The checks could not be read." };
+    }
+    const valid = validateChecks(parsed);
+    if (!valid.ok) return valid;
+    const r = await evals.saveRubric({
+      owner: o.owner,
+      id: prev.id,
+      agentName: prev.agentName,
+      defaultJudge: data.defaultJudge || prev.defaultJudge,
+      checks: valid.value,
+    });
+    return { ok: true as const, version: r.version };
   });

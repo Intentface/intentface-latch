@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { ChevronDown, ChevronUp, Loader2, X } from "lucide-react";
 import { currentPrincipalFn } from "@/lib/server";
-import { getEvalGridFn, getEvalThreadFn, getEvalsIndexFn, getEvalsOverviewFn, saveEvalRulingFn } from "@/lib/evals-server";
-import type { EvalGrid, EvalsOverview } from "@/lib/evals-server";
+import { getEvalGridFn, getEvalThreadFn, getEvalsIndexFn, saveEvalRulingFn } from "@/lib/evals-server";
+import type { EvalGrid } from "@/lib/evals-server";
+import { EvalsEmpty, EvalsShell, Picker, useOverview, useSetSearch, validateEvalsSearch } from "@/components/evals/shell";
 import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui/select";
 
@@ -20,16 +21,9 @@ import { Select } from "@/components/ui/select";
  * (`pnpm evals`) until there is a cost guard in front of them.
  */
 
-type Search = { agent?: string; dataset?: string; rubric?: string; run?: string; check?: string; version?: string };
-
-export const Route = createFileRoute("/evals")({
+export const Route = createFileRoute("/evals/")({
   head: () => ({ meta: [{ title: "Evals · Latch" }] }),
-  validateSearch: (s: Record<string, unknown>): Search => {
-    const out: Search = {};
-    for (const k of ["agent", "dataset", "rubric", "run", "check", "version"] as const)
-      if (typeof s[k] === "string" && s[k]) out[k] = s[k];
-    return out;
-  },
+  validateSearch: validateEvalsSearch,
   beforeLoad: async () => {
     const principal = await currentPrincipalFn();
     if (!principal) throw redirect({ to: "/login" });
@@ -44,21 +38,12 @@ type Cell = { checkId: string; version: string };
 function EvalsPage() {
   const index = Route.useLoaderData();
   const search = Route.useSearch();
-  const navigate = useNavigate({ from: "/evals" });
-  const set = useCallback(
-    (patch: Partial<Search>) => void navigate({ search: (s) => ({ ...s, ...patch }), replace: true }),
-    [navigate],
-  );
+  const set = useSetSearch();
 
   const agent = search.agent ?? index[0]?.agent;
-  const [overview, setOverview] = useState<EvalsOverview | null>(null);
+  const [overview] = useOverview(agent);
   const [grid, setGrid] = useState<EvalGrid | null>(null);
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    setOverview(null);
-    if (agent) void getEvalsOverviewFn({ data: agent }).then(setOverview);
-  }, [agent]);
 
   const dataset =
     overview?.datasets.find((d) => d.id === search.dataset) ??
@@ -81,61 +66,54 @@ function EvalsPage() {
   const toggle = (c: Cell) =>
     set(open?.checkId === c.checkId && open.version === c.version ? { check: undefined, version: undefined } : { check: c.checkId, version: c.version });
 
-  if (!index.length) return <Empty />;
+  if (!index.length) return <EvalsEmpty />;
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-5 p-6">
-      <header className="space-y-3">
-        <div>
-          <h1 className="text-ink-primary text-lg font-semibold">Evals</h1>
-          <p className="text-ink-tertiary text-sm">
-            How each version answers the same questions — and whether the judge can be believed.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-end gap-2">
-          <Picker label="Agent and questions">
-            <Select
-              id="evals-subject"
-              value={`${agent}|${dataset?.id ?? ""}`}
-              onChange={(e) => {
-                const [a, d] = e.target.value.split("|");
-                set({ agent: a, dataset: d, run: undefined, rubric: a === agent ? search.rubric : undefined, check: undefined, version: undefined });
-              }}
-            >
-              {index.flatMap((x) =>
-                x.datasets.map((d) => (
-                  <option key={`${x.agent}|${d.id}`} value={`${x.agent}|${d.id}`}>
-                    {x.agent} · {d.name}
-                  </option>
-                )),
-              )}
-            </Select>
-          </Picker>
-          <Picker label="Checks">
-            <Select id="evals-rubric" value={rubricId ?? ""} onChange={(e) => set({ rubric: e.target.value })}>
-              {overview?.rubrics.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.id} · v{r.version}
-                </option>
-              ))}
-            </Select>
-          </Picker>
-          <Picker label="Run">
-            <Select id="evals-run" value={runId ?? ""} onChange={(e) => set({ run: e.target.value, check: undefined, version: undefined })}>
-              {dataset?.runs.map((r) => (
-                <option key={r.runId} value={r.runId}>
-                  {new Date(r.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} · {r.versions.join(" vs ")}
-                </option>
-              ))}
-            </Select>
-          </Picker>
-          {loading && <Loader2 className="text-ink-tertiary mb-2 size-4 animate-spin" />}
-        </div>
-      </header>
+      <EvalsShell page="results" index={index} search={search}>
+        <Picker label="Questions">
+          <Select
+            id="evals-dataset"
+            value={dataset?.id ?? ""}
+            onChange={(e) => set({ dataset: e.target.value, run: undefined, check: undefined, version: undefined })}
+          >
+            {overview?.datasets.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({d.inputs})
+              </option>
+            ))}
+          </Select>
+        </Picker>
+        <Picker label="Checks">
+          <Select id="evals-rubric" value={rubricId ?? ""} onChange={(e) => set({ rubric: e.target.value })}>
+            {overview?.rubrics.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.id}
+              </option>
+            ))}
+          </Select>
+        </Picker>
+        <Picker label="Run">
+          <Select id="evals-run" value={runId ?? ""} onChange={(e) => set({ run: e.target.value, check: undefined, version: undefined })}>
+            {dataset?.runs.map((r) => (
+              <option key={r.runId} value={r.runId}>
+                {new Date(r.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} · {r.versions.join(" vs ")}
+              </option>
+            ))}
+          </Select>
+        </Picker>
+        {loading && <Loader2 className="text-ink-tertiary mb-2 size-4 animate-spin" />}
+      </EvalsShell>
 
       {overview && dataset && !dataset.runs.length && (
         <p className="text-ink-secondary text-sm">
           {dataset.name} has {dataset.inputs} questions but no runs yet. Start one with <code>pnpm evals run</code>.
+        </p>
+      )}
+      {grid && grid.rubricVersion < grid.latestVersion && (
+        <p className="text-ink-secondary text-sm">
+          Showing checks v{grid.rubricVersion}. Version {grid.latestVersion} has not been judged on this run yet; run{" "}
+          <code>pnpm evals judge</code> to score it.
         </p>
       )}
 
@@ -158,32 +136,6 @@ function EvalsPage() {
         </div>
       )}
     </div>
-  );
-}
-
-function Empty() {
-  return (
-    <div className="mx-auto max-w-2xl space-y-3 p-6">
-      <h1 className="text-ink-primary text-lg font-semibold">Evals</h1>
-      <p className="text-ink-secondary text-sm">
-        No agent has a question set yet. A question set is a list of things people ask the agent, each with what a good
-        answer conveys. Import one, run it against the versions you want to compare, then judge it:
-      </p>
-      <pre className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg text-ink-secondary overflow-x-auto rounded-lg p-3 text-xs">
-        {`pnpm evals import --agent NAME --name QUESTIONS --file questions.json
-pnpm evals run    --dataset ID --versions live,@draft --only 1,2,3
-pnpm evals judge  --dataset ID --rubric CHECKS`}
-      </pre>
-    </div>
-  );
-}
-
-function Picker({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-ink-secondary text-xs font-medium">{label}</span>
-      {children}
-    </label>
   );
 }
 
