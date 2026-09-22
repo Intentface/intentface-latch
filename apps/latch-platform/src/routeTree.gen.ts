@@ -14,6 +14,7 @@ import { Route as AcceptInvitationRouteImport } from './routes/accept-invitation
 import { Route as AgentsRouteImport } from './routes/agents'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as ConnectionsRouteImport } from './routes/connections'
+import { Route as EvalsRouteImport } from './routes/evals'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as MembersRouteImport } from './routes/members'
 import { Route as ObservabilityRouteImport } from './routes/observability'
@@ -59,6 +60,11 @@ const ChatRoute = ChatRouteImport.update({
 const ConnectionsRoute = ConnectionsRouteImport.update({
   id: '/connections',
   path: '/connections',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EvalsRoute = EvalsRouteImport.update({
+  id: '/evals',
+  path: '/evals',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -173,6 +179,7 @@ export interface FileRoutesByFullPath {
   '/agents': typeof AgentsRouteWithChildren
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
+  '/evals': typeof EvalsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
   '/observability': typeof ObservabilityRoute
@@ -199,6 +206,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accept-invitation': typeof AcceptInvitationRoute
   '/connections': typeof ConnectionsRoute
+  '/evals': typeof EvalsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
   '/observability': typeof ObservabilityRoute
@@ -228,6 +236,7 @@ export interface FileRoutesById {
   '/agents': typeof AgentsRouteWithChildren
   '/chat': typeof ChatRouteWithChildren
   '/connections': typeof ConnectionsRoute
+  '/evals': typeof EvalsRoute
   '/login': typeof LoginRoute
   '/members': typeof MembersRoute
   '/observability': typeof ObservabilityRoute
@@ -258,6 +267,7 @@ export interface FileRouteTypes {
     | '/agents'
     | '/chat'
     | '/connections'
+    | '/evals'
     | '/login'
     | '/members'
     | '/observability'
@@ -284,6 +294,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accept-invitation'
     | '/connections'
+    | '/evals'
     | '/login'
     | '/members'
     | '/observability'
@@ -312,6 +323,7 @@ export interface FileRouteTypes {
     | '/agents'
     | '/chat'
     | '/connections'
+    | '/evals'
     | '/login'
     | '/members'
     | '/observability'
@@ -341,6 +353,7 @@ export interface RootRouteChildren {
   AgentsRoute: typeof AgentsRouteWithChildren
   ChatRoute: typeof ChatRouteWithChildren
   ConnectionsRoute: typeof ConnectionsRoute
+  EvalsRoute: typeof EvalsRoute
   LoginRoute: typeof LoginRoute
   MembersRoute: typeof MembersRoute
   ObservabilityRoute: typeof ObservabilityRoute
@@ -393,6 +406,13 @@ declare module '@tanstack/react-router' {
       path: '/connections'
       fullPath: '/connections'
       preLoaderRoute: typeof ConnectionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/evals': {
+      id: '/evals'
+      path: '/evals'
+      fullPath: '/evals'
+      preLoaderRoute: typeof EvalsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -590,6 +610,7 @@ const rootRouteChildren: RootRouteChildren = {
   AgentsRoute: AgentsRouteWithChildren,
   ChatRoute: ChatRouteWithChildren,
   ConnectionsRoute: ConnectionsRoute,
+  EvalsRoute: EvalsRoute,
   LoginRoute: LoginRoute,
   MembersRoute: MembersRoute,
   ObservabilityRoute: ObservabilityRoute,

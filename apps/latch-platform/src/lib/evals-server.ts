@@ -1,5 +1,5 @@
 /**
- * Server functions for the Evals section of the agent editor.
+ * Server functions for the Evals page.
  *
  * Read-mostly: the grid reads datasets, runs, verdicts and rulings; the only
  * write is a person's ruling. Running and judging stay in `pnpm evals` until
@@ -22,6 +22,18 @@ async function ownerFor(principal: Principal, agent: string) {
   const rec = await agentStore.getRecord(principal, normalizeAgentName(agent));
   return rec ? { owner: agentOwnerKey(principal, rec.scope), name: rec.name } : null;
 }
+
+/** Every agent with eval data the caller can see, with its question sets. */
+export const getEvalsIndexFn = createServerFn({ method: "GET" }).handler(async () => {
+  const principal = await getPrincipal();
+  if (!principal) return [];
+  const { evals } = await getLatch();
+  const owners = [...new Set([agentOwnerKey(principal, "user"), agentOwnerKey(principal, "org")])];
+  const datasets = (await Promise.all(owners.map((o) => evals.listDatasets(o)))).flat();
+  const byAgent = new Map<string, { id: string; name: string }[]>();
+  for (const d of datasets) byAgent.set(d.agentName, [...(byAgent.get(d.agentName) ?? []), { id: d.id, name: d.name }]);
+  return [...byAgent].map(([agent, sets]) => ({ agent, datasets: sets })).sort((a, b) => a.agent.localeCompare(b.agent));
+});
 
 export const getEvalsOverviewFn = createServerFn({ method: "GET" })
   .validator((agent: string) => agent)
