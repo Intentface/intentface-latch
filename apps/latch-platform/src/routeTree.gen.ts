@@ -30,6 +30,7 @@ import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as ChatChatIdRouteImport } from './routes/chat.$chatId'
 import { Route as EvalsIndexRouteImport } from './routes/evals.index'
 import { Route as EvalsChecksRouteImport } from './routes/evals.checks'
+import { Route as EvalsFailuresRouteImport } from './routes/evals.failures'
 import { Route as EvalsQuestionsRouteImport } from './routes/evals.questions'
 import { Route as LinkKindRouteImport } from './routes/link.$kind'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
@@ -144,6 +145,11 @@ const EvalsChecksRoute = EvalsChecksRouteImport.update({
   path: '/evals/checks',
   getParentRoute: () => rootRouteImport,
 } as any)
+const EvalsFailuresRoute = EvalsFailuresRouteImport.update({
+  id: '/evals/failures',
+  path: '/evals/failures',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const EvalsQuestionsRoute = EvalsQuestionsRouteImport.update({
   id: '/evals/questions',
   path: '/evals/questions',
@@ -204,6 +210,7 @@ export interface FileRoutesByFullPath {
   '/api/transcribe': typeof ApiTranscribeRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/evals/checks': typeof EvalsChecksRoute
+  '/evals/failures': typeof EvalsFailuresRoute
   '/evals/questions': typeof EvalsQuestionsRoute
   '/link/$kind': typeof LinkKindRoute
   '/agents/': typeof AgentsIndexRoute
@@ -233,6 +240,7 @@ export interface FileRoutesByTo {
   '/api/transcribe': typeof ApiTranscribeRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/evals/checks': typeof EvalsChecksRoute
+  '/evals/failures': typeof EvalsFailuresRoute
   '/evals/questions': typeof EvalsQuestionsRoute
   '/link/$kind': typeof LinkKindRoute
   '/agents': typeof AgentsIndexRoute
@@ -265,6 +273,7 @@ export interface FileRoutesById {
   '/api/transcribe': typeof ApiTranscribeRoute
   '/chat/$chatId': typeof ChatChatIdRoute
   '/evals/checks': typeof EvalsChecksRoute
+  '/evals/failures': typeof EvalsFailuresRoute
   '/evals/questions': typeof EvalsQuestionsRoute
   '/link/$kind': typeof LinkKindRoute
   '/agents/': typeof AgentsIndexRoute
@@ -298,6 +307,7 @@ export interface FileRouteTypes {
     | '/api/transcribe'
     | '/chat/$chatId'
     | '/evals/checks'
+    | '/evals/failures'
     | '/evals/questions'
     | '/link/$kind'
     | '/agents/'
@@ -327,6 +337,7 @@ export interface FileRouteTypes {
     | '/api/transcribe'
     | '/chat/$chatId'
     | '/evals/checks'
+    | '/evals/failures'
     | '/evals/questions'
     | '/link/$kind'
     | '/agents'
@@ -358,6 +369,7 @@ export interface FileRouteTypes {
     | '/api/transcribe'
     | '/chat/$chatId'
     | '/evals/checks'
+    | '/evals/failures'
     | '/evals/questions'
     | '/link/$kind'
     | '/agents/'
@@ -388,6 +400,7 @@ export interface RootRouteChildren {
   ApiSlackRoute: typeof ApiSlackRouteWithChildren
   ApiTranscribeRoute: typeof ApiTranscribeRoute
   EvalsChecksRoute: typeof EvalsChecksRoute
+  EvalsFailuresRoute: typeof EvalsFailuresRoute
   EvalsQuestionsRoute: typeof EvalsQuestionsRoute
   LinkKindRoute: typeof LinkKindRoute
   EvalsIndexRoute: typeof EvalsIndexRoute
@@ -546,6 +559,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EvalsChecksRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/evals/failures': {
+      id: '/evals/failures'
+      path: '/evals/failures'
+      fullPath: '/evals/failures'
+      preLoaderRoute: typeof EvalsFailuresRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/evals/questions': {
       id: '/evals/questions'
       path: '/evals/questions'
@@ -661,6 +681,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiSlackRoute: ApiSlackRouteWithChildren,
   ApiTranscribeRoute: ApiTranscribeRoute,
   EvalsChecksRoute: EvalsChecksRoute,
+  EvalsFailuresRoute: EvalsFailuresRoute,
   EvalsQuestionsRoute: EvalsQuestionsRoute,
   LinkKindRoute: LinkKindRoute,
   EvalsIndexRoute: EvalsIndexRoute,

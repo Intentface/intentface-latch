@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict } from "./model";
 import type { EvalJob } from "./jobs";
+import type { FailureMode, Note } from "./failures";
 
 /**
  * Storage for evals v2.
@@ -54,6 +55,14 @@ export interface EvalsStore {
   /** What each thread cost, summed over its runs — what an estimate is made from. */
   threadCosts: (threadIds: string[]) => Promise<Map<string, number>>;
 
+  saveNote: (n: Note) => Promise<void>;
+  deleteNote: (owner: Owner, threadId: string) => Promise<void>;
+  listNotes: (owner: Owner, agentName: string) => Promise<Note[]>;
+  /** Replace an agent's failure modes and which note belongs to which. */
+  setModes: (owner: Owner, agentName: string, modes: FailureMode[], assign: Map<string, string>) => Promise<void>;
+  listModes: (owner: Owner, agentName: string) => Promise<FailureMode[]>;
+  updateMode: (owner: Owner, id: string, patch: { name?: string; description?: string }) => Promise<void>;
+
   saveRuling: (r: Ruling) => Promise<void>;
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
   deleteRuling: (threadId: string, checkId: string) => Promise<void>;
@@ -98,6 +107,14 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS latch_eval_jobs_dataset ON latch_eval_jobs (owner, dataset_id, created_at)`,
     `CREATE INDEX IF NOT EXISTS latch_eval_jobs_open ON latch_eval_jobs (status, lease_until)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_notes (
+      owner TEXT NOT NULL, thread_id TEXT NOT NULL PRIMARY KEY, agent_name TEXT NOT NULL, dataset_id TEXT,
+      text TEXT NOT NULL, ok INTEGER NOT NULL, mode_id TEXT, by TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_notes_agent ON latch_eval_notes (owner, agent_name)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_modes (
+      owner TEXT NOT NULL, agent_name TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL,
+      description TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (owner, id))`,
     `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
       thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
       by TEXT, created_at INTEGER NOT NULL,
@@ -466,6 +483,70 @@ export function createEvalsStore(client: Client): EvalsStore {
           out.set(String(r.chat_id), Number(r.c));
       }
       return out;
+    },
+
+    async saveNote(n) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_notes (owner, thread_id, agent_name, dataset_id, text, ok, mode_id, by, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(thread_id) DO UPDATE SET text = excluded.text, ok = excluded.ok, by = excluded.by,
+                updated_at = excluded.updated_at,
+                -- A rewritten note may no longer fit its mode; the next grouping decides.
+                mode_id = CASE WHEN latch_eval_notes.text = excluded.text THEN latch_eval_notes.mode_id ELSE NULL END`,
+        args: [n.owner, n.threadId, n.agentName, n.datasetId ?? null, n.text, n.ok ? 1 : 0, n.modeId ?? null, n.by ?? null, n.createdAt, n.updatedAt],
+      });
+    },
+    async deleteNote(owner, threadId) {
+      await client.execute({ sql: `DELETE FROM latch_eval_notes WHERE owner = ? AND thread_id = ?`, args: [owner, threadId] });
+    },
+    async listNotes(owner, agentName) {
+      return (await rows(`SELECT * FROM latch_eval_notes WHERE owner = ? AND agent_name = ? ORDER BY updated_at DESC`, [owner, agentName])).map(
+        (r) => ({
+          owner: String(r.owner),
+          threadId: String(r.thread_id),
+          agentName: String(r.agent_name),
+          ...(str(r.dataset_id) ? { datasetId: str(r.dataset_id) } : {}),
+          text: String(r.text),
+          ok: Number(r.ok) === 1,
+          ...(str(r.mode_id) ? { modeId: str(r.mode_id) } : {}),
+          ...(str(r.by) ? { by: str(r.by) } : {}),
+          createdAt: Number(r.created_at),
+          updatedAt: Number(r.updated_at),
+        }),
+      );
+    },
+    async setModes(owner, agentName, modes, assign) {
+      await client.batch(
+        [
+          { sql: `DELETE FROM latch_eval_modes WHERE owner = ? AND agent_name = ?`, args: [owner, agentName] },
+          { sql: `UPDATE latch_eval_notes SET mode_id = NULL WHERE owner = ? AND agent_name = ?`, args: [owner, agentName] },
+          ...modes.map((m) => ({
+            sql: `INSERT INTO latch_eval_modes (owner, agent_name, id, name, description, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [owner, agentName, m.id, m.name, m.description, m.createdAt],
+          })),
+          ...[...assign].map(([threadId, modeId]) => ({
+            sql: `UPDATE latch_eval_notes SET mode_id = ? WHERE owner = ? AND thread_id = ?`,
+            args: [modeId, owner, threadId],
+          })),
+        ],
+        "write",
+      );
+    },
+    async listModes(owner, agentName) {
+      return (await rows(`SELECT * FROM latch_eval_modes WHERE owner = ? AND agent_name = ? ORDER BY created_at`, [owner, agentName])).map((r) => ({
+        owner: String(r.owner),
+        agentName: String(r.agent_name),
+        id: String(r.id),
+        name: String(r.name),
+        description: String(r.description),
+        createdAt: Number(r.created_at),
+      }));
+    },
+    async updateMode(owner, id, patch) {
+      await client.execute({
+        sql: `UPDATE latch_eval_modes SET name = COALESCE(?, name), description = COALESCE(?, description) WHERE owner = ? AND id = ?`,
+        args: [patch.name ?? null, patch.description ?? null, owner, id],
+      });
     },
 
     async deleteRuling(threadId, checkId) {

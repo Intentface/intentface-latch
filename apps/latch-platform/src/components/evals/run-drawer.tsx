@@ -242,7 +242,7 @@ function Bill({ estimate, estimating, empty }: { estimate: { estimate: Estimate;
         <span className="text-ink-primary tabular-nums">
           {e.agentRuns} agent run{e.agentRuns === 1 ? "" : "s"} · {e.judgeCalls} judge call{e.judgeCalls === 1 ? "" : "s"}
         </span>
-        <span className="text-ink-primary text-base font-semibold tabular-nums">{e.cost === null ? "Unknown" : `about $${e.cost.toFixed(2)}`}</span>
+        <span className="text-ink-primary text-[15px] font-semibold tabular-nums">{e.cost === null ? "Unknown" : `about $${e.cost.toFixed(2)}`}</span>
       </div>
       <p className="text-ink-tertiary text-xs">{e.basis} Judge calls are not included.</p>
       {estimate.same.length > 0 && (

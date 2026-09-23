@@ -44,5 +44,6 @@ describe("checks", () => {
   it("makes readable, unique ids", () => {
     expect(checkIdFor("Got the answer right!", [])).toBe("got-the-answer-right");
     expect(checkIdFor("Got the answer right", ["got-the-answer-right"])).toBe("got-the-answer-right-2");
+    expect(checkIdFor("Provides a direct answer or recommendation rather than questions", [])).toBe("provides-a-direct-answer-or");
   });
 });

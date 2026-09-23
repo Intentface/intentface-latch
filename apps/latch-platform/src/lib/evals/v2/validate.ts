@@ -109,7 +109,10 @@ export function validateChecks(checks: Check[]): Valid<Check[]> {
 
 /** A check id from its name: stable, readable, unique within the rubric. */
 export function checkIdFor(label: string, taken: Iterable<string>): string {
-  const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "check";
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  // Cut at a word, not mid-word: an id is read in URLs and exports.
+  const cut = slug.length <= 40 ? slug : slug.slice(0, 41).replace(/-[^-]*$/, "");
+  const base = cut || "check";
   const used = new Set(taken);
   let id = base;
   for (let n = 2; used.has(id); n++) id = `${base}-${n}`;

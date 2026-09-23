@@ -4,7 +4,6 @@ import { ChevronDown, ChevronUp, Loader2, Play, X } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
 import {
   getEvalGridFn,
-  getEvalThreadFn,
   getEvalsIndexFn,
   listJobsFn,
   cancelJobFn,
@@ -13,8 +12,8 @@ import {
 } from "@/lib/evals-server"
 import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { RunDrawer } from "@/components/evals/run-drawer"
+import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
 import Drawer from "@/components/ui/drawer"
-import { Markdown } from "@/components/ui/markdown"
 import {
   EDITOR_DRAWER,
   EvalsEmpty,
@@ -565,7 +564,7 @@ function Grid({
                         )}
                       >
                         <div className="flex items-baseline gap-1.5">
-                          <span className="font-semibold text-base text-ink-primary">
+                          <span className="font-semibold text-[15px] text-ink-primary">
                             {cell.total
                               ? `${pct(cell.passed, cell.total)}%`
                               : "—"}
@@ -1004,112 +1003,13 @@ function Thread({
   row: Row
   repeated: boolean
 }) {
-  const [detail, setDetail] = useState<
-    Awaited<ReturnType<typeof getEvalThreadFn>> | undefined
-  >(undefined)
-  useEffect(() => {
-    void getEvalThreadFn({ data: { agent, threadId: row.threadId } }).then(
-      setDetail
-    )
-  }, [agent, row.threadId])
-
   return (
-    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3 text-sm">
-      <div className="text-xs text-ink-tertiary">
-        Question #{row.inputId}
-        {repeated ? `, try ${row.attempt + 1}` : ""}
-      </div>
-      {detail === undefined ? (
-        <Loader2 className="size-4 animate-spin text-ink-tertiary" />
-      ) : detail === null ? (
-        <p className="text-ink-tertiary">This thread is no longer available.</p>
-      ) : (
-        <>
-          <Part label="Asked">
-            {[detail.prompt, ...detail.followUps].join("\n\n")}
-          </Part>
-          {detail.tools.length > 0 && (
-            <Part label={`Tools (${detail.tools.length} calls)`}>
-              <span className="flex flex-wrap gap-1">
-                {grouped(detail.tools).map((t) => (
-                  <span
-                    key={t.tool}
-                    className="rounded bg-primary-bg-hover px-1.5 py-0.5 font-mono text-[11px] text-ink-secondary"
-                  >
-                    {t.tool}
-                    {t.n > 1 ? ` ×${t.n}` : ""}
-                    {t.stubbed ? " · simulated" : ""}
-                  </span>
-                ))}
-              </span>
-            </Part>
-          )}
-          <Part label="Answer" markdown>
-            {detail.answer || "(no answer)"}
-          </Part>
-          {detail.reference && (
-            <Part label="A good answer conveys" quiet>
-              {detail.reference}
-            </Part>
-          )}
-        </>
-      )}
-    </div>
-  )
-}
-
-function Key({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="inline-block rounded px-1 font-sans text-[11px] leading-4 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border">
-      {children}
-    </kbd>
-  )
-}
-
-/** Calls to the same tool, counted, in first-call order. */
-function grouped(tools: { tool: string; stubbed: boolean }[]) {
-  const out = new Map<string, { tool: string; n: number; stubbed: boolean }>()
-  for (const t of tools) {
-    const g =
-      out.get(t.tool) ??
-      out.set(t.tool, { tool: t.tool, n: 0, stubbed: false }).get(t.tool)!
-    g.n += 1
-    g.stubbed ||= t.stubbed
-  }
-  return [...out.values()]
-}
-
-function Part({
-  label,
-  quiet,
-  markdown,
-  children,
-}: {
-  label: string
-  quiet?: boolean
-  markdown?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <section>
-      <div className="mb-1 text-xs font-medium text-ink-secondary">{label}</div>
-      {/* The agent answers in markdown; show it the way its user saw it. */}
-      {markdown && typeof children === "string" ? (
-        <Markdown className="text-sm leading-relaxed text-ink-primary">
-          {children}
-        </Markdown>
-      ) : (
-        <div
-          className={cn(
-            "leading-relaxed whitespace-pre-wrap",
-            quiet
-              ? "border-l-2 border-primary-border pl-3 text-ink-secondary"
-              : "text-ink-primary"
-          )}
-        >
-          {children}
-        </div>
-      )}
-    </section>
+    <ThreadView
+      agent={agent}
+      threadId={row.threadId}
+      caption={`Question #${row.inputId}${repeated ? `, try ${row.attempt + 1}` : ""}`}
+    >
+      <NoteBox agent={agent} threadId={row.threadId} />
+    </ThreadView>
   )
 }
