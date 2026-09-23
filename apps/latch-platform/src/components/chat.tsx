@@ -117,10 +117,19 @@ export function Chat({
   chatId,
   agent,
   initialMessages,
+  embedded = false,
+  starters,
 }: {
   chatId: string
   agent: string
   initialMessages?: AppMessage[]
+  /**
+   * Hosted inside another page (the Evals panel) rather than the Chats route:
+   * no chat-page controls in the corner, no per-chat evals drawer.
+   */
+  embedded?: boolean
+  /** Prompts offered while the chat is empty; a click sends one as the first message. */
+  starters?: { label: string; prompt: string }[]
 }) {
   const router = useRouter()
   const [deciding, setDeciding] = useState(false)
@@ -664,6 +673,7 @@ export function Chat({
       <div className="flex h-full min-w-0">
         <div className="relative flex h-full min-w-0 flex-1 flex-col">
           {/* Chat-area controls, floating over the thread's top-right corner. */}
+          {!embedded && (
           <div className="absolute top-2 right-2 z-20 flex items-center gap-2">
             {editable && (
               <button
@@ -680,13 +690,29 @@ export function Chat({
             )}
             <DisplaySettings />
           </div>
+          )}
 
           <Thread autoScroll={scrollMode}>
             {showOverlays && <Thread.Overlay direction="top" />}
             <Thread.Viewport>
               {messages.length === 0 ? (
                 <Thread.Placeholder>
-                  <ChatPlaceholder agent={agent} />
+                  {starters?.length ? (
+                    <div className="flex w-full flex-col gap-2">
+                      {starters.map((s) => (
+                        <button
+                          key={s.label}
+                          type="button"
+                          onClick={() => void submitMessage(s.prompt, [])}
+                          className="rounded-xl border border-primary-border bg-primary-bg px-3 py-2 text-left text-sm text-ink-primary hover:bg-primary-bg-hover"
+                        >
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <ChatPlaceholder agent={agent} />
+                  )}
                 </Thread.Placeholder>
               ) : (
                 <>
@@ -806,7 +832,7 @@ export function Chat({
           />
         </div>
 
-        {showEvals && (
+        {showEvals && !embedded && (
           <EvalsDrawer
             agent={agent}
             draft={draft}

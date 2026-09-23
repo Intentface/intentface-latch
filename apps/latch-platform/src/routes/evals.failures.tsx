@@ -80,7 +80,7 @@ function FailuresPage() {
   const ungrouped = failures.filter((n) => !n.modeId || !data?.modes.some((m) => m.id === n.modeId));
 
   return (
-    <div className="mx-auto max-w-[1100px] space-y-6 p-6">
+    <div className="evals-page mx-auto max-w-[1100px] space-y-6 p-6 transition-[margin]">
       <EvalsShell
         page="failures"
         index={index}

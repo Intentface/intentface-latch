@@ -29,7 +29,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { summarize, compareVersions } = await import("@/lib/evals/v2/runner");
   const { runtime, agentStore, evals } = await getLatch();
   const { planRun, startPlannedRun } = await import("@/lib/evals-jobs");
-  const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-server");
+  const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-actions");
 
   /** Question ids that failed any check in a run — what "re-run the failures" means. */
   const failedQuestions = async (owner: string, runId: string) => {

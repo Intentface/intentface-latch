@@ -4,6 +4,8 @@ import { getEvalsOverviewFn } from "@/lib/evals-server";
 import type { EvalsOverview } from "@/lib/evals-server";
 import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui/select";
+import { Sparkles } from "lucide-react";
+import { EvalsAgentPanel, usePanelOpen } from "@/components/evals/agent-panel";
 
 /**
  * What the three Evals pages share: the title, the switch between them, and
@@ -82,6 +84,7 @@ export function EvalsShell({
   const here = PAGES.find((p) => p.page === page)!;
   // Carry the subject across pages; a cell or a selected question is page-local.
   const carry = { agent: search.agent, dataset: search.dataset, rubric: search.rubric };
+  const [panel, setPanel] = usePanelOpen();
 
   return (
     <header className="space-y-4">
@@ -90,6 +93,16 @@ export function EvalsShell({
           <h1 className="text-ink-primary text-lg font-semibold">Evals</h1>
           <p className="text-ink-tertiary text-sm">{here.blurb}</p>
         </div>
+        <div className="flex items-center gap-2">
+        {!panel && (
+          <button
+            type="button"
+            onClick={() => setPanel(true)}
+            className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg text-ink-primary hover:bg-primary-bg-hover flex h-8 items-center gap-1.5 rounded-lg px-3 text-sm"
+          >
+            <Sparkles className="size-4" /> Ask the evals agent
+          </button>
+        )}
         <nav aria-label="Evals pages" className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg flex rounded-lg p-0.5">
           {PAGES.map((p) => (
             <Link
@@ -106,7 +119,15 @@ export function EvalsShell({
             </Link>
           ))}
         </nav>
+        </div>
       </div>
+      {agent && (
+        <EvalsAgentPanel
+          open={panel}
+          onClose={() => setPanel(false)}
+          context={{ agent, ...(search.dataset ? { questionSet: search.dataset } : {}), ...(search.run ? { run: search.run } : {}), ...(search.rubric ? { checks: search.rubric } : {}) }}
+        />
+      )}
       <div className="flex flex-wrap items-end gap-2">
         <Picker label="Agent">
           <Select

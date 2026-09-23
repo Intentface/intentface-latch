@@ -95,7 +95,7 @@ function ChecksPage() {
   const counted = data?.checks.filter((c): c is CountedCheck => c.kind === "counted") ?? [];
 
   return (
-    <div className="mx-auto max-w-[1000px] space-y-5 p-6">
+    <div className="evals-page mx-auto max-w-[1000px] space-y-5 p-6 transition-[margin]">
       <EvalsShell page="checks" index={index} search={search}>
         <Picker label="Checks">
           <Select id="evals-rubric" value={rubricId ?? ""} onChange={(e) => set({ rubric: e.target.value, check: undefined })}>

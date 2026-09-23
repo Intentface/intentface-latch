@@ -116,7 +116,7 @@ function EvalsPage() {
   if (!index.length) return <EvalsEmpty />
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-5 p-6">
+    <div className="evals-page mx-auto max-w-[1400px] space-y-5 p-6 transition-[margin]">
       <EvalsShell
         page="results"
         index={index}

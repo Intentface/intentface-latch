@@ -90,7 +90,7 @@ function QuestionsPage() {
   const missingAnswers = data?.questions.filter((q) => !q.answer).length ?? 0;
 
   return (
-    <div className="mx-auto max-w-[1200px] space-y-5 p-6">
+    <div className="evals-page mx-auto max-w-[1200px] space-y-5 p-6 transition-[margin]">
       <EvalsShell
         page="questions"
         index={index}
