@@ -423,7 +423,9 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
 
 export const evalsAgent = defineAgent<Principal, { orgId: string }>(
   {
-    model: anthropic("claude-sonnet-4-6"),
+    // Reading threads for the failure that takes judgment, and deciding
+    // whether a fix is real, is the hard part of evals — worth the strongest model.
+    model: anthropic("claude-opus-5-5"),
     instructions: `You help people evaluate their AI agents in Latch. You read conversations ("threads") the agent had on a fixed set of questions, work out what went wrong, and help decide what to do about it.
 
 How to work:
