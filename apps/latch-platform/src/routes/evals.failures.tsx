@@ -3,7 +3,7 @@ import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { BookOpen, ChevronDown, ChevronUp, Loader2, Sparkles } from "lucide-react";
 import { currentPrincipalFn } from "@/lib/server";
 import { getEvalsIndexFn } from "@/lib/evals-server";
-import { createCheckFromModeFn, findPatternsFn, getFailuresFn, getReadingQueueFn, proposeCheckFn } from "@/lib/failures-server";
+import { createCheckFromModeFn, decideModeFn, findPatternsFn, getFailuresFn, getReadingQueueFn, proposeCheckFn } from "@/lib/failures-server";
 import type { Failures } from "@/lib/failures-server";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -140,7 +140,15 @@ function FailuresPage() {
                   .map((m) => ({ m, notes: failures.filter((n) => n.modeId === m.id) }))
                   .sort((a, b) => b.notes.length - a.notes.length)
                   .map(({ m, notes }) => (
-                    <ModeCard key={m.id} mode={m} notes={notes} of={failures.length} onOpen={reread} onCheck={() => setToCheck(m)} />
+                    <ModeCard
+                      key={m.id}
+                      mode={m}
+                      notes={notes}
+                      of={failures.length}
+                      onOpen={reread}
+                      onCheck={() => setToCheck(m)}
+                      onDecide={(decision) => agent && void decideModeFn({ data: { agent, id: m.id, decision } }).then(load)}
+                    />
                   ))}
               </ul>
             </section>
@@ -216,12 +224,14 @@ function ModeCard({
   of,
   onOpen,
   onCheck,
+  onDecide,
 }: {
   mode: Failures["modes"][number];
   notes: Note[];
   of: number;
   onOpen: (n: Note) => void;
   onCheck: () => void;
+  onDecide: (d: "fix" | "measure" | "leave") => void;
 }) {
   const [open, setOpen] = useState(false);
   const share = of ? Math.round((100 * notes.length) / of) : 0;
@@ -231,7 +241,7 @@ function ModeCard({
         <div className="min-w-0 flex-1">
           <div className="text-ink-primary font-medium">{mode.name}</div>
           <p className="text-ink-secondary mt-0.5 text-sm">{mode.description}</p>
-          <div className="mt-2 flex items-center gap-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <div className="bg-primary-border h-1 w-32 overflow-hidden rounded-full">
               <div className="bg-ink-secondary h-full" style={{ width: `${share}%` }} />
             </div>
@@ -239,18 +249,49 @@ function ModeCard({
               {notes.length} thread{notes.length === 1 ? "" : "s"} · {share}% of failures
             </span>
           </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <div role="radiogroup" aria-label="What to do about it" className="smooth-shadow-ring-xs smooth-ring-primary-border inline-flex rounded-lg p-0.5">
+              {(
+                [
+                  ["fix", "Fix now", "The cause is plain: change the agent and re-run the threads that failed."],
+                  ["measure", "Measure", "Subjective, recurring or risky: make it a check."],
+                  ["leave", "Leave", "Rare or harmless: not worth the effort now."],
+                ] as const
+              ).map(([value, label, hint]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={mode.decision === value}
+                  title={hint}
+                  onClick={() => onDecide(value)}
+                  className={cn(
+                    "rounded-md px-2.5 py-1",
+                    mode.decision === value ? "bg-primary-bg-active text-ink-primary font-medium" : "text-ink-secondary hover:text-ink-primary",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {mode.decision && mode.decidedBy === "agent" && (
+              <span className="text-ink-tertiary">Suggested by the evals agent{mode.decisionWhy ? `: ${mode.decisionWhy}` : "."}</span>
+            )}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button type="button" onClick={() => setOpen(!open)} className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-sm">
             {open ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />} Notes
           </button>
-          <button
-            type="button"
-            onClick={onCheck}
-            className="smooth-shadow-ring-xs smooth-ring-primary-border text-ink-primary hover:bg-primary-bg-hover h-8 rounded-lg px-3 text-sm"
-          >
-            Turn into a check
-          </button>
+          {mode.decision !== "fix" && mode.decision !== "leave" && (
+            <button
+              type="button"
+              onClick={onCheck}
+              className="smooth-shadow-ring-xs smooth-ring-primary-border text-ink-primary hover:bg-primary-bg-hover h-8 rounded-lg px-3 text-sm"
+            >
+              Turn into a check
+            </button>
+          )}
         </div>
       </div>
       {open && (

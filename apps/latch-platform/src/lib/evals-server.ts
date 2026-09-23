@@ -12,9 +12,9 @@ import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Principal } from "./session";
 import type { Check, Rubric, ThreadRef } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
-import { CONFIRM_TWICE_ABOVE, MAX_UNITS, estimateRun } from "./evals/v2/jobs";
-import type { EvalJob } from "./evals/v2/jobs";
-import { kickJob, resolveVersions } from "./evals-jobs";
+import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
+import { kickJob, planRun, startPlannedRun } from "./evals-jobs";
+import type { RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { compareVersions, configFingerprint, summarize } from "./evals/v2/runner";
 import { thresholdFor, trustOf } from "./evals/v2/alignment";
@@ -334,46 +334,12 @@ export const getRunOptionsFn = createServerFn({ method: "GET" })
     };
   });
 
-type RunRequest = { agent: string; datasetId: string; rubricId: string; versions: string[]; inputIds: string[]; repeats: number };
-
-/** Price a run from what this set's earlier threads actually cost. */
-async function priced(principal: Principal, d: RunRequest) {
-  const o = await ownerFor(principal, d.agent);
-  if (!o) return { ok: false as const, error: "Only agents you can edit can be run." };
-  const { evals, agentStore } = await getLatch();
-  const rubric = await evals.getRubric(o.owner, d.rubricId);
-  if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
-  const repeats = Math.max(1, Math.min(5, Math.floor(d.repeats)));
-  const inputs = new Set((await evals.listInputs(d.datasetId)).map((i) => i.id));
-  const inputIds = [...new Set(d.inputIds)].filter((id) => inputs.has(id));
-  if (!d.versions.length) return { ok: false as const, error: "Pick at least one version." };
-  if (!inputIds.length) return { ok: false as const, error: "Pick at least one question." };
-  let versions;
-  try {
-    versions = await resolveVersions(agentStore, principal, o.name, [...new Set(d.versions)]);
-  } catch (e) {
-    return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
-  }
-  const units = versions.length * inputIds.length * repeats;
-  if (units > MAX_UNITS) return { ok: false as const, error: `That is ${units} threads; one run is capped at ${MAX_UNITS}.` };
-  const past = await evals.listThreads(o.owner, { datasetId: d.datasetId, limit: 400 });
-  const costs = await evals.threadCosts(past.filter((t) => !t.error).map((t) => t.threadId));
-  const estimate = estimateRun({
-    units,
-    askedChecks: rubric.checks.filter((c) => c.kind === "asked").length,
-    history: [...costs.values()].filter((c) => c > 0),
-  });
-  // Two labels for one configuration measure noise, not a change.
-  const same = versions.filter((v, i) => versions.findIndex((w) => w.fingerprint === v.fingerprint) !== i).map((v) => v.label);
-  return { ok: true as const, owner: o.owner, name: o.name, versions, inputIds, repeats, estimate, same };
-}
-
 export const estimateRunFn = createServerFn({ method: "POST" })
   .validator((d: RunRequest) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
-    const p = await priced(principal, data);
+    const p = await planRun(principal, data);
     if (!p.ok) return p;
     return { ok: true as const, estimate: p.estimate, same: p.same, confirmTwiceAbove: CONFIRM_TWICE_ABOVE };
   });
@@ -388,38 +354,7 @@ export const startRunFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
-    const p = await priced(principal, data);
-    if (!p.ok) return p;
-    const cost = p.estimate.cost;
-    if (cost !== null && (data.confirmedCost === null || cost > data.confirmedCost * 1.05 + 0.01))
-      return { ok: false as const, error: `The estimate changed to about $${cost.toFixed(2)}. Check it and start again.` };
-    const { evals } = await getLatch();
-    const now = Date.now();
-    const id = `run_${new Date(now).toISOString().replace(/[-:]/g, "").slice(0, 15)}_${Math.random().toString(36).slice(2, 6)}`;
-    const job: EvalJob = {
-      owner: p.owner,
-      id,
-      runId: id,
-      kind: "run",
-      agentName: p.name,
-      datasetId: data.datasetId,
-      rubricId: data.rubricId,
-      principal: { orgId: principal.orgId, ...(principal.userId ? { userId: principal.userId } : {}) },
-      versions: p.versions,
-      inputIds: p.inputIds,
-      repeats: p.repeats,
-      status: "running",
-      total: p.estimate.agentRuns,
-      done: 0,
-      failed: 0,
-      estimate: p.estimate,
-      createdAt: now,
-      updatedAt: now,
-      leaseUntil: 0,
-    };
-    await evals.saveJob(job);
-    await kickJob(p.owner, id);
-    return { ok: true as const, id };
+    return startPlannedRun(principal, data, data.confirmedCost);
   });
 
 /** Re-score an existing run under the latest checks. No agent runs, so no confirmation. */

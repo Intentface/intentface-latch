@@ -28,6 +28,18 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { agentOwnerKey, normalizeAgentName } = await import("@/lib/agent-store");
   const { summarize, compareVersions } = await import("@/lib/evals/v2/runner");
   const { runtime, agentStore, evals } = await getLatch();
+  const { planRun, startPlannedRun } = await import("@/lib/evals-jobs");
+  const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-server");
+
+  /** Question ids that failed any check in a run — what "re-run the failures" means. */
+  const failedQuestions = async (owner: string, runId: string) => {
+    const threads = await evals.listThreads(owner, { runId });
+    const verdicts = await evals.listVerdicts({ threadIds: threads.map((t) => t.threadId) });
+    const failed = new Set(verdicts.filter((v) => v.failed).map((v) => v.threadId));
+    return [...new Set(threads.filter((t) => failed.has(t.threadId) && t.inputId).map((t) => t.inputId!))];
+  };
+  const modeByName = async (owner: string, name: string, mode: string) =>
+    (await evals.listModes(owner, name)).find((m) => m.id === mode || m.name.toLowerCase() === mode.toLowerCase());
 
   /** The owner this agent's eval data lives under — or an error the model can read. */
   const scope = async (agent: string) => {
@@ -208,6 +220,169 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
       },
     }),
 
+    find_patterns: tool({
+      description:
+        "Group the notes PEOPLE have accepted into failure modes with counts (one small model call). Needs at least 5 notes. Your open suggestions do not count until accepted.",
+      inputSchema: z.object({ agent: Agent }),
+      execute: async ({ agent }) => groupNotes(principal, agent),
+    }),
+
+    triage: tool({
+      description:
+        "Record what to do about a failure mode: 'fix' when the cause is plain (a missing or wrong instruction, a broken tool) and a change should just be made and re-run; 'measure' when it is subjective, recurring or risky and needs a check; 'leave' when it is rare or harmless. A person's decision always wins over yours.",
+      inputSchema: z.object({
+        agent: Agent,
+        mode: z.string().describe("Failure mode name or id"),
+        decision: z.enum(["fix", "measure", "leave"]),
+        why: z.string().describe("One or two sentences, pointing at the evidence."),
+      }),
+      execute: async ({ agent, mode, decision, why }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const m = await modeByName(o.owner, o.name, mode);
+        if (!m) return { error: `No failure mode "${mode}". Use list_notes to see them.` };
+        const ok = await evals.decideMode(o.owner, m.id, { decision, why, by: "agent" });
+        return ok ? { saved: true } : { error: `A person already decided "${m.decision}" for this mode; theirs stands.` };
+      },
+    }),
+
+    estimate_run: tool({
+      description:
+        "What a run would cost, priced from what this question set's earlier threads cost. Free. Call it before start_run and pass the cost it returns.",
+      inputSchema: z.object({
+        agent: Agent,
+        questionSetId: z.string(),
+        checksId: z.string(),
+        versions: z.array(z.string()).describe('e.g. ["live", "@draft"]'),
+        questions: z.array(z.string()).optional().describe("Question ids; omit with onlyFailedIn or for all"),
+        onlyFailedIn: z.string().optional().describe("A run id: re-run only the questions that failed a check in it"),
+        repeats: z.number().int().min(1).max(5).default(1),
+      }),
+      execute: async ({ agent, questionSetId, checksId, versions, questions, onlyFailedIn, repeats }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const inputIds = onlyFailedIn
+          ? await failedQuestions(o.owner, onlyFailedIn)
+          : questions ?? (await evals.listInputs(questionSetId)).map((i) => i.id);
+        const p = await planRun(principal, { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds, repeats });
+        if (!p.ok) return p;
+        return {
+          questions: p.inputIds,
+          agentRuns: p.estimate.agentRuns,
+          judgeCalls: p.estimate.judgeCalls,
+          estimatedCost: p.estimate.cost,
+          basis: p.estimate.basis,
+          ...(p.same.length ? { warning: `${p.same.join(", ")} is the same configuration as another version picked; comparing them measures noise.` } : {}),
+        };
+      },
+    }),
+
+    start_run: tool({
+      description:
+        "Run questions against versions and judge them. Costs money, so a person approves it first — put the plan and the cost from estimate_run in `summary`. Returns a job id; follow it with job_status.",
+      inputSchema: z.object({
+        summary: z.string().describe('For the person approving, e.g. "Re-run the 4 questions that failed, on live and @draft, once each: 8 agent runs, about $0.60."'),
+        agent: Agent,
+        questionSetId: z.string(),
+        checksId: z.string(),
+        versions: z.array(z.string()),
+        questions: z.array(z.string()).describe("Question ids, as estimate_run returned them"),
+        repeats: z.number().int().min(1).max(5).default(1),
+        estimatedCost: z.number().nullable().describe("The cost estimate_run returned"),
+      }),
+      execute: async ({ agent, questionSetId, checksId, versions, questions, repeats, estimatedCost }) => {
+        const r = await startPlannedRun(
+          principal,
+          { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds: questions, repeats },
+          estimatedCost,
+        );
+        return r.ok ? { jobId: r.id, runId: r.id, estimatedCost: r.estimate.cost, next: "Call job_status until it is done." } : r;
+      },
+    }),
+
+    job_status: tool({
+      description: "How a run is going: running, judging, done, failed or cancelled, with progress. When done, use run_results with its run id.",
+      inputSchema: z.object({ agent: Agent, jobId: z.string() }),
+      execute: async ({ agent, jobId }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const j = await evals.getJob(o.owner, jobId);
+        if (!j) return { error: `No job "${jobId}".` };
+        return { status: j.status, done: `${j.done}/${j.total}`, failedToRun: j.failed, runId: j.runId, ...(j.error ? { error: j.error } : {}) };
+      },
+    }),
+
+    propose_fix: tool({
+      description:
+        "Change the agent's instructions in its unpublished DRAFT (@draft) — never the live agent. Each edit replaces one exact passage (quote it from read_agent) or appends. A person approves the diff first, and only a person publishes. Then compare live and @draft with estimate_run/start_run on the questions that failed.",
+      inputSchema: z.object({
+        summary: z.string().describe("For the person approving: what changes and which failure it should fix."),
+        agent: Agent,
+        edits: z
+          .array(
+            z.object({
+              find: z.string().optional().describe("Exact passage to replace, copied from the current draft (or live if there is no draft). Omit to append."),
+              replace: z.string().describe("The new text"),
+            }),
+          )
+          .min(1),
+      }),
+      execute: async ({ agent, edits }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const draft = await agentStore.getDraft(principal, o.name, o.rec.scope);
+        const base = draft?.record ?? o.rec;
+        let instructions = base.instructions;
+        for (const e of edits) {
+          if (!e.find) {
+            instructions = `${instructions.trimEnd()}\n\n${e.replace.trim()}`;
+            continue;
+          }
+          const at = instructions.indexOf(e.find);
+          if (at < 0) return { error: `Passage not found in the ${draft ? "draft" : "live"} instructions: "${e.find.slice(0, 80)}…". Read them again with read_agent.` };
+          if (instructions.indexOf(e.find, at + 1) >= 0) return { error: `Passage appears more than once; quote more of it: "${e.find.slice(0, 80)}…"` };
+          instructions = instructions.slice(0, at) + e.replace + instructions.slice(at + e.find.length);
+        }
+        const published = (await agentStore.listVersions(principal, o.name, o.rec.scope)).find((v) => v.published)?.version;
+        await agentStore.saveDraft(principal, o.name, o.rec.scope, { ...base, instructions }, draft?.baseVersion ?? published);
+        return { saved: "@draft", startedFrom: draft ? "the existing draft" : "live", note: "Not published. A person publishes from the agent editor." };
+      },
+    }),
+
+    propose_check: tool({
+      description: "Draft a yes/no check that would catch a failure mode, from the notes behind it. Nothing is saved; show the person the draft.",
+      inputSchema: z.object({ agent: Agent, mode: z.string().describe("Failure mode name or id") }),
+      execute: async ({ agent, mode }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const m = await modeByName(o.owner, o.name, mode);
+        if (!m) return { error: `No failure mode "${mode}".` };
+        const r = await draftCheck(principal, { agent, modeId: m.id });
+        return r.ok ? { label: r.draft.label, ask: r.draft.ask, basedOnNotes: r.examples, checks: r.rubrics } : r;
+      },
+    }),
+
+    add_check: tool({
+      description:
+        "Add a check to a set of checks as a new version. The notes behind the failure mode become its first rulings (noted threads fail, threads marked fine pass). A person approves it first.",
+      inputSchema: z.object({
+        summary: z.string().describe("For the person approving: the check and where it goes."),
+        agent: Agent,
+        mode: z.string(),
+        checksId: z.string(),
+        label: z.string(),
+        ask: z.string().describe("Yes/no question; yes means the agent did well"),
+      }),
+      execute: async ({ agent, mode, checksId, label, ask }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const m = await modeByName(o.owner, o.name, mode);
+        if (!m) return { error: `No failure mode "${mode}".` };
+        const r = await addCheckFromMode(principal, { agent, modeId: m.id, rubricId: checksId, label, ask });
+        return r.ok ? { ...r, next: `Nothing has judged v${r.version} yet. Judge a run with it from the Results page.` } : r;
+      },
+    }),
+
     suggest_note: tool({
       description:
         "Propose a note on a thread you have READ: the first thing that went wrong, as the user would see it — or that it looks fine. A person accepts or rejects it on the Failures page; it counts for nothing until then. Do not suggest on threads a person already noted, or ones whose suggestion was rejected.",
@@ -256,9 +431,16 @@ How to work:
 - When you read a thread, look for the FIRST thing that went wrong, from the user's side: it did not answer what was asked, it asked a question instead of answering, it claimed something no tool returned, it used the wrong tool, it contradicted what a good answer conveys, it broke a must-not. Stop at the first upstream error; later problems usually follow from it.
 - Then suggest_note: specific and short ("Recommended WCAG 2.2 as the baseline; the docs say 2.1 AA"), never vague ("answer could be better"). Say why, pointing at the message or tool call. If it looks fine, say so — that is useful too.
 - Some failures need knowledge you do not have: what the business wants, what this user needed. When you are unsure, say that in the note's why rather than guessing, and leave it to the person.
-- Group what you found only in words; turning notes into failure modes and checks is done on the Failures page once a person has accepted them.
 
-What you never do: accept your own suggestions, rule on whether the judge was right, change or publish the agent, or start runs. Those belong to the person.
+Deciding what to do (after people have accepted notes): find_patterns, then triage each failure mode.
+- "fix" when the cause is plain — an instruction that is missing, wrong or ambiguous; a tool that fails. Do not build a check for these: propose_fix on @draft, then re-run ONLY the questions that failed (estimate_run with onlyFailedIn), on live and @draft, and report question by question whether it helped and whether anything got worse.
+- "measure" when it is subjective, recurring or risky — something that could come back after other changes. propose_check, show the person the draft, and add_check once they agree.
+- "leave" when it is rare and harmless. Say so; not every failure is worth effort.
+A fix is judged by whether the failed questions pass now without others breaking — a handful of re-runs cannot prove it; say how many questions it rests on, and when a full run would be worth its cost.
+
+Money and changes: estimate_run is free; always call it and put the cost in start_run's summary. start_run, propose_fix and add_check wait for the person's approval. propose_fix only ever writes @draft.
+
+What you never do: accept your own suggestions, rule on whether the judge was right, or publish the agent. Those belong to the person.
 
 Be brief. Lead with what you found ("4 of 6 failures end with a question instead of an answer"), then the evidence. Name threads by question number and version ("#3 on @draft"), not ids, unless asked.`,
     toolSources: [
@@ -268,10 +450,12 @@ Be brief. Lead with what you found ("4 of 6 failures end with a question instead
         },
       },
     ],
+    // What spends money or changes something a person relies on waits for them.
+    toolApproval: { start_run: "user-approval", propose_fix: "user-approval", add_check: "user-approval" },
     smoothStream: true,
   },
   {
     title: "Evals",
-    description: "Reads an agent's eval threads, finds what went wrong, and suggests notes for you to accept on the Failures page.",
+    description: "Reads an agent's eval threads, finds what went wrong, and helps fix it: suggests notes, drafts fixes and checks, re-runs failures — with your approval.",
   },
 );

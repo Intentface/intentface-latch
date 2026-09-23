@@ -62,6 +62,8 @@ export interface EvalsStore {
   setModes: (owner: Owner, agentName: string, modes: FailureMode[], assign: Map<string, string>) => Promise<void>;
   listModes: (owner: Owner, agentName: string) => Promise<FailureMode[]>;
   updateMode: (owner: Owner, id: string, patch: { name?: string; description?: string }) => Promise<void>;
+  /** Record what to do about a failure mode. A person's decision is never overwritten by the agent's. */
+  decideMode: (owner: Owner, id: string, d: { decision: "fix" | "measure" | "leave"; why: string; by: "agent" | "person" }) => Promise<boolean>;
 
   saveSuggestion: (s: Suggestion) => Promise<void>;
   listSuggestions: (owner: Owner, agentName: string, status?: Suggestion["status"]) => Promise<Suggestion[]>;
@@ -130,6 +132,8 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
   ];
   for (const sql of ddl) await client.execute(sql);
   // Tables created before repeats existed; ADD COLUMN fails once present.
+  for (const col of ["decision TEXT", "decision_why TEXT", "decided_by TEXT"])
+    await client.execute(`ALTER TABLE latch_eval_modes ADD COLUMN ${col}`).catch(() => {});
   for (const col of ["run_id TEXT", "attempt INTEGER"])
     await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
@@ -529,8 +533,9 @@ export function createEvalsStore(client: Client): EvalsStore {
           { sql: `DELETE FROM latch_eval_modes WHERE owner = ? AND agent_name = ?`, args: [owner, agentName] },
           { sql: `UPDATE latch_eval_notes SET mode_id = NULL WHERE owner = ? AND agent_name = ?`, args: [owner, agentName] },
           ...modes.map((m) => ({
-            sql: `INSERT INTO latch_eval_modes (owner, agent_name, id, name, description, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-            args: [owner, agentName, m.id, m.name, m.description, m.createdAt],
+            sql: `INSERT INTO latch_eval_modes (owner, agent_name, id, name, description, created_at, decision, decision_why, decided_by)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [owner, agentName, m.id, m.name, m.description, m.createdAt, m.decision ?? null, m.decisionWhy ?? null, m.decidedBy ?? null],
           })),
           ...[...assign].map(([threadId, modeId]) => ({
             sql: `UPDATE latch_eval_notes SET mode_id = ? WHERE owner = ? AND thread_id = ?`,
@@ -547,8 +552,19 @@ export function createEvalsStore(client: Client): EvalsStore {
         id: String(r.id),
         name: String(r.name),
         description: String(r.description),
+        ...(str(r.decision) ? { decision: str(r.decision) as "fix" | "measure" | "leave" } : {}),
+        ...(str(r.decision_why) ? { decisionWhy: str(r.decision_why) } : {}),
+        ...(str(r.decided_by) ? { decidedBy: str(r.decided_by) as "agent" | "person" } : {}),
         createdAt: Number(r.created_at),
       }));
+    },
+    async decideMode(owner, id, d) {
+      const r = await client.execute({
+        sql: `UPDATE latch_eval_modes SET decision = ?, decision_why = ?, decided_by = ?
+              WHERE owner = ? AND id = ? AND NOT (? = 'agent' AND decided_by = 'person')`,
+        args: [d.decision, d.why, d.by, owner, id, d.by],
+      });
+      return r.rowsAffected === 1;
     },
     async updateMode(owner, id, patch) {
       await client.execute({

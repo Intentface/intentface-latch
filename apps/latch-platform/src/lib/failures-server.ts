@@ -70,7 +70,14 @@ export const getFailuresFn = createServerFn({ method: "GET" })
       readTarget: READ_TARGET,
       minToCluster: MIN_NOTES_TO_CLUSTER,
       threadsAvailable: threads.filter((t) => !t.error).length,
-      modes: modes.map((m) => ({ id: m.id, name: m.name, description: m.description })),
+      modes: modes.map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        decision: m.decision ?? null,
+        decisionWhy: m.decisionWhy ?? null,
+        decidedBy: m.decidedBy ?? null,
+      })),
       /** Threads the evals agent has read and suggested a note on, waiting for a person. */
       suggested: suggestions
         .filter((x) => !noted.has(x.threadId))
@@ -192,11 +199,7 @@ export const saveNoteFn = createServerFn({ method: "POST" })
   });
 
 /** Group the notes into failure modes. One small model call; names seen before are kept where they fit. */
-export const findPatternsFn = createServerFn({ method: "POST" })
-  .validator((agent: string) => agent)
-  .handler(async ({ data: agent }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "Sign in again." };
+export async function groupNotes(principal: Principal, agent: string) {
     const o = await ownerFor(principal, agent);
     if (!o) return { ok: false as const, error: "Only agents you can edit." };
     const { evals } = await getLatch();
@@ -216,12 +219,30 @@ export const findPatternsFn = createServerFn({ method: "POST" })
     const assign = new Map<string, string>();
     for (const m of cleanClusters(object, notes.length)) {
       // A mode that keeps its name keeps its id, so links to it survive a re-grouping.
-      const id = existing.find((e) => e.name.toLowerCase() === m.name.toLowerCase())?.id ?? `fm_${now.toString(36)}_${modes.length}`;
-      modes.push({ owner: o.owner, agentName: o.name, id, name: m.name, description: m.description, createdAt: now + modes.length });
+      const kept = existing.find((e) => e.name.toLowerCase() === m.name.toLowerCase());
+      const id = kept?.id ?? `fm_${now.toString(36)}_${modes.length}`;
+      modes.push({
+        owner: o.owner,
+        agentName: o.name,
+        id,
+        name: m.name,
+        description: m.description,
+        // A mode that keeps its name keeps what was decided about it.
+        ...(kept?.decision ? { decision: kept.decision, decisionWhy: kept.decisionWhy, decidedBy: kept.decidedBy } : {}),
+        createdAt: now + modes.length,
+      });
       for (const i of m.notes) assign.set(notes[i].threadId, id);
     }
     await evals.setModes(o.owner, o.name, modes, assign);
     return { ok: true as const, modes: modes.length, grouped: assign.size, of: notes.length };
+}
+
+export const findPatternsFn = createServerFn({ method: "POST" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return groupNotes(principal, agent);
   });
 
 export const renameModeFn = createServerFn({ method: "POST" })
@@ -237,11 +258,7 @@ export const renameModeFn = createServerFn({ method: "POST" })
   });
 
 /** Draft a check that would catch a failure mode. The person edits it before anything is saved. */
-export const proposeCheckFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; modeId: string }) => d)
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "Sign in again." };
+export async function draftCheck(principal: Principal, data: { agent: string; modeId: string }) {
     const o = await ownerFor(principal, data.agent);
     if (!o) return { ok: false as const, error: "Only agents you can edit." };
     const { evals } = await getLatch();
@@ -262,6 +279,14 @@ export const proposeCheckFn = createServerFn({ method: "POST" })
       examples: examples.length,
       rubrics: rubrics.map((r) => ({ id: r.id, version: r.version })),
     };
+}
+
+export const proposeCheckFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; modeId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return draftCheck(principal, data);
   });
 
 /**
@@ -270,11 +295,7 @@ export const proposeCheckFn = createServerFn({ method: "POST" })
  * failure is a fail, a thread marked "looks fine" is a pass. The check
  * starts with evidence about its judge instead of at zero.
  */
-export const createCheckFromModeFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; modeId: string; rubricId: string; label: string; ask: string }) => d)
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return { ok: false as const, error: "Sign in again." };
+export async function addCheckFromMode(principal: Principal, data: { agent: string; modeId: string; rubricId: string; label: string; ask: string }) {
     const o = await ownerFor(principal, data.agent);
     if (!o) return { ok: false as const, error: "Only agents you can edit." };
     const label = data.label.trim();
@@ -303,4 +324,26 @@ export const createCheckFromModeFn = createServerFn({ method: "POST" })
     for (const n of [...failed, ...passed])
       await evals.saveRuling({ threadId: n.threadId, checkId: id, failed: !n.ok, ...(principal.userId ? { by: principal.userId } : {}), createdAt: now });
     return { ok: true as const, checkId: id, version: saved.version, failed: failed.length, passed: passed.length };
+}
+
+export const createCheckFromModeFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; modeId: string; rubricId: string; label: string; ask: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return addCheckFromMode(principal, data);
+  });
+
+/** A person decides what to do about a failure mode — overriding the agent's suggestion. */
+export const decideModeFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; id: string; decision: "fix" | "measure" | "leave" }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const };
+    const { evals } = await getLatch();
+    const m = (await evals.listModes(o.owner, o.name)).find((x) => x.id === data.id);
+    await evals.decideMode(o.owner, data.id, { decision: data.decision, why: m?.decisionWhy ?? "", by: "person" });
+    return { ok: true as const };
   });

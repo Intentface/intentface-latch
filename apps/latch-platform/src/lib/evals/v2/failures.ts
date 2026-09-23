@@ -55,6 +55,14 @@ export interface FailureMode {
   name: string;
   /** What the failure looks like, in a sentence, from the user's side. */
   description: string;
+  /**
+   * What to do about it. Not every failure deserves a check: an obvious gap
+   * in the instructions is fixed and re-run; a subjective or recurring one is
+   * measured; a rare, harmless one is left.
+   */
+  decision?: "fix" | "measure" | "leave";
+  decisionWhy?: string;
+  decidedBy?: "agent" | "person";
   createdAt: number;
 }
 
