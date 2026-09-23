@@ -123,6 +123,43 @@ export async function startPlannedRun(principal: Principal, d: RunRequest, confi
   return { ok: true as const, id, estimate: p.estimate };
 }
 
+/** Re-score an existing run under the latest checks. Only the judge runs, never the agent. */
+export async function startJudgeJob(principal: Principal, data: { agent: string; datasetId: string; rubricId: string; runId: string }) {
+  const { agentStore } = await getLatch();
+  const rec = await agentStore.getRecord(principal, normalizeAgentName(data.agent));
+  const o = rec ? { owner: agentOwnerKey(principal, rec.scope), name: rec.name } : null;
+  if (!o) return { ok: false as const, error: "Only agents you can edit can be judged." };
+  const { evals } = await getLatch();
+  const threads = await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId });
+  if (!threads.length) return { ok: false as const, error: "That run has no threads." };
+  const now = Date.now();
+  const id = `judge_${now.toString(36)}`;
+  const ok = threads.filter((t) => !t.error).length;
+  await evals.saveJob({
+    owner: o.owner,
+    id,
+    runId: data.runId,
+    kind: "judge",
+    agentName: o.name,
+    datasetId: data.datasetId,
+    rubricId: data.rubricId,
+    principal: { orgId: principal.orgId, ...(principal.userId ? { userId: principal.userId } : {}) },
+    versions: [],
+    inputIds: [],
+    repeats: 1,
+    status: "running",
+    total: ok,
+    done: 0,
+    failed: 0,
+    estimate: { agentRuns: 0, judgeCalls: ok, cost: null, basis: "Judging only: the agent does not run." },
+    createdAt: now,
+    updatedAt: now,
+    leaseUntil: 0,
+  });
+  await kickJob(o.owner, id);
+  return { ok: true as const, id };
+}
+
 /** Advance one job while this caller holds its lease. Never throws. */
 export async function processJob(owner: string, id: string): Promise<void> {
   const { evals, runtime, modelFor } = await getLatch();

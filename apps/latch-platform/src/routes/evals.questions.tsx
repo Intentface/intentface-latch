@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Plus, Search, Trash2 } from "lucide-react";
 import { currentPrincipalFn } from "@/lib/server";
-import { getEvalsIndexFn, getQuestionsFn, saveQuestionsFn } from "@/lib/evals-server";
+import { createQuestionSetFn, getEvalsIndexFn, getQuestionsFn, saveQuestionsFn } from "@/lib/evals-server";
 import { nextInputId } from "@/lib/evals/v2/validate";
 import type { EditableQuestion } from "@/lib/evals/v2/validate";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import Drawer from "@/components/ui/drawer";
-import { EDITOR_DRAWER, EvalsEmpty, EvalsShell, Field, Picker, useOverview, useSetSearch, validateEvalsSearch } from "@/components/evals/shell";
+import { CreateDrawer, EDITOR_DRAWER, EvalsEmpty, EvalsShell, Field, Picker, useOverview, useSetSearch, validateEvalsSearch } from "@/components/evals/shell";
 
 /**
  * The questions a set asks. A list you can scan — which ones lack a reference
@@ -35,7 +35,8 @@ function QuestionsPage() {
   const search = Route.useSearch();
   const set = useSetSearch();
   const agent = search.agent ?? index[0]?.agent;
-  const [overview] = useOverview(agent);
+  const [overview, reloadOverview] = useOverview(agent);
+  const [creating, setCreating] = useState(false);
   const datasetId = search.dataset ?? overview?.datasets[0]?.id;
   const [data, setData] = useState<Loaded | null>(null);
   const [filter, setFilter] = useState("");
@@ -98,6 +99,13 @@ function QuestionsPage() {
         actions={
           data && (
             <>
+              <button
+                type="button"
+                onClick={() => setCreating(true)}
+                className="text-ink-secondary hover:text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border h-8 rounded-lg px-3 text-sm"
+              >
+                New question set
+              </button>
               <button
                 type="button"
                 onClick={() => setLocal({ kind: "set" })}
@@ -200,6 +208,24 @@ function QuestionsPage() {
             </table>
           </div>
         </div>
+      )}
+
+      {agent && (
+        <CreateDrawer
+          open={creating}
+          title="New question set"
+          description="A fixed list of questions to ask every version you compare. Add the questions next, or ask the evals agent to draft them."
+          withSetFields
+          onClose={() => setCreating(false)}
+          onCreate={async (v) => {
+            const r = await createQuestionSetFn({ data: { agent, ...v } });
+            if (!r.ok) return r.error;
+            setCreating(false);
+            reloadOverview();
+            set({ dataset: r.id, q: undefined });
+            return null;
+          }}
+        />
       )}
 
       <Drawer open={!!editing} onOpenChange={(o) => !o && close()}>

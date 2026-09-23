@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import Drawer from "@/components/ui/drawer";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { getEvalsOverviewFn } from "@/lib/evals-server";
 import type { EvalsOverview } from "@/lib/evals-server";
@@ -195,3 +198,77 @@ export function Field({ id, label, hint, children }: { id: string; label: string
  */
 export const EDITOR_DRAWER =
   "bg-primary-bg smooth-shadow-ring-xs smooth-ring-primary-border inset-y-2 right-2 h-auto w-[calc(100%-1rem)] gap-0 overflow-hidden rounded-xl border-0 outline-none data-closed:translate-x-[calc(100%+1rem)] sm:max-w-xl";
+
+/**
+ * Name something new — a question set or a set of checks — in the same inset
+ * drawer the editors use. `fields` adds the optional lines a question set has.
+ */
+export function CreateDrawer({
+  open,
+  title,
+  description,
+  withSetFields,
+  onClose,
+  onCreate,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  withSetFields?: boolean;
+  onClose: () => void;
+  onCreate: (v: { name: string; audience: string; note: string }) => Promise<string | null>;
+}) {
+  const [name, setName] = useState("");
+  const [audience, setAudience] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (open) (setName(""), setAudience(""), setNote(""), setError(null));
+  }, [open]);
+  return (
+    <Drawer open={open} onOpenChange={(o) => !o && onClose()}>
+      <Drawer.Content className={EDITOR_DRAWER}>
+        <form
+          className="flex h-full flex-col"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setSaving(true);
+            void onCreate({ name, audience, note }).then((err) => (setError(err), setSaving(false)));
+          }}
+        >
+          <Drawer.Header className="border-primary-border border-b px-5">
+            <Drawer.Title className="text-ink-primary">{title}</Drawer.Title>
+            <Drawer.Description className="text-ink-tertiary text-xs">{description}</Drawer.Description>
+          </Drawer.Header>
+          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
+            <Field id="new-name" label="Name">
+              <Input id="new-name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+            </Field>
+            {withSetFields && (
+              <>
+                <Field id="new-audience" label="Who is asking" hint="One line. Steers the judge on register.">
+                  <Input id="new-audience" value={audience} onChange={(e) => setAudience(e.target.value)} />
+                </Field>
+                <Field id="new-note" label="How answers should read" hint="E.g. free-standing advice that never cites its source.">
+                  <Textarea id="new-note" value={note} onChange={(e) => setNote(e.target.value)} rows={3} />
+                </Field>
+              </>
+            )}
+          </div>
+          <div className="border-primary-border flex items-center gap-2 border-t px-5 py-3">
+            {error && <span className="min-w-0 flex-1 text-sm text-red-600 dark:text-red-400">{error}</span>}
+            <div className="ml-auto flex gap-2">
+              <button type="button" onClick={onClose} className="text-ink-secondary hover:text-ink-primary px-3 py-1.5 text-sm">
+                Cancel
+              </button>
+              <button type="submit" disabled={saving || !name.trim()} className="bg-ink-primary text-primary-bg rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50">
+                {saving ? "Creating…" : "Create"}
+              </button>
+            </div>
+          </div>
+        </form>
+      </Drawer.Content>
+    </Drawer>
+  );
+}

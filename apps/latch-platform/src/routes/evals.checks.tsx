@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { MessageSquareText, Plus, ScrollText, Trash2, X } from "lucide-react";
 import { currentPrincipalFn } from "@/lib/server";
-import { getChecksFn, getEvalsIndexFn, saveChecksFn } from "@/lib/evals-server";
+import { createChecksFn, getChecksFn, getEvalsIndexFn, saveChecksFn } from "@/lib/evals-server";
 import { describeCounted } from "@/lib/evals/v2/counted";
 import { checkIdFor } from "@/lib/evals/v2/validate";
 import type { AnswerShape, AskedCheck, Check, CountedCheck, CountedSpec, Matcher } from "@/lib/evals/v2/model";
@@ -11,7 +11,7 @@ import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import Drawer from "@/components/ui/drawer";
-import { EDITOR_DRAWER, EvalsEmpty, EvalsShell, Field, Picker, useOverview, useSetSearch, validateEvalsSearch } from "@/components/evals/shell";
+import { CreateDrawer, EDITOR_DRAWER, EvalsEmpty, EvalsShell, Field, Picker, useOverview, useSetSearch, validateEvalsSearch } from "@/components/evals/shell";
 
 /**
  * What gets judged. Two kinds of check, and the page keeps them visibly
@@ -41,7 +41,8 @@ function ChecksPage() {
   const search = Route.useSearch();
   const set = useSetSearch();
   const agent = search.agent ?? index[0]?.agent;
-  const [overview] = useOverview(agent);
+  const [overview, reloadOverview] = useOverview(agent);
+  const [creating, setCreating] = useState(false);
   const rubricId = search.rubric ?? overview?.rubrics[0]?.id;
   const [data, setData] = useState<Loaded | null>(null);
   // An existing check is open when the URL names it; local state holds only a new one.
@@ -96,7 +97,20 @@ function ChecksPage() {
 
   return (
     <div className="evals-page mx-auto max-w-[1000px] space-y-5 p-6 transition-[margin]">
-      <EvalsShell page="checks" index={index} search={search}>
+      <EvalsShell
+        page="checks"
+        index={index}
+        search={search}
+        actions={
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="text-ink-secondary hover:text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border h-8 rounded-lg px-3 text-sm"
+          >
+            New set of checks
+          </button>
+        }
+      >
         <Picker label="Checks">
           <Select id="evals-rubric" value={rubricId ?? ""} onChange={(e) => set({ rubric: e.target.value, check: undefined })}>
             {overview?.rubrics.map((r) => (
@@ -154,6 +168,23 @@ function ChecksPage() {
             ))}
           </CheckGroup>
         </>
+      )}
+
+      {agent && (
+        <CreateDrawer
+          open={creating}
+          title="New set of checks"
+          description="Starts with one check, “Answered what was asked”. The checks worth having come from reading threads on the Failures page."
+          onClose={() => setCreating(false)}
+          onCreate={async (v) => {
+            const r = await createChecksFn({ data: { agent, name: v.name } });
+            if (!r.ok) return r.error;
+            setCreating(false);
+            reloadOverview();
+            set({ rubric: r.id, check: undefined });
+            return null;
+          }}
+        />
       )}
 
       <Drawer open={!!editing} onOpenChange={(o) => !o && close()}>

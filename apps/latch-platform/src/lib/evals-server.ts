@@ -13,7 +13,8 @@ import type { Principal } from "./session";
 import type { Check, Rubric, ThreadRef } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
 import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
-import { kickJob, planRun, startPlannedRun } from "./evals-jobs";
+import { planRun, startJudgeJob, startPlannedRun } from "./evals-jobs";
+import { createChecks, createQuestionSet } from "./evals-actions";
 import type { RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { compareVersions, configFingerprint, summarize } from "./evals/v2/runner";
@@ -363,37 +364,7 @@ export const startJudgeFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
-    const o = await ownerFor(principal, data.agent);
-    if (!o) return { ok: false as const, error: "Only agents you can edit can be judged." };
-    const { evals } = await getLatch();
-    const threads = await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId });
-    if (!threads.length) return { ok: false as const, error: "That run has no threads." };
-    const now = Date.now();
-    const id = `judge_${now.toString(36)}`;
-    const ok = threads.filter((t) => !t.error).length;
-    await evals.saveJob({
-      owner: o.owner,
-      id,
-      runId: data.runId,
-      kind: "judge",
-      agentName: o.name,
-      datasetId: data.datasetId,
-      rubricId: data.rubricId,
-      principal: { orgId: principal.orgId, ...(principal.userId ? { userId: principal.userId } : {}) },
-      versions: [],
-      inputIds: [],
-      repeats: 1,
-      status: "running",
-      total: ok,
-      done: 0,
-      failed: 0,
-      estimate: { agentRuns: 0, judgeCalls: ok, cost: null, basis: "Judging only: the agent does not run." },
-      createdAt: now,
-      updatedAt: now,
-      leaseUntil: 0,
-    });
-    await kickJob(o.owner, id);
-    return { ok: true as const, id };
+    return startJudgeJob(principal, data);
   });
 
 /** Recent jobs for a question set, newest first — what the progress bar reads. */
@@ -438,4 +409,20 @@ export const cancelJobFn = createServerFn({ method: "POST" })
     // Threads already in flight finish and are kept; nothing new starts.
     await evals.updateJob(data.id, { status: "cancelled", updatedAt: Date.now() });
     return { ok: true as const };
+  });
+
+export const createQuestionSetFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; name: string; audience: string; note: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return createQuestionSet(principal, data);
+  });
+
+export const createChecksFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; name: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return createChecks(principal, data);
   });

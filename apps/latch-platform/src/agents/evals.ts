@@ -22,6 +22,45 @@ import { transcriptOf } from "./eval-author";
 
 const Agent = z.string().describe("Name of the agent being evaluated, e.g. edge-v2");
 
+const Question = z.object({
+  prompt: z.string().describe("The question, worded the way a real person would ask it"),
+  answer: z.string().optional().describe("What a good answer conveys — substance, not wording"),
+  mustNot: z.array(z.string()).optional().describe("Things the answer must not do, in plain words"),
+  docs: z.array(z.string()).optional().describe("File names of the documents that hold the answer"),
+  followUps: z.array(z.string()).optional().describe("Further messages in the same thread after the first answer"),
+  extra: z.string().optional().describe('Other facts as a JSON object, read by checks as {{facts.name}}'),
+});
+
+/** Checks are validated by the same rules as the Checks page; the shape here only guides the model. */
+const CheckInput = z.object({
+  id: z.string().optional().describe("Give it to change an existing check; omit to add one"),
+  kind: z.enum(["asked", "counted"]).describe("asked = a question for the judge; counted = a rule over the tool log"),
+  label: z.string().describe("What passing means, as the grid shows it"),
+  ask: z.string().optional().describe("asked: the question, phrased so yes (or the good options) means the agent did well"),
+  shape: z
+    .any()
+    .optional()
+    .describe('asked: {"type":"boolean","bad":"false"} | {"type":"choice","options":{"id":"meaning"},"bad":["id"]} | {"type":"score","levels":[{"name","means"}],"bad":0}'),
+  spec: z
+    .any()
+    .optional()
+    .describe('counted: {"op":"called"|"never_called"|"called_with"|"at_least"|"at_most"|"repeated"|"before"|"before_answering"|"stopped_for_approval","tool":"glob", ...}'),
+  judge: z.string().optional(),
+  because: z.string().optional().describe("Why the check exists"),
+});
+
+type QuestionInput = z.infer<typeof Question>;
+const editable = (q: QuestionInput, id: string) => ({
+  id,
+  prompt: q.prompt,
+  followUps: q.followUps ?? [],
+  answer: q.answer ?? "",
+  mustNot: q.mustNot ?? [],
+  docs: q.docs ?? [],
+  extra: q.extra ?? "{}",
+});
+
+
 async function evalsTools(principal: Principal): Promise<Record<string, unknown>> {
   // Lazy imports avoid a static cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
@@ -30,6 +69,9 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { runtime, agentStore, evals } = await getLatch();
   const { planRun, startPlannedRun } = await import("@/lib/evals-jobs");
   const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-actions");
+  const { createQuestionSet, editQuestions, createChecks, editChecks } = await import("@/lib/evals-actions");
+  const { startJudgeJob } = await import("@/lib/evals-jobs");
+  const { toEditable } = await import("@/lib/evals/v2/validate");
 
   /** Question ids that failed any check in a run — what "re-run the failures" means. */
   const failedQuestions = async (owner: string, runId: string) => {
@@ -383,6 +425,134 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
       },
     }),
 
+    list_questions: tool({
+      description: "Every question in a set: the prompt, follow-ups, what a good answer conveys, must-nots, the documents that hold the answer, and other facts.",
+      inputSchema: z.object({ agent: Agent, questionSetId: z.string() }),
+      execute: async ({ agent, questionSetId }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const set = await evals.getDataset(o.owner, questionSetId);
+        if (!set) return { error: `No question set "${questionSetId}".` };
+        return {
+          name: set.name,
+          whoIsAsking: set.audience ?? null,
+          howAnswersShouldRead: set.note ?? null,
+          questions: (await evals.listInputs(set.id)).map(toEditable),
+        };
+      },
+    }),
+
+    create_question_set: tool({
+      description: "Start a new question set for the agent, optionally with its first questions. A person approves it first.",
+      inputSchema: z.object({
+        summary: z.string().describe("For the person approving: what the set is for and how many questions."),
+        agent: Agent,
+        name: z.string(),
+        whoIsAsking: z.string().optional().describe("One line: the audience, e.g. 'a product lead at a client, not an engineer'"),
+        howAnswersShouldRead: z.string().optional().describe("E.g. 'free-standing advice; never cites the source'"),
+        questions: z.array(Question).optional(),
+      }),
+      execute: async ({ agent, name, whoIsAsking, howAnswersShouldRead, questions }) =>
+        createQuestionSet(principal, {
+          agent,
+          name,
+          ...(whoIsAsking ? { audience: whoIsAsking } : {}),
+          ...(howAnswersShouldRead ? { note: howAnswersShouldRead } : {}),
+          questions: (questions ?? []).map((q, i) => editable(q, String(i + 1))),
+        }),
+    }),
+
+    edit_questions: tool({
+      description:
+        "Add, change or delete questions in a set, or change who is asking / how answers should read. A question keeps its id when changed; give an id to change one, omit it to add. A person approves it first.",
+      inputSchema: z.object({
+        summary: z.string().describe("For the person approving: what changes and why."),
+        agent: Agent,
+        questionSetId: z.string(),
+        upserts: z.array(Question.extend({ id: z.string().optional() })).optional(),
+        deletes: z.array(z.string()).optional().describe("Question ids to delete"),
+        whoIsAsking: z.string().optional(),
+        howAnswersShouldRead: z.string().optional(),
+      }),
+      execute: async ({ agent, questionSetId, upserts, deletes, whoIsAsking, howAnswersShouldRead }) =>
+        editQuestions(principal, {
+          agent,
+          questionSetId,
+          upserts: (upserts ?? []).map((q) => ({ ...editable(q, q.id ?? ""), ...(q.id ? { id: q.id } : { id: undefined }) })),
+          ...(deletes ? { deletes } : {}),
+          ...(whoIsAsking !== undefined ? { audience: whoIsAsking } : {}),
+          ...(howAnswersShouldRead !== undefined ? { note: howAnswersShouldRead } : {}),
+        }),
+    }),
+
+    list_checks: tool({
+      description: "Every check in a set of checks, in full (question and answer shape for judge checks, rule for tool-log checks), and its version.",
+      inputSchema: z.object({ agent: Agent, checksId: z.string() }),
+      execute: async ({ agent, checksId }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const r = await evals.getRubric(o.owner, checksId);
+        return r ? { version: r.version, defaultJudge: r.defaultJudge, checks: r.checks } : { error: `No checks "${checksId}".` };
+      },
+    }),
+
+    create_checks: tool({
+      description: "Start a new set of checks for the agent (with one starter check if you give none). A person approves it first.",
+      inputSchema: z.object({ summary: z.string(), agent: Agent, name: z.string(), checks: z.array(CheckInput).optional() }),
+      execute: async ({ agent, name, checks }) =>
+        createChecks(principal, { agent, name, ...(checks?.length ? { checks: checks.map((c, i) => ({ ...c, id: c.id ?? `check-${i + 1}` }) as never) } : {}) }),
+    }),
+
+    edit_checks: tool({
+      description:
+        "Add, change or delete checks. Saves a new version; earlier results stay with the version that produced them, and nothing is scored under the new one until judge_run. Give an id to change a check, omit it to add. A person approves it first.",
+      inputSchema: z.object({
+        summary: z.string().describe("For the person approving: what changes and why."),
+        agent: Agent,
+        checksId: z.string(),
+        upserts: z.array(CheckInput).optional(),
+        deletes: z.array(z.string()).optional().describe("Check ids to delete"),
+      }),
+      execute: async ({ agent, checksId, upserts, deletes }) =>
+        editChecks(principal, { agent, checksId, ...(upserts ? { upserts } : {}), ...(deletes ? { deletes } : {}) }),
+    }),
+
+    judge_run: tool({
+      description:
+        "Re-judge an existing run under the latest version of a set of checks. Only the judge runs, never the agent, so it costs a few cents. Follow it with job_status.",
+      inputSchema: z.object({ agent: Agent, questionSetId: z.string(), checksId: z.string(), runId: z.string() }),
+      execute: async ({ agent, questionSetId, checksId, runId }) => {
+        const r = await startJudgeJob(principal, { agent, datasetId: questionSetId, rubricId: checksId, runId });
+        return r.ok ? { jobId: r.id, next: "Call job_status until it is done, then run_results." } : r;
+      },
+    }),
+
+    stop_run: tool({
+      description: "Stop a run or judging job. Threads already running finish and are kept; nothing new starts.",
+      inputSchema: z.object({ agent: Agent, jobId: z.string() }),
+      execute: async ({ agent, jobId }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const j = await evals.getJob(o.owner, jobId);
+        if (!j || (j.status !== "running" && j.status !== "judging")) return { error: "That job is not running." };
+        await evals.updateJob(jobId, { status: "cancelled", updatedAt: Date.now() });
+        return { stopped: true };
+      },
+    }),
+
+    rename_failure_mode: tool({
+      description: "Give a failure mode a clearer name or description.",
+      inputSchema: z.object({ agent: Agent, mode: z.string(), name: z.string(), description: z.string() }),
+      execute: async ({ agent, mode, name, description }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        const m = await modeByName(o.owner, o.name, mode);
+        if (!m) return { error: `No failure mode "${mode}".` };
+        await evals.updateMode(o.owner, m.id, { name, description });
+        return { saved: true };
+      },
+    }),
+
     suggest_note: tool({
       description:
         "Propose a note on a thread you have READ: the first thing that went wrong, as the user would see it — or that it looks fine. A person accepts or rejects it on the Failures page; it counts for nothing until then. Do not suggest on threads a person already noted, or ones whose suggestion was rejected.",
@@ -442,6 +612,8 @@ A fix is judged by whether the failed questions pass now without others breaking
 
 Money and changes: estimate_run is free; always call it and put the cost in start_run's summary. start_run, propose_fix and add_check wait for the person's approval. propose_fix only ever writes @draft.
 
+The tests themselves: you can read, create and edit question sets (list_questions, create_question_set, edit_questions) and checks (list_checks, create_checks, edit_checks), each behind the person's approval. Never loosen a check or a question so that a failing agent passes — the tests measure the agent, not the other way round. Change a test when it is wrong: it asks the wrong thing, a good answer it describes is out of date, or it cannot be judged from the thread; say which. After editing checks, judge_run re-scores a run under the new version (judge only, a few cents).
+
 What you never do: accept your own suggestions, rule on whether the judge was right, or publish the agent. Those belong to the person.
 
 Be brief. Lead with what you found ("4 of 6 failures end with a question instead of an answer"), then the evidence. Name threads by question number and version ("#3 on @draft"), not ids, unless asked.`,
@@ -453,7 +625,15 @@ Be brief. Lead with what you found ("4 of 6 failures end with a question instead
       },
     ],
     // What spends money or changes something a person relies on waits for them.
-    toolApproval: { start_run: "user-approval", propose_fix: "user-approval", add_check: "user-approval" },
+    toolApproval: {
+      start_run: "user-approval",
+      propose_fix: "user-approval",
+      add_check: "user-approval",
+      create_question_set: "user-approval",
+      edit_questions: "user-approval",
+      create_checks: "user-approval",
+      edit_checks: "user-approval",
+    },
     smoothStream: true,
   },
   {
