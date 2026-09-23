@@ -115,6 +115,23 @@ function FailuresPage() {
         <>
           <Progress read={read} failures={failures.length} fine={fine.length} target={data.readTarget} available={data.threadsAvailable} />
 
+          {data.suggested.length > 0 && (
+            <div className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg flex flex-wrap items-center gap-3 rounded-lg px-4 py-3 text-sm">
+              <Sparkles className="text-ink-secondary size-4" />
+              <span className="text-ink-primary">
+                The evals agent read {data.suggested.length} thread{data.suggested.length === 1 ? "" : "s"} and suggested notes.
+              </span>
+              <span className="text-ink-tertiary">They count once you accept them.</span>
+              <button
+                type="button"
+                onClick={() => setReading(data.suggested)}
+                className="text-ink-primary ml-auto font-medium underline"
+              >
+                Review suggestions
+              </button>
+            </div>
+          )}
+
           {data.modes.length > 0 && (
             <section className="space-y-3">
               <h2 className="text-ink-primary text-sm font-semibold">Failure modes</h2>

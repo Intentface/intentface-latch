@@ -4,7 +4,7 @@ import { getEvalThreadFn } from "@/lib/evals-server";
 import { loadHistoryFn } from "@/lib/server";
 import type { AppUIMessage } from "@/lib/ai/types";
 import { ChatMessageItem } from "@/components/chat/message-item";
-import { getNoteFn, saveNoteFn } from "@/lib/failures-server";
+import { getNoteFn, resolveSuggestionFn, saveNoteFn } from "@/lib/failures-server";
 
 /**
  * One thread as its user saw it: the same message rendering as Chats —
@@ -95,13 +95,16 @@ export function NoteBox({
   const [text, setText] = useState("");
   const [ok, setOk] = useState(false);
   const [state, setState] = useState<"loading" | "idle" | "dirty" | "saving" | "saved" | "error">("loading");
+  const [suggestion, setSuggestion] = useState<{ text: string; ok: boolean; why: string } | null>(null);
   const saved = useRef({ text: "", ok: false });
   const onSavedRef = useRef(onSaved);
   onSavedRef.current = onSaved;
 
   useEffect(() => {
     setState("loading");
-    void getNoteFn({ data: { agent, threadId } }).then((n) => {
+    void getNoteFn({ data: { agent, threadId } }).then((r) => {
+      const n = r?.note;
+      setSuggestion(r?.suggestion ?? null);
       saved.current = { text: n?.text ?? "", ok: n?.ok ?? false };
       setText(saved.current.text);
       setOk(saved.current.ok);
@@ -153,6 +156,41 @@ export function NoteBox({
           Looks fine
         </label>
       </div>
+      {suggestion && (
+        <div className="bg-primary-bg-hover space-y-1.5 rounded-lg px-3 py-2 text-sm">
+          <div className="text-ink-secondary text-xs font-medium">The evals agent suggests</div>
+          <p className="text-ink-primary">{suggestion.ok ? "Looks fine." : suggestion.text}</p>
+          {suggestion.why && <p className="text-ink-tertiary text-xs">{suggestion.why}</p>}
+          <div className="flex gap-3 pt-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() =>
+                void resolveSuggestionFn({ data: { agent, threadId, accept: true } }).then((r) => {
+                  if (!r.ok) return setState("error");
+                  const next = { text: suggestion.text, ok: suggestion.ok };
+                  saved.current = next;
+                  setText(next.text);
+                  setOk(next.ok);
+                  setSuggestion(null);
+                  setState("saved");
+                  onSavedRef.current?.(next);
+                })
+              }
+              className="text-ink-primary font-medium underline"
+            >
+              Use it
+            </button>
+            <button
+              type="button"
+              onClick={() => void resolveSuggestionFn({ data: { agent, threadId, accept: false } }).then(() => setSuggestion(null))}
+              className="text-ink-secondary hover:text-ink-primary"
+            >
+              Dismiss
+            </button>
+            <span className="text-ink-tertiary">Or write your own below; yours replaces it.</span>
+          </div>
+        </div>
+      )}
       <textarea
         id={`note-${threadId}`}
         ref={textareaRef}

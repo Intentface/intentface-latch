@@ -1,7 +1,7 @@
 import type { Client } from "@libsql/client";
 import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict } from "./model";
 import type { EvalJob } from "./jobs";
-import type { FailureMode, Note } from "./failures";
+import type { FailureMode, Note, Suggestion } from "./failures";
 
 /**
  * Storage for evals v2.
@@ -63,6 +63,10 @@ export interface EvalsStore {
   listModes: (owner: Owner, agentName: string) => Promise<FailureMode[]>;
   updateMode: (owner: Owner, id: string, patch: { name?: string; description?: string }) => Promise<void>;
 
+  saveSuggestion: (s: Suggestion) => Promise<void>;
+  listSuggestions: (owner: Owner, agentName: string, status?: Suggestion["status"]) => Promise<Suggestion[]>;
+  setSuggestionStatus: (owner: Owner, threadId: string, status: Suggestion["status"]) => Promise<void>;
+
   saveRuling: (r: Ruling) => Promise<void>;
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
   deleteRuling: (threadId: string, checkId: string) => Promise<void>;
@@ -115,6 +119,10 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
     `CREATE TABLE IF NOT EXISTS latch_eval_modes (
       owner TEXT NOT NULL, agent_name TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL,
       description TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (owner, id))`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_suggestions (
+      owner TEXT NOT NULL, thread_id TEXT NOT NULL PRIMARY KEY, agent_name TEXT NOT NULL,
+      text TEXT NOT NULL, ok INTEGER NOT NULL, why TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS latch_eval_suggestions_agent ON latch_eval_suggestions (owner, agent_name, status)`,
     `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
       thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
       by TEXT, created_at INTEGER NOT NULL,
@@ -547,6 +555,36 @@ export function createEvalsStore(client: Client): EvalsStore {
         sql: `UPDATE latch_eval_modes SET name = COALESCE(?, name), description = COALESCE(?, description) WHERE owner = ? AND id = ?`,
         args: [patch.name ?? null, patch.description ?? null, owner, id],
       });
+    },
+
+    async saveSuggestion(x) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_suggestions (owner, thread_id, agent_name, text, ok, why, status, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(thread_id) DO UPDATE SET text = excluded.text, ok = excluded.ok, why = excluded.why,
+                status = excluded.status, created_at = excluded.created_at`,
+        args: [x.owner, x.threadId, x.agentName, x.text, x.ok ? 1 : 0, x.why, x.status, x.createdAt],
+      });
+    },
+    async listSuggestions(owner, agentName, status) {
+      return (
+        await rows(
+          `SELECT * FROM latch_eval_suggestions WHERE owner = ? AND agent_name = ?${status ? " AND status = ?" : ""} ORDER BY created_at DESC`,
+          status ? [owner, agentName, status] : [owner, agentName],
+        )
+      ).map((r) => ({
+        owner: String(r.owner),
+        threadId: String(r.thread_id),
+        agentName: String(r.agent_name),
+        text: String(r.text),
+        ok: Number(r.ok) === 1,
+        why: String(r.why),
+        status: String(r.status) as Suggestion["status"],
+        createdAt: Number(r.created_at),
+      }));
+    },
+    async setSuggestionStatus(owner, threadId, status) {
+      await client.execute({ sql: `UPDATE latch_eval_suggestions SET status = ? WHERE owner = ? AND thread_id = ?`, args: [status, owner, threadId] });
     },
 
     async deleteRuling(threadId, checkId) {

@@ -55,11 +55,13 @@ export const getFailuresFn = createServerFn({ method: "GET" })
     const o = await ownerFor(principal, agent);
     if (!o) return null;
     const { evals } = await getLatch();
-    const [notes, modes, threads] = await Promise.all([
+    const [notes, modes, threads, suggestions] = await Promise.all([
       evals.listNotes(o.owner, o.name),
       evals.listModes(o.owner, o.name),
       evals.listThreads(o.owner, { agentName: o.name }),
+      evals.listSuggestions(o.owner, o.name, "open"),
     ]);
+    const noted = new Set(notes.map((n) => n.threadId));
     const byThread = new Map(threads.map((t) => [t.threadId, t]));
     const prompts = new Map<string, string>();
     for (const d of new Set(threads.map((t) => t.datasetId).filter((x): x is string => !!x)))
@@ -69,6 +71,13 @@ export const getFailuresFn = createServerFn({ method: "GET" })
       minToCluster: MIN_NOTES_TO_CLUSTER,
       threadsAvailable: threads.filter((t) => !t.error).length,
       modes: modes.map((m) => ({ id: m.id, name: m.name, description: m.description })),
+      /** Threads the evals agent has read and suggested a note on, waiting for a person. */
+      suggested: suggestions
+        .filter((x) => !noted.has(x.threadId))
+        .map((x) => {
+          const t = byThread.get(x.threadId);
+          return { threadId: x.threadId, version: t?.version ?? "", inputId: t?.inputId ?? "", attempt: t?.attempt ?? 0 };
+        }),
       notes: notes.map((n) => {
         const t = byThread.get(n.threadId);
         return {
@@ -113,7 +122,42 @@ export const getNoteFn = createServerFn({ method: "GET" })
     if (!o) return null;
     const { evals } = await getLatch();
     const n = (await evals.listNotes(o.owner, o.name)).find((x) => x.threadId === data.threadId);
-    return n ? { text: n.text, ok: n.ok } : null;
+    const sug = (await evals.listSuggestions(o.owner, o.name, "open")).find((x) => x.threadId === data.threadId);
+    return {
+      note: n ? { text: n.text, ok: n.ok } : null,
+      // Only while nobody has written a note: a person's note always stands.
+      suggestion: !n && sug ? { text: sug.text, ok: sug.ok, why: sug.why } : null,
+    };
+  });
+
+/** Accept or dismiss the evals agent's suggestion. Accepting writes it as the person's own note. */
+export const resolveSuggestionFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; threadId: string; accept: boolean }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const, error: "Only agents you can edit." };
+    const { evals } = await getLatch();
+    const sug = (await evals.listSuggestions(o.owner, o.name, "open")).find((x) => x.threadId === data.threadId);
+    if (!sug) return { ok: false as const, error: "That suggestion is gone." };
+    if (data.accept) {
+      const t = await evals.getThread(o.owner, data.threadId);
+      const now = Date.now();
+      await evals.saveNote({
+        owner: o.owner,
+        threadId: data.threadId,
+        agentName: o.name,
+        ...(t?.datasetId ? { datasetId: t.datasetId } : {}),
+        text: sug.text,
+        ok: sug.ok,
+        ...(principal.userId ? { by: principal.userId } : {}),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    await evals.setSuggestionStatus(o.owner, data.threadId, data.accept ? "accepted" : "rejected");
+    return { ok: true as const };
   });
 
 /** Save what went wrong in a thread — or that nothing did. Empty and not ok clears it. */

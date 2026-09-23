@@ -28,6 +28,26 @@ export interface Note {
   updatedAt: number;
 }
 
+/**
+ * A note the evals agent proposes after reading a thread. It never counts —
+ * not in patterns, not as a ruling — until a person accepts it: agents miss
+ * the failures that take product judgment, and a reviewer who only clicks
+ * "accept" stops reading. Rejected suggestions are kept, so the agent does
+ * not propose the same thing again.
+ */
+export interface Suggestion {
+  owner: string;
+  threadId: string;
+  agentName: string;
+  /** What went wrong, or empty when the agent thinks it looks fine. */
+  text: string;
+  ok: boolean;
+  /** Why the agent thinks so, pointing at what in the thread shows it. */
+  why: string;
+  status: "open" | "accepted" | "rejected";
+  createdAt: number;
+}
+
 export interface FailureMode {
   owner: string;
   agentName: string;

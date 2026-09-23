@@ -2,6 +2,7 @@ import { assistant } from "./assistant";
 import { weekly } from "./weekly";
 import { agentBuilder } from "./agent-builder";
 import { evalAuthor } from "./eval-author";
+import { evalsAgent } from "./evals";
 import { anchorInterview } from "./anchor-interview";
 import { anchorInterviewMem } from "./anchor-interview-mem";
 import { anchorOrient } from "./anchor-orient";
@@ -25,6 +26,7 @@ export const agents = {
   weekly,
   "agent-builder": agentBuilder,
   "eval-author": evalAuthor,
+  evals: evalsAgent,
   "anchor-interview": anchorInterview,
   "anchor-interview-mem": anchorInterviewMem,
   "anchor-orient": anchorOrient,
