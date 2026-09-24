@@ -541,9 +541,10 @@ function SuggestionList({
         <p className="max-w-3xl text-sm text-ink-secondary">
           {agent} answered these test questions in your eval runs. The evals agent read the
           conversations and wrote down what it thinks went wrong in each. Check that it read them
-          right: <b className="font-medium text-ink-primary">accept</b> if you agree,{" "}
-          <b className="font-medium text-ink-primary">reject</b> if it got it wrong. Only what you
-          accept is used to find patterns — so a misreading never decides what gets fixed.
+          right. <b className="font-medium text-ink-primary">Agree</b> saves its sentence as your note
+          on that conversation; <b className="font-medium text-ink-primary">Disagree</b> throws it
+          away. Only notes are used to find patterns, so a misreading never decides what gets fixed.
+          Nothing else changes — not the agent, its checks or its scores.
         </p>
       </div>
 
@@ -587,7 +588,7 @@ function SuggestionList({
                 onClick={() => void resolve(chosen.map((s) => s.threadId), true)}
                 className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
               >
-                {busy ? "Saving…" : "Accept"}
+                {busy ? "Saving…" : "Agree"}
               </button>
               <button
                 type="button"
@@ -595,7 +596,7 @@ function SuggestionList({
                 onClick={() => void resolve(chosen.map((s) => s.threadId), false)}
                 className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
               >
-                Reject
+                Disagree
               </button>
             </div>
           )}
@@ -681,7 +682,7 @@ function SuggestionList({
                                 onClick={() => void resolve([s.threadId], true)}
                                 className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
                               >
-                                Accept
+                                Agree
                               </button>
                               <button
                                 type="button"
@@ -689,7 +690,7 @@ function SuggestionList({
                                 onClick={() => void resolve([s.threadId], false)}
                                 className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
                               >
-                                Reject
+                                Disagree
                               </button>
                               <button
                                 type="button"
