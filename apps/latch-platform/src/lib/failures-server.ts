@@ -77,6 +77,8 @@ export const getFailuresFn = createServerFn({ method: "GET" })
             inputId: t?.inputId ?? "",
             attempt: t?.attempt ?? 0,
             prompt: (t && prompts.get(`${t.datasetId}|${t.inputId}`)) ?? "",
+            /** When the thread ran — which run a suggestion is about. */
+            ranAt: t?.createdAt ?? null,
             text: x.text,
             ok: x.ok,
             why: x.why,

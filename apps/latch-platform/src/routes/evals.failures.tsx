@@ -136,37 +136,6 @@ function FailuresPage() {
           page="failures"
           index={index}
           search={search}
-          actions={
-            data && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => void group()}
-                  disabled={grouping || failures.length < data.minToCluster}
-                  title={
-                    failures.length < data.minToCluster
-                      ? `Write at least ${data.minToCluster} notes first`
-                      : undefined
-                  }
-                  className="flex h-8 items-center gap-1.5 rounded-lg px-3 text-sm text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border hover:bg-primary-bg-hover disabled:opacity-50"
-                >
-                  {grouping ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="size-4" />
-                  )}{" "}
-                  Find patterns
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void startReading()}
-                  className="flex h-8 items-center gap-1.5 rounded-lg bg-ink-primary px-3 text-sm font-medium text-primary-bg"
-                >
-                  <BookOpen className="size-4" /> Read threads
-                </button>
-              </>
-            )
-          }
         />
 
         {message && (
@@ -184,12 +153,20 @@ function FailuresPage() {
 
         {data && (
           <>
-            <Progress
+            <Steps
               read={read}
               failures={failures.length}
               fine={fine.length}
+              toReview={data.suggested.length}
               target={data.readTarget}
               available={data.threadsAvailable}
+              minToCluster={data.minToCluster}
+              modes={data.modes.length}
+              decided={data.modes.filter((m) => m.decision).length}
+              ungrouped={ungrouped.length}
+              grouping={grouping}
+              onRead={() => void startReading()}
+              onGroup={() => void group()}
             />
 
             {data.suggested.length > 0 && (
@@ -210,7 +187,7 @@ function FailuresPage() {
             )}
 
             {data.modes.length > 0 && (
-              <section className="space-y-3">
+              <section id="failure-modes" className="scroll-mt-4 space-y-3">
                 <h2 className="text-sm font-semibold text-ink-primary">
                   Failure modes
                 </h2>
@@ -295,13 +272,204 @@ function FailuresPage() {
   )
 }
 
+/**
+ * The page is a sequence, so it says so: read threads and say what went
+ * wrong, group what was said into patterns, then decide what each pattern
+ * deserves. Each step shows where it stands and holds its own button; the
+ * next one to do is marked.
+ */
+function Steps({
+  read,
+  failures,
+  fine,
+  toReview,
+  target,
+  available,
+  minToCluster,
+  modes,
+  decided,
+  ungrouped,
+  grouping,
+  onRead,
+  onGroup,
+}: {
+  read: number
+  failures: number
+  fine: number
+  toReview: number
+  target: number
+  available: number
+  minToCluster: number
+  modes: number
+  decided: number
+  ungrouped: number
+  grouping: boolean
+  onRead: () => void
+  onGroup: () => void
+}) {
+  const canGroup = failures >= minToCluster
+  const next =
+    toReview > 0 || !canGroup ? 1 : !modes || ungrouped > 0 ? 2 : decided < modes ? 3 : 1
+  const unread = Math.max(0, available - read)
+  const steps = [
+    {
+      title: "Read threads",
+      status: (
+        <>
+          <b className="font-semibold text-ink-primary tabular-nums">{read}</b>{" "}
+          read · {failures} went wrong · {fine} fine
+        </>
+      ),
+      detail:
+        toReview > 0
+          ? `${toReview} read by the evals agent, waiting for you below.`
+          : read < target
+            ? `New kinds of failure keep turning up until about ${target} threads. ${unread} unread.`
+            : `Past the point where new kinds of failure usually stop appearing. ${unread} unread.`,
+      action: (
+        <div className="flex flex-wrap gap-2">
+          {toReview > 0 && (
+            <StepButton
+              primary={next === 1}
+              onClick={() => document.getElementById("to-review")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            >
+              Review {toReview}
+            </StepButton>
+          )}
+          <StepButton primary={next === 1 && !toReview} onClick={onRead}>
+            <BookOpen className="size-4" /> Read threads
+          </StepButton>
+        </div>
+      ),
+    },
+    {
+      title: "Find patterns",
+      status: modes ? (
+        <>
+          <b className="font-semibold text-ink-primary tabular-nums">{modes}</b>{" "}
+          failure mode{modes === 1 ? "" : "s"}
+        </>
+      ) : (
+        "None yet"
+      ),
+      detail: !canGroup
+        ? `Needs ${minToCluster} notes on what went wrong; you have ${failures}.`
+        : ungrouped
+          ? `${ungrouped} note${ungrouped === 1 ? " is" : "s are"} not in a pattern yet.`
+          : "Every note is in a pattern.",
+      action: (
+        <StepButton primary={next === 2} onClick={onGroup} disabled={grouping || !canGroup}>
+          {grouping ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}{" "}
+          {modes ? "Group again" : "Find patterns"}
+        </StepButton>
+      ),
+    },
+    {
+      title: "Decide what to do",
+      status: modes ? (
+        <>
+          <b className="font-semibold text-ink-primary tabular-nums">{decided}</b> of{" "}
+          {modes} decided
+        </>
+      ) : (
+        "After patterns"
+      ),
+      detail: "Fix the agent, measure it with a check, or leave it.",
+      action: modes ? (
+        <StepButton
+          primary={next === 3}
+          onClick={() =>
+            document.getElementById("failure-modes")?.scrollIntoView({ behavior: "smooth", block: "start" })
+          }
+        >
+          Go to patterns
+        </StepButton>
+      ) : null,
+    },
+  ]
+  return (
+    <ol className="grid gap-px overflow-hidden rounded-lg border border-primary-border bg-primary-border md:grid-cols-3">
+      {steps.map((st, i) => (
+        <li
+          key={st.title}
+          aria-current={next === i + 1 ? "step" : undefined}
+          className="flex flex-col gap-2 bg-primary-bg px-4 py-3"
+        >
+          <div className="flex items-baseline gap-2">
+            <span
+              className={cn(
+                "grid size-5 shrink-0 place-items-center rounded-full text-xs font-medium tabular-nums",
+                next === i + 1 ? "bg-ink-primary text-primary-bg" : "bg-primary-bg-hover text-ink-secondary"
+              )}
+            >
+              {i + 1}
+            </span>
+            <span className="text-sm font-medium text-ink-primary">{st.title}</span>
+            {next === i + 1 && <span className="text-xs text-ink-tertiary">Next</span>}
+          </div>
+          <div className="text-sm text-ink-secondary">{st.status}</div>
+          <p className="flex-1 text-xs text-ink-tertiary">{st.detail}</p>
+          {st.action && <div>{st.action}</div>}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+function StepButton({
+  primary,
+  disabled,
+  onClick,
+  children,
+}: {
+  primary: boolean
+  disabled?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "flex h-8 items-center gap-1.5 rounded-lg px-3 text-sm disabled:opacity-50",
+        primary
+          ? "bg-ink-primary font-medium text-primary-bg"
+          : "text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border hover:bg-primary-bg-hover"
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
 type Suggested = Failures["suggested"][number]
+type Filter = "wrong" | "fine" | "all"
+
+/** "Went wrong" or "Looks fine" — a chip, so the verdict reads before the words. */
+function Verdict({ ok }: { ok: boolean }) {
+  return (
+    <span className="inline-flex w-[6.25rem] shrink-0 items-center gap-1.5 rounded-full bg-primary-bg-hover px-2 py-0.5 text-xs font-medium text-ink-secondary">
+      <span
+        aria-hidden
+        className="size-2 rounded-full"
+        style={{ background: ok ? "var(--eval-good)" : "var(--eval-bad)" }}
+      />
+      {ok ? "Looks fine" : "Went wrong"}
+    </span>
+  )
+}
+
+const day = (at: number | null) =>
+  at ? new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : null
 
 /**
- * What the evals agent proposes, all in one place. Each counts for nothing
- * until accepted: "Use it" makes it your note, "Dismiss" rejects it (the agent
- * will not propose it again). Opening the thread is the way to check it — the
- * agent misses failures that take product judgment.
+ * What the evals agent read and would note, waiting for a person. One line
+ * each — the verdict, the question, the gist — and the rest on click. Accepting
+ * makes it your note on that thread (the only thing it changes); rejecting
+ * drops it, and the agent will not suggest it again. Several at once by
+ * ticking them, since the agent often says "accept these five".
  */
 function SuggestionList({
   agent,
@@ -316,123 +484,183 @@ function SuggestionList({
   onReviewAll: () => void
   onResolved: () => void
 }) {
-  const [busy, setBusy] = useState<string | null>(null)
-  const resolve = async (threadId: string, accept: boolean) => {
-    setBusy(threadId)
-    await resolveSuggestionFn({ data: { agent, threadId, accept } })
-    setBusy(null)
+  const [filter, setFilter] = useState<Filter>("all")
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const wrong = items.filter((s) => !s.ok)
+  const fine = items.filter((s) => s.ok)
+  const shown = (filter === "wrong" ? wrong : filter === "fine" ? fine : items)
+    .slice()
+    // What went wrong first, then by question number.
+    .sort((a, b) => Number(a.ok) - Number(b.ok) || Number(a.inputId) - Number(b.inputId) || a.inputId.localeCompare(b.inputId))
+  const chosen = shown.filter((s) => picked.has(s.threadId))
+  const allOn = shown.length > 0 && chosen.length === shown.length
+
+  const resolve = async (threadIds: string[], accept: boolean) => {
+    setBusy(true)
+    // One at a time: each is its own note, and a failure should not take the rest with it.
+    for (const threadId of threadIds) await resolveSuggestionFn({ data: { agent, threadId, accept } })
+    setBusy(false)
+    setPicked(new Set())
     onResolved()
   }
+  const toggle = (id: string) => {
+    const next = new Set(picked)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setPicked(next)
+  }
+
   return (
-    <section className="space-y-3">
-      <div className="flex flex-wrap items-baseline gap-3">
-        <h2 className="text-sm font-semibold text-ink-primary">
-          Suggested by the evals agent
-        </h2>
-        <span className="text-xs text-ink-tertiary">
-          {items.length} waiting · they count once you accept them
-        </span>
-        <button
-          type="button"
-          onClick={onReviewAll}
-          className="ml-auto text-sm font-medium text-ink-primary underline"
-        >
-          Review one by one
-        </button>
-      </div>
-      <ul className="divide-y divide-primary-border rounded-lg border border-primary-border bg-primary-bg">
-        {items.map((s) => (
-          <li
-            key={s.threadId}
-            className="flex flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3 text-sm"
+    <section id="to-review" className="scroll-mt-4 space-y-3">
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <h2 className="text-sm font-semibold text-ink-primary">To review</h2>
+          <span className="text-xs text-ink-tertiary">
+            {items.length} thread{items.length === 1 ? "" : "s"} the evals agent read
+          </span>
+          <button
+            type="button"
+            onClick={onReviewAll}
+            className="ml-auto text-sm text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
           >
-            <div className="min-w-0 flex-1 space-y-1">
-              <div className="text-xs text-ink-tertiary">
-                #{s.inputId} on {s.version}
-                {s.prompt && <span> · {s.prompt}</span>}
-              </div>
-              <div className="text-ink-primary">
-                {s.ok ? "Looks fine." : s.text}
-              </div>
-              {s.why && (
-                <div
-                  className="line-clamp-2 text-xs text-ink-tertiary"
-                  title={s.why}
-                >
-                  {s.why}
-                </div>
-              )}
-            </div>
-            <div className="flex shrink-0 items-center gap-3 pt-0.5 text-xs">
+            Review one by one
+          </button>
+        </div>
+        <p className="max-w-3xl text-xs text-ink-tertiary">
+          Accepting makes it your note on that thread, as if you had written it: it counts toward the
+          patterns in step 2. It changes nothing else — not the agent, the checks or the scores.
+          Rejecting drops it, and the agent will not suggest it again.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-primary-border bg-primary-bg">
+        <div className="flex flex-wrap items-center gap-3 border-b border-primary-border px-3 py-2">
+          <input
+            type="checkbox"
+            aria-label="Select all shown"
+            checked={allOn}
+            onChange={() => setPicked(allOn ? new Set() : new Set(shown.map((s) => s.threadId)))}
+          />
+          <div role="radiogroup" aria-label="Show" className="inline-flex rounded-lg p-0.5 text-xs smooth-shadow-ring-xs smooth-ring-primary-border">
+            {(
+              [
+                ["all", `All ${items.length}`],
+                ["wrong", `Went wrong ${wrong.length}`],
+                ["fine", `Looks fine ${fine.length}`],
+              ] as const
+            ).map(([value, label]) => (
               <button
+                key={value}
                 type="button"
-                onClick={() => onOpen(s.threadId)}
-                className="text-ink-secondary hover:text-ink-primary"
+                role="radio"
+                aria-checked={filter === value}
+                onClick={() => (setFilter(value), setPicked(new Set()))}
+                className={cn(
+                  "rounded-md px-2.5 py-1 tabular-nums",
+                  filter === value ? "bg-primary-bg-active font-medium text-ink-primary" : "text-ink-secondary hover:text-ink-primary"
+                )}
               >
-                Open thread
+                {label}
               </button>
+            ))}
+          </div>
+          {chosen.length > 0 && (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-ink-secondary tabular-nums">{chosen.length} selected</span>
               <button
                 type="button"
-                disabled={busy === s.threadId}
-                onClick={() => void resolve(s.threadId, false)}
-                className="text-ink-secondary hover:text-ink-primary disabled:opacity-50"
-              >
-                Dismiss
-              </button>
-              <button
-                type="button"
-                disabled={busy === s.threadId}
-                onClick={() => void resolve(s.threadId, true)}
+                disabled={busy}
+                onClick={() => void resolve(chosen.map((s) => s.threadId), true)}
                 className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
               >
-                Use it
+                {busy ? "Saving…" : "Accept"}
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void resolve(chosen.map((s) => s.threadId), false)}
+                className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
+              >
+                Reject
               </button>
             </div>
-          </li>
-        ))}
-      </ul>
-    </section>
-  )
-}
+          )}
+        </div>
 
-function Progress({
-  read,
-  failures,
-  fine,
-  target,
-  available,
-}: {
-  read: number
-  failures: number
-  fine: number
-  target: number
-  available: number
-}) {
-  const pct = Math.min(100, Math.round((100 * read) / target))
-  return (
-    <div className="space-y-2 rounded-lg border border-primary-border bg-primary-bg px-4 py-3 text-sm">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-ink-primary">
-          <span className="text-[15px] font-semibold tabular-nums">{read}</span>{" "}
-          of about {target} threads read
-        </span>
-        <span className="text-ink-tertiary tabular-nums">
-          {failures} went wrong · {fine} looked fine ·{" "}
-          {Math.max(0, available - read)} unread
-        </span>
+        <ul className="divide-y divide-primary-border">
+          {shown.map((s) => {
+            const isOpen = expanded === s.threadId
+            return (
+              <li key={s.threadId} className={cn(isOpen && "bg-primary-bg-hover/40")}>
+                <div className="flex items-center gap-3 px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select #${s.inputId} on ${s.version}`}
+                    checked={picked.has(s.threadId)}
+                    onChange={() => toggle(s.threadId)}
+                  />
+                  <button
+                    type="button"
+                    aria-expanded={isOpen}
+                    onClick={() => setExpanded(isOpen ? null : s.threadId)}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  >
+                    <span className="w-9 shrink-0 text-xs font-medium text-ink-secondary tabular-nums">#{s.inputId}</span>
+                    <Verdict ok={s.ok} />
+                    <span className={cn("min-w-0 flex-1 text-ink-primary", !isOpen && "truncate")}>
+                      {s.ok ? s.prompt || "Looks fine." : s.text}
+                    </span>
+                    <span className="hidden shrink-0 text-xs text-ink-tertiary sm:inline">
+                      {s.version}
+                      {day(s.ranAt) && ` · ${day(s.ranAt)}`}
+                    </span>
+                    {isOpen ? <ChevronUp className="size-4 shrink-0 text-ink-tertiary" /> : <ChevronDown className="size-4 shrink-0 text-ink-tertiary" />}
+                  </button>
+                </div>
+                {isOpen && (
+                  <div className="space-y-3 pb-3 pr-4 pl-[4.25rem] text-sm">
+                    <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-[5rem_minmax(0,1fr)]">
+                      <dt className="text-xs text-ink-tertiary">Question</dt>
+                      <dd className="text-ink-secondary">{s.prompt || "—"}</dd>
+                      <dt className="text-xs text-ink-tertiary">Why</dt>
+                      <dd className="text-ink-secondary">{s.why || "—"}</dd>
+                    </dl>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void resolve([s.threadId], true)}
+                        className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void resolve([s.threadId], false)}
+                        className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpen(s.threadId)}
+                        className="px-1.5 py-1 text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                      >
+                        Read the thread
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-primary-border">
-        <div
-          className="h-full rounded-full bg-ink-secondary"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <p className="text-xs text-ink-tertiary">
-        {read < target
-          ? "New kinds of failure keep turning up until about a hundred threads. Before that, a pattern you have not seen yet is likely."
-          : "Past the point where new kinds of failure usually stop appearing."}
-      </p>
-    </div>
+    </section>
   )
 }
 
