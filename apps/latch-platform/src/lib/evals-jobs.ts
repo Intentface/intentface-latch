@@ -17,6 +17,7 @@ import type { Principal } from "./session";
 import { evaluationModelFor } from "./evals/v2/evaluation-model";
 import { MAX_UNITS, advanceJob, estimateRun } from "./evals/v2/jobs";
 import type { EvalJob } from "./evals/v2/jobs";
+import type { ThreadRef } from "./evals/v2/model";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import { configFingerprint } from "./evals/v2/runner";
 
@@ -45,7 +46,17 @@ export async function resolveVersions(agentStore: AgentStore, principal: Princip
   return out;
 }
 
-export type RunRequest = { agent: string; datasetId: string; rubricId: string; versions: string[]; inputIds: string[]; repeats: number; name?: string };
+export type RunRequest = {
+  agent: string;
+  datasetId: string;
+  rubricId: string;
+  versions: string[];
+  inputIds: string[];
+  repeats: number;
+  name?: string;
+  /** Existing results to compare the new ones against when the run finishes — a baseline that was not re-run. */
+  compareWith?: { runId: string; version: string }[];
+};
 
 /**
  * Plan and price a run from what this set's earlier threads actually cost.
@@ -71,7 +82,7 @@ export async function planRun(principal: Principal, d: RunRequest) {
   }
   const units = versions.length * inputIds.length * repeats;
   if (units > MAX_UNITS) return { ok: false as const, error: `That is ${units} threads; one run is capped at ${MAX_UNITS}.` };
-  const past = await evals.listThreads(owner, { datasetId: d.datasetId, limit: 400 });
+  const past = await evals.listThreads(owner, { datasetId: d.datasetId });
   const costs = await evals.threadCosts(past.filter((t) => !t.error).map((t) => t.threadId));
   const estimate = estimateRun({
     units,
@@ -80,7 +91,41 @@ export async function planRun(principal: Principal, d: RunRequest) {
   });
   // Two labels for one configuration measure noise, not a change.
   const same = versions.filter((v, i) => versions.findIndex((w) => w.fingerprint === v.fingerprint) !== i).map((v) => v.label);
-  return { ok: true as const, owner, name: rec.name, versions, inputIds, repeats, estimate, same };
+  const reusable = reusableResults(past, versions, inputIds, repeats);
+  return { ok: true as const, owner, name: rec.name, versions, inputIds, repeats, estimate, same, reusable };
+}
+
+/**
+ * Versions that need not run again: an earlier run already has this exact
+ * configuration (same fingerprint, whatever it was called then) answering
+ * every requested question and try. Comparing against that result saves the
+ * threads; the price is that it was answered at another time, so the world
+ * — documents, tools, the provider — may have moved in between.
+ */
+export function reusableResults(
+  past: ThreadRef[],
+  versions: { label: string; fingerprint: string }[],
+  inputIds: string[],
+  repeats: number,
+): { version: string; runId: string; as: string; at: number }[] {
+  const out: { version: string; runId: string; as: string; at: number }[] = [];
+  for (const v of versions) {
+    // A result is one label in one run — how the comparison picks its threads.
+    const results = new Map<string, { runId: string; as: string; covered: Set<string>; at: number }>();
+    for (const t of past) {
+      if (t.error || !t.runId || t.configFingerprint !== v.fingerprint || !t.inputId) continue;
+      const key = `${t.runId}|${t.version}`;
+      const r = results.get(key) ?? results.set(key, { runId: t.runId, as: t.version, covered: new Set(), at: t.createdAt }).get(key)!;
+      r.covered.add(`${t.inputId}|${t.attempt ?? 0}`);
+      r.at = Math.max(r.at, t.createdAt);
+    }
+    const best = [...results.values()]
+      .filter((r) => inputIds.every((id) => Array.from({ length: repeats }, (_, a) => r.covered.has(`${id}|${a}`)).every(Boolean)))
+      .sort((a, b) => b.at - a.at)
+      .at(0);
+    if (best) out.push({ version: v.label, runId: best.runId, as: best.as, at: best.at });
+  }
+  return out;
 }
 
 /**
@@ -103,6 +148,7 @@ export async function startPlannedRun(principal: Principal, d: RunRequest, confi
     runId: id,
     kind: "run",
     ...(d.name?.trim() ? { name: d.name.trim().slice(0, 80) } : {}),
+    ...(d.compareWith?.length ? { compareWith: d.compareWith.slice(0, 6) } : {}),
     agentName: p.name,
     datasetId: d.datasetId,
     rubricId: d.rubricId,

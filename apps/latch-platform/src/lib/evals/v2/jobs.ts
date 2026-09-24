@@ -27,6 +27,8 @@ export interface EvalJob {
   kind: "run" | "judge";
   /** What this run is testing, in the person's words — "stricter read-failure rule". */
   name?: string;
+  /** Existing results (baseline first) the new ones are compared with when it finishes. */
+  compareWith?: { runId: string; version: string }[];
   agentName: string;
   datasetId: string;
   rubricId: string;

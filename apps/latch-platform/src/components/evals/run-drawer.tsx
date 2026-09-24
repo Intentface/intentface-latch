@@ -12,10 +12,16 @@ import { EDITOR_DRAWER, Field } from "@/components/evals/shell";
  * it will run, what that cost last time, and a start button that names the
  * amount. It defaults to a few questions once — enough to see whether a
  * change does anything before paying to measure how much.
+ *
+ * A version that has not changed since an earlier run answered the same
+ * questions need not be paid for twice: the drawer offers to compare against
+ * that result instead, and the run opens on that comparison when it finishes.
  */
 
 type Options = NonNullable<Awaited<ReturnType<typeof getRunOptionsFn>>>;
 type Scope = "few" | "all" | "pick";
+type Reusable = { version: string; runId: string; as: string; at: number };
+type Priced = { estimate: Estimate; same: string[]; reusable: Reusable[]; confirmTwiceAbove: number };
 const FEW = 3;
 
 export function RunDrawer({
@@ -40,7 +46,9 @@ export function RunDrawer({
   const [filter, setFilter] = useState("");
   const [repeats, setRepeats] = useState(1);
   const [name, setName] = useState("");
-  const [estimate, setEstimate] = useState<{ estimate: Estimate; same: string[]; confirmTwiceAbove: number } | null>(null);
+  const [estimate, setEstimate] = useState<Priced | null>(null);
+  // Earlier results standing in for versions left out of this run, baseline first.
+  const [reused, setReused] = useState<Reusable[]>([]);
   const [estimating, setEstimating] = useState(false);
   const [sure, setSure] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -50,6 +58,7 @@ export function RunDrawer({
     if (!open) return;
     setOptions(null);
     setError(null);
+    setReused([]);
     void getRunOptionsFn({ data: { agent, datasetId } }).then((o) => {
       setOptions(o);
       // Live against the draft is the comparison worth paying for; live alone otherwise.
@@ -88,11 +97,34 @@ export function RunDrawer({
     if (!estimate) return;
     setStarting(true);
     setError(null);
-    const r = await startRunFn({ data: { agent, datasetId, rubricId, versions, inputIds, repeats, name, confirmedCost: cost } });
+    const compareWith = reused.map((r) => ({ runId: r.runId, version: r.as }));
+    const r = await startRunFn({ data: { agent, datasetId, rubricId, versions, inputIds, repeats, name, confirmedCost: cost, compareWith } });
     setStarting(false);
     if (!r.ok) return setError(r.error);
     onStarted(r.id);
   };
+
+  const reuse = (r: Reusable) => {
+    setVersions(versions.filter((v) => v !== r.version));
+    // Live leads: it is the baseline the change is measured against.
+    setReused((rs) => [...rs.filter((x) => x.version !== r.version), r].sort((a, b) => Number(b.version === "live") - Number(a.version === "live")));
+  };
+  const runAgain = (version: string) => {
+    setReused((rs) => rs.filter((x) => x.version !== version));
+    if (!versions.includes(version)) setVersions([...versions, version]);
+  };
+  const offers = (estimate?.reusable ?? []).filter((r) => versions.includes(r.version));
+  // A reused result covered the questions and tries it was offered for, not
+  // whatever is picked next: a new choice puts those versions back in the run.
+  const covered = `${inputIds.join(",")}|${repeats}`;
+  const [coveredFor, setCoveredFor] = useState(covered);
+  if (coveredFor !== covered) {
+    setCoveredFor(covered);
+    if (reused.length) {
+      setVersions([...versions, ...reused.map((r) => r.version).filter((v) => !versions.includes(v))]);
+      setReused([]);
+    }
+  }
 
   const shownQuestions = (options?.questions ?? []).filter(
     (q) => !filter.trim() || `${q.id} ${q.prompt}`.toLowerCase().includes(filter.trim().toLowerCase()),
@@ -125,13 +157,26 @@ export function RunDrawer({
                       <input
                         type="checkbox"
                         checked={versions.includes(v.label)}
-                        onChange={(e) => setVersions(e.target.checked ? [...versions, v.label] : versions.filter((x) => x !== v.label))}
+                        onChange={(e) => {
+                          if (e.target.checked) runAgain(v.label);
+                          else setVersions(versions.filter((x) => x !== v.label));
+                        }}
                       />
                       <span className="text-ink-primary font-medium">{v.label}</span>
                       {v.note && <span className="text-ink-tertiary truncate text-xs">{v.note}</span>}
                     </label>
                   ))}
                 </div>
+                {reused.map((r) => (
+                  <p key={r.version} className="text-ink-secondary mt-1.5 flex items-baseline gap-2 px-2 text-xs">
+                    <span className="min-w-0 flex-1">
+                      Compared against {r.version} from the {day(r.at)} run, which already answered these questions.
+                    </span>
+                    <button type="button" onClick={() => runAgain(r.version)} className="text-ink-tertiary hover:text-ink-primary shrink-0 underline-offset-2 hover:underline">
+                      Run it again
+                    </button>
+                  </p>
+                ))}
               </Field>
 
               <Field id="run-scope" label="Questions">
@@ -204,6 +249,22 @@ export function RunDrawer({
 
           <div className="border-primary-border space-y-3 border-t px-5 py-4">
             <Bill estimate={estimate} estimating={estimating} empty={!versions.length || !inputIds.length} />
+            {!estimating &&
+              offers.map((r) => (
+                <div key={r.version} className="bg-primary-bg-hover flex items-start gap-3 rounded-lg px-3 py-2.5 text-sm">
+                  <p className="text-ink-secondary min-w-0 flex-1">
+                    <span className="text-ink-primary font-medium">{r.version}</span> hasn't changed since the {day(r.at)} run, which already answered these
+                    questions. Compare against that result instead of paying for it again.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => reuse(r)}
+                    className="border-primary-border bg-primary-bg text-ink-primary hover:bg-primary-bg-hover shrink-0 rounded-md border px-2.5 py-1 text-xs font-medium"
+                  >
+                    Use that result
+                  </button>
+                </div>
+              ))}
             {twice && (
               <label className="text-ink-primary flex items-start gap-2 text-sm">
                 <input type="checkbox" className="mt-0.5" checked={sure} onChange={(e) => setSure(e.target.checked)} />
@@ -230,6 +291,8 @@ export function RunDrawer({
     </Drawer>
   );
 }
+
+const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
 function Bill({ estimate, estimating, empty }: { estimate: { estimate: Estimate; same: string[] } | null; estimating: boolean; empty: boolean }) {
   if (empty) return <p className="text-ink-tertiary text-sm">Pick at least one version and one question.</p>;

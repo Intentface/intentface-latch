@@ -193,3 +193,24 @@ describe("estimates", () => {
     expect(e.cost).toBeCloseTo(3);
   });
 });
+
+describe("reusable results", () => {
+  it("finds the latest run that answered every question and try with the same configuration", async () => {
+    const { reusableResults } = await import("@/lib/evals-jobs");
+    const t = (runId: string, fingerprint: string, inputId: string, attempt: number, createdAt: number, extra: object = {}) =>
+      ({ owner, threadId: `${runId}${inputId}${attempt}`, datasetId: "ds", runId, version: "live", configFingerprint: fingerprint, inputId, attempt, createdAt, ...extra }) as never;
+    const past = [
+      t("old", "A", "1", 0, 1), t("old", "A", "2", 0, 1),
+      t("new", "A", "1", 0, 5, { version: "v3" }), t("new", "A", "2", 0, 5, { version: "v3" }),
+      t("gap", "A", "1", 0, 9),
+      t("split", "A", "1", 0, 8), t("split", "A", "2", 0, 8, { version: "v4" }),
+      t("draft", "B", "1", 0, 9), t("draft", "B", "2", 0, 9),
+    ];
+    const v = [{ label: "live", fingerprint: "A" }, { label: "@draft", fingerprint: "C" }];
+    // "gap" missed question 2, "split" answered it under two names; "new" answered
+    // both as v3 — the same configuration live is now. @draft changed since.
+    expect(reusableResults(past, v, ["1", "2"], 1)).toEqual([{ version: "live", runId: "new", as: "v3", at: 5 }]);
+    // Two tries asked for, one given: nothing covers it.
+    expect(reusableResults(past, v, ["1", "2"], 2)).toEqual([]);
+  });
+});

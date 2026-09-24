@@ -72,6 +72,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { createQuestionSet, editQuestions, createChecks, editChecks } = await import("@/lib/evals-actions");
   const { startJudgeJob } = await import("@/lib/evals-jobs");
   const { toEditable } = await import("@/lib/evals/v2/validate");
+  const { computeGrid } = await import("@/lib/evals-grid");
 
   /** Question ids that failed any check in a run — what "re-run the failures" means. */
   const failedQuestions = async (owner: string, runId: string) => {
@@ -316,6 +317,17 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
           estimatedCost: p.estimate.cost,
           basis: p.estimate.basis,
           ...(p.same.length ? { warning: `${p.same.join(", ")} is the same configuration as another version picked; comparing them measures noise.` } : {}),
+          ...(p.reusable.length
+            ? {
+                alreadyAnswered: p.reusable.map((r) => ({
+                  version: r.version,
+                  runId: r.runId,
+                  answeredAs: r.as,
+                  on: new Date(r.at).toISOString().slice(0, 10),
+                })),
+                note: "These versions have not changed since a run that already answered every one of these questions. Leave them out of start_run and pass them as compareWith instead, unless something outside the agent may have changed since (documents, tools, connections) or the person asks for a fresh baseline.",
+              }
+            : {}),
         };
       },
     }),
@@ -333,14 +345,27 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         questions: z.array(z.string()).describe("Question ids, as estimate_run returned them"),
         repeats: z.number().int().min(1).max(5).default(1),
         estimatedCost: z.number().nullable().describe("The cost estimate_run returned"),
+        compareWith: z
+          .array(z.object({ runId: z.string(), version: z.string() }))
+          .optional()
+          .describe("Existing results to compare the new ones against (baseline first), from estimate_run's alreadyAnswered — versions you did not re-run"),
       }),
-      execute: async ({ agent, questionSetId, checksId, versions, questions, repeats, estimatedCost, name }) => {
+      execute: async ({ agent, questionSetId, checksId, versions, questions, repeats, estimatedCost, name, compareWith }) => {
         const r = await startPlannedRun(
           principal,
-          { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds: questions, repeats, ...(name ? { name } : {}) },
+          { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds: questions, repeats, ...(name ? { name } : {}), ...(compareWith?.length ? { compareWith } : {}) },
           estimatedCost,
         );
-        return r.ok ? { jobId: r.id, runId: r.id, estimatedCost: r.estimate.cost, next: "Call job_status until it is done." } : r;
+        return r.ok
+          ? {
+              jobId: r.id,
+              runId: r.id,
+              estimatedCost: r.estimate.cost,
+              next: compareWith?.length
+                ? `Call job_status until it is done, then compare_results with ${JSON.stringify([...compareWith, ...versions.map((version) => ({ runId: r.id, version }))])}.`
+                : "Call job_status until it is done.",
+            }
+          : r;
       },
     }),
 
@@ -519,6 +544,40 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         editChecks(principal, { agent, checksId, ...(upserts ? { upserts } : {}), ...(deletes ? { deletes } : {}) }),
     }),
 
+    compare_results: tool({
+      description:
+        "Compare results from any runs question by question: the first is the baseline, each other is measured against it on the questions both answered (improved/regressed, p-value). Use it for a new @draft result against a live result from an earlier run, so live need not run again.",
+      inputSchema: z.object({
+        agent: Agent,
+        questionSetId: z.string(),
+        checksId: z.string(),
+        results: z.array(z.object({ runId: z.string(), version: z.string() })).min(2).max(6).describe("Baseline first"),
+      }),
+      execute: async ({ agent, questionSetId, checksId, results }) => {
+        const g = await computeGrid(principal, { agent, datasetId: questionSetId, rubricId: checksId, columns: results });
+        if (!g) return { error: "Nothing to compare: check the agent, question set, checks and run ids." };
+        if ("error" in g) return g;
+        const judged = new Set(g.columns.map((c) => c.judgedWith));
+        const [base, ...rest] = g.columns;
+        return {
+          baseline: base.label,
+          columns: g.columns.map((c, i) => ({ result: c.label, runId: c.runId, version: c.version, errored: g.errors[i]?.errors ?? 0, checksVersion: c.judgedWith })),
+          checks: g.checks.map((c) => ({
+            check: c.label,
+            ...Object.fromEntries(g.columns.map((col, i) => [col.label, `${c.cells[i].passed}/${c.cells[i].total}`])),
+            ...Object.fromEntries(
+              rest.map((col) => {
+                const x = c.changes[col.label];
+                return [`vs baseline: ${col.label}`, x ? `+${x.improved} −${x.regressed} of ${x.pairs} questions, p=${x.p.toFixed(3)}` : "no shared questions"];
+              }),
+            ),
+          })),
+          ...(g.crossRun ? { caveat: "These results come from different runs, answered at different times; a change outside the agent (documents, tools, the model provider) would show up as a difference too." } : {}),
+          ...(judged.size > 1 ? { warning: `The results were judged under different versions of the checks (${[...judged].join(", ")}). judge_run the older run under the latest checks before trusting the comparison.` } : {}),
+        };
+      },
+    }),
+
     judge_run: tool({
       description:
         "Re-judge an existing run under the latest version of a set of checks. Only the judge runs, never the agent, so it costs a few cents. Follow it with job_status.",
@@ -607,7 +666,8 @@ How to work:
 - Some failures need knowledge you do not have: what the business wants, what this user needed. When you are unsure, say that in the note's why rather than guessing, and leave it to the person.
 
 Deciding what to do (after people have accepted notes): find_patterns, then triage each failure mode.
-- "fix" when the cause is plain — an instruction that is missing, wrong or ambiguous; a tool that fails. Do not build a check for these: propose_fix on @draft, then re-run ONLY the questions that failed (estimate_run with onlyFailedIn), on live and @draft, and report question by question whether it helped and whether anything got worse.
+- "fix" when the cause is plain — an instruction that is missing, wrong or ambiguous; a tool that fails. Do not build a check for these: propose_fix on @draft, then re-run ONLY the questions that failed (estimate_run with onlyFailedIn) on @draft, and report question by question whether it helped and whether anything got worse.
+- Do not re-run a baseline that has not changed. estimate_run says when a version (usually live) already answered these questions in an earlier run (alreadyAnswered): run only the changed version, pass the old result as compareWith, then compare_results. Re-run the baseline only when something outside the agent may have changed since (its documents, tools, connections, or a long time), when the person asks, or when a result came from a different number of tries; say that the comparison spans runs.
 - "measure" when it is subjective, recurring or risky — something that could come back after other changes. propose_check, show the person the draft, and add_check once they agree.
 - "leave" when it is rare and harmless. Say so; not every failure is worth effort.
 A fix is judged by whether the failed questions pass now without others breaking — a handful of re-runs cannot prove it; say how many questions it rests on, and when a full run would be worth its cost.

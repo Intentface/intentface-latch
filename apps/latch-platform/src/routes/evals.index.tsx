@@ -132,7 +132,13 @@ function EvalsPage() {
     if (finished.kind === "run")
       set({
         run: finished.runId,
-        cols: undefined,
+        // A run that left its baseline out opens on the comparison with the result it reused.
+        cols: finished.compareWith?.length
+          ? encodeResults([
+              ...finished.compareWith,
+              ...finished.versions.map((version) => ({ runId: finished.runId, version })),
+            ])
+          : undefined,
         check: undefined,
         version: undefined,
       })

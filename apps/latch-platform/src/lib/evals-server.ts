@@ -10,16 +10,16 @@ import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Principal } from "./session";
-import type { Check, Rubric, ThreadRef, Verdict } from "./evals/v2/model";
+import type { Check } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
 import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planRun, startJudgeJob, startPlannedRun } from "./evals-jobs";
+import { computeGrid } from "./evals-grid";
+import type { ResultRef } from "./evals-grid";
 import { createChecks, createQuestionSet } from "./evals-actions";
 import type { RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
-import { compareVersions, configFingerprint, summarize } from "./evals/v2/runner";
-import { thresholdFor, trustOf } from "./evals/v2/alignment";
-import { describeCounted } from "./evals/v2/counted";
+import { configFingerprint } from "./evals/v2/runner";
 import { finalAnswer, viewOf } from "./evals/v2/thread";
 
 /** The owner key this agent's eval data lives under, or null when not editable. */
@@ -73,138 +73,23 @@ export const getEvalsOverviewFn = createServerFn({ method: "GET" })
 
 export type EvalsOverview = NonNullable<Awaited<ReturnType<typeof getEvalsOverviewFn>>>;
 
-/** A check as a sentence; a per-question value reads as what it is, not as template syntax. */
-const sentence = (c: Rubric["checks"][number]) =>
-  c.kind === "asked"
-    ? c.ask
-    : describeCounted(c).replace(/"?\{\{facts\.(\w+)\}\}"?/g, (_, k: string) => (k === "docs" ? "the document the question names" : `the question's ${k}`));
-
 /**
  * A result: one version's answers in one run. The grid compares any results,
  * question by question — the first is the baseline. Within one run the
  * comparison holds everything but the agent fixed; across runs the world may
  * have moved too, so the grid says which it is showing.
  */
-export type ResultRef = { runId: string; version: string };
+export type { ResultRef } from "./evals-grid";
 
 export const getEvalGridFn = createServerFn({ method: "GET" })
   .validator((d: { agent: string; datasetId: string; rubricId: string; runId?: string; columns?: ResultRef[] }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return null;
-    const o = await ownerFor(principal, data.agent);
-    if (!o) return null;
-    const { evals } = await getLatch();
-    const latest = await evals.getRubric(o.owner, data.rubricId);
-    if (!latest) return null;
-    const runs = await evals.listRuns(o.owner, data.datasetId);
-
-    // Columns: as asked, or every version of one run (the latest by default).
-    let columns: ResultRef[] = (data.columns ?? []).filter((c) => runs.some((r) => r.runId === c.runId && r.versions.includes(c.version)));
-    if (!columns.length) {
-      const run = runs.find((r) => r.runId === data.runId) ?? runs.at(0);
-      if (!run) return null;
-      const order = (v: string) => (v === "live" ? "" : v);
-      columns = [...run.versions].sort((a, b) => order(a).localeCompare(order(b))).map((version) => ({ runId: run.runId, version }));
-    }
-    const crossRun = new Set(columns.map((c) => c.runId)).size > 1;
-    const runOf = new Map(runs.map((r) => [r.runId, r]));
-    const when = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    // Across runs a column needs its run in its name; within one, the version is enough.
-    const labelOf = (c: ResultRef) => {
-      if (!crossRun) return c.version;
-      const r = runOf.get(c.runId)!;
-      return `${c.version} · ${r.name ?? when(r.createdAt)}`;
-    };
-
-    const rubrics = new Map<number, Rubric>([[latest.version, latest]]);
-    const rubricAt = async (v: number) => rubrics.get(v) ?? (await evals.getRubric(o.owner, data.rubricId, v).then((r) => (r && rubrics.set(v, r), r)));
-    const threads: ThreadRef[] = [];
-    const verdicts: Verdict[] = [];
-    const judgedWith: number[] = [];
-    for (const c of columns) {
-      const label = labelOf(c);
-      const mine = (await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: c.runId })).filter((t) => t.version === c.version);
-      const ids = mine.map((t) => t.threadId);
-      // Editing the checks saves a new version nothing has judged yet: each
-      // column shows the newest version that HAS verdicts on its threads.
-      let used = latest.version;
-      let vs = await evals.listVerdicts({ threadIds: ids, rubricVersion: used });
-      for (let v = latest.version - 1; !vs.length && v >= 1; v--) {
-        if (!(await rubricAt(v))) continue;
-        const older = await evals.listVerdicts({ threadIds: ids, rubricVersion: v });
-        if (older.length) (vs = older, used = v);
-      }
-      judgedWith.push(used);
-      threads.push(...mine.map((t) => ({ ...t, version: label })));
-      verdicts.push(...vs);
-    }
-    const rubric = (await rubricAt(Math.max(...judgedWith))) ?? latest;
-
-    // Trust reads every ruled thread of this question set, not just these runs.
-    const all = await evals.listThreads(o.owner, { datasetId: data.datasetId });
-    const allVerdicts = await evals.listVerdicts({ threadIds: all.map((t) => t.threadId), rubricVersion: rubric.version });
-    const rulings = await evals.listRulings({ threadIds: all.map((t) => t.threadId) });
-    const inputs = new Map((await evals.listInputs(data.datasetId)).map((i) => [i.id, i]));
-
-    const labels = columns.map(labelOf);
-    const byLabel = new Map(summarize(threads, verdicts, rubric).map((s) => [s.version, s]));
-    const summaries = labels.map((l) => byLabel.get(l) ?? { version: l, threads: 0, errors: 0, checks: rubric.checks.map((c) => ({ checkId: c.id, passed: 0, total: 0, allPassed: 0, inputs: 0, answers: {} })) });
-    const checkIds = rubric.checks.map((c) => c.id);
-    // Every column against the baseline, on the questions both answered.
-    const changes = new Map(labels.slice(1).map((l) => [l, compareVersions(threads, verdicts, checkIds, labels[0], l)]));
-    const trust = trustOf(allVerdicts, rulings);
-    const rulingOf = new Map(rulings.map((r) => [`${r.threadId}|${r.checkId}`, r.failed]));
-    const byThread = new Map<string, ThreadRef>(threads.map((t) => [t.threadId, t]));
-
-    return {
-      runId: columns[0].runId,
-      crossRun,
-      columns: columns.map((c, i) => {
-        const r = runOf.get(c.runId)!;
-        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i] };
-      }),
-      rubricVersion: rubric.version,
-      latestVersion: latest.version,
-      versions: labels,
-      attempts: Math.max(1, ...threads.map((t) => (t.attempt ?? 0) + 1)),
-      errors: summaries.map((s) => ({ version: s.version, errors: s.errors })),
-      checks: rubric.checks.map((c) => {
-        const th = thresholdFor(c.id, allVerdicts, rulings);
-        return {
-          id: c.id,
-          label: c.label,
-          kind: c.kind,
-          sentence: sentence(c),
-          judge: c.kind === "counted" ? "counted" : (c.judge ?? rubric.defaultJudge),
-          cells: summaries.map((s) => s.checks.find((k) => k.checkId === c.id)!),
-          /** Baseline vs the second column — what the summary sentence reads. */
-          compare: labels[1] ? (changes.get(labels[1])?.find((x) => x.checkId === c.id) ?? null) : null,
-          /** Baseline vs each other column, by column label. */
-          changes: Object.fromEntries(labels.slice(1).map((l) => [l, changes.get(l)?.find((x) => x.checkId === c.id) ?? null])),
-          trust: trust.find((t) => t.checkId === c.id) ?? null,
-          accept: th.accept,
-        };
-      }),
-      verdicts: verdicts.map((v) => {
-        const t = byThread.get(v.threadId)!;
-        return {
-          threadId: v.threadId,
-          checkId: v.checkId,
-          version: t.version,
-          inputId: t.inputId ?? "",
-          attempt: t.attempt ?? 0,
-          prompt: (t.inputId && inputs.get(t.inputId)?.prompt) || "",
-          answer: v.answer,
-          failed: v.failed,
-          confidence: v.confidence ?? null,
-          ruling: rulingOf.get(`${v.threadId}|${v.checkId}`) ?? null,
-        };
-      }),
-    };
+    return computeGrid(principal, data);
   });
 
-export type EvalGrid = NonNullable<Awaited<ReturnType<typeof getEvalGridFn>>>;
+export type EvalGrid = NonNullable<Awaited<ReturnType<typeof computeGrid>>>;
 
 /** One thread as a reviewer needs it: question, tools, answer, reference. */
 export const getEvalThreadFn = createServerFn({ method: "GET" })
@@ -396,7 +281,7 @@ export const estimateRunFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "Sign in again." };
     const p = await planRun(principal, data);
     if (!p.ok) return p;
-    return { ok: true as const, estimate: p.estimate, same: p.same, confirmTwiceAbove: CONFIRM_TWICE_ABOVE };
+    return { ok: true as const, estimate: p.estimate, same: p.same, reusable: p.reusable, confirmTwiceAbove: CONFIRM_TWICE_ABOVE };
   });
 
 /**
@@ -442,6 +327,7 @@ export const listJobsFn = createServerFn({ method: "GET" })
       questions: j.inputIds.length,
       repeats: j.repeats,
       cost: j.estimate.cost,
+      compareWith: j.compareWith ?? null,
       error: j.error ?? null,
       createdAt: j.createdAt,
       updatedAt: j.updatedAt,
