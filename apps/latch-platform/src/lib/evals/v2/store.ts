@@ -71,6 +71,10 @@ export interface EvalsStore {
   saveSuggestion: (s: Suggestion) => Promise<void>;
   listSuggestions: (owner: Owner, agentName: string, status?: Suggestion["status"]) => Promise<Suggestion[]>;
   setSuggestionStatus: (owner: Owner, threadId: string, status: Suggestion["status"]) => Promise<void>;
+  /** The evals agent's proposed pattern for each reading; null leaves one out. */
+  setSuggestionGroups: (owner: Owner, groups: { threadId: string; group: { name: string; description: string } | null }[]) => Promise<void>;
+  /** Add one failure mode, leaving the others alone; nothing if the id exists. */
+  addMode: (m: FailureMode) => Promise<void>;
 
   saveRuling: (r: Ruling) => Promise<void>;
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
@@ -137,6 +141,8 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
   // Tables created before repeats existed; ADD COLUMN fails once present.
   for (const col of ["decision TEXT", "decision_why TEXT", "decided_by TEXT"])
     await client.execute(`ALTER TABLE latch_eval_modes ADD COLUMN ${col}`).catch(() => {});
+  for (const col of ["group_name TEXT", "group_description TEXT"])
+    await client.execute(`ALTER TABLE latch_eval_suggestions ADD COLUMN ${col}`).catch(() => {});
   for (const col of ["run_id TEXT", "attempt INTEGER"])
     await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
@@ -587,7 +593,9 @@ export function createEvalsStore(client: Client): EvalsStore {
         sql: `INSERT INTO latch_eval_suggestions (owner, thread_id, agent_name, text, ok, why, status, created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(thread_id) DO UPDATE SET text = excluded.text, ok = excluded.ok, why = excluded.why,
-                status = excluded.status, created_at = excluded.created_at`,
+                status = excluded.status, created_at = excluded.created_at,
+                -- A new reading may not fit the pattern proposed for the old one.
+                group_name = NULL, group_description = NULL`,
         args: [x.owner, x.threadId, x.agentName, x.text, x.ok ? 1 : 0, x.why, x.status, x.createdAt],
       });
     },
@@ -606,7 +614,25 @@ export function createEvalsStore(client: Client): EvalsStore {
         why: String(r.why),
         status: String(r.status) as Suggestion["status"],
         createdAt: Number(r.created_at),
+        ...(r.group_name ? { group: { name: String(r.group_name), description: String(r.group_description ?? "") } } : {}),
       }));
+    },
+    async setSuggestionGroups(owner, groups) {
+      if (!groups.length) return;
+      await client.batch(
+        groups.map((g) => ({
+          sql: `UPDATE latch_eval_suggestions SET group_name = ?, group_description = ? WHERE owner = ? AND thread_id = ?`,
+          args: [g.group?.name ?? null, g.group?.description ?? null, owner, g.threadId],
+        })),
+        "write",
+      );
+    },
+    async addMode(m) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_modes (owner, agent_name, id, name, description, created_at, decision, decision_why, decided_by)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner, id) DO NOTHING`,
+        args: [m.owner, m.agentName, m.id, m.name, m.description, m.createdAt, m.decision ?? null, m.decisionWhy ?? null, m.decidedBy ?? null],
+      });
     },
     async setSuggestionStatus(owner, threadId, status) {
       await client.execute({ sql: `UPDATE latch_eval_suggestions SET status = ? WHERE owner = ? AND thread_id = ?`, args: [status, owner, threadId] });

@@ -46,6 +46,11 @@ export interface Suggestion {
   why: string;
   status: "open" | "accepted" | "rejected";
   createdAt: number;
+  /**
+   * The pattern the evals agent proposes this reading belongs to, before a
+   * person has agreed to it. Agreeing turns the pattern into a failure mode.
+   */
+  group?: { name: string; description: string };
 }
 
 export interface FailureMode {

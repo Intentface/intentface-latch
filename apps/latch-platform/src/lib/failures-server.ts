@@ -9,7 +9,7 @@ import type { Principal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import { MIN_NOTES_TO_CLUSTER, READ_TARGET } from "./evals/v2/failures";
-import { addCheckFromMode, draftCheck, groupNotes } from "./failures-actions";
+import { addCheckFromMode, decidePattern, draftCheck, groupNotes, groupSuggestions } from "./failures-actions";
 import type { ThreadRef } from "./evals/v2/model";
 
 async function ownerFor(principal: Principal, agent: string) {
@@ -82,6 +82,7 @@ export const getFailuresFn = createServerFn({ method: "GET" })
             text: x.text,
             ok: x.ok,
             why: x.why,
+            group: x.group ?? null,
             createdAt: x.createdAt,
           };
         }),
@@ -205,6 +206,24 @@ export const findPatternsFn = createServerFn({ method: "POST" })
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
     return groupNotes(principal, agent);
+  });
+
+/** Group the evals agent's readings into the patterns it proposes. A small, cheap model. */
+export const groupSuggestionsFn = createServerFn({ method: "POST" })
+  .validator((agent: string) => agent)
+  .handler(async ({ data: agent }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return groupSuggestions(principal, agent);
+  });
+
+/** Agree with a proposed pattern and say what to do about it — or disagree with it. */
+export const decidePatternFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; name: string; decision: "fix" | "measure" | "leave" | "disagree" }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return decidePattern(principal, data);
   });
 
 export const renameModeFn = createServerFn({ method: "POST" })

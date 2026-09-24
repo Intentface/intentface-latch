@@ -130,3 +130,90 @@ export async function addCheckFromMode(principal: Principal, data: { agent: stri
       await evals.saveRuling({ threadId: n.threadId, checkId: id, failed: !n.ok, ...(principal.userId ? { by: principal.userId } : {}), createdAt: now });
     return { ok: true as const, checkId: id, version: saved.version, failed: failed.length, passed: passed.length };
 }
+
+/**
+ * Group the evals agent's open readings into the patterns it proposes, so a
+ * person decides once per pattern instead of once per conversation. Names
+ * match failure modes already decided where they fit, so agreeing adds to
+ * them. Only readings that say something went wrong are grouped.
+ */
+export async function groupSuggestions(principal: Principal, agent: string) {
+  const o = await ownerFor(principal, agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit." };
+  const { evals } = await getLatch();
+  const open = (await evals.listSuggestions(o.owner, o.name, "open")).filter((x) => !x.ok && x.text.trim());
+  const noted = new Set((await evals.listNotes(o.owner, o.name)).map((n) => n.threadId));
+  const readings = open.filter((x) => !noted.has(x.threadId));
+  if (readings.length < 2) return { ok: true as const, patterns: 0 };
+  const existing = await evals.listModes(o.owner, o.name);
+  const { object } = await generateObject({
+    model: await helperModel(),
+    schema: ClusterSchema,
+    temperature: 0,
+    prompt: clusterPrompt({ agentName: o.name, notes: readings, existing }),
+    abortSignal: AbortSignal.timeout(60_000),
+  });
+  const groups = new Map<string, { name: string; description: string }>();
+  const clusters = cleanClusters(object, readings.length);
+  for (const m of clusters) {
+    const kept = existing.find((e) => e.name.toLowerCase() === m.name.toLowerCase());
+    const g = kept ? { name: kept.name, description: kept.description } : { name: m.name, description: m.description };
+    for (const i of m.notes) groups.set(readings[i].threadId, g);
+  }
+  await evals.setSuggestionGroups(
+    o.owner,
+    readings.map((x) => ({ threadId: x.threadId, group: groups.get(x.threadId) ?? null })),
+  );
+  return { ok: true as const, patterns: clusters.length };
+}
+
+/**
+ * A person's answer to one proposed pattern. Disagreeing drops its readings.
+ * Otherwise each reading becomes the person's note, the pattern becomes a
+ * failure mode (or joins the one of that name), and the decision is theirs.
+ */
+export async function decidePattern(
+  principal: Principal,
+  data: { agent: string; name: string; decision: "fix" | "measure" | "leave" | "disagree" },
+) {
+  const o = await ownerFor(principal, data.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit." };
+  const { evals } = await getLatch();
+  const mine = (await evals.listSuggestions(o.owner, o.name, "open")).filter((x) => x.group?.name === data.name);
+  if (!mine.length) return { ok: false as const, error: "That pattern is gone. Refresh the page." };
+  if (data.decision === "disagree") {
+    for (const x of mine) await evals.setSuggestionStatus(o.owner, x.threadId, "rejected");
+    return { ok: true as const, modeId: null };
+  }
+  const now = Date.now();
+  const modes = await evals.listModes(o.owner, o.name);
+  const mode = modes.find((m) => m.name.toLowerCase() === data.name.toLowerCase());
+  const modeId = mode?.id ?? `fm_${now.toString(36)}`;
+  if (!mode)
+    await evals.addMode({
+      owner: o.owner,
+      agentName: o.name,
+      id: modeId,
+      name: data.name,
+      description: mine[0].group?.description ?? "",
+      createdAt: now,
+    });
+  for (const x of mine) {
+    const t = await evals.getThread(o.owner, x.threadId);
+    await evals.saveNote({
+      owner: o.owner,
+      threadId: x.threadId,
+      agentName: o.name,
+      ...(t?.datasetId ? { datasetId: t.datasetId } : {}),
+      text: x.text,
+      ok: false,
+      modeId,
+      ...(principal.userId ? { by: principal.userId } : {}),
+      createdAt: now,
+      updatedAt: now,
+    });
+    await evals.setSuggestionStatus(o.owner, x.threadId, "accepted");
+  }
+  await evals.decideMode(o.owner, modeId, { decision: data.decision, why: "", by: "person" });
+  return { ok: true as const, modeId };
+}

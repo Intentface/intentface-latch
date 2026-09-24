@@ -13,6 +13,8 @@ import { getEvalsIndexFn } from "@/lib/evals-server"
 import {
   createCheckFromModeFn,
   decideModeFn,
+  decidePatternFn,
+  groupSuggestionsFn,
   findPatternsFn,
   getFailuresFn,
   getReadingQueueFn,
@@ -34,6 +36,7 @@ import {
 } from "@/components/evals/shell"
 import { useEvalsChanged } from "@/components/evals/events"
 import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
+import { askEvalsAgent } from "@/components/evals/agent-panel"
 
 /**
  * Error discovery, before measurement: read threads, write down the first
@@ -85,6 +88,43 @@ function FailuresPage() {
   // The Evals agent may have suggested notes, grouped them or triaged a mode.
   useEvalsChanged(load)
 
+  // New readings from the evals agent are grouped into the patterns it
+  // proposes as soon as they appear — once per set of readings.
+  const [proposing, setProposing] = useState(false)
+  const proposedFor = useRef("")
+  useEffect(() => {
+    if (!agent || !data) return
+    const loose = data.suggested
+      .filter((s) => !s.ok && !s.group)
+      .map((s) => s.threadId)
+    const key = loose.sort().join(",")
+    if (loose.length < 2 || proposedFor.current === key) return
+    proposedFor.current = key
+    setProposing(true)
+    void groupSuggestionsFn({ data: agent })
+      .then((r) => r.ok && load())
+      .finally(() => setProposing(false))
+  }, [agent, data, load])
+
+  const decidePattern = async (
+    p: Pattern,
+    decision: "fix" | "measure" | "leave" | "disagree"
+  ) => {
+    if (!agent) return
+    const r = await decidePatternFn({ data: { agent, name: p.name, decision } })
+    if (!r.ok) return setMessage({ text: r.error, bad: true })
+    const next = await getFailuresFn({ data: agent })
+    setData(next)
+    const mode = next?.modes.find((m) => m.id === r.modeId)
+    if (decision === "fix") {
+      const questions = [...new Set(p.items.map((s) => s.inputId))].join(", ")
+      askEvalsAgent(
+        `For ${agent}: fix the failure mode "${p.name}" (questions ${questions}). Read the failing threads and the agent's configuration, propose_fix on @draft, then estimate re-running only those questions on @draft and compare with the existing live result.`
+      )
+    }
+    if (decision === "measure" && mode) setToCheck(mode)
+  }
+
   const startReading = async () => {
     if (!agent) return
     const q = await getReadingQueueFn({ data: agent })
@@ -132,11 +172,7 @@ function FailuresPage() {
   return (
     <div className={GROUND}>
       <div className="evals-page mx-auto max-w-[1100px] space-y-6 p-6 transition-[margin]">
-        <EvalsShell
-          page="failures"
-          index={index}
-          search={search}
-        />
+        <EvalsShell page="failures" index={index} search={search} />
 
         {message && (
           <p
@@ -169,10 +205,30 @@ function FailuresPage() {
               onGroup={() => void group()}
             />
 
-            {data.suggested.length > 0 && (
+            {(proposing || data.suggested.some((s) => s.group)) && (
+              <PatternList
+                patterns={patternsOf(data.suggested)}
+                modes={data.modes.map((m) => ({
+                  name: m.name,
+                  decision: m.decision,
+                  count: failures.filter((n) => n.modeId === m.id).length,
+                }))}
+                proposing={proposing}
+                agent={agent}
+                onOpen={(threadId) => {
+                  const s = data.suggested.find((x) => x.threadId === threadId)
+                  if (s) setReading([s])
+                }}
+                onDecide={(p, d) => void decidePattern(p, d)}
+                onResolved={load}
+              />
+            )}
+
+            {data.suggested.some((s) => !s.group) && (
               <SuggestionList
                 agent={agent}
-                items={data.suggested}
+                items={data.suggested.filter((s) => !s.group)}
+                titled={data.suggested.some((s) => s.group)}
                 onOpen={(threadId) => {
                   const s = data.suggested.find((x) => x.threadId === threadId)
                   if (s)
@@ -309,7 +365,13 @@ function Steps({
 }) {
   const canGroup = failures >= minToCluster
   const next =
-    toReview > 0 || !canGroup ? 1 : !modes || ungrouped > 0 ? 2 : decided < modes ? 3 : 1
+    toReview > 0 || !canGroup
+      ? 1
+      : !modes || ungrouped > 0
+        ? 2
+        : decided < modes
+          ? 3
+          : 1
   const unread = Math.max(0, available - read)
   const steps = [
     {
@@ -331,7 +393,11 @@ function Steps({
           {toReview > 0 && (
             <StepButton
               primary={next === 1}
-              onClick={() => document.getElementById("to-review")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              onClick={() =>
+                document
+                  .getElementById("to-review")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
             >
               Review {toReview}
             </StepButton>
@@ -358,8 +424,16 @@ function Steps({
           ? `${ungrouped} note${ungrouped === 1 ? " is" : "s are"} not in a pattern yet.`
           : "Every note is in a pattern.",
       action: (
-        <StepButton primary={next === 2} onClick={onGroup} disabled={grouping || !canGroup}>
-          {grouping ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}{" "}
+        <StepButton
+          primary={next === 2}
+          onClick={onGroup}
+          disabled={grouping || !canGroup}
+        >
+          {grouping ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Sparkles className="size-4" />
+          )}{" "}
           {modes ? "Group again" : "Find patterns"}
         </StepButton>
       ),
@@ -368,8 +442,10 @@ function Steps({
       title: "Decide what to do",
       status: modes ? (
         <>
-          <b className="font-semibold text-ink-primary tabular-nums">{decided}</b> of{" "}
-          {modes} decided
+          <b className="font-semibold text-ink-primary tabular-nums">
+            {decided}
+          </b>{" "}
+          of {modes} decided
         </>
       ) : (
         "After patterns"
@@ -379,7 +455,9 @@ function Steps({
         <StepButton
           primary={next === 3}
           onClick={() =>
-            document.getElementById("failure-modes")?.scrollIntoView({ behavior: "smooth", block: "start" })
+            document
+              .getElementById("failure-modes")
+              ?.scrollIntoView({ behavior: "smooth", block: "start" })
           }
         >
           Go to patterns
@@ -399,13 +477,19 @@ function Steps({
             <span
               className={cn(
                 "grid size-5 shrink-0 place-items-center rounded-full text-xs font-medium tabular-nums",
-                next === i + 1 ? "bg-ink-primary text-primary-bg" : "bg-primary-bg-hover text-ink-secondary"
+                next === i + 1
+                  ? "bg-ink-primary text-primary-bg"
+                  : "bg-primary-bg-hover text-ink-secondary"
               )}
             >
               {i + 1}
             </span>
-            <span className="text-sm font-medium text-ink-primary">{st.title}</span>
-            {next === i + 1 && <span className="text-xs text-ink-tertiary">Next</span>}
+            <span className="text-sm font-medium text-ink-primary">
+              {st.title}
+            </span>
+            {next === i + 1 && (
+              <span className="text-xs text-ink-tertiary">Next</span>
+            )}
           </div>
           <div className="text-sm text-ink-secondary">{st.status}</div>
           <p className="flex-1 text-xs text-ink-tertiary">{st.detail}</p>
@@ -447,6 +531,217 @@ function StepButton({
 type Suggested = Failures["suggested"][number]
 type Filter = "wrong" | "fine" | "all"
 
+type Pattern = { name: string; description: string; items: Suggested[] }
+
+const patternsOf = (items: Suggested[]): Pattern[] => {
+  const by = new Map<string, Pattern>()
+  for (const s of items) {
+    if (!s.group) continue
+    const p = by.get(s.group.name) ?? {
+      name: s.group.name,
+      description: s.group.description,
+      items: [],
+    }
+    p.items.push(s)
+    by.set(s.group.name, p)
+  }
+  return [...by.values()].sort((a, b) => b.items.length - a.items.length)
+}
+
+const OUTCOMES = [
+  [
+    "fix",
+    "Fix it",
+    "The evals agent drafts a change to @draft for you to approve, then re-runs these questions on it.",
+  ],
+  [
+    "measure",
+    "Make it a check",
+    "A check scores every future run for this, so you notice if it comes back.",
+  ],
+  ["leave", "Leave it", "Recorded as known. Nothing changes."],
+] as const
+
+/**
+ * The evals agent's findings as patterns: one decision each instead of one
+ * per conversation. Every choice says what it leads to. Agreeing (any of the
+ * three) saves its readings as your notes under a failure mode; a reading it
+ * got wrong can be taken out first.
+ */
+function PatternList({
+  patterns,
+  modes,
+  proposing,
+  agent,
+  onOpen,
+  onDecide,
+  onResolved,
+}: {
+  patterns: Pattern[]
+  /** Failure modes already agreed; a pattern of the same name adds to one. */
+  modes: { name: string; decision: string | null; count: number }[]
+  proposing: boolean
+  agent: string
+  onOpen: (threadId: string) => void
+  onDecide: (p: Pattern, d: "fix" | "measure" | "leave" | "disagree") => void
+  onResolved: () => void
+}) {
+  const [open, setOpen] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const decide = (p: Pattern, d: "fix" | "measure" | "leave" | "disagree") => {
+    setBusy(p.name)
+    onDecide(p, d)
+  }
+  useEffect(() => setBusy(null), [patterns])
+  const drop = async (threadId: string) => {
+    await resolveSuggestionFn({ data: { agent, threadId, accept: false } })
+    onResolved()
+  }
+  return (
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="text-sm font-semibold text-ink-primary">
+          What the evals agent found
+        </h2>
+        <p className="max-w-3xl text-sm text-ink-secondary">
+          It read {agent}&apos;s answers to your test questions and grouped what
+          went wrong. For each pattern, say what should happen. If it got a
+          conversation wrong, take it out first.
+        </p>
+      </div>
+      {proposing && (
+        <p className="flex items-center gap-2 text-sm text-ink-tertiary">
+          <Loader2 className="size-4 animate-spin" /> Grouping what it found…
+        </p>
+      )}
+      <ul className="space-y-3">
+        {patterns.map((p) => {
+          const questions = [...new Set(p.items.map((s) => s.inputId))].sort(
+            (a, b) => Number(a) - Number(b)
+          )
+          const versions = [...new Set(p.items.map((s) => s.version))]
+          const isOpen = open === p.name
+          const known = modes.find(
+            (m) => m.name.toLowerCase() === p.name.toLowerCase()
+          )
+          return (
+            <li
+              key={p.name}
+              className="rounded-lg border border-primary-border bg-primary-bg"
+            >
+              <div className="space-y-3 px-4 py-3">
+                <div>
+                  <div className="font-medium text-ink-primary">{p.name}</div>
+                  {known && (
+                    <p className="mt-0.5 text-xs text-ink-tertiary">
+                      Already a failure mode with {known.count} answer
+                      {known.count === 1 ? "" : "s"}
+                      {known.decision
+                        ? `, marked “${OUTCOMES.find(([v]) => v === known.decision)?.[1] ?? known.decision}”`
+                        : ""}
+                      . Agreeing adds these to it.
+                    </p>
+                  )}
+                  <p className="mt-0.5 text-sm text-ink-secondary">
+                    {p.description}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setOpen(isOpen ? null : p.name)}
+                    aria-expanded={isOpen}
+                    className="mt-1.5 flex items-center gap-1 text-xs text-ink-tertiary hover:text-ink-primary"
+                  >
+                    {isOpen ? (
+                      <ChevronUp className="size-3.5" />
+                    ) : (
+                      <ChevronDown className="size-3.5" />
+                    )}
+                    {p.items.length} answer{p.items.length === 1 ? "" : "s"} ·
+                    question
+                    {questions.length === 1 ? "" : "s"} {questions.join(", ")} ·{" "}
+                    {versions.join(" and ")}
+                  </button>
+                </div>
+                {isOpen && (
+                  <ul className="divide-y divide-primary-border rounded-md border border-primary-border">
+                    {p.items.map((s) => (
+                      <li
+                        key={s.threadId}
+                        className="flex items-start gap-3 px-3 py-2 text-sm"
+                      >
+                        <span className="w-28 shrink-0 text-xs text-ink-secondary">
+                          <span className="font-medium text-ink-primary">
+                            Q{s.inputId}
+                          </span>{" "}
+                          · {s.version}
+                          {day(s.ranAt) && (
+                            <span className="text-ink-tertiary">
+                              {" "}
+                              · {day(s.ranAt)}
+                            </span>
+                          )}
+                        </span>
+                        <span className="min-w-0 flex-1 text-ink-primary">
+                          {s.text}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onOpen(s.threadId)}
+                          className="shrink-0 text-xs text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                        >
+                          Read
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void drop(s.threadId)}
+                          title="The evals agent got this one wrong"
+                          className="shrink-0 text-xs text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                        >
+                          Take out
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {OUTCOMES.map(([value, label, hint]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={busy === p.name}
+                      onClick={() => decide(p, value)}
+                      className="flex flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left smooth-shadow-ring-xs smooth-ring-primary-border hover:bg-primary-bg-hover disabled:opacity-50"
+                    >
+                      <span className="text-sm font-medium text-ink-primary">
+                        {label}
+                      </span>
+                      <span className="text-xs text-ink-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 text-xs text-ink-tertiary">
+                  <span>Not a real problem?</span>
+                  <button
+                    type="button"
+                    disabled={busy === p.name}
+                    onClick={() => decide(p, "disagree")}
+                    className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline disabled:opacity-50"
+                  >
+                    Disagree — drop{" "}
+                    {p.items.length === 1
+                      ? "this reading"
+                      : `these ${p.items.length} readings`}
+                  </button>
+                </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
 /** "Went wrong" or "Looks fine" — a chip, so the verdict reads before the words. */
 function Verdict({ ok }: { ok: boolean }) {
   return (
@@ -462,7 +757,12 @@ function Verdict({ ok }: { ok: boolean }) {
 }
 
 const day = (at: number | null) =>
-  at ? new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : null
+  at
+    ? new Date(at).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      })
+    : null
 
 /**
  * What the evals agent read and would note, waiting for a person. One line
@@ -477,12 +777,15 @@ function SuggestionList({
   onOpen,
   onReviewAll,
   onResolved,
+  titled,
 }: {
   agent: string
   items: Suggested[]
   onOpen: (threadId: string) => void
   onReviewAll: () => void
   onResolved: () => void
+  /** Shown below the patterns: these are the readings that fit none. */
+  titled?: boolean
 }) {
   const [filter, setFilter] = useState<Filter>("all")
   const [picked, setPicked] = useState<Set<string>>(new Set())
@@ -494,7 +797,11 @@ function SuggestionList({
   const shown = (filter === "wrong" ? wrong : filter === "fine" ? fine : items)
     .slice()
     // In question order, as the question set lists them.
-    .sort((a, b) => Number(a.inputId) - Number(b.inputId) || a.inputId.localeCompare(b.inputId))
+    .sort(
+      (a, b) =>
+        Number(a.inputId) - Number(b.inputId) ||
+        a.inputId.localeCompare(b.inputId)
+    )
   const byQuestion = new Map<string, Suggested[]>()
   for (const s of shown) {
     const key = `${s.inputId}|${s.prompt}`
@@ -504,7 +811,9 @@ function SuggestionList({
     key,
     inputId: answers[0].inputId,
     prompt: answers[0].prompt,
-    items: answers.sort((a, b) => Number(a.ok) - Number(b.ok) || (b.ranAt ?? 0) - (a.ranAt ?? 0)),
+    items: answers.sort(
+      (a, b) => Number(a.ok) - Number(b.ok) || (b.ranAt ?? 0) - (a.ranAt ?? 0)
+    ),
   }))
   const chosen = shown.filter((s) => picked.has(s.threadId))
   const allOn = shown.length > 0 && chosen.length === shown.length
@@ -512,7 +821,8 @@ function SuggestionList({
   const resolve = async (threadIds: string[], accept: boolean) => {
     setBusy(true)
     // One at a time: each is its own note, and a failure should not take the rest with it.
-    for (const threadId of threadIds) await resolveSuggestionFn({ data: { agent, threadId, accept } })
+    for (const threadId of threadIds)
+      await resolveSuggestionFn({ data: { agent, threadId, accept } })
     setBusy(false)
     setPicked(new Set())
     onResolved()
@@ -528,8 +838,14 @@ function SuggestionList({
     <section id="to-review" className="scroll-mt-4 space-y-3">
       <div className="space-y-1">
         <div className="flex flex-wrap items-baseline gap-3">
-          <h2 className="text-sm font-semibold text-ink-primary">Is the evals agent right?</h2>
-          <span className="text-xs text-ink-tertiary tabular-nums">{items.length} to check</span>
+          <h2 className="text-sm font-semibold text-ink-primary">
+            {titled
+              ? "Readings that fit no pattern"
+              : "Is the evals agent right?"}
+          </h2>
+          <span className="text-xs text-ink-tertiary tabular-nums">
+            {items.length} to check
+          </span>
           <button
             type="button"
             onClick={onReviewAll}
@@ -538,14 +854,26 @@ function SuggestionList({
             Review one by one
           </button>
         </div>
-        <p className="max-w-3xl text-sm text-ink-secondary">
-          {agent} answered these test questions in your eval runs. The evals agent read the
-          conversations and wrote down what it thinks went wrong in each. Check that it read them
-          right. <b className="font-medium text-ink-primary">Agree</b> saves its sentence as your note
-          on that conversation; <b className="font-medium text-ink-primary">Disagree</b> throws it
-          away. Only notes are used to find patterns, so a misreading never decides what gets fixed.
-          Nothing else changes — not the agent, its checks or its scores.
-        </p>
+        {titled ? (
+          <p className="max-w-3xl text-sm text-ink-secondary">
+            <b className="font-medium text-ink-primary">Agree</b> saves the
+            reading as your note on that conversation;{" "}
+            <b className="font-medium text-ink-primary">Disagree</b> throws it
+            away.
+          </p>
+        ) : (
+          <p className="max-w-3xl text-sm text-ink-secondary">
+            {agent} answered these test questions in your eval runs. The evals
+            agent read the conversations and wrote down what it thinks went
+            wrong in each. Check that it read them right.{" "}
+            <b className="font-medium text-ink-primary">Agree</b> saves its
+            sentence as your note on that conversation;{" "}
+            <b className="font-medium text-ink-primary">Disagree</b> throws it
+            away. Only notes are used to find patterns, so a misreading never
+            decides what gets fixed. Nothing else changes — not the agent, its
+            checks or its scores.
+          </p>
+        )}
       </div>
 
       <div className="rounded-lg border border-primary-border bg-primary-bg">
@@ -554,9 +882,17 @@ function SuggestionList({
             type="checkbox"
             aria-label="Select all shown"
             checked={allOn}
-            onChange={() => setPicked(allOn ? new Set() : new Set(shown.map((s) => s.threadId)))}
+            onChange={() =>
+              setPicked(
+                allOn ? new Set() : new Set(shown.map((s) => s.threadId))
+              )
+            }
           />
-          <div role="radiogroup" aria-label="Show" className="inline-flex rounded-lg p-0.5 text-xs smooth-shadow-ring-xs smooth-ring-primary-border">
+          <div
+            role="radiogroup"
+            aria-label="Show"
+            className="inline-flex rounded-lg p-0.5 text-xs smooth-shadow-ring-xs smooth-ring-primary-border"
+          >
             {(
               [
                 ["all", `All ${items.length}`],
@@ -572,7 +908,9 @@ function SuggestionList({
                 onClick={() => (setFilter(value), setPicked(new Set()))}
                 className={cn(
                   "rounded-md px-2.5 py-1 tabular-nums",
-                  filter === value ? "bg-primary-bg-active font-medium text-ink-primary" : "text-ink-secondary hover:text-ink-primary"
+                  filter === value
+                    ? "bg-primary-bg-active font-medium text-ink-primary"
+                    : "text-ink-secondary hover:text-ink-primary"
                 )}
               >
                 {label}
@@ -581,11 +919,18 @@ function SuggestionList({
           </div>
           {chosen.length > 0 && (
             <div className="flex items-center gap-2 text-xs">
-              <span className="text-ink-secondary tabular-nums">{chosen.length} selected</span>
+              <span className="text-ink-secondary tabular-nums">
+                {chosen.length} selected
+              </span>
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => void resolve(chosen.map((s) => s.threadId), true)}
+                onClick={() =>
+                  void resolve(
+                    chosen.map((s) => s.threadId),
+                    true
+                  )
+                }
                 className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
               >
                 {busy ? "Saving…" : "Agree"}
@@ -593,7 +938,12 @@ function SuggestionList({
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => void resolve(chosen.map((s) => s.threadId), false)}
+                onClick={() =>
+                  void resolve(
+                    chosen.map((s) => s.threadId),
+                    false
+                  )
+                }
                 className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
               >
                 Disagree
@@ -609,7 +959,10 @@ function SuggestionList({
             const groupOn = ids.every((id) => picked.has(id))
             const wrongHere = g.items.filter((s) => !s.ok).length
             return (
-              <li key={g.key} className="border-b border-primary-border last:border-b-0">
+              <li
+                key={g.key}
+                className="border-b border-primary-border last:border-b-0"
+              >
                 <div className="flex items-start gap-3 bg-primary-bg-hover/40 px-3 py-2.5">
                   <input
                     type="checkbox"
@@ -626,12 +979,19 @@ function SuggestionList({
                     }}
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="text-xs text-ink-tertiary">Question {g.inputId}</div>
-                    <div className="text-sm font-medium text-ink-primary">{g.prompt || "—"}</div>
+                    <div className="text-xs text-ink-tertiary">
+                      Question {g.inputId}
+                    </div>
+                    <div className="text-sm font-medium text-ink-primary">
+                      {g.prompt || "—"}
+                    </div>
                   </div>
                   <span className="shrink-0 pt-0.5 text-xs text-ink-tertiary tabular-nums">
-                    {g.items.length} answer{g.items.length === 1 ? "" : "s"} read
-                    {wrongHere > 0 && wrongHere < g.items.length && ` · ${wrongHere} went wrong`}
+                    {g.items.length} answer{g.items.length === 1 ? "" : "s"}{" "}
+                    read
+                    {wrongHere > 0 &&
+                      wrongHere < g.items.length &&
+                      ` · ${wrongHere} went wrong`}
                   </span>
                 </div>
                 <ul className="divide-y divide-primary-border">
@@ -649,15 +1009,32 @@ function SuggestionList({
                           <button
                             type="button"
                             aria-expanded={isOpen}
-                            onClick={() => setExpanded(isOpen ? null : s.threadId)}
+                            onClick={() =>
+                              setExpanded(isOpen ? null : s.threadId)
+                            }
                             className="flex min-w-0 flex-1 items-center gap-3 text-left"
                           >
-                            <span className="w-28 shrink-0 text-xs text-ink-secondary" title="Which version answered, and when it ran">
-                              <span className="font-medium text-ink-primary">{s.version}</span>
-                              {day(s.ranAt) && <span className="text-ink-tertiary"> · {day(s.ranAt)}</span>}
+                            <span
+                              className="w-28 shrink-0 text-xs text-ink-secondary"
+                              title="Which version answered, and when it ran"
+                            >
+                              <span className="font-medium text-ink-primary">
+                                {s.version}
+                              </span>
+                              {day(s.ranAt) && (
+                                <span className="text-ink-tertiary">
+                                  {" "}
+                                  · {day(s.ranAt)}
+                                </span>
+                              )}
                             </span>
                             <Verdict ok={s.ok} />
-                            <span className={cn("min-w-0 flex-1 text-ink-primary", !isOpen && "truncate")}>
+                            <span
+                              className={cn(
+                                "min-w-0 flex-1 text-ink-primary",
+                                !isOpen && "truncate"
+                              )}
+                            >
                               {s.ok ? s.text || "Nothing went wrong." : s.text}
                             </span>
                             {isOpen ? (
@@ -671,7 +1048,9 @@ function SuggestionList({
                           <div className="space-y-3 pr-4 pb-3 pl-[10.5rem] text-sm">
                             {s.why && (
                               <p className="text-ink-secondary">
-                                <span className="text-xs text-ink-tertiary">Why: </span>
+                                <span className="text-xs text-ink-tertiary">
+                                  Why:{" "}
+                                </span>
                                 {s.why}
                               </p>
                             )}
@@ -687,7 +1066,9 @@ function SuggestionList({
                               <button
                                 type="button"
                                 disabled={busy}
-                                onClick={() => void resolve([s.threadId], false)}
+                                onClick={() =>
+                                  void resolve([s.threadId], false)
+                                }
                                 className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
                               >
                                 Disagree
