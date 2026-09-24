@@ -3,9 +3,9 @@ import { Check, Link2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
- * The Evals pages' visual language: a quiet ground, flat bordered cards,
- * colour only inside charts, and a small filled square as the one ornament,
- * marking sections. Defined once so every page reads the same.
+ * The Evals pages' visual language: flat bordered cards, colour only inside
+ * charts, plain section headings over a hairline. Defined once so every page
+ * reads the same.
  */
 
 /** A card: flat, bordered, no shadow — the surface lifts off the ground by tone and a hairline. */
@@ -17,8 +17,7 @@ export const GROUND = "min-h-full";
 export function SectionTitle({ id, children, aside }: { id: string; children: React.ReactNode; aside?: React.ReactNode }) {
   return (
     <div className="border-primary-border flex items-end gap-3 border-t pt-5">
-      <h2 id={`${id}-title`} className="text-ink-primary flex items-center gap-2.5 text-lg font-semibold tracking-tight">
-        <span aria-hidden className="bg-ink-primary inline-block size-3" />
+      <h2 id={`${id}-title`} className="text-ink-primary text-lg font-semibold tracking-tight">
         {children}
       </h2>
       {aside && <div className="text-ink-tertiary ml-auto text-sm">{aside}</div>}
@@ -102,9 +101,9 @@ export function SectionNav({ sections }: { sections: { id: string; label: string
           <li key={s.id}>
             <a
               href={`#${s.id}`}
-              className={cn("flex items-center gap-2.5 py-0.5", active === s.id ? "text-ink-primary" : "text-ink-tertiary hover:text-ink-secondary")}
+              aria-current={active === s.id ? "location" : undefined}
+              className={cn("block py-0.5", active === s.id ? "text-ink-primary font-medium" : "text-ink-tertiary hover:text-ink-secondary")}
             >
-              <span aria-hidden className={cn("inline-block size-2", active === s.id ? "bg-ink-primary" : "bg-primary-border")} />
               {s.label}
             </a>
           </li>

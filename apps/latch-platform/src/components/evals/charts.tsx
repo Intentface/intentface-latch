@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import type { EvalGrid, RunPoint } from "@/lib/evals-server";
 import { cn } from "@/lib/utils";
 import { passColor } from "@/components/evals/ui";
@@ -12,7 +13,16 @@ import { passColor } from "@/components/evals/ui";
  * a row that is red across the board is a question the agent cannot answer,
  * a column that is red is a check nothing passes.
  */
-export function QuestionHeatmap({ grid, onOpen }: { grid: EvalGrid; onOpen: (c: { checkId: string; version: string }) => void }) {
+export function QuestionHeatmap({
+  grid,
+  onOpen,
+  checkLink,
+}: {
+  grid: EvalGrid;
+  onOpen: (c: { checkId: string; version: string }) => void;
+  /** When given, each check's name opens it on the Checks page. */
+  checkLink?: { agent: string; dataset?: string; rubric: string };
+}) {
   const rows = useMemo(() => {
     const byQ = new Map<string, { prompt: string; cells: Map<string, { passed: number; total: number }> }>();
     for (const v of grid.verdicts) {
@@ -45,7 +55,18 @@ export function QuestionHeatmap({ grid, onOpen }: { grid: EvalGrid; onOpen: (c: 
                 className="text-ink-secondary min-w-24 px-1 pb-1 text-left align-bottom font-medium"
                 title={c.sentence}
               >
-                <span className="line-clamp-2">{c.label}</span>
+                {checkLink ? (
+                  <Link
+                    to="/evals/checks"
+                    search={{ ...checkLink, check: c.id }}
+                    title="Open this check"
+                    className="line-clamp-2 underline-offset-2 hover:text-ink-primary hover:underline"
+                  >
+                    {c.label}
+                  </Link>
+                ) : (
+                  <span className="line-clamp-2">{c.label}</span>
+                )}
               </th>
             ))}
           </tr>

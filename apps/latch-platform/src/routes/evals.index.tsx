@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { createFileRoute, redirect } from "@tanstack/react-router"
+import { createFileRoute, Link, redirect } from "@tanstack/react-router"
 import { ChevronDown, ChevronUp, Loader2, Play, X } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
 import {
@@ -280,7 +280,20 @@ function EvalsPage() {
                   subtitle={`Share of verdicts that passed, per version${grid.attempts > 1 ? `; dots are the ${grid.attempts} tries of each question` : ""}. Change compares question by question. Click a cell to read its threads.`}
                   flush
                 >
-                  <Grid grid={grid} open={open} onOpen={toggle} />
+                  <Grid
+                    grid={grid}
+                    open={open}
+                    onOpen={toggle}
+                    checkLink={
+                      agent && rubricId
+                        ? {
+                            agent,
+                            rubric: rubricId,
+                            ...(dataset ? { dataset: dataset.id } : {}),
+                          }
+                        : undefined
+                    }
+                  />
                 </ChartCard>
               </section>
 
@@ -296,7 +309,19 @@ function EvalsPage() {
                   title="Where each question fails"
                   subtitle="Each question's pass rate on each check, per version. A red row is a question the agent cannot answer; a red column is a check nothing passes."
                 >
-                  <QuestionHeatmap grid={grid} onOpen={toggle} />
+                  <QuestionHeatmap
+                    grid={grid}
+                    onOpen={toggle}
+                    checkLink={
+                      agent && rubricId
+                        ? {
+                            agent,
+                            rubric: rubricId,
+                            ...(dataset ? { dataset: dataset.id } : {}),
+                          }
+                        : undefined
+                    }
+                  />
                 </ChartCard>
               </section>
 
@@ -613,14 +638,19 @@ function strips(
   )
 }
 
+/** Where a check's name leads: its editor on the Checks page, with the same agent and set of checks. */
+type CheckLink = { agent: string; dataset?: string; rubric: string }
+
 function Grid({
   grid,
   open,
   onOpen,
+  checkLink,
 }: {
   grid: EvalGrid
   open: Cell | null
   onOpen: (c: Cell) => void
+  checkLink?: CheckLink
 }) {
   const b = grid.versions[1]
   const dots = useMemo(() => strips(grid), [grid])
@@ -653,9 +683,20 @@ function Grid({
             return (
               <tr key={c.id} className="align-top">
                 <td className="w-[30%] border-t border-primary-border px-4 py-3">
-                  <div className="text-[13px] font-medium text-ink-primary">
-                    {c.label}
-                  </div>
+                  {checkLink ? (
+                    <Link
+                      to="/evals/checks"
+                      search={{ ...checkLink, check: c.id }}
+                      title="Open this check"
+                      className="text-[13px] font-medium text-ink-primary underline-offset-2 hover:underline"
+                    >
+                      {c.label}
+                    </Link>
+                  ) : (
+                    <div className="text-[13px] font-medium text-ink-primary">
+                      {c.label}
+                    </div>
+                  )}
                   <div
                     className="mt-1 line-clamp-2 text-ink-tertiary"
                     title={c.sentence}
