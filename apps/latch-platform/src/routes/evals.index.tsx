@@ -27,6 +27,11 @@ import {
 } from "@/components/evals/ui"
 import { CostChart, QuestionHeatmap } from "@/components/evals/charts"
 import { RunDrawer } from "@/components/evals/run-drawer"
+import {
+  ComparePicker,
+  decodeResults,
+  encodeResults,
+} from "@/components/evals/compare-picker"
 import { useEvalsChanged } from "@/components/evals/events"
 import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
 import Drawer from "@/components/ui/drawer"
@@ -89,16 +94,25 @@ function EvalsPage() {
   const rubricId = search.rubric ?? overview?.rubrics[0]?.id
   const runId = search.run ?? dataset?.runs[0]?.runId
   const run = dataset?.runs.find((r) => r.runId === runId)
+  // Any results from any runs; without a choice, every version of one run.
+  const cols = search.cols
+  const columns = useMemo(() => decodeResults(cols), [cols])
 
   const reload = useCallback(() => {
     if (!agent || !dataset || !rubricId || !runId) return setGrid(null)
     setLoading(true)
     void getEvalGridFn({
-      data: { agent, datasetId: dataset.id, rubricId, runId },
+      data: {
+        agent,
+        datasetId: dataset.id,
+        rubricId,
+        runId,
+        ...(columns.length ? { columns } : {}),
+      },
     })
       .then(setGrid)
       .finally(() => setLoading(false))
-  }, [agent, dataset, rubricId, runId])
+  }, [agent, dataset, rubricId, runId, columns])
   useEffect(reload, [reload])
 
   const [history, setHistory] = useState<RunPoint[] | null>(null)
@@ -116,7 +130,12 @@ function EvalsPage() {
     reloadOverview()
     setHistoryTick((t) => t + 1)
     if (finished.kind === "run")
-      set({ run: finished.runId, check: undefined, version: undefined })
+      set({
+        run: finished.runId,
+        cols: undefined,
+        check: undefined,
+        version: undefined,
+      })
     else reload()
   })
   // The Evals agent may have started a run, judged one, or edited checks.
@@ -205,24 +224,32 @@ function EvalsPage() {
                   ))}
                 </Select>
               </Picker>
-              <Picker label="Run">
-                <Select
-                  id="evals-run"
-                  value={runId ?? ""}
-                  onChange={(e) =>
-                    set({
-                      run: e.target.value,
-                      check: undefined,
-                      version: undefined,
-                    })
+              <Picker label="Compare">
+                <ComparePicker
+                  runs={dataset?.runs ?? []}
+                  selected={
+                    grid?.columns.map((c) => ({
+                      runId: c.runId,
+                      version: c.version,
+                    })) ?? []
                   }
-                >
-                  {dataset?.runs.map((r) => (
-                    <option key={r.runId} value={r.runId}>
-                      {runLabel(r)}
-                    </option>
-                  ))}
-                </Select>
+                  labels={grid?.versions ?? []}
+                  runLabel={runLabel}
+                  onChange={(next) =>
+                    "run" in next
+                      ? set({
+                          run: next.run,
+                          cols: undefined,
+                          check: undefined,
+                          version: undefined,
+                        })
+                      : set({
+                          cols: encodeResults(next.results),
+                          check: undefined,
+                          version: undefined,
+                        })
+                  }
+                />
               </Picker>
             </>
           )}
@@ -284,7 +311,17 @@ function EvalsPage() {
           </p>
         )}
 
-        {grid && run && (
+        {grid?.crossRun && (
+          <p className="max-w-[80ch] text-sm text-ink-secondary">
+            These results come from different runs. Part of any difference may
+            be run-to-run noise or a changed world — documents, tools, the model
+            provider — rather than the agent. Each is compared with the baseline
+            only on the questions both answered. For a clean test of a change,
+            run both versions together.
+          </p>
+        )}
+
+        {grid && (run || columns.length > 0) && (
           <div className="evals-sections gap-10 xl:grid xl:grid-cols-[168px_minmax(0,1fr)]">
             <SectionNav sections={SECTIONS} />
             <div className="min-w-0 space-y-10">
@@ -563,6 +600,45 @@ function runLabel(r: {
     .join(" · ")
 }
 
+/** Against the baseline, in a cell: questions that got better and worse. */
+function ChangeVsBaseline({
+  change,
+}: {
+  change: EvalGrid["checks"][number]["compare"] | undefined
+}) {
+  if (!change || !change.pairs)
+    return <div className="mt-1.5 text-ink-tertiary">no shared questions</div>
+  return (
+    <div
+      className="mt-1.5 whitespace-nowrap"
+      title={`vs baseline on ${change.pairs} shared questions · p = ${change.p.toFixed(3)}`}
+    >
+      <span
+        className={
+          change.improved
+            ? "text-emerald-700 dark:text-emerald-400"
+            : "text-ink-tertiary"
+        }
+      >
+        +{change.improved}
+      </span>{" "}
+      <span
+        className={
+          change.regressed
+            ? "text-red-600 dark:text-red-400"
+            : "text-ink-tertiary"
+        }
+      >
+        −{change.regressed}
+      </span>
+      <span className="text-ink-tertiary">
+        {" "}
+        vs baseline{change.p < 0.05 ? " · real" : ""}
+      </span>
+    </div>
+  )
+}
+
 const SECTIONS = [
   { id: "summary", label: "Summary" },
   { id: "checks", label: "Checks" },
@@ -707,12 +783,17 @@ function Grid({
         <thead>
           <tr className="text-left text-ink-secondary">
             <th className="px-4 py-2.5 font-medium">Check</th>
-            {grid.versions.map((v) => (
+            {grid.versions.map((v, i) => (
               <th key={v} className="px-3 py-2.5 font-medium">
                 {v}
+                {i === 0 && grid.versions.length > 2 && (
+                  <span className="ml-1.5 font-normal text-ink-tertiary">
+                    baseline
+                  </span>
+                )}
               </th>
             ))}
-            {b && (
+            {b && grid.versions.length === 2 && (
               <th
                 className="px-3 py-2.5 font-medium"
                 title="Question by question: how many passed more often (+) or less often (−)"
@@ -793,11 +874,14 @@ function Grid({
                             {cell.allPassed} of {cell.inputs} every time
                           </div>
                         )}
+                        {i > 0 && grid.versions.length > 2 && (
+                          <ChangeVsBaseline change={c.changes[version]} />
+                        )}
                       </button>
                     </td>
                   )
                 })}
-                {b && (
+                {b && grid.versions.length === 2 && (
                   <td className="border-t border-primary-border px-3 py-3.5">
                     {c.compare && c.compare.pairs ? (
                       <>
