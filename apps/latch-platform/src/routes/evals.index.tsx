@@ -259,7 +259,7 @@ function EvalsPage() {
         )}
 
         {grid && run && (
-          <div className="gap-10 xl:grid xl:grid-cols-[168px_minmax(0,1fr)]">
+          <div className="evals-sections gap-10 xl:grid xl:grid-cols-[168px_minmax(0,1fr)]">
             <SectionNav sections={SECTIONS} />
             <div className="min-w-0 space-y-10">
               <section id="summary" className="scroll-mt-6 space-y-4">
