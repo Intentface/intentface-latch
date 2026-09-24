@@ -178,7 +178,7 @@ function EvalsPage() {
                     })
                   }
                 >
-                  {overview?.datasets.map((d) => (
+                  {overview.datasets.map((d) => (
                     <option key={d.id} value={d.id}>
                       {d.name} ({d.inputs})
                     </option>
@@ -191,7 +191,7 @@ function EvalsPage() {
                   value={rubricId ?? ""}
                   onChange={(e) => set({ rubric: e.target.value })}
                 >
-                  {overview?.rubrics.map((r) => (
+                  {overview.rubrics.map((r) => (
                     <option key={r.id} value={r.id}>
                       {r.id}
                     </option>
