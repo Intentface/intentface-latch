@@ -5,6 +5,7 @@ import type { AppMessage } from "@intentface/latch-core";
 import { loadHistoryFn } from "@/lib/server";
 import { Chat } from "@/components/chat";
 import { cn } from "@/lib/utils";
+import { notifyEvalsChanged } from "@/components/evals/events";
 
 /**
  * The Evals agent as a tab in a dock at the bottom right of the Evals pages —
@@ -182,6 +183,7 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
               initialMessages={conversation.history}
               embedded
               starters={startersFor(context)}
+              onTurnFinished={notifyEvalsChanged}
               {...(pending ? { autoSend: pending } : {})}
             />
           ) : (

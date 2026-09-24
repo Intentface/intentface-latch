@@ -6,6 +6,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { createQuestionSetFn, getEvalsOverviewFn } from "@/lib/evals-server";
 import type { EvalsOverview } from "@/lib/evals-server";
 import { cn } from "@/lib/utils";
+import { useEvalsChanged } from "@/components/evals/events";
 import { Select } from "@/components/ui/select";
 import { EvalsAgentDock, askEvalsAgent } from "@/components/evals/agent-panel";
 import { Sparkles } from "lucide-react";
@@ -64,6 +65,7 @@ export function useOverview(agent: string | undefined) {
     setOverview(null);
     reload();
   }, [reload]);
+  useEvalsChanged(reload);
   return [overview, reload] as const;
 }
 

@@ -27,6 +27,7 @@ import {
   validateEvalsSearch,
   NoEvalsYet,
 } from "@/components/evals/shell"
+import { useEvalsChanged } from "@/components/evals/events"
 
 /**
  * The questions a set asks. A list you can scan — which ones lack a reference
@@ -69,6 +70,11 @@ function QuestionsPage() {
     if (agent && datasetId)
       void getQuestionsFn({ data: { agent, datasetId } }).then(setData)
   }, [agent, datasetId])
+  // The Evals agent may have created or edited this set.
+  useEvalsChanged(() => {
+    if (agent && datasetId)
+      void getQuestionsFn({ data: { agent, datasetId } }).then(setData)
+  })
 
   const selected = search.q
     ? data?.questions.find((x) => x.id === search.q)

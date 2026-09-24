@@ -120,6 +120,7 @@ export function Chat({
   embedded = false,
   starters,
   autoSend,
+  onTurnFinished,
 }: {
   chatId: string
   agent: string
@@ -133,7 +134,11 @@ export function Chat({
   starters?: { label: string; prompt: string }[]
   /** Sent once as the first message when the conversation is empty — "ask the agent to do X" from elsewhere in the app. */
   autoSend?: string
+  /** After each turn settles — the host may need to reload what the turn changed. */
+  onTurnFinished?: () => void
 }) {
+  const onTurnFinishedRef = useRef(onTurnFinished)
+  onTurnFinishedRef.current = onTurnFinished
   const router = useRouter()
   const [deciding, setDeciding] = useState(false)
   // A failed secret write (e.g. not an org admin): shown in the composer form,
@@ -192,7 +197,10 @@ export function Chat({
         return { body: { ...body, id, messages: all, trigger, messageId } }
       },
     }),
-    onFinish: () => router.invalidate(),
+    onFinish: () => {
+      void router.invalidate()
+      onTurnFinishedRef.current?.()
+    },
     // Without this a rejected send is swallowed whole: `sendMessage` only ever
     // added the user bubble to client state, so a failed turn looked like it was
     // accepted until a reload made the message vanish. Surface it instead.

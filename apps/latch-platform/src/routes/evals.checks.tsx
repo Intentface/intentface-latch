@@ -36,6 +36,7 @@ import {
   validateEvalsSearch,
   NoEvalsYet,
 } from "@/components/evals/shell"
+import { useEvalsChanged } from "@/components/evals/events"
 
 /**
  * What gets judged. Two kinds of check, and the page keeps them visibly
@@ -93,6 +94,19 @@ function ChecksPage() {
           })
       )
   }, [agent, rubricId])
+  // The Evals agent may have added or edited checks.
+  useEvalsChanged(() => {
+    if (agent && rubricId)
+      void getChecksFn({ data: { agent, rubricId } }).then(
+        (r) =>
+          r &&
+          setData({
+            ...r.rubric,
+            checks: JSON.parse(r.rubric.checks) as Check[],
+            judges: r.judges,
+          })
+      )
+  })
 
   const selected = search.check
     ? data?.checks.find((x) => x.id === search.check)

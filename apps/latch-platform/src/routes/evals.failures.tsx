@@ -31,6 +31,7 @@ import {
   Field,
   validateEvalsSearch,
 } from "@/components/evals/shell"
+import { useEvalsChanged } from "@/components/evals/events"
 import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
 
 /**
@@ -80,6 +81,8 @@ function FailuresPage() {
     setData(null)
     load()
   }, [load])
+  // The Evals agent may have suggested notes, grouped them or triaged a mode.
+  useEvalsChanged(load)
 
   const startReading = async () => {
     if (!agent) return

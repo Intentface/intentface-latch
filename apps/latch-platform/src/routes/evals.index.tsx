@@ -27,6 +27,7 @@ import {
 } from "@/components/evals/ui"
 import { CostChart, QuestionHeatmap } from "@/components/evals/charts"
 import { RunDrawer } from "@/components/evals/run-drawer"
+import { useEvalsChanged } from "@/components/evals/events"
 import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
 import Drawer from "@/components/ui/drawer"
 import {
@@ -117,6 +118,12 @@ function EvalsPage() {
     if (finished.kind === "run")
       set({ run: finished.runId, check: undefined, version: undefined })
     else reload()
+  })
+  // The Evals agent may have started a run, judged one, or edited checks.
+  useEvalsChanged(() => {
+    reload()
+    setHistoryTick((t) => t + 1)
+    jobs.refresh()
   })
   const judgeAgain = async () => {
     if (!agent || !dataset || !rubricId || !runId) return
