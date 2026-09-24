@@ -161,6 +161,27 @@ describe("jobs", () => {
   });
 });
 
+describe("unit order", () => {
+  it("interleaves versions question by question, so they answer side by side", async () => {
+    const { unitsOf } = await import("./jobs");
+    const units = unitsOf(
+      {
+        versions: [
+          { label: "live", ref: "a", fingerprint: "A" },
+          { label: "@draft", ref: "a@draft", fingerprint: "B" },
+        ],
+        inputIds: ["1", "2"],
+        repeats: 2,
+      },
+      inputs,
+    );
+    expect(units.map((u) => `${u.input.id}.${u.attempt}.${u.v.label}`)).toEqual([
+      "1.0.live", "1.0.@draft", "1.1.live", "1.1.@draft",
+      "2.0.live", "2.0.@draft", "2.1.live", "2.1.@draft",
+    ]);
+  });
+});
+
 describe("estimates", () => {
   it("refuses to guess without history", () => {
     expect(estimateRun({ units: 12, askedChecks: 3, history: [] })).toMatchObject({ agentRuns: 12, judgeCalls: 12, cost: null });

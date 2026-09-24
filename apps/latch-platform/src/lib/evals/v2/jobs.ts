@@ -97,7 +97,13 @@ export type Unit = { v: EvalJob["versions"][number]; input: Input; attempt: numb
 export function unitsOf(job: Pick<EvalJob, "versions" | "inputIds" | "repeats">, inputs: Input[]): Unit[] {
   const byId = new Map(inputs.map((i) => [i.id, i]));
   const picked = job.inputIds.map((id) => byId.get(id)).filter((i): i is Input => !!i);
-  return job.versions.flatMap((v) => picked.flatMap((input) => Array.from({ length: job.repeats }, (_, attempt) => ({ v, input, attempt }))));
+  // Question-major, versions interleaved: the versions answer each question
+  // side by side, at the same moment, under the same conditions — which is
+  // the whole point of running them together. Version-major would run all of
+  // one version, then all of the other, minutes apart.
+  return picked.flatMap((input) =>
+    Array.from({ length: job.repeats }, (_, attempt) => job.versions.map((v) => ({ v, input, attempt }))).flat(),
+  );
 }
 
 const unitKey = (version: string, inputId: string, attempt: number) => `${version}|${inputId}|${attempt}`;
