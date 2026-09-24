@@ -11,8 +11,8 @@ import { cn } from "@/lib/utils";
 /** A card: flat, bordered, no shadow — the surface lifts off the ground by tone and a hairline. */
 export const CARD = "rounded-lg border border-primary-border bg-primary-bg";
 
-/** The page ground the cards sit on. */
-export const GROUND = "bg-[var(--eval-ground)] min-h-full";
+/** The page wrapper. The app's own background, like every other page. */
+export const GROUND = "min-h-full";
 
 export function SectionTitle({ id, children, aside }: { id: string; children: React.ReactNode; aside?: React.ReactNode }) {
   return (

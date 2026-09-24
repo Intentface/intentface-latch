@@ -48,8 +48,6 @@
   --eval-bad: oklch(0.83 0.1 25);
   --eval-mid: oklch(0.95 0.004 250);
   --eval-good: oklch(0.84 0.09 160);
-  /* The ground the Evals cards sit on — visibly darker than a white card. */
-  --eval-ground: oklch(0.962 0.003 250);
   --con: 0.3;
 
   /* State deltas (OKLCH L offsets, scale with --con).
@@ -146,7 +144,6 @@
   --eval-bad: oklch(0.42 0.11 25);
   --eval-mid: oklch(0.27 0.004 250);
   --eval-good: oklch(0.43 0.08 160);
-  --eval-ground: oklch(from var(--bg) calc(l - 0.02) c h);
 
   /* State deltas flip positive in dark — surfaces sit far from
      white, so states lift toward white instead of sinking. */
