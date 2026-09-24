@@ -156,7 +156,10 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   /**
    * Rebuild a `Principal` from the opaque identity blob a run stored, for
    * resume/cron (no request). Default: passthrough (`identity as P`). Override to
-   * re-hydrate (e.g. re-fetch fresh identity) or validate on resume.
+   * re-hydrate (e.g. re-fetch fresh identity) or validate on resume — return
+   * `null` to refuse an identity that is no longer valid (see
+   * `ReconstructPrincipal`). Runs before a cron occurrence is consumed, so keep
+   * it well under `durability.leaseTtlMs`.
    */
   reconstructPrincipal?: ReconstructPrincipal<P>;
   /**
@@ -330,6 +333,15 @@ export interface HandleChatInput<P> {
   turnContext?: unknown;
 }
 
+/** What one `runDue` pass did — see `Runtime.runDue` for each counter. */
+export interface RunDueResult {
+  fired: number;
+  errors: number;
+  skipped: number;
+  parked: number;
+  rejected: number;
+}
+
 export interface Runtime<P> {
   /** The agents available to the caller (code-declared + dynamic) — for a picker. */
   listAgents(principal: P): Promise<AgentInfo[]>;
@@ -447,7 +459,7 @@ export interface Runtime<P> {
    * still runs. Safe to fire on every node concurrently (claims are atomic).
    */
   cron(opts?: { now?: number; maxAttempts?: number }): Promise<{
-    due: { fired: number; errors: number; skipped: number; parked: number };
+    due: RunDueResult;
     reaped: RunRecord[];
     resumed: RunOutcome[];
     /** Phase failures (`"runDue: …"` / `"sweep: …"`) — reported, never thrown. */
@@ -548,10 +560,13 @@ export interface Runtime<P> {
    * is paying for nothing, and for a one-shot schedule there is no later
    * occurrence to notice. Chats awaiting a human are queryable via
    * `ChatRecord.lastRunStatus`.
+   *
+   * `rejected` counts occurrences whose principal `reconstructPrincipal`
+   * refused (returned `null`): not run, and the schedule is DISABLED rather
+   * than left to refuse on every tick. Not counted in `errors` — nothing broke;
+   * the identity is simply no longer allowed to act.
    */
-  runDue(opts?: {
-    now?: number;
-  }): Promise<{ fired: number; errors: number; skipped: number; parked: number }>;
+  runDue(opts?: { now?: number }): Promise<RunDueResult>;
 }
 
 /** A user's decision on one pending tool-approval request. */
@@ -2793,12 +2808,29 @@ export function createRuntime<P, RC = unknown>(
 
     // System op (no request): rebuild the principal from the run's identity blob.
     const principal = await reconstructPrincipal(run.identity);
-
-    const uiMessages = await storage.loadMessages(principal, run.chatId);
     const lease: RunLease = {
       owner: dur.instanceId,
       fencingToken: run.fencingToken ?? 1,
     };
+    if (principal === null) {
+      // Refused (see `ReconstructPrincipal`): the identity may no longer act, so
+      // nothing below — not even reading its history — runs as it. End the run
+      // instead of returning early with the lease held: an `active` row would be
+      // reaped and re-refused every tick until `maxAttempts`, and a throw here
+      // would abort the rest of `sweep`'s loop. No `onRunFinished`: its meta
+      // carries the principal, and there is none to report.
+      const error = "principal rejected: reconstructPrincipal refused the run's identity";
+      await storage.updateRun(run.id, { status: "errored", error, endedAt: Date.now() }, lease);
+      console.warn(`[resume] run ${run.id} (${run.agent}): ${error}`);
+      const settled = await storage.getRun(runId);
+      return {
+        runId,
+        status: settled?.status ?? "errored",
+        attempt: settled?.attempt ?? run.attempt ?? null,
+      };
+    }
+
+    const uiMessages = await storage.loadMessages(principal, run.chatId);
 
     // What does this run actually need? A crash between the last step's
     // checkpoint and `onFinish`'s `updateRun` leaves a FINISHED turn on an
@@ -2956,14 +2988,14 @@ export function createRuntime<P, RC = unknown>(
   }
 
   async function cron(opts?: { now?: number; maxAttempts?: number }): Promise<{
-    due: { fired: number; errors: number; skipped: number; parked: number };
+    due: RunDueResult;
     reaped: RunRecord[];
     resumed: RunOutcome[];
     errors: string[];
   }> {
     const errors: string[] = [];
     const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
-    let due = { fired: 0, errors: 0, skipped: 0, parked: 0 };
+    let due: RunDueResult = { fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 };
     try {
       due = await runDue({ now: opts?.now });
     } catch (e) {
@@ -3664,15 +3696,34 @@ export function createRuntime<P, RC = unknown>(
 
   async function runDue(opts?: {
     now?: number;
-  }): Promise<{ fired: number; errors: number; skipped: number; parked: number }> {
+  }): Promise<RunDueResult> {
     const now = opts?.now ?? Date.now();
     const claimed = await storage.claimDueSchedules(now, dur.leaseTtlMs, dur.instanceId);
     let fired = 0;
     let errors = 0;
     let skipped = 0;
     let parked = 0;
+    let rejected = 0;
     for (const s of claimed) {
       const next = s.cron ? (config.cron?.(s.cron, now, s.timezone) ?? null) : null;
+      // Rebuild the principal FIRST, because a refusal has to reach the one
+      // write below: `completeSchedule` is fenced by the claim lease and clears
+      // it, so there is no second write in which to disable the schedule. A
+      // refused identity (`null`) is permanent — the owner was removed, the
+      // account is gone — so the schedule is disabled rather than left to refuse
+      // on every tick, which is how a revoked user's schedule stays invisible
+      // forever. A THROW is transient and keeps today's contract: the occurrence
+      // is still consumed, the fire is counted in `errors`, the schedule stays
+      // live. Hosts keep the hook fast (see `reconstructPrincipal`); it now runs
+      // inside the claim window.
+      let principal: P | null = null;
+      let principalError: { error: unknown } | undefined;
+      try {
+        principal = await reconstructPrincipal(s.identity);
+      } catch (error) {
+        principalError = { error };
+      }
+      const refused = !principalError && principal === null;
       // Consume the occurrence BEFORE firing, not after. The claim lease is
       // stamped once (never heartbeated), so while a fire is in flight the row
       // still reads `enabled AND nextRunAt <= now` — and once the lease TTL
@@ -3689,7 +3740,7 @@ export function createRuntime<P, RC = unknown>(
       try {
         await storage.completeSchedule(
           s.id,
-          { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null },
+          { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null && !refused },
           dur.instanceId,
         );
       } catch (e) {
@@ -3700,8 +3751,23 @@ export function createRuntime<P, RC = unknown>(
         errors++;
         continue;
       }
+      if (principalError) {
+        console.error(
+          `[schedule] fire failed for ${s.id} (${s.agent}): reconstructPrincipal threw:`,
+          principalError.error,
+        );
+        errors++;
+        continue;
+      }
+      if (principal === null) {
+        console.warn(
+          `[schedule] ${s.id} (${s.agent}): reconstructPrincipal refused the schedule's ` +
+            `identity — not fired, schedule disabled`,
+        );
+        rejected++;
+        continue;
+      }
       try {
-        const principal = await reconstructPrincipal(s.identity);
         // Parked-predecessor guard: when the LAST fire's chat is still waiting
         // on a human (an undecided approval or tool result), firing again just
         // mints another parked chat and pays for the tokens up to the gate —
@@ -3803,7 +3869,7 @@ export function createRuntime<P, RC = unknown>(
         errors++;
       }
     }
-    return { fired, errors, skipped, parked };
+    return { fired, errors, skipped, parked, rejected };
   }
 
   const self: Runtime<P> = {
