@@ -493,8 +493,19 @@ function SuggestionList({
   const fine = items.filter((s) => s.ok)
   const shown = (filter === "wrong" ? wrong : filter === "fine" ? fine : items)
     .slice()
-    // What went wrong first, then by question number.
-    .sort((a, b) => Number(a.ok) - Number(b.ok) || Number(a.inputId) - Number(b.inputId) || a.inputId.localeCompare(b.inputId))
+    // In question order, as the question set lists them.
+    .sort((a, b) => Number(a.inputId) - Number(b.inputId) || a.inputId.localeCompare(b.inputId))
+  const byQuestion = new Map<string, Suggested[]>()
+  for (const s of shown) {
+    const key = `${s.inputId}|${s.prompt}`
+    byQuestion.set(key, [...(byQuestion.get(key) ?? []), s])
+  }
+  const groups = [...byQuestion].map(([key, answers]) => ({
+    key,
+    inputId: answers[0].inputId,
+    prompt: answers[0].prompt,
+    items: answers.sort((a, b) => Number(a.ok) - Number(b.ok) || (b.ranAt ?? 0) - (a.ranAt ?? 0)),
+  }))
   const chosen = shown.filter((s) => picked.has(s.threadId))
   const allOn = shown.length > 0 && chosen.length === shown.length
 
@@ -519,7 +530,7 @@ function SuggestionList({
         <div className="flex flex-wrap items-baseline gap-3">
           <h2 className="text-sm font-semibold text-ink-primary">To review</h2>
           <span className="text-xs text-ink-tertiary">
-            {items.length} thread{items.length === 1 ? "" : "s"} the evals agent read
+            The evals agent read {items.length} answer{items.length === 1 ? "" : "s"} and says what it thinks went wrong in each
           </span>
           <button
             type="button"
@@ -590,71 +601,110 @@ function SuggestionList({
           )}
         </div>
 
-        <ul className="divide-y divide-primary-border">
-          {shown.map((s) => {
-            const isOpen = expanded === s.threadId
+        {/* Grouped by question: a row is one answer to it — by one version, in one run. */}
+        <ul>
+          {groups.map((g) => {
+            const ids = g.items.map((s) => s.threadId)
+            const groupOn = ids.every((id) => picked.has(id))
+            const wrongHere = g.items.filter((s) => !s.ok).length
             return (
-              <li key={s.threadId} className={cn(isOpen && "bg-primary-bg-hover/40")}>
-                <div className="flex items-center gap-3 px-3 py-2 text-sm">
+              <li key={g.key} className="border-b border-primary-border last:border-b-0">
+                <div className="flex items-start gap-3 bg-primary-bg-hover/40 px-3 py-2.5">
                   <input
                     type="checkbox"
-                    aria-label={`Select #${s.inputId} on ${s.version}`}
-                    checked={picked.has(s.threadId)}
-                    onChange={() => toggle(s.threadId)}
+                    className="mt-1"
+                    aria-label={`Select every answer to question ${g.inputId}`}
+                    checked={groupOn}
+                    onChange={() => {
+                      const next = new Set(picked)
+                      for (const id of ids) {
+                        if (groupOn) next.delete(id)
+                        else next.add(id)
+                      }
+                      setPicked(next)
+                    }}
                   />
-                  <button
-                    type="button"
-                    aria-expanded={isOpen}
-                    onClick={() => setExpanded(isOpen ? null : s.threadId)}
-                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                  >
-                    <span className="w-9 shrink-0 text-xs font-medium text-ink-secondary tabular-nums">#{s.inputId}</span>
-                    <Verdict ok={s.ok} />
-                    <span className={cn("min-w-0 flex-1 text-ink-primary", !isOpen && "truncate")}>
-                      {s.ok ? s.prompt || "Looks fine." : s.text}
-                    </span>
-                    <span className="hidden shrink-0 text-xs text-ink-tertiary sm:inline">
-                      {s.version}
-                      {day(s.ranAt) && ` · ${day(s.ranAt)}`}
-                    </span>
-                    {isOpen ? <ChevronUp className="size-4 shrink-0 text-ink-tertiary" /> : <ChevronDown className="size-4 shrink-0 text-ink-tertiary" />}
-                  </button>
-                </div>
-                {isOpen && (
-                  <div className="space-y-3 pb-3 pr-4 pl-[4.25rem] text-sm">
-                    <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-[5rem_minmax(0,1fr)]">
-                      <dt className="text-xs text-ink-tertiary">Question</dt>
-                      <dd className="text-ink-secondary">{s.prompt || "—"}</dd>
-                      <dt className="text-xs text-ink-tertiary">Why</dt>
-                      <dd className="text-ink-secondary">{s.why || "—"}</dd>
-                    </dl>
-                    <div className="flex flex-wrap items-center gap-2 text-xs">
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void resolve([s.threadId], true)}
-                        className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
-                      >
-                        Accept
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void resolve([s.threadId], false)}
-                        className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
-                      >
-                        Reject
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onOpen(s.threadId)}
-                        className="px-1.5 py-1 text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
-                      >
-                        Read the thread
-                      </button>
-                    </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs text-ink-tertiary">Question {g.inputId}</div>
+                    <div className="text-sm font-medium text-ink-primary">{g.prompt || "—"}</div>
                   </div>
-                )}
+                  <span className="shrink-0 pt-0.5 text-xs text-ink-tertiary tabular-nums">
+                    {g.items.length} answer{g.items.length === 1 ? "" : "s"} read
+                    {wrongHere > 0 && wrongHere < g.items.length && ` · ${wrongHere} went wrong`}
+                  </span>
+                </div>
+                <ul className="divide-y divide-primary-border">
+                  {g.items.map((s) => {
+                    const isOpen = expanded === s.threadId
+                    return (
+                      <li key={s.threadId}>
+                        <div className="flex items-center gap-3 px-3 py-2 text-sm">
+                          <input
+                            type="checkbox"
+                            aria-label={`Select the ${s.version} answer to question ${s.inputId}`}
+                            checked={picked.has(s.threadId)}
+                            onChange={() => toggle(s.threadId)}
+                          />
+                          <button
+                            type="button"
+                            aria-expanded={isOpen}
+                            onClick={() => setExpanded(isOpen ? null : s.threadId)}
+                            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                          >
+                            <span className="w-28 shrink-0 text-xs text-ink-secondary" title="Which version answered, and when it ran">
+                              <span className="font-medium text-ink-primary">{s.version}</span>
+                              {day(s.ranAt) && <span className="text-ink-tertiary"> · {day(s.ranAt)}</span>}
+                            </span>
+                            <Verdict ok={s.ok} />
+                            <span className={cn("min-w-0 flex-1 text-ink-primary", !isOpen && "truncate")}>
+                              {s.ok ? s.text || "Nothing went wrong." : s.text}
+                            </span>
+                            {isOpen ? (
+                              <ChevronUp className="size-4 shrink-0 text-ink-tertiary" />
+                            ) : (
+                              <ChevronDown className="size-4 shrink-0 text-ink-tertiary" />
+                            )}
+                          </button>
+                        </div>
+                        {isOpen && (
+                          <div className="space-y-3 pr-4 pb-3 pl-[10.5rem] text-sm">
+                            {s.why && (
+                              <p className="text-ink-secondary">
+                                <span className="text-xs text-ink-tertiary">Why: </span>
+                                {s.why}
+                              </p>
+                            )}
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void resolve([s.threadId], true)}
+                                className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
+                              >
+                                Accept
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void resolve([s.threadId], false)}
+                                className="rounded-md px-2.5 py-1 text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary disabled:opacity-50"
+                              >
+                                Reject
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onOpen(s.threadId)}
+                                className="px-1.5 py-1 text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                              >
+                                Read the conversation
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
               </li>
             )
           })}
