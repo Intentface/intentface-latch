@@ -111,16 +111,13 @@ export function EvalsShell({
             </Link>
           ))}
         </nav>
-        {agent && (
-          <>
-            <span aria-hidden className="bg-primary-border mx-1 h-5 w-px" />
-            <EvalsAgentDock
-              context={{ agent, ...(search.dataset ? { questionSet: search.dataset } : {}), ...(search.run ? { run: search.run } : {}), ...(search.rubric ? { checks: search.rubric } : {}) }}
-            />
-          </>
-        )}
         </div>
       </div>
+      {agent && (
+        <EvalsAgentDock
+          context={{ agent, ...(search.dataset ? { questionSet: search.dataset } : {}), ...(search.run ? { run: search.run } : {}), ...(search.rubric ? { checks: search.rubric } : {}) }}
+        />
+      )}
       <div className="flex flex-wrap items-end gap-2">
         <Picker label="Agent">
           <Select

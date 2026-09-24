@@ -7,11 +7,12 @@ import { Chat } from "@/components/chat";
 import { cn } from "@/lib/utils";
 
 /**
- * The Evals agent as a tab in the Evals header — the first thing in a dock of
- * things you have open, beside the fixed page links.
+ * The Evals agent as a tab in a dock at the bottom right of the Evals pages —
+ * the first thing in a strip of things you have open, out of the way of the
+ * page links and the controls.
  *
  * The dock is the Tabs primitive: an open-ended, closable collection with at
- * most one showing. Its panel floats under its own tab by default — non-modal,
+ * most one showing. Its panel opens upward from its own tab by default — non-modal,
  * so the page stays usable behind it and the grid and the answer can be read
  * together — or pins to the side of the page when you want it to stay put.
  * Closing the tab (×) removes it; hiding (the chevron, or Esc) keeps the tab
@@ -112,9 +113,9 @@ function startersFor(c: PanelContext) {
 }
 
 const tabClass =
-  "border-primary-border text-ink-secondary hover:text-ink-primary data-[selected]:bg-primary-bg data-[selected]:text-ink-primary focus-visible:ring-ring flex h-8 cursor-default items-center gap-1.5 rounded-lg border pr-1 pl-2.5 text-sm outline-none focus-visible:ring-2";
+  "border-primary-border bg-primary-bg text-ink-secondary hover:text-ink-primary data-[selected]:text-ink-primary data-[selected]:border-primary-border-active focus-visible:ring-ring flex h-9 cursor-default items-center gap-1.5 rounded-full border pr-1.5 pl-3.5 text-sm shadow-md outline-none focus-visible:ring-2";
 
-/** The dock: the strip for the Evals header, and wherever its panel is showing. */
+/** The dock: the strip at the bottom right, and wherever its panel is showing. */
 export function EvalsAgentDock({ context }: { context: PanelContext }) {
   const [dock, update] = useDock();
   const open = dock.items.includes(AGENT_TAB);
@@ -171,13 +172,17 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
       onItemsChange={(items) => update({ items, ...(items.length ? {} : { value: null }) })}
       value={dock.value}
       onValueChange={(value) => update({ value })}
-      className="flex items-center gap-1.5"
+      className={cn(
+        "fixed bottom-4 z-40 flex items-center gap-1.5",
+        // Beside a pinned panel rather than under it.
+        dock.pinned && showing ? "right-[468px]" : "right-4",
+      )}
     >
       {!open && (
         <button
           type="button"
           onClick={ask}
-          className="border-primary-border bg-primary-bg text-ink-primary hover:bg-primary-bg-hover flex h-8 items-center gap-1.5 rounded-lg border px-3 text-sm"
+          className="border-primary-border bg-primary-bg text-ink-primary hover:bg-primary-bg-hover flex h-9 items-center gap-1.5 rounded-full border px-4 text-sm shadow-md"
         >
           <Sparkles className="size-4" /> Ask the evals agent
         </button>
@@ -217,12 +222,12 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
         )
       ) : (
         <Tabs.Portal>
-          <Tabs.Positioner side="bottom" align="end" sideOffset={8} collisionPadding={8} className="z-40">
+          <Tabs.Positioner side="top" align="end" sideOffset={8} collisionPadding={8} className="z-40">
             <Tabs.Popup
               aria-label="Evals agent"
               className={cn(
-                "border-primary-border bg-primary-bg flex h-[min(760px,calc(100vh-7rem))] w-[min(460px,calc(100vw-1rem))] flex-col overflow-hidden rounded-xl border shadow-lg",
-                "origin-top-right transition-[opacity,scale] duration-150 data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0",
+                "border-primary-border bg-primary-bg flex h-[min(720px,calc(100vh-6rem))] w-[min(460px,calc(100vw-1rem))] flex-col overflow-hidden rounded-xl border shadow-lg",
+                "origin-bottom-right transition-[opacity,scale] duration-150 data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0",
               )}
             >
               {header}
