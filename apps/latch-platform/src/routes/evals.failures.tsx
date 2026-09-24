@@ -528,10 +528,8 @@ function SuggestionList({
     <section id="to-review" className="scroll-mt-4 space-y-3">
       <div className="space-y-1">
         <div className="flex flex-wrap items-baseline gap-3">
-          <h2 className="text-sm font-semibold text-ink-primary">To review</h2>
-          <span className="text-xs text-ink-tertiary">
-            The evals agent read {items.length} answer{items.length === 1 ? "" : "s"} and says what it thinks went wrong in each
-          </span>
+          <h2 className="text-sm font-semibold text-ink-primary">Is the evals agent right?</h2>
+          <span className="text-xs text-ink-tertiary tabular-nums">{items.length} to check</span>
           <button
             type="button"
             onClick={onReviewAll}
@@ -540,10 +538,12 @@ function SuggestionList({
             Review one by one
           </button>
         </div>
-        <p className="max-w-3xl text-xs text-ink-tertiary">
-          Accepting makes it your note on that thread, as if you had written it: it counts toward the
-          patterns in step 2. It changes nothing else — not the agent, the checks or the scores.
-          Rejecting drops it, and the agent will not suggest it again.
+        <p className="max-w-3xl text-sm text-ink-secondary">
+          {agent} answered these test questions in your eval runs. The evals agent read the
+          conversations and wrote down what it thinks went wrong in each. Check that it read them
+          right: <b className="font-medium text-ink-primary">accept</b> if you agree,{" "}
+          <b className="font-medium text-ink-primary">reject</b> if it got it wrong. Only what you
+          accept is used to find patterns — so a misreading never decides what gets fixed.
         </p>
       </div>
 
