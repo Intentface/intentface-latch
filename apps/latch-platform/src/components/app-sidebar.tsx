@@ -6,6 +6,7 @@ import {
   Building2,
   CalendarClock,
   Check,
+  ChevronDown,
   ChevronsUpDown,
   FlaskConical,
   LogOut,
@@ -20,7 +21,7 @@ import {
 } from "lucide-react";
 import { DisplaySettingsPanel } from "@/components/display-settings";
 import { Dialog } from "@/components/ui/dialog";
-import { Sidebar } from "@/components/ui/sidebar";
+import { Nav } from "@intentface/chat/nav";
 import { listAgentsFn, recentChatsFn } from "@/lib/server";
 import { AgentPickerDialog, type PickableAgent } from "@/components/agent-picker-dialog";
 import { authClient, signOut, useSession } from "@/lib/auth-client";
@@ -40,19 +41,49 @@ import {
 
 type NavItem = { to: string; label: string; icon: ComponentType<{ className?: string }> };
 
-const NAV: NavItem[] = [
+const NAV_BEFORE_EVALS: NavItem[] = [
   { to: "/chat", label: "Chats", icon: MessageSquare },
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/runs", label: "Runs", icon: Activity },
   { to: "/observability", label: "Observability", icon: Telescope },
-  { to: "/evals", label: "Evals", icon: FlaskConical },
+];
+const EVALS_PAGES: { to: "/evals" | "/evals/failures" | "/evals/questions" | "/evals/checks"; label: string }[] = [
+  { to: "/evals", label: "Results" },
+  { to: "/evals/failures", label: "Failures" },
+  { to: "/evals/questions", label: "Questions" },
+  { to: "/evals/checks", label: "Checks" },
+];
+const NAV_AFTER_EVALS: NavItem[] = [
   { to: "/schedules", label: "Schedules", icon: CalendarClock },
   { to: "/connections", label: "Connections", icon: Plug },
   { to: "/tools", label: "Tools", icon: Wrench },
   { to: "/members", label: "Members", icon: Users },
 ];
 
-export function AppSidebar() {
+/**
+ * One row style for leaves and group headings alike — in a sidebar they are
+ * the same thing you click; the only visible difference is the chevron. The
+ * explicit height is load-bearing (14px text has a fractional line-height),
+ * and no `truncate` on the row: overflow would clip the rail's pseudo-elements.
+ */
+const rowClass = [
+  "group/row flex h-8 shrink-0 cursor-pointer select-none items-center gap-2 rounded-md px-2 text-md/none no-underline",
+  "text-ink-secondary transition-colors hover:bg-base-bg-hover hover:text-ink-primary",
+  "focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-ink-primary",
+  "data-[active]:bg-base-bg-hover data-[active]:text-ink-primary",
+  "[&_svg]:size-4 [&_svg]:shrink-0",
+].join(" ");
+
+/** The disclosure arrow — this sidebar's convention, not the widget's. It turns with its group. */
+const Chevron = () => <ChevronDown className="text-ink-tertiary ml-auto !size-3.5 transition-transform group-data-[closed]/row:-rotate-90" />;
+
+/**
+ * What the sidebar holds: the header with its collapse control, New chat, the
+ * navigation tree and recent threads, and the account menu. The frame around
+ * it — collapse, hover-peek, resizing — is the Shell's (see app-shell.tsx);
+ * on a phone the same content sits in a drawer.
+ */
+export function AppSidebarContent({ trigger }: { trigger?: React.ReactNode }) {
   const { data: session, isPending } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [chats, setChats] = useState<
@@ -97,96 +128,109 @@ export function AppSidebar() {
     };
   }, [session, chatKey]);
 
+  // Groups: Threads open by default; Evals opens whenever you are on an Evals page.
+  const onEvals = pathname === "/evals" || pathname.startsWith("/evals/");
+  const [expanded, setExpanded] = useState<string[]>(() => ["threads", ...(onEvals ? ["evals"] : [])]);
+  useEffect(() => {
+    if (onEvals) setExpanded((e) => (e.includes("evals") ? e : [...e, "evals"]));
+  }, [onEvals]);
+
+  const active = (to: string) => pathname === to || pathname.startsWith(`${to}/`);
+  const item = ({ to, label, icon: Icon }: NavItem) => (
+    <Nav.Item key={to} value={to} active={active(to)} className={rowClass} render={<Link to={to} />}>
+      <Nav.Icon>
+        <Icon />
+      </Nav.Icon>
+      <Nav.Label className="min-w-0 truncate">{label}</Nav.Label>
+    </Nav.Item>
+  );
+
   return (
-    <Sidebar>
-      <Sidebar.Header className="flex-row items-center justify-between">
-        <Link to="/" className="inline-flex px-1">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 pr-2 pl-3">
+        <Link to="/" className="inline-flex">
           <LatchLogo className="h-7 w-auto" />
         </Link>
-        <Sidebar.Trigger />
-      </Sidebar.Header>
+        {trigger}
+      </div>
 
-      <Sidebar.Content className="px-2">
-        {session && (
-          <Sidebar.Group>
-            <Sidebar.Menu>
-              <Sidebar.MenuItem>
-                <Sidebar.MenuButton
-                  isActive={pathname === "/chat"}
-                  onClick={openPicker}
-                >
-                  <Plus />
-                  <span>New Chat</span>
-                </Sidebar.MenuButton>
-              </Sidebar.MenuItem>
-            </Sidebar.Menu>
-          </Sidebar.Group>
-        )}
+      {session && (
+        <Nav.Root
+          aria-label="Main"
+          guide="none"
+          expanded={expanded}
+          onExpandedChange={setExpanded}
+          render={<nav />}
+          className="app-nav flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto px-2 pb-2"
+        >
+          <Nav.List className="flex flex-col gap-0.5">
+            <Nav.Item value="new-chat" active={pathname === "/chat"} className={rowClass} onClick={openPicker}>
+              <Nav.Icon>
+                <Plus />
+              </Nav.Icon>
+              <Nav.Label className="min-w-0 truncate">New Chat</Nav.Label>
+            </Nav.Item>
 
-        {session && (
-          <Sidebar.Group>
-            <Sidebar.Menu>
-              {NAV.map(({ to, label, icon: Icon }) => (
-                <Sidebar.MenuItem key={to}>
-                  <Sidebar.MenuButton
-                    isActive={pathname === to || pathname.startsWith(`${to}/`)}
-                    render={
-                      <Link to={to}>
-                        <Icon />
-                        <span>{label}</span>
-                      </Link>
-                    }
-                  />
-                </Sidebar.MenuItem>
-              ))}
-            </Sidebar.Menu>
-          </Sidebar.Group>
-        )}
+            <div aria-hidden className="h-3" />
 
-        {session && chats.length > 0 && (
-          <Sidebar.Group>
-            <Sidebar.GroupLabel>Threads</Sidebar.GroupLabel>
-            <Sidebar.GroupContent>
-              <Sidebar.Menu>
-                {chats.map((c) => (
-                  <Sidebar.MenuItem key={c.id}>
-                    <Sidebar.MenuButton
-                      isActive={pathname === `/chat/${c.id}`}
-                      render={
-                        <Link
-                          to="/chat/$chatId"
-                          params={{ chatId: c.id }}
-                          search={{ agent: undefined }}
-                        >
-                          <span className="flex-1 truncate">{c.title?.trim() || c.agent}</span>
-                          {c.lastRunStatus === "awaiting_input" && (
-                            <>
-                              {/* Part of the LINK's accessible name — an
-                                  aria-label on a bare span never reaches it. */}
-                              <span className="sr-only">— waiting for your input</span>
-                              <span
-                                aria-hidden
-                                className="size-1.5 shrink-0 rounded-full bg-amber-500"
-                                title="Waiting for your input"
-                              />
-                            </>
-                          )}
-                        </Link>
-                      }
-                    />
-                  </Sidebar.MenuItem>
+            {NAV_BEFORE_EVALS.map(item)}
+            <Nav.Group value="evals">
+              <Nav.Trigger active={onEvals && !expanded.includes("evals")} className={rowClass}>
+                <Nav.Icon>
+                  <FlaskConical />
+                </Nav.Icon>
+                <Nav.Label className="min-w-0 truncate">Evals</Nav.Label>
+                <Chevron />
+              </Nav.Trigger>
+              <Nav.List guide="rail" className="flex flex-col gap-0.5">
+                {EVALS_PAGES.map((p) => (
+                  <Nav.Item key={p.to} value={p.to} active={pathname === p.to} className={rowClass} render={<Link to={p.to} />}>
+                    <Nav.Label className="min-w-0 truncate">{p.label}</Nav.Label>
+                  </Nav.Item>
                 ))}
-              </Sidebar.Menu>
-            </Sidebar.GroupContent>
-          </Sidebar.Group>
-        )}
-      </Sidebar.Content>
+              </Nav.List>
+            </Nav.Group>
+            {NAV_AFTER_EVALS.map(item)}
+
+            {chats.length > 0 && (
+              <Nav.Group value="threads" className="mt-3">
+                <Nav.Trigger className={rowClass}>
+                  <Nav.Label className="text-ink-tertiary min-w-0 truncate text-xs font-medium">Threads</Nav.Label>
+                  <Chevron />
+                </Nav.Trigger>
+                <Nav.List className="flex flex-col gap-0.5">
+                  {chats.map((c) => (
+                    <Nav.Item
+                      key={c.id}
+                      value={`chat:${c.id}`}
+                      active={pathname === `/chat/${c.id}`}
+                      className={rowClass}
+                      render={<Link to="/chat/$chatId" params={{ chatId: c.id }} search={{ agent: undefined }} />}
+                    >
+                      <Nav.Label className="min-w-0 flex-1 truncate">{c.title?.trim() || c.agent}</Nav.Label>
+                      {c.lastRunStatus === "awaiting_input" && (
+                        <>
+                          {/* Part of the LINK's accessible name — an
+                              aria-label on a bare span never reaches it. */}
+                          <span className="sr-only">— waiting for your input</span>
+                          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-amber-500" title="Waiting for your input" />
+                        </>
+                      )}
+                    </Nav.Item>
+                  ))}
+                </Nav.List>
+              </Nav.Group>
+            )}
+          </Nav.List>
+        </Nav.Root>
+      )}
+      {!session && <div className="flex-1" />}
 
       {pickerOpen && pickerAgents !== null && (
         <AgentPickerDialog agents={pickerAgents} onClose={() => setPickerOpen(false)} />
       )}
 
-      <Sidebar.Footer>
+      <div className="flex shrink-0 flex-col gap-2 p-2">
         {isPending ? null : session ? (
           <AccountMenu
             email={session.user.email}
@@ -198,20 +242,15 @@ export function AppSidebar() {
             <Button render={<Link to="/login" />} size="sm" className="min-w-0 flex-1">
               Sign in
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Settings"
-              onClick={() => setSettingsOpen(true)}
-            >
+            <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => setSettingsOpen(true)}>
               <SettingsIcon className="size-4" />
             </Button>
           </div>
         )}
         <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
         {session && <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />}
-      </Sidebar.Footer>
-    </Sidebar>
+      </div>
+    </div>
   );
 }
 

@@ -132,7 +132,6 @@
 
   --radius: 8px;
 
-  --sidebar-width: 224px;
   --thread-width: 672px;
 }
 
@@ -479,4 +478,43 @@
 .dark .shiki,
 .dark .shiki span {
   color: var(--shiki-dark);
+}
+
+/* ─── App sidebar nav (Nav primitive) ───────────────────────────────────────
+   After the @intentface/chat Nav reference: nested lists indent under their
+   parent's icon, animate open and closed, and draw a rail down their left
+   edge. The rail lives in the list's padding, not the row's, so an active
+   row's background never covers it. */
+.app-nav {
+  --rail: color-mix(in oklch, var(--color-ink-tertiary) 45%, transparent);
+}
+.app-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
+  overflow: hidden;
+  opacity: 1;
+  transition: height 200ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease-out;
+}
+.app-nav [data-nav-list][data-starting-style],
+.app-nav [data-nav-list][data-ending-style] { height: 0; opacity: 0; }
+.app-nav [data-nav-list] > * { flex-shrink: 0; }
+.app-nav [data-nav-list][data-indent] {
+  --nav-row: 2rem;
+  margin-top: 2px;
+  margin-left: 15px;
+  padding-left: 7px;
+}
+.app-nav [data-nav-list][data-rail] > * { position: relative; overflow: visible; }
+.app-nav [data-nav-list][data-rail] > *::before,
+.app-nav [data-nav-list][data-rail] > *::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  border-color: var(--rail);
+  border-left-width: 1px;
+}
+.app-nav [data-nav-list][data-rail] > *::before { top: -2px; width: 6px; height: calc(var(--nav-row) / 2 + 2px); }
+.app-nav [data-nav-list][data-rail] > *::after { top: calc(var(--nav-row) / 2 - 6px); bottom: -2px; }
+.app-nav [data-nav-list][data-rail] > *:last-child::after { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .app-nav [data-nav-group] > [data-nav-list] { transition: none; }
 }
