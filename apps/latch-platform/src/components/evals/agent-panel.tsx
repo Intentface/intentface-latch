@@ -87,6 +87,14 @@ function useConversation(agent: string, active: boolean) {
   return { chatId, history, fresh };
 }
 
+/**
+ * Ask the Evals agent something from anywhere on the Evals pages: opens its
+ * tab and sends the prompt as the first message of a new conversation.
+ */
+export function askEvalsAgent(prompt: string) {
+  window.dispatchEvent(new CustomEvent("evals:ask", { detail: { prompt } }));
+}
+
 export type PanelContext = { agent: string; questionSet?: string; run?: string; checks?: string };
 
 function startersFor(c: PanelContext) {
@@ -124,6 +132,19 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
 
   const ask = () => update({ items: open ? dock.items : [...dock.items, AGENT_TAB], value: AGENT_TAB });
 
+  // "Ask the evals agent to …" from elsewhere: a new conversation that opens with the request.
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    const onAsk = (e: Event) => {
+      const prompt = (e as CustomEvent<{ prompt: string }>).detail.prompt;
+      conversation.fresh();
+      setPending(prompt);
+      ask();
+    };
+    window.addEventListener("evals:ask", onAsk);
+    return () => window.removeEventListener("evals:ask", onAsk);
+  });
+
   const header = (
     <div className="border-primary-border flex items-center gap-1.5 border-b px-3 py-2">
       <Sparkles className="text-ink-secondary size-4" />
@@ -131,7 +152,13 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
         <div className="text-ink-primary text-sm font-medium">Evals agent</div>
         <div className="text-ink-tertiary truncate text-xs">On {context.agent} · it suggests, you decide</div>
       </div>
-      <IconButton label="New conversation" onClick={conversation.fresh}>
+      <IconButton
+        label="New conversation"
+        onClick={() => {
+          setPending(null);
+          conversation.fresh();
+        }}
+      >
         <SquarePen className="size-4" />
       </IconButton>
       <IconButton label={dock.pinned ? "Float over the page" : "Pin beside the page"} onClick={() => update({ pinned: !dock.pinned })}>
@@ -155,6 +182,7 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
               initialMessages={conversation.history}
               embedded
               starters={startersFor(context)}
+              {...(pending ? { autoSend: pending } : {})}
             />
           ) : (
             <div className="p-4">

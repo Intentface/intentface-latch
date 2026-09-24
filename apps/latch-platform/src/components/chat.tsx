@@ -119,6 +119,7 @@ export function Chat({
   initialMessages,
   embedded = false,
   starters,
+  autoSend,
 }: {
   chatId: string
   agent: string
@@ -130,6 +131,8 @@ export function Chat({
   embedded?: boolean
   /** Prompts offered while the chat is empty; a click sends one as the first message. */
   starters?: { label: string; prompt: string }[]
+  /** Sent once as the first message when the conversation is empty — "ask the agent to do X" from elsewhere in the app. */
+  autoSend?: string
 }) {
   const router = useRouter()
   const [deciding, setDeciding] = useState(false)
@@ -542,6 +545,14 @@ export function Chat({
     },
     [clearSelections, selections, sendMessage, supersedePendingApprovals]
   )
+
+  // Sent once, and only into an empty conversation: a reload must not repeat it.
+  const autoSent = useRef(false)
+  useEffect(() => {
+    if (!autoSend || autoSent.current || messages.length > 0) return
+    autoSent.current = true
+    void submitMessage(autoSend, [])
+  }, [autoSend, messages.length, submitMessage])
 
   const answerQuestions = useCallback(
     (answers: ComposerAnswerEntry[]) => {

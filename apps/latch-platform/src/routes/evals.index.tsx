@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { createFileRoute, Link, redirect } from "@tanstack/react-router"
+import {
+  createFileRoute,
+  Link,
+  redirect,
+  useNavigate,
+} from "@tanstack/react-router"
 import { ChevronDown, ChevronUp, Loader2, Play, X } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
 import {
@@ -27,6 +32,7 @@ import Drawer from "@/components/ui/drawer"
 import {
   EDITOR_DRAWER,
   EvalsEmpty,
+  NoEvalsYet,
   EvalsShell,
   Picker,
   useOverview,
@@ -67,6 +73,7 @@ function EvalsPage() {
   const index = Route.useLoaderData()
   const search = Route.useSearch()
   const set = useSetSearch()
+  const navigate = useNavigate()
 
   const agent = search.agent ?? index[0]?.agent
   const [overview, reloadOverview] = useOverview(agent)
@@ -156,62 +163,62 @@ function EvalsPage() {
             )
           }
         >
-          <Picker label="Questions">
-            <Select
-              id="evals-dataset"
-              value={dataset?.id ?? ""}
-              onChange={(e) =>
-                set({
-                  dataset: e.target.value,
-                  run: undefined,
-                  check: undefined,
-                  version: undefined,
-                })
-              }
-            >
-              {overview?.datasets.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({d.inputs})
-                </option>
-              ))}
-            </Select>
-          </Picker>
-          <Picker label="Checks">
-            <Select
-              id="evals-rubric"
-              value={rubricId ?? ""}
-              onChange={(e) => set({ rubric: e.target.value })}
-            >
-              {overview?.rubrics.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.id}
-                </option>
-              ))}
-            </Select>
-          </Picker>
-          <Picker label="Run">
-            <Select
-              id="evals-run"
-              value={runId ?? ""}
-              onChange={(e) =>
-                set({
-                  run: e.target.value,
-                  check: undefined,
-                  version: undefined,
-                })
-              }
-            >
-              {dataset?.runs.map((r) => (
-                <option key={r.runId} value={r.runId}>
-                  {new Date(r.createdAt).toLocaleString(undefined, {
-                    dateStyle: "medium",
-                    timeStyle: "short",
-                  })}{" "}
-                  · {r.versions.join(" vs ")}
-                </option>
-              ))}
-            </Select>
-          </Picker>
+          {overview && overview.datasets.length > 0 && (
+            <>
+              <Picker label="Questions">
+                <Select
+                  id="evals-dataset"
+                  value={dataset?.id ?? ""}
+                  onChange={(e) =>
+                    set({
+                      dataset: e.target.value,
+                      run: undefined,
+                      check: undefined,
+                      version: undefined,
+                    })
+                  }
+                >
+                  {overview?.datasets.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name} ({d.inputs})
+                    </option>
+                  ))}
+                </Select>
+              </Picker>
+              <Picker label="Checks">
+                <Select
+                  id="evals-rubric"
+                  value={rubricId ?? ""}
+                  onChange={(e) => set({ rubric: e.target.value })}
+                >
+                  {overview?.rubrics.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.id}
+                    </option>
+                  ))}
+                </Select>
+              </Picker>
+              <Picker label="Run">
+                <Select
+                  id="evals-run"
+                  value={runId ?? ""}
+                  onChange={(e) =>
+                    set({
+                      run: e.target.value,
+                      check: undefined,
+                      version: undefined,
+                    })
+                  }
+                >
+                  {dataset?.runs.map((r) => (
+                    <option key={r.runId} value={r.runId}>
+                      {runLabel(r)}
+                    </option>
+                  ))}
+                </Select>
+              </Picker>
+            </>
+          )}
           {loading && (
             <Loader2 className="mb-2 size-4 animate-spin text-ink-tertiary" />
           )}
@@ -219,6 +226,18 @@ function EvalsPage() {
 
         {agent && (
           <JobBanner agent={agent} jobs={jobs.rows} onChanged={jobs.refresh} />
+        )}
+
+        {agent && overview && !overview.datasets.length && (
+          <NoEvalsYet
+            agent={agent}
+            onCreated={(id) =>
+              void navigate({
+                to: "/evals/questions",
+                search: { agent, dataset: id },
+              })
+            }
+          />
         )}
 
         {overview &&
@@ -514,6 +533,27 @@ function JobBanner({
       })}
     </div>
   )
+}
+
+/**
+ * A run as the picker names it — an experiment: what it tested (when named),
+ * which versions, on how many questions and tries, and when.
+ */
+function runLabel(r: {
+  name: string | null
+  versions: string[]
+  questions: number
+  tries: number
+  createdAt: number
+}) {
+  const when = new Date(r.createdAt).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  })
+  const scope = `${r.questions} question${r.questions === 1 ? "" : "s"}${r.tries > 1 ? ` × ${r.tries} tries` : ""}`
+  return [r.name, r.versions.join(" vs "), scope, when]
+    .filter(Boolean)
+    .join(" · ")
 }
 
 const SECTIONS = [

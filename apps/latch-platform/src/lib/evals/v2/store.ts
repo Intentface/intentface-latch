@@ -37,7 +37,10 @@ export interface EvalsStore {
   /** The most recent run of a dataset — what `judge` reads by default. */
   latestRunId: (owner: Owner, datasetId: string) => Promise<string | null>;
   /** Runs of a dataset, newest first — what the results view offers to pick from. */
-  listRuns: (owner: Owner, datasetId: string) => Promise<{ runId: string; threads: number; versions: string[]; createdAt: number }[]>;
+  listRuns: (
+    owner: Owner,
+    datasetId: string,
+  ) => Promise<{ runId: string; threads: number; versions: string[]; questions: number; tries: number; name: string | null; createdAt: number }[]>;
 
   saveVerdicts: (vs: Verdict[]) => Promise<void>;
   /** Latest verdict per (thread, check) for one rubric version. */
@@ -379,15 +382,21 @@ export function createEvalsStore(client: Client): EvalsStore {
 
     async listRuns(owner, datasetId) {
       const rs = await rows(
-        `SELECT run_id, COUNT(*) AS n, GROUP_CONCAT(DISTINCT version) AS versions, MIN(created_at) AS at
-           FROM latch_eval_threads WHERE owner = ? AND dataset_id = ? AND run_id IS NOT NULL
-          GROUP BY run_id ORDER BY at DESC LIMIT 50`,
+        `SELECT t.run_id, COUNT(*) AS n, GROUP_CONCAT(DISTINCT t.version) AS versions,
+                COUNT(DISTINCT t.input_id) AS questions, MAX(COALESCE(t.attempt, 0)) + 1 AS tries,
+                MIN(t.created_at) AS at, json_extract(MAX(j.data), '$.name') AS name
+           FROM latch_eval_threads t LEFT JOIN latch_eval_jobs j ON j.id = t.run_id
+          WHERE t.owner = ? AND t.dataset_id = ? AND t.run_id IS NOT NULL
+          GROUP BY t.run_id ORDER BY at DESC LIMIT 50`,
         [owner, datasetId],
       );
       return rs.map((r) => ({
         runId: String(r.run_id),
         threads: Number(r.n),
         versions: String(r.versions ?? "").split(",").filter(Boolean),
+        questions: Number(r.questions),
+        tries: Number(r.tries),
+        name: str(r.name) ?? null,
         createdAt: Number(r.at),
       }));
     },

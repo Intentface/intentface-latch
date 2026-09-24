@@ -59,7 +59,14 @@ export async function createQuestionSet(
     ...(d.note?.trim() ? { note: d.note.trim() } : {}),
   });
   await evals.setInputs(id, valid.value);
-  return { ok: true as const, id, questions: valid.value.length };
+  // A question set is only runnable with checks to judge it by. An agent's
+  // first set gets the starter checks, so its first run needs no other step.
+  let checksId: string | undefined;
+  if (!(await evals.listRubrics(o.owner, o.name)).length) {
+    const c = await createChecks(principal, { agent: d.agent, name: "checks" });
+    if (c.ok) checksId = c.id;
+  }
+  return { ok: true as const, id, questions: valid.value.length, ...(checksId ? { checksId } : {}) };
 }
 
 /** Add, change or delete questions, and the set's audience and note. Ids never change: past results hang on them. */

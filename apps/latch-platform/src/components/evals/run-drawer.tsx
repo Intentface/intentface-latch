@@ -39,6 +39,7 @@ export function RunDrawer({
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
   const [repeats, setRepeats] = useState(1);
+  const [name, setName] = useState("");
   const [estimate, setEstimate] = useState<{ estimate: Estimate; same: string[]; confirmTwiceAbove: number } | null>(null);
   const [estimating, setEstimating] = useState(false);
   const [sure, setSure] = useState(false);
@@ -87,7 +88,7 @@ export function RunDrawer({
     if (!estimate) return;
     setStarting(true);
     setError(null);
-    const r = await startRunFn({ data: { agent, datasetId, rubricId, versions, inputIds, repeats, confirmedCost: cost } });
+    const r = await startRunFn({ data: { agent, datasetId, rubricId, versions, inputIds, repeats, name, confirmedCost: cost } });
     setStarting(false);
     if (!r.ok) return setError(r.error);
     onStarted(r.id);
@@ -114,6 +115,9 @@ export function RunDrawer({
             </div>
           ) : (
             <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-4">
+              <Field id="run-name" label="What are you testing?" hint="Optional. Names this run in the Run picker, so you can tell experiments apart later.">
+                <Input id="run-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. stricter read-failure rule" maxLength={80} />
+              </Field>
               <Field id="run-versions" label="Versions" hint="Two versions on the same questions is a comparison; one is a measurement.">
                 <div id="run-versions" className="space-y-1">
                   {options.versions.map((v) => (

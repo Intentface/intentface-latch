@@ -3,11 +3,12 @@ import Drawer from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { getEvalsOverviewFn } from "@/lib/evals-server";
+import { createQuestionSetFn, getEvalsOverviewFn } from "@/lib/evals-server";
 import type { EvalsOverview } from "@/lib/evals-server";
 import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui/select";
-import { EvalsAgentDock } from "@/components/evals/agent-panel";
+import { EvalsAgentDock, askEvalsAgent } from "@/components/evals/agent-panel";
+import { Sparkles } from "lucide-react";
 
 /**
  * What the three Evals pages share: the title, the switch between them, and
@@ -257,5 +258,71 @@ export function CreateDrawer({
         </form>
       </Drawer.Content>
     </Drawer>
+  );
+}
+
+/**
+ * An agent with no evals yet: the three steps, and two ways to take the
+ * first — write the questions, or have the Evals agent draft them from the
+ * agent's own instructions and tools, for you to approve.
+ */
+export function NoEvalsYet({ agent, onCreated }: { agent: string; onCreated: (datasetId: string) => void }) {
+  const [creating, setCreating] = useState(false);
+  const draft = () =>
+    askEvalsAgent(
+      `For ${agent}: it has no evals yet. Read its instructions and tools with read_agent, then draft a question set of 8 realistic questions its users would ask — each with what a good answer conveys, and anything the answer must not do. Say briefly what the set covers, then create it with create_question_set; I will approve it.`,
+    );
+  return (
+    <div className="border-primary-border bg-primary-bg max-w-2xl space-y-5 rounded-lg border px-6 py-5">
+      <div className="space-y-1">
+        <h2 className="text-ink-primary text-lg font-semibold tracking-tight">{agent} has no evals yet</h2>
+        <p className="text-ink-secondary text-sm">
+          Evals ask the agent the same questions every time and judge the answers, so versions can be compared on equal terms.
+        </p>
+      </div>
+      <ol className="text-ink-secondary space-y-2 text-sm">
+        <li>
+          <span className="text-ink-primary font-medium">1. Questions.</span> What people really ask it, each with what a good answer conveys.
+        </li>
+        <li>
+          <span className="text-ink-primary font-medium">2. Checks.</span> Created for you with one starter check. Better ones come from reading
+          the first answers on the Failures page.
+        </li>
+        <li>
+          <span className="text-ink-primary font-medium">3. A first run.</span> A few questions on live (and @draft, if it has one), priced before it
+          starts.
+        </li>
+      </ol>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium"
+        >
+          Create a question set
+        </button>
+        <button
+          type="button"
+          onClick={draft}
+          className="border-primary-border text-ink-primary hover:bg-primary-bg-hover flex h-9 items-center gap-1.5 rounded-lg border px-4 text-sm"
+        >
+          <Sparkles className="size-4" /> Draft questions with the evals agent
+        </button>
+      </div>
+      <CreateDrawer
+        open={creating}
+        title="New question set"
+        description={`The questions ${agent} is tested on. Add them next, or ask the evals agent to draft them.`}
+        withSetFields
+        onClose={() => setCreating(false)}
+        onCreate={async (v) => {
+          const r = await createQuestionSetFn({ data: { agent, ...v } });
+          if (!r.ok) return r.error;
+          setCreating(false);
+          onCreated(r.id);
+          return null;
+        }}
+      />
+    </div>
   );
 }

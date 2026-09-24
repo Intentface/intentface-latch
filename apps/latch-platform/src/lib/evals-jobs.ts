@@ -45,7 +45,7 @@ export async function resolveVersions(agentStore: AgentStore, principal: Princip
   return out;
 }
 
-export type RunRequest = { agent: string; datasetId: string; rubricId: string; versions: string[]; inputIds: string[]; repeats: number };
+export type RunRequest = { agent: string; datasetId: string; rubricId: string; versions: string[]; inputIds: string[]; repeats: number; name?: string };
 
 /**
  * Plan and price a run from what this set's earlier threads actually cost.
@@ -102,6 +102,7 @@ export async function startPlannedRun(principal: Principal, d: RunRequest, confi
     id,
     runId: id,
     kind: "run",
+    ...(d.name?.trim() ? { name: d.name.trim().slice(0, 80) } : {}),
     agentName: p.name,
     datasetId: d.datasetId,
     rubricId: d.rubricId,

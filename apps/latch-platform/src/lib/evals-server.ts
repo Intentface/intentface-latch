@@ -29,16 +29,23 @@ async function ownerFor(principal: Principal, agent: string) {
   return rec ? { owner: agentOwnerKey(principal, rec.scope), name: rec.name } : null;
 }
 
-/** Every agent with eval data the caller can see, with its question sets. */
+/**
+ * Every agent the caller can edit, with its question sets — including agents
+ * with none yet, so a new agent can be set up from the Evals pages.
+ */
 export const getEvalsIndexFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
-  const { evals } = await getLatch();
+  const { evals, agentStore } = await getLatch();
   const owners = [...new Set([agentOwnerKey(principal, "user"), agentOwnerKey(principal, "org")])];
   const datasets = (await Promise.all(owners.map((o) => evals.listDatasets(o)))).flat();
   const byAgent = new Map<string, { id: string; name: string }[]>();
+  for (const r of await agentStore.listRecords(principal)) byAgent.set(r.name, []);
   for (const d of datasets) byAgent.set(d.agentName, [...(byAgent.get(d.agentName) ?? []), { id: d.id, name: d.name }]);
-  return [...byAgent].map(([agent, sets]) => ({ agent, datasets: sets })).sort((a, b) => a.agent.localeCompare(b.agent));
+  // Agents that have evals first, then the rest, each alphabetical.
+  return [...byAgent]
+    .map(([agent, sets]) => ({ agent, datasets: sets }))
+    .sort((a, b) => Number(!a.datasets.length) - Number(!b.datasets.length) || a.agent.localeCompare(b.agent));
 });
 
 export const getEvalsOverviewFn = createServerFn({ method: "GET" })

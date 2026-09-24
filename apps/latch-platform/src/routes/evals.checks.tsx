@@ -34,6 +34,7 @@ import {
   useOverview,
   useSetSearch,
   validateEvalsSearch,
+  NoEvalsYet,
 } from "@/components/evals/shell"
 
 /**
@@ -186,6 +187,16 @@ function ChecksPage() {
             </Select>
           </Picker>
         </EvalsShell>
+
+        {agent &&
+          overview &&
+          !overview.datasets.length &&
+          !overview.rubrics.length && (
+            <NoEvalsYet
+              agent={agent}
+              onCreated={(id) => set({ dataset: id })}
+            />
+          )}
 
         {data && (
           <>

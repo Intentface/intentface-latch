@@ -25,6 +25,8 @@ export interface EvalJob {
   runId: string;
   /** `run` produces threads then judges; `judge` re-scores an existing run. */
   kind: "run" | "judge";
+  /** What this run is testing, in the person's words — "stricter read-failure rule". */
+  name?: string;
   agentName: string;
   datasetId: string;
   rubricId: string;

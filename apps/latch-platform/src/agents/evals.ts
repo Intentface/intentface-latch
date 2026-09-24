@@ -108,6 +108,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
               questions: (await evals.listInputs(d.id)).length,
               runs: (await evals.listRuns(o.owner, d.id)).slice(0, 8).map((r) => ({
                 runId: r.runId,
+                ...(r.name ? { name: r.name } : {}),
                 versions: r.versions,
                 threads: r.threads,
                 at: new Date(r.createdAt).toISOString(),
@@ -324,6 +325,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         "Run questions against versions and judge them. Costs money, so a person approves it first — put the plan and the cost from estimate_run in `summary`. Returns a job id; follow it with job_status.",
       inputSchema: z.object({
         summary: z.string().describe('For the person approving, e.g. "Re-run the 4 questions that failed, on live and @draft, once each: 8 agent runs, about $0.60."'),
+        name: z.string().optional().describe('What the run tests, as the Run picker will show it, e.g. "stricter read-failure rule"'),
         agent: Agent,
         questionSetId: z.string(),
         checksId: z.string(),
@@ -332,10 +334,10 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         repeats: z.number().int().min(1).max(5).default(1),
         estimatedCost: z.number().nullable().describe("The cost estimate_run returned"),
       }),
-      execute: async ({ agent, questionSetId, checksId, versions, questions, repeats, estimatedCost }) => {
+      execute: async ({ agent, questionSetId, checksId, versions, questions, repeats, estimatedCost, name }) => {
         const r = await startPlannedRun(
           principal,
-          { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds: questions, repeats },
+          { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds: questions, repeats, ...(name ? { name } : {}) },
           estimatedCost,
         );
         return r.ok ? { jobId: r.id, runId: r.id, estimatedCost: r.estimate.cost, next: "Call job_status until it is done." } : r;
