@@ -71,7 +71,17 @@ export const getFailuresFn = createServerFn({ method: "GET" })
         .filter((x) => !noted.has(x.threadId))
         .map((x) => {
           const t = byThread.get(x.threadId);
-          return { threadId: x.threadId, version: t?.version ?? "", inputId: t?.inputId ?? "", attempt: t?.attempt ?? 0 };
+          return {
+            threadId: x.threadId,
+            version: t?.version ?? "",
+            inputId: t?.inputId ?? "",
+            attempt: t?.attempt ?? 0,
+            prompt: (t && prompts.get(`${t.datasetId}|${t.inputId}`)) ?? "",
+            text: x.text,
+            ok: x.ok,
+            why: x.why,
+            createdAt: x.createdAt,
+          };
         }),
       notes: notes.map((n) => {
         const t = byThread.get(n.threadId);

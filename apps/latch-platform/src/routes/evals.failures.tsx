@@ -17,6 +17,7 @@ import {
   getFailuresFn,
   getReadingQueueFn,
   proposeCheckFn,
+  resolveSuggestionFn,
 } from "@/lib/failures-server"
 import type { Failures } from "@/lib/failures-server"
 import { cn } from "@/lib/utils"
@@ -192,23 +193,20 @@ function FailuresPage() {
             />
 
             {data.suggested.length > 0 && (
-              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary-border bg-primary-bg px-4 py-3 text-sm">
-                <Sparkles className="size-4 text-ink-secondary" />
-                <span className="text-ink-primary">
-                  The evals agent read {data.suggested.length} thread
-                  {data.suggested.length === 1 ? "" : "s"} and suggested notes.
-                </span>
-                <span className="text-ink-tertiary">
-                  They count once you accept them.
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setReading(data.suggested)}
-                  className="ml-auto font-medium text-ink-primary underline"
-                >
-                  Review suggestions
-                </button>
-              </div>
+              <SuggestionList
+                agent={agent}
+                items={data.suggested}
+                onOpen={(threadId) => {
+                  const s = data.suggested.find((x) => x.threadId === threadId)
+                  if (s)
+                    setReading([
+                      s,
+                      ...data.suggested.filter((x) => x.threadId !== threadId),
+                    ])
+                }}
+                onReviewAll={() => setReading(data.suggested)}
+                onResolved={load}
+              />
             )}
 
             {data.modes.length > 0 && (
@@ -294,6 +292,106 @@ function FailuresPage() {
         )}
       </div>
     </div>
+  )
+}
+
+type Suggested = Failures["suggested"][number]
+
+/**
+ * What the evals agent proposes, all in one place. Each counts for nothing
+ * until accepted: "Use it" makes it your note, "Dismiss" rejects it (the agent
+ * will not propose it again). Opening the thread is the way to check it — the
+ * agent misses failures that take product judgment.
+ */
+function SuggestionList({
+  agent,
+  items,
+  onOpen,
+  onReviewAll,
+  onResolved,
+}: {
+  agent: string
+  items: Suggested[]
+  onOpen: (threadId: string) => void
+  onReviewAll: () => void
+  onResolved: () => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const resolve = async (threadId: string, accept: boolean) => {
+    setBusy(threadId)
+    await resolveSuggestionFn({ data: { agent, threadId, accept } })
+    setBusy(null)
+    onResolved()
+  }
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-3">
+        <h2 className="text-sm font-semibold text-ink-primary">
+          Suggested by the evals agent
+        </h2>
+        <span className="text-xs text-ink-tertiary">
+          {items.length} waiting · they count once you accept them
+        </span>
+        <button
+          type="button"
+          onClick={onReviewAll}
+          className="ml-auto text-sm font-medium text-ink-primary underline"
+        >
+          Review one by one
+        </button>
+      </div>
+      <ul className="divide-y divide-primary-border rounded-lg border border-primary-border bg-primary-bg">
+        {items.map((s) => (
+          <li
+            key={s.threadId}
+            className="flex flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3 text-sm"
+          >
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="text-xs text-ink-tertiary">
+                #{s.inputId} on {s.version}
+                {s.prompt && <span> · {s.prompt}</span>}
+              </div>
+              <div className="text-ink-primary">
+                {s.ok ? "Looks fine." : s.text}
+              </div>
+              {s.why && (
+                <div
+                  className="line-clamp-2 text-xs text-ink-tertiary"
+                  title={s.why}
+                >
+                  {s.why}
+                </div>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-3 pt-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => onOpen(s.threadId)}
+                className="text-ink-secondary hover:text-ink-primary"
+              >
+                Open thread
+              </button>
+              <button
+                type="button"
+                disabled={busy === s.threadId}
+                onClick={() => void resolve(s.threadId, false)}
+                className="text-ink-secondary hover:text-ink-primary disabled:opacity-50"
+              >
+                Dismiss
+              </button>
+              <button
+                type="button"
+                disabled={busy === s.threadId}
+                onClick={() => void resolve(s.threadId, true)}
+                className="rounded-md bg-ink-primary px-2.5 py-1 font-medium text-primary-bg disabled:opacity-50"
+              >
+                Use it
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 
