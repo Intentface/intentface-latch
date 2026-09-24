@@ -1,17 +1,40 @@
-import { useEffect, useRef, useState } from "react";
-import { createFileRoute, redirect } from "@tanstack/react-router";
-import { MessageSquareText, Plus, ScrollText, Trash2, X } from "lucide-react";
-import { currentPrincipalFn } from "@/lib/server";
-import { createChecksFn, getChecksFn, getEvalsIndexFn, saveChecksFn } from "@/lib/evals-server";
-import { describeCounted } from "@/lib/evals/v2/counted";
-import { checkIdFor } from "@/lib/evals/v2/validate";
-import type { AnswerShape, AskedCheck, Check, CountedCheck, CountedSpec, Matcher } from "@/lib/evals/v2/model";
-import { cn } from "@/lib/utils";
-import { Select } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import Drawer from "@/components/ui/drawer";
-import { CreateDrawer, EDITOR_DRAWER, EvalsEmpty, EvalsShell, Field, Picker, useOverview, useSetSearch, validateEvalsSearch } from "@/components/evals/shell";
+import { GROUND } from "@/components/evals/ui"
+import { useEffect, useRef, useState } from "react"
+import { createFileRoute, redirect } from "@tanstack/react-router"
+import { MessageSquareText, Plus, ScrollText, Trash2, X } from "lucide-react"
+import { currentPrincipalFn } from "@/lib/server"
+import {
+  createChecksFn,
+  getChecksFn,
+  getEvalsIndexFn,
+  saveChecksFn,
+} from "@/lib/evals-server"
+import { describeCounted } from "@/lib/evals/v2/counted"
+import { checkIdFor } from "@/lib/evals/v2/validate"
+import type {
+  AnswerShape,
+  AskedCheck,
+  Check,
+  CountedCheck,
+  CountedSpec,
+  Matcher,
+} from "@/lib/evals/v2/model"
+import { cn } from "@/lib/utils"
+import { Select } from "@/components/ui/select"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import Drawer from "@/components/ui/drawer"
+import {
+  CreateDrawer,
+  EDITOR_DRAWER,
+  EvalsEmpty,
+  EvalsShell,
+  Field,
+  Picker,
+  useOverview,
+  useSetSearch,
+  validateEvalsSearch,
+} from "@/components/evals/shell"
 
 /**
  * What gets judged. Two kinds of check, and the page keeps them visibly
@@ -26,187 +49,253 @@ export const Route = createFileRoute("/evals/checks")({
   head: () => ({ meta: [{ title: "Checks · Evals · Latch" }] }),
   validateSearch: validateEvalsSearch,
   beforeLoad: async () => {
-    const principal = await currentPrincipalFn();
-    if (!principal) throw redirect({ to: "/login" });
+    const principal = await currentPrincipalFn()
+    if (!principal) throw redirect({ to: "/login" })
   },
   loader: () => getEvalsIndexFn(),
   component: ChecksPage,
-});
+})
 
-type Loaded = { id: string; version: number; defaultJudge: string; checks: Check[]; judges: string[] };
-type Editing = { draft: Check; isNew: boolean };
+type Loaded = {
+  id: string
+  version: number
+  defaultJudge: string
+  checks: Check[]
+  judges: string[]
+}
+type Editing = { draft: Check; isNew: boolean }
 
 function ChecksPage() {
-  const index = Route.useLoaderData();
-  const search = Route.useSearch();
-  const set = useSetSearch();
-  const agent = search.agent ?? index[0]?.agent;
-  const [overview, reloadOverview] = useOverview(agent);
-  const [creating, setCreating] = useState(false);
-  const rubricId = search.rubric ?? overview?.rubrics[0]?.id;
-  const [data, setData] = useState<Loaded | null>(null);
+  const index = Route.useLoaderData()
+  const search = Route.useSearch()
+  const set = useSetSearch()
+  const agent = search.agent ?? index[0]?.agent
+  const [overview, reloadOverview] = useOverview(agent)
+  const [creating, setCreating] = useState(false)
+  const rubricId = search.rubric ?? overview?.rubrics[0]?.id
+  const [data, setData] = useState<Loaded | null>(null)
   // An existing check is open when the URL names it; local state holds only a new one.
-  const [adding, setAdding] = useState<Editing | null>(null);
-  const [saved, setSaved] = useState<number | null>(null);
+  const [adding, setAdding] = useState<Editing | null>(null)
+  const [saved, setSaved] = useState<number | null>(null)
 
   useEffect(() => {
-    setData(null);
-    setSaved(null);
+    setData(null)
+    setSaved(null)
     if (agent && rubricId)
       void getChecksFn({ data: { agent, rubricId } }).then(
-        (r) => r && setData({ ...r.rubric, checks: JSON.parse(r.rubric.checks) as Check[], judges: r.judges }),
-      );
-  }, [agent, rubricId]);
+        (r) =>
+          r &&
+          setData({
+            ...r.rubric,
+            checks: JSON.parse(r.rubric.checks) as Check[],
+            judges: r.judges,
+          })
+      )
+  }, [agent, rubricId])
 
-  const selected = search.check ? data?.checks.find((x) => x.id === search.check) : undefined;
-  const editing: Editing | null = adding ?? (selected ? { draft: selected, isNew: false } : null);
+  const selected = search.check
+    ? data?.checks.find((x) => x.id === search.check)
+    : undefined
+  const editing: Editing | null =
+    adding ?? (selected ? { draft: selected, isNew: false } : null)
   // Keep the last content while the drawer animates shut.
-  const last = useRef(editing);
-  if (editing) last.current = editing;
-  const inDrawer = editing ?? last.current;
+  const last = useRef(editing)
+  if (editing) last.current = editing
+  const inDrawer = editing ?? last.current
 
   const close = () => {
-    setAdding(null);
-    if (search.check) set({ check: undefined });
-  };
+    setAdding(null)
+    if (search.check) set({ check: undefined })
+  }
 
   const save = async (checks: Check[]) => {
-    if (!agent || !data) return "Nothing to save to.";
-    const res = await saveChecksFn({ data: { agent, rubricId: data.id, defaultJudge: data.defaultJudge, checks: JSON.stringify(checks) } });
-    if (!res.ok) return res.error;
-    setData({ ...data, checks, version: res.version });
-    setSaved(res.version);
-    close();
-    return null;
-  };
+    if (!agent || !data) return "Nothing to save to."
+    const res = await saveChecksFn({
+      data: {
+        agent,
+        rubricId: data.id,
+        defaultJudge: data.defaultJudge,
+        checks: JSON.stringify(checks),
+      },
+    })
+    if (!res.ok) return res.error
+    setData({ ...data, checks, version: res.version })
+    setSaved(res.version)
+    close()
+    return null
+  }
 
   const add = (kind: Check["kind"]) => {
-    if (!data) return;
-    const taken = data.checks.map((c) => c.id);
+    if (!data) return
+    const taken = data.checks.map((c) => c.id)
     const draft: Check =
       kind === "asked"
-        ? { kind: "asked", id: checkIdFor("new check", taken), label: "", ask: "", shape: { type: "boolean" } }
-        : { kind: "counted", id: checkIdFor("new rule", taken), label: "", spec: { op: "called", tool: "" } };
-    setAdding({ draft, isNew: true });
-  };
+        ? {
+            kind: "asked",
+            id: checkIdFor("new check", taken),
+            label: "",
+            ask: "",
+            shape: { type: "boolean" },
+          }
+        : {
+            kind: "counted",
+            id: checkIdFor("new rule", taken),
+            label: "",
+            spec: { op: "called", tool: "" },
+          }
+    setAdding({ draft, isNew: true })
+  }
 
-  if (!index.length) return <EvalsEmpty />;
+  if (!index.length) return <EvalsEmpty />
 
-  const asked = data?.checks.filter((c): c is AskedCheck => c.kind === "asked") ?? [];
-  const counted = data?.checks.filter((c): c is CountedCheck => c.kind === "counted") ?? [];
+  const asked =
+    data?.checks.filter((c): c is AskedCheck => c.kind === "asked") ?? []
+  const counted =
+    data?.checks.filter((c): c is CountedCheck => c.kind === "counted") ?? []
 
   return (
-    <div className="evals-page mx-auto max-w-[1000px] space-y-5 p-6 transition-[margin]">
-      <EvalsShell
-        page="checks"
-        index={index}
-        search={search}
-        actions={
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="text-ink-secondary hover:text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border h-8 rounded-lg px-3 text-sm"
-          >
-            New set of checks
-          </button>
-        }
-      >
-        <Picker label="Checks">
-          <Select id="evals-rubric" value={rubricId ?? ""} onChange={(e) => set({ rubric: e.target.value, check: undefined })}>
-            {overview?.rubrics.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.id}
-              </option>
-            ))}
-          </Select>
-        </Picker>
-      </EvalsShell>
+    <div className={GROUND}>
+      <div className="evals-page mx-auto max-w-[1000px] space-y-5 p-6 transition-[margin]">
+        <EvalsShell
+          page="checks"
+          index={index}
+          search={search}
+          actions={
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              className="h-8 rounded-lg px-3 text-sm text-ink-secondary smooth-shadow-ring-xs smooth-ring-primary-border hover:text-ink-primary"
+            >
+              New set of checks
+            </button>
+          }
+        >
+          <Picker label="Checks">
+            <Select
+              id="evals-rubric"
+              value={rubricId ?? ""}
+              onChange={(e) =>
+                set({ rubric: e.target.value, check: undefined })
+              }
+            >
+              {overview?.rubrics.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.id}
+                </option>
+              ))}
+            </Select>
+          </Picker>
+        </EvalsShell>
 
-      {data && (
-        <>
-          <p className="text-ink-tertiary text-sm">
-            Version {data.version}. Each save makes a new version; results stay with the version that produced them.
-            {saved !== null && (
-              <span className="text-ink-secondary">
-                {" "}
-                Saved as v{saved}. Nothing has judged it yet: run <code>pnpm evals judge</code> to score it.
-              </span>
+        {data && (
+          <>
+            <p className="text-sm text-ink-tertiary">
+              Version {data.version}. Each save makes a new version; results
+              stay with the version that produced them.
+              {saved !== null && (
+                <span className="text-ink-secondary">
+                  {" "}
+                  Saved as v{saved}. Nothing has judged it yet: run{" "}
+                  <code>pnpm evals judge</code> to score it.
+                </span>
+              )}
+            </p>
+
+            <CheckGroup
+              icon={<MessageSquareText className="size-4" />}
+              title="Questions for the judge"
+              blurb="Plain-English questions a judge model answers about each thread. They cost a call each and can be wrong, which is what your calls on the Results page measure."
+              onAdd={() => add("asked")}
+              addLabel="Ask the judge"
+            >
+              {asked.map((c) => (
+                <CheckRow key={c.id} onOpen={() => set({ check: c.id })}>
+                  <div className="font-medium text-ink-primary">{c.label}</div>
+                  <div className="mt-0.5 line-clamp-2 text-ink-secondary">
+                    {c.ask}
+                  </div>
+                  <div className="mt-1 text-xs text-ink-tertiary">
+                    {shapeSummary(c.shape)} ·{" "}
+                    {c.judge ?? `${data.defaultJudge} (default)`}
+                  </div>
+                </CheckRow>
+              ))}
+            </CheckGroup>
+
+            <CheckGroup
+              icon={<ScrollText className="size-4" />}
+              title="Facts from the tool log"
+              blurb="Rules read straight from which tools the agent called and how. Free, exact and instant: they cannot misread a thread, only ask the wrong thing."
+              onAdd={() => add("counted")}
+              addLabel="Add a rule"
+            >
+              {counted.map((c) => (
+                <CheckRow key={c.id} onOpen={() => set({ check: c.id })}>
+                  <div className="font-medium text-ink-primary">{c.label}</div>
+                  <div className="mt-0.5 font-mono text-xs text-ink-secondary">
+                    {readable(c)}
+                  </div>
+                  {c.because && (
+                    <div className="mt-1 text-xs text-ink-tertiary">
+                      Because {c.because}
+                    </div>
+                  )}
+                </CheckRow>
+              ))}
+            </CheckGroup>
+          </>
+        )}
+
+        {agent && (
+          <CreateDrawer
+            open={creating}
+            title="New set of checks"
+            description="Starts with one check, “Answered what was asked”. The checks worth having come from reading threads on the Failures page."
+            onClose={() => setCreating(false)}
+            onCreate={async (v) => {
+              const r = await createChecksFn({ data: { agent, name: v.name } })
+              if (!r.ok) return r.error
+              setCreating(false)
+              reloadOverview()
+              set({ rubric: r.id, check: undefined })
+              return null
+            }}
+          />
+        )}
+
+        <Drawer open={!!editing} onOpenChange={(o) => !o && close()}>
+          <Drawer.Content className={EDITOR_DRAWER}>
+            {inDrawer && data && (
+              <CheckEditor
+                key={inDrawer.draft.id}
+                initial={inDrawer.draft}
+                isNew={inDrawer.isNew}
+                judges={data.judges}
+                defaultJudge={data.defaultJudge}
+                version={data.version}
+                taken={data.checks
+                  .map((c) => c.id)
+                  .filter((id) => id !== inDrawer.draft.id)}
+                onCancel={close}
+                onSave={(c) =>
+                  save(
+                    inDrawer.isNew
+                      ? [...data.checks, c]
+                      : data.checks.map((x) =>
+                          x.id === inDrawer.draft.id ? c : x
+                        )
+                  )
+                }
+                onDelete={() =>
+                  save(data.checks.filter((x) => x.id !== inDrawer.draft.id))
+                }
+              />
             )}
-          </p>
-
-          <CheckGroup
-            icon={<MessageSquareText className="size-4" />}
-            title="Questions for the judge"
-            blurb="Plain-English questions a judge model answers about each thread. They cost a call each and can be wrong, which is what your calls on the Results page measure."
-            onAdd={() => add("asked")}
-            addLabel="Ask the judge"
-          >
-            {asked.map((c) => (
-              <CheckRow key={c.id} onOpen={() => set({ check: c.id })}>
-                <div className="text-ink-primary font-medium">{c.label}</div>
-                <div className="text-ink-secondary mt-0.5 line-clamp-2">{c.ask}</div>
-                <div className="text-ink-tertiary mt-1 text-xs">
-                  {shapeSummary(c.shape)} · {c.judge ?? `${data.defaultJudge} (default)`}
-                </div>
-              </CheckRow>
-            ))}
-          </CheckGroup>
-
-          <CheckGroup
-            icon={<ScrollText className="size-4" />}
-            title="Facts from the tool log"
-            blurb="Rules read straight from which tools the agent called and how. Free, exact and instant: they cannot misread a thread, only ask the wrong thing."
-            onAdd={() => add("counted")}
-            addLabel="Add a rule"
-          >
-            {counted.map((c) => (
-              <CheckRow key={c.id} onOpen={() => set({ check: c.id })}>
-                <div className="text-ink-primary font-medium">{c.label}</div>
-                <div className="text-ink-secondary mt-0.5 font-mono text-xs">{readable(c)}</div>
-                {c.because && <div className="text-ink-tertiary mt-1 text-xs">Because {c.because}</div>}
-              </CheckRow>
-            ))}
-          </CheckGroup>
-        </>
-      )}
-
-      {agent && (
-        <CreateDrawer
-          open={creating}
-          title="New set of checks"
-          description="Starts with one check, “Answered what was asked”. The checks worth having come from reading threads on the Failures page."
-          onClose={() => setCreating(false)}
-          onCreate={async (v) => {
-            const r = await createChecksFn({ data: { agent, name: v.name } });
-            if (!r.ok) return r.error;
-            setCreating(false);
-            reloadOverview();
-            set({ rubric: r.id, check: undefined });
-            return null;
-          }}
-        />
-      )}
-
-      <Drawer open={!!editing} onOpenChange={(o) => !o && close()}>
-        <Drawer.Content className={EDITOR_DRAWER}>
-          {inDrawer && data && (
-            <CheckEditor
-              key={inDrawer.draft.id}
-              initial={inDrawer.draft}
-              isNew={inDrawer.isNew}
-              judges={data.judges}
-              defaultJudge={data.defaultJudge}
-              version={data.version}
-              taken={data.checks.map((c) => c.id).filter((id) => id !== inDrawer.draft.id)}
-              onCancel={close}
-              onSave={(c) => save(inDrawer.isNew ? [...data.checks, c] : data.checks.map((x) => (x.id === inDrawer.draft.id ? c : x)))}
-              onDelete={() => save(data.checks.filter((x) => x.id !== inDrawer.draft.id))}
-            />
-          )}
-        </Drawer.Content>
-      </Drawer>
+          </Drawer.Content>
+        </Drawer>
+      </div>
     </div>
-  );
+  )
 }
 
 function CheckGroup({
@@ -217,44 +306,54 @@ function CheckGroup({
   addLabel,
   children,
 }: {
-  icon: React.ReactNode;
-  title: string;
-  blurb: string;
-  onAdd: () => void;
-  addLabel: string;
-  children: React.ReactNode;
+  icon: React.ReactNode
+  title: string
+  blurb: string
+  onAdd: () => void
+  addLabel: string
+  children: React.ReactNode
 }) {
   return (
     <section className="space-y-2">
       <div className="flex items-start gap-3">
-        <span className="text-ink-secondary mt-0.5">{icon}</span>
+        <span className="mt-0.5 text-ink-secondary">{icon}</span>
         <div className="min-w-0 flex-1">
-          <h2 className="text-ink-primary text-sm font-semibold">{title}</h2>
-          <p className="text-ink-tertiary max-w-[70ch] text-xs">{blurb}</p>
+          <h2 className="text-sm font-semibold text-ink-primary">{title}</h2>
+          <p className="max-w-[70ch] text-xs text-ink-tertiary">{blurb}</p>
         </div>
         <button
           type="button"
           onClick={onAdd}
-          className="smooth-shadow-ring-xs smooth-ring-primary-border text-ink-primary hover:bg-primary-bg-hover flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-3 text-sm"
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-3 text-sm text-ink-primary smooth-shadow-ring-xs smooth-ring-primary-border hover:bg-primary-bg-hover"
         >
           <Plus className="size-4" /> {addLabel}
         </button>
       </div>
-      <ul className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg divide-primary-border divide-y overflow-hidden rounded-lg">
+      <ul className="divide-y divide-primary-border overflow-hidden rounded-lg border border-primary-border bg-primary-bg">
         {children}
       </ul>
     </section>
-  );
+  )
 }
 
-function CheckRow({ onOpen, children }: { onOpen: () => void; children: React.ReactNode }) {
+function CheckRow({
+  onOpen,
+  children,
+}: {
+  onOpen: () => void
+  children: React.ReactNode
+}) {
   return (
     <li>
-      <button type="button" onClick={onOpen} className="hover:bg-primary-bg-hover focus-visible:bg-primary-bg-hover block w-full px-4 py-3 text-left text-sm outline-none">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="block w-full px-4 py-3 text-left text-sm outline-none hover:bg-primary-bg-hover focus-visible:bg-primary-bg-hover"
+      >
         {children}
       </button>
     </li>
-  );
+  )
 }
 
 const shapeSummary = (s: AnswerShape) =>
@@ -262,13 +361,15 @@ const shapeSummary = (s: AnswerShape) =>
     ? `Yes or no; fails on ${s.bad === "true" ? "yes" : "no"}`
     : s.type === "choice"
       ? `Pick one of ${Object.keys(s.options).length}; fails on ${s.bad.map(human).join(", ")}`
-      : `Scale of ${s.levels.length}; fails at ${human(s.levels[s.bad ?? 0]?.name ?? "the bottom")} or below`;
+      : `Scale of ${s.levels.length}; fails at ${human(s.levels[s.bad ?? 0]?.name ?? "the bottom")} or below`
 
-const human = (id: string) => id.replace(/_/g, " ");
+const human = (id: string) => id.replace(/_/g, " ")
 
 /** The rule as a sentence; per-question values read as what they are. */
 const readable = (c: CountedCheck) =>
-  describeCounted(c).replace(/"?\{\{facts\.(\w+)\}\}"?/g, (_, k: string) => (k === "docs" ? "each question's documents" : `each question's ${k}`));
+  describeCounted(c).replace(/"?\{\{facts\.(\w+)\}\}"?/g, (_, k: string) =>
+    k === "docs" ? "each question's documents" : `each question's ${k}`
+  )
 
 // ─── The editor ────────────────────────────────────────────────────────────
 
@@ -283,94 +384,168 @@ function CheckEditor({
   onSave,
   onDelete,
 }: {
-  initial: Check;
-  isNew: boolean;
-  judges: string[];
-  defaultJudge: string;
-  version: number;
-  taken: string[];
-  onCancel: () => void;
-  onSave: (c: Check) => Promise<string | null>;
-  onDelete: () => Promise<string | null>;
+  initial: Check
+  isNew: boolean
+  judges: string[]
+  defaultJudge: string
+  version: number
+  taken: string[]
+  onCancel: () => void
+  onSave: (c: Check) => Promise<string | null>
+  onDelete: () => Promise<string | null>
 }) {
-  const [draft, setDraft] = useState<Check>(initial);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [draft, setDraft] = useState<Check>(initial)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const run = async (fn: () => Promise<string | null>) => {
-    setSaving(true);
-    setError(await fn());
-    setSaving(false);
-  };
+    setSaving(true)
+    setError(await fn())
+    setSaving(false)
+  }
   // A new check takes its id from its name; an existing one keeps its id, which its results hang on.
-  const finished = (): Check => (isNew ? { ...draft, id: checkIdFor(draft.label || "check", taken) } : draft);
+  const finished = (): Check =>
+    isNew ? { ...draft, id: checkIdFor(draft.label || "check", taken) } : draft
 
   return (
     <form
       className="flex h-full flex-col"
       onSubmit={(e) => {
-        e.preventDefault();
-        void run(() => onSave(finished()));
+        e.preventDefault()
+        void run(() => onSave(finished()))
       }}
     >
-      <Drawer.Header className="border-primary-border border-b px-5">
+      <Drawer.Header className="border-b border-primary-border px-5">
         <Drawer.Title className="text-ink-primary">
-          {isNew ? (draft.kind === "asked" ? "New question for the judge" : "New rule from the tool log") : draft.label || "Check"}
+          {isNew
+            ? draft.kind === "asked"
+              ? "New question for the judge"
+              : "New rule from the tool log"
+            : draft.label || "Check"}
         </Drawer.Title>
-        <Drawer.Description className="text-ink-tertiary text-xs">Saving makes version {version + 1}. Version {version} and its results stay as they are.</Drawer.Description>
+        <Drawer.Description className="text-xs text-ink-tertiary">
+          Saving makes version {version + 1}. Version {version} and its results
+          stay as they are.
+        </Drawer.Description>
       </Drawer.Header>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
-        <Field id="c-label" label="Name" hint="What the results grid shows. Say what passing means: “Read the document that holds the answer”.">
-          <Input id="c-label" value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} autoFocus={isNew} />
+        <Field
+          id="c-label"
+          label="Name"
+          hint="What the results grid shows. Say what passing means: “Read the document that holds the answer”."
+        >
+          <Input
+            id="c-label"
+            value={draft.label}
+            onChange={(e) => setDraft({ ...draft, label: e.target.value })}
+            autoFocus={isNew}
+          />
         </Field>
 
         {draft.kind === "asked" ? (
-          <AskedFields check={draft} judges={judges} defaultJudge={defaultJudge} onChange={setDraft} />
+          <AskedFields
+            check={draft}
+            judges={judges}
+            defaultJudge={defaultJudge}
+            onChange={setDraft}
+          />
         ) : (
           <CountedFields check={draft} onChange={setDraft} />
         )}
 
-        <Field id="c-because" label="Why this check exists" hint="A promise the agent makes, a tool it has, or a failure you saw. Helps whoever edits it next.">
-          <Input id="c-because" value={draft.because ?? ""} onChange={(e) => setDraft({ ...draft, because: e.target.value || undefined })} />
+        <Field
+          id="c-because"
+          label="Why this check exists"
+          hint="A promise the agent makes, a tool it has, or a failure you saw. Helps whoever edits it next."
+        >
+          <Input
+            id="c-because"
+            value={draft.because ?? ""}
+            onChange={(e) =>
+              setDraft({ ...draft, because: e.target.value || undefined })
+            }
+          />
         </Field>
       </div>
 
-      <div className="border-primary-border flex items-center gap-2 border-t px-5 py-3">
+      <div className="flex items-center gap-2 border-t border-primary-border px-5 py-3">
         {!isNew &&
           (confirmDelete ? (
             <span className="flex items-center gap-2 text-sm">
-              <span className="text-ink-secondary">Remove from v{version + 1}?</span>
-              <button type="button" disabled={saving} onClick={() => void run(onDelete)} className="font-medium text-red-600 dark:text-red-400">
+              <span className="text-ink-secondary">
+                Remove from v{version + 1}?
+              </span>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => void run(onDelete)}
+                className="font-medium text-red-600 dark:text-red-400"
+              >
                 Remove
               </button>
-              <button type="button" onClick={() => setConfirmDelete(false)} className="text-ink-tertiary">
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="text-ink-tertiary"
+              >
                 Keep
               </button>
             </span>
           ) : (
-            <button type="button" onClick={() => setConfirmDelete(true)} aria-label="Remove check" className="text-ink-tertiary rounded p-1 hover:text-red-600">
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              aria-label="Remove check"
+              className="rounded p-1 text-ink-tertiary hover:text-red-600"
+            >
               <Trash2 className="size-4" />
             </button>
           ))}
-        {error && <span className="min-w-0 flex-1 text-sm text-red-600 dark:text-red-400">{error}</span>}
+        {error && (
+          <span className="min-w-0 flex-1 text-sm text-red-600 dark:text-red-400">
+            {error}
+          </span>
+        )}
         <div className="ml-auto flex gap-2">
-          <button type="button" onClick={onCancel} className="text-ink-secondary hover:text-ink-primary px-3 py-1.5 text-sm">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 text-sm text-ink-secondary hover:text-ink-primary"
+          >
             Cancel
           </button>
-          <button type="submit" disabled={saving} className="bg-ink-primary text-primary-bg rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50">
+          <button
+            type="submit"
+            disabled={saving}
+            className="rounded-md bg-ink-primary px-3 py-1.5 text-sm font-medium text-primary-bg disabled:opacity-50"
+          >
             {saving ? "Saving…" : `Save as v${version + 1}`}
           </button>
         </div>
       </div>
     </form>
-  );
+  )
 }
 
-function Segmented<T extends string>({ id, value, options, onChange }: { id: string; value: T; options: { value: T; label: string }[]; onChange: (v: T) => void }) {
+function Segmented<T extends string>({
+  id,
+  value,
+  options,
+  onChange,
+}: {
+  id: string
+  value: T
+  options: { value: T; label: string }[]
+  onChange: (v: T) => void
+}) {
   return (
-    <div id={id} role="radiogroup" className="smooth-shadow-ring-xs smooth-ring-primary-border inline-flex rounded-lg p-0.5">
+    <div
+      id={id}
+      role="radiogroup"
+      className="inline-flex rounded-lg p-0.5 smooth-shadow-ring-xs smooth-ring-primary-border"
+    >
       {options.map((o) => (
         <button
           key={o.value}
@@ -380,23 +555,36 @@ function Segmented<T extends string>({ id, value, options, onChange }: { id: str
           onClick={() => onChange(o.value)}
           className={cn(
             "rounded-md px-3 py-1 text-sm",
-            value === o.value ? "bg-primary-bg-active text-ink-primary font-medium" : "text-ink-secondary hover:text-ink-primary",
+            value === o.value
+              ? "bg-primary-bg-active font-medium text-ink-primary"
+              : "text-ink-secondary hover:text-ink-primary"
           )}
         >
           {o.label}
         </button>
       ))}
     </div>
-  );
+  )
 }
 
 // ─── Asked ─────────────────────────────────────────────────────────────────
 
-type Option = { name: string; means: string; bad: boolean };
+type Option = { name: string; means: string; bad: boolean }
 
 const optionsOf = (s: AnswerShape): Option[] =>
-  s.type === "choice" ? Object.entries(s.options).map(([id, means]) => ({ name: human(id), means, bad: s.bad.includes(id) })) : [];
-const optionId = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  s.type === "choice"
+    ? Object.entries(s.options).map(([id, means]) => ({
+        name: human(id),
+        means,
+        bad: s.bad.includes(id),
+      }))
+    : []
+const optionId = (name: string) =>
+  name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "")
 
 function AskedFields({
   check,
@@ -404,18 +592,22 @@ function AskedFields({
   defaultJudge,
   onChange,
 }: {
-  check: AskedCheck;
-  judges: string[];
-  defaultJudge: string;
-  onChange: (c: Check) => void;
+  check: AskedCheck
+  judges: string[]
+  defaultJudge: string
+  onChange: (c: Check) => void
 }) {
-  const shape = check.shape;
-  const setShape = (s: AnswerShape) => onChange({ ...check, shape: s });
+  const shape = check.shape
+  const setShape = (s: AnswerShape) => onChange({ ...check, shape: s })
   const switchTo = (type: AnswerShape["type"]) => {
-    if (type === shape.type) return;
-    if (type === "boolean") setShape({ type: "boolean" });
+    if (type === shape.type) return
+    if (type === "boolean") setShape({ type: "boolean" })
     if (type === "choice")
-      setShape({ type: "choice", options: { good: "It does what was asked", bad: "It does not" }, bad: ["bad"] });
+      setShape({
+        type: "choice",
+        options: { good: "It does what was asked", bad: "It does not" },
+        bad: ["bad"],
+      })
     if (type === "score")
       setShape({
         type: "score",
@@ -425,15 +617,17 @@ function AskedFields({
           { name: "good", means: "Does it well" },
         ],
         bad: 0,
-      });
-  };
-  const opts = optionsOf(shape);
+      })
+  }
+  const opts = optionsOf(shape)
   const setOpts = (next: Option[]) =>
     setShape({
       type: "choice",
-      options: Object.fromEntries(next.map((o) => [optionId(o.name) || "answer", o.means])),
+      options: Object.fromEntries(
+        next.map((o) => [optionId(o.name) || "answer", o.means])
+      ),
       bad: next.filter((o) => o.bad).map((o) => optionId(o.name) || "answer"),
-    });
+    })
 
   return (
     <>
@@ -442,7 +636,12 @@ function AskedFields({
         label="Question for the judge"
         hint="Write it as you would brief a colleague reviewing the thread. The judge also sees the question, the tools used, the answer, and the question's good answer and must-nots."
       >
-        <Textarea id="c-ask" value={check.ask} onChange={(e) => onChange({ ...check, ask: e.target.value })} rows={4} />
+        <Textarea
+          id="c-ask"
+          value={check.ask}
+          onChange={(e) => onChange({ ...check, ask: e.target.value })}
+          rows={4}
+        />
       </Field>
 
       <Field id="c-shape" label="The judge answers with">
@@ -459,7 +658,11 @@ function AskedFields({
       </Field>
 
       {shape.type === "boolean" && (
-        <Field id="c-bad" label="It fails when the judge says" hint="Phrase the question so yes is good; then leave this on no.">
+        <Field
+          id="c-bad"
+          label="It fails when the judge says"
+          hint="Phrase the question so yes is good; then leave this on no."
+        >
           <Segmented
             id="c-bad"
             value={shape.bad ?? "false"}
@@ -473,32 +676,58 @@ function AskedFields({
       )}
 
       {shape.type === "choice" && (
-        <Field id="c-options" label="Answers to pick from" hint="The answer the judge picks is the diagnosis, so make each one say what went wrong. Tick the ones that count as a fail.">
+        <Field
+          id="c-options"
+          label="Answers to pick from"
+          hint="The answer the judge picks is the diagnosis, so make each one say what went wrong. Tick the ones that count as a fail."
+        >
           <div id="c-options" className="space-y-2">
             {opts.map((o, i) => (
               <div key={i} className="flex items-start gap-2">
                 <Input
                   aria-label={`Answer ${i + 1} name`}
                   value={o.name}
-                  onChange={(e) => setOpts(opts.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
+                  onChange={(e) =>
+                    setOpts(
+                      opts.map((x, j) =>
+                        j === i ? { ...x, name: e.target.value } : x
+                      )
+                    )
+                  }
                   className="w-36 shrink-0"
                 />
                 <Textarea
                   aria-label={`Answer ${i + 1} meaning`}
                   value={o.means}
-                  onChange={(e) => setOpts(opts.map((x, j) => (j === i ? { ...x, means: e.target.value } : x)))}
+                  onChange={(e) =>
+                    setOpts(
+                      opts.map((x, j) =>
+                        j === i ? { ...x, means: e.target.value } : x
+                      )
+                    )
+                  }
                   rows={2}
                   className="min-h-0 min-w-0 flex-1 text-sm"
                 />
-                <label className="text-ink-secondary flex h-8 shrink-0 items-center gap-1.5 text-xs">
-                  <input type="checkbox" checked={o.bad} onChange={(e) => setOpts(opts.map((x, j) => (j === i ? { ...x, bad: e.target.checked } : x)))} />
+                <label className="flex h-8 shrink-0 items-center gap-1.5 text-xs text-ink-secondary">
+                  <input
+                    type="checkbox"
+                    checked={o.bad}
+                    onChange={(e) =>
+                      setOpts(
+                        opts.map((x, j) =>
+                          j === i ? { ...x, bad: e.target.checked } : x
+                        )
+                      )
+                    }
+                  />
                   Fail
                 </label>
                 <button
                   type="button"
                   aria-label={`Remove answer ${i + 1}`}
                   onClick={() => setOpts(opts.filter((_, j) => j !== i))}
-                  className="text-ink-tertiary hover:text-ink-primary flex h-8 items-center"
+                  className="flex h-8 items-center text-ink-tertiary hover:text-ink-primary"
                 >
                   <X className="size-4" />
                 </button>
@@ -506,8 +735,13 @@ function AskedFields({
             ))}
             <button
               type="button"
-              onClick={() => setOpts([...opts, { name: `answer ${opts.length + 1}`, means: "", bad: false }])}
-              className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-sm"
+              onClick={() =>
+                setOpts([
+                  ...opts,
+                  { name: `answer ${opts.length + 1}`, means: "", bad: false },
+                ])
+              }
+              className="flex items-center gap-1 text-sm text-ink-secondary hover:text-ink-primary"
             >
               <Plus className="size-4" /> Add an answer
             </button>
@@ -516,27 +750,53 @@ function AskedFields({
       )}
 
       {shape.type === "score" && (
-        <Field id="c-levels" label="Levels, worst first" hint="A scale suits “how well”, not “whether”. Everything at or below the fail line fails.">
+        <Field
+          id="c-levels"
+          label="Levels, worst first"
+          hint="A scale suits “how well”, not “whether”. Everything at or below the fail line fails."
+        >
           <div id="c-levels" className="space-y-2">
             {shape.levels.map((l, i) => (
               <div key={i} className="flex items-center gap-2">
-                <span className="text-ink-tertiary w-4 text-xs tabular-nums">{i + 1}</span>
+                <span className="w-4 text-xs text-ink-tertiary tabular-nums">
+                  {i + 1}
+                </span>
                 <Input
                   aria-label={`Level ${i + 1} name`}
                   value={l.name}
-                  onChange={(e) => setShape({ ...shape, levels: shape.levels.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)) })}
+                  onChange={(e) =>
+                    setShape({
+                      ...shape,
+                      levels: shape.levels.map((x, j) =>
+                        j === i ? { ...x, name: e.target.value } : x
+                      ),
+                    })
+                  }
                   className="w-32 shrink-0"
                 />
                 <Input
                   aria-label={`Level ${i + 1} meaning`}
                   value={l.means}
-                  onChange={(e) => setShape({ ...shape, levels: shape.levels.map((x, j) => (j === i ? { ...x, means: e.target.value } : x)) })}
+                  onChange={(e) =>
+                    setShape({
+                      ...shape,
+                      levels: shape.levels.map((x, j) =>
+                        j === i ? { ...x, means: e.target.value } : x
+                      ),
+                    })
+                  }
                   className="min-w-0 flex-1"
                 />
                 <button
                   type="button"
                   aria-label={`Remove level ${i + 1}`}
-                  onClick={() => setShape({ ...shape, levels: shape.levels.filter((_, j) => j !== i), bad: Math.min(shape.bad ?? 0, shape.levels.length - 3) })}
+                  onClick={() =>
+                    setShape({
+                      ...shape,
+                      levels: shape.levels.filter((_, j) => j !== i),
+                      bad: Math.min(shape.bad ?? 0, shape.levels.length - 3),
+                    })
+                  }
                   className="text-ink-tertiary hover:text-ink-primary"
                 >
                   <X className="size-4" />
@@ -546,14 +806,25 @@ function AskedFields({
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => setShape({ ...shape, levels: [...shape.levels, { name: "", means: "" }] })}
-                className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-sm"
+                onClick={() =>
+                  setShape({
+                    ...shape,
+                    levels: [...shape.levels, { name: "", means: "" }],
+                  })
+                }
+                className="flex items-center gap-1 text-sm text-ink-secondary hover:text-ink-primary"
               >
                 <Plus className="size-4" /> Add a level
               </button>
-              <label className="text-ink-secondary ml-auto flex items-center gap-2 text-xs">
+              <label className="ml-auto flex items-center gap-2 text-xs text-ink-secondary">
                 Fails at or below
-                <Select id="c-fail-line" value={String(shape.bad ?? 0)} onChange={(e) => setShape({ ...shape, bad: Number(e.target.value) })}>
+                <Select
+                  id="c-fail-line"
+                  value={String(shape.bad ?? 0)}
+                  onChange={(e) =>
+                    setShape({ ...shape, bad: Number(e.target.value) })
+                  }
+                >
                   {shape.levels.slice(0, -1).map((l, i) => (
                     <option key={i} value={i}>
                       {l.name || `level ${i + 1}`}
@@ -566,8 +837,19 @@ function AskedFields({
         </Field>
       )}
 
-      <Field id="c-judge" label="Judge" hint="The default is cheap and fast. Pick a bigger model when a check needs real reading.">
-        <Select id="c-judge" className="w-full" value={check.judge ?? ""} onChange={(e) => onChange({ ...check, judge: e.target.value || undefined })}>
+      <Field
+        id="c-judge"
+        label="Judge"
+        hint="The default is cheap and fast. Pick a bigger model when a check needs real reading."
+      >
+        <Select
+          id="c-judge"
+          className="w-full"
+          value={check.judge ?? ""}
+          onChange={(e) =>
+            onChange({ ...check, judge: e.target.value || undefined })
+          }
+        >
           <option value="">Default ({defaultJudge})</option>
           {judges.map((j) => (
             <option key={j} value={j}>
@@ -577,7 +859,7 @@ function AskedFields({
         </Select>
       </Field>
     </>
-  );
+  )
 }
 
 // ─── Counted ───────────────────────────────────────────────────────────────
@@ -592,35 +874,55 @@ const RULES: { op: CountedSpec["op"]; label: string }[] = [
   { op: "before", label: "Calls one tool before another" },
   { op: "before_answering", label: "Calls a tool before answering" },
   { op: "stopped_for_approval", label: "Waits for approval on a tool" },
-];
+]
 
 function specFor(op: CountedSpec["op"], prev: CountedSpec): CountedSpec {
-  const tool = prev.tool;
+  const tool = prev.tool
   switch (op) {
     case "called_with":
-      return { op, tool, path: "path" in prev ? prev.path : "", match: "match" in prev ? prev.match : { equals: "" } };
+      return {
+        op,
+        tool,
+        path: "path" in prev ? prev.path : "",
+        match: "match" in prev ? prev.match : { equals: "" },
+      }
     case "at_least":
     case "at_most":
-      return { op, tool, n: "n" in prev ? prev.n : 1 };
+      return { op, tool, n: "n" in prev ? prev.n : 1 }
     case "before":
-      return { op, tool, then: "then" in prev ? prev.then : "" };
+      return { op, tool, then: "then" in prev ? prev.then : "" }
     default:
-      return { op, tool };
+      return { op, tool }
   }
 }
 
-type MatchKind = "equals" | "contains" | "matches" | "oneOf";
-const kindOf = (m: Matcher): MatchKind => ("equals" in m ? "equals" : "contains" in m ? "contains" : "matches" in m ? "matches" : "oneOf");
+type MatchKind = "equals" | "contains" | "matches" | "oneOf"
+const kindOf = (m: Matcher): MatchKind =>
+  "equals" in m
+    ? "equals"
+    : "contains" in m
+      ? "contains"
+      : "matches" in m
+        ? "matches"
+        : "oneOf"
 const textOf = (m: Matcher) =>
-  "equals" in m ? (typeof m.equals === "string" ? m.equals : JSON.stringify(m.equals)) : "contains" in m ? m.contains : "matches" in m ? m.matches : m.oneOf.map(String).join(", ");
+  "equals" in m
+    ? typeof m.equals === "string"
+      ? m.equals
+      : JSON.stringify(m.equals)
+    : "contains" in m
+      ? m.contains
+      : "matches" in m
+        ? m.matches
+        : m.oneOf.map(String).join(", ")
 /** `equals 3` means the number 3; anything that is not JSON is taken as text. */
 const loose = (s: string): unknown => {
   try {
-    return JSON.parse(s);
+    return JSON.parse(s)
   } catch {
-    return s;
+    return s
   }
-};
+}
 const matcherOf = (kind: MatchKind, text: string): Matcher =>
   kind === "equals"
     ? { equals: loose(text) }
@@ -628,15 +930,33 @@ const matcherOf = (kind: MatchKind, text: string): Matcher =>
       ? { contains: text }
       : kind === "matches"
         ? { matches: text }
-        : { oneOf: text.split(",").map((x) => loose(x.trim())).filter((x) => x !== "") };
+        : {
+            oneOf: text
+              .split(",")
+              .map((x) => loose(x.trim()))
+              .filter((x) => x !== ""),
+          }
 
-function CountedFields({ check, onChange }: { check: CountedCheck; onChange: (c: Check) => void }) {
-  const s = check.spec;
-  const setSpec = (spec: CountedSpec) => onChange({ ...check, spec });
+function CountedFields({
+  check,
+  onChange,
+}: {
+  check: CountedCheck
+  onChange: (c: Check) => void
+}) {
+  const s = check.spec
+  const setSpec = (spec: CountedSpec) => onChange({ ...check, spec })
   return (
     <>
       <Field id="c-op" label="Rule">
-        <Select id="c-op" className="w-full" value={s.op} onChange={(e) => setSpec(specFor(e.target.value as CountedSpec["op"], s))}>
+        <Select
+          id="c-op"
+          className="w-full"
+          value={s.op}
+          onChange={(e) =>
+            setSpec(specFor(e.target.value as CountedSpec["op"], s))
+          }
+        >
           {RULES.map((r) => (
             <option key={r.op} value={r.op}>
               {r.label}
@@ -644,23 +964,53 @@ function CountedFields({ check, onChange }: { check: CountedCheck; onChange: (c:
           ))}
         </Select>
       </Field>
-      <Field id="c-tool" label={s.op === "before" ? "This tool first" : "Tool"} hint="The tool's name as the agent sees it. A * matches anything: linear_* or *_read_file.">
-        <Input id="c-tool" value={s.tool} onChange={(e) => setSpec({ ...s, tool: e.target.value })} className="font-mono text-sm" />
+      <Field
+        id="c-tool"
+        label={s.op === "before" ? "This tool first" : "Tool"}
+        hint="The tool's name as the agent sees it. A * matches anything: linear_* or *_read_file."
+      >
+        <Input
+          id="c-tool"
+          value={s.tool}
+          onChange={(e) => setSpec({ ...s, tool: e.target.value })}
+          className="font-mono text-sm"
+        />
       </Field>
       {s.op === "before" && (
         <Field id="c-then" label="Then this tool">
-          <Input id="c-then" value={s.then} onChange={(e) => setSpec({ ...s, then: e.target.value })} className="font-mono text-sm" />
+          <Input
+            id="c-then"
+            value={s.then}
+            onChange={(e) => setSpec({ ...s, then: e.target.value })}
+            className="font-mono text-sm"
+          />
         </Field>
       )}
       {(s.op === "at_least" || s.op === "at_most") && (
         <Field id="c-n" label="Number of calls">
-          <Input id="c-n" type="number" min={0} value={s.n} onChange={(e) => setSpec({ ...s, n: Number(e.target.value) })} className="w-28" />
+          <Input
+            id="c-n"
+            type="number"
+            min={0}
+            value={s.n}
+            onChange={(e) => setSpec({ ...s, n: Number(e.target.value) })}
+            className="w-28"
+          />
         </Field>
       )}
       {s.op === "called_with" && (
         <>
-          <Field id="c-path" label="Look at" hint="A field of the call's arguments, like state or issue.id. Start with result. to look at what the tool returned.">
-            <Input id="c-path" value={s.path} onChange={(e) => setSpec({ ...s, path: e.target.value })} className="font-mono text-sm" />
+          <Field
+            id="c-path"
+            label="Look at"
+            hint="A field of the call's arguments, like state or issue.id. Start with result. to look at what the tool returned."
+          >
+            <Input
+              id="c-path"
+              value={s.path}
+              onChange={(e) => setSpec({ ...s, path: e.target.value })}
+              className="font-mono text-sm"
+            />
           </Field>
           <Field
             id="c-match"
@@ -668,7 +1018,19 @@ function CountedFields({ check, onChange }: { check: CountedCheck; onChange: (c:
             hint="Use {{facts.name}} to compare with each question's own value. {{facts.docs}} is the question's list of documents, and every one must match."
           >
             <div className="flex gap-2">
-              <Select id="c-match" value={kindOf(s.match)} onChange={(e) => setSpec({ ...s, match: matcherOf(e.target.value as MatchKind, textOf(s.match)) })}>
+              <Select
+                id="c-match"
+                value={kindOf(s.match)}
+                onChange={(e) =>
+                  setSpec({
+                    ...s,
+                    match: matcherOf(
+                      e.target.value as MatchKind,
+                      textOf(s.match)
+                    ),
+                  })
+                }
+              >
                 <option value="equals">equal</option>
                 <option value="contains">contain</option>
                 <option value="matches">match the pattern</option>
@@ -677,17 +1039,24 @@ function CountedFields({ check, onChange }: { check: CountedCheck; onChange: (c:
               <Input
                 aria-label="Value"
                 value={textOf(s.match)}
-                onChange={(e) => setSpec({ ...s, match: matcherOf(kindOf(s.match), e.target.value) })}
+                onChange={(e) =>
+                  setSpec({
+                    ...s,
+                    match: matcherOf(kindOf(s.match), e.target.value),
+                  })
+                }
                 className="min-w-0 flex-1 font-mono text-sm"
               />
             </div>
           </Field>
         </>
       )}
-      <div className="bg-primary-bg-hover text-ink-secondary rounded-md px-3 py-2 text-xs">
+      <div className="rounded-md bg-primary-bg-hover px-3 py-2 text-xs text-ink-secondary">
         <span className="text-ink-tertiary">Passes when </span>
-        <span className="font-mono">{s.tool.trim() ? readable(check) : "…name a tool"}</span>
+        <span className="font-mono">
+          {s.tool.trim() ? readable(check) : "…name a tool"}
+        </span>
       </div>
     </>
-  );
+  )
 }

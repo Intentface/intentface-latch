@@ -426,3 +426,49 @@ export const createChecksFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "Sign in again." };
     return createChecks(principal, data);
   });
+
+/**
+ * Every run of a question set as points: for each version in each run, the
+ * share of verdicts that passed and what a thread cost on average. What the
+ * cost chart plots — did the better version cost more?
+ */
+export const getRunHistoryFn = createServerFn({ method: "GET" })
+  .validator((d: { agent: string; datasetId: string; rubricId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return [];
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return [];
+    const { evals } = await getLatch();
+    const latest = await evals.getRubric(o.owner, data.rubricId);
+    if (!latest) return [];
+    const runs = (await evals.listRuns(o.owner, data.datasetId)).slice(0, 20);
+    const points: { runId: string; version: string; at: number; passRate: number; verdicts: number; costPerThread: number | null; threads: number }[] = [];
+    for (const r of runs) {
+      const threads = (await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: r.runId })).filter((t) => !t.error);
+      const ids = threads.map((t) => t.threadId);
+      // The newest checks version this run was judged under.
+      let verdicts = await evals.listVerdicts({ threadIds: ids, rubricVersion: latest.version });
+      for (let v = latest.version - 1; !verdicts.length && v >= 1; v--) verdicts = await evals.listVerdicts({ threadIds: ids, rubricVersion: v });
+      if (!verdicts.length) continue;
+      const costs = await evals.threadCosts(ids);
+      for (const version of r.versions) {
+        const mine = new Set(threads.filter((t) => t.version === version).map((t) => t.threadId));
+        const vs = verdicts.filter((v) => mine.has(v.threadId));
+        const cs = [...mine].map((id) => costs.get(id)).filter((c): c is number => c !== undefined && c > 0);
+        if (!vs.length) continue;
+        points.push({
+          runId: r.runId,
+          version,
+          at: r.createdAt,
+          passRate: vs.filter((v) => !v.failed).length / vs.length,
+          verdicts: vs.length,
+          costPerThread: cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : null,
+          threads: mine.size,
+        });
+      }
+    }
+    return points;
+  });
+
+export type RunPoint = Awaited<ReturnType<typeof getRunHistoryFn>>[number];

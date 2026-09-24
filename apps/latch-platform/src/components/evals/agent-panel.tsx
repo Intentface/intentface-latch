@@ -95,7 +95,7 @@ export function EvalsAgentPanel({ open, onClose, context }: { open: boolean; onC
   return (
     <>
       {/* Make room: on wide screens the page moves left instead of hiding under the panel. */}
-      <style>{`@media (min-width: 1280px) { .evals-page { margin-right: 452px; } }`}</style>
+      <style>{`@media (min-width: 1280px) { .evals-page { margin-right: 452px; } } @media (max-width: 1799px) { .evals-nav { display: none !important; } }`}</style>
       <aside
         aria-label="Evals agent"
         className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg fixed inset-y-2 right-2 z-40 flex w-[min(440px,calc(100vw-1rem))] flex-col overflow-hidden rounded-xl"
