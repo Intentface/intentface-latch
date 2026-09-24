@@ -3,6 +3,7 @@ import { Menu, PanelLeft } from "lucide-react";
 import { Shell, useShell } from "@intentface/chat/shell";
 import type { ShellStore } from "@intentface/chat/shell";
 import { AppSidebarContent } from "@/components/app-sidebar";
+import { ScrollPane } from "@/components/scroll-pane";
 import Drawer from "@/components/ui/drawer";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
@@ -86,8 +87,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <AppSidebarContent />
           </Drawer.Content>
         </Drawer>
-        <div data-slot="sidebar-inset" className="relative bg-secondary-bg border-secondary-border mx-2 mb-2 min-h-0 flex-1 overflow-auto rounded-xl border">
-          {children}
+        <div data-slot="sidebar-inset" className="relative bg-secondary-bg border-secondary-border mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-xl border">
+          <ScrollPane>{children}</ScrollPane>
         </div>
       </div>
     );
@@ -157,7 +158,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         >
           {/* A flex row: the pane claims the space explicitly, or it would
               shrink to the thread's min-width instead of filling. */}
-          <div className="h-full min-w-0 flex-1 overflow-auto">{children}</div>
+          <ScrollPane>{children}</ScrollPane>
         </div>
       </Shell.Viewport>
     </Shell.Root>
