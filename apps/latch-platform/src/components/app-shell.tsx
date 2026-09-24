@@ -134,11 +134,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* A sibling of the sidebar, not a child: the sidebar clips its overflow
           for the collapsed card, so a handle hung off its edge would be cut in
-          half. It straddles the content panel's left border. */}
+          half. Centred on the content panel's 1px left border, which starts
+          where the gutter ends (the viewport has no left padding). */}
       <Shell.Grip
         aria-label="Resize sidebar"
         className={cn(
-          "absolute inset-y-0 left-[calc(var(--shell-sidebar-width)+4px)] z-20 w-1.5 -translate-x-1/2 cursor-col-resize select-none",
+          "absolute inset-y-0 left-[calc(var(--shell-sidebar-width)+0.5px)] z-20 w-1.5 -translate-x-1/2 cursor-col-resize select-none",
           "before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-transparent before:transition-colors before:duration-100",
           "before:[mask-image:linear-gradient(to_bottom,transparent_20px,black_76px,black_calc(100%-76px),transparent_calc(100%-20px))]",
           "hover:before:bg-ink-tertiary data-[resizing]:before:bg-ink-secondary",
