@@ -60,6 +60,18 @@ export interface Input {
   /** Further user messages into the same thread, after the first answer. */
   followUps?: string[];
   facts?: InputFacts;
+  /** Sent with the first message on every run — the same bytes each time, so answers compare. */
+  files?: InputFile[];
+}
+
+/** A file an input carries, as chat sends one: a data URL. */
+export interface InputFile {
+  filename: string;
+  mediaType: string;
+  /** `data:` URL. */
+  url: string;
+  /** Bytes, for display. */
+  size: number;
 }
 
 /**

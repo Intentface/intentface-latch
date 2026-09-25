@@ -148,10 +148,16 @@ export function checkIdFor(label: string, taken: Iterable<string>): string {
 }
 
 /** The next free question id: numeric sets continue their numbering. */
-export function nextInputId(inputs: { id: string }[]): string {
-  const nums = inputs.map((i) => Number(i.id)).filter((n) => Number.isInteger(n));
-  if (nums.length === inputs.length) return String((nums.length ? Math.max(...nums) : 0) + 1);
-  const ids = new Set(inputs.map((i) => i.id));
+/**
+ * An id for a new input. `retired` are ids that still have answers in past
+ * runs — a removed input's — and are never handed out again, or the new
+ * input would inherit its answers.
+ */
+export function nextInputId(inputs: { id: string }[], retired: Iterable<string> = []): string {
+  const all = [...inputs.map((i) => i.id), ...retired];
+  const nums = all.map((id) => Number(id)).filter((n) => Number.isInteger(n));
+  if (inputs.every((i) => Number.isInteger(Number(i.id)))) return String((nums.length ? Math.max(...nums) : 0) + 1);
+  const ids = new Set(all);
   let n = inputs.length + 1;
   while (ids.has(`q${n}`)) n++;
   return `q${n}`;

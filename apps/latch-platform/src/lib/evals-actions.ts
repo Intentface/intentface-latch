@@ -7,7 +7,7 @@
 import type { Principal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
-import type { Check, Input, Rubric } from "./evals/v2/model";
+import type { Check, Input, InputFile, Rubric } from "./evals/v2/model";
 import { saysItems } from "./evals/v2/expect";
 import { checkIdFor, fromEditable, nextInputId, toEditable, validateChecks } from "./evals/v2/validate";
 import type { EditableQuestion } from "./evals/v2/validate";
@@ -87,10 +87,15 @@ export async function editQuestions(
   const { evals } = await getLatch();
   const set = await evals.getDataset(o.owner, d.questionSetId);
   if (!set) return { ok: false as const, error: `No question set "${d.questionSetId}".` };
-  let list = (await evals.listInputs(set.id)).map(toEditable);
+  const before = await evals.listInputs(set.id);
+  // Files never travel through the editors: they stay with the input by id.
+  const filesOf = new Map(before.map((i) => [i.id, i.files]));
+  let list = before.map(toEditable);
   const gone = new Set(d.deletes ?? []);
   list = list.filter((q) => !gone.has(q.id));
   const added: string[] = [];
+  // Ids with answers in past runs; read once, only if something is added.
+  let retired: Set<string> | undefined;
   for (const u of d.upserts ?? []) {
     const at = u.id ? list.findIndex((q) => q.id === u.id) : -1;
     if (at >= 0) {
@@ -109,7 +114,8 @@ export async function editQuestions(
         ...(u.extra !== undefined ? { extra: u.extra } : {}),
       };
     } else {
-      const id = u.id && !list.some((q) => q.id === u.id) ? u.id : nextInputId(list);
+      retired ??= new Set((await evals.listThreads(o.owner, { datasetId: set.id })).flatMap((t) => (t.inputId ? [t.inputId] : [])));
+      const id = u.id && !list.some((q) => q.id === u.id) && !retired.has(u.id) ? u.id : nextInputId(list, retired);
       list.push({
         id,
         prompt: u.prompt,
@@ -128,6 +134,10 @@ export async function editQuestions(
   }
   const valid = fromEditable(list);
   if (!valid.ok) return valid;
+  for (const i of valid.value) {
+    const f = filesOf.get(i.id);
+    if (f?.length) i.files = f;
+  }
   if (d.audience !== undefined || d.note !== undefined)
     await evals.saveDataset({
       owner: set.owner,
@@ -180,6 +190,36 @@ async function ensureOn(r: Rubric, inputs: Input[]) {
   if (!add.length) return [];
   await evals.saveRubric({ owner: r.owner, id: r.id, agentName: r.agentName, defaultJudge: r.defaultJudge, checks: [...r.checks, ...add] });
   return add.map((c) => c.label);
+}
+
+/** The most a file may weigh, and how many one input may carry — as chat allows. */
+export const INPUT_FILE_MAX = 10 * 1024 * 1024;
+export const INPUT_FILES_MAX = 5;
+
+/** Attach a file to an input, or take one off. Its answers from before keep what they were given. */
+export async function editInputFiles(
+  principal: Principal,
+  d: { agent: string; datasetId: string; inputId: string; add?: Omit<InputFile, "size">; remove?: number },
+) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit." };
+  const { evals } = await getLatch();
+  const set = await evals.getDataset(o.owner, d.datasetId);
+  if (!set) return { ok: false as const, error: "This set no longer exists." };
+  const inputs = await evals.listInputs(set.id);
+  const input = inputs.find((i) => i.id === d.inputId);
+  if (!input) return { ok: false as const, error: `No input ${d.inputId}.` };
+  let files = input.files ?? [];
+  if (d.add) {
+    if (!d.add.url.startsWith("data:")) return { ok: false as const, error: "A file must be sent as its contents." };
+    const size = Math.round(((d.add.url.length - d.add.url.indexOf(",") - 1) * 3) / 4);
+    if (size > INPUT_FILE_MAX) return { ok: false as const, error: `${d.add.filename} is over 10 MB.` };
+    if (files.length >= INPUT_FILES_MAX) return { ok: false as const, error: `An input can carry ${INPUT_FILES_MAX} files.` };
+    files = [...files, { ...d.add, size }];
+  }
+  if (d.remove !== undefined) files = files.filter((_, i) => i !== d.remove);
+  await evals.setInputs(set.id, inputs.map((i) => (i.id === input.id ? { ...i, files } : i)));
+  return { ok: true as const, files: files.map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })) };
 }
 
 export async function createChecks(principal: Principal, d: { agent: string; name: string; checks?: Check[] }) {

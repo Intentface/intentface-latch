@@ -16,7 +16,7 @@ import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
-import { createChecks, createQuestionSet, editQuestions } from "./evals-actions";
+import { createChecks, createQuestionSet, editInputFiles, editQuestions } from "./evals-actions";
 import type { AgainRequest, RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { configFingerprint } from "./evals/v2/runner";
@@ -149,7 +149,13 @@ export const getQuestionsFn = createServerFn({ method: "GET" })
     const { evals } = await getLatch();
     const d = await evals.getDataset(o.owner, data.datasetId);
     if (!d) return null;
-    return { dataset: { id: d.id, name: d.name, audience: d.audience ?? "", note: d.note ?? "" }, questions: (await evals.listInputs(d.id)).map(toEditable) };
+    return {
+      dataset: { id: d.id, name: d.name, audience: d.audience ?? "", note: d.note ?? "" },
+      questions: (await evals.listInputs(d.id)).map((i) => ({
+        ...toEditable(i),
+        files: (i.files ?? []).map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })),
+      })),
+    };
   });
 
 /**
@@ -169,6 +175,11 @@ export const saveQuestionsFn = createServerFn({ method: "POST" })
     if (!d) return { ok: false as const, error: "This question set no longer exists." };
     const valid = fromEditable(data.questions);
     if (!valid.ok) return valid;
+    const filesOf = new Map((await evals.listInputs(d.id)).map((i) => [i.id, i.files]));
+    for (const i of valid.value) {
+      const f = filesOf.get(i.id);
+      if (f?.length) i.files = f;
+    }
     await evals.saveDataset({
       owner: d.owner,
       id: d.id,
@@ -248,6 +259,15 @@ export const getToolArgsFn = createServerFn({ method: "GET" })
         seen: [...a.values.entries()].sort((x, y) => y[1] - x[1]).slice(0, 8).map(([v]) => v),
       })),
     }));
+  });
+
+/** Attach a file to an input, or remove one. Sent as its contents, the way chat sends one. */
+export const editInputFilesFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; inputId: string; add?: { filename: string; mediaType: string; url: string }; remove?: number }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return editInputFiles(principal, data);
   });
 
 /** The latest version of a set of checks, plus the judges a check may name. */

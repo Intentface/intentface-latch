@@ -369,11 +369,12 @@ export async function processJob(owner: string, id: string): Promise<void> {
       job,
       {
         run: {
-          runAgent: ({ agent, prompt, threadId }) =>
+          runAgent: ({ agent, prompt, files, threadId }) =>
             runtime.runAgent({
               principal,
               agent,
               prompt,
+              ...(files?.length ? { files } : {}),
               ...(threadId ? { threadId } : {}),
               // Actions are simulated, never performed: an eval must not send
               // the email it is testing whether the agent would send.

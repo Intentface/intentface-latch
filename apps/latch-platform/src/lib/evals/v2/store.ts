@@ -1,5 +1,5 @@
 import type { Client } from "@libsql/client";
-import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, Variant } from "./model";
+import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, Variant, InputFile } from "./model";
 import type { EvalJob } from "./jobs";
 import type { FailureMode, Note, Suggestion } from "./failures";
 
@@ -149,6 +149,7 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
     await client.execute(`ALTER TABLE latch_eval_modes ADD COLUMN ${col}`).catch(() => {});
   for (const col of ["group_name TEXT", "group_description TEXT"])
     await client.execute(`ALTER TABLE latch_eval_suggestions ADD COLUMN ${col}`).catch(() => {});
+  await client.execute(`ALTER TABLE latch_eval_inputs ADD COLUMN files TEXT`).catch(() => {});
   for (const col of ["run_id TEXT", "attempt INTEGER"])
     await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
@@ -279,7 +280,7 @@ export function createEvalsStore(client: Client): EvalsStore {
         [
           { sql: `DELETE FROM latch_eval_inputs WHERE dataset_id = ?`, args: [datasetId] },
           ...inputs.map((i, position) => ({
-            sql: `INSERT INTO latch_eval_inputs (dataset_id, id, position, prompt, follow_ups, facts) VALUES (?, ?, ?, ?, ?, ?)`,
+            sql: `INSERT INTO latch_eval_inputs (dataset_id, id, position, prompt, follow_ups, facts, files) VALUES (?, ?, ?, ?, ?, ?, ?)`,
             args: [
               datasetId,
               i.id,
@@ -287,6 +288,7 @@ export function createEvalsStore(client: Client): EvalsStore {
               i.prompt,
               i.followUps?.length ? JSON.stringify(i.followUps) : null,
               i.facts && Object.keys(i.facts).length ? JSON.stringify(i.facts) : null,
+              i.files?.length ? JSON.stringify(i.files) : null,
             ],
           })),
         ],
@@ -300,6 +302,7 @@ export function createEvalsStore(client: Client): EvalsStore {
           prompt: String(r.prompt),
           ...(r.follow_ups ? { followUps: parse<string[]>(r.follow_ups, []) } : {}),
           ...(r.facts ? { facts: parse(r.facts, {}) } : {}),
+          ...(r.files ? { files: parse<InputFile[]>(r.files, []) } : {}),
         }),
       );
     },

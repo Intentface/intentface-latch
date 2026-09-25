@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
-import { Loader2, Plus, X } from "lucide-react"
-import { editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, saveChecksFn } from "@/lib/evals-server"
+import { FileText, Loader2, Paperclip, Plus, X } from "lucide-react"
+import { editInputFilesFn, editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, saveChecksFn } from "@/lib/evals-server"
+import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_FILE_SIZE, formatFileSize } from "@/lib/ai/attachments"
 import type { EvalGrid } from "@/lib/evals-server"
 import type { CallExpectation, CallMatch, Check } from "@/lib/evals/v2/model"
 import { checkIdFor } from "@/lib/evals/v2/validate"
@@ -16,6 +17,54 @@ import { cn } from "@/lib/utils"
  */
 
 type Input = EvalGrid["inputs"][number]
+type FileMeta = { filename: string; mediaType: string; size: number }
+
+/** A picked file as chat sends one: its contents as a data URL. */
+const readFile = (f: File) =>
+  new Promise<{ filename: string; mediaType: string; url: string }>((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve({ filename: f.name, mediaType: f.type || "application/octet-stream", url: String(r.result) })
+    r.onerror = () => reject(new Error(`Couldn't read ${f.name}.`))
+    r.readAsDataURL(f)
+  })
+
+function FileChip({ file, onRemove }: { file: FileMeta; onRemove?: () => void }) {
+  return (
+    <span className="border-primary-border bg-primary-bg-hover/40 inline-flex h-7 max-w-[260px] items-center gap-1.5 rounded-md border px-2 text-xs">
+      <FileText className="text-ink-tertiary size-3.5 shrink-0" />
+      <span className="text-ink-primary truncate">{file.filename}</span>
+      <span className="text-ink-tertiary shrink-0 tabular-nums">{formatFileSize(file.size)}</span>
+      {onRemove && (
+        <button type="button" aria-label={`Remove ${file.filename}`} onClick={onRemove} className="text-ink-tertiary hover:text-ink-primary">
+          <X className="size-3" />
+        </button>
+      )}
+    </span>
+  )
+}
+
+/** A paperclip that opens the file picker; each chosen file is handed over as it's read. */
+function Attach({ onPick, disabled }: { onPick: (files: File[]) => void; disabled?: boolean }) {
+  const ref = useRef<HTMLInputElement>(null)
+  return (
+    <>
+      <input
+        ref={ref}
+        type="file"
+        multiple
+        hidden
+        accept={ATTACHMENT_ACCEPT}
+        onChange={(e) => {
+          onPick([...(e.target.files ?? [])])
+          e.target.value = ""
+        }}
+      />
+      <button type="button" disabled={disabled} onClick={() => ref.current?.click()} className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-xs disabled:opacity-40">
+        <Paperclip className="size-3.5" /> Attach
+      </button>
+    </>
+  )
+}
 
 const label = "text-ink-tertiary text-xs"
 const field =
@@ -79,6 +128,8 @@ export function InputDrawer({
 }) {
   const [draft, setDraft] = useState<Expectations | null>(null)
   const [tools, setTools] = useState<Tools>([])
+  const [files, setFiles] = useState<FileMeta[]>([])
+  const [uploading, setUploading] = useState(false)
   const [state, setState] = useState<"idle" | "saving" | "saved" | string>("idle")
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const dirty = useRef(false)
@@ -87,6 +138,7 @@ export function InputDrawer({
     if (!input) return setDraft(null)
     dirty.current = false
     setState("idle")
+    setFiles(input.files)
     setDraft({
       prompt: input.prompt,
       followUps: input.followUps,
@@ -146,6 +198,28 @@ export function InputDrawer({
     else if (dirty.current) onSaved()
     onClose()
   }
+  const attach = async (picked: File[]) => {
+    if (!input) return
+    setUploading(true)
+    for (const f of picked) {
+      if (f.size > ATTACHMENT_MAX_FILE_SIZE) {
+        setState(`${f.name} is over ${formatFileSize(ATTACHMENT_MAX_FILE_SIZE)}.`)
+        continue
+      }
+      const r = await editInputFilesFn({ data: { agent, datasetId, inputId: input.id, add: await readFile(f) } })
+      if (!r.ok) setState(r.error)
+      else setFiles(r.files)
+    }
+    setUploading(false)
+    dirty.current = true
+  }
+  const detach = async (n: number) => {
+    if (!input) return
+    const r = await editInputFilesFn({ data: { agent, datasetId, inputId: input.id, remove: n } })
+    if (!r.ok) return setState(r.error)
+    setFiles(r.files)
+    dirty.current = true
+  }
   const remove = async () => {
     if (!input) return
     const r = await editInputsFn({ data: { agent, datasetId, deletes: [input.id] } })
@@ -168,6 +242,13 @@ export function InputDrawer({
               <div className="space-y-1.5">
                 <div className={label}>The user sends</div>
                 <Grow value={draft.prompt} onChange={(e) => change({ prompt: e.target.value })} aria-label="The user sends" className="text-[14px]" />
+                <div className="flex flex-wrap items-center gap-2">
+                  {files.map((f, n) => (
+                    <FileChip key={`${f.filename}-${n}`} file={f} onRemove={() => void detach(n)} />
+                  ))}
+                  {uploading ? <Loader2 className="text-ink-tertiary size-3.5 animate-spin" /> : <Attach onPick={(fs) => void attach(fs)} />}
+                  {files.length > 0 && <span className="text-ink-tertiary text-[11px]">Sent with the first message on every run</span>}
+                </div>
                 <div className={label}>Then asks</div>
                 <Lines values={draft.followUps} onChange={(followUps) => change({ followUps })} placeholder="A follow-up in the same conversation" add="Then asks" />
               </div>
@@ -496,6 +577,7 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
 export function Composer({ agent, datasetId, onAdded }: { agent: string; datasetId: string; onAdded: (id: string) => void }) {
   const [text, setText] = useState("")
   const [turns, setTurns] = useState<string[]>([])
+  const [picked, setPicked] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const add = async () => {
@@ -503,15 +585,28 @@ export function Composer({ agent, datasetId, onAdded }: { agent: string; dataset
     setBusy(true)
     setError(null)
     const r = await editInputsFn({ data: { agent, datasetId, upserts: [{ prompt: text.trim(), followUps: turns.filter((t) => t.trim()) }] } })
+    if (!r.ok) return (setBusy(false), setError(r.error))
+    const id = r.added[0]
+    // The input exists now; its files go on one at a time.
+    for (const f of id ? picked : []) {
+      const a = await editInputFilesFn({ data: { agent, datasetId, inputId: id, add: await readFile(f) } })
+      if (!a.ok) setError(a.error)
+    }
     setBusy(false)
-    if (!r.ok) return setError(r.error)
     setText("")
     setTurns([])
-    const id = r.added[0]
+    setPicked([])
     if (id) onAdded(id)
   }
   return (
     <div className="border-primary-border bg-primary-bg focus-within:border-ink-tertiary rounded-xl border px-3 pt-2 pb-1.5">
+      {picked.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pt-0.5 pb-1">
+          {picked.map((f, n) => (
+            <FileChip key={`${f.name}-${n}`} file={{ filename: f.name, mediaType: f.type, size: f.size }} onRemove={() => setPicked(picked.filter((_, i) => i !== n))} />
+          ))}
+        </div>
+      )}
       <Grow
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -540,6 +635,13 @@ export function Composer({ agent, datasetId, onAdded }: { agent: string; dataset
         </div>
       ))}
       <div className="flex items-center gap-3 pt-1">
+        <Attach
+          onPick={(fs) => {
+            const big = fs.find((f) => f.size > ATTACHMENT_MAX_FILE_SIZE)
+            if (big) setError(`${big.name} is over ${formatFileSize(ATTACHMENT_MAX_FILE_SIZE)}.`)
+            setPicked([...picked, ...fs.filter((f) => f.size <= ATTACHMENT_MAX_FILE_SIZE)].slice(0, 5))
+          }}
+        />
         <button type="button" onClick={() => setTurns([...turns, ""])} className="text-ink-secondary hover:text-ink-primary text-xs">
           + Then asks
         </button>

@@ -49,7 +49,12 @@ export async function computeGrid(
     // Columns: as asked, or every version of one run (the latest by default).
     let columns: ResultRef[] = (data.columns ?? []).filter((c) => runs.some((r) => r.runId === c.runId && r.versions.includes(c.version)));
     if (!columns.length) {
-      const run = runs.find((r) => r.runId === data.runId) ?? runs.at(0);
+      // By default the newest COMPLETE run: one that was stopped, or answered
+      // only a few inputs, is a poor thing to land on.
+      const size = (await evals.listInputs(data.datasetId)).length;
+      // A set grows after a run, so "complete" is nearly every input it has now.
+      const complete = runs.find((r) => r.questions >= Math.floor(size * 0.9) && r.threads >= r.versions.length * r.questions);
+      const run = runs.find((r) => r.runId === data.runId) ?? complete ?? runs.at(0);
       if (!run) return null;
       const order = (v: string) => (v === "live" ? "" : v);
       columns = [...run.versions].sort((a, b) => order(a).localeCompare(order(b))).map((version) => ({ runId: run.runId, version }));
@@ -150,6 +155,8 @@ export async function computeGrid(
         asks: Array.isArray(i.facts?.asks) ? i.facts.asks.map(String) : [],
         decline: i.facts?.decline === true,
         calls: Array.isArray(i.facts?.calls) ? i.facts.calls : [],
+        /** What's attached — never the contents, which can be megabytes. */
+        files: (i.files ?? []).map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })),
       })),
       /** Every answer shown, so a cell knows its tries and whether one broke. */
       threads: threads.map((t) => ({ threadId: t.threadId, column: t.version, inputId: t.inputId ?? "", attempt: t.attempt ?? 0, error: t.error ?? null })),

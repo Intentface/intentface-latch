@@ -346,6 +346,12 @@ export interface Runtime<P> {
     principal: P;
     agent: string;
     prompt: string;
+    /**
+     * Files sent with the prompt, as chat sends them: `url` is a data URL or
+     * a URL the model provider can fetch. They precede the text in the user
+     * message. Omit for a text-only turn — nothing changes.
+     */
+    files?: { url: string; mediaType: string; filename?: string }[];
     threadId?: string;
     blockGated?: boolean | "simulate-success";
     /**
@@ -3449,11 +3455,14 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /** A fresh user message from plain text (for cron-fired turns). */
-  function userMessageOf(text: string): AppMessage {
+  function userMessageOf(text: string, files?: { url: string; mediaType: string; filename?: string }[]): AppMessage {
     return {
       id: generateMessageId(),
       role: "user",
-      parts: [{ type: "text", text }],
+      parts: [
+        ...(files ?? []).map((f) => ({ type: "file" as const, url: f.url, mediaType: f.mediaType, ...(f.filename ? { filename: f.filename } : {}) })),
+        { type: "text", text },
+      ],
       metadata: { visibility: "user", createdAt: Date.now() },
     } as AppMessage;
   }
@@ -3882,6 +3891,7 @@ export function createRuntime<P, RC = unknown>(
       principal,
       agent,
       prompt,
+      files,
       threadId,
       blockGated = true,
       memory,
@@ -3895,7 +3905,7 @@ export function createRuntime<P, RC = unknown>(
       const r = await runToCompletion({
         principal,
         agent,
-        message: userMessageOf(prompt),
+        message: userMessageOf(prompt, files),
         chatId: threadId,
         depth: 1,
         // Autonomous: no human to authorize (blockGated stubs the gated tools).

@@ -47,3 +47,11 @@ describe("checks", () => {
     expect(checkIdFor("Provides a direct answer or recommendation rather than questions", [])).toBe("provides-a-direct-answer-or");
   });
 });
+
+describe("new input ids", () => {
+  it("never reuse the id of a removed input that still has answers", async () => {
+    const { nextInputId } = await import("./validate");
+    expect(nextInputId([{ id: "1" }, { id: "2" }], ["3"])).toBe("4");
+    expect(nextInputId([{ id: "1" }, { id: "2" }])).toBe("3");
+  });
+});

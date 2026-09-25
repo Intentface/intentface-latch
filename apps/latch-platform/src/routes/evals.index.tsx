@@ -901,7 +901,7 @@ function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"]
     timer.current = setTimeout(() => {
       const el = ref.current
       if (!el) return
-      if (el.scrollWidth <= el.clientWidth && !input.followUps.length) return
+      if (el.scrollWidth <= el.clientWidth && !input.followUps.length && !input.files.length) return
       setGrown(el.getBoundingClientRect())
     }, 220)
   }
@@ -923,6 +923,7 @@ function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"]
         <span ref={ref} className="text-ink-primary block min-w-0 flex-1 truncate leading-7 hover:underline hover:decoration-[color:var(--color-ink-tertiary)] hover:underline-offset-2">
           {input.prompt}
         </span>
+        {input.files.length > 0 && <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums" title={input.files.map((f) => f.filename).join(", ")}>📎 {input.files.length}</span>}
         <span className={cn("shrink-0 text-[11.5px] tabular-nums", failed ? "text-[color:var(--eval-bad-ink)]" : "text-ink-tertiary")}>
           {failed ? `${failed} failed` : count ? `${count} expectation${count === 1 ? "" : "s"}` : "No expectations"}
         </span>
@@ -936,6 +937,7 @@ function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"]
           style={{ left: grown.left - 11, top: grown.top - 4, width: grown.width + 22 }}
         >
           <div>{input.prompt}</div>
+          {input.files.length > 0 && <div className="text-ink-secondary text-xs">📎 {input.files.map((f) => f.filename).join(", ")}</div>}
           {input.followUps.map((f, n) => (
             <div key={n} className="text-ink-secondary text-xs">
               <span className="text-ink-tertiary mr-2">Then asks</span>
@@ -959,7 +961,7 @@ function NothingRun({ agent, datasetId, onRun, onChanged }: { agent: string; dat
   const load = useCallback(() => {
     void getQuestionsFn({ data: { agent, datasetId } }).then((r) =>
       setInputs(
-        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, docs: q.docs, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls })) ?? [],
+        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, docs: q.docs, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, files: q.files })) ?? [],
       ),
     )
   }, [agent, datasetId])

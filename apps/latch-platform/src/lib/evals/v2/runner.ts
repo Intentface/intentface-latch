@@ -40,7 +40,7 @@ export function configFingerprint(rec: {
 }
 
 export interface RunDeps {
-  runAgent(input: { agent: string; prompt: string; threadId?: string }): Promise<{ threadId: string; answer: string }>;
+  runAgent(input: { agent: string; prompt: string; files?: { url: string; mediaType: string; filename?: string }[]; threadId?: string }): Promise<{ threadId: string; answer: string }>;
 }
 
 export async function runDataset(opts: {
@@ -80,6 +80,28 @@ export async function runDataset(opts: {
  * throws — a failure is a ThreadRef with `error`, so a job can record it and
  * move on, and never re-runs it.
  */
+/**
+ * An input's first message with its files. PDFs and images travel as file
+ * parts; text files go in the message itself, named — providers that read a
+ * PDF often refuse a text/plain part.
+ */
+export function withFiles(input: Pick<Input, "prompt" | "files">): { prompt: string; files: { url: string; mediaType: string; filename: string }[] } {
+  const files: { url: string; mediaType: string; filename: string }[] = [];
+  const texts: string[] = [];
+  for (const f of input.files ?? []) {
+    const isText = f.mediaType.startsWith("text/") || f.mediaType === "application/json";
+    const comma = f.url.indexOf(",");
+    if (isText && f.url.startsWith("data:") && comma > 0) {
+      const body = f.url.slice(comma + 1);
+      const text = f.url.slice(0, comma).endsWith(";base64")
+        ? new TextDecoder().decode(Uint8Array.from(atob(body), (c) => c.charCodeAt(0)))
+        : decodeURIComponent(body);
+      texts.push(`<file name="${f.filename}">\n${text}\n</file>`);
+    } else files.push({ url: f.url, mediaType: f.mediaType, filename: f.filename });
+  }
+  return { prompt: texts.length ? `${texts.join("\n\n")}\n\n${input.prompt}` : input.prompt, files };
+}
+
 export async function runUnit(opts: {
   owner: string;
   dataset: Pick<Dataset, "id" | "agentName">;
@@ -105,7 +127,9 @@ export async function runUnit(opts: {
   };
   let threadId = "";
   try {
-    let res = await opts.deps.runAgent({ agent: v.ref, prompt: input.prompt });
+    // An input's files go with its first message, as a user would attach them.
+    const { files, prompt } = withFiles(input);
+    let res = await opts.deps.runAgent({ agent: v.ref, prompt, ...(files.length ? { files } : {}) });
     threadId = res.threadId;
     // Follow-ups go into the SAME thread: the failures worth catching are
     // usually on turn two, after the agent has something to lose track of.
