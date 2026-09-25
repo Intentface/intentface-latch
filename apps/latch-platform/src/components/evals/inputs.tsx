@@ -313,7 +313,11 @@ type Expectations = {
   calls: CallExpectation[]
 }
 type Tools = NonNullable<Awaited<ReturnType<typeof getToolArgsFn>>>
-const short = (t: string) => t.slice(t.indexOf("_") + 1)
+/** `edge-v2-kn_read_file` → `read_file`; a built-in like `read_file` stays whole. */
+const short = (t: string) => {
+  const cut = t.indexOf("_")
+  return cut > 0 && t.slice(0, cut).includes("-") ? t.slice(cut + 1) : t
+}
 const OPS: Partial<Record<string, [CallMatch["op"], string][]>> = {
   text: [["contains", "contains"], ["equals", "is"], ["not_contains", "doesn't contain"], ["any", "is set"]],
   list: [["contains", "includes"], ["not_contains", "doesn't include"], ["any", "is set"]],
@@ -352,7 +356,7 @@ function CallEditor({ call, tools, onChange }: { call: CallExpectation; tools: T
           return (
             <option key={t.name} value={t.name}>
               {short(t.name)}
-              {clash ? ` (${t.name.slice(0, t.name.indexOf("_"))})` : ""}
+              {t.builtIn ? " · built-in" : clash ? ` (${t.name.slice(0, t.name.indexOf("_"))})` : ""}
               {t.called ? "" : " · not called yet"}
             </option>
           )

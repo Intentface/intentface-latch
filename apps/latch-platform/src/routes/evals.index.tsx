@@ -1061,7 +1061,8 @@ function InputResults({ grid, inputId, onOpen }: { grid: EvalGrid; inputId: stri
 
 /** An expected call in words: "calls read_file · file contains a.md", "never calls send_email". */
 const callText = (c: EvalGrid["inputs"][number]["calls"][number]) => {
-  const tool = c.tool.slice(c.tool.indexOf("_") + 1)
+  const cut = c.tool.indexOf("_")
+  const tool = cut > 0 && c.tool.slice(0, cut).includes("-") ? c.tool.slice(cut + 1) : c.tool
   if (c.never) return `never calls ${tool}`
   const m = (c.match ?? []).map((x) => (x.op === "any" ? `${x.path} set` : `${x.path === "result" ? "the result" : x.path} ${x.op.replace("_", " ")} ${x.value ?? ""}`)).join(", ")
   return `calls ${tool}${m ? ` · ${m}` : ""}`

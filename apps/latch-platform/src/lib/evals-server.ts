@@ -249,10 +249,14 @@ export const getToolArgsFn = createServerFn({ method: "GET" })
       }
     }
     const enabled = (rec?.tools as { enabled?: string[] } | undefined)?.enabled ?? [];
-    const names = [...new Set([...seen.keys(), ...enabled])].sort();
+    // Built-in tools (sandbox, default tools, web, memory…) are callable too.
+    const { builtInToolsOf } = await import("./agent-tools");
+    const builtIn = rec ? builtInToolsOf(rec).map((b) => b.name) : [];
+    const names = [...new Set([...seen.keys(), ...enabled, ...builtIn])].sort();
     return names.map((name) => ({
       name,
       called: seen.has(name),
+      builtIn: builtIn.includes(name),
       args: [...(seen.get(name) ?? new Map()).entries()].map(([arg, a]) => ({
         name: arg,
         type: a.type,

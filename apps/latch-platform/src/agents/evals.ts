@@ -247,7 +247,8 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
     }),
 
     read_agent: tool({
-      description: "The agent's configuration — instructions, model, tools — as live, as the unpublished draft, or at a published version.",
+      description:
+        "The agent's configuration — instructions, model, its connection tools AND the built-in tools its settings switch on (sandbox, default tools, web, memory, authored tools, subagents) — as live, as the unpublished draft, or at a published version. Read it before writing questions, so they exercise what the agent can actually do.",
       inputSchema: z.object({ agent: Agent, version: z.string().default("live").describe('"live", "@draft" or "@3"') }),
       execute: async ({ agent, version }) => {
         const o = await scope(agent);
@@ -259,7 +260,18 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
               ? (await agentStore.getDraft(principal, o.name, o.rec.scope))?.record
               : await agentStore.getVersion(principal, o.name, o.rec.scope, Number(version.replace("@", "")));
         if (!rec) return { error: `${o.name} has no ${version}.` };
-        return { version, model: rec.modelId, instructions: rec.instructions, tools: rec.tools, connections: rec.connections };
+        const { builtInToolsOf } = await import("@/lib/agent-tools");
+        return {
+          version,
+          model: rec.modelId,
+          instructions: rec.instructions,
+          connections: rec.connections,
+          /** Tools from its connections: which are enabled, how described, which need approval. */
+          connectionTools: rec.tools,
+          /** Tools its settings switch on — sandbox, default tools, web, memory, authored, subagents. It can use these too. */
+          builtInTools: builtInToolsOf(rec),
+          ...(rec.exec?.effort ? { reasoningEffort: rec.exec.effort } : {}),
+        };
       },
     }),
 
