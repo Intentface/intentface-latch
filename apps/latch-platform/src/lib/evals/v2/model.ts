@@ -195,6 +195,24 @@ export interface Rubric {
   createdAt: number;
 }
 
+/**
+ * A version with one thing changed, run without saving a version: the model,
+ * the reasoning effort, or a line added to the instructions. It resolves as
+ * `name[@base]~id`, and its fingerprint is that of the changed configuration,
+ * so it is its own column, reused and compared like any other.
+ */
+export interface Variant {
+  owner: Owner;
+  id: string;
+  agentName: string;
+  /** `live`, `@draft`, `@3`. */
+  base: string;
+  /** What the column says, e.g. `live · sonnet-5`. */
+  name: string;
+  change: { model?: string; effort?: "minimal" | "low" | "medium" | "high"; addInstructions?: string };
+  createdAt: number;
+}
+
 // ─── Threads, verdicts, rulings ────────────────────────────────────────────
 
 /**

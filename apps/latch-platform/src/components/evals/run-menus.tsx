@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { ChevronLeft, Loader2, Plus } from "lucide-react"
-import { estimateAgainFn, estimateRunFn, getRunOptionsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
+import { createVariantFn, estimateAgainFn, estimateRunFn, getRunOptionsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
 import type { Estimate } from "@/lib/evals/v2/jobs"
 import { Popover } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
@@ -103,6 +103,8 @@ export function AddColumn({
   const [open, setOpen] = useState(false)
   const [options, setOptions] = useState<Awaited<ReturnType<typeof getRunOptionsFn>>>(null)
   const [picked, setPicked] = useState<string | null>(null)
+  const [variantOpen, setVariantOpen] = useState(false)
+  const [madeName, setMadeName] = useState<string | null>(null)
   const [tries, setTries] = useState(1)
   const [priced, setPriced] = useState<{ estimate: Estimate; reusable: { version: string; runId: string; as: string; at: number }[]; limit: number } | null>(null)
   const [sure, setSure] = useState(false)
@@ -112,6 +114,7 @@ export function AddColumn({
   useEffect(() => {
     if (!open) return
     setPicked(null)
+    setVariantOpen(false)
     setError(null)
     void getRunOptionsFn({ data: { agent, datasetId } }).then(setOptions)
   }, [open, agent, datasetId])
@@ -142,9 +145,11 @@ export function AddColumn({
     setBusy(false)
     if (!r.ok) return setError(r.error)
     setOpen(false)
-    onStarted([{ runId: r.id, version: picked }])
+    onStarted([{ runId: r.id, version: pickedName ?? picked }])
   }
   const cost = priced?.estimate.cost ?? null
+  // A variant runs as `~id`; its column and every sentence here call it by name.
+  const pickedName = picked?.startsWith("~") ? (options?.variants.find((v) => `~${v.id}` === picked)?.name ?? madeName ?? picked) : picked
   const reuse = priced?.reusable.find((x) => x.version === picked)
 
   return (
@@ -160,18 +165,39 @@ export function AddColumn({
         <Plus className="size-3.5" /> Run
       </Popover.Trigger>
       <Popover.Content align="start" className="w-[22rem] p-1.5">
-        {!picked ? (
+        {variantOpen && options ? (
+          <VariantForm
+            agent={agent}
+            versions={options.versions.map((v) => v.label)}
+            models={options.models}
+            current={{ model: options.model, effort: options.effort }}
+            onBack={() => setVariantOpen(false)}
+            onMade={(id, name) => (setMadeName(name), setVariantOpen(false), setPicked(`~${id}`))}
+          />
+        ) : !picked ? (
           <>
             <div className="text-ink-tertiary px-2.5 pt-1 pb-1 text-xs">Run on all {inputIds.length || "the"} inputs</div>
             {!options ? (
               <Loader2 className="text-ink-tertiary m-2.5 size-4 animate-spin" />
             ) : (
-              options.versions.map((v) => (
-                <button key={v.label} type="button" className={item} onClick={() => setPicked(v.label)}>
-                  {v.label}
-                  {v.note && <span className={hint}>{v.note}</span>}
+              <>
+                {options.versions.map((v) => (
+                  <button key={v.label} type="button" className={item} onClick={() => setPicked(v.label)}>
+                    {v.label}
+                    {v.note && <span className={hint}>{v.note}</span>}
+                  </button>
+                ))}
+                {options.variants.map((v) => (
+                  <button key={v.id} type="button" className={item} onClick={() => setPicked(`~${v.id}`)}>
+                    {v.name}
+                    <span className={hint}>Variant · {v.note}</span>
+                  </button>
+                ))}
+                <button type="button" className={item} onClick={() => setVariantOpen(true)}>
+                  + New variant
+                  <span className={hint}>A version with one thing changed — model, reasoning effort, an instruction — without saving a version</span>
                 </button>
-              ))
+              </>
             )}
             {hidden.length > 0 && (
               <>
@@ -198,13 +224,14 @@ export function AddColumn({
               <ChevronLeft className="size-3.5" /> Configurations
             </button>
             <div className="text-ink-primary text-sm font-medium">
-              Run {picked} on {inputIds.length} inputs
+              Run {pickedName} on {inputIds.length} inputs
             </div>
+            {picked.startsWith("~") && <p className={hint}>Priced from this set's past answers; on another model the real cost can differ.</p>}
             <Tries value={tries} onChange={setTries} />
             {reuse && (
               <div className="bg-primary-bg-hover rounded-md px-2.5 py-2 text-xs">
                 <span className="text-ink-secondary">
-                  {picked} hasn't changed since {day(reuse.at)}, when it answered all of these.{" "}
+                  {pickedName} hasn't changed since {day(reuse.at)}, when it answered all of these.{" "}
                 </span>
                 <button type="button" className="text-ink-primary underline underline-offset-2" onClick={() => (setOpen(false), onShow({ runId: reuse.runId, version: reuse.as }))}>
                   Show those instead · free
@@ -219,7 +246,7 @@ export function AddColumn({
               onClick={() => void start()}
               className="bg-ink-primary text-primary-bg h-8 w-full rounded-md text-sm font-medium tabular-nums disabled:opacity-40"
             >
-              {busy ? "Starting…" : `Run ${picked}${cost !== null ? ` · about ${money(cost)}` : ""}`}
+              {busy ? "Starting…" : `Run ${pickedName}${cost !== null ? ` · about ${money(cost)}` : ""}`}
             </button>
           </div>
         )}
@@ -318,6 +345,103 @@ export function AgainPanel({
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
       <button type="button" disabled={blocked} onClick={() => void start()} className="bg-ink-primary text-primary-bg h-8 w-full rounded-md text-sm font-medium tabular-nums disabled:opacity-40">
         {busy ? "Starting…" : `Answer again${cost !== null ? ` · about ${money(cost)}` : ""}`}
+      </button>
+    </div>
+  )
+}
+
+/** A variant: pick the version it starts from, and the one thing that differs. */
+function VariantForm({
+  agent,
+  versions,
+  models,
+  current,
+  onBack,
+  onMade,
+}: {
+  agent: string
+  versions: string[]
+  models: string[]
+  current: { model: string; effort: string | null }
+  onBack: () => void
+  onMade: (id: string, name: string) => void
+}) {
+  const [base, setBase] = useState(versions[0] ?? "live")
+  const [what, setWhat] = useState<"model" | "effort" | "instructions">("model")
+  // Start on a sibling of the current model — the usual question is "a smaller or bigger one of these?"
+  const family = current.model.replace(/-[^-]*$/, "")
+  const [model, setModel] = useState(models.find((m) => m !== current.model && m.startsWith(family)) ?? models.find((m) => m !== current.model) ?? current.model)
+  const [effort, setEffort] = useState<"minimal" | "low" | "medium" | "high">(current.effort === "high" ? "low" : "high")
+  const [line, setLine] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const box = "border-primary-border bg-primary-bg w-full rounded-md border px-2 py-1.5 text-[13px] outline-none"
+  const make = async () => {
+    setBusy(true)
+    const r = await createVariantFn({
+      data: { agent, base, change: what === "model" ? { model } : what === "effort" ? { effort } : { addInstructions: line } },
+    })
+    setBusy(false)
+    if (!r.ok) return setError(r.error)
+    onMade(r.id, r.name)
+  }
+  return (
+    <div className="space-y-3 p-2">
+      <button type="button" onClick={onBack} className="text-ink-tertiary hover:text-ink-primary flex items-center gap-1 text-xs">
+        <ChevronLeft className="size-3.5" /> Configurations
+      </button>
+      <div className="text-ink-primary text-sm font-medium">New variant</div>
+      <p className={hint}>Nothing is saved to the agent and users aren't affected. If it wins, make it a version in the agent builder.</p>
+      <label className="block space-y-1">
+        <span className={hint}>Based on</span>
+        <select value={base} onChange={(e) => setBase(e.target.value)} className={box}>
+          {versions.map((v) => (
+            <option key={v}>{v}</option>
+          ))}
+        </select>
+      </label>
+      <div className="space-y-1">
+        <span className={hint}>What changes</span>
+        <div role="radiogroup" className="smooth-shadow-ring-xs smooth-ring-primary-border inline-flex rounded-lg p-0.5 text-xs">
+          {([["model", "Model"], ["effort", "Reasoning"], ["instructions", "An instruction"]] as const).map(([v, l]) => (
+            <button key={v} type="button" role="radio" aria-checked={what === v} onClick={() => setWhat(v)} className={cn("rounded-md px-2.5 py-1", what === v ? "bg-primary-bg-active text-ink-primary font-medium" : "text-ink-secondary")}>
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+      {what === "model" ? (
+        <label className="block space-y-1">
+          <span className={hint}>Model · now {current.model}</span>
+          <select value={model} onChange={(e) => setModel(e.target.value)} className={box}>
+            {models.map((m) => (
+              <option key={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+      ) : what === "effort" ? (
+        <label className="block space-y-1">
+          <span className={hint}>Reasoning effort · now {current.effort ?? "the model's default"}</span>
+          <select value={effort} onChange={(e) => setEffort(e.target.value as typeof effort)} className={box}>
+            {(["minimal", "low", "medium", "high"] as const).map((x) => (
+              <option key={x}>{x}</option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <label className="block space-y-1">
+          <span className={hint}>Added at the end of the instructions</span>
+          <textarea value={line} onChange={(e) => setLine(e.target.value)} rows={3} className={box} placeholder="e.g. Always open the document whose title names the question's subject before answering." />
+        </label>
+      )}
+      {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+      <button
+        type="button"
+        disabled={busy || (what === "instructions" && !line.trim())}
+        onClick={() => void make()}
+        className="bg-ink-primary text-primary-bg h-8 w-full rounded-md text-sm font-medium disabled:opacity-40"
+      >
+        {busy ? "Saving…" : "Continue to the price"}
       </button>
     </div>
   )

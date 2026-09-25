@@ -1,5 +1,5 @@
 import type { Client } from "@libsql/client";
-import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict } from "./model";
+import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, Variant } from "./model";
 import type { EvalJob } from "./jobs";
 import type { FailureMode, Note, Suggestion } from "./failures";
 
@@ -79,6 +79,9 @@ export interface EvalsStore {
   saveRuling: (r: Ruling) => Promise<void>;
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
   deleteRuling: (threadId: string, checkId: string) => Promise<void>;
+  saveVariant: (v: Variant) => Promise<void>;
+  getVariant: (owner: Owner, id: string) => Promise<Variant | null>;
+  listVariants: (owner: Owner, agentName: string) => Promise<Variant[]>;
   listRulings: (q: { threadIds?: string[]; checkIds?: string[] }) => Promise<Ruling[]>;
 }
 
@@ -132,6 +135,9 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       owner TEXT NOT NULL, thread_id TEXT NOT NULL PRIMARY KEY, agent_name TEXT NOT NULL,
       text TEXT NOT NULL, ok INTEGER NOT NULL, why TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS latch_eval_suggestions_agent ON latch_eval_suggestions (owner, agent_name, status)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_variants (
+      owner TEXT NOT NULL, id TEXT NOT NULL, agent_name TEXT NOT NULL, base TEXT NOT NULL, name TEXT NOT NULL,
+      change TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (owner, id))`,
     `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
       thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
       by TEXT, created_at INTEGER NOT NULL,
@@ -213,6 +219,16 @@ const toVerdict = (r: Row): Verdict => ({
 });
 
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(",");
+
+const variantOf = (r: Record<string, unknown>): Variant => ({
+  owner: String(r.owner),
+  id: String(r.id),
+  agentName: String(r.agent_name),
+  base: String(r.base),
+  name: String(r.name),
+  change: JSON.parse(String(r.change)) as Variant["change"],
+  createdAt: Number(r.created_at),
+});
 
 export function createEvalsStore(client: Client): EvalsStore {
   const rows = async (sql: string, args: unknown[] = []) =>
@@ -638,6 +654,20 @@ export function createEvalsStore(client: Client): EvalsStore {
       await client.execute({ sql: `UPDATE latch_eval_suggestions SET status = ? WHERE owner = ? AND thread_id = ?`, args: [status, owner, threadId] });
     },
 
+    async saveVariant(v) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_variants (owner, id, agent_name, base, name, change, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(owner, id) DO UPDATE SET base = excluded.base, name = excluded.name, change = excluded.change`,
+        args: [v.owner, v.id, v.agentName, v.base, v.name, JSON.stringify(v.change), v.createdAt],
+      });
+    },
+    async getVariant(owner, id) {
+      const r = (await rows(`SELECT * FROM latch_eval_variants WHERE owner = ? AND id = ?`, [owner, id]))[0];
+      return r ? variantOf(r) : null;
+    },
+    async listVariants(owner, agentName) {
+      return (await rows(`SELECT * FROM latch_eval_variants WHERE owner = ? AND agent_name = ? ORDER BY created_at DESC`, [owner, agentName])).map(variantOf);
+    },
     async deleteRuling(threadId, checkId) {
       await client.execute({ sql: `DELETE FROM latch_eval_rulings WHERE thread_id = ? AND check_id = ?`, args: [threadId, checkId] });
     },

@@ -40,7 +40,7 @@ import { createConnectionStore  } from "./connection-store";
 import type {ConnectionStore} from "./connection-store";
 import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
-import { agentOwnerSegments, evalOwnerOfRecord } from "./agent-store";
+import { agentOwnerKey, agentOwnerSegments, evalOwnerOfRecord, parseAgentRef } from "./agent-store";
 import type { AgentStore } from "./agent-store";
 import { memoryAgentOf } from "./memory/agent-identity";
 import { isOrgMember } from "./auth";
@@ -112,6 +112,8 @@ let cached:
       runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
+      /** USD per 1M tokens by model id — what an estimate on another model scales by. */
+      pricing: (id: string) => { inputPer1M: number; outputPer1M: number } | undefined;
       /** Per-agent prompt-cache stats + lint for /caching. */
       cachingStats: ReturnType<typeof createCachingStats>;
       /** The adapter's serialized owner key for a principal (raw-SQL scoping). */
@@ -142,6 +144,7 @@ export async function getLatch(): Promise<{
   runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
+  pricing: (id: string) => { inputPer1M: number; outputPer1M: number } | undefined;
   cachingStats: ReturnType<typeof createCachingStats>;
   ownerKeyFor: (p: Principal) => string;
   handler: LatchHandler;
@@ -452,8 +455,30 @@ export async function getLatch(): Promise<{
     // Resolve each agent's `connections: [...]` across code-declared MCP +
     // OpenAPI and the UI-added (Vault-stored) connections.
     connections: allConnections,
-    // UI-created agents (not in the static `agents` registry).
-    dynamicAgents: agentStore,
+    // UI-created agents (not in the static `agents` registry) — and eval
+    // variants of them: `name[@base]~id` is that base with one thing changed
+    // (model, reasoning effort, an added instruction line), never saved as a
+    // version. Only evals run them.
+    dynamicAgents: {
+      list: (p) => agentStore.list(p),
+      resolve: async (name, p) => {
+        const cut = name.indexOf("~");
+        if (cut < 0) return agentStore.resolve(name, p);
+        const base = name.slice(0, cut);
+        const cfg = await agentStore.resolve(base, p);
+        const rec = await agentStore.getRecord(p, parseAgentRef(base).name);
+        if (!cfg || !rec) return undefined;
+        const v = await evals.getVariant(agentOwnerKey(p, rec.scope), name.slice(cut + 1));
+        if (!v) return undefined;
+        const add = v.change.addInstructions?.trim();
+        return {
+          ...cfg,
+          ...(v.change.model ? { model: catalog.modelFor(v.change.model) } : {}),
+          ...(v.change.effort ? { effort: v.change.effort } : {}),
+          ...(add ? { instructions: `${cfg.instructions ?? ""}\n\n${add}` } : {}),
+        };
+      },
+    },
     // Persistent agent memory: injects the compiled index + memory tools into
     // any agent (code or UI) that declares `memory`.
     memory: memoryProvider,
@@ -702,6 +727,7 @@ export async function getLatch(): Promise<{
     runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
+    pricing: catalog.pricing,
     cachingStats: createCachingStats({ client, pricing: catalog.pricing }),
     ownerKeyFor: ownerKeyStr,
     handler,

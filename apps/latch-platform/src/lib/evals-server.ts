@@ -10,7 +10,7 @@ import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Principal } from "./session";
-import type { Check } from "./evals/v2/model";
+import type { Check, Variant } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
 import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
@@ -300,6 +300,41 @@ export const saveChecksFn = createServerFn({ method: "POST" })
 // ─── Running and judging ───────────────────────────────────────────────────
 
 /** What a new run can be made of: the versions that exist, and the questions. */
+/**
+ * Save a variant — a version with one thing changed — so it can be run as a
+ * column. Its name says what changed; the same change on the same base is the
+ * same variant, so running it again reuses its answers.
+ */
+export const createVariantFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; base: string; change: Variant["change"] }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const, error: "Only agents you can edit." };
+    const { evals, models } = await getLatch();
+    const change: Variant["change"] = {
+      ...(data.change.model ? { model: data.change.model } : {}),
+      ...(data.change.effort ? { effort: data.change.effort } : {}),
+      ...(data.change.addInstructions?.trim() ? { addInstructions: data.change.addInstructions.trim() } : {}),
+    };
+    if (!Object.keys(change).length) return { ok: false as const, error: "Change one thing: the model, the reasoning effort or the instructions." };
+    if (change.model && !models.some((m) => m.id === change.model)) return { ok: false as const, error: `No model ${change.model} is configured.` };
+    const existing = await evals.listVariants(o.owner, o.name);
+    const same = existing.find((v) => v.base === data.base && JSON.stringify(v.change) === JSON.stringify(change));
+    if (same) return { ok: true as const, id: same.id, name: same.name };
+    const what = change.model
+      ? change.model.replace(/^claude-/, "")
+      : change.effort
+        ? `${change.effort} effort`
+        : `+ “${change.addInstructions!.slice(0, 24)}${change.addInstructions!.length > 24 ? "…" : ""}”`;
+    let name = `${data.base} · ${what}`;
+    for (let n = 2; existing.some((v) => v.name === name); n++) name = `${data.base} · ${what} ${n}`;
+    const id = `v_${Math.random().toString(36).slice(2, 8)}`;
+    await evals.saveVariant({ owner: o.owner, id, agentName: o.name, base: data.base, name, change, createdAt: Date.now() });
+    return { ok: true as const, id, name };
+  });
+
 export const getRunOptionsFn = createServerFn({ method: "GET" })
   .validator((d: { agent: string; datasetId: string }) => d)
   .handler(async ({ data }) => {
@@ -339,6 +374,21 @@ export const getRunOptionsFn = createServerFn({ method: "GET" })
         })),
       ],
       questions: inputs.map((i) => ({ id: i.id, prompt: i.prompt })),
+      /** Saved variants, runnable as `~id`. */
+      variants: (await evals.listVariants(o.owner, o.name)).map((v) => ({
+        id: v.id,
+        name: v.name,
+        base: v.base,
+        note: v.change.model ? `model ${v.change.model}` : v.change.effort ? `${v.change.effort} reasoning effort` : `adds: ${v.change.addInstructions}`,
+      })),
+      /** What a variant may switch to. */
+      // Models an agent can run on: the catalog also lists image, speech,
+      // embedding and video models, which have no place in a chat turn.
+      models: (await getLatch()).models
+        .map((m) => m.id)
+        .filter((id) => !/image|embedding|tts|veo|lyria|realtime|-live|computer-use|deep-research|translate|audio|-codex/.test(id)),
+      model: rec.modelId,
+      effort: rec.exec?.effort ?? null,
     };
   });
 

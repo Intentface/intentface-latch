@@ -11,13 +11,13 @@
  */
 import { typeSafeAi } from "@ai-sdk/typesafe-ai";
 import { parseAgentRef } from "@intentface/latch-agent-builder";
-import type { AgentStore } from "./agent-store";
+import type { AgentRecord, AgentStore } from "./agent-store";
 import { getLatch } from "./latch";
 import type { Principal } from "./session";
 import { evaluationModelFor } from "./evals/v2/evaluation-model";
 import { MAX_UNITS, advanceJob, estimateRun } from "./evals/v2/jobs";
 import type { EvalJob } from "./evals/v2/jobs";
-import type { ThreadRef } from "./evals/v2/model";
+import type { ThreadRef, Variant } from "./evals/v2/model";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import { configFingerprint } from "./evals/v2/runner";
 
@@ -26,12 +26,38 @@ const LEASE_MS = 5 * 60_000;
 /** Stop STARTING work this long into a slice; Vercel functions are cut at 300s. */
 const SLICE_MS = 4 * 60_000;
 
-/** Resolve `live`, `@draft`, `@3` to the configurations they name, right now. */
+/** A record with a variant's one change applied — what its fingerprint is taken from. */
+export function applyVariant(rec: AgentRecord, change: Variant["change"]): AgentRecord {
+  const add = change.addInstructions?.trim();
+  return {
+    ...rec,
+    ...(change.model ? { modelId: change.model } : {}),
+    ...(change.effort ? { exec: { ...rec.exec, effort: change.effort } } : {}),
+    ...(add ? { instructions: `${rec.instructions}\n\n${add}` } : {}),
+  };
+}
+
+/**
+ * Resolve `live`, `@draft`, `@3` — or a variant, `~id` — to the
+ * configurations they name, right now. A variant's label is its name.
+ */
 export async function resolveVersions(agentStore: AgentStore, principal: Principal, agentName: string, labels: string[]) {
-  const out: { label: string; ref: string; fingerprint: string }[] = [];
+  const out: { label: string; ref: string; fingerprint: string; modelId?: string }[] = [];
   const live = await agentStore.getRecord(principal, agentName);
   const scope = live?.scope ?? "user";
-  for (const label of labels) {
+  for (const asked of labels) {
+    let label = asked;
+    let variant: Variant | null = null;
+    // A variant, by id (`~v_ab12`) or by the name its column shows.
+    if (asked.startsWith("~") || (asked !== "live" && !asked.startsWith("@"))) {
+      const { evals } = await getLatch();
+      const owner = agentOwnerKey(principal, scope);
+      variant = asked.startsWith("~")
+        ? await evals.getVariant(owner, asked.slice(1))
+        : ((await evals.listVariants(owner, agentName)).find((v) => v.name === asked) ?? null);
+      if (!variant) throw new Error(asked.startsWith("~") ? "That variant no longer exists." : `${asked} does not exist for ${agentName}.`);
+      label = variant.base;
+    }
     const ref = label === "live" ? agentName : `${agentName}${label}`;
     const p = parseAgentRef(ref);
     const rec =
@@ -41,7 +67,10 @@ export async function resolveVersions(agentStore: AgentStore, principal: Princip
           ? (await agentStore.getDraft(principal, p.name, scope))?.record
           : await agentStore.getVersion(principal, p.name, scope, p.at);
     if (!rec) throw new Error(`${label} does not exist for ${agentName}.`);
-    out.push({ label, ref, fingerprint: configFingerprint(rec) });
+    if (variant) {
+      const applied = applyVariant(rec, variant.change);
+      out.push({ label: variant.name, ref: `${ref}~${variant.id}`, fingerprint: configFingerprint(applied), modelId: applied.modelId });
+    } else out.push({ label, ref, fingerprint: configFingerprint(rec), modelId: rec.modelId });
   }
   return out;
 }
@@ -89,6 +118,25 @@ export async function planRun(principal: Principal, d: RunRequest) {
     askedChecks: rubric.checks.filter((c) => c.kind === "asked").length,
     history: [...costs.values()].filter((c) => c > 0),
   });
+  // Past answers were mostly the live model's; a version on another model
+  // costs what its model costs. Scale each version's share by its price
+  // relative to live's — blended 4:1 input to output, as agent turns are.
+  const { pricing } = await getLatch();
+  const blended = (id: string | undefined) => {
+    const pr = id ? pricing(id) : undefined;
+    return pr ? pr.inputPer1M * 0.8 + pr.outputPer1M * 0.2 : null;
+  };
+  const home = blended(rec.modelId);
+  const ratios = versions.map((v) => {
+    const mine = blended(v.modelId);
+    return home && mine ? mine / home : 1;
+  });
+  const factor = ratios.reduce((a, r) => a + r, 0) / ratios.length;
+  if (estimate.cost !== null && Math.abs(factor - 1) > 0.05) {
+    const moved = versions.flatMap((v, i) => (Math.abs(ratios[i] - 1) > 0.05 ? [`${v.label} ×${ratios[i].toFixed(1)}`] : []));
+    estimate.cost = estimate.cost * factor;
+    estimate.basis = `${estimate.basis} Scaled for model prices (${moved.join(", ")}).`;
+  }
   // Two labels for one configuration measure noise, not a change.
   const same = versions.filter((v, i) => versions.findIndex((w) => w.fingerprint === v.fingerprint) !== i).map((v) => v.label);
   const reusable = reusableResults(past, versions, inputIds, repeats);
