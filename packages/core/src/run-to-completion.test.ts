@@ -199,7 +199,7 @@ describe("scheduled fire (runDue → runToCompletion)", () => {
     const mem = withSchedules(memoryStorage());
     const rt = runtimeWith(mem, model("never reached", { name: "write_thing", input: '{"what":"x"}' }), triggers);
     const out = await rt.runDue();
-    expect(out).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1 });
+    expect(out).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1, rejected: 0 });
     expect(triggers).toEqual(["schedule"]);
     // The fire ran in a USER-kind chat the scheduler created, not an internal sub_ thread.
     const chat = [...mem.chats.values()][0]!;
@@ -211,7 +211,7 @@ describe("scheduled fire (runDue → runToCompletion)", () => {
   it("an un-gated fire completes and is not parked", async () => {
     const mem = withSchedules(memoryStorage());
     const rt = runtimeWith(mem, model("report ready"));
-    expect(await rt.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
+    expect(await rt.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0, rejected: 0 });
     const chat = [...mem.chats.values()][0]!;
     expect(mem.messages.get(chat.id)!.map((m) => m.role)).toEqual(["user", "assistant"]);
   });

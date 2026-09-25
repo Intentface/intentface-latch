@@ -36,5 +36,19 @@ export type ContextResolver<P> = (
  * Rebuilds a `Principal` from the opaque identity blob persisted on a run, for
  * non-interactive triggers (resume, cron) where there is no request. The mirror
  * of `ContextResolver`. Default in the runtime is a passthrough.
+ *
+ * Return `null` to REFUSE the identity — e.g. the user was removed from the
+ * tenant, or their account is gone since the run/schedule was created. That
+ * is a permanent answer, and the runtime makes it terminal: a refused cron
+ * fire disables its schedule, a refused resume ends its run `errored`. Throw
+ * only for a transient failure (the lookup itself broke): a throw is an error
+ * for that occurrence — which is still consumed, so a recurring schedule stays
+ * live for its next one and a one-shot is spent — and a thrown resume is
+ * retried once its lease lapses.
+ *
+ * Only `null` refuses. `undefined` is not a refusal: the default passthrough
+ * yields it for identity-less rows, which must keep running.
  */
-export type ReconstructPrincipal<P> = (identity: unknown) => P | Promise<P>;
+export type ReconstructPrincipal<P> = (
+  identity: unknown,
+) => P | null | Promise<P | null>;

@@ -43,7 +43,7 @@ Every field below is a seam. Omit it and the corresponding capability simply doe
 | `resolvePromptCaching` | Caching still defaults **on** for first-party Anthropic/OpenAI models (derived from the model's `provider`) — worth ~6× on MCP-heavy agents. Supply the hook to use your own model catalog or per-principal cache keys; `() => undefined` turns caching off. See [Prompt caching](/docs/reference/seams#prompt-caching--the-6-default). |
 | `telemetry` | Nothing is traced; no step/finish hooks fire. |
 | `limits` | Nothing is limited — no turn, token or cost budgets. |
-| `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is. |
+| `reconstructPrincipal` | Resume/cron pass the stored identity blob through as-is — a user removed since the schedule was created keeps running. Return `null` to refuse; see [Nobody is there](/docs/foundations/principals#pattern-5--nobody-is-there). |
 | `extensions` | No moments have handlers; a turn is byte-identical to a runtime without the seam. See [Extensions](/docs/reference/seams#extensions--moments-and-effects). |
 
 <Callout title="Why so many seams are functions">

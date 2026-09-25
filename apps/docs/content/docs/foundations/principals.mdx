@@ -159,6 +159,20 @@ createRuntime({
 
 The rule: **the identity is captured when the schedule is created, not when it fires.** A report scheduled by user A three months ago still runs as user A, reads what user A can read, and lands in user A's rows — even though no one is logged in.
 
+Which is also the risk: if user A has since been removed from the org, the passthrough above keeps running their schedule, as them, forever. Re-validate on the way back out and return `null` to refuse:
+
+```ts
+createRuntime({
+  reconstructPrincipal: async (identity) => {
+    const p = identity as Principal;
+    // The same question your login answers — not a weaker one.
+    return (await isActiveMember(p.userId, p.orgId)) ? p : null;
+  },
+});
+```
+
+A refusal is permanent, and the runtime treats it that way: a refused cron fire is not run and its **schedule is disabled** (counted in `runDue`'s `rejected`), and a refused resume ends the run `errored` without anything running as that identity. Throw only for a transient failure — a lookup that couldn't be made — which counts as an error for that occurrence: it is still consumed, so a recurring schedule stays live for its next one and a one-shot is spent, while a thrown resume is retried once its lease lapses. Only `null` refuses; `undefined` does not. The hook runs inside the schedule's claim window, so keep it fast.
+
 <Callout type="warn" title="Never derive identity from the request payload">
 `defineContext`'s `build` also receives `turnContext` — the parsed request body,
 the active document, a UI selection. It is **not persisted with the run**, so a
