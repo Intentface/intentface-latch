@@ -705,7 +705,7 @@ function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
         <div
           data-grown
           onMouseLeave={hide}
-          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 space-y-1.5 rounded-lg border px-2.5 py-[3px] text-[13px] leading-7 shadow-lg"
+          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 space-y-1.5 rounded-lg border px-2.5 pt-2 pb-2 text-[13px] leading-[1.4] shadow-lg"
           style={{ left: grown.left - 11, top: grown.top - 4, width: grown.width + 22 }}
         >
           <div>{input.prompt}</div>
