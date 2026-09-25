@@ -2995,8 +2995,19 @@ export function createRuntime<P, RC = unknown>(
     for (const run of reaped) {
       // Give up on poison runs that keep dying — don't loop forever.
       if ((run.attempt ?? 1) >= maxAttempts) continue;
-      const outcome = await resumeRun(run.id);
-      if (outcome) resumed.push(outcome);
+      // One run's failure must not strand the rest of the batch. The reaper
+      // flipped EVERY run here to `errored` in one write, and no later reap
+      // selects an `errored` row — so an escaping throw (a transient
+      // `reconstructPrincipal` failure, a storage blip) would leave each run
+      // after it unrecovered for good. The run that threw was already
+      // reclaimed to `active` under a lease, so it is reaped and retried once
+      // that lease lapses, spending an attempt like any other failed resume.
+      try {
+        const outcome = await resumeRun(run.id);
+        if (outcome) resumed.push(outcome);
+      } catch (e) {
+        console.error(`[resume] run ${run.id} (${run.agent}) failed; continuing the sweep:`, e);
+      }
     }
     return { reaped, resumed };
   }
@@ -3762,13 +3773,13 @@ export function createRuntime<P, RC = unknown>(
         );
         if (applied === false) {
           // The fence rejected us: our claim lapsed (the lease is never
-          // renewed, and the hook above runs inside it) and another node now
-          // holds this occurrence. It fires it and accounts for it; firing
-          // here too would be the duplicate paid turn consuming-first exists
-          // to prevent.
+          // renewed, and the hook above runs inside it) and a newer claim —
+          // another node's, or a later pass on this one — holds this
+          // occurrence. It fires it and accounts for it; firing here too would
+          // be the duplicate paid turn consuming-first exists to prevent.
           console.warn(
             `[schedule] ${s.id} (${s.agent}): claim lost before the occurrence was consumed; ` +
-              `another node owns this fire`,
+              `the newer claim owns this fire`,
           );
           continue;
         }

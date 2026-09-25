@@ -373,7 +373,8 @@ describe("a runSchedule host can join the same accounting", () => {
       fired: 1,
       errors: 0,
       skipped: 0,
-      parked: 0, rejected: 0,
+      parked: 0,
+      rejected: 0,
     });
   });
 

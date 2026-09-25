@@ -63,6 +63,15 @@ Get this wrong and you get double-fired schedules and two workers streaming into
 
 The scenario: a worker's lease expires (it was slow, not dead), the reaper reassigns the run, and then the original worker wakes up and tries to write. Without fencing it overwrites newer state. This is why the token exists and why it must be checked in the `WHERE` clause, not in application code.
 
+### A schedule consume reports whether it applied
+
+`claimDueSchedules` stamps a lease that is never renewed, so a slow pass can lose its claim before it consumes the occurrence — to another node, or to a later `runDue` pass on the same instance (same owner id). `completeSchedule` is the write that settles which claimant fires:
+
+- Fence it on `owner` **and** on `claim.leaseExpiresAt` when given — the expiry that claim stamped, which is strictly later on every re-claim, so it tells two claims by the same owner apart.
+- Return `false` when the fence rejected the write. The runtime then does not fire; the current holder owns the occurrence.
+
+Returning `void` is still accepted and treated as applied, so older adapters keep working — but they keep the duplicate-fire window this closes.
+
 ### Ownership scoping is not optional
 
 Every read that **takes a principal** must filter by the derived owner key — `listChats`, `loadMessages`, `listRuns`, `listSchedules`. Filter in the query, not after it: a capped scan that slices in application code silently stops being correct once a tenant has more rows than the cap.

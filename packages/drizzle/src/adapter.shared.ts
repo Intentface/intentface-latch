@@ -681,7 +681,7 @@ export function makeStorageAdapter<P>(
           ),
         )
         .returning({ id: s.schedules.id });
-      // Reported, not swallowed: a no-op here means another node holds the
+      // Reported, not swallowed: a no-op here means a newer claim holds the
       // occurrence, and the runtime must not fire it too.
       return applied.length > 0;
     },

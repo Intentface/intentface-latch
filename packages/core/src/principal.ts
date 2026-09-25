@@ -42,7 +42,12 @@ export type ContextResolver<P> = (
  * is a permanent answer, and the runtime makes it terminal: a refused cron
  * fire disables its schedule, a refused resume ends its run `errored`. Throw
  * only for a transient failure (the lookup itself broke): a throw is an error
- * for that occurrence, and the schedule stays live.
+ * for that occurrence — which is still consumed, so a recurring schedule stays
+ * live for its next one and a one-shot is spent — and a thrown resume is
+ * retried once its lease lapses.
+ *
+ * Only `null` refuses. `undefined` is not a refusal: the default passthrough
+ * yields it for identity-less rows, which must keep running.
  */
 export type ReconstructPrincipal<P> = (
   identity: unknown,

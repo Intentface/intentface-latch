@@ -125,6 +125,19 @@ describe("runDue: a refused principal", () => {
     expect(res).toMatchObject({ fired: 1, rejected: 1, errors: 0 });
   });
 
+  it("a refused one-shot is spent, not fired", async () => {
+    const { runtime, consumed, fired } = cronRuntime(
+      [{ ...schedule("sch_once", REVOKED), cron: null }],
+      refuseRevoked,
+    );
+
+    const res = await runtime.runDue({ now: 100 });
+
+    expect(fired).toEqual([]);
+    expect(consumed.get("sch_once")).toEqual({ nextRunAt: 100, lastRunAt: 100, enabled: false });
+    expect(res).toMatchObject({ fired: 0, rejected: 1, errors: 0 });
+  });
+
   it("a hook that THROWS stays transient: an error, the occurrence consumed, the schedule live", async () => {
     const { runtime, consumed, fired } = cronRuntime([schedule("sch_1", "u_member")], () => {
       throw new Error("identity lookup unavailable");
@@ -166,7 +179,7 @@ describe("resumeRun / sweep: a refused principal", () => {
     startedAt: 1000,
   });
 
-  function resumeRuntime(runs: RunRecord[]) {
+  function resumeRuntime(runs: RunRecord[], reconstructPrincipal = refuseRevoked) {
     const rows = new Map(runs.map((r) => [r.id, { ...r }]));
     const patches: Array<{ id: string; patch: Partial<RunRecord>; guard: unknown }> = [];
     const loadedAs: P[] = [];
@@ -191,7 +204,7 @@ describe("resumeRun / sweep: a refused principal", () => {
       agents: {
         assistant: defineAgent(() => ({ model: forbiddenModel(), instructions: "be brief" })),
       },
-      reconstructPrincipal: refuseRevoked,
+      reconstructPrincipal,
       durability: { enabled: true, instanceId: "node_a" },
     });
     return { runtime, patches, loadedAs };
@@ -235,5 +248,26 @@ describe("resumeRun / sweep: a refused principal", () => {
       { runId: "run_ok", status: "completed", attempt: 2 },
     ]);
     expect(loadedAs).toEqual([{ userId: "u_member" }]);
+  });
+
+  it("a hook that THROWS on one run does not strand the rest of the sweep", async () => {
+    // The reaper marks the whole batch `errored` in one write and never selects
+    // those rows again, so an escaping throw would leave every later run
+    // unrecovered. The run that threw stays reclaimed (active, leased) and is
+    // retried once that lease lapses.
+    const { runtime, loadedAs, patches } = resumeRuntime(
+      [run("run_blip", "u_blip"), run("run_ok", "u_member")],
+      async (identity) => {
+        if ((identity as P).userId === "u_blip") throw new Error("membership lookup unavailable");
+        return identity as P;
+      },
+    );
+
+    const { resumed } = await runtime.sweep();
+
+    expect(resumed).toEqual([{ runId: "run_ok", status: "completed", attempt: 2 }]);
+    expect(loadedAs).toEqual([{ userId: "u_member" }]);
+    // Transient, not terminal: nothing wrote the blipped run off.
+    expect(patches.filter((p) => p.id === "run_blip")).toEqual([]);
   });
 });

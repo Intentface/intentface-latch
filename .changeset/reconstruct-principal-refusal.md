@@ -20,7 +20,14 @@ a throw on resume aborted the rest of `sweep`'s loop.
   history or resolving its agent as that identity, and `sweep` continues with
   the next run.
 - A **throw** keeps its current meaning — a transient failure: counted in
-  `errors`, the occurrence consumed, the schedule left live.
+  `errors` and the occurrence consumed (a recurring schedule stays live; a
+  one-shot is spent, as before). Only `null` refuses; `undefined` does not.
+- `sweep` now isolates each resume: a run whose resume throws is logged and
+  retried once its lease lapses, instead of aborting the loop and stranding
+  every reaped run after it (the reaper marks the whole batch `errored`, and no
+  later reap selects those rows again).
+- A refused resume fires no `onRunFinished`: its meta carries the principal,
+  and there is none.
 
 The hook now runs before the occurrence is consumed, inside the schedule's
 claim lease, so keep it well under `durability.leaseTtlMs`. If the lease does

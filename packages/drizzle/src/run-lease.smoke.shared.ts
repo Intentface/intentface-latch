@@ -70,6 +70,25 @@ export async function runLeaseSmoke<P>(args: {
   const persisted = (await store.loadMessages(me, t2.id)).length;
   assert(won === 1 && persisted === 1, `openTurn: one of three racing turns wins, one message persisted (${won}/${persisted})`);
 
+  // A refused resume (reconstructPrincipal → null) ends the run with the
+  // runtime's fenced terminal patch, which releases the lease. Once the
+  // reclaim's own TTL would have lapsed, the row must still not be
+  // reclaimable — or a direct resume() re-claims and re-refuses it.
+  const rc = await store.createChat(me, { agent: "lease" });
+  const dying = await store.claimRun({ principal: me, chatId: rc.id, agent: "lease", owner: "n1", ttlMs: 1 });
+  await sleep(5);
+  await store.reapExpiredRuns(Date.now());
+  const reclaimed = (await store.reclaimRun(dying.id, "n2", 1))!;
+  assert(reclaimed?.status === "active", "refused resume: reaped run is reclaimed first");
+  const ended = await store.updateRun(
+    dying.id,
+    { status: "errored", error: "principal rejected", endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null },
+    { owner: "n2", fencingToken: reclaimed.fencingToken ?? 1 },
+  );
+  assert(ended, "refused resume: the fenced terminal patch applies for the reclaimer");
+  await sleep(5);
+  assert((await store.reclaimRun(dying.id, "n3", 60_000)) === null, "refused resume: a released run is not reclaimable");
+
   // Another chat is unaffected.
   const other = await store.createChat(me, { agent: "lease" });
   assert((await busy(() => store.createRun(me, { chatId: other.id, agent: "lease" }))) === null, "run lease: other chats unaffected");

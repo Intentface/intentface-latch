@@ -431,9 +431,9 @@ export interface StorageAdapter<P> {
    * only the node holding the claim lease may apply it, so a node whose lease
    * expired can't clobber a newer claim.
    *
-   * Return `false` when the fence rejected the write (another node now holds
-   * the claim): the runtime then does NOT fire, since the new holder owns the
-   * occurrence and firing too would be a duplicate paid turn. `true` or
+   * Return `false` when the fence rejected the write (a newer claim holds the
+   * row — another node's, or a later pass on this one): the runtime then does
+   * NOT fire, since the new holder owns the occurrence and firing too would be a duplicate paid turn. `true` or
    * `void` means applied — `void` keeps adapters written before this signal
    * existed working, at the cost of that protection.
    *
