@@ -47,11 +47,9 @@ const NAV_BEFORE_EVALS: NavItem[] = [
   { to: "/runs", label: "Runs", icon: Activity },
   { to: "/observability", label: "Observability", icon: Telescope },
 ];
-const EVALS_PAGES: { to: "/evals" | "/evals/failures" | "/evals/questions" | "/evals/checks"; label: string }[] = [
+const EVALS_PAGES: { to: "/evals" | "/evals/failures"; label: string }[] = [
   { to: "/evals", label: "Results" },
   { to: "/evals/failures", label: "Failures" },
-  { to: "/evals/questions", label: "Questions" },
-  { to: "/evals/checks", label: "Checks" },
 ];
 const NAV_AFTER_EVALS: NavItem[] = [
   { to: "/schedules", label: "Schedules", icon: CalendarClock },

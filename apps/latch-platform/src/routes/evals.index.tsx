@@ -6,11 +6,13 @@ import { currentPrincipalFn } from "@/lib/server"
 import {
   getEvalGridFn,
   getEvalsIndexFn,
+  getQuestionsFn,
   saveEvalRulingFn,
   startJudgeFn,
 } from "@/lib/evals-server"
 import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { AddColumn, AgainPanel } from "@/components/evals/run-menus"
+import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { RunDrawer } from "@/components/evals/run-drawer"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -76,6 +78,8 @@ function EvalsPage() {
   const [filter, setFilter] = useState<Filter>("all")
   const [byCheck, setByCheck] = useState(false)
   const [openCell, setOpenCell] = useState<{ inputId: string; column: string } | null>(null)
+  const [openInput, setOpenInput] = useState<string | null>(null)
+  const [checksOpen, setChecksOpen] = useState(false)
 
   const dataset =
     overview?.datasets.find((d) => d.id === search.dataset) ??
@@ -165,7 +169,7 @@ function EvalsPage() {
         )}
 
         {overview && dataset && !dataset.runs.length && (
-          <NothingRun inputs={dataset.inputs} onRun={() => setRunOpen(true)} />
+          <NothingRun agent={agent} datasetId={dataset.id} onRun={() => setRunOpen(true)} onChanged={reloadOverview} />
         )}
 
         {grid ? (
@@ -191,6 +195,9 @@ function EvalsPage() {
             datasetId={dataset?.id ?? ""}
             rubricId={rubricId ?? ""}
             jobs={jobs.rows}
+            onOpenInput={setOpenInput}
+            onOpenChecks={() => setChecksOpen(true)}
+            onAdded={(id) => (reload(), reloadOverview(), setOpenInput(id))}
           />
         ) : (
           loading && <Loader2 className="text-ink-tertiary size-4 animate-spin" />
@@ -208,6 +215,22 @@ function EvalsPage() {
               jobs.refresh()
             }}
           />
+        )}
+
+        {agent && grid && dataset && (
+          <InputDrawer
+            agent={agent}
+            datasetId={dataset.id}
+            input={grid.inputs.find((i) => i.id === openInput) ?? null}
+            checks={grid.checks}
+            results={<InputResults grid={grid} inputId={openInput} onOpen={(column) => (setOpenInput(null), setOpenCell({ inputId: openInput!, column }))} />}
+            onClose={() => setOpenInput(null)}
+            onSaved={reload}
+            onOpenChecks={() => (setOpenInput(null), setChecksOpen(true))}
+          />
+        )}
+        {agent && rubricId && (
+          <ChecksDrawer agent={agent} rubricId={rubricId} open={checksOpen} onClose={() => setChecksOpen(false)} onSaved={reload} />
         )}
 
         {agent && grid && (
@@ -299,6 +322,9 @@ function Results({
   datasetId,
   rubricId,
   jobs,
+  onOpenInput,
+  onOpenChecks,
+  onAdded,
 }: {
   agent: string
   grid: EvalGrid
@@ -318,6 +344,9 @@ function Results({
   datasetId: string
   rubricId: string
   jobs: JobRow[]
+  onOpenInput: (id: string) => void
+  onOpenChecks: () => void
+  onAdded: (id: string) => void
 }) {
   const cells = useMemo(() => cellsOf(grid), [grid])
   const [picked, setPicked] = useState<Set<string>>(new Set())
@@ -331,8 +360,10 @@ function Results({
   const gradeUngraded = async (inputIds: string[] | null) => {
     const verdictOf = new Set(grid.verdicts.map((v) => v.threadId))
     for (const c of grid.columns) {
+      // Graded under older checks: every answer needs grading under the new ones.
+      const stale = c.judgedWith < grid.latestVersion
       const threadIds = grid.threads
-        .filter((t) => t.column === c.label && !t.error && !verdictOf.has(t.threadId) && (!inputIds || inputIds.includes(t.inputId)))
+        .filter((t) => t.column === c.label && !t.error && (stale || !verdictOf.has(t.threadId)) && (!inputIds || inputIds.includes(t.inputId)))
         .map((t) => t.threadId)
       if (threadIds.length) await startJudgeFn({ data: { agent, datasetId, rubricId, runId: c.runId, threadIds } })
     }
@@ -481,6 +512,7 @@ function Results({
                       <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={ids} columns={columnRefs} preset={[c.label]} onStarted={() => (done(), onAgain())} />
                     )}
                     onGrade={() => void gradeUngraded(null)}
+                    stale={c.judgedWith < grid.latestVersion && !grading(c)}
                     canHide={grid.columns.length > 1}
                     onBaseline={() => onBaseline(c.label)}
                     onFocus={() => onFocus(c.label)}
@@ -519,7 +551,7 @@ function Results({
                 </td>
                 <td className="bg-primary-bg text-ink-tertiary sticky left-9 z-10 px-3 py-1.5 tabular-nums">{input.id}</td>
                 <td className="bg-primary-bg sticky left-[76px] z-10 w-[480px] max-w-[480px] px-3 py-1.5">
-                  <InputText input={input} />
+                  <InputText input={input} onOpen={() => onOpenInput(input.id)} />
                 </td>
                 {grid.columns.map((c) => (
                   <td key={c.label} className="px-2 py-1.5 text-center whitespace-nowrap">
@@ -556,12 +588,25 @@ function Results({
           </tbody>
         </table>
       </div>
-      <p className="text-ink-tertiary border-primary-border border-t px-5 py-2.5 text-xs">
-        {grid.inputs.length} inputs · {grid.checks.length} checks per answer ·{" "}
-        <a className="underline underline-offset-2" href={`/evals/checks?agent=${encodeURIComponent(agent)}`}>
-          edit checks
-        </a>
-      </p>
+      <div className="border-primary-border border-t px-4 py-3">
+        <Composer agent={agent} datasetId={datasetId} onAdded={onAdded} />
+      </div>
+      <div className="text-ink-tertiary border-primary-border flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-5 py-2.5 text-xs">
+        <span className="tabular-nums">{grid.inputs.length} inputs</span>
+        <span>
+          Every input also: {grid.checks.map((c) => c.label).join(" · ")}{" "}
+          <button type="button" onClick={onOpenChecks} className="text-ink-secondary hover:text-ink-primary underline underline-offset-2">
+            Edit
+          </button>
+        </span>
+        <span className="flex-1" />
+        <Popover>
+          <Popover.Trigger render={<button type="button" className="text-ink-secondary hover:text-ink-primary underline underline-offset-2" />}>About these inputs</Popover.Trigger>
+          <Popover.Content align="end" className="w-80 p-1">
+            <SetDetails agent={agent} datasetId={datasetId} />
+          </Popover.Content>
+        </Popover>
+      </div>
     </section>
   )
 }
@@ -638,6 +683,7 @@ function ColumnMenu({
   failed,
   againPanel,
   onGrade,
+  stale,
   canHide,
   onBaseline,
   onFocus,
@@ -653,6 +699,8 @@ function ColumnMenu({
   failed: string[]
   againPanel: (inputIds: string[], done: () => void) => React.ReactNode
   onGrade: () => void
+  /** Graded under an older version of the checks. */
+  stale: boolean
   canHide: boolean
   onBaseline: () => void
   onFocus: () => void
@@ -676,6 +724,11 @@ function ColumnMenu({
           {tries > 1 && ` · ${tries} tries`}
         </span>
       </Popover.Trigger>
+      {stale && (
+        <button type="button" onClick={onGrade} className="border-primary-border text-ink-secondary hover:text-ink-primary mx-auto mt-1 block rounded-full border border-dashed px-2 text-[10.5px] whitespace-nowrap">
+          New checks · grade them
+        </button>
+      )}
       <Popover.Content align="start" className="w-80 p-1.5">
         {again ? againPanel(failed, () => setOpen(false)) : <>
         <div className="text-ink-tertiary px-2.5 pt-1 pb-1.5 text-xs">
@@ -769,7 +822,7 @@ function CellButton({
  * the table doesn't jump. The block is drawn at the page's top level: inside
  * the sticky cell it would sit under the next row's sticky cell.
  */
-function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
+function InputText({ input, onOpen }: { input: EvalGrid["inputs"][number]; onOpen: () => void }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [grown, setGrown] = useState<DOMRect | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -796,14 +849,17 @@ function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
   }, [grown])
   return (
     <div onMouseEnter={show} onMouseLeave={(e) => { if (!(e.relatedTarget instanceof Element && e.relatedTarget.closest("[data-grown]"))) hide() }} className="relative">
-      <span ref={ref} className="text-ink-primary block truncate leading-7">
-        {input.prompt}
-      </span>
+      <button type="button" onClick={onOpen} className="block w-full text-left">
+        <span ref={ref} className="text-ink-primary block truncate leading-7 hover:underline hover:decoration-[color:var(--color-ink-tertiary)] hover:underline-offset-2">
+          {input.prompt}
+        </span>
+      </button>
       {grown && createPortal(
         <div
           data-grown
           onMouseLeave={hide}
-          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 space-y-1.5 rounded-lg border px-2.5 pt-2 pb-2 text-[13px] leading-[1.4] shadow-lg"
+          onClick={() => (hide(), onOpen())}
+          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 cursor-pointer space-y-1.5 rounded-lg border px-2.5 pt-2 pb-2 text-[13px] leading-[1.4] shadow-lg"
           style={{ left: grown.left - 11, top: grown.top - 4, width: grown.width + 22 }}
         >
           <div>{input.prompt}</div>
@@ -820,18 +876,81 @@ function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
   )
 }
 
-function NothingRun({ inputs, onRun }: { inputs: number; onRun: () => void }) {
+/**
+ * Before anything has run: the inputs are still the rows, editable, with the
+ * composer under them — and one button to get the first answers.
+ */
+function NothingRun({ agent, datasetId, onRun, onChanged }: { agent: string; datasetId: string; onRun: () => void; onChanged: () => void }) {
+  const [inputs, setInputs] = useState<EvalGrid["inputs"] | null>(null)
+  const [open, setOpen] = useState<string | null>(null)
+  const load = useCallback(() => {
+    void getQuestionsFn({ data: { agent, datasetId } }).then((r) =>
+      setInputs(r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, docs: q.docs, mustNot: q.mustNot })) ?? []),
+    )
+  }, [agent, datasetId])
+  useEffect(load, [load])
   return (
-    <section className="border-primary-border bg-primary-bg space-y-3 rounded-xl border px-5 py-5">
-      <h2 className="text-ink-primary text-[22px] font-semibold">Nothing has run yet</h2>
-      <p className="text-ink-secondary max-w-[62ch] text-sm">
-        {inputs} input{inputs === 1 ? " is" : "s are"} ready. Run a configuration to get its answers, graded against what each input
-        expects.
-      </p>
-      <button type="button" onClick={onRun} className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium">
-        Run a configuration
-      </button>
+    <section className="border-primary-border bg-primary-bg rounded-xl border">
+      <div className="space-y-3 px-5 py-5">
+        <h2 className="text-ink-primary text-[22px] font-semibold">Nothing has run yet</h2>
+        <p className="text-ink-secondary max-w-[62ch] text-sm">
+          {inputs?.length ?? 0} input{inputs?.length === 1 ? " is" : "s are"} ready. Run a configuration to get its answers, graded against what each input expects.
+        </p>
+        <button type="button" onClick={onRun} disabled={!inputs?.length} className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium disabled:opacity-40">
+          Run a configuration
+        </button>
+      </div>
+      {inputs && inputs.length > 0 && (
+        <ul className="divide-primary-border border-primary-border divide-y border-t">
+          {inputs.map((i) => (
+            <li key={i.id}>
+              <button type="button" onClick={() => setOpen(i.id)} className="hover:bg-primary-bg-hover flex w-full gap-3 px-5 py-2 text-left text-[13px]">
+                <span className="text-ink-tertiary w-6 shrink-0 tabular-nums">{i.id}</span>
+                <span className="text-ink-primary truncate">{i.prompt}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="border-primary-border border-t px-4 py-3">
+        <Composer agent={agent} datasetId={datasetId} onAdded={(id) => (load(), onChanged(), setOpen(id))} />
+      </div>
+      <InputDrawer
+        agent={agent}
+        datasetId={datasetId}
+        input={inputs?.find((i) => i.id === open) ?? null}
+        checks={[]}
+        results={<p className="text-ink-tertiary text-xs">Not run yet.</p>}
+        onClose={() => setOpen(null)}
+        onSaved={load}
+        onOpenChecks={() => setOpen(null)}
+      />
     </section>
+  )
+}
+
+/** In an input's drawer: each open column's result on it, to open. */
+function InputResults({ grid, inputId, onOpen }: { grid: EvalGrid; inputId: string | null; onOpen: (column: string) => void }) {
+  const cells = useMemo(() => cellsOf(grid), [grid])
+  if (!inputId) return null
+  const shown = grid.columns.map((c) => ({ c, cell: cells.get(`${inputId}|${c.label}`) }))
+  if (!shown.some((x) => x.cell)) return <p className="text-ink-tertiary text-xs">Not run yet — use ↻ on its row to answer it.</p>
+  return (
+    <div className="flex flex-wrap gap-2">
+      {shown.map(({ c, cell }) =>
+        cell ? (
+          <button
+            key={c.label}
+            type="button"
+            onClick={() => onOpen(c.label)}
+            style={{ background: cell.rate === null ? undefined : passColor(cell.rate) }}
+            className="text-ink-primary rounded-full px-3 py-1 text-xs font-semibold tabular-nums"
+          >
+            {c.version} · {cell.rate === null ? "not graded" : `${Math.round(cell.rate * 100)}%`}
+          </button>
+        ) : null,
+      )}
+    </div>
   )
 }
 

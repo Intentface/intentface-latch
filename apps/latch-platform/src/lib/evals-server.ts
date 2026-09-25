@@ -16,7 +16,7 @@ import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
-import { createChecks, createQuestionSet } from "./evals-actions";
+import { createChecks, createQuestionSet, editQuestions } from "./evals-actions";
 import type { AgainRequest, RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { configFingerprint } from "./evals/v2/runner";
@@ -180,6 +180,29 @@ export const saveQuestionsFn = createServerFn({ method: "POST" })
     });
     await evals.setInputs(d.id, valid.value);
     return { ok: true as const, questions: valid.value.map(toEditable) };
+  });
+
+/**
+ * Add, change or remove inputs one at a time — what the results table's
+ * composer and an input's drawer save. An edited input keeps its id, which
+ * is what its past answers hang on.
+ */
+export const editInputsFn = createServerFn({ method: "POST" })
+  .validator(
+    (d: {
+      agent: string;
+      datasetId: string;
+      upserts?: (Partial<EditableQuestion> & { prompt: string })[];
+      deletes?: string[];
+      audience?: string;
+      note?: string;
+    }) => d,
+  )
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again to save." };
+
+    return editQuestions(principal, { ...data, questionSetId: data.datasetId });
   });
 
 /** The latest version of a set of checks, plus the judges a check may name. */

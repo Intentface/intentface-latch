@@ -133,6 +133,7 @@ export async function computeGrid(
         followUps: i.followUps ?? [],
         answer: typeof i.facts?.answer === "string" ? i.facts.answer : null,
         docs: Array.isArray(i.facts?.docs) ? (i.facts.docs as unknown[]).map(String) : [],
+        mustNot: Array.isArray(i.facts?.mustNot) ? i.facts.mustNot.map(String) : [],
       })),
       /** Every answer shown, so a cell knows its tries and whether one broke. */
       threads: threads.map((t) => ({ threadId: t.threadId, column: t.version, inputId: t.inputId ?? "", attempt: t.attempt ?? 0, error: t.error ?? null })),

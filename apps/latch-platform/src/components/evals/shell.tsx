@@ -41,13 +41,11 @@ export function validateEvalsSearch(s: Record<string, unknown>): EvalsSearch {
 
 export type EvalsIndex = { agent: string; datasets: { id: string; name: string }[] }[];
 
-type Page = "results" | "failures" | "questions" | "checks";
+type Page = "results" | "failures";
 
-const PAGES: { page: Page; to: "/evals" | "/evals/failures" | "/evals/questions" | "/evals/checks"; label: string; blurb: string }[] = [
-  { page: "results", to: "/evals", label: "Results", blurb: "How each version answers the same questions, and whether the judge can be believed." },
+const PAGES: { page: Page; to: "/evals" | "/evals/failures"; label: string; blurb: string }[] = [
+  { page: "results", to: "/evals", label: "Results", blurb: "Your inputs, each configuration's answers to them, and what changed." },
   { page: "failures", to: "/evals/failures", label: "Failures", blurb: "Read threads, say what went wrong, and find the patterns worth measuring." },
-  { page: "questions", to: "/evals/questions", label: "Questions", blurb: "What gets asked. Each question says what a good answer conveys and what it must not do." },
-  { page: "checks", to: "/evals/checks", label: "Checks", blurb: "What gets judged. A check is a question for the judge, or a fact read from the tool log." },
 ];
 
 /** Patch the URL's search without adding a history entry. */
