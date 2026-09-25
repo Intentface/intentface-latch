@@ -88,7 +88,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { runtime, agentStore, evals } = await getLatch();
   const { planRun, startPlannedRun } = await import("@/lib/evals-jobs");
   const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-actions");
-  const { createQuestionSet, editQuestions, createChecks, editChecks } = await import("@/lib/evals-actions");
+  const { createQuestionSet, editQuestions, createChecks, editChecks, createVariant } = await import("@/lib/evals-actions");
   const { startJudgeJob } = await import("@/lib/evals-jobs");
   const { toEditable } = await import("@/lib/evals/v2/validate");
   const { computeGrid } = await import("@/lib/evals-grid");
@@ -563,6 +563,32 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         editChecks(principal, { agent, checksId, ...(upserts ? { upserts } : {}), ...(deletes ? { deletes } : {}) }),
     }),
 
+    list_variants: tool({
+      description: "The agent's saved variants — versions with one thing changed (model, reasoning effort, an added instruction line). Run one with estimate_run/start_run using version `~<id>`.",
+      inputSchema: z.object({ agent: Agent }),
+      execute: async ({ agent }) => {
+        const o = await scope(agent);
+        if ("error" in o) return o;
+        return (await evals.listVariants(o.owner, o.name)).map((v) => ({ id: v.id, runAs: `~${v.id}`, name: v.name, base: v.base, change: v.change }));
+      },
+    }),
+
+    create_variant: tool({
+      description:
+        "Save a variant: a version (live, @draft, @3) with ONE thing changed — the model, the reasoning effort, or a line added to the instructions — to run as its own column without saving a version or touching @draft. Free; returns `runAs` for estimate_run/start_run.",
+      inputSchema: z.object({
+        agent: Agent,
+        base: z.string().describe('The version it starts from: "live", "@draft", "@3"'),
+        model: z.string().optional().describe("A model id to run on instead"),
+        effort: z.enum(["minimal", "low", "medium", "high"]).optional().describe("Reasoning effort instead"),
+        addInstructions: z.string().optional().describe("A line appended to the instructions"),
+      }),
+      execute: async ({ agent, base, model, effort, addInstructions }) => {
+        const r = await createVariant(principal, { agent, base, change: { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(addInstructions ? { addInstructions } : {}) } });
+        return r.ok ? { ...r, runAs: `~${r.id}`, next: "estimate_run with versions [runAs] on the inputs it should fix, then start_run." } : r;
+      },
+    }),
+
     compare_results: tool({
       description:
         "Compare results from any runs question by question: the first is the baseline, each other is measured against it on the questions both answered (improved/regressed, p-value). Use it for a new @draft result against a live result from an earlier run, so live need not run again.",
@@ -694,6 +720,10 @@ A fix is judged by whether the failed questions pass now without others breaking
 Money and changes: estimate_run is free; always call it and put the cost in start_run's summary. start_run, propose_fix and add_check wait for the person's approval. propose_fix only ever writes @draft.
 
 The tests themselves: you can read, create and edit question sets (list_questions, create_question_set, edit_questions) and checks (list_checks, create_checks, edit_checks), each behind the person's approval. Never loosen a check or a question so that a failing agent passes — the tests measure the agent, not the other way round. Change a test when it is wrong: it asks the wrong thing, a good answer it describes is out of date, or it cannot be judged from the thread; say which. After editing checks, judge_run re-scores a run under the new version (judge only, a few cents).
+
+How the Evals page is laid out, so you can point people at it: inputs are the rows, configurations are the columns — live, @draft, a published @3, or a variant (a version with one thing changed, run as \`~id\`). A column's answers are graded; the first column is the baseline. "Answer again" adds a try to a column; a new configuration is a new column.
+- Each input says what should happen for itself: a good answer, the document that holds it, tool calls it should or shouldn't make (calls), what it must say, must not say, whether it should decline, and yes/no questions for the grader (asks). When a failure is specific to some inputs, put the expectation on those inputs (edit_questions) rather than adding a check every input gets.
+- To try a model, reasoning-effort or single-instruction change without touching @draft, create_variant and run it on just the inputs it should fix. To change the instructions or tools for real, propose_fix on @draft.
 
 What you never do: accept your own suggestions, rule on whether the judge was right, or publish the agent. Those belong to the person.
 

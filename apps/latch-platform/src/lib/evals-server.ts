@@ -16,7 +16,7 @@ import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
-import { createChecks, createQuestionSet, editInputFiles, editQuestions } from "./evals-actions";
+import { createChecks, createQuestionSet, createVariant, editInputFiles, editQuestions } from "./evals-actions";
 import type { AgainRequest, RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { configFingerprint } from "./evals/v2/runner";
@@ -330,29 +330,7 @@ export const createVariantFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
-    const o = await ownerFor(principal, data.agent);
-    if (!o) return { ok: false as const, error: "Only agents you can edit." };
-    const { evals, models } = await getLatch();
-    const change: Variant["change"] = {
-      ...(data.change.model ? { model: data.change.model } : {}),
-      ...(data.change.effort ? { effort: data.change.effort } : {}),
-      ...(data.change.addInstructions?.trim() ? { addInstructions: data.change.addInstructions.trim() } : {}),
-    };
-    if (!Object.keys(change).length) return { ok: false as const, error: "Change one thing: the model, the reasoning effort or the instructions." };
-    if (change.model && !models.some((m) => m.id === change.model)) return { ok: false as const, error: `No model ${change.model} is configured.` };
-    const existing = await evals.listVariants(o.owner, o.name);
-    const same = existing.find((v) => v.base === data.base && JSON.stringify(v.change) === JSON.stringify(change));
-    if (same) return { ok: true as const, id: same.id, name: same.name };
-    const what = change.model
-      ? change.model.replace(/^claude-/, "")
-      : change.effort
-        ? `${change.effort} effort`
-        : `+ “${change.addInstructions!.slice(0, 24)}${change.addInstructions!.length > 24 ? "…" : ""}”`;
-    let name = `${data.base} · ${what}`;
-    for (let n = 2; existing.some((v) => v.name === name); n++) name = `${data.base} · ${what} ${n}`;
-    const id = `v_${Math.random().toString(36).slice(2, 8)}`;
-    await evals.saveVariant({ owner: o.owner, id, agentName: o.name, base: data.base, name, change, createdAt: Date.now() });
-    return { ok: true as const, id, name };
+    return createVariant(principal, data);
   });
 
 export const getRunOptionsFn = createServerFn({ method: "GET" })
@@ -532,48 +510,3 @@ export const createChecksFn = createServerFn({ method: "POST" })
     return createChecks(principal, data);
   });
 
-/**
- * Every run of a question set as points: for each version in each run, the
- * share of verdicts that passed and what a thread cost on average. What the
- * cost chart plots — did the better version cost more?
- */
-export const getRunHistoryFn = createServerFn({ method: "GET" })
-  .validator((d: { agent: string; datasetId: string; rubricId: string }) => d)
-  .handler(async ({ data }) => {
-    const principal = await getPrincipal();
-    if (!principal) return [];
-    const o = await ownerFor(principal, data.agent);
-    if (!o) return [];
-    const { evals } = await getLatch();
-    const latest = await evals.getRubric(o.owner, data.rubricId);
-    if (!latest) return [];
-    const runs = (await evals.listRuns(o.owner, data.datasetId)).slice(0, 20);
-    const points: { runId: string; version: string; at: number; passRate: number; verdicts: number; costPerThread: number | null; threads: number }[] = [];
-    for (const r of runs) {
-      const threads = (await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: r.runId })).filter((t) => !t.error);
-      const ids = threads.map((t) => t.threadId);
-      // The newest checks version this run was judged under.
-      let verdicts = await evals.listVerdicts({ threadIds: ids, rubricVersion: latest.version });
-      for (let v = latest.version - 1; !verdicts.length && v >= 1; v--) verdicts = await evals.listVerdicts({ threadIds: ids, rubricVersion: v });
-      if (!verdicts.length) continue;
-      const costs = await evals.threadCosts(ids);
-      for (const version of r.versions) {
-        const mine = new Set(threads.filter((t) => t.version === version).map((t) => t.threadId));
-        const vs = verdicts.filter((v) => mine.has(v.threadId));
-        const cs = [...mine].map((id) => costs.get(id)).filter((c): c is number => c !== undefined && c > 0);
-        if (!vs.length) continue;
-        points.push({
-          runId: r.runId,
-          version,
-          at: r.createdAt,
-          passRate: vs.filter((v) => !v.failed).length / vs.length,
-          verdicts: vs.length,
-          costPerThread: cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : null,
-          threads: mine.size,
-        });
-      }
-    }
-    return points;
-  });
-
-export type RunPoint = Awaited<ReturnType<typeof getRunHistoryFn>>[number];

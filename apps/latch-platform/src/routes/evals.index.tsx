@@ -16,7 +16,6 @@ import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/ev
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, saysItems } from "@/lib/evals/v2/expect"
 import { GROUND, passColor } from "@/components/evals/ui"
-import { RunDrawer } from "@/components/evals/run-drawer"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
 import type { Result } from "@/components/evals/compare-picker"
 import { useEvalsChanged } from "@/components/evals/events"
@@ -76,7 +75,6 @@ function EvalsPage() {
   const [overview, reloadOverview] = useOverview(agent)
   const [grid, setGrid] = useState<EvalGrid | null>(null)
   const [loading, setLoading] = useState(false)
-  const [runOpen, setRunOpen] = useState(false)
   const [filter, setFilter] = useState<Filter>("all")
   const [byCheck, setByCheck] = useState(false)
   const [openCell, setOpenCell] = useState<{ inputId: string; column: string } | null>(null)
@@ -172,7 +170,13 @@ function EvalsPage() {
         )}
 
         {overview && dataset && !dataset.runs.length && (
-          <NothingRun agent={agent} datasetId={dataset.id} onRun={() => setRunOpen(true)} onChanged={reloadOverview} />
+          <NothingRun
+            agent={agent}
+            datasetId={dataset.id}
+            rubricId={rubricId ?? ""}
+            onStarted={(added) => (setColumns(added, added[0]?.version), jobs.refresh(), reloadOverview())}
+            onChanged={reloadOverview}
+          />
         )}
 
         {grid ? (
@@ -206,19 +210,6 @@ function EvalsPage() {
           loading && <Loader2 className="text-ink-tertiary size-4 animate-spin" />
         )}
 
-        {agent && dataset && rubricId && runOpen && (
-          <RunDrawer
-            open={runOpen}
-            agent={agent}
-            datasetId={dataset.id}
-            rubricId={rubricId}
-            onClose={() => setRunOpen(false)}
-            onStarted={() => {
-              setRunOpen(false)
-              jobs.refresh()
-            }}
-          />
-        )}
 
         {agent && grid && dataset && (
           <InputDrawer
@@ -254,6 +245,20 @@ function EvalsPage() {
 }
 
 const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
+
+/**
+ * The brief for "Why do these still fail?": which columns, which inputs, and
+ * what to come back with — causes grouped, one fix proposed as a new
+ * configuration, priced, not run.
+ */
+function whyPrompt(agent: string, datasetId: string, rubricId: string, base: Column, focus: Column, failing: string[]) {
+  return [
+    `For ${agent}, question set ${datasetId}, checks ${rubricId}: the column ${focus.label} (run ${focus.runId}, version ${focus.version}) still fails a check on ${failing.length} input${failing.length === 1 ? "" : "s"}: ${failing.join(", ")}. The baseline is ${base.label} (run ${base.runId}).`,
+    "Read those threads and find the first thing that went wrong in each. Group them by cause and list each group with the inputs it covers, biggest first.",
+    "Then propose ONE fix for the biggest group, as a new configuration: an edit to @draft (propose_fix) when the instructions or a tool are at fault, or a variant (create_variant) when it's a question of model or reasoning effort. If the failure is specific to some inputs, say which per-input expectation would catch it.",
+    "Don't run anything yet: price re-running only the failing inputs with estimate_run and tell me the cost.",
+  ].join("\n\n")
+}
 
 /**
  * The checks that read an input's own expectations: the one comparing with
@@ -442,6 +447,15 @@ function Results({
     <section className="border-primary-border bg-primary-bg rounded-xl border" aria-label="Results">
       <div className="border-primary-border space-y-3 border-b px-5 py-4">
         <div className="flex flex-wrap items-start gap-3">
+          {focus && (
+            <button
+              type="button"
+              onClick={() => askEvalsAgent(whyPrompt(agent, datasetId, rubricId, base, focus, grid.inputs.filter((i) => (cell(i.id, focus.label)?.rate ?? 1) < 1).map((i) => i.id)))}
+              className="border-primary-border hover:bg-primary-bg-hover order-last h-8 shrink-0 rounded-lg border px-3 text-[13px]"
+            >
+              Why do these still fail?
+            </button>
+          )}
           <div className="min-w-0 flex-1">
             {focus ? (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
@@ -955,7 +969,19 @@ function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"]
  * Before anything has run: the inputs are still the rows, editable, with the
  * composer under them — and one button to get the first answers.
  */
-function NothingRun({ agent, datasetId, onRun, onChanged }: { agent: string; datasetId: string; onRun: () => void; onChanged: () => void }) {
+function NothingRun({
+  agent,
+  datasetId,
+  rubricId,
+  onStarted,
+  onChanged,
+}: {
+  agent: string
+  datasetId: string
+  rubricId: string
+  onStarted: (added: Result[]) => void
+  onChanged: () => void
+}) {
   const [inputs, setInputs] = useState<EvalGrid["inputs"] | null>(null)
   const [open, setOpen] = useState<string | null>(null)
   const load = useCallback(() => {
@@ -973,9 +999,9 @@ function NothingRun({ agent, datasetId, onRun, onChanged }: { agent: string; dat
         <p className="text-ink-secondary max-w-[62ch] text-sm">
           {inputs?.length ?? 0} input{inputs?.length === 1 ? " is" : "s are"} ready. Run a configuration to get its answers, graded against what each input expects.
         </p>
-        <button type="button" onClick={onRun} disabled={!inputs?.length} className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium disabled:opacity-40">
-          Run a configuration
-        </button>
+        {inputs && inputs.length > 0 && rubricId && (
+          <AddColumn agent={agent} datasetId={datasetId} rubricId={rubricId} shown={[]} hidden={[]} onShow={() => {}} onStarted={onStarted} first />
+        )}
       </div>
       {inputs && inputs.length > 0 && (
         <ul className="divide-primary-border border-primary-border divide-y border-t">

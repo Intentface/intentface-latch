@@ -7,7 +7,7 @@
 import type { Principal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
-import type { Check, Input, InputFile, Rubric } from "./evals/v2/model";
+import type { Check, Input, InputFile, Rubric, Variant } from "./evals/v2/model";
 import { saysItems } from "./evals/v2/expect";
 import { checkIdFor, fromEditable, nextInputId, toEditable, validateChecks } from "./evals/v2/validate";
 import type { EditableQuestion } from "./evals/v2/validate";
@@ -259,3 +259,34 @@ export async function editChecks(
   const saved = await evals.saveRubric({ owner: o.owner, id: r.id, agentName: r.agentName, defaultJudge: r.defaultJudge, checks: valid.value });
   return { ok: true as const, version: saved.version, checks: valid.value.map((c) => `${c.id}: ${c.label}`) };
 }
+
+/**
+ * Save a variant — a version with one thing changed — so it can be run as a
+ * column. Its name says what changed; the same change on the same base is the
+ * same variant, so running it again reuses its answers.
+ */
+export async function createVariant(principal: Principal, data: { agent: string; base: string; change: Variant["change"] }) {
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return { ok: false as const, error: "Only agents you can edit." };
+    const { evals, models } = await getLatch();
+    const change: Variant["change"] = {
+      ...(data.change.model ? { model: data.change.model } : {}),
+      ...(data.change.effort ? { effort: data.change.effort } : {}),
+      ...(data.change.addInstructions?.trim() ? { addInstructions: data.change.addInstructions.trim() } : {}),
+    };
+    if (!Object.keys(change).length) return { ok: false as const, error: "Change one thing: the model, the reasoning effort or the instructions." };
+    if (change.model && !models.some((m) => m.id === change.model)) return { ok: false as const, error: `No model ${change.model} is configured.` };
+    const existing = await evals.listVariants(o.owner, o.name);
+    const same = existing.find((v) => v.base === data.base && JSON.stringify(v.change) === JSON.stringify(change));
+    if (same) return { ok: true as const, id: same.id, name: same.name };
+    const what = change.model
+      ? change.model.replace(/^claude-/, "")
+      : change.effort
+        ? `${change.effort} effort`
+        : `+ “${change.addInstructions!.slice(0, 24)}${change.addInstructions!.length > 24 ? "…" : ""}”`;
+    let name = `${data.base} · ${what}`;
+    for (let n = 2; existing.some((v) => v.name === name); n++) name = `${data.base} · ${what} ${n}`;
+    const id = `v_${Math.random().toString(36).slice(2, 8)}`;
+    await evals.saveVariant({ owner: o.owner, id, agentName: o.name, base: data.base, name, change, createdAt: Date.now() });
+    return { ok: true as const, id, name };
+  }

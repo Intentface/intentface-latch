@@ -90,6 +90,7 @@ export function AddColumn({
   hidden,
   onShow,
   onStarted,
+  first,
 }: {
   agent: string
   datasetId: string
@@ -99,6 +100,8 @@ export function AddColumn({
   hidden: Shown[]
   onShow: (r: Ref) => void
   onStarted: (r: Ref[]) => void
+  /** The big button a set with no answers yet offers, instead of the header's "+ Run". */
+  first?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [options, setOptions] = useState<Awaited<ReturnType<typeof getRunOptionsFn>>>(null)
@@ -156,13 +159,17 @@ export function AddColumn({
     <Popover open={open} onOpenChange={setOpen}>
       <Popover.Trigger
         render={
-          <button
-            type="button"
-            className="border-primary-border text-ink-secondary hover:text-ink-primary hover:bg-primary-bg-hover flex h-7 items-center gap-1 rounded-full border border-dashed px-3 text-xs whitespace-nowrap"
-          />
+          first ? (
+            <button type="button" className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium" />
+          ) : (
+            <button
+              type="button"
+              className="border-primary-border text-ink-secondary hover:text-ink-primary hover:bg-primary-bg-hover flex h-7 items-center gap-1 rounded-full border border-dashed px-3 text-xs whitespace-nowrap"
+            />
+          )
         }
       >
-        <Plus className="size-3.5" /> Run
+        {first ? "Run a configuration" : <><Plus className="size-3.5" /> Run</>}
       </Popover.Trigger>
       <Popover.Content align="start" className="w-[22rem] p-1.5">
         {variantOpen && options ? (
