@@ -13,6 +13,7 @@ import {
 import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { AddColumn, AgainPanel } from "@/components/evals/run-menus"
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
+import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { RunDrawer } from "@/components/evals/run-drawer"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -222,7 +223,7 @@ function EvalsPage() {
             agent={agent}
             datasetId={dataset.id}
             input={grid.inputs.find((i) => i.id === openInput) ?? null}
-            checks={grid.checks}
+            checks={grid.checks.filter((c) => !expectationChecks(grid).some((e) => e.checkId === c.id))}
             results={<InputResults grid={grid} inputId={openInput} onOpen={(column) => (setOpenInput(null), setOpenCell({ inputId: openInput!, column }))} />}
             onClose={() => setOpenInput(null)}
             onSaved={reload}
@@ -251,6 +252,27 @@ function EvalsPage() {
 }
 
 const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
+
+/**
+ * The checks that read an input's own expectations: the one comparing with
+ * its good answer, the one looking for the document it names. The rest apply
+ * to every input the same way.
+ */
+function expectationChecks(grid: EvalGrid) {
+  const out: { checkId: string; reads: "answer" | "docs" }[] = []
+  for (const c of grid.checks) {
+    if (c.sentence.includes("the document the question names")) out.push({ checkId: c.id, reads: "docs" })
+    else if (c.kind === "asked" && /REFERENCE_ANSWER|reference answer|good answer/i.test(c.sentence)) out.push({ checkId: c.id, reads: "answer" })
+  }
+  return out
+}
+const expectationCount = (i: EvalGrid["inputs"][number]) => (i.answer ? 1 : 0) + (i.docs.length ? 1 : 0) + i.mustNot.length
+function failedExpectations(grid: EvalGrid, exp: ReturnType<typeof expectationChecks>, inputId: string, column: string) {
+  const input = grid.inputs.find((i) => i.id === inputId)
+  if (!input) return 0
+  const mine = exp.filter((e) => (e.reads === "answer" ? !!input.answer : input.docs.length > 0))
+  return mine.filter((e) => grid.verdicts.some((v) => v.inputId === inputId && v.version === column && v.checkId === e.checkId && (v.ruling ?? v.failed))).length
+}
 
 // ─── Numbers ──────────────────────────────────────────────────────────────
 
@@ -350,6 +372,8 @@ function Results({
 }) {
   const cells = useMemo(() => cellsOf(grid), [grid])
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [lens, setLens] = useState<string | null>(null)
+  const expectations = expectationChecks(grid)
   // What is running against which column, so cells can say so instead of "—".
   const active = jobs.filter(isActive)
   const running = (c: Column) => active.find((j) => j.kind === "run" && !j.again && j.runId === c.runId && j.versions.includes(c.version))
@@ -385,7 +409,12 @@ function Results({
   const up = shared.filter((r) => r.d! > 0).length
   const down = shared.filter((r) => r.d! < 0).length
   const p = signTest(up, down)
-  const triesOf = (c: Column) => Math.max(1, ...grid.threads.filter((t) => t.column === c.label).map((t) => t.attempt + 1))
+  // Tries per input in a column: a range, since answering one input again gives only it a second.
+  const triesOf = (c: Column) => {
+    const per = grid.inputs.map((i) => cell(i.id, c.label)?.tries.length ?? 0).filter((n) => n > 0)
+    const lo = per.length ? Math.min(...per) : 1, hi = per.length ? Math.max(...per) : 1
+    return lo === hi ? (hi > 1 ? `${hi} tries each` : "1 try") : `${lo}–${hi} tries`
+  }
   const broken = focus ? grid.inputs.filter((i) => cell(i.id, focus.label)?.tries.some((t) => t.error)).length : 0
 
   const shown = rows.filter((r) =>
@@ -434,7 +463,7 @@ function Results({
             )}
             <p className="text-ink-tertiary mt-1 text-xs tabular-nums">
               {focus
-                ? `${focus.runName ?? nameOf(focus)} · compared with ${nameOf(base)} on ${shared.length} input${shared.length === 1 ? "" : "s"} · ${triesOf(focus) > 1 ? `${triesOf(focus)} tries each` : "1 try"}${focus.runId !== base.runId ? " · answered on different days" : ""}`
+                ? `${focus.runName ?? nameOf(focus)} · compared with ${nameOf(base)} on ${shared.length} input${shared.length === 1 ? "" : "s"} · ${triesOf(focus)}${focus.runId !== base.runId ? " · answered on different days" : ""}`
                 : "Add a column to compare with it."}
               {broken > 0 && ` · ${broken} answer${broken === 1 ? "" : "s"} broke — left out of the score`}
             </p>
@@ -484,6 +513,27 @@ function Results({
           </button>
         </div>
       )}
+      <div className="text-ink-tertiary flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pt-3 pb-1 text-xs">
+        <span className="tabular-nums">{grid.inputs.length} inputs</span>
+        <button
+          type="button"
+          className="text-ink-secondary hover:text-ink-primary underline underline-offset-2"
+          onClick={() => askEvalsAgent(`For ${agent}: write 10 more inputs like the ones in this set — everyday ones, tricky ones, and a few it should decline — each with what a good answer says, and add them with edit_questions.`)}
+        >
+          Generate more
+        </button>
+        <span className="flex-1" />
+        {expectations.length > 0 && (
+          <>
+            <span>Highlight failures on</span>
+            <Segmented
+              value={lens ?? ""}
+              onChange={(v) => setLens(v || null)}
+              options={[["", "Nothing"], ...grid.columns.map((c): [string, string] => [c.label, nameOf(c)])]}
+            />
+          </>
+        )}
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-full border-collapse text-[13px]">
           <thead>
@@ -551,7 +601,12 @@ function Results({
                 </td>
                 <td className="bg-primary-bg text-ink-tertiary sticky left-9 z-10 px-3 py-1.5 tabular-nums">{input.id}</td>
                 <td className="bg-primary-bg sticky left-[76px] z-10 w-[480px] max-w-[480px] px-3 py-1.5">
-                  <InputText input={input} onOpen={() => onOpenInput(input.id)} />
+                  <InputText
+                    input={input}
+                    onOpen={() => onOpenInput(input.id)}
+                    count={expectationCount(input)}
+                    failed={lens ? failedExpectations(grid, expectations, input.id, lens) : 0}
+                  />
                 </td>
                 {grid.columns.map((c) => (
                   <td key={c.label} className="px-2 py-1.5 text-center whitespace-nowrap">
@@ -593,8 +648,15 @@ function Results({
       </div>
       <div className="text-ink-tertiary border-primary-border flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-5 py-2.5 text-xs">
         <span className="tabular-nums">{grid.inputs.length} inputs</span>
-        <span>
-          Every input also: {grid.checks.map((c) => c.label).join(" · ")}{" "}
+        <span className="flex flex-wrap items-center gap-1.5">
+          Every input also:
+          {grid.checks
+            .filter((c) => !expectations.some((e) => e.checkId === c.id))
+            .map((c) => (
+              <span key={c.id} title={c.sentence} className="border-primary-border text-ink-secondary rounded-full border px-2 py-0.5">
+                {c.label}
+              </span>
+            ))}
           <button type="button" onClick={onOpenChecks} className="text-ink-secondary hover:text-ink-primary underline underline-offset-2">
             Edit
           </button>
@@ -693,7 +755,7 @@ function ColumnMenu({
   isBase: boolean
   isFocus: boolean
   rate: number | null
-  tries: number
+  tries: string
   /** What is happening to it right now — answering, grading. */
   state: string | null
   failed: string[]
@@ -721,7 +783,7 @@ function ColumnMenu({
         <span className={cn("text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
           {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : <>{day(column.at)} · {pct(rate)}</>}
           {column.spent > 0 && ` · ${money(column.spent)}`}
-          {tries > 1 && ` · ${tries} tries`}
+          {tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
         </span>
       </Popover.Trigger>
       {stale && (
@@ -822,7 +884,7 @@ function CellButton({
  * the table doesn't jump. The block is drawn at the page's top level: inside
  * the sticky cell it would sit under the next row's sticky cell.
  */
-function InputText({ input, onOpen }: { input: EvalGrid["inputs"][number]; onOpen: () => void }) {
+function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"][number]; onOpen: () => void; count: number; failed: number }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [grown, setGrown] = useState<DOMRect | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -849,9 +911,12 @@ function InputText({ input, onOpen }: { input: EvalGrid["inputs"][number]; onOpe
   }, [grown])
   return (
     <div onMouseEnter={show} onMouseLeave={(e) => { if (!(e.relatedTarget instanceof Element && e.relatedTarget.closest("[data-grown]"))) hide() }} className="relative">
-      <button type="button" onClick={onOpen} className="block w-full text-left">
-        <span ref={ref} className="text-ink-primary block truncate leading-7 hover:underline hover:decoration-[color:var(--color-ink-tertiary)] hover:underline-offset-2">
+      <button type="button" onClick={onOpen} className="flex w-full items-center gap-3 text-left">
+        <span ref={ref} className="text-ink-primary block min-w-0 flex-1 truncate leading-7 hover:underline hover:decoration-[color:var(--color-ink-tertiary)] hover:underline-offset-2">
           {input.prompt}
+        </span>
+        <span className={cn("shrink-0 text-[11.5px] tabular-nums", failed ? "text-[color:var(--eval-bad-ink)]" : "text-ink-tertiary")}>
+          {failed ? `${failed} failed` : count ? `${count} expectation${count === 1 ? "" : "s"}` : "No expectations"}
         </span>
       </button>
       {grown && createPortal(

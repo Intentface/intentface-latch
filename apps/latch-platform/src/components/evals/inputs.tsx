@@ -137,36 +137,18 @@ export function InputDrawer({
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
               <div className="space-y-1.5">
                 <div className={label}>The user sends</div>
-                <Grow value={draft.prompt} onChange={(e) => change({ prompt: e.target.value })} aria-label="The user sends" />
+                <Grow value={draft.prompt} onChange={(e) => change({ prompt: e.target.value })} aria-label="The user sends" className="text-[14px]" />
                 <div className={label}>Then asks</div>
                 <Lines values={draft.followUps} onChange={(followUps) => change({ followUps })} placeholder="A follow-up in the same conversation" add="Then asks" />
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-2">
                 <div className="text-ink-primary text-sm font-medium">What should happen</div>
-                <div className="space-y-1.5">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className={label}>A good answer says</span>
-                    <button
-                      type="button"
-                      className="text-ink-secondary hover:text-ink-primary text-xs underline underline-offset-2"
-                      onClick={() => askEvalsAgent(`For ${agent}: draft what a good answer to input ${input.id} ("${input.prompt}") says, from the documents ${agent} can read, and save it to the input with edit_questions.`)}
-                    >
-                      Draft it from the documents
-                    </button>
-                  </div>
-                  <Grow value={draft.answer} placeholder="What the answer should convey — the substance, not the wording" onChange={(e) => change({ answer: e.target.value })} />
-                  <p className="text-ink-tertiary text-[11px]">The grader compares answers with this. Without it, it judges with nothing to compare against — far less reliable.</p>
-                </div>
-                <div className="space-y-1.5">
-                  <div className={label}>Reads the document that holds the answer</div>
-                  <Lines values={draft.docs} onChange={(docs) => change({ docs })} placeholder="e.g. accessibility.md" add="Document" />
-                  <p className="text-ink-tertiary text-[11px]">Checked exactly from the tool log: a read must return this document.</p>
-                </div>
-                <div className="space-y-1.5">
-                  <div className={label}>Must not say</div>
-                  <Lines values={draft.mustNot} onChange={(mustNot) => change({ mustNot })} placeholder="e.g. that an overlay makes it compliant" add="Must not say" />
-                </div>
+                <ExpectationList
+                  draft={draft}
+                  change={change}
+                  onDraftAnswer={() => askEvalsAgent(`For ${agent}: draft what a good answer to input ${input.id} ("${input.prompt}") says, from the documents ${agent} can read, and save it to the input with edit_questions.`)}
+                />
               </div>
 
               <div className="space-y-1.5">
@@ -176,11 +158,11 @@ export function InputDrawer({
                     Edit for all
                   </button>
                 </div>
-                <ul className="text-ink-secondary space-y-1 text-[13px]">
+                <ul className="divide-primary-border border-primary-border divide-y rounded-lg border text-[13px]">
                   {checks.map((c) => (
-                    <li key={c.id} title={c.sentence}>
-                      {c.label}
-                      <span className="text-ink-tertiary text-xs"> · {c.kind === "counted" ? "exact, from the tool log" : "judged by the grader"}</span>
+                    <li key={c.id} title={c.sentence} className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 px-3 py-2">
+                      <span className="text-ink-tertiary text-xs">{c.kind === "counted" ? "Tool log" : "Grader"}</span>
+                      <span className="text-ink-primary">{c.label}</span>
                     </li>
                   ))}
                 </ul>
@@ -204,6 +186,123 @@ export function InputDrawer({
         )}
       </Drawer.Content>
     </Drawer>
+  )
+}
+
+type Expectations = { prompt: string; followUps: string[]; answer: string; docs: string[]; mustNot: string[] }
+
+const inline =
+  "text-ink-primary -mx-1.5 -my-1 w-[calc(100%+12px)] resize-none rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none hover:border-[color:var(--color-primary-border)] focus:border-[color:var(--color-ink-tertiary)] focus:bg-[color:var(--color-primary-bg-hover)]"
+
+/** A value edited where it sits: plain text until hovered or focused. */
+function Inline(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = "auto"
+    el.style.height = `${el.scrollHeight + 2}px`
+  }, [props.value])
+  return <textarea ref={ref} rows={1} {...props} className={cn(inline, props.className)} />
+}
+
+/**
+ * What should happen, one row per expectation: its kind, its value edited in
+ * place, how it's checked. + adds one; × removes it.
+ */
+function ExpectationList({ draft, change, onDraftAnswer }: { draft: Expectations; change: (p: Partial<Expectations>) => void; onDraftAnswer: () => void }) {
+  const [adding, setAdding] = useState(false)
+  const [showAnswer, setShowAnswer] = useState(!!draft.answer)
+  const focusLast = useRef<string | null>(null)
+  const listRef = useRef<HTMLUListElement>(null)
+  useEffect(() => {
+    if (!focusLast.current) return
+    const els = listRef.current?.querySelectorAll<HTMLTextAreaElement>(`[data-kind="${focusLast.current}"]`)
+    els?.[els.length - 1]?.focus()
+    focusLast.current = null
+  })
+  const row = (key: string, kind: string, how: string, editor: React.ReactNode, onRemove: () => void, extra?: React.ReactNode) => (
+    <li key={key} className="grid grid-cols-[96px_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-0.5 px-3 py-2">
+      <span className="text-ink-tertiary pt-1 text-xs">{kind}</span>
+      <div className="min-w-0 space-y-1">
+        {editor}
+        {extra}
+        <p className="text-ink-tertiary text-[11px]">{how}</p>
+      </div>
+      <button type="button" aria-label={`Remove ${kind.toLowerCase()}`} onClick={onRemove} className="text-ink-tertiary hover:text-ink-primary pt-1.5">
+        <X className="size-3.5" />
+      </button>
+    </li>
+  )
+  const add = (kind: "answer" | "docs" | "mustNot") => {
+    setAdding(false)
+    if (kind === "answer") setShowAnswer(true)
+    else change({ [kind]: [...draft[kind], ""] })
+    focusLast.current = kind
+  }
+  const rows = [
+    ...(showAnswer || draft.answer
+      ? [
+          row(
+            "answer",
+            "Good answer",
+            "Judged by the grader, against this",
+            <Inline data-kind="answer" value={draft.answer} placeholder="What the answer should convey — the substance, not the wording" onChange={(e) => change({ answer: e.target.value })} />,
+            () => (change({ answer: "" }), setShowAnswer(false)),
+            <button type="button" onClick={onDraftAnswer} className="text-ink-secondary hover:text-ink-primary text-[11px] underline underline-offset-2">
+              Draft it from the documents
+            </button>,
+          ),
+        ]
+      : []),
+    ...draft.docs.map((d, n) =>
+      row(
+        `doc-${n}`,
+        "Reads",
+        "Exact, from the tool log: a read must return this document",
+        <Inline data-kind="docs" value={d} placeholder="e.g. accessibility.md" onChange={(e) => change({ docs: draft.docs.map((x, i) => (i === n ? e.target.value : x)) })} />,
+        () => change({ docs: draft.docs.filter((_, i) => i !== n) }),
+      ),
+    ),
+    ...draft.mustNot.map((m, n) =>
+      row(
+        `not-${n}`,
+        "Must not say",
+        "Judged by the grader",
+        <Inline data-kind="mustNot" value={m} placeholder="e.g. that an overlay makes it compliant" onChange={(e) => change({ mustNot: draft.mustNot.map((x, i) => (i === n ? e.target.value : x)) })} />,
+        () => change({ mustNot: draft.mustNot.filter((_, i) => i !== n) }),
+      ),
+    ),
+  ]
+  return (
+    <div className="space-y-2">
+      {rows.length > 0 ? (
+        <ul ref={listRef} className="divide-primary-border border-primary-border divide-y rounded-lg border">
+          {rows}
+        </ul>
+      ) : (
+        <p className="text-ink-tertiary text-xs">Nothing yet — without a good answer, the grader has nothing to compare against.</p>
+      )}
+      {adding ? (
+        <div className="border-primary-border rounded-lg border p-1">
+          {!showAnswer && !draft.answer && (
+            <button type="button" onClick={() => add("answer")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+              Good answer <span className="text-ink-tertiary text-xs">What the answer should convey</span>
+            </button>
+          )}
+          <button type="button" onClick={() => add("docs")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Reads a document <span className="text-ink-tertiary text-xs">The one that holds the answer — checked exactly</span>
+          </button>
+          <button type="button" onClick={() => add("mustNot")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Must not say <span className="text-ink-tertiary text-xs">e.g. legal advice</span>
+          </button>
+        </div>
+      ) : (
+        <button type="button" onClick={() => setAdding(true)} className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-[13px]">
+          <Plus className="size-3.5" /> Add an expectation
+        </button>
+      )}
+    </div>
   )
 }
 

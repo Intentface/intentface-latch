@@ -92,62 +92,58 @@ export function EvalsShell({
   // Carry the subject across pages; a cell or a selected question is page-local.
   const carry = { agent: search.agent, dataset: search.dataset, rubric: search.rubric };
 
+  // One quiet row: what this is, which agent, the page switch. The results start right under it.
   return (
-    <header className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-ink-primary text-lg font-semibold">Evals</h1>
-          <p className="text-ink-tertiary text-sm">{here.blurb}</p>
-        </div>
-        <div className="flex items-center gap-2">
-        <nav aria-label="Evals pages" className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg flex rounded-lg p-0.5">
-          {PAGES.map((p) => (
-            <Link
-              key={p.page}
-              to={p.to}
-              search={carry}
-              aria-current={p.page === page ? "page" : undefined}
-              className={cn(
-                "focus-visible:ring-ring rounded-md px-3 py-1 text-sm outline-none focus-visible:ring-2",
-                p.page === page ? "bg-primary-bg-active text-ink-primary font-medium" : "text-ink-secondary hover:text-ink-primary",
-              )}
-            >
-              {p.label}
-            </Link>
+    <header className="flex flex-wrap items-center gap-2.5">
+      <h1 className="text-ink-primary mr-1 text-lg font-semibold" title={here.blurb}>
+        Evals
+      </h1>
+      <Picker label="Agent">
+        <Select
+          id="evals-agent"
+          value={agent}
+          onChange={(e) => set({ agent: e.target.value, dataset: undefined, rubric: undefined, run: undefined, check: undefined, version: undefined, q: undefined, cols: undefined, focus: undefined })}
+        >
+          {index.map((x) => (
+            <option key={x.agent} value={x.agent}>
+              {x.agent}
+            </option>
           ))}
-        </nav>
-        </div>
-      </div>
+        </Select>
+      </Picker>
+      {children}
+      <span className="flex-1" />
+      {actions}
+      <nav aria-label="Evals pages" className="flex items-center gap-1 text-sm">
+        {PAGES.map((p) => (
+          <Link
+            key={p.page}
+            to={p.to}
+            search={carry}
+            aria-current={p.page === page ? "page" : undefined}
+            className={cn(
+              "focus-visible:ring-ring rounded-md px-2.5 py-1 outline-none focus-visible:ring-2",
+              p.page === page ? "text-ink-primary font-medium" : "text-ink-tertiary hover:text-ink-primary",
+            )}
+          >
+            {p.label}
+          </Link>
+        ))}
+      </nav>
       {agent && (
         <EvalsAgentDock
           context={{ agent, ...(search.dataset ? { questionSet: search.dataset } : {}), ...(search.run ? { run: search.run } : {}), ...(search.rubric ? { checks: search.rubric } : {}) }}
         />
       )}
-      <div className="flex flex-wrap items-end gap-2">
-        <Picker label="Agent">
-          <Select
-            id="evals-agent"
-            value={agent}
-            onChange={(e) => set({ agent: e.target.value, dataset: undefined, rubric: undefined, run: undefined, check: undefined, version: undefined, q: undefined })}
-          >
-            {index.map((x) => (
-              <option key={x.agent} value={x.agent}>
-                {x.agent}
-              </option>
-            ))}
-          </Select>
-        </Picker>
-        {children}
-        {actions && <div className="ml-auto flex items-center gap-2">{actions}</div>}
-      </div>
     </header>
   );
 }
 
+/** A picker in the header row: the control speaks for itself; its label is for screen readers. */
 export function Picker({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1">
-      <span className="text-ink-secondary text-xs font-medium">{label}</span>
+    <label className="flex items-center">
+      <span className="sr-only">{label}</span>
       {children}
     </label>
   );
