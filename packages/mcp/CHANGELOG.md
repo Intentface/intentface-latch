@@ -1,5 +1,13 @@
 # @intentface/latch-mcp
 
+## 0.12.0
+
+### Patch Changes
+
+- Updated dependencies [e602c55]
+  - @intentface/latch-core@0.12.0
+  - @intentface/latch-net@0.12.0
+
 ## 0.11.0
 
 ### Minor Changes
