@@ -110,10 +110,11 @@ export async function scheduleSmoke<P>({
   // why the runtime must consume the occurrence before firing anything slow.
   const t1 = Date.now() + 60_000; // node-1's 30s lease has expired by here
   await store.claimDueSchedules(t1, 0, "node-1"); // re-claim, already-expired lease
+  const staleClaim = (await store.claimDueSchedules(t1 + 1, 30_000, "node-2")).find(
+    (s) => s.id === created.id,
+  );
   assert(
-    (await store.claimDueSchedules(t1 + 1, 30_000, "node-2")).some(
-      (s) => s.id === created.id,
-    ),
+    !!staleClaim,
     "an expired claim lease alone does NOT protect an occurrence (contract, not a bug)",
   );
 
@@ -128,6 +129,27 @@ export async function scheduleSmoke<P>({
     "completeSchedule reports false when another node holds the claim",
   );
 
+  // The owner id alone can't tell two claims by the SAME instance apart (two
+  // runDue passes sharing an instanceId). Let node-2's claim lapse and node-2
+  // re-claim: the first pass's late consume is fenced out by its claim's
+  // expiry, and only the current claim may consume.
+  const current = (
+    await store.claimDueSchedules(t1 + 40_000, 30_000, "node-2")
+  ).find((s) => s.id === created.id);
+  assert(
+    !!current && current.leaseExpiresAt !== staleClaim!.leaseExpiresAt,
+    "a same-owner re-claim stamps a new lease expiry",
+  );
+  assert(
+    (await store.completeSchedule(
+      created.id,
+      { nextRunAt: t1, lastRunAt: t1, enabled: false },
+      "node-2",
+      { leaseExpiresAt: staleClaim!.leaseExpiresAt! },
+    )) === false,
+    "completeSchedule rejects a stale claim by the same owner",
+  );
+
   // Second, the protection: once the occurrence is CONSUMED (nextRunAt
   // advanced past now), no claimer can take it again — lease state is
   // irrelevant. This is the write the runtime issues between claim and fire.
@@ -136,8 +158,9 @@ export async function scheduleSmoke<P>({
       created.id,
       { nextRunAt: t1 + 24 * 60 * 60 * 1000, lastRunAt: t1, enabled: true },
       "node-2",
+      { leaseExpiresAt: current!.leaseExpiresAt! },
     )) === true,
-    "completeSchedule reports true for the claim holder",
+    "completeSchedule reports true for the current claim",
   );
   assert(
     !(await store.claimDueSchedules(t1 + 60_000, 30_000, "node-3")).some(

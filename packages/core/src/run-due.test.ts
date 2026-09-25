@@ -143,6 +143,24 @@ describe("runDue consumes the occurrence before firing", () => {
     expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
   });
 
+  it("fences the consume on the claim it holds, not just the owner id", async () => {
+    // Two passes on one instance share an owner id; the claim's own lease
+    // expiry is what tells a late first pass from the re-claiming second.
+    let fence: unknown;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [{ ...SCHEDULE, leaseOwner: "node_a", leaseExpiresAt: 30_100 }],
+      completeSchedule: async (_id, _patch, _owner, claim) => {
+        fence = claim;
+        return true;
+      },
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    await rt.runDue({ now: 100 });
+
+    expect(fence).toEqual({ leaseExpiresAt: 30_100 });
+  });
+
   it("does NOT fire when the fence rejects the consume (another node holds the claim)", async () => {
     // The claim lease is never renewed: if it lapsed before the consume (a slow
     // `reconstructPrincipal` runs inside it), another node re-claimed and owns

@@ -436,11 +436,21 @@ export interface StorageAdapter<P> {
    * occurrence and firing too would be a duplicate paid turn. `true` or
    * `void` means applied — `void` keeps adapters written before this signal
    * existed working, at the cost of that protection.
+   *
+   * `claim` identifies WHICH claim is completing: the `leaseExpiresAt` the
+   * claim stamped. `owner` alone can't tell two claims by the same instance
+   * apart — two `runDue` passes sharing an `instanceId` (an interval tick plus
+   * a manual `/cron/run`) where the first outlives its lease and the second
+   * re-claims — so fence on both when given. Every claim stamps a strictly
+   * later expiry than the lapsed one it replaces, so the value is unique per
+   * claim with no extra column. Adapters that ignore it keep the owner-only
+   * fence.
    */
   completeSchedule(
     id: string,
     patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
     owner: string,
+    claim?: { leaseExpiresAt: number },
   ): Promise<boolean | void>;
   /**
    * OPTIONAL system op (no principal): remember which chat a fire ran in, so

@@ -29,6 +29,11 @@ return `false` when its fence rejected the write (another node holds the
 claim), and `runDue` then leaves the occurrence to that node. The drizzle
 adapter reports it; adapters returning `void` are treated as applied, as
 before. This also closes the older, narrower window between claim and consume.
+`completeSchedule` also takes an optional `claim` (`{ leaseExpiresAt }`, the
+value the claim stamped) so a re-claim by the SAME instance — two `runDue`
+passes sharing an `instanceId` — fences out the earlier pass's late consume;
+the drizzle adapter fences on it. Adapters that ignore it keep the owner-only
+fence.
 
 A refused resume also releases the run's lease, so the errored row cannot be
 re-claimed by a later `resume()`.

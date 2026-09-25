@@ -3756,6 +3756,9 @@ export function createRuntime<P, RC = unknown>(
           s.id,
           { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null && !refused },
           dur.instanceId,
+          // Which claim this is: a later pass on this same instance may have
+          // re-claimed the row under the same owner id since.
+          s.leaseExpiresAt != null ? { leaseExpiresAt: s.leaseExpiresAt } : undefined,
         );
         if (applied === false) {
           // The fence rejected us: our claim lapsed (the lease is never
