@@ -2999,9 +2999,12 @@ export function createRuntime<P, RC = unknown>(
       // flipped EVERY run here to `errored` in one write, and no later reap
       // selects an `errored` row — so an escaping throw (a transient
       // `reconstructPrincipal` failure, a storage blip) would leave each run
-      // after it unrecovered for good. The run that threw was already
-      // reclaimed to `active` under a lease, so it is reaped and retried once
-      // that lease lapses, spending an attempt like any other failed resume.
+      // after it unrecovered for good. A throw AFTER the reclaim (the hook,
+      // history, the turn) leaves that run `active` under a lease, so it is
+      // reaped and retried once the lease lapses, spending an attempt like any
+      // other failed resume. A throw FROM the reclaim itself leaves the run as
+      // the reaper left it — `errored`, not auto-retried — which is today's
+      // outcome for that run too; only its neighbours are new to recovery.
       try {
         const outcome = await resumeRun(run.id);
         if (outcome) resumed.push(outcome);
