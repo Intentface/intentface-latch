@@ -1,5 +1,12 @@
 # @intentface/latch-agent-builder
 
+## 0.12.0
+
+### Patch Changes
+
+- Updated dependencies [e602c55]
+  - @intentface/latch-core@0.12.0
+
 ## 0.11.0
 
 ### Patch Changes

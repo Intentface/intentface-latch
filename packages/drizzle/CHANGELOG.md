@@ -1,5 +1,72 @@
 # @intentface/latch-drizzle
 
+## 0.12.0
+
+### Minor Changes
+
+- e602c55: `reconstructPrincipal` can now refuse a stored identity by returning `null`, and
+  the runtime makes that refusal terminal instead of replaying the identity.
+  
+  Until now the hook could only return a principal, so a user removed from their
+  tenant after creating a schedule kept firing it — as themselves, indefinitely.
+  Throwing did not stop it: a cron fire consumes its occurrence before rebuilding
+  the principal, so the schedule stayed live and refused again on every tick, and
+  a throw on resume aborted the rest of `sweep`'s loop.
+  
+  - **Cron:** a refused fire is not run, and the schedule is disabled in the same
+    write that consumes the occurrence. `runDue` (and `cron().due`) report it in a
+    new `rejected` counter, separate from `errors`. The result type is exported as
+    `RunDueResult`.
+  - **Resume:** a refused run ends `errored` (fenced write) without loading its
+    history or resolving its agent as that identity, and `sweep` continues with
+    the next run.
+  - A **throw** keeps its current meaning — a transient failure: counted in
+    `errors` and the occurrence consumed (a recurring schedule stays live; a
+    one-shot is spent, as before). Only `null` refuses; `undefined` does not.
+  - `sweep` now isolates each resume: a run whose resume throws is logged and
+    retried once its lease lapses, instead of aborting the loop and stranding
+    every reaped run after it (the reaper marks the whole batch `errored`, and no
+    later reap selects those rows again).
+  - A refused resume fires no `onRunFinished`: its meta carries the principal,
+    and there is none.
+  
+  The hook now runs before the occurrence is consumed, inside the schedule's
+  claim lease, so keep it well under `durability.leaseTtlMs`. If the lease does
+  lapse, the fire is now skipped rather than duplicated: `completeSchedule` may
+  return `false` when its fence rejected the write (another node holds the
+  claim), and `runDue` then leaves the occurrence to that node. The drizzle
+  adapter reports it; adapters returning `void` are treated as applied, as
+  before. This also closes the older, narrower window between claim and consume.
+  `completeSchedule` also takes an optional `claim` (`{ leaseExpiresAt }`, the
+  value the claim stamped) so a re-claim by the SAME instance — two `runDue`
+  passes sharing an `instanceId` — fences out the earlier pass's late consume;
+  the drizzle adapter fences on it. Adapters that ignore it keep the owner-only
+  fence.
+  
+  A refused resume also releases the run's lease, so the errored row cannot be
+  re-claimed by a later `resume()`.
+  
+  Upgrading: existing hooks keep working unchanged. Tests that deep-equal
+  `runDue`'s result need `rejected: 0`.
+
+### Patch Changes
+
+- 96cc9f7: Drop the AI SDK beta pin: both packages now declare `ai` as `>=7.0.0`, matching
+  every other package in the repo.
+  
+  `latch-drizzle` and `latch-server` still declared `ai: ">=7.0.0-beta.178"` and
+  dev-installed that exact beta, so a workspace install resolved two copies of
+  `ai` — a beta for these two and a release for everyone else. Two copies in one
+  process means two sets of error classes, so an `instanceof AISDKError` check
+  across the boundary silently fails.
+  
+  No source change: the published code is byte-identical. Only the declared floor
+  moves, from a prerelease nobody should still be on to the release line.
+- Updated dependencies [e602c55]
+  - @intentface/latch-core@0.12.0
+  - @intentface/latch-agent-builder@0.12.0
+  - @intentface/latch-memory@0.12.0
+
 ## 0.11.0
 
 ### Patch Changes
