@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { createFileRoute, redirect } from "@tanstack/react-router"
 import { ChevronDown, Loader2, Plus } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
@@ -667,7 +668,8 @@ function CellButton({ cell, baseRate, label, onOpen }: { cell: Cell | undefined;
 /**
  * An input, one line. Resting on it grows its own block in place — the whole
  * text, any follow-ups — over the rows below, so nothing is shown twice and
- * the table doesn't jump.
+ * the table doesn't jump. The block is drawn at the page's top level: inside
+ * the sticky cell it would sit under the next row's sticky cell.
  */
 function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
   const ref = useRef<HTMLSpanElement>(null)
@@ -687,15 +689,24 @@ function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
     setGrown(null)
   }
   useEffect(() => () => clearTimeout(timer.current), [])
+  // Fixed to where the row was; once anything scrolls, it no longer is.
+  useEffect(() => {
+    if (!grown) return
+    const off = () => setGrown(null)
+    window.addEventListener("scroll", off, true)
+    return () => window.removeEventListener("scroll", off, true)
+  }, [grown])
   return (
-    <div onMouseEnter={show} onMouseLeave={hide} className="relative">
+    <div onMouseEnter={show} onMouseLeave={(e) => { if (!(e.relatedTarget instanceof Element && e.relatedTarget.closest("[data-grown]"))) hide() }} className="relative">
       <span ref={ref} className="text-ink-primary block truncate leading-7">
         {input.prompt}
       </span>
-      {grown && (
+      {grown && createPortal(
         <div
-          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 space-y-1.5 rounded-lg border px-2.5 py-1.5 leading-relaxed shadow-lg"
-          style={{ left: grown.left - 10, top: grown.top - 1, width: grown.width + 20 }}
+          data-grown
+          onMouseLeave={hide}
+          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 space-y-1.5 rounded-lg border px-2.5 py-[3px] text-[13px] leading-7 shadow-lg"
+          style={{ left: grown.left - 11, top: grown.top - 4, width: grown.width + 22 }}
         >
           <div>{input.prompt}</div>
           {input.followUps.map((f, n) => (
@@ -704,7 +715,8 @@ function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
               {f}
             </div>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )
