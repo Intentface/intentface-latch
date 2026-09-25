@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { createFileRoute, redirect } from "@tanstack/react-router"
-import { ChevronDown, Loader2, Plus } from "lucide-react"
+import { ChevronDown, Loader2, RotateCw } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
 import {
   getEvalGridFn,
   getEvalsIndexFn,
   saveEvalRulingFn,
+  startJudgeFn,
 } from "@/lib/evals-server"
-import type { EvalGrid } from "@/lib/evals-server"
+import type { EvalGrid, JobRow } from "@/lib/evals-server"
+import { AddColumn, AgainPanel } from "@/components/evals/run-menus"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { RunDrawer } from "@/components/evals/run-drawer"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -108,6 +110,15 @@ function EvalsPage() {
     else reload()
   })
 
+  // While something runs, answers land every few seconds: show them as they do.
+  const progress = jobs.rows.filter(isActive).map((j) => `${j.id}:${j.done}:${j.status}`).join(",")
+  const seenProgress = useRef("")
+  useEffect(() => {
+    if (progress === seenProgress.current) return
+    seenProgress.current = progress
+    if (progress) reload()
+  }, [progress, reload])
+
   if (!index.length) return <EvalsEmpty />
 
   const columns = grid?.columns ?? []
@@ -175,7 +186,11 @@ function EvalsPage() {
             onFocus={(label) => set({ focus: label })}
             onHide={(label) => setColumns(refs.filter((_, n) => columns[n].label !== label))}
             onShow={(r) => setColumns([...refs, r], undefined)}
-            onRun={() => setRunOpen(true)}
+            onStarted={(added) => (setColumns([...refs, ...added], added[0]?.version), jobs.refresh())}
+            onAgain={jobs.refresh}
+            datasetId={dataset?.id ?? ""}
+            rubricId={rubricId ?? ""}
+            jobs={jobs.rows}
           />
         ) : (
           loading && <Loader2 className="text-ink-tertiary size-4 animate-spin" />
@@ -202,12 +217,17 @@ function EvalsPage() {
             at={openCell}
             onClose={() => setOpenCell(null)}
             onRuled={reload}
+            datasetId={dataset?.id ?? ""}
+            rubricId={rubricId ?? ""}
+            onAgain={() => (setOpenCell(null), jobs.refresh())}
           />
         )}
       </div>
     </div>
   )
 }
+
+const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
 
 // ─── Numbers ──────────────────────────────────────────────────────────────
 
@@ -274,7 +294,11 @@ function Results({
   onFocus,
   onHide,
   onShow,
-  onRun,
+  onStarted,
+  onAgain,
+  datasetId,
+  rubricId,
+  jobs,
 }: {
   agent: string
   grid: EvalGrid
@@ -289,9 +313,31 @@ function Results({
   onFocus: (label: string) => void
   onHide: (label: string) => void
   onShow: (r: Result) => void
-  onRun: () => void
+  onStarted: (added: Result[]) => void
+  onAgain: () => void
+  datasetId: string
+  rubricId: string
+  jobs: JobRow[]
 }) {
   const cells = useMemo(() => cellsOf(grid), [grid])
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  // What is running against which column, so cells can say so instead of "—".
+  const active = jobs.filter(isActive)
+  const running = (c: Column) => active.find((j) => j.kind === "run" && !j.again && j.runId === c.runId && j.versions.includes(c.version))
+  const grading = (c: Column) => active.some((j) => j.runId === c.runId && (j.kind === "judge" || j.status === "judging"))
+  const againFor = (c: Column, inputId: string) =>
+    active.some((j) => j.again && j.runId === c.runId && j.versions.includes(c.version) && j.inputIds.includes(inputId))
+  const columnRefs = grid.columns.map((c) => ({ runId: c.runId, version: c.version, label: c.label }))
+  const gradeUngraded = async (inputIds: string[] | null) => {
+    const verdictOf = new Set(grid.verdicts.map((v) => v.threadId))
+    for (const c of grid.columns) {
+      const threadIds = grid.threads
+        .filter((t) => t.column === c.label && !t.error && !verdictOf.has(t.threadId) && (!inputIds || inputIds.includes(t.inputId)))
+        .map((t) => t.threadId)
+      if (threadIds.length) await startJudgeFn({ data: { agent, datasetId, rubricId, runId: c.runId, threadIds } })
+    }
+    onAgain()
+  }
   const [base, ...rest] = grid.columns
   const focus = rest.find((c) => c.label === focusAsked) ?? rest.at(0)
   const cell = (inputId: string, label: string) => cells.get(`${inputId}|${label}`)
@@ -388,20 +434,53 @@ function Results({
         {byCheck && focus && <ByCheck grid={grid} base={base} focus={focus} />}
       </div>
 
+      {picked.size > 0 && (
+        <div className="border-primary-border bg-primary-bg-hover flex flex-wrap items-center gap-3 border-b px-5 py-2 text-[13px]">
+          <b className="text-ink-primary tabular-nums">{picked.size} selected</b>
+          <Popover>
+            <Popover.Trigger render={<button type="button" className="border-primary-border bg-primary-bg hover:bg-primary-bg-hover flex h-7 items-center gap-1.5 rounded-md border px-2.5" />}>
+              <RotateCw className="size-3.5" /> Answer again
+            </Popover.Trigger>
+            <Popover.Content align="start" className="w-80 p-1">
+              <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={[...picked]} columns={columnRefs} onStarted={() => (setPicked(new Set()), onAgain())} />
+            </Popover.Content>
+          </Popover>
+          <button type="button" className="text-ink-secondary hover:text-ink-primary underline underline-offset-2" onClick={() => void gradeUngraded([...picked]).then(() => setPicked(new Set()))}>
+            Grade what isn't graded
+          </button>
+          <button type="button" className="text-ink-tertiary hover:text-ink-primary ml-auto" onClick={() => setPicked(new Set())}>
+            Clear
+          </button>
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full min-w-full border-collapse text-[13px]">
           <thead>
             <tr className="border-primary-border border-b">
-              <th className="bg-primary-bg text-ink-tertiary sticky left-0 z-10 w-10 px-3 py-2 text-left text-xs font-medium">#</th>
-              <th className="bg-primary-bg text-ink-tertiary sticky left-10 z-10 w-[480px] max-w-[480px] px-3 py-2 text-left text-xs font-medium">Input</th>
+              <th className="bg-primary-bg sticky left-0 z-10 w-9 py-2 pl-3">
+                <input
+                  type="checkbox"
+                  aria-label="Select every input"
+                  checked={picked.size === grid.inputs.length}
+                  onChange={() => setPicked(picked.size === grid.inputs.length ? new Set() : new Set(grid.inputs.map((i) => i.id)))}
+                />
+              </th>
+              <th className="bg-primary-bg text-ink-tertiary sticky left-9 z-10 w-10 px-3 py-2 text-left text-xs font-medium">#</th>
+              <th className="bg-primary-bg text-ink-tertiary sticky left-[76px] z-10 w-[480px] max-w-[480px] px-3 py-2 text-left text-xs font-medium">Input</th>
               {grid.columns.map((c, n) => (
-                <th key={c.label} className="px-2 py-2 text-center align-bottom">
+                <th key={c.label} className="min-w-[132px] px-2 py-2 text-center align-bottom">
                   <ColumnMenu
                     column={c}
                     isBase={n === 0}
                     isFocus={c.label === focus?.label}
                     rate={columnRate(grid, cells, c.label)}
                     tries={triesOf(c)}
+                    state={running(c) ? `answering · ${running(c)!.done}/${running(c)!.total}` : grading(c) ? "grading…" : null}
+                    failed={grid.inputs.filter((i) => (cell(i.id, c.label)?.rate ?? 1) < 1).map((i) => i.id)}
+                    againPanel={(ids, done) => (
+                      <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={ids} columns={columnRefs} preset={[c.label]} onStarted={() => (done(), onAgain())} />
+                    )}
+                    onGrade={() => void gradeUngraded(null)}
                     canHide={grid.columns.length > 1}
                     onBaseline={() => onBaseline(c.label)}
                     onFocus={() => onFocus(c.label)}
@@ -410,20 +489,42 @@ function Results({
                 </th>
               ))}
               <th className="w-full px-2 py-2 text-left align-bottom">
-                <AddColumn hidden={hidden} onShow={onShow} onRun={onRun} />
+                <AddColumn
+                  agent={agent}
+                  datasetId={datasetId}
+                  rubricId={rubricId}
+                  shown={grid.columns.map((c) => ({ runId: c.runId, version: c.version }))}
+                  hidden={hidden}
+                  onShow={onShow}
+                  onStarted={onStarted}
+                />
               </th>
             </tr>
           </thead>
           <tbody>
             {shown.map(({ input }) => (
-              <tr key={input.id} className="border-primary-border border-b last:border-b-0">
-                <td className="bg-primary-bg text-ink-tertiary sticky left-0 z-10 px-3 py-1.5 tabular-nums">{input.id}</td>
-                <td className="bg-primary-bg sticky left-10 z-10 w-[480px] max-w-[480px] px-3 py-1.5">
+              <tr key={input.id} className="group/row border-primary-border border-b last:border-b-0">
+                <td className="bg-primary-bg sticky left-0 z-10 py-1.5 pl-3">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select input ${input.id}`}
+                    checked={picked.has(input.id)}
+                    onChange={() => {
+                      const next = new Set(picked)
+                      if (next.has(input.id)) next.delete(input.id)
+                      else next.add(input.id)
+                      setPicked(next)
+                    }}
+                  />
+                </td>
+                <td className="bg-primary-bg text-ink-tertiary sticky left-9 z-10 px-3 py-1.5 tabular-nums">{input.id}</td>
+                <td className="bg-primary-bg sticky left-[76px] z-10 w-[480px] max-w-[480px] px-3 py-1.5">
                   <InputText input={input} />
                 </td>
                 {grid.columns.map((c) => (
                   <td key={c.label} className="px-2 py-1.5 text-center whitespace-nowrap">
                     <CellButton
+                      pending={againFor(c, input.id) ? "answering…" : !cell(input.id, c.label) && running(c) ? "···" : null}
                       cell={cell(input.id, c.label)}
                       baseRate={c.label === base.label ? null : (cell(input.id, base.label)?.rate ?? null)}
                       label={`Input ${input.id} on ${c.label}`}
@@ -431,7 +532,25 @@ function Results({
                     />
                   </td>
                 ))}
-                <td />
+                <td className="px-1 py-1.5">
+                  <Popover>
+                    <Popover.Trigger
+                      render={
+                        <button
+                          type="button"
+                          aria-label={`Answer input ${input.id} again`}
+                          title="Answer again"
+                          className="text-ink-tertiary hover:text-ink-primary hover:bg-primary-bg-hover grid size-7 place-items-center rounded-md opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+                        />
+                      }
+                    >
+                      <RotateCw className="size-3.5" />
+                    </Popover.Trigger>
+                    <Popover.Content align="end" className="w-80 p-1">
+                      <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={[input.id]} columns={columnRefs} onStarted={onAgain} />
+                    </Popover.Content>
+                  </Popover>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -515,6 +634,10 @@ function ColumnMenu({
   isFocus,
   rate,
   tries,
+  state,
+  failed,
+  againPanel,
+  onGrade,
   canHide,
   onBaseline,
   onFocus,
@@ -525,6 +648,11 @@ function ColumnMenu({
   isFocus: boolean
   rate: number | null
   tries: number
+  /** What is happening to it right now — answering, grading. */
+  state: string | null
+  failed: string[]
+  againPanel: (inputIds: string[], done: () => void) => React.ReactNode
+  onGrade: () => void
   canHide: boolean
   onBaseline: () => void
   onFocus: () => void
@@ -532,22 +660,24 @@ function ColumnMenu({
 }) {
   const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
   const [open, setOpen] = useState(false)
+  const [again, setAgain] = useState(false)
   const pick = (f: () => void) => () => (setOpen(false), f())
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(false))}>
       <Popover.Trigger render={<button type="button" className="group inline-flex flex-col items-center" />}>
         <span className={cn("flex items-center gap-1 text-xs font-semibold whitespace-nowrap", isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary")}>
           {column.version}
           {isBase && <span className="border-primary-border text-ink-tertiary rounded-full border px-1.5 text-[10px] font-medium">baseline</span>}
           <ChevronDown className="size-3" />
         </span>
-        <span className="text-ink-tertiary text-[11px] whitespace-nowrap tabular-nums">
-          {day(column.at)} · {pct(rate)}
+        <span className={cn("text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
+          {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : <>{day(column.at)} · {pct(rate)}</>}
           {column.spent > 0 && ` · ${money(column.spent)}`}
           {tries > 1 && ` · ${tries} tries`}
         </span>
       </Popover.Trigger>
-      <Popover.Content align="start" className="w-72 p-1.5">
+      <Popover.Content align="start" className="w-80 p-1.5">
+        {again ? againPanel(failed, () => setOpen(false)) : <>
         <div className="text-ink-tertiary px-2.5 pt-1 pb-1.5 text-xs">
           {column.runName ?? "Unnamed run"} · {day(column.at)}
           {column.spent > 0 && ` · spent ${money(column.spent)}`}
@@ -562,72 +692,40 @@ function ColumnMenu({
             Compare in the headline <span className="text-ink-tertiary text-xs">Against the baseline</span>
           </button>
         )}
+        {failed.length > 0 && (
+          <button type="button" className={item} onClick={() => setAgain(true)}>
+            Answer again where it failed <span className="text-ink-tertiary text-xs tabular-nums">{failed.length} input{failed.length === 1 ? "" : "s"} · another try each</span>
+          </button>
+        )}
+        <button type="button" className={item} onClick={pick(onGrade)}>
+          Grade what isn't graded <span className="text-ink-tertiary text-xs">Answers without a grade under the current checks · cents</span>
+        </button>
         {canHide && (
           <button type="button" className={item} onClick={pick(onHide)}>
             Hide column <span className="text-ink-tertiary text-xs">Its answers are kept</span>
           </button>
         )}
+        </>}
       </Popover.Content>
     </Popover>
   )
 }
 
-/** The last header cell: show an earlier result as a column, or run something new. */
-function AddColumn({
-  hidden,
-  onShow,
-  onRun,
+function CellButton({
+  cell,
+  baseRate,
+  label,
+  pending,
+  onOpen,
 }: {
-  hidden: { runId: string; version: string; run: { name: string | null; createdAt: number; questions: number; tries: number } }[]
-  onShow: (r: Result) => void
-  onRun: () => void
+  cell: Cell | undefined
+  baseRate: number | null
+  label: string
+  /** Being answered right now — shown instead of the result, or of "—". */
+  pending: string | null
+  onOpen: () => void
 }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <Popover.Trigger
-        render={
-          <button
-            type="button"
-            className="border-primary-border text-ink-secondary hover:text-ink-primary hover:bg-primary-bg-hover flex h-7 items-center gap-1 rounded-full border border-dashed px-3 text-xs whitespace-nowrap"
-          />
-        }
-      >
-        <Plus className="size-3.5" /> Run
-      </Popover.Trigger>
-      <Popover.Content align="start" className="w-80 p-1.5">
-        <button type="button" onClick={() => (setOpen(false), onRun())} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-2 text-left text-sm">
-          Run a configuration
-          <span className="text-ink-tertiary text-xs">New answers from any version, priced before it starts</span>
-        </button>
-        {hidden.length > 0 && (
-          <>
-            <div className="text-ink-tertiary px-2.5 pt-2 pb-1 text-xs">Or show answers you already have · free</div>
-            <ul className="max-h-72 overflow-y-auto">
-              {hidden.map((h) => (
-                <li key={`${h.runId}|${h.version}`}>
-                  <button
-                    type="button"
-                    onClick={() => (setOpen(false), onShow({ runId: h.runId, version: h.version }))}
-                    className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
-                  >
-                    {h.version}
-                    <span className="text-ink-tertiary text-xs tabular-nums">
-                      {h.run.name ? `${h.run.name} · ` : ""}
-                      {day(h.run.createdAt)} · {h.run.questions} inputs{h.run.tries > 1 ? ` × ${h.run.tries} tries` : ""}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </Popover.Content>
-    </Popover>
-  )
-}
-
-function CellButton({ cell, baseRate, label, onOpen }: { cell: Cell | undefined; baseRate: number | null; label: string; onOpen: () => void }) {
+  if (pending) return <span className="text-ink-tertiary inline-flex h-7 min-w-[76px] items-center justify-center text-xs">{pending}</span>
   if (!cell) return <span className="text-ink-tertiary text-xs">—</span>
   const broke = cell.tries.every((t) => t.error)
   if (broke)
@@ -760,13 +858,21 @@ function AnswerDrawer({
   at,
   onClose,
   onRuled,
+  datasetId,
+  rubricId,
+  onAgain,
 }: {
   agent: string
   grid: EvalGrid
   at: { inputId: string; column: string } | null
   onClose: () => void
   onRuled: () => void
+  datasetId: string
+  rubricId: string
+  onAgain: () => void
 }) {
+  const [againOpen, setAgainOpen] = useState(false)
+  useEffect(() => setAgainOpen(false), [at?.inputId, at?.column])
   const cells = useMemo(() => cellsOf(grid), [grid])
   const [tryN, setTryN] = useState(0)
   useEffect(() => setTryN(0), [at?.inputId, at?.column])
@@ -803,6 +909,31 @@ function AnswerDrawer({
               )}
             </Drawer.Header>
             <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="flex flex-wrap items-center gap-2 px-5 pt-4">
+                <button type="button" onClick={() => setAgainOpen(!againOpen)} className="border-primary-border hover:bg-primary-bg-hover flex h-8 items-center gap-1.5 rounded-md border px-3 text-[13px]">
+                  <RotateCw className="size-3.5" /> Answer again
+                </button>
+                {!pick.error && !verdicts.length && (
+                  <button
+                    type="button"
+                    className="border-primary-border hover:bg-primary-bg-hover h-8 rounded-md border px-3 text-[13px]"
+                    onClick={() => {
+                      const col = grid.columns.find((c) => c.label === at.column)
+                      if (col) void startJudgeFn({ data: { agent, datasetId, rubricId, runId: col.runId, threadIds: [pick.threadId] } }).then(onAgain)
+                    }}
+                  >
+                    Grade it
+                  </button>
+                )}
+              </div>
+              {againOpen && (() => {
+                const col = grid.columns.find((c) => c.label === at.column)
+                return col ? (
+                  <div className="border-primary-border mx-5 mt-3 rounded-lg border">
+                    <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={[input.id]} columns={[{ runId: col.runId, version: col.version, label: col.label }]} onStarted={onAgain} />
+                  </div>
+                ) : null
+              })()}
               <div className="space-y-2 px-5 pt-4">
                 {pick.error ? (
                   <div className="border-primary-border bg-primary-bg-hover rounded-lg border px-3 py-2.5 text-sm">

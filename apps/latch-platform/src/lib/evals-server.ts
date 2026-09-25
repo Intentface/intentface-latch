@@ -13,11 +13,11 @@ import type { Principal } from "./session";
 import type { Check } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
 import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
-import { planRun, startJudgeJob, startPlannedRun } from "./evals-jobs";
+import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
 import { createChecks, createQuestionSet } from "./evals-actions";
-import type { RunRequest } from "./evals-jobs";
+import type { AgainRequest, RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { configFingerprint } from "./evals/v2/runner";
 import { finalAnswer, viewOf } from "./evals/v2/thread";
@@ -298,8 +298,32 @@ export const startRunFn = createServerFn({ method: "POST" })
   });
 
 /** Re-score an existing run under the latest checks. No agent runs, so no confirmation. */
+/** What answering again would cost: one more try per answer, into the runs they came from. */
+export const estimateAgainFn = createServerFn({ method: "POST" })
+  .validator((d: AgainRequest) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const p = await planAgain(principal, data);
+    if (!p.ok) return p;
+    return {
+      ok: true as const,
+      estimate: p.estimate,
+      skipped: p.targets.filter((t) => !t.ok).map((t) => ({ version: t.version, error: t.error })),
+      confirmTwiceAbove: CONFIRM_TWICE_ABOVE,
+    };
+  });
+
+export const startAgainFn = createServerFn({ method: "POST" })
+  .validator((d: AgainRequest & { confirmedCost: number | null }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return startAgain(principal, data, data.confirmedCost);
+  });
+
 export const startJudgeFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; datasetId: string; rubricId: string; runId: string }) => d)
+  .validator((d: { agent: string; datasetId: string; rubricId: string; runId: string; threadIds?: string[] }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
@@ -325,9 +349,12 @@ export const listJobsFn = createServerFn({ method: "GET" })
       failed: j.failed,
       versions: j.versions.map((v) => v.label),
       questions: j.inputIds.length,
+      inputIds: j.inputIds,
       repeats: j.repeats,
       cost: j.estimate.cost,
       compareWith: j.compareWith ?? null,
+      /** Answering again into an existing run, rather than a run of its own. */
+      again: !!j.tryOf,
       error: j.error ?? null,
       createdAt: j.createdAt,
       updatedAt: j.updatedAt,

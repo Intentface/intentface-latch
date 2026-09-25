@@ -37,6 +37,13 @@ export interface EvalJob {
   versions: (Version & { fingerprint: string })[];
   inputIds: string[];
   repeats: number;
+  /**
+   * Answering again, into an existing run: the one try each input gets —
+   * one past the tries it already has. The run's other answers are untouched.
+   */
+  tryOf?: Record<string, number>;
+  /** A `judge` job limited to these threads; all of the run's when absent. */
+  threadIds?: string[];
   status: JobStatus;
   /** Units planned / produced (including failed) — for `judge` jobs, threads to judge. */
   total: number;
@@ -96,9 +103,12 @@ export function estimateRun(opts: {
 
 export type Unit = { v: EvalJob["versions"][number]; input: Input; attempt: number };
 
-export function unitsOf(job: Pick<EvalJob, "versions" | "inputIds" | "repeats">, inputs: Input[]): Unit[] {
+export function unitsOf(job: Pick<EvalJob, "versions" | "inputIds" | "repeats" | "tryOf">, inputs: Input[]): Unit[] {
   const byId = new Map(inputs.map((i) => [i.id, i]));
   const picked = job.inputIds.map((id) => byId.get(id)).filter((i): i is Input => !!i);
+  // Answering again: exactly one new try per input, numbered after its others.
+  const tryOf = job.tryOf;
+  if (tryOf) return picked.flatMap((input) => job.versions.map((v) => ({ v, input, attempt: tryOf[input.id] ?? 0 })));
   // Question-major, versions interleaved: the versions answer each question
   // side by side, at the same moment, under the same conditions — which is
   // the whole point of running them together. Version-major would run all of
@@ -169,7 +179,8 @@ export async function advanceJob(job: EvalJob, deps: JobDeps, opts: { deadline: 
         return current;
       }
       const [inputs, dataset] = await Promise.all([deps.loadInputs(), deps.loadDataset()]);
-      const threads = (await deps.threadsOf(current.runId)).filter((t) => !t.error);
+      const only = current.threadIds ? new Set(current.threadIds) : null;
+      const threads = (await deps.threadsOf(current.runId)).filter((t) => !t.error && (!only || only.has(t.threadId)));
       const judged = new Set((await deps.verdictsOf(threads.map((t) => t.threadId), rubric.version)).map((v) => v.threadId));
       const todo = threads.filter((t) => !judged.has(t.threadId));
       if (current.kind === "judge" && current.total !== threads.length) await stillWanted({ total: threads.length, done: judged.size });

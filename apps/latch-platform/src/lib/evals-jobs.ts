@@ -170,14 +170,111 @@ export async function startPlannedRun(principal: Principal, d: RunRequest, confi
   return { ok: true as const, id, estimate: p.estimate };
 }
 
+export type AgainRequest = {
+  agent: string;
+  datasetId: string;
+  rubricId: string;
+  /** Existing results to add a try to: a run, one of its versions, the inputs to answer again. */
+  targets: { runId: string; version: string; inputIds: string[] }[];
+};
+
+/**
+ * Plan answering again: one more try per input, into the run the answers
+ * already live in, so the new try sits beside the old in the same column.
+ * Refused for a version that has changed since — those answers would be a
+ * different configuration, which belongs in a column of its own.
+ */
+export async function planAgain(principal: Principal, d: AgainRequest) {
+  const { evals, agentStore } = await getLatch();
+  const rec = await agentStore.getRecord(principal, normalizeAgentName(d.agent));
+  if (!rec) return { ok: false as const, error: "Only agents you can edit can be run." };
+  const owner = agentOwnerKey(principal, rec.scope);
+  const rubric = await evals.getRubric(owner, d.rubricId);
+  if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
+  const inputs = new Set((await evals.listInputs(d.datasetId)).map((i) => i.id));
+  const targets = [];
+  for (const t of d.targets) {
+    const inputIds = [...new Set(t.inputIds)].filter((id) => inputs.has(id));
+    if (!inputIds.length) continue;
+    const threads = (await evals.listThreads(owner, { datasetId: d.datasetId, runId: t.runId })).filter((x) => x.version === t.version);
+    let version;
+    try {
+      [version] = await resolveVersions(agentStore, principal, rec.name, [t.version]);
+    } catch (e) {
+      targets.push({ ...t, inputIds, ok: false as const, error: e instanceof Error ? e.message : String(e) });
+      continue;
+    }
+    const then = threads.find((x) => x.configFingerprint)?.configFingerprint;
+    if (then && then !== version.fingerprint) {
+      targets.push({ ...t, inputIds, ok: false as const, error: `${t.version} has changed since these answers. Run it as a new column instead.` });
+      continue;
+    }
+    const tryOf = Object.fromEntries(inputIds.map((id) => [id, Math.max(-1, ...threads.filter((x) => x.inputId === id).map((x) => x.attempt ?? 0)) + 1]));
+    targets.push({ ...t, inputIds, ok: true as const, version, tryOf });
+  }
+  const units = targets.reduce((a, t) => a + (t.ok ? t.inputIds.length : 0), 0);
+  if (!targets.length) return { ok: false as const, error: "Pick at least one answer." };
+  if (units > MAX_UNITS) return { ok: false as const, error: `That is ${units} threads; one run is capped at ${MAX_UNITS}.` };
+  const past = await evals.listThreads(owner, { datasetId: d.datasetId });
+  const costs = await evals.threadCosts(past.filter((t) => !t.error).map((t) => t.threadId));
+  const estimate = estimateRun({
+    units,
+    askedChecks: rubric.checks.filter((c) => c.kind === "asked").length,
+    history: [...costs.values()].filter((c) => c > 0),
+  });
+  return { ok: true as const, owner, name: rec.name, targets, estimate };
+}
+
+/** Start answering again: a job per result, each adding its tries to its own run. */
+export async function startAgain(principal: Principal, d: AgainRequest, confirmedCost: number | null) {
+  const p = await planAgain(principal, d);
+  if (!p.ok) return p;
+  const cost = p.estimate.cost;
+  if (cost !== null && (confirmedCost === null || cost > confirmedCost * 1.05 + 0.01))
+    return { ok: false as const, error: `The estimate changed to about $${cost.toFixed(2)}. Check it and start again.` };
+  const { evals } = await getLatch();
+  const ids: string[] = [];
+  for (const t of p.targets) {
+    if (!t.ok) continue;
+    const now = Date.now();
+    const id = `again_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    await evals.saveJob({
+      owner: p.owner,
+      id,
+      runId: t.runId,
+      kind: "run",
+      agentName: p.name,
+      datasetId: d.datasetId,
+      rubricId: d.rubricId,
+      principal: { orgId: principal.orgId, ...(principal.userId ? { userId: principal.userId } : {}) },
+      versions: [t.version],
+      inputIds: t.inputIds,
+      repeats: 1,
+      tryOf: t.tryOf,
+      status: "running",
+      total: t.inputIds.length,
+      done: 0,
+      failed: 0,
+      estimate: { ...p.estimate, agentRuns: t.inputIds.length },
+      createdAt: now,
+      updatedAt: now,
+      leaseUntil: 0,
+    });
+    await kickJob(p.owner, id);
+    ids.push(id);
+  }
+  return { ok: true as const, ids, skipped: p.targets.filter((t) => !t.ok).map((t) => ({ version: t.version, error: t.error })) };
+}
+
 /** Re-score an existing run under the latest checks. Only the judge runs, never the agent. */
-export async function startJudgeJob(principal: Principal, data: { agent: string; datasetId: string; rubricId: string; runId: string }) {
+export async function startJudgeJob(principal: Principal, data: { agent: string; datasetId: string; rubricId: string; runId: string; threadIds?: string[] }) {
   const { agentStore } = await getLatch();
   const rec = await agentStore.getRecord(principal, normalizeAgentName(data.agent));
   const o = rec ? { owner: agentOwnerKey(principal, rec.scope), name: rec.name } : null;
   if (!o) return { ok: false as const, error: "Only agents you can edit can be judged." };
   const { evals } = await getLatch();
-  const threads = await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId });
+  const only = data.threadIds?.length ? new Set(data.threadIds) : null;
+  const threads = (await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId })).filter((t) => !only || only.has(t.threadId));
   if (!threads.length) return { ok: false as const, error: "That run has no threads." };
   const now = Date.now();
   const id = `judge_${now.toString(36)}`;
@@ -194,6 +291,7 @@ export async function startJudgeJob(principal: Principal, data: { agent: string;
     versions: [],
     inputIds: [],
     repeats: 1,
+    ...(only ? { threadIds: [...only] } : {}),
     status: "running",
     total: ok,
     done: 0,

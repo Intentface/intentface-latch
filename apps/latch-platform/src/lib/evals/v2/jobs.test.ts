@@ -151,6 +151,32 @@ describe("jobs", () => {
     expect(agentCalls).toBe(calls);
   });
 
+  it("answering again adds one try per input to the same run, and leaves the others alone", async () => {
+    await store.saveJob(job({ repeats: 1, total: 3 }));
+    await advanceJob(job({ repeats: 1, total: 3 }), deps(), { deadline: Date.now() + 60_000, concurrency: 1 });
+    expect(agentCalls).toBe(3);
+    const again = job({ id: "again_a", runId: "run_a", inputIds: ["2"], repeats: 1, tryOf: { "2": 1 }, total: 1 });
+    await store.saveJob(again);
+    const end = await advanceJob(again, deps("again_a"), { deadline: Date.now() + 60_000, concurrency: 1 });
+    expect(end.status).toBe("done");
+    expect(agentCalls).toBe(4);
+    const threads = await store.listThreads(owner, { runId: "run_a" });
+    expect(threads.map((t) => `${t.inputId}.${t.attempt}`).sort()).toEqual(["1.0", "2.0", "2.1", "3.0"]);
+    // Resuming it runs nothing more: the new try is already there.
+    await advanceJob((await store.getJob(owner, "again_a"))!, deps("again_a"), { deadline: Date.now() + 60_000 });
+    expect(agentCalls).toBe(4);
+  });
+
+  it("a judge job can be limited to some threads", async () => {
+    await store.saveJob(job({ repeats: 1, total: 3 }));
+    await advanceJob(job({ repeats: 1, total: 3 }), deps(), { deadline: Date.now() + 60_000, concurrency: 1 });
+    const one = (await store.listThreads(owner, { runId: "run_a" }))[0].threadId;
+    const j = job({ id: "judge_b", runId: "run_a", kind: "judge", total: 0, threadIds: [one] });
+    await store.saveJob(j);
+    const end = await advanceJob(j, { ...deps("judge_b"), loadRubric: () => Promise.resolve({ ...rubric, version: 3 }) }, { deadline: Date.now() + 60_000 });
+    expect(end).toMatchObject({ status: "done", total: 1, done: 1 });
+  });
+
   it("only one holder gets the lease", async () => {
     await store.saveJob(job());
     const now = Date.now();
