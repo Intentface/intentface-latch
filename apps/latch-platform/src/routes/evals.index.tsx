@@ -105,7 +105,8 @@ function EvalsPage() {
   const jobs = useJobs(agent, dataset?.id, (finished) => {
     reloadOverview()
     // A finished run opens beside what it was compared with, or on its own.
-    if (finished.kind === "run")
+    // Answering again added tries to columns already open: just show them.
+    if (finished.kind === "run" && !finished.again)
       set({
         cols: encodeResults([
           ...(finished.compareWith ?? []),
