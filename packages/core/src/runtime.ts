@@ -2820,7 +2820,21 @@ export function createRuntime<P, RC = unknown>(
       // would abort the rest of `sweep`'s loop. No `onRunFinished`: its meta
       // carries the principal, and there is none to report.
       const error = "principal rejected: reconstructPrincipal refused the run's identity";
-      await storage.updateRun(run.id, { status: "errored", error, endedAt: Date.now() }, lease);
+      await storage.updateRun(
+        run.id,
+        {
+          status: "errored",
+          error,
+          endedAt: Date.now(),
+          // Terminal, so give up the reclaim just taken. `reclaimRun` matches
+          // any non-completed row whose lease has lapsed, so a lease left to
+          // expire would let a direct `resume()` re-claim and re-refuse it,
+          // spending an attempt each time.
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        },
+        lease,
+      );
       console.warn(`[resume] run ${run.id} (${run.agent}): ${error}`);
       const settled = await storage.getRun(runId);
       return {
@@ -3738,11 +3752,23 @@ export function createRuntime<P, RC = unknown>(
       // survives and `sweep()` resumes it. For work that is billed per
       // attempt, "ran twice" is strictly worse than "ran once, resumed".
       try {
-        await storage.completeSchedule(
+        const applied = await storage.completeSchedule(
           s.id,
           { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null && !refused },
           dur.instanceId,
         );
+        if (applied === false) {
+          // The fence rejected us: our claim lapsed (the lease is never
+          // renewed, and the hook above runs inside it) and another node now
+          // holds this occurrence. It fires it and accounts for it; firing
+          // here too would be the duplicate paid turn consuming-first exists
+          // to prevent.
+          console.warn(
+            `[schedule] ${s.id} (${s.agent}): claim lost before the occurrence was consumed; ` +
+              `another node owns this fire`,
+          );
+          continue;
+        }
       } catch (e) {
         // Cannot consume the occurrence → do NOT fire. Firing anyway would
         // leave the row due, and every subsequent tick would fire it again —

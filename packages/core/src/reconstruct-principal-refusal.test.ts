@@ -210,6 +210,10 @@ describe("resumeRun / sweep: a refused principal", () => {
           status: "errored",
           error: expect.stringContaining("principal rejected"),
           endedAt: expect.any(Number),
+          // Terminal: the reclaim's lease is released, so the row can't be
+          // reclaimed (and re-refused) once it would have lapsed.
+          leaseOwner: null,
+          leaseExpiresAt: null,
         },
         // Fenced like every terminal write: a newer owner of the lease decides.
         guard: { owner: "node_a", fencingToken: 3 },

@@ -430,12 +430,18 @@ export interface StorageAdapter<P> {
    * enabled), so the occurrence cannot be claimed twice. Fenced by `owner`:
    * only the node holding the claim lease may apply it, so a node whose lease
    * expired can't clobber a newer claim.
+   *
+   * Return `false` when the fence rejected the write (another node now holds
+   * the claim): the runtime then does NOT fire, since the new holder owns the
+   * occurrence and firing too would be a duplicate paid turn. `true` or
+   * `void` means applied — `void` keeps adapters written before this signal
+   * existed working, at the cost of that protection.
    */
   completeSchedule(
     id: string,
     patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
     owner: string,
-  ): Promise<void>;
+  ): Promise<boolean | void>;
   /**
    * OPTIONAL system op (no principal): remember which chat a fire ran in, so
    * the next occurrence can check `onParked` against it. Best-effort, and

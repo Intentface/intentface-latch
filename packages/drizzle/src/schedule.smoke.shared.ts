@@ -117,13 +117,27 @@ export async function scheduleSmoke<P>({
     "an expired claim lease alone does NOT protect an occurrence (contract, not a bug)",
   );
 
+  // The node that lost the claim is told so: its fenced consume no-ops and
+  // reports false, which is what stops the runtime firing a duplicate.
+  assert(
+    (await store.completeSchedule(
+      created.id,
+      { nextRunAt: t1 + 24 * 60 * 60 * 1000, lastRunAt: t1, enabled: true },
+      "node-1",
+    )) === false,
+    "completeSchedule reports false when another node holds the claim",
+  );
+
   // Second, the protection: once the occurrence is CONSUMED (nextRunAt
   // advanced past now), no claimer can take it again — lease state is
   // irrelevant. This is the write the runtime issues between claim and fire.
-  await store.completeSchedule(
-    created.id,
-    { nextRunAt: t1 + 24 * 60 * 60 * 1000, lastRunAt: t1, enabled: true },
-    "node-2",
+  assert(
+    (await store.completeSchedule(
+      created.id,
+      { nextRunAt: t1 + 24 * 60 * 60 * 1000, lastRunAt: t1, enabled: true },
+      "node-2",
+    )) === true,
+    "completeSchedule reports true for the claim holder",
   );
   assert(
     !(await store.claimDueSchedules(t1 + 60_000, 30_000, "node-3")).some(

@@ -660,7 +660,7 @@ export function makeStorageAdapter<P>(
     },
 
     async completeSchedule(id, patch, owner) {
-      await db
+      const applied = await db
         .update(s.schedules)
         .set({
           nextRunAt: patch.nextRunAt,
@@ -673,7 +673,11 @@ export function makeStorageAdapter<P>(
         // node re-claimed the schedule, this no-ops instead of clobbering it.
         .where(
           and(eq(s.schedules.id, id), eq(s.schedules.leaseOwner, owner)),
-        );
+        )
+        .returning({ id: s.schedules.id });
+      // Reported, not swallowed: a no-op here means another node holds the
+      // occurrence, and the runtime must not fire it too.
+      return applied.length > 0;
     },
 
     async noteScheduleFire(id, patch) {

@@ -143,6 +143,30 @@ describe("runDue consumes the occurrence before firing", () => {
     expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
   });
 
+  it("does NOT fire when the fence rejects the consume (another node holds the claim)", async () => {
+    // The claim lease is never renewed: if it lapsed before the consume (a slow
+    // `reconstructPrincipal` runs inside it), another node re-claimed and owns
+    // the occurrence. The fenced write no-ops and reports false; firing anyway
+    // would be the duplicate paid turn. The owner accounts for it, not us.
+    let firedHook = false;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => false,
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        firedHook = true;
+        return true;
+      },
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(firedHook).toBe(false);
+    expect(res).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 });
+  });
+
   it("stamps the fire's chat via noteScheduleFire so the next occurrence can see it", async () => {
     // The default path errors later (agent "digest" isn't registered), but the
     // stamp happens between createChat and the turn — assert it regardless.

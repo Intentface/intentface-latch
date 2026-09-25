@@ -1,5 +1,6 @@
 ---
 "@intentface/latch-core": minor
+"@intentface/latch-drizzle": minor
 ---
 
 `reconstructPrincipal` can now refuse a stored identity by returning `null`, and
@@ -22,7 +23,15 @@ a throw on resume aborted the rest of `sweep`'s loop.
   `errors`, the occurrence consumed, the schedule left live.
 
 The hook now runs before the occurrence is consumed, inside the schedule's
-claim lease, so keep it well under `durability.leaseTtlMs`.
+claim lease, so keep it well under `durability.leaseTtlMs`. If the lease does
+lapse, the fire is now skipped rather than duplicated: `completeSchedule` may
+return `false` when its fence rejected the write (another node holds the
+claim), and `runDue` then leaves the occurrence to that node. The drizzle
+adapter reports it; adapters returning `void` are treated as applied, as
+before. This also closes the older, narrower window between claim and consume.
+
+A refused resume also releases the run's lease, so the errored row cannot be
+re-claimed by a later `resume()`.
 
 Upgrading: existing hooks keep working unchanged. Tests that deep-equal
 `runDue`'s result need `rejected: 0`.
