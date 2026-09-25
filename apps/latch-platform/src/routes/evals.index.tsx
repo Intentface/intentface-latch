@@ -14,6 +14,7 @@ import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { AddColumn, AgainPanel } from "@/components/evals/run-menus"
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
 import { askEvalsAgent } from "@/components/evals/agent-panel"
+import { eachOf, saysItems } from "@/lib/evals/v2/expect"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { RunDrawer } from "@/components/evals/run-drawer"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -259,19 +260,25 @@ const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
  * to every input the same way.
  */
 function expectationChecks(grid: EvalGrid) {
-  const out: { checkId: string; reads: "answer" | "docs" }[] = []
-  for (const c of grid.checks) {
-    if (c.sentence.includes("the document the question names")) out.push({ checkId: c.id, reads: "docs" })
-    else if (c.kind === "asked" && /REFERENCE_ANSWER|reference answer|good answer/i.test(c.sentence)) out.push({ checkId: c.id, reads: "answer" })
-  }
-  return out
+  return grid.checks.filter((c) => c.reads).map((c) => ({ checkId: c.id, reads: c.reads! }))
 }
-const expectationCount = (i: EvalGrid["inputs"][number]) => (i.answer ? 1 : 0) + (i.docs.length ? 1 : 0) + i.mustNot.length
+/** An input's lists, as the grader numbers them. */
+const listsOf = (i: EvalGrid["inputs"][number]) => ({ mustSay: i.mustSay, mustNot: i.mustNot, decline: i.decline, asks: i.asks })
+/** How many things an input says should happen — each item of its lists counts. */
+const expectationCount = (i: EvalGrid["inputs"][number]) =>
+  (i.answer ? 1 : 0) + (i.docs.length ? 1 : 0) + i.calls.length + saysItems(listsOf(i)).length
 function failedExpectations(grid: EvalGrid, exp: ReturnType<typeof expectationChecks>, inputId: string, column: string) {
   const input = grid.inputs.find((i) => i.id === inputId)
   if (!input) return 0
-  const mine = exp.filter((e) => (e.reads === "answer" ? !!input.answer : input.docs.length > 0))
-  return mine.filter((e) => grid.verdicts.some((v) => v.inputId === inputId && v.version === column && v.checkId === e.checkId && (v.ruling ?? v.failed))).length
+  let failed = 0
+  for (const e of exp) {
+    const v = grid.verdicts.find((x) => x.inputId === inputId && x.version === column && x.checkId === e.checkId)
+    if (!v) continue
+    const each = eachOf(v.answer)
+    // A check over a list counts each item that didn't hold; the others count once.
+    failed += each ? each.filter((ok) => !ok).length : (v.ruling ?? v.failed) ? 1 : 0
+  }
+  return failed
 }
 
 // ─── Numbers ──────────────────────────────────────────────────────────────
@@ -950,7 +957,9 @@ function NothingRun({ agent, datasetId, onRun, onChanged }: { agent: string; dat
   const [open, setOpen] = useState<string | null>(null)
   const load = useCallback(() => {
     void getQuestionsFn({ data: { agent, datasetId } }).then((r) =>
-      setInputs(r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, docs: q.docs, mustNot: q.mustNot })) ?? []),
+      setInputs(
+        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, docs: q.docs, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls })) ?? [],
+      ),
     )
   }, [agent, datasetId])
   useEffect(load, [load])
@@ -1020,6 +1029,16 @@ function InputResults({ grid, inputId, onOpen }: { grid: EvalGrid; inputId: stri
 }
 
 // ─── One answer ──────────────────────────────────────────────────────────
+
+/** An expected call in words: "calls read_file · file contains a.md", "never calls send_email". */
+const callText = (c: EvalGrid["inputs"][number]["calls"][number]) => {
+  const tool = c.tool.slice(c.tool.indexOf("_") + 1)
+  if (c.never) return `never calls ${tool}`
+  const m = (c.match ?? []).map((x) => (x.op === "any" ? `${x.path} set` : `${x.path === "result" ? "the result" : x.path} ${x.op.replace("_", " ")} ${x.value ?? ""}`)).join(", ")
+  return `calls ${tool}${m ? ` · ${m}` : ""}`
+}
+const sayText = (x: ReturnType<typeof saysItems>[number]) =>
+  x.kind === "mustSay" ? `says: ${x.text}` : x.kind === "mustNot" ? `doesn't say: ${x.text}` : x.kind === "decline" ? "declines" : x.text
 
 /** A verdict's answer, in words; the raw value when there is no better one. */
 const WHY: Record<string, string> = {
@@ -1132,6 +1151,8 @@ function AnswerDrawer({
                       {verdicts.map((v) => {
                         const c = checkOf(v.checkId)
                         const why = WHY[v.answer] ?? ""
+                        const each = eachOf(v.answer)
+                        const items = c?.reads === "calls" ? input.calls.map(callText) : c?.reads === "says" ? saysItems(listsOf(input)).map((x) => sayText(x)) : []
                         const overruled = v.ruling !== null && v.ruling !== v.failed
                         const shownFailed = v.ruling ?? v.failed
                         return (
@@ -1140,6 +1161,16 @@ function AnswerDrawer({
                             <span>
                               <span className="text-ink-primary">{c?.label ?? v.checkId}</span>
                               {why && <span className="text-ink-tertiary block text-xs">{why}</span>}
+                              {each && (
+                                <span className="mt-1 block space-y-0.5">
+                                  {each.map((ok, n) => (
+                                    <span key={n} className="flex gap-1.5 text-xs">
+                                      <span className={ok ? "text-[color:var(--eval-good-ink)]" : "text-[color:var(--eval-bad-ink)]"}>{ok ? "✓" : "✕"}</span>
+                                      <span className="text-ink-secondary">{items[n] ?? `Item ${n + 1}`}</span>
+                                    </span>
+                                  ))}
+                                </span>
+                              )}
                               {overruled && <span className="text-ink-tertiary block text-xs">You said the grader got this wrong</span>}
                             </span>
                             {c?.kind === "counted" ? (

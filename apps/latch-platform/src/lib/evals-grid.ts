@@ -26,6 +26,16 @@ const sentence = (c: Rubric["checks"][number]) =>
     ? c.ask
     : describeCounted(c).replace(/"?\{\{facts\.(\w+)\}\}"?/g, (_, k: string) => (k === "docs" ? "the document the question names" : `the question's ${k}`));
 
+/** A check that reads what each input says for itself — its good answer, its document, its lists. */
+function readsOf(c: Rubric["checks"][number]): "answer" | "docs" | "calls" | "says" | null {
+  if (c.kind === "counted") {
+    if (c.spec.op === "expected_calls") return "calls";
+    return JSON.stringify(c.spec).includes("{{facts.docs}}") ? "docs" : null;
+  }
+  if (c.fromInput === "says") return "says";
+  return /REFERENCE_ANSWER/.test(c.ask) ? "answer" : null;
+}
+
 export async function computeGrid(
   principal: Principal,
   data: { agent: string; datasetId: string; rubricId: string; runId?: string; columns?: ResultRef[] },
@@ -116,6 +126,8 @@ export async function computeGrid(
           label: c.label,
           kind: c.kind,
           sentence: sentence(c),
+          /** Which of an input's own expectations this check reads, if any. */
+          reads: readsOf(c),
           judge: c.kind === "counted" ? "counted" : (c.judge ?? rubric.defaultJudge),
           cells: summaries.map((s) => s.checks.find((k) => k.checkId === c.id)!),
           /** Baseline vs the second column — what the summary sentence reads. */
@@ -134,6 +146,10 @@ export async function computeGrid(
         answer: typeof i.facts?.answer === "string" ? i.facts.answer : null,
         docs: Array.isArray(i.facts?.docs) ? (i.facts.docs as unknown[]).map(String) : [],
         mustNot: Array.isArray(i.facts?.mustNot) ? i.facts.mustNot.map(String) : [],
+        mustSay: Array.isArray(i.facts?.mustSay) ? i.facts.mustSay.map(String) : [],
+        asks: Array.isArray(i.facts?.asks) ? i.facts.asks.map(String) : [],
+        decline: i.facts?.decline === true,
+        calls: Array.isArray(i.facts?.calls) ? i.facts.calls : [],
       })),
       /** Every answer shown, so a cell knows its tries and whether one broke. */
       threads: threads.map((t) => ({ threadId: t.threadId, column: t.version, inputId: t.inputId ?? "", attempt: t.attempt ?? 0, error: t.error ?? null })),

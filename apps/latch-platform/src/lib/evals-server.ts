@@ -205,6 +205,51 @@ export const editInputsFn = createServerFn({ method: "POST" })
     return editQuestions(principal, { ...data, questionSetId: data.datasetId });
   });
 
+/**
+ * The agent's tools, each with the arguments seen in its past answers to
+ * this set and the values it passed — what an input's "calls a tool" picks
+ * from. Read from real calls rather than declared schemas, so it names what
+ * the agent actually sends; tools it has never called are listed bare.
+ */
+export const getToolArgsFn = createServerFn({ method: "GET" })
+  .validator((d: { agent: string; datasetId: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return null;
+    const { evals, agentStore, runtime } = await getLatch();
+    const rec = await agentStore.getRecord(principal, o.name);
+    const threads = (await evals.listThreads(o.owner, { datasetId: data.datasetId })).filter((t) => !t.error).slice(0, 30);
+    const seen = new Map<string, Map<string, { type: string; values: Map<string, number> }>>();
+    for (const t of threads) {
+      const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal }));
+      for (const c of view.calls) {
+        const args = seen.get(c.tool) ?? seen.set(c.tool, new Map()).get(c.tool)!;
+        if (!c.args || typeof c.args !== "object") continue;
+        for (const [k, v] of Object.entries(c.args as Record<string, unknown>)) {
+          if (k === "reason") continue;
+          const a = args.get(k) ?? args.set(k, { type: Array.isArray(v) ? "list" : typeof v === "number" ? "number" : typeof v === "boolean" ? "boolean" : "text", values: new Map() }).get(k)!;
+          for (const item of Array.isArray(v) ? v : [v]) {
+            const text = typeof item === "string" || typeof item === "number" || typeof item === "boolean" ? String(item) : null;
+            if (text && text.length < 80) a.values.set(text, (a.values.get(text) ?? 0) + 1);
+          }
+        }
+      }
+    }
+    const enabled = (rec?.tools as { enabled?: string[] } | undefined)?.enabled ?? [];
+    const names = [...new Set([...seen.keys(), ...enabled])].sort();
+    return names.map((name) => ({
+      name,
+      called: seen.has(name),
+      args: [...(seen.get(name) ?? new Map()).entries()].map(([arg, a]) => ({
+        name: arg,
+        type: a.type,
+        seen: [...a.values.entries()].sort((x, y) => y[1] - x[1]).slice(0, 8).map(([v]) => v),
+      })),
+    }));
+  });
+
 /** The latest version of a set of checks, plus the judges a check may name. */
 export const getChecksFn = createServerFn({ method: "GET" })
   .validator((d: { agent: string; rubricId: string }) => d)

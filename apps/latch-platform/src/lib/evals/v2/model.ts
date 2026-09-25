@@ -25,7 +25,32 @@ export interface InputFacts {
   answer?: string;
   /** Things the response must not do or say, in plain English. Judge-only. */
   mustNot?: string[];
+  /** Things the response must say, in plain English. Judge-only. */
+  mustSay?: string[];
+  /** The right answer is a polite refusal. */
+  decline?: boolean;
+  /** Yes/no questions for the grader about this input's answer — "is the tone friendly?". */
+  asks?: string[];
+  /** Tools this input should (or should never) call, read exactly from the log. */
+  calls?: CallExpectation[];
   [key: string]: unknown;
+}
+
+/**
+ * One tool call an input expects. `never` inverts it. Every match must hold
+ * on the same call: the tool, and each argument or the result.
+ */
+export interface CallExpectation {
+  tool: string;
+  never?: boolean;
+  match?: CallMatch[];
+}
+
+/** `path` is an argument name, a dot path into the args, or `result`. */
+export interface CallMatch {
+  path: string;
+  op: "contains" | "equals" | "not_contains" | "any";
+  value?: string;
 }
 
 export interface Input {
@@ -100,6 +125,12 @@ export interface AskedCheck {
   judge?: string;
   /** Why this check exists — a promise, a tool, an observed failure. */
   because?: string;
+  /**
+   * `says`: the question comes from each input — its must say, must not say,
+   * should decline and grader questions, each asked as a yes/no. `ask` is
+   * only the description then. Skipped for inputs that list none.
+   */
+  fromInput?: "says";
 }
 
 /** How a value in a tool call is compared. */
@@ -133,7 +164,9 @@ export type CountedSpec =
   /** `tool` was called at some point before the final response. */
   | { op: "before_answering"; tool: string }
   /** `tool` hit its approval gate — a fact only the runtime has. */
-  | { op: "stopped_for_approval"; tool: string };
+  | { op: "stopped_for_approval"; tool: string }
+  /** The tool calls each input lists under `facts.calls` — skipped for inputs that list none. */
+  | { op: "expected_calls" };
 
 /** A fact read from the log by code. Free, exact, cannot be wrong. */
 export interface CountedCheck {

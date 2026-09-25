@@ -1,4 +1,4 @@
-import type { CountedCheck, CountedSpec, Matcher } from "./model";
+import type { CallExpectation, CountedCheck, CountedSpec, Matcher } from "./model";
 import type { ThreadView, ToolCall } from "./thread";
 
 /**
@@ -65,9 +65,31 @@ export interface CountedResult {
   passed: boolean;
   /** One line a person can read: what was checked and what was found. */
   detail: string;
+  /** Per item, for a check over a list the input supplies — which held. */
+  each?: boolean[];
+}
+
+/**
+ * One expected call: some call to the tool satisfies every match (or, for
+ * `never`, no call to it happens). A bare path reads the arguments.
+ */
+export function callHolds(e: CallExpectation, v: ThreadView): boolean {
+  const hits = callsOf(v, e.tool);
+  if (e.never) return hits.length === 0;
+  return hits.some((c) =>
+    (e.match ?? []).every((m) => {
+      const value = readPath(c, m.path);
+      if (m.op === "any") return value !== undefined;
+      if (m.op === "equals") return matches(value, { equals: m.value ?? "" });
+      const has = matches(value, { contains: m.value ?? "" });
+      return m.op === "contains" ? has : !has;
+    }),
+  );
 }
 
 export function evaluateCounted(spec: CountedSpec, v: ThreadView): CountedResult {
+  // Only meaningful with an input's facts — see evaluateBound.
+  if (spec.op === "expected_calls") return { passed: true, detail: "no calls expected" };
   const hits = callsOf(v, spec.tool);
   switch (spec.op) {
     case "called":
@@ -149,6 +171,13 @@ export function bindFacts(spec: CountedSpec, facts: Record<string, unknown> | un
 
 /** Evaluate a spec that may reference input facts. `null` = not applicable. */
 export function evaluateBound(spec: CountedSpec, v: ThreadView, facts?: Record<string, unknown>): CountedResult | null {
+  if (spec.op === "expected_calls") {
+    const list = Array.isArray(facts?.calls) ? (facts.calls as CallExpectation[]) : [];
+    if (!list.length) return null;
+    const each = list.map((e) => callHolds(e, v));
+    const held = each.filter(Boolean).length;
+    return { passed: held === each.length, detail: `${held} of ${each.length} expected calls`, each };
+  }
   const specs = bindFacts(spec, facts);
   if (!specs) return null;
   const results = specs.map((s) => evaluateCounted(s, v));
@@ -174,5 +203,6 @@ export function describeCounted(c: CountedCheck): string {
     case "before": return `${s.tool} was called before ${s.then}`;
     case "before_answering": return `${s.tool} was called before answering`;
     case "stopped_for_approval": return `every call to ${s.tool} went through approval`;
+    case "expected_calls": return "the tool calls each input lists were made";
   }
 }

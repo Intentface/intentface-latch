@@ -7,7 +7,8 @@
 import type { Principal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
-import type { Check } from "./evals/v2/model";
+import type { Check, Input, Rubric } from "./evals/v2/model";
+import { saysItems } from "./evals/v2/expect";
 import { checkIdFor, fromEditable, nextInputId, toEditable, validateChecks } from "./evals/v2/validate";
 import type { EditableQuestion } from "./evals/v2/validate";
 
@@ -101,11 +102,27 @@ export async function editQuestions(
         ...(u.answer !== undefined ? { answer: u.answer } : {}),
         ...(u.mustNot ? { mustNot: u.mustNot } : {}),
         ...(u.docs ? { docs: u.docs } : {}),
+        ...(u.mustSay ? { mustSay: u.mustSay } : {}),
+        ...(u.asks ? { asks: u.asks } : {}),
+        ...(u.decline !== undefined ? { decline: u.decline } : {}),
+        ...(u.calls ? { calls: u.calls } : {}),
         ...(u.extra !== undefined ? { extra: u.extra } : {}),
       };
     } else {
       const id = u.id && !list.some((q) => q.id === u.id) ? u.id : nextInputId(list);
-      list.push({ id, prompt: u.prompt, followUps: u.followUps ?? [], answer: u.answer ?? "", mustNot: u.mustNot ?? [], docs: u.docs ?? [], extra: u.extra ?? "{}" });
+      list.push({
+        id,
+        prompt: u.prompt,
+        followUps: u.followUps ?? [],
+        answer: u.answer ?? "",
+        mustNot: u.mustNot ?? [],
+        docs: u.docs ?? [],
+        mustSay: u.mustSay ?? [],
+        asks: u.asks ?? [],
+        decline: u.decline ?? false,
+        calls: u.calls ?? [],
+        extra: u.extra ?? "{}",
+      });
       added.push(id);
     }
   }
@@ -122,7 +139,47 @@ export async function editQuestions(
       ...((d.note ?? set.note)?.trim() ? { note: (d.note ?? set.note)!.trim() } : {}),
     });
   await evals.setInputs(set.id, valid.value);
-  return { ok: true as const, questions: valid.value.length, added, deleted: [...gone] };
+  const checks = await ensureExpectationChecks(principal, { agent: d.agent, datasetId: set.id });
+  return { ok: true as const, questions: valid.value.length, added, deleted: [...gone], checksAdded: checks.added };
+}
+
+/**
+ * An input's own tool calls and says-items are read by two shared checks.
+ * The first input that needs one adds it to the agent's checks, as a new
+ * version — until then the checks have nothing to read them with.
+ */
+export async function ensureExpectationChecks(principal: Principal, d: { agent: string; datasetId: string }) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { added: [] as string[] };
+  const { evals } = await getLatch();
+  const inputs = await evals.listInputs(d.datasetId);
+  const added: string[] = [];
+  for (const r of await evals.listRubrics(o.owner, o.name)) added.push(...(await ensureOn(r, inputs)));
+  return { added };
+}
+
+async function ensureOn(r: Rubric, inputs: Input[]) {
+  const { evals } = await getLatch();
+  const wantsCalls = inputs.some((i) => (i.facts?.calls?.length ?? 0) > 0);
+  const wantsSays = inputs.some((i) => saysItems(i.facts).some((x) => x.kind !== "mustNot") || (i.facts?.mustNot?.length ?? 0) > 0);
+  const hasCalls = r.checks.some((c) => c.kind === "counted" && c.spec.op === "expected_calls");
+  const hasSays = r.checks.some((c) => c.kind === "asked" && c.fromInput === "says");
+  const add: Check[] = [];
+  const taken = r.checks.map((c) => c.id);
+  if (wantsCalls && !hasCalls)
+    add.push({ kind: "counted", id: checkIdFor("called-the-expected-tools", taken), label: "Called the expected tools", spec: { op: "expected_calls" } });
+  if (wantsSays && !hasSays)
+    add.push({
+      kind: "asked",
+      id: checkIdFor("said-what-it-should", taken),
+      label: "Said what it should",
+      ask: "What each input says the answer must say, must not say, or whether it should decline — each asked as a yes/no.",
+      shape: { type: "boolean" },
+      fromInput: "says",
+    });
+  if (!add.length) return [];
+  await evals.saveRubric({ owner: r.owner, id: r.id, agentName: r.agentName, defaultJudge: r.defaultJudge, checks: [...r.checks, ...add] });
+  return add.map((c) => c.label);
 }
 
 export async function createChecks(principal: Principal, d: { agent: string; name: string; checks?: Check[] }) {

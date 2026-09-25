@@ -2,6 +2,7 @@ import type { Experimental_EvaluationModelV4 as EvaluationModel } from "@ai-sdk/
 import type { AskedCheck, CountedCheck, Dataset, Input, Rubric, ThreadRef, Verdict, Version } from "./model";
 import { evaluateBound } from "./counted";
 import { judgeAsked, stateOf, type AskedAnswer, type JudgeUsage } from "./judge";
+import { saysItems } from "./expect";
 import { finalAnswer, viewOf } from "./thread";
 
 /**
@@ -138,6 +139,9 @@ export interface JudgeDeps {
  * Errored threads are skipped — there is nothing to judge, and scoring them
  * would average an outage into the result.
  */
+/** Joins a check's id to one of its input-listed items: `said-what-it-should#2`. */
+const ITEM = "#";
+
 export async function judgeThreads(opts: {
   rubric: Rubric;
   threads: ThreadRef[];
@@ -174,12 +178,24 @@ export async function judgeThreads(opts: {
         checkId: c.id,
         rubricVersion: opts.rubric.version,
         judgeId: "counted",
-        answer: String(r.passed),
+        answer: r.each ? JSON.stringify({ each: r.each }) : String(r.passed),
         failed: !r.passed,
         createdAt: now,
       });
     }
-    if (asked.length && finalAnswer(view)) {
+    // A check "from the input" becomes one yes/no per item the input lists,
+    // asked in the same call as the rest; its verdict passes only if all do.
+    const fromInput = asked.filter((c) => c.fromInput === "says");
+    const items = saysItems(facts);
+    const expanded: AskedCheck[] = [
+      ...asked.filter((c) => !c.fromInput),
+      ...(items.length
+        ? fromInput.flatMap((c) =>
+            items.map((it, n): AskedCheck => ({ kind: "asked", id: `${c.id}${ITEM}${n}`, label: it.text, ask: it.question, shape: { type: "boolean" }, ...(c.judge ? { judge: c.judge } : {}) })),
+          )
+        : []),
+    ];
+    if (expanded.length && finalAnswer(view)) {
       const state = stateOf({ view, ...(facts ? { facts } : {}), ...(opts.dataset ? { dataset: opts.dataset } : {}) });
       const ask = (checks: AskedCheck[], defaultJudge: string) =>
         judgeAsked({
@@ -189,7 +205,7 @@ export async function judgeThreads(opts: {
           judgeFor: opts.deps.judgeFor,
           ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
         });
-      let answers = await ask(asked, opts.rubric.defaultJudge);
+      let answers = await ask(expanded, opts.rubric.defaultJudge);
       const esc = opts.escalate;
       const unsure = esc
         ? answers.filter((a) => {
@@ -205,6 +221,26 @@ export async function judgeThreads(opts: {
         );
         const byCheck = new Map(again.map((a) => [a.checkId, { ...a, escalatedTo: esc.judge }]));
         answers = answers.map((a) => byCheck.get(a.checkId) ?? a);
+      }
+      // Fold each input-listed item back into its check's one verdict.
+      for (const c of fromInput) {
+        const mine = answers.filter((a) => a.checkId.startsWith(`${c.id}${ITEM}`));
+        if (!mine.length) continue;
+        const each = items.map((_, n) => {
+          const a = mine.find((x) => x.checkId === `${c.id}${ITEM}${n}`);
+          return a ? !a.failed : false;
+        });
+        const sure = mine.map((a) => a.confidence).filter((x): x is number => x !== undefined);
+        answers = [
+          ...answers.filter((a) => !a.checkId.startsWith(`${c.id}${ITEM}`)),
+          {
+            checkId: c.id,
+            judgeId: mine[0].judgeId,
+            answer: JSON.stringify({ each }),
+            ...(sure.length ? { confidence: Math.min(...sure) } : {}),
+            failed: each.some((ok) => !ok),
+          },
+        ];
       }
       for (const a of answers as (AskedAnswer & { escalatedTo?: string })[]) {
         vs.push({

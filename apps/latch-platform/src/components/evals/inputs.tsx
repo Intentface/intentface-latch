@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { Loader2, Plus, X } from "lucide-react"
-import { editInputsFn, getChecksFn, getQuestionsFn, saveChecksFn } from "@/lib/evals-server"
+import { editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, saveChecksFn } from "@/lib/evals-server"
 import type { EvalGrid } from "@/lib/evals-server"
-import type { Check } from "@/lib/evals/v2/model"
+import type { CallExpectation, CallMatch, Check } from "@/lib/evals/v2/model"
 import { checkIdFor } from "@/lib/evals/v2/validate"
 import Drawer from "@/components/ui/drawer"
 import { EDITOR_DRAWER } from "@/components/evals/shell"
@@ -77,7 +77,8 @@ export function InputDrawer({
   onSaved: () => void
   onOpenChecks: () => void
 }) {
-  const [draft, setDraft] = useState<{ prompt: string; followUps: string[]; answer: string; docs: string[]; mustNot: string[] } | null>(null)
+  const [draft, setDraft] = useState<Expectations | null>(null)
+  const [tools, setTools] = useState<Tools>([])
   const [state, setState] = useState<"idle" | "saving" | "saved" | string>("idle")
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const dirty = useRef(false)
@@ -86,8 +87,24 @@ export function InputDrawer({
     if (!input) return setDraft(null)
     dirty.current = false
     setState("idle")
-    setDraft({ prompt: input.prompt, followUps: input.followUps, answer: input.answer ?? "", docs: input.docs, mustNot: input.mustNot })
+    setDraft({
+      prompt: input.prompt,
+      followUps: input.followUps,
+      answer: input.answer ?? "",
+      docs: input.docs,
+      mustNot: input.mustNot,
+      mustSay: input.mustSay,
+      asks: input.asks,
+      decline: input.decline,
+      calls: input.calls,
+    })
   }, [input])
+  // Once per input opened: the tools don't change while it's open.
+  const openId = input?.id
+  useEffect(() => {
+    if (!openId) return
+    void getToolArgsFn({ data: { agent, datasetId } }).then((t) => setTools(t ?? []))
+  }, [openId, agent, datasetId])
 
   const save = async (d: NonNullable<typeof draft>) => {
     if (!input) return
@@ -97,10 +114,23 @@ export function InputDrawer({
       data: {
         agent,
         datasetId,
-        upserts: [{ id: input.id, prompt: d.prompt, followUps: d.followUps.filter((x) => x.trim()), answer: d.answer, docs: d.docs.filter((x) => x.trim()), mustNot: d.mustNot.filter((x) => x.trim()) }],
+        upserts: [
+          {
+            id: input.id,
+            prompt: d.prompt,
+            followUps: d.followUps.filter((x) => x.trim()),
+            answer: d.answer,
+            docs: d.docs.filter((x) => x.trim()),
+            mustNot: d.mustNot.filter((x) => x.trim()),
+            mustSay: d.mustSay.filter((x) => x.trim()),
+            asks: d.asks.filter((x) => x.trim()),
+            decline: d.decline,
+            calls: d.calls.filter((c) => c.tool.trim()),
+          },
+        ],
       },
     })
-    setState(r.ok ? "saved" : r.error)
+    setState(r.ok ? (r.checksAdded.length ? `Saved — added “${r.checksAdded.join("” and “")}” to the checks, so this can be graded` : "saved") : r.error)
   }
   const change = (patch: Partial<NonNullable<typeof draft>>) => {
     if (!draft) return
@@ -147,6 +177,7 @@ export function InputDrawer({
                 <ExpectationList
                   draft={draft}
                   change={change}
+                  tools={tools}
                   onDraftAnswer={() => askEvalsAgent(`For ${agent}: draft what a good answer to input ${input.id} ("${input.prompt}") says, from the documents ${agent} can read, and save it to the input with edit_questions.`)}
                 />
               </div>
@@ -174,7 +205,7 @@ export function InputDrawer({
               </div>
             </div>
             <div className="border-primary-border flex items-center gap-3 border-t px-5 py-3 text-xs">
-              <span className={cn(state !== "idle" && state !== "saving" && state !== "saved" ? "text-red-600 dark:text-red-400" : "text-ink-tertiary")}>
+              <span className={cn(state !== "idle" && state !== "saving" && !state.startsWith("Saved") && state !== "saved" ? "text-red-600 dark:text-red-400" : "text-ink-tertiary")}>
                 {state === "idle" ? "Changes save as you type" : state === "saving" ? "Saving…" : state === "saved" ? "Saved" : state}
               </span>
               <span className="flex-1" />
@@ -189,7 +220,116 @@ export function InputDrawer({
   )
 }
 
-type Expectations = { prompt: string; followUps: string[]; answer: string; docs: string[]; mustNot: string[] }
+type Expectations = {
+  prompt: string
+  followUps: string[]
+  answer: string
+  docs: string[]
+  mustNot: string[]
+  mustSay: string[]
+  asks: string[]
+  decline: boolean
+  calls: CallExpectation[]
+}
+type Tools = NonNullable<Awaited<ReturnType<typeof getToolArgsFn>>>
+const short = (t: string) => t.slice(t.indexOf("_") + 1)
+const OPS: Partial<Record<string, [CallMatch["op"], string][]>> = {
+  text: [["contains", "contains"], ["equals", "is"], ["not_contains", "doesn't contain"], ["any", "is set"]],
+  list: [["contains", "includes"], ["not_contains", "doesn't include"], ["any", "is set"]],
+  number: [["equals", "is"], ["any", "is set"]],
+  boolean: [["equals", "is"]],
+  result: [["contains", "contains"], ["not_contains", "doesn't contain"]],
+}
+const TEXT_OPS: [CallMatch["op"], string][] = [["contains", "contains"], ["equals", "is"], ["not_contains", "doesn't contain"], ["any", "is set"]]
+const opsFor = (type: string) => OPS[type] ?? TEXT_OPS
+
+/**
+ * One expected call: the tool from the agent's own list, then a match per
+ * argument — picked from the arguments it actually sent before, with the
+ * values it sent suggested — or on what came back.
+ */
+function CallEditor({ call, tools, onChange }: { call: CallExpectation; tools: Tools; onChange: (c: CallExpectation) => void }) {
+  const tool = tools.find((t) => t.name === call.tool)
+  const args = tool?.args ?? []
+  const choices = [...args.map((a) => ({ name: a.name, type: a.type, seen: a.seen })), { name: "result", type: "result", seen: [] as string[] }]
+  const box = "border-primary-border bg-primary-bg rounded-md border px-1.5 py-1 text-[13px] outline-none"
+  const match = call.match ?? []
+  const setMatch = (n: number, patch: Partial<CallMatch>) => onChange({ ...call, match: match.map((m, i) => (i === n ? { ...m, ...patch } : m)) })
+  return (
+    <div className="space-y-1.5">
+      <select
+        aria-label="Tool"
+        value={call.tool}
+        onChange={(e) => onChange({ tool: e.target.value, ...(call.never ? { never: true } : {}) })}
+        className={cn(box, "max-w-full")}
+      >
+        {!call.tool && <option value="">Pick a tool…</option>}
+        {!tools.some((t) => t.name === call.tool) && call.tool && <option value={call.tool}>{short(call.tool)}</option>}
+        {tools.map((t) => {
+          // Two servers can both have a read_file: name the server where the short names clash.
+          const clash = tools.filter((x) => short(x.name) === short(t.name)).length > 1
+          return (
+            <option key={t.name} value={t.name}>
+              {short(t.name)}
+              {clash ? ` (${t.name.slice(0, t.name.indexOf("_"))})` : ""}
+              {t.called ? "" : " · not called yet"}
+            </option>
+          )
+        })}
+      </select>
+      {!call.never &&
+        match.map((m, n) => {
+          const c = choices.find((x) => x.name === m.path) ?? { name: m.path, type: "text", seen: [] }
+          const ops = opsFor(c.type)
+          return (
+            <div key={n} className="grid grid-cols-[minmax(0,1fr)_112px_minmax(0,1.3fr)_auto] items-center gap-1.5">
+              <select aria-label="Argument" value={m.path} onChange={(e) => setMatch(n, { path: e.target.value, op: opsFor(choices.find((x) => x.name === e.target.value)?.type ?? "text")[0][0], value: "" })} className={box}>
+                {choices.map((x) => (
+                  <option key={x.name} value={x.name}>
+                    {x.name === "result" ? "the result" : x.name}
+                  </option>
+                ))}
+              </select>
+              <select aria-label="Match" value={m.op} onChange={(e) => setMatch(n, { op: e.target.value as CallMatch["op"] })} className={box}>
+                {ops.map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+              {m.op === "any" ? (
+                <span />
+              ) : (
+                <>
+                  <input aria-label="Value" list={`seen-${call.tool}-${m.path}`} value={m.value ?? ""} onChange={(e) => setMatch(n, { value: e.target.value })} className={box} placeholder="value" />
+                  <datalist id={`seen-${call.tool}-${m.path}`}>
+                    {c.seen.map((v) => (
+                      <option key={v} value={v} />
+                    ))}
+                  </datalist>
+                </>
+              )}
+              <button type="button" aria-label="Remove match" onClick={() => onChange({ ...call, match: match.filter((_, i) => i !== n) })} className="text-ink-tertiary hover:text-ink-primary">
+                <X className="size-3.5" />
+              </button>
+            </div>
+          )
+        })}
+      {!call.never && call.tool && (
+        <button
+          type="button"
+          onClick={() => {
+            const free = choices.find((x) => !match.some((m) => m.path === x.name)) ?? choices[0]
+            onChange({ ...call, match: [...match, { path: free.name, op: opsFor(free.type)[0][0], value: "" }] })
+          }}
+          className="text-ink-secondary hover:text-ink-primary text-[11px] underline underline-offset-2"
+        >
+          + {args.length ? `argument (${args.length} seen in past calls) or result` : "match on the result"}
+        </button>
+      )}
+    </div>
+  )
+}
 
 const inline =
   "text-ink-primary -mx-1.5 -my-1 w-[calc(100%+12px)] resize-none rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none hover:border-[color:var(--color-primary-border)] focus:border-[color:var(--color-ink-tertiary)] focus:bg-[color:var(--color-primary-bg-hover)]"
@@ -210,7 +350,7 @@ function Inline(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
  * What should happen, one row per expectation: its kind, its value edited in
  * place, how it's checked. + adds one; × removes it.
  */
-function ExpectationList({ draft, change, onDraftAnswer }: { draft: Expectations; change: (p: Partial<Expectations>) => void; onDraftAnswer: () => void }) {
+function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expectations; change: (p: Partial<Expectations>) => void; onDraftAnswer: () => void; tools: Tools }) {
   const [adding, setAdding] = useState(false)
   const [showAnswer, setShowAnswer] = useState(!!draft.answer)
   const focusLast = useRef<string | null>(null)
@@ -234,12 +374,24 @@ function ExpectationList({ draft, change, onDraftAnswer }: { draft: Expectations
       </button>
     </li>
   )
-  const add = (kind: "answer" | "docs" | "mustNot") => {
+  const add = (kind: "answer" | "docs" | "mustNot" | "mustSay" | "asks" | "decline" | "calls" | "never") => {
     setAdding(false)
     if (kind === "answer") setShowAnswer(true)
+    else if (kind === "decline") change({ decline: true })
+    else if (kind === "calls" || kind === "never") change({ calls: [...draft.calls, { tool: "", ...(kind === "never" ? { never: true } : {}) }] })
     else change({ [kind]: [...draft[kind], ""] })
     focusLast.current = kind
   }
+  const listRow = (key: "mustSay" | "asks", kind: string, placeholder: string) =>
+    draft[key].map((m, n) =>
+      row(
+        `${key}-${n}`,
+        kind,
+        "Judged by the grader, as a yes/no",
+        <Inline data-kind={key} value={m} placeholder={placeholder} onChange={(e) => change({ [key]: draft[key].map((x, i) => (i === n ? e.target.value : x)) })} />,
+        () => change({ [key]: draft[key].filter((_, i) => i !== n) }),
+      ),
+    )
   const rows = [
     ...(showAnswer || draft.answer
       ? [
@@ -268,11 +420,25 @@ function ExpectationList({ draft, change, onDraftAnswer }: { draft: Expectations
       row(
         `not-${n}`,
         "Must not say",
-        "Judged by the grader",
+        "Judged by the grader, as a yes/no",
         <Inline data-kind="mustNot" value={m} placeholder="e.g. that an overlay makes it compliant" onChange={(e) => change({ mustNot: draft.mustNot.map((x, i) => (i === n ? e.target.value : x)) })} />,
         () => change({ mustNot: draft.mustNot.filter((_, i) => i !== n) }),
       ),
     ),
+    ...listRow("mustSay", "Must say", "e.g. the August 2026 deadline"),
+    ...draft.calls.map((c, n) =>
+      row(
+        `call-${n}`,
+        c.never ? "Never calls" : "Calls a tool",
+        c.never ? "Exact, from the tool log: no call to this tool" : "Exact, from the tool log: one call must match all of these",
+        <CallEditor call={c} tools={tools} onChange={(next) => change({ calls: draft.calls.map((x, i) => (i === n ? next : x)) })} />,
+        () => change({ calls: draft.calls.filter((_, i) => i !== n) }),
+      ),
+    ),
+    ...(draft.decline
+      ? [row("decline", "Should decline", "Judged by the grader, as a yes/no", <span className="text-ink-primary text-[13px]">A polite no, pointing somewhere useful</span>, () => change({ decline: false }))]
+      : []),
+    ...listRow("asks", "Ask the grader", "A yes/no question, e.g. Is the tone friendly?"),
   ]
   return (
     <div className="space-y-2">
@@ -293,8 +459,25 @@ function ExpectationList({ draft, change, onDraftAnswer }: { draft: Expectations
           <button type="button" onClick={() => add("docs")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
             Reads a document <span className="text-ink-tertiary text-xs">The one that holds the answer — checked exactly</span>
           </button>
+          <button type="button" onClick={() => add("calls")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Calls a tool <span className="text-ink-tertiary text-xs">e.g. get_weather with city Turku — checked exactly</span>
+          </button>
+          <button type="button" onClick={() => add("never")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Doesn't call a tool <span className="text-ink-tertiary text-xs">e.g. never sends email without asking</span>
+          </button>
+          <button type="button" onClick={() => add("mustSay")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Must say <span className="text-ink-tertiary text-xs">Something the answer has to include</span>
+          </button>
           <button type="button" onClick={() => add("mustNot")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
             Must not say <span className="text-ink-tertiary text-xs">e.g. legal advice</span>
+          </button>
+          {!draft.decline && (
+            <button type="button" onClick={() => add("decline")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+              Should decline <span className="text-ink-tertiary text-xs">The right answer is a polite no</span>
+            </button>
+          )}
+          <button type="button" onClick={() => add("asks")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Ask the grader <span className="text-ink-tertiary text-xs">A yes/no question, e.g. Is the tone friendly?</span>
           </button>
         </div>
       ) : (

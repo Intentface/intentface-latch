@@ -2,7 +2,7 @@
  * What the editors may save. Every refusal is a sentence a person can act
  * on, because the person reading it wrote the question or the check.
  */
-import type { Check, CountedSpec, Input, Matcher } from "./model";
+import type { CallExpectation, Check, CountedSpec, Input, Matcher } from "./model";
 
 export type Valid<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -16,6 +16,7 @@ const OPS = new Set<CountedSpec["op"]>([
   "before",
   "before_answering",
   "stopped_for_approval",
+  "expected_calls",
 ]);
 
 const clean = (xs: unknown): string[] =>
@@ -37,9 +38,19 @@ export function validateInputs(inputs: Input[]): Valid<Input[]> {
     const answer = typeof facts.answer === "string" ? facts.answer.trim() : "";
     if (answer) facts.answer = answer;
     else delete facts.answer;
-    const mustNot = clean(facts.mustNot);
-    if (mustNot.length) facts.mustNot = mustNot;
-    else delete facts.mustNot;
+    for (const key of ["mustNot", "mustSay", "asks"] as const) {
+      const xs = clean(facts[key]);
+      if (xs.length) facts[key] = xs;
+      else delete facts[key];
+    }
+    if (facts.decline === true) facts.decline = true;
+    else delete facts.decline;
+    if ("calls" in facts) {
+      const calls = cleanCalls(facts.calls);
+      if (typeof calls === "string") return { ok: false, error: `${where}: ${calls}` };
+      if (calls.length) facts.calls = calls;
+      else delete facts.calls;
+    }
     if ("docs" in facts) {
       const docs = clean(facts.docs);
       if (docs.length) facts.docs = docs;
@@ -48,6 +59,22 @@ export function validateInputs(inputs: Input[]): Valid<Input[]> {
     out.push({ id, prompt, ...(followUps.length ? { followUps } : {}), ...(Object.keys(facts).length ? { facts } : {}) });
   }
   return { ok: true, value: out };
+}
+
+/** Expected tool calls as saved: a tool each, matches with a path; an error in words otherwise. */
+function cleanCalls(raw: unknown): CallExpectation[] | string {
+  if (!Array.isArray(raw)) return [];
+  const out: CallExpectation[] = [];
+  for (const c of raw as Partial<CallExpectation>[]) {
+    const tool = String(c.tool ?? "").trim();
+    if (!tool) return "an expected tool call has no tool.";
+    const match = (c.match ?? [])
+      .map((m) => ({ path: String(m.path).trim(), op: m.op, ...(m.value !== undefined && m.op !== "any" ? { value: String(m.value) } : {}) }))
+      .filter((m) => m.path);
+    if (match.some((m) => !["contains", "equals", "not_contains", "any"].includes(m.op))) return `a match on ${tool} uses an unknown rule.`;
+    out.push({ tool, ...(c.never ? { never: true } : {}), ...(match.length && !c.never ? { match } : {}) });
+  }
+  return out;
 }
 
 function validMatcher(m: Matcher): string | null {
@@ -93,6 +120,7 @@ export function validateChecks(checks: Check[]): Valid<Check[]> {
     } else {
       const s = c.spec;
       if (!OPS.has(s.op)) return { ok: false, error: `${name} uses an unknown rule.` };
+      if (s.op === "expected_calls") continue;
       if (!s.tool.trim()) return { ok: false, error: `${name} needs a tool name (a * matches any characters).` };
       if (s.op === "called_with") {
         if (!s.path.trim()) return { ok: false, error: `${name}: say which part of the call to look at, e.g. "state" or "result".` };
@@ -140,12 +168,16 @@ export interface EditableQuestion {
   answer: string;
   mustNot: string[];
   docs: string[];
+  mustSay: string[];
+  asks: string[];
+  decline: boolean;
+  calls: CallExpectation[];
   /** Other facts, as JSON — `{}` when there are none. */
   extra: string;
 }
 
 export function toEditable(i: Input): EditableQuestion {
-  const { answer, mustNot, docs, ...rest } = i.facts ?? {};
+  const { answer, mustNot, docs, mustSay, asks, decline, calls, ...rest } = i.facts ?? {};
   return {
     id: i.id,
     prompt: i.prompt,
@@ -153,6 +185,10 @@ export function toEditable(i: Input): EditableQuestion {
     answer: typeof answer === "string" ? answer : "",
     mustNot: clean(mustNot),
     docs: clean(docs),
+    mustSay: clean(mustSay),
+    asks: clean(asks),
+    decline: decline === true,
+    calls: Array.isArray(calls) ? calls : [],
     extra: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "{}",
   };
 }
@@ -172,7 +208,16 @@ export function fromEditable(qs: EditableQuestion[]): Valid<Input[]> {
       id: q.id,
       prompt: q.prompt,
       followUps: q.followUps,
-      facts: { ...(extra as Record<string, unknown>), answer: q.answer, mustNot: q.mustNot, docs: q.docs },
+      facts: {
+        ...(extra as Record<string, unknown>),
+        answer: q.answer,
+        mustNot: q.mustNot,
+        docs: q.docs,
+        mustSay: q.mustSay,
+        asks: q.asks,
+        decline: q.decline,
+        calls: q.calls,
+      },
     });
   }
   return validateInputs(inputs);

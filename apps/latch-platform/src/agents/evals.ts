@@ -28,6 +28,21 @@ const Question = z.object({
   mustNot: z.array(z.string()).optional().describe("Things the answer must not do, in plain words"),
   docs: z.array(z.string()).optional().describe("File names of the documents that hold the answer"),
   followUps: z.array(z.string()).optional().describe("Further messages in the same thread after the first answer"),
+  mustSay: z.array(z.string()).optional().describe("Things the answer must say, in plain words — each graded as a yes/no"),
+  decline: z.boolean().optional().describe("True when the right answer is a polite refusal"),
+  asks: z.array(z.string()).optional().describe('Yes/no questions for the grader about this answer, e.g. "Is the tone friendly?"'),
+  calls: z
+    .array(
+      z.object({
+        tool: z.string().describe("Tool name; * matches anything, e.g. *_read_file"),
+        never: z.boolean().optional().describe("True: the tool must NOT be called"),
+        match: z
+          .array(z.object({ path: z.string().describe('An argument name, or "result"'), op: z.enum(["contains", "equals", "not_contains", "any"]), value: z.string().optional() }))
+          .optional(),
+      }),
+    )
+    .optional()
+    .describe("Tool calls this input expects, checked exactly from the log"),
   extra: z.string().optional().describe('Other facts as a JSON object, read by checks as {{facts.name}}'),
 });
 
@@ -57,6 +72,10 @@ const editable = (q: QuestionInput, id: string) => ({
   answer: q.answer ?? "",
   mustNot: q.mustNot ?? [],
   docs: q.docs ?? [],
+  mustSay: q.mustSay ?? [],
+  asks: q.asks ?? [],
+  decline: q.decline ?? false,
+  calls: q.calls ?? [],
   extra: q.extra ?? "{}",
 });
 
