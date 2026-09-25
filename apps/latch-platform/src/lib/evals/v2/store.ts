@@ -82,6 +82,8 @@ export interface EvalsStore {
   saveVariant: (v: Variant) => Promise<void>;
   getVariant: (owner: Owner, id: string) => Promise<Variant | null>;
   listVariants: (owner: Owner, agentName: string) => Promise<Variant[]>;
+  /** The variant and every answer filed under its old name, in one go. */
+  renameVariant: (owner: Owner, v: Variant, name: string) => Promise<void>;
   listRulings: (q: { threadIds?: string[]; checkIds?: string[] }) => Promise<Ruling[]>;
 }
 
@@ -667,6 +669,15 @@ export function createEvalsStore(client: Client): EvalsStore {
     async getVariant(owner, id) {
       const r = (await rows(`SELECT * FROM latch_eval_variants WHERE owner = ? AND id = ?`, [owner, id]))[0];
       return r ? variantOf(r) : null;
+    },
+    async renameVariant(owner, v, name) {
+      await client.batch(
+        [
+          { sql: `UPDATE latch_eval_variants SET name = ? WHERE owner = ? AND id = ?`, args: [name, owner, v.id] },
+          { sql: `UPDATE latch_eval_threads SET version = ? WHERE owner = ? AND agent_name = ? AND version = ?`, args: [name, owner, v.agentName, v.name] },
+        ],
+        "write",
+      );
     },
     async listVariants(owner, agentName) {
       return (await rows(`SELECT * FROM latch_eval_variants WHERE owner = ? AND agent_name = ? ORDER BY created_at DESC`, [owner, agentName])).map(variantOf);

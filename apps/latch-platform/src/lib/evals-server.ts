@@ -16,7 +16,7 @@ import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
-import { createChecks, createQuestionSet, createVariant, editInputFiles, editQuestions } from "./evals-actions";
+import { createChecks, createQuestionSet, createVariant, editInputFiles, editQuestions, renameVariant } from "./evals-actions";
 import type { AgainRequest, RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { configFingerprint } from "./evals/v2/runner";
@@ -330,11 +330,19 @@ export const saveChecksFn = createServerFn({ method: "POST" })
  * same variant, so running it again reuses its answers.
  */
 export const createVariantFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; base: string; change: Variant["change"] }) => d)
+  .validator((d: { agent: string; base: string; change: Variant["change"]; name?: string }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
     return createVariant(principal, data);
+  });
+
+export const renameVariantFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; from: string; name: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    return renameVariant(principal, data);
   });
 
 export const getRunOptionsFn = createServerFn({ method: "GET" })
@@ -381,7 +389,7 @@ export const getRunOptionsFn = createServerFn({ method: "GET" })
         id: v.id,
         name: v.name,
         base: v.base,
-        note: v.change.model ? `model ${v.change.model}` : v.change.effort ? `${v.change.effort} reasoning effort` : `adds: ${v.change.addInstructions}`,
+        note: v.change.model ? `on ${v.change.model}` : v.change.effort ? `${v.change.effort} reasoning effort` : `adds: ${v.change.addInstructions}`,
       })),
       /** What a variant may switch to. */
       // Models an agent can run on: the catalog also lists image, speech,

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ChevronLeft, Loader2, Plus } from "lucide-react"
+import { ChevronLeft, Columns2, Loader2, Play, Plus } from "lucide-react"
 import { createVariantFn, estimateAgainFn, estimateRunFn, getRunOptionsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
 import type { Estimate } from "@/lib/evals/v2/jobs"
 import { Popover } from "@/components/ui/popover"
@@ -17,7 +17,6 @@ type Shown = { runId: string; version: string; run: { name: string | null; creat
 
 const money = (x: number) => (x < 1 ? `${Math.max(1, Math.round(x * 100))}¢` : `$${x.toFixed(2)}`)
 const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
-const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
 const hint = "text-ink-tertiary text-xs"
 
 function Tries({ value, onChange }: { value: number; onChange: (n: number) => void }) {
@@ -75,6 +74,27 @@ function Bill({
         </label>
       )}
     </div>
+  )
+}
+
+/** A heading inside the menu, so what a choice does — run, or show — is never a guess. */
+function Section({ icon, title, aside }: { icon: React.ReactNode; title: string; aside: string }) {
+  return (
+    <div className="flex items-center gap-1.5 px-2.5 pt-1.5 pb-1 text-xs">
+      <span className="text-ink-secondary">{icon}</span>
+      <span className="text-ink-primary font-medium">{title}</span>
+      <span className="text-ink-tertiary">· {aside}</span>
+    </div>
+  )
+}
+
+/** One choice: its name, and one line on what it is — the rest on hover. */
+function Choice({ title, note, onClick }: { title: string; note?: string; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} title={note} className="hover:bg-primary-bg-hover flex w-full min-w-0 flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+      <span className="text-ink-primary max-w-full truncate">{title}</span>
+      {note && <span className="text-ink-tertiary max-w-full truncate text-xs">{note}</span>}
+    </button>
   )
 }
 
@@ -183,42 +203,33 @@ export function AddColumn({
           />
         ) : !picked ? (
           <>
-            <div className="text-ink-tertiary px-2.5 pt-1 pb-1 text-xs">Run on all {inputIds.length || "the"} inputs</div>
+            <Section icon={<Play className="size-3" />} title="Run new answers" aside={`on all ${inputIds.length || ""} inputs · priced first`} />
             {!options ? (
               <Loader2 className="text-ink-tertiary m-2.5 size-4 animate-spin" />
             ) : (
               <>
                 {options.versions.map((v) => (
-                  <button key={v.label} type="button" className={item} onClick={() => setPicked(v.label)}>
-                    {v.label}
-                    {v.note && <span className={hint}>{v.note}</span>}
-                  </button>
+                  <Choice key={v.label} title={v.label} note={v.note} onClick={() => setPicked(v.label)} />
                 ))}
+                {options.variants.length > 0 && <div className="text-ink-tertiary px-2.5 pt-2 pb-0.5 text-[11px]">Variants</div>}
                 {options.variants.map((v) => (
-                  <button key={v.id} type="button" className={item} onClick={() => setPicked(`~${v.id}`)}>
-                    {v.name}
-                    <span className={hint}>Variant · {v.note}</span>
-                  </button>
+                  <Choice key={v.id} title={v.name} note={v.note} onClick={() => setPicked(`~${v.id}`)} />
                 ))}
-                <button type="button" className={item} onClick={() => setVariantOpen(true)}>
-                  + New variant
-                  <span className={hint}>A version with one thing changed — model, reasoning effort, an instruction — without saving a version</span>
-                </button>
+                <Choice title="+ New variant" note="A version with one thing changed — model, reasoning effort, an instruction" onClick={() => setVariantOpen(true)} />
               </>
             )}
             {hidden.length > 0 && (
               <>
-                <div className="text-ink-tertiary px-2.5 pt-2.5 pb-1 text-xs">Or show answers you already have · free</div>
+                <div className="border-primary-border mx-1 my-1.5 border-t" />
+                <Section icon={<Columns2 className="size-3" />} title="Add answers you already have" aside="free · nothing runs" />
                 <ul className="max-h-60 overflow-y-auto">
                   {hidden.map((h) => (
                     <li key={`${h.runId}|${h.version}`}>
-                      <button type="button" className={item} onClick={() => (setOpen(false), onShow({ runId: h.runId, version: h.version }))}>
-                        {h.version}
-                        <span className={cn(hint, "tabular-nums")}>
-                          {h.run.name ? `${h.run.name} · ` : ""}
-                          {day(h.run.createdAt)} · {h.run.questions} inputs{h.run.tries > 1 ? ` × ${h.run.tries} tries` : ""}
-                        </span>
-                      </button>
+                      <Choice
+                        title={`${h.version} · ${day(h.run.createdAt)}`}
+                        note={`${h.run.name ? `${h.run.name} · ` : ""}${h.run.questions} input${h.run.questions === 1 ? "" : "s"}${h.run.tries > 1 ? ` × ${h.run.tries} tries` : ""}`}
+                        onClick={() => (setOpen(false), onShow({ runId: h.runId, version: h.version }))}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -380,13 +391,14 @@ function VariantForm({
   const [model, setModel] = useState(models.find((m) => m !== current.model && m.startsWith(family)) ?? models.find((m) => m !== current.model) ?? current.model)
   const [effort, setEffort] = useState<"minimal" | "low" | "medium" | "high">(current.effort === "high" ? "low" : "high")
   const [line, setLine] = useState("")
+  const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const box = "border-primary-border bg-primary-bg w-full rounded-md border px-2 py-1.5 text-[13px] outline-none"
   const make = async () => {
     setBusy(true)
     const r = await createVariantFn({
-      data: { agent, base, change: what === "model" ? { model } : what === "effort" ? { effort } : { addInstructions: line } },
+      data: { agent, base, name, change: what === "model" ? { model } : what === "effort" ? { effort } : { addInstructions: line } },
     })
     setBusy(false)
     if (!r.ok) return setError(r.error)
@@ -441,6 +453,10 @@ function VariantForm({
           <textarea value={line} onChange={(e) => setLine(e.target.value)} rows={3} className={box} placeholder="e.g. Always open the document whose title names the question's subject before answering." />
         </label>
       )}
+      <label className="block space-y-1">
+        <span className={hint}>Name — optional, as its column will show it</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={48} className={box} placeholder={what === "model" ? `${base} · ${model.replace(/^claude-/, "")}` : what === "effort" ? `${base} · ${effort} effort` : `${base} + stricter sourcing`} />
+      </label>
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
       <button
         type="button"

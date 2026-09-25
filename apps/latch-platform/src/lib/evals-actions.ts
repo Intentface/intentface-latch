@@ -265,7 +265,17 @@ export async function editChecks(
  * column. Its name says what changed; the same change on the same base is the
  * same variant, so running it again reuses its answers.
  */
-export async function createVariant(principal: Principal, data: { agent: string; base: string; change: Variant["change"] }) {
+/** A short name for what a variant changes: "live · gpt-5.6", "live · high effort", "live + sourcing rules". */
+export function variantName(base: string, change: Variant["change"]) {
+  if (change.model) return `${base} · ${change.model.replace(/^claude-/, "")}`;
+  if (change.effort) return `${base} · ${change.effort} effort`;
+  const text = (change.addInstructions ?? "").trim();
+  // The line's own heading when it has one ("Sourcing rules: …"), else its first words.
+  const head = /^([^:.\n]{3,32}):/.exec(text)?.[1] ?? text.split(/\s+/).slice(0, 3).join(" ");
+  return `${base} + ${head.toLowerCase()}`;
+}
+
+export async function createVariant(principal: Principal, data: { agent: string; base: string; change: Variant["change"]; name?: string }) {
     const o = await ownerFor(principal, data.agent);
     if (!o) return { ok: false as const, error: "Only agents you can edit." };
     const { evals, models } = await getLatch();
@@ -279,14 +289,29 @@ export async function createVariant(principal: Principal, data: { agent: string;
     const existing = await evals.listVariants(o.owner, o.name);
     const same = existing.find((v) => v.base === data.base && JSON.stringify(v.change) === JSON.stringify(change));
     if (same) return { ok: true as const, id: same.id, name: same.name };
-    const what = change.model
-      ? change.model.replace(/^claude-/, "")
-      : change.effort
-        ? `${change.effort} effort`
-        : `+ “${change.addInstructions!.slice(0, 24)}${change.addInstructions!.length > 24 ? "…" : ""}”`;
-    let name = `${data.base} · ${what}`;
-    for (let n = 2; existing.some((v) => v.name === name); n++) name = `${data.base} · ${what} ${n}`;
+    const wanted = data.name?.trim().slice(0, 48) || variantName(data.base, change);
+    let name = wanted;
+    for (let n = 2; existing.some((v) => v.name === name); n++) name = `${wanted} ${n}`;
     const id = `v_${Math.random().toString(36).slice(2, 8)}`;
     await evals.saveVariant({ owner: o.owner, id, agentName: o.name, base: data.base, name, change, createdAt: Date.now() });
     return { ok: true as const, id, name };
   }
+
+/**
+ * Rename a variant. Its answers are filed under its name, so they are
+ * renamed with it — the column keeps them.
+ */
+export async function renameVariant(principal: Principal, d: { agent: string; from: string; name: string }) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit." };
+  const { evals } = await getLatch();
+  // A column knows its variant by name.
+  const v = (await evals.listVariants(o.owner, o.name)).find((x) => x.name === d.from) ?? null;
+  if (!v) return { ok: false as const, error: "That variant no longer exists." };
+  const name = d.name.trim().slice(0, 48);
+  if (!name || name === v.name) return { ok: true as const, name: v.name };
+  if (name === "live" || name.startsWith("@") || name.startsWith("~")) return { ok: false as const, error: "That name belongs to a version." };
+  if ((await evals.listVariants(o.owner, o.name)).some((x) => x.id !== v.id && x.name === name)) return { ok: false as const, error: `There is already a variant called ${name}.` };
+  await evals.renameVariant(o.owner, v, name);
+  return { ok: true as const, name };
+}

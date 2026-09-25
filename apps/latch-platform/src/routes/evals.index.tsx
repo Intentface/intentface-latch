@@ -7,6 +7,7 @@ import {
   getEvalGridFn,
   getEvalsIndexFn,
   getQuestionsFn,
+  renameVariantFn,
   saveEvalRulingFn,
   startJudgeFn,
 } from "@/lib/evals-server"
@@ -205,6 +206,10 @@ function EvalsPage() {
             onOpenInput={setOpenInput}
             onOpenChecks={() => setChecksOpen(true)}
             onAdded={(id) => (reload(), reloadOverview(), setOpenInput(id))}
+            onRenamed={(c, name) => {
+              setColumns(refs.map((r) => (r.runId === c.runId && r.version === c.version ? { ...r, version: name } : r)))
+              reloadOverview()
+            }}
           />
         ) : (
           loading && <Loader2 className="text-ink-tertiary size-4 animate-spin" />
@@ -360,6 +365,7 @@ function Results({
   onOpenInput,
   onOpenChecks,
   onAdded,
+  onRenamed,
 }: {
   agent: string
   grid: EvalGrid
@@ -382,6 +388,8 @@ function Results({
   onOpenInput: (id: string) => void
   onOpenChecks: () => void
   onAdded: (id: string) => void
+  /** A variant got a new name: its column follows it. */
+  onRenamed: (c: Column, name: string) => void
 }) {
   const cells = useMemo(() => cellsOf(grid), [grid])
   const [picked, setPicked] = useState<Set<string>>(new Set())
@@ -571,7 +579,7 @@ function Results({
               <th className="bg-primary-bg text-ink-tertiary sticky left-9 z-10 w-10 px-3 py-2 text-left text-xs font-medium">#</th>
               <th className="bg-primary-bg text-ink-tertiary sticky left-[76px] z-10 w-[480px] max-w-[480px] px-3 py-2 text-left text-xs font-medium">Input</th>
               {grid.columns.map((c, n) => (
-                <th key={c.label} className="min-w-[132px] px-2 py-2 text-center align-bottom">
+                <th key={c.label} className="w-[176px] min-w-[176px] px-2 py-2 text-center align-bottom">
                   <ColumnMenu
                     column={c}
                     isBase={n === 0}
@@ -585,6 +593,16 @@ function Results({
                     )}
                     onGrade={() => void gradeUngraded(null)}
                     stale={c.judgedWith < grid.latestVersion && !grading(c)}
+                    {...(c.version !== "live" && !c.version.startsWith("@")
+                      ? {
+                          onRename: async (name: string) => {
+                            const r = await renameVariantFn({ data: { agent, from: c.version, name } })
+                            if (!r.ok) return r.error
+                            onRenamed(c, r.name)
+                            return null
+                          },
+                        }
+                      : {})}
                     canHide={grid.columns.length > 1}
                     onBaseline={() => onBaseline(c.label)}
                     onFocus={() => onFocus(c.label)}
@@ -768,6 +786,7 @@ function ColumnMenu({
   againPanel,
   onGrade,
   stale,
+  onRename,
   canHide,
   onBaseline,
   onFocus,
@@ -785,6 +804,8 @@ function ColumnMenu({
   onGrade: () => void
   /** Graded under an older version of the checks. */
   stale: boolean
+  /** A variant's column can be renamed; versions keep their names. */
+  onRename?: (name: string) => Promise<string | null>
   canHide: boolean
   onBaseline: () => void
   onFocus: () => void
@@ -793,6 +814,8 @@ function ColumnMenu({
   const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
   const [open, setOpen] = useState(false)
   const [again, setAgain] = useState(false)
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [renameError, setRenameError] = useState<string | null>(null)
   const pick = (f: () => void) => () => (setOpen(false), f())
   return (
     <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(false))}>
@@ -802,7 +825,7 @@ function ColumnMenu({
           {isBase && <span className="border-primary-border text-ink-tertiary rounded-full border px-1.5 text-[10px] font-medium">baseline</span>}
           <ChevronDown className="size-3" />
         </span>
-        <span className={cn("text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
+        <span className={cn("block text-[11px] leading-snug tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
           {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : <>{day(column.at)} · {pct(rate)}</>}
           {column.spent > 0 && ` · ${money(column.spent)}`}
           {tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
@@ -837,6 +860,26 @@ function ColumnMenu({
         <button type="button" className={item} onClick={pick(onGrade)}>
           Grade what isn't graded <span className="text-ink-tertiary text-xs">Answers without a grade under the current checks · cents</span>
         </button>
+        {onRename &&
+          (renaming === null ? (
+            <button type="button" className={item} onClick={() => (setRenaming(column.version), setRenameError(null))}>
+              Rename <span className="text-ink-tertiary text-xs">A variant's name, as its column shows it</span>
+            </button>
+          ) : (
+            <form
+              className="space-y-1.5 px-2.5 py-1.5"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void onRename(renaming).then((err) => (err ? setRenameError(err) : (setRenaming(null), setOpen(false))))
+              }}
+            >
+              <input autoFocus value={renaming} maxLength={48} onChange={(e) => setRenaming(e.target.value)} aria-label="New name" className="border-primary-border bg-primary-bg w-full rounded-md border px-2 py-1 text-sm outline-none" />
+              {renameError && <p className="text-xs text-red-600 dark:text-red-400">{renameError}</p>}
+              <button type="submit" className="bg-ink-primary text-primary-bg h-7 rounded-md px-3 text-xs font-medium">
+                Save name
+              </button>
+            </form>
+          ))}
         {canHide && (
           <button type="button" className={item} onClick={pick(onHide)}>
             Hide column <span className="text-ink-tertiary text-xs">Its answers are kept</span>
