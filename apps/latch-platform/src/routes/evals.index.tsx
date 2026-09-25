@@ -1,64 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import {
-  createFileRoute,
-  Link,
-  redirect,
-  useNavigate,
-} from "@tanstack/react-router"
-import { ChevronDown, ChevronUp, Loader2, Play, X } from "lucide-react"
+import { createFileRoute, redirect } from "@tanstack/react-router"
+import { ChevronDown, Loader2, Plus } from "lucide-react"
 import { currentPrincipalFn } from "@/lib/server"
 import {
   getEvalGridFn,
   getEvalsIndexFn,
-  getRunHistoryFn,
-  listJobsFn,
-  cancelJobFn,
-  startJudgeFn,
   saveEvalRulingFn,
 } from "@/lib/evals-server"
-import type { EvalGrid, JobRow, RunPoint } from "@/lib/evals-server"
-import {
-  CARD,
-  ChartCard,
-  GROUND,
-  Pill,
-  SectionNav,
-  SectionTitle,
-} from "@/components/evals/ui"
-import { CostChart, QuestionHeatmap } from "@/components/evals/charts"
+import type { EvalGrid } from "@/lib/evals-server"
+import { GROUND, passColor } from "@/components/evals/ui"
 import { RunDrawer } from "@/components/evals/run-drawer"
-import {
-  ComparePicker,
-  decodeResults,
-  encodeResults,
-} from "@/components/evals/compare-picker"
+import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
+import type { Result } from "@/components/evals/compare-picker"
 import { useEvalsChanged } from "@/components/evals/events"
-import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
+import { ThreadView } from "@/components/evals/thread-view"
+import { JobBanner, useJobs } from "@/components/evals/jobs"
 import Drawer from "@/components/ui/drawer"
+import { Popover } from "@/components/ui/popover"
 import {
   EDITOR_DRAWER,
   EvalsEmpty,
-  NoEvalsYet,
   EvalsShell,
+  NoEvalsYet,
   Picker,
   useOverview,
   useSetSearch,
   validateEvalsSearch,
 } from "@/components/evals/shell"
-import { cn } from "@/lib/utils"
 import { Select } from "@/components/ui/select"
+import { cn } from "@/lib/utils"
 
 /**
- * Evals: how each version of an agent does on a fixed set of questions, and
- * whether the judge that says so can be believed.
- *
- * One grid — checks down, versions across — because that is how a
- * spreadsheet person already reads a comparison. A cell opens a review panel
- * beside it: one thread at a time, P/F to make the call, J/K to move. Those
- * calls are what the Trust column is made of.
- *
- * Nothing here runs or judges. Both cost money and stay on the command line
- * (`pnpm evals`) until there is a cost guard in front of them.
+ * Evals: the agent's inputs down the side, configurations across the top,
+ * each cell one configuration's answer to one input, graded. Running a
+ * configuration adds a column; comparing is choosing which columns are open,
+ * the first being the baseline. Nothing here is organised around "runs" or
+ * "experiments" — those are just where a column's answers came from.
  */
 
 export const Route = createFileRoute("/evals/")({
@@ -72,356 +49,138 @@ export const Route = createFileRoute("/evals/")({
   component: EvalsPage,
 })
 
-type Row = EvalGrid["verdicts"][number]
-type Cell = { checkId: string; version: string }
+type Column = EvalGrid["columns"][number]
+type Verdict = EvalGrid["verdicts"][number]
+type Filter = "all" | "changed" | "failing"
+
+/** One configuration's answer to one input: every try, graded or not. */
+type Cell = {
+  tries: { threadId: string; attempt: number; pass: number; of: number; error: string | null }[]
+  /** Mean share of checks passed over the graded tries, or null when none are. */
+  rate: number | null
+}
 
 function EvalsPage() {
   const index = Route.useLoaderData()
   const search = Route.useSearch()
   const set = useSetSearch()
-  const navigate = useNavigate()
 
   const agent = search.agent ?? index[0]?.agent
   const [overview, reloadOverview] = useOverview(agent)
   const [grid, setGrid] = useState<EvalGrid | null>(null)
   const [loading, setLoading] = useState(false)
   const [runOpen, setRunOpen] = useState(false)
+  const [filter, setFilter] = useState<Filter>("all")
+  const [byCheck, setByCheck] = useState(false)
+  const [openCell, setOpenCell] = useState<{ inputId: string; column: string } | null>(null)
 
   const dataset =
     overview?.datasets.find((d) => d.id === search.dataset) ??
     overview?.datasets.find((d) => d.runs.length) ??
     overview?.datasets[0]
   const rubricId = search.rubric ?? overview?.rubrics[0]?.id
-  const runId = search.run ?? dataset?.runs[0]?.runId
-  const run = dataset?.runs.find((r) => r.runId === runId)
-  // Any results from any runs; without a choice, every version of one run.
-  const cols = search.cols
-  const columns = useMemo(() => decodeResults(cols), [cols])
+  const columnsAsked = useMemo(() => decodeResults(search.cols), [search.cols])
 
   const reload = useCallback(() => {
-    if (!agent || !dataset || !rubricId || !runId) return setGrid(null)
+    if (!agent || !dataset || !rubricId || !dataset.runs.length) return setGrid(null)
     setLoading(true)
     void getEvalGridFn({
-      data: {
-        agent,
-        datasetId: dataset.id,
-        rubricId,
-        runId,
-        ...(columns.length ? { columns } : {}),
-      },
+      data: { agent, datasetId: dataset.id, rubricId, ...(columnsAsked.length ? { columns: columnsAsked } : {}) },
     })
       .then(setGrid)
       .finally(() => setLoading(false))
-  }, [agent, dataset, rubricId, runId, columns])
+  }, [agent, dataset, rubricId, columnsAsked])
   useEffect(reload, [reload])
-
-  const [history, setHistory] = useState<RunPoint[] | null>(null)
-  const [historyTick, setHistoryTick] = useState(0)
-  useEffect(() => {
-    setHistory(null)
-    if (!agent || !dataset || !rubricId) return
-    void getRunHistoryFn({
-      data: { agent, datasetId: dataset.id, rubricId },
-    }).then(setHistory)
-  }, [agent, dataset, rubricId, historyTick])
+  useEvalsChanged(reload)
 
   const jobs = useJobs(agent, dataset?.id, (finished) => {
-    // A run that just finished is the one worth looking at.
     reloadOverview()
-    setHistoryTick((t) => t + 1)
+    // A finished run opens beside what it was compared with, or on its own.
     if (finished.kind === "run")
       set({
-        run: finished.runId,
-        // A run that left its baseline out opens on the comparison with the result it reused.
-        cols: finished.compareWith?.length
-          ? encodeResults([
-              ...finished.compareWith,
-              ...finished.versions.map((version) => ({ runId: finished.runId, version })),
-            ])
-          : undefined,
-        check: undefined,
-        version: undefined,
+        cols: encodeResults([
+          ...(finished.compareWith ?? []),
+          ...finished.versions.map((version) => ({ runId: finished.runId, version })),
+        ]),
+        focus: undefined,
       })
     else reload()
   })
-  // The Evals agent may have started a run, judged one, or edited checks.
-  useEvalsChanged(() => {
-    reload()
-    setHistoryTick((t) => t + 1)
-    jobs.refresh()
-  })
-  const judgeAgain = async () => {
-    if (!agent || !dataset || !rubricId || !runId) return
-    const r = await startJudgeFn({
-      data: { agent, datasetId: dataset.id, rubricId, runId },
-    })
-    if (r.ok) jobs.refresh()
-  }
-
-  const open: Cell | null =
-    search.check && search.version
-      ? { checkId: search.check, version: search.version }
-      : null
-  // Keep the last cell's threads on screen while the drawer animates shut.
-  const lastOpen = useRef(open)
-  if (open) lastOpen.current = open
-  const reviewing = open ?? lastOpen.current
-  const toggle = (c: Cell) =>
-    set(
-      open?.checkId === c.checkId && open.version === c.version
-        ? { check: undefined, version: undefined }
-        : { check: c.checkId, version: c.version }
-    )
 
   if (!index.length) return <EvalsEmpty />
 
+  const columns = grid?.columns ?? []
+  const setColumns = (next: Result[], focus?: string) =>
+    set({ cols: encodeResults(next), focus })
+  const refs = columns.map((c) => ({ runId: c.runId, version: c.version }))
+
   return (
     <div className={GROUND}>
-      <div className="evals-page mx-auto max-w-[1400px] space-y-6 p-6 transition-[margin]">
-        <EvalsShell
-          page="results"
-          index={index}
-          search={search}
-          actions={
-            dataset &&
-            rubricId && (
-              <button
-                type="button"
-                onClick={() => setRunOpen(true)}
-                className="flex h-8 items-center gap-1.5 rounded-lg bg-ink-primary px-3 text-sm font-medium text-primary-bg"
+      <div className="evals-page mx-auto max-w-[1280px] space-y-5 p-6 transition-[margin]">
+        <EvalsShell page="results" index={index} search={search}>
+          {overview && overview.datasets.length > 1 && (
+            <Picker label="Inputs">
+              <Select
+                id="evals-dataset"
+                value={dataset?.id}
+                onChange={(e) => set({ dataset: e.target.value, cols: undefined, focus: undefined })}
               >
-                <Play className="size-3.5" /> New run
-              </button>
-            )
-          }
-        >
-          {overview && overview.datasets.length > 0 && (
-            <>
-              <Picker label="Questions">
-                <Select
-                  id="evals-dataset"
-                  value={dataset?.id ?? ""}
-                  onChange={(e) =>
-                    set({
-                      dataset: e.target.value,
-                      run: undefined,
-                      check: undefined,
-                      version: undefined,
-                    })
-                  }
-                >
-                  {overview.datasets.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} ({d.inputs})
-                    </option>
-                  ))}
-                </Select>
-              </Picker>
-              <Picker label="Checks">
-                <Select
-                  id="evals-rubric"
-                  value={rubricId ?? ""}
-                  onChange={(e) => set({ rubric: e.target.value })}
-                >
-                  {overview.rubrics.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.id}
-                    </option>
-                  ))}
-                </Select>
-              </Picker>
-              <Picker label="Compare">
-                <ComparePicker
-                  runs={dataset?.runs ?? []}
-                  selected={
-                    grid?.columns.map((c) => ({
-                      runId: c.runId,
-                      version: c.version,
-                    })) ?? []
-                  }
-                  labels={grid?.versions ?? []}
-                  runLabel={runLabel}
-                  onChange={(next) =>
-                    "run" in next
-                      ? set({
-                          run: next.run,
-                          cols: undefined,
-                          check: undefined,
-                          version: undefined,
-                        })
-                      : set({
-                          cols: encodeResults(next.results),
-                          check: undefined,
-                          version: undefined,
-                        })
-                  }
-                />
-              </Picker>
-            </>
+                {overview.datasets.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name} ({d.inputs})
+                  </option>
+                ))}
+              </Select>
+            </Picker>
           )}
-          {loading && (
-            <Loader2 className="mb-2 size-4 animate-spin text-ink-tertiary" />
+          {overview && overview.rubrics.length > 1 && (
+            <Picker label="Checks">
+              <Select id="evals-rubric" value={rubricId} onChange={(e) => set({ rubric: e.target.value })}>
+                {overview.rubrics.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.id}
+                  </option>
+                ))}
+              </Select>
+            </Picker>
           )}
         </EvalsShell>
 
-        {agent && (
-          <JobBanner agent={agent} jobs={jobs.rows} onChanged={jobs.refresh} />
+        {agent && <JobBanner agent={agent} jobs={jobs.rows} onChanged={jobs.refresh} />}
+
+        {overview && !overview.datasets.length && agent && (
+          <NoEvalsYet agent={agent} onCreated={(id) => (set({ dataset: id }), reloadOverview())} />
         )}
 
-        {agent && overview && !overview.datasets.length && (
-          <NoEvalsYet
+        {overview && dataset && !dataset.runs.length && (
+          <NothingRun inputs={dataset.inputs} onRun={() => setRunOpen(true)} />
+        )}
+
+        {grid ? (
+          <Results
             agent={agent}
-            onCreated={(id) =>
-              void navigate({
-                to: "/evals/questions",
-                search: { agent, dataset: id },
-              })
-            }
+            grid={grid}
+            focusAsked={search.focus}
+            filter={filter}
+            setFilter={setFilter}
+            byCheck={byCheck}
+            setByCheck={setByCheck}
+            runs={dataset?.runs ?? []}
+            onOpen={setOpenCell}
+            onBaseline={(label) => {
+              const i = columns.findIndex((c) => c.label === label)
+              setColumns([refs[i], ...refs.filter((_, n) => n !== i)])
+            }}
+            onFocus={(label) => set({ focus: label })}
+            onHide={(label) => setColumns(refs.filter((_, n) => columns[n].label !== label))}
+            onShow={(r) => setColumns([...refs, r], undefined)}
+            onRun={() => setRunOpen(true)}
           />
+        ) : (
+          loading && <Loader2 className="text-ink-tertiary size-4 animate-spin" />
         )}
 
-        {overview &&
-          dataset &&
-          !dataset.runs.length &&
-          !jobs.rows.some(isActive) && (
-            <p className="text-sm text-ink-secondary">
-              {dataset.name} has {dataset.inputs} questions but no runs yet.{" "}
-              <button
-                type="button"
-                onClick={() => setRunOpen(true)}
-                className="text-ink-primary underline"
-              >
-                Start the first one
-              </button>
-              .
-            </p>
-          )}
-        {grid && grid.rubricVersion < grid.latestVersion && (
-          <p className="flex flex-wrap items-center gap-x-2 text-sm text-ink-secondary">
-            Showing checks v{grid.rubricVersion}. Version {grid.latestVersion}{" "}
-            has not been judged on this run yet.
-            {!jobs.rows.some(
-              (j) => isActive(j) && j.kind === "judge" && j.runId === runId
-            ) && (
-              <button
-                type="button"
-                onClick={() => void judgeAgain()}
-                className="font-medium text-ink-primary underline"
-              >
-                Judge it with v{grid.latestVersion}
-              </button>
-            )}
-            <span className="text-ink-tertiary">
-              Only the judge runs; the agent does not.
-            </span>
-          </p>
-        )}
-
-        {grid?.crossRun && (
-          <p className="max-w-[80ch] text-sm text-ink-secondary">
-            These results come from different runs. Part of any difference may
-            be run-to-run noise or a changed world — documents, tools, the model
-            provider — rather than the agent. Each is compared with the baseline
-            only on the questions both answered. For a clean test of a change,
-            run both versions together.
-          </p>
-        )}
-
-        {grid && (run || columns.length > 0) && (
-          <div className="evals-sections gap-10 xl:grid xl:grid-cols-[168px_minmax(0,1fr)]">
-            <SectionNav sections={SECTIONS} />
-            <div className="min-w-0 space-y-10">
-              <section id="summary" className="scroll-mt-6 space-y-4">
-                <SectionTitle id="summary">Summary</SectionTitle>
-                <Verdict grid={grid} questions={dataset?.inputs ?? 0} />
-              </section>
-
-              <section id="checks" className="scroll-mt-6 space-y-4">
-                <SectionTitle
-                  id="checks"
-                  aside={`${grid.checks.length} checks · version ${grid.rubricVersion}`}
-                >
-                  Checks
-                </SectionTitle>
-                <ChartCard
-                  id="checks"
-                  title="Pass rate by check"
-                  subtitle={`Share of verdicts that passed, per version${grid.attempts > 1 ? `; dots are the ${grid.attempts} tries of each question` : ""}. Change compares question by question. Click a cell to read its threads.`}
-                  flush
-                >
-                  <Grid
-                    grid={grid}
-                    open={open}
-                    onOpen={toggle}
-                    checkLink={
-                      agent && rubricId
-                        ? {
-                            agent,
-                            rubric: rubricId,
-                            ...(dataset ? { dataset: dataset.id } : {}),
-                          }
-                        : undefined
-                    }
-                  />
-                </ChartCard>
-              </section>
-
-              <section id="questions" className="scroll-mt-6 space-y-4">
-                <SectionTitle
-                  id="questions"
-                  aside={`${new Set(grid.verdicts.map((v) => v.inputId)).size} questions`}
-                >
-                  Questions
-                </SectionTitle>
-                <ChartCard
-                  id="questions"
-                  title="Where each question fails"
-                  subtitle="Each question's pass rate on each check, per version. A red row is a question the agent cannot answer; a red column is a check nothing passes."
-                >
-                  <QuestionHeatmap
-                    grid={grid}
-                    onOpen={toggle}
-                    checkLink={
-                      agent && rubricId
-                        ? {
-                            agent,
-                            rubric: rubricId,
-                            ...(dataset ? { dataset: dataset.id } : {}),
-                          }
-                        : undefined
-                    }
-                  />
-                </ChartCard>
-              </section>
-
-              <section id="cost" className="scroll-mt-6 space-y-4">
-                <SectionTitle
-                  id="cost"
-                  aside={
-                    history
-                      ? `${history.length} version${history.length === 1 ? "" : "s"} across runs`
-                      : undefined
-                  }
-                >
-                  Cost
-                </SectionTitle>
-                <ChartCard
-                  id="cost"
-                  title="Pass rate vs cost per thread"
-                  subtitle="Every version in every run of this question set. Up and to the left is better; the dotted line joins the runs nothing beat on both. Hover a point for its run."
-                >
-                  {history ? (
-                    <CostChart points={history} current={runId} />
-                  ) : (
-                    <Loader2 className="size-4 animate-spin text-ink-tertiary" />
-                  )}
-                </ChartCard>
-              </section>
-            </div>
-          </div>
-        )}
-
-        {agent && dataset && rubricId && (
+        {agent && dataset && rubricId && runOpen && (
           <RunDrawer
             open={runOpen}
             agent={agent}
@@ -435,883 +194,650 @@ function EvalsPage() {
           />
         )}
 
-        <Drawer
-          open={!!(open && grid)}
-          onOpenChange={(o) =>
-            !o && set({ check: undefined, version: undefined })
-          }
-        >
-          <Drawer.Content className={EDITOR_DRAWER}>
-            {reviewing && grid && agent && (
-              <Review
-                key={`${reviewing.checkId}|${reviewing.version}|${grid.runId}`}
-                agent={agent}
-                grid={grid}
-                cell={reviewing}
-                onClose={() => set({ check: undefined, version: undefined })}
-                onRuled={reload}
-              />
-            )}
-          </Drawer.Content>
-        </Drawer>
+        {agent && grid && (
+          <AnswerDrawer
+            agent={agent}
+            grid={grid}
+            at={openCell}
+            onClose={() => setOpenCell(null)}
+            onRuled={reload}
+          />
+        )}
       </div>
     </div>
   )
 }
 
-const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
+// ─── Numbers ──────────────────────────────────────────────────────────────
 
-/** Recent jobs for this set, polled while any is running; `onFinished` fires once per job that completes. */
-function useJobs(
-  agent: string | undefined,
-  datasetId: string | undefined,
-  onFinished: (j: JobRow) => void
-) {
-  const [rows, setRows] = useState<JobRow[]>([])
-  const seen = useRef(new Map<string, JobRow["status"]>())
-  const finished = useRef(onFinished)
-  finished.current = onFinished
-  const [tick, setTick] = useState(0)
-  const refresh = useCallback(() => setTick((t) => t + 1), [])
-
-  useEffect(() => {
-    if (!agent || !datasetId) return setRows([])
-    let stop = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const load = async () => {
-      const next = await listJobsFn({ data: { agent, datasetId } })
-      if (stop) return
-      for (const j of next) {
-        const was = seen.current.get(j.id)
-        if (was && was !== "done" && j.status === "done") finished.current(j)
-        seen.current.set(j.id, j.status)
-      }
-      setRows(next)
-      if (next.some(isActive)) timer = setTimeout(() => void load(), 2500)
-    }
-    void load()
-    return () => {
-      stop = true
-      clearTimeout(timer)
-    }
-  }, [agent, datasetId, tick])
-
-  return { rows, refresh }
+/** Every cell of the grid, keyed "input|column". */
+function cellsOf(grid: EvalGrid): Map<string, Cell> {
+  const verdictsOf = new Map<string, Verdict[]>()
+  for (const v of grid.verdicts) verdictsOf.set(v.threadId, [...(verdictsOf.get(v.threadId) ?? []), v])
+  const out = new Map<string, Cell>()
+  for (const t of grid.threads) {
+    const key = `${t.inputId}|${t.column}`
+    const vs = verdictsOf.get(t.threadId) ?? []
+    const cell = out.get(key) ?? { tries: [], rate: null }
+    cell.tries.push({ threadId: t.threadId, attempt: t.attempt, pass: vs.filter((v) => !v.failed).length, of: vs.length, error: t.error })
+    out.set(key, cell)
+  }
+  for (const cell of out.values()) {
+    cell.tries.sort((a, b) => a.attempt - b.attempt)
+    const graded = cell.tries.filter((x) => !x.error && x.of)
+    cell.rate = graded.length ? graded.reduce((a, x) => a + x.pass / x.of, 0) / graded.length : null
+  }
+  return out
 }
 
-/** What is running now, and what went wrong recently. Finished runs speak through the Run picker. */
-function JobBanner({
+/** Share of all checks passed in a column, over its graded answers. */
+function columnRate(grid: EvalGrid, cells: Map<string, Cell>, label: string) {
+  let pass = 0, of = 0
+  for (const i of grid.inputs)
+    for (const t of cells.get(`${i.id}|${label}`)?.tries ?? []) if (!t.error) (pass += t.pass, of += t.of)
+  return of ? pass / of : null
+}
+
+/**
+ * How likely a split this lopsided is by chance, if the change did nothing:
+ * a two-sided sign test on the inputs that moved.
+ */
+function signTest(up: number, down: number) {
+  const n = up + down, k = Math.min(up, down)
+  if (!n) return 1
+  let c = 1, sum = 0
+  for (let i = 0; i <= k; i++) {
+    if (i) c = (c * (n - i + 1)) / i
+    sum += c
+  }
+  return Math.min(1, (2 * sum) / 2 ** n)
+}
+
+const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+const pct = (r: number | null) => (r === null ? "—" : `${Math.round(r * 100)}%`)
+const money = (x: number) => (x < 1 ? `${Math.max(1, Math.round(x * 100))}¢` : `$${x.toFixed(2)}`)
+
+// ─── Results ─────────────────────────────────────────────────────────────
+
+function Results({
   agent,
-  jobs,
-  onChanged,
+  grid,
+  focusAsked,
+  filter,
+  setFilter,
+  byCheck,
+  setByCheck,
+  runs,
+  onOpen,
+  onBaseline,
+  onFocus,
+  onHide,
+  onShow,
+  onRun,
 }: {
   agent: string
-  jobs: JobRow[]
-  onChanged: () => void
+  grid: EvalGrid
+  focusAsked: string | undefined
+  filter: Filter
+  setFilter: (f: Filter) => void
+  byCheck: boolean
+  setByCheck: (b: boolean) => void
+  runs: { runId: string; versions: string[]; name: string | null; createdAt: number; questions: number; tries: number }[]
+  onOpen: (at: { inputId: string; column: string }) => void
+  onBaseline: (label: string) => void
+  onFocus: (label: string) => void
+  onHide: (label: string) => void
+  onShow: (r: Result) => void
+  onRun: () => void
 }) {
-  const recent = Date.now() - 30 * 60_000
-  const shown = jobs.filter(
-    (j) => isActive(j) || (j.status === "failed" && j.updatedAt > recent)
+  const cells = useMemo(() => cellsOf(grid), [grid])
+  const [base, ...rest] = grid.columns
+  const focus = rest.find((c) => c.label === focusAsked) ?? rest.at(0)
+  const cell = (inputId: string, label: string) => cells.get(`${inputId}|${label}`)
+  // A column is called by its version; the day is added only where two share one.
+  const nameOf = (c: Column) => (grid.columns.filter((x) => x.version === c.version).length > 1 ? `${c.version} · ${day(c.at)}` : c.version)
+
+  // The baseline against the column in the headline, on the inputs both answered.
+  const rows = grid.inputs.map((i) => {
+    const a = cell(i.id, base.label)?.rate ?? null
+    const b = focus ? (cell(i.id, focus.label)?.rate ?? null) : null
+    return { input: i, d: a !== null && b !== null ? Math.sign(b - a) : null }
+  })
+  const shared = rows.filter((r) => r.d !== null)
+  const up = shared.filter((r) => r.d! > 0).length
+  const down = shared.filter((r) => r.d! < 0).length
+  const p = signTest(up, down)
+  const triesOf = (c: Column) => Math.max(1, ...grid.threads.filter((t) => t.column === c.label).map((t) => t.attempt + 1))
+  const broken = focus ? grid.inputs.filter((i) => cell(i.id, focus.label)?.tries.some((t) => t.error)).length : 0
+
+  const shown = rows.filter((r) =>
+    filter === "all" || !focus
+      ? true
+      : filter === "changed"
+        ? r.d !== null && r.d !== 0
+        : (cell(r.input.id, focus.label)?.rate ?? 1) < 1,
   )
-  if (!shown.length) return null
+  const hidden = runs.flatMap((r) =>
+    r.versions
+      .filter((v) => !grid.columns.some((c) => c.runId === r.runId && c.version === v))
+      .map((v) => ({ runId: r.runId, version: v, run: r })),
+  )
+
   return (
-    <div className="space-y-2">
-      {shown.map((j) => {
-        const pctDone = j.total ? Math.round((100 * j.done) / j.total) : 0
-        const what =
-          j.kind === "judge"
-            ? `Judging ${j.total} threads`
-            : `${j.versions.join(" vs ")} · ${j.questions} question${j.questions === 1 ? "" : "s"}${j.repeats > 1 ? ` × ${j.repeats} tries` : ""}`
-        return (
-          <div
-            key={j.id}
-            className="rounded-lg bg-primary-bg px-4 py-3 text-sm smooth-shadow-ring-xs smooth-ring-primary-border"
-          >
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              {isActive(j) && (
-                <Loader2 className="size-4 animate-spin text-ink-secondary" />
-              )}
-              <span className="font-medium text-ink-primary">
-                {j.status === "failed"
-                  ? "Run failed"
-                  : j.status === "judging"
-                    ? "Judging"
-                    : j.kind === "judge"
-                      ? "Judging"
-                      : "Running"}
-              </span>
-              <span className="text-ink-secondary">{what}</span>
-              <span className="text-ink-tertiary tabular-nums">
-                {j.status === "judging"
-                  ? `${j.total} threads run`
-                  : `${j.done} of ${j.total}`}
-                {j.failed > 0 && ` · ${j.failed} failed to run`}
-                {j.cost !== null && ` · about $${j.cost.toFixed(2)}`}
-              </span>
-              {isActive(j) && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    void cancelJobFn({ data: { agent, id: j.id } }).then(
-                      onChanged
-                    )
-                  }
-                  className="ml-auto text-ink-secondary hover:text-ink-primary"
-                >
-                  Stop
-                </button>
-              )}
-            </div>
-            {isActive(j) && (
-              <div className="mt-2 h-1 overflow-hidden rounded-full bg-primary-border">
-                <div
+    <section className="border-primary-border bg-primary-bg rounded-xl border" aria-label="Results">
+      <div className="border-primary-border space-y-3 border-b px-5 py-4">
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-0 flex-1">
+            {focus ? (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
+                <span className="flex items-baseline gap-2.5 text-[22px] tracking-tight">
+                  <span className="text-ink-tertiary">{nameOf(base)} {pct(columnRate(grid, cells, base.label))}</span>
+                  <span className="text-ink-tertiary text-base" aria-hidden>→</span>
+                  <b className="text-ink-primary font-semibold">{nameOf(focus)} {pct(columnRate(grid, cells, focus.label))}</b>
+                </span>
+                <span className="text-ink-secondary text-[13px]">
+                  <b className="font-semibold text-[color:var(--eval-good-ink)]">{up} better</b> ·{" "}
+                  <b className="font-semibold text-[color:var(--eval-bad-ink)]">{down} worse</b> · {shared.length - up - down} same
+                </span>
+                <span
+                  title={p < 0.05 ? `${up + down} inputs changed, ${Math.max(up, down)} the same way — very unlikely to be chance.` : "Too few inputs changed to tell. Run it with more tries per input."}
                   className={cn(
-                    "h-full rounded-full bg-ink-secondary transition-[width] duration-500",
-                    j.status === "judging" && "animate-pulse"
+                    "rounded-full px-2.5 py-0.5 text-xs font-medium",
+                    p < 0.05 ? "bg-[color:var(--eval-good)] text-ink-primary" : "border-primary-border text-ink-secondary border",
                   )}
-                  style={{
-                    width: `${j.status === "judging" ? 100 : pctDone}%`,
-                  }}
-                />
+                >
+                  {p < 0.05 ? `Clear ${up >= down ? "improvement" : "regression"}` : "Could be chance"}
+                </span>
+              </div>
+            ) : (
+              <div className="text-ink-primary text-[22px] font-semibold tabular-nums">
+                {nameOf(base)} {pct(columnRate(grid, cells, base.label))}
               </div>
             )}
-            {j.error && (
-              <p className="mt-1 text-red-600 dark:text-red-400">{j.error}</p>
-            )}
+            <p className="text-ink-tertiary mt-1 text-xs tabular-nums">
+              {focus
+                ? `${focus.runName ?? nameOf(focus)} · compared with ${nameOf(base)} on ${shared.length} input${shared.length === 1 ? "" : "s"} · ${triesOf(focus) > 1 ? `${triesOf(focus)} tries each` : "1 try"}${focus.runId !== base.runId ? " · answered on different days" : ""}`
+                : "Add a column to compare with it."}
+              {broken > 0 && ` · ${broken} answer${broken === 1 ? "" : "s"} broke — left out of the score`}
+            </p>
           </div>
-        )
-      })}
-    </div>
-  )
-}
-
-/**
- * A run as the picker names it — an experiment: what it tested (when named),
- * which versions, on how many questions and tries, and when.
- */
-function runLabel(r: {
-  name: string | null
-  versions: string[]
-  questions: number
-  tries: number
-  createdAt: number
-}) {
-  const when = new Date(r.createdAt).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  })
-  const scope = `${r.questions} question${r.questions === 1 ? "" : "s"}${r.tries > 1 ? ` × ${r.tries} tries` : ""}`
-  return [r.name, r.versions.join(" vs "), scope, when]
-    .filter(Boolean)
-    .join(" · ")
-}
-
-/** Against the baseline, in a cell: questions that got better and worse. */
-function ChangeVsBaseline({
-  change,
-}: {
-  change: EvalGrid["checks"][number]["compare"] | undefined
-}) {
-  if (!change || !change.pairs)
-    return <div className="mt-1.5 text-ink-tertiary">no shared questions</div>
-  return (
-    <div
-      className="mt-1.5 whitespace-nowrap"
-      title={`vs baseline on ${change.pairs} shared questions · p = ${change.p.toFixed(3)}`}
-    >
-      <span
-        className={
-          change.improved
-            ? "text-emerald-700 dark:text-emerald-400"
-            : "text-ink-tertiary"
-        }
-      >
-        +{change.improved}
-      </span>{" "}
-      <span
-        className={
-          change.regressed
-            ? "text-red-600 dark:text-red-400"
-            : "text-ink-tertiary"
-        }
-      >
-        −{change.regressed}
-      </span>
-      <span className="text-ink-tertiary">
-        {" "}
-        vs baseline{change.p < 0.05 ? " · real" : ""}
-      </span>
-    </div>
-  )
-}
-
-const SECTIONS = [
-  { id: "summary", label: "Summary" },
-  { id: "checks", label: "Checks" },
-  { id: "questions", label: "Questions" },
-  { id: "cost", label: "Cost" },
-]
-
-const pct = (a: number, b: number) => (b ? Math.round((100 * a) / b) : 0)
-
-/** The one sentence a person wants before the grid: did the candidate win, and can we tell yet? */
-function Verdict({ grid, questions }: { grid: EvalGrid; questions: number }) {
-  const [a, b] = grid.versions
-  const paired = grid.checks[0]?.compare?.pairs ?? 0
-  const tries = `${paired || questions} question${paired === 1 ? "" : "s"}${grid.attempts > 1 ? ` × ${grid.attempts} tries` : ""}`
-  const overall = grid.versions.map((v, i) => {
-    let passed = 0
-    let total = 0
-    for (const c of grid.checks)
-      ((passed += c.cells[i].passed), (total += c.cells[i].total))
-    return { v, rate: total ? passed / total : 0, total }
-  })
-  if (!b)
-    return (
-      <div className={cn(CARD, "space-y-2 px-5 py-4")}>
-        <Pill>{a}</Pill>
-        <p className="text-[15px] text-ink-primary">
-          <span className="font-semibold">{a}</span> passed{" "}
-          <span className="font-semibold">
-            {Math.round((overall[0]?.rate ?? 0) * 100)}%
-          </span>{" "}
-          of {overall[0]?.total ?? 0} verdicts on {tries}.
-        </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Segmented
+            value={filter}
+            onChange={setFilter}
+            options={[
+              ["all", "All"],
+              ["changed", "Changed"],
+              ["failing", "Still failing"],
+            ]}
+          />
+          <span className="flex-1" />
+          {focus && (
+            <button
+              type="button"
+              aria-expanded={byCheck}
+              onClick={() => setByCheck(!byCheck)}
+              className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-[13px]"
+            >
+              By check <ChevronDown className={cn("size-3.5 transition-transform", byCheck && "rotate-180")} />
+            </button>
+          )}
+        </div>
+        {byCheck && focus && <ByCheck grid={grid} base={base} focus={focus} />}
       </div>
-    )
-  const moved = grid.checks.filter(
-    (c) => c.compare && c.compare.improved + c.compare.regressed > 0
-  )
-  const better = moved.filter((c) => c.compare!.improved > c.compare!.regressed)
-  const worse = moved.filter((c) => c.compare!.regressed > c.compare!.improved)
-  const real = moved.filter((c) => c.compare!.p < 0.05)
-  const names = (cs: typeof moved) =>
-    cs.map((c) => c.label.toLowerCase()).join(", ")
-  return (
-    <div className={cn(CARD, "space-y-3 px-5 py-4")}>
-      <Pill>
-        {a} vs {b}
-      </Pill>
-      <p className="max-w-[80ch] text-[15px] leading-relaxed text-ink-primary">
-        <span className="font-semibold">{b}</span> passed{" "}
-        <span className="font-semibold">
-          {Math.round(overall[1].rate * 100)}%
-        </span>{" "}
-        of its verdicts, <span className="font-semibold">{a}</span>{" "}
-        <span className="font-semibold">
-          {Math.round(overall[0].rate * 100)}%
-        </span>
-        . {b} is{" "}
-        {better.length ? <>better on {names(better)}</> : "better on nothing"}
-        {worse.length ? (
-          <> and worse on {names(worse)}</>
-        ) : (
-          " and worse on nothing"
-        )}
-        .
-      </p>
-      <p className="text-sm text-ink-tertiary">
-        {real.length
-          ? `The change in ${names(real)} is larger than chance explains. `
-          : "None of it is larger than chance explains yet — "}
-        {tries}.
-        {!real.length && paired < 15 && " Run more questions before deciding."}
-      </p>
-    </div>
-  )
-}
 
-const TRUST: Record<string, { label: string; tone: string; means: string }> = {
-  unknown: {
-    label: "Not yet known",
-    tone: "text-ink-tertiary",
-    means: "Fewer than 20 of your calls: the number is the judge's word only.",
-  },
-  trusted: {
-    label: "Trusted",
-    tone: "text-emerald-700 dark:text-emerald-400",
-    means: "Agrees with your calls at least 9 times in 10.",
-  },
-  gating: {
-    label: "Can gate",
-    tone: "text-emerald-700 dark:text-emerald-400",
-    means: "50+ calls at 90%+ agreement: safe to block a publish on.",
-  },
-  disputed: {
-    label: "Disputed",
-    tone: "text-amber-700 dark:text-amber-400",
-    means: "You overrule this judge more than 1 time in 10. Reword the check.",
-  },
-}
-
-/** Per question, its attempts in order: the dot strip a cell draws. */
-function strips(
-  grid: EvalGrid
-): Map<string, { inputId: string; tries: boolean[] }[]> {
-  const out = new Map<string, Map<string, boolean[]>>()
-  for (const v of grid.verdicts) {
-    const k = `${v.checkId}|${v.version}`
-    const byInput = out.get(k) ?? out.set(k, new Map()).get(k)!
-    const tries =
-      byInput.get(v.inputId) ?? byInput.set(v.inputId, []).get(v.inputId)!
-    tries[v.attempt] = !v.failed
-  }
-  return new Map(
-    [...out].map(([k, m]) => [
-      k,
-      [...m]
-        .sort(([x], [y]) => x.localeCompare(y, undefined, { numeric: true }))
-        // Object.values skips the holes a missing attempt leaves.
-        .map(([inputId, tries]) => ({ inputId, tries: Object.values(tries) })),
-    ])
-  )
-}
-
-/** Where a check's name leads: its editor on the Checks page, with the same agent and set of checks. */
-type CheckLink = { agent: string; dataset?: string; rubric: string }
-
-function Grid({
-  grid,
-  open,
-  onOpen,
-  checkLink,
-}: {
-  grid: EvalGrid
-  open: Cell | null
-  onOpen: (c: Cell) => void
-  checkLink?: CheckLink
-}) {
-  const b = grid.versions[1]
-  const dots = useMemo(() => strips(grid), [grid])
-  return (
-    <div className="overflow-x-auto border-t border-primary-border">
-      <table className="w-full min-w-[620px] border-separate border-spacing-0 text-xs tabular-nums">
-        <thead>
-          <tr className="text-left text-ink-secondary">
-            <th className="px-4 py-2.5 font-medium">Check</th>
-            {grid.versions.map((v, i) => (
-              <th key={v} className="px-3 py-2.5 font-medium">
-                {v}
-                {i === 0 && grid.versions.length > 2 && (
-                  <span className="ml-1.5 font-normal text-ink-tertiary">
-                    baseline
-                  </span>
-                )}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-full border-collapse text-[13px]">
+          <thead>
+            <tr className="border-primary-border border-b">
+              <th className="bg-primary-bg text-ink-tertiary sticky left-0 z-10 w-10 px-3 py-2 text-left text-xs font-medium">#</th>
+              <th className="bg-primary-bg text-ink-tertiary sticky left-10 z-10 w-[480px] max-w-[480px] px-3 py-2 text-left text-xs font-medium">Input</th>
+              {grid.columns.map((c, n) => (
+                <th key={c.label} className="px-2 py-2 text-center align-bottom">
+                  <ColumnMenu
+                    column={c}
+                    isBase={n === 0}
+                    isFocus={c.label === focus?.label}
+                    rate={columnRate(grid, cells, c.label)}
+                    tries={triesOf(c)}
+                    canHide={grid.columns.length > 1}
+                    onBaseline={() => onBaseline(c.label)}
+                    onFocus={() => onFocus(c.label)}
+                    onHide={() => onHide(c.label)}
+                  />
+                </th>
+              ))}
+              <th className="w-full px-2 py-2 text-left align-bottom">
+                <AddColumn hidden={hidden} onShow={onShow} onRun={onRun} />
               </th>
-            ))}
-            {b && grid.versions.length === 2 && (
-              <th
-                className="px-3 py-2.5 font-medium"
-                title="Question by question: how many passed more often (+) or less often (−)"
-              >
-                Change
-              </th>
-            )}
-            <th className="px-3 py-2.5 font-medium">Trust</th>
-          </tr>
-        </thead>
-        <tbody>
-          {grid.checks.map((c) => {
-            const trust = TRUST[c.trust?.level ?? "unknown"]
-            const ruled = c.trust?.ruled ?? 0
-            return (
-              <tr key={c.id} className="align-top">
-                <td className="w-[30%] border-t border-primary-border px-4 py-3">
-                  {checkLink ? (
-                    <Link
-                      to="/evals/checks"
-                      search={{ ...checkLink, check: c.id }}
-                      title="Open this check"
-                      className="text-[13px] font-medium text-ink-primary underline-offset-2 hover:underline"
-                    >
-                      {c.label}
-                    </Link>
-                  ) : (
-                    <div className="text-[13px] font-medium text-ink-primary">
-                      {c.label}
-                    </div>
-                  )}
-                  <div
-                    className="mt-1 line-clamp-2 text-ink-tertiary"
-                    title={c.sentence}
-                  >
-                    {c.sentence}
-                  </div>
-                  <div className="mt-1 text-ink-tertiary">
-                    {c.kind === "counted"
-                      ? "Read from the tool log"
-                      : `Asked of ${c.judge}`}
-                  </div>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map(({ input }) => (
+              <tr key={input.id} className="border-primary-border border-b last:border-b-0">
+                <td className="bg-primary-bg text-ink-tertiary sticky left-0 z-10 px-3 py-1.5 tabular-nums">{input.id}</td>
+                <td className="bg-primary-bg sticky left-10 z-10 w-[480px] max-w-[480px] px-3 py-1.5">
+                  <InputText input={input} />
                 </td>
-                {c.cells.map((cell, i) => {
-                  const version = grid.versions[i]
-                  const active =
-                    open?.checkId === c.id && open.version === version
-                  return (
-                    <td
-                      key={version}
-                      className="border-t border-primary-border p-1.5"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => onOpen({ checkId: c.id, version })}
-                        aria-pressed={active}
-                        className={cn(
-                          "w-full rounded-md px-2.5 py-2 text-left outline-none hover:bg-primary-bg-hover focus-visible:ring-2 focus-visible:ring-ring",
-                          active &&
-                            "bg-primary-bg-active smooth-shadow-ring-xs smooth-ring-primary-border-active"
-                        )}
-                      >
-                        <div className="flex items-baseline gap-1.5">
-                          <span className="text-[15px] font-semibold text-ink-primary">
-                            {cell.total
-                              ? `${pct(cell.passed, cell.total)}%`
-                              : "—"}
-                          </span>
-                          <span className="text-ink-tertiary">
-                            {cell.passed}/{cell.total}
-                          </span>
-                        </div>
-                        <DotStrip
-                          questions={dots.get(`${c.id}|${version}`) ?? []}
-                        />
-                        {grid.attempts > 1 && (
-                          <div className="mt-1.5 whitespace-nowrap text-ink-tertiary">
-                            {cell.allPassed} of {cell.inputs} every time
-                          </div>
-                        )}
-                        {i > 0 && grid.versions.length > 2 && (
-                          <ChangeVsBaseline change={c.changes[version]} />
-                        )}
-                      </button>
-                    </td>
-                  )
-                })}
-                {b && grid.versions.length === 2 && (
-                  <td className="border-t border-primary-border px-3 py-3.5">
-                    {c.compare && c.compare.pairs ? (
-                      <>
-                        <div className="text-[13px] whitespace-nowrap">
-                          <span
-                            className={
-                              c.compare.improved
-                                ? "text-emerald-700 dark:text-emerald-400"
-                                : "text-ink-tertiary"
-                            }
-                          >
-                            +{c.compare.improved}
-                          </span>{" "}
-                          <span
-                            className={
-                              c.compare.regressed
-                                ? "text-red-600 dark:text-red-400"
-                                : "text-ink-tertiary"
-                            }
-                          >
-                            −{c.compare.regressed}
-                          </span>
-                        </div>
-                        <div
-                          className="mt-1 text-ink-tertiary"
-                          title={`p = ${c.compare.p.toFixed(3)}`}
-                        >
-                          {c.compare.p < 0.05
-                            ? "real difference"
-                            : c.compare.improved + c.compare.regressed
-                              ? "could be chance"
-                              : "no change"}
-                        </div>
-                        <div className="mt-0.5 whitespace-nowrap text-ink-tertiary">
-                          {Math.round(c.compare.rateA * 100)}% →{" "}
-                          {Math.round(c.compare.rateB * 100)}%
-                        </div>
-                      </>
-                    ) : (
-                      <span className="text-ink-tertiary">—</span>
-                    )}
+                {grid.columns.map((c) => (
+                  <td key={c.label} className="px-2 py-1.5 text-center whitespace-nowrap">
+                    <CellButton
+                      cell={cell(input.id, c.label)}
+                      baseRate={c.label === base.label ? null : (cell(input.id, base.label)?.rate ?? null)}
+                      label={`Input ${input.id} on ${c.label}`}
+                      onOpen={() => onOpen({ inputId: input.id, column: c.label })}
+                    />
                   </td>
-                )}
-                <td
-                  className="border-t border-primary-border px-3 py-3.5"
-                  title={trust.means}
-                >
-                  <div
-                    className={cn(
-                      "text-[13px] font-medium whitespace-nowrap",
-                      trust.tone
-                    )}
-                  >
-                    {trust.label}
-                  </div>
-                  <div className="mt-1 whitespace-nowrap text-ink-tertiary">
-                    {ruled < 20
-                      ? `${ruled} of 20 calls`
-                      : `${pct(c.trust!.agreed, ruled)}% of ${ruled} agree`}
-                  </div>
-                  {ruled < 20 && (
-                    <div className="mt-1.5 h-1 w-20 overflow-hidden rounded-full bg-primary-border">
-                      <div
-                        className="h-full bg-ink-tertiary"
-                        style={{ width: `${(ruled / 20) * 100}%` }}
-                      />
-                    </div>
-                  )}
-                  {!!c.trust?.falsePasses && (
-                    <div className="mt-1 text-amber-700 dark:text-amber-400">
-                      passed {c.trust.falsePasses} you failed
-                    </div>
-                  )}
-                </td>
+                ))}
+                <td />
               </tr>
-            )
-          })}
-        </tbody>
-      </table>
-      {grid.errors.some((e) => e.errors) && (
-        <p className="border-t border-primary-border px-4 py-2 text-xs text-ink-tertiary">
-          {grid.errors
-            .filter((e) => e.errors)
-            .map(
-              (e) =>
-                `${e.version}: ${e.errors} thread${e.errors === 1 ? "" : "s"} failed to run and are left out`
-            )
-            .join(" · ")}
-        </p>
-      )}
-    </div>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-ink-tertiary border-primary-border border-t px-5 py-2.5 text-xs">
+        {grid.inputs.length} inputs · {grid.checks.length} checks per answer ·{" "}
+        <a className="underline underline-offset-2" href={`/evals/checks?agent=${encodeURIComponent(agent)}`}>
+          edit checks
+        </a>
+      </p>
+    </section>
   )
 }
 
-/**
- * One cluster per question, one dot per try: filled passed, hollow failed.
- * A rate says how often; the strip says whether it is the same questions
- * failing every time or a coin toss everywhere, which a rate cannot.
- */
-function DotStrip({
-  questions,
-}: {
-  questions: { inputId: string; tries: boolean[] }[]
-}) {
+function Segmented<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: [T, string][] }) {
   return (
-    <div className="mt-2 flex flex-wrap gap-x-1.5 gap-y-1" aria-hidden>
-      {questions.map((q) => (
-        <span
-          key={q.inputId}
-          className="flex gap-[2px]"
-          title={`#${q.inputId}: ${q.tries.filter(Boolean).length} of ${q.tries.length}`}
+    <div role="radiogroup" className="smooth-shadow-ring-xs smooth-ring-primary-border inline-flex rounded-lg p-0.5 text-xs">
+      {options.map(([v, label]) => (
+        <button
+          key={v}
+          type="button"
+          role="radio"
+          aria-checked={value === v}
+          onClick={() => onChange(v)}
+          className={cn("rounded-md px-2.5 py-1", value === v ? "bg-primary-bg-active text-ink-primary font-medium" : "text-ink-secondary hover:text-ink-primary")}
         >
-          {q.tries.map((ok, i) => (
-            <span
-              key={i}
-              className={cn(
-                "size-[7px] rounded-full",
-                ok ? "bg-ink-secondary" : "ring-1 ring-ink-tertiary ring-inset"
-              )}
-            />
-          ))}
-        </span>
+          {label}
+        </button>
       ))}
     </div>
   )
 }
 
-// ─── Review ────────────────────────────────────────────────────────────────
+/**
+ * Per check, on the inputs both columns answered: the share that passed, the
+ * baseline's mark on the same bar. Counts alone would mislead when one
+ * column answered fewer inputs, or tried each more than once.
+ */
+function ByCheck({ grid, base, focus }: { grid: EvalGrid; base: Column; focus: Column }) {
+  const inputsOf = (checkId: string, label: string) => new Set(grid.verdicts.filter((v) => v.checkId === checkId && v.version === label).map((v) => v.inputId))
+  const rateOf = (checkId: string, label: string, only: Set<string>) => {
+    const vs = grid.verdicts.filter((v) => v.checkId === checkId && v.version === label && only.has(v.inputId))
+    return { pass: vs.filter((v) => !v.failed).length, of: vs.length }
+  }
+  const share = (x: { pass: number; of: number }) => (x.of ? x.pass / x.of : 0)
+  return (
+    <table className="w-full text-[13px] tabular-nums" aria-label="By check">
+      <tbody>
+        {grid.checks.map((c) => {
+          const theirs = inputsOf(c.id, focus.label)
+          const both = new Set([...inputsOf(c.id, base.label)].filter((id) => theirs.has(id)))
+          const a = rateOf(c.id, base.label, both), b = rateOf(c.id, focus.label, both)
+          const d = Math.round((share(b) - share(a)) * 100)
+          return (
+            <tr key={c.id}>
+              <td className="text-ink-secondary py-1 pr-4" title={c.sentence}>{c.label}</td>
+              <td className="w-[34%] py-1">
+                <span className="bg-primary-bg-hover relative block h-1.5 rounded-full">
+                  <i className="absolute inset-y-0 left-0 rounded-full bg-[color:var(--eval-good)]" style={{ width: `${share(b) * 100}%` }} />
+                  <u className="bg-ink-tertiary absolute -top-[3px] h-3 w-0.5 rounded" style={{ left: `calc(${share(a) * 100}% - 1px)` }} />
+                </span>
+              </td>
+              <td className="w-28 py-1 text-right">
+                {b.pass}/{b.of} <span className="text-ink-tertiary">was {a.pass}/{a.of}</span>
+              </td>
+              <td className={cn("w-14 py-1 text-right text-xs font-semibold", d > 0 ? "text-[color:var(--eval-good-ink)]" : d < 0 ? "text-[color:var(--eval-bad-ink)]" : "text-ink-tertiary")}>
+                {!both.size ? "—" : d > 0 ? `+${d} pts` : d < 0 ? `${d} pts` : "same"}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
+function ColumnMenu({
+  column,
+  isBase,
+  isFocus,
+  rate,
+  tries,
+  canHide,
+  onBaseline,
+  onFocus,
+  onHide,
+}: {
+  column: Column
+  isBase: boolean
+  isFocus: boolean
+  rate: number | null
+  tries: number
+  canHide: boolean
+  onBaseline: () => void
+  onFocus: () => void
+  onHide: () => void
+}) {
+  const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
+  const [open, setOpen] = useState(false)
+  const pick = (f: () => void) => () => (setOpen(false), f())
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Popover.Trigger render={<button type="button" className="group inline-flex flex-col items-center" />}>
+        <span className={cn("flex items-center gap-1 text-xs font-semibold whitespace-nowrap", isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary")}>
+          {column.version}
+          {isBase && <span className="border-primary-border text-ink-tertiary rounded-full border px-1.5 text-[10px] font-medium">baseline</span>}
+          <ChevronDown className="size-3" />
+        </span>
+        <span className="text-ink-tertiary text-[11px] whitespace-nowrap tabular-nums">
+          {day(column.at)} · {pct(rate)}
+          {column.spent > 0 && ` · ${money(column.spent)}`}
+          {tries > 1 && ` · ${tries} tries`}
+        </span>
+      </Popover.Trigger>
+      <Popover.Content align="start" className="w-72 p-1.5">
+        <div className="text-ink-tertiary px-2.5 pt-1 pb-1.5 text-xs">
+          {column.runName ?? "Unnamed run"} · {day(column.at)}
+          {column.spent > 0 && ` · spent ${money(column.spent)}`}
+        </div>
+        {!isBase && (
+          <button type="button" className={item} onClick={pick(onBaseline)}>
+            Use as baseline <span className="text-ink-tertiary text-xs">The others are compared with it</span>
+          </button>
+        )}
+        {!isBase && !isFocus && (
+          <button type="button" className={item} onClick={pick(onFocus)}>
+            Compare in the headline <span className="text-ink-tertiary text-xs">Against the baseline</span>
+          </button>
+        )}
+        {canHide && (
+          <button type="button" className={item} onClick={pick(onHide)}>
+            Hide column <span className="text-ink-tertiary text-xs">Its answers are kept</span>
+          </button>
+        )}
+      </Popover.Content>
+    </Popover>
+  )
+}
+
+/** The last header cell: show an earlier result as a column, or run something new. */
+function AddColumn({
+  hidden,
+  onShow,
+  onRun,
+}: {
+  hidden: { runId: string; version: string; run: { name: string | null; createdAt: number; questions: number; tries: number } }[]
+  onShow: (r: Result) => void
+  onRun: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Popover.Trigger
+        render={
+          <button
+            type="button"
+            className="border-primary-border text-ink-secondary hover:text-ink-primary hover:bg-primary-bg-hover flex h-7 items-center gap-1 rounded-full border border-dashed px-3 text-xs whitespace-nowrap"
+          />
+        }
+      >
+        <Plus className="size-3.5" /> Run
+      </Popover.Trigger>
+      <Popover.Content align="start" className="w-80 p-1.5">
+        <button type="button" onClick={() => (setOpen(false), onRun())} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-2 text-left text-sm">
+          Run a configuration
+          <span className="text-ink-tertiary text-xs">New answers from any version, priced before it starts</span>
+        </button>
+        {hidden.length > 0 && (
+          <>
+            <div className="text-ink-tertiary px-2.5 pt-2 pb-1 text-xs">Or show answers you already have · free</div>
+            <ul className="max-h-72 overflow-y-auto">
+              {hidden.map((h) => (
+                <li key={`${h.runId}|${h.version}`}>
+                  <button
+                    type="button"
+                    onClick={() => (setOpen(false), onShow({ runId: h.runId, version: h.version }))}
+                    className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
+                  >
+                    {h.version}
+                    <span className="text-ink-tertiary text-xs tabular-nums">
+                      {h.run.name ? `${h.run.name} · ` : ""}
+                      {day(h.run.createdAt)} · {h.run.questions} inputs{h.run.tries > 1 ? ` × ${h.run.tries} tries` : ""}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </Popover.Content>
+    </Popover>
+  )
+}
+
+function CellButton({ cell, baseRate, label, onOpen }: { cell: Cell | undefined; baseRate: number | null; label: string; onOpen: () => void }) {
+  if (!cell) return <span className="text-ink-tertiary text-xs">—</span>
+  const broke = cell.tries.every((t) => t.error)
+  if (broke)
+    return (
+      <button type="button" onClick={onOpen} title={cell.tries[0].error ?? undefined} className="border-ink-tertiary text-ink-secondary inline-flex h-7 min-w-[76px] items-center justify-center rounded-full border border-dashed px-2.5 text-xs">
+        Broke
+      </button>
+    )
+  if (cell.rate === null)
+    return (
+      <button type="button" onClick={onOpen} className="border-ink-tertiary text-ink-secondary inline-flex h-7 min-w-[76px] items-center justify-center rounded-full border border-dashed px-2.5 text-xs">
+        Not graded
+      </button>
+    )
+  const graded = cell.tries.filter((t) => !t.error && t.of)
+  const of = Math.max(...graded.map((t) => t.of))
+  const differ = new Set(graded.map((t) => t.pass)).size > 1
+  const d = baseRate === null ? 0 : Math.sign(cell.rate - baseRate)
+  return (
+    <span className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`${label}: ${graded.map((t) => t.pass).join(" and ")} of ${of}`}
+        style={{ background: passColor(cell.rate) }}
+        className="text-ink-primary inline-flex min-w-[76px] flex-col items-center justify-center rounded-full px-2.5 py-1 text-xs leading-tight font-semibold tabular-nums hover:ring-2 hover:ring-[color:var(--color-ink-tertiary)]"
+      >
+        {graded.map((t) => t.pass).join(" · ")}/{of}
+        {graded.length > 1 && <small className={cn("text-[9.5px] font-medium", differ ? "text-[color:var(--eval-bad-ink)]" : "text-ink-secondary")}>{graded.length} tries{differ ? " · differ" : ""}</small>}
+      </button>
+      <span aria-hidden className={cn("w-2 text-[11px]", d > 0 ? "text-[color:var(--eval-good-ink)]" : "text-[color:var(--eval-bad-ink)]", !d && "invisible")}>
+        {d > 0 ? "▲" : "▼"}
+      </span>
+    </span>
+  )
+}
 
 /**
- * The threads behind one cell, one at a time. Unruled and least certain come
- * first: a call where the judge was unsure teaches the most about the judge.
+ * An input, one line. Resting on it grows its own block in place — the whole
+ * text, any follow-ups — over the rows below, so nothing is shown twice and
+ * the table doesn't jump.
  */
-function Review({
-  agent,
-  grid,
-  cell,
-  onClose,
-  onRuled,
-}: {
-  agent: string
-  grid: EvalGrid
-  cell: Cell
-  onClose: () => void
-  onRuled: () => void
-}) {
-  const check = grid.checks.find((c) => c.id === cell.checkId)
-  // Order is fixed when the panel opens, so a call does not reshuffle the list under the cursor.
-  const [order] = useState(() =>
-    grid.verdicts
-      .filter((v) => v.checkId === cell.checkId && v.version === cell.version)
-      .sort(
-        (x, y) =>
-          Number(x.ruling !== null) - Number(y.ruling !== null) ||
-          (x.confidence ?? 1) - (y.confidence ?? 1) ||
-          x.inputId.localeCompare(y.inputId, undefined, { numeric: true }) ||
-          x.attempt - y.attempt
-      )
-      .map((v) => v.threadId)
-  )
-  const rows = useMemo(() => {
-    const by = new Map(
-      grid.verdicts
-        .filter((v) => v.checkId === cell.checkId && v.version === cell.version)
-        .map((v) => [v.threadId, v])
-    )
-    return order.map((id) => by.get(id)).filter((r): r is Row => !!r)
-  }, [grid, cell, order])
-  const [at, setAt] = useState(0)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const row = rows[Math.min(at, rows.length - 1)] as Row | undefined
-  const ruledCount = rows.filter((r) => r.ruling !== null).length
-
-  const rule = useCallback(
-    async (failed: boolean) => {
-      if (!row || saving) return
-      setSaving(true)
-      setError(null)
-      // Making the call you already made takes it back.
-      const res = await saveEvalRulingFn({
-        data: {
-          agent,
-          threadId: row.threadId,
-          checkId: row.checkId,
-          failed: row.ruling === failed ? null : failed,
-        },
-      })
-      setSaving(false)
-      if (!res.ok) return setError(`Your call was not saved: ${res.error}.`)
-      onRuled()
-      if (row.ruling !== failed) setAt((i) => Math.min(i + 1, rows.length - 1))
-    },
-    [agent, row, rows.length, saving, onRuled]
-  )
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement
-      if (
-        e.metaKey ||
-        e.ctrlKey ||
-        e.altKey ||
-        /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) ||
-        t.isContentEditable
-      )
-        return
-      const k = e.key.toLowerCase()
-      if (k === "p") void rule(false)
-      else if (k === "f") void rule(true)
-      else if (k === "j" || e.key === "ArrowDown")
-        setAt((i) => Math.min(i + 1, rows.length - 1))
-      else if (k === "k" || e.key === "ArrowUp")
-        setAt((i) => Math.max(i - 1, 0))
-      else return
-      e.preventDefault()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [rule, rows.length])
-
-  if (!check) return null
-
+function InputText({ input }: { input: EvalGrid["inputs"][number] }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const [grown, setGrown] = useState<DOMRect | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const show = () => {
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => {
+      const el = ref.current
+      if (!el) return
+      if (el.scrollWidth <= el.clientWidth && !input.followUps.length) return
+      setGrown(el.getBoundingClientRect())
+    }, 220)
+  }
+  const hide = () => {
+    clearTimeout(timer.current)
+    setGrown(null)
+  }
+  useEffect(() => () => clearTimeout(timer.current), [])
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-start gap-3 border-b border-primary-border px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-ink-primary">
-            {check.label}{" "}
-            <span className="font-normal text-ink-tertiary">
-              on {cell.version}
-            </span>
-          </div>
-          <div
-            className="mt-0.5 line-clamp-2 text-xs text-ink-tertiary"
-            title={check.sentence}
-          >
-            {check.sentence}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close review"
-          className="rounded p-0.5 text-ink-tertiary hover:text-ink-primary"
+    <div onMouseEnter={show} onMouseLeave={hide} className="relative">
+      <span ref={ref} className="text-ink-primary block truncate leading-7">
+        {input.prompt}
+      </span>
+      {grown && (
+        <div
+          className="border-primary-border bg-primary-bg text-ink-primary fixed z-40 space-y-1.5 rounded-lg border px-2.5 py-1.5 leading-relaxed shadow-lg"
+          style={{ left: grown.left - 10, top: grown.top - 1, width: grown.width + 20 }}
         >
-          <X className="size-4" />
-        </button>
-      </div>
-
-      <div className="flex items-center gap-2 border-b border-primary-border px-4 py-2 text-xs">
-        <button
-          type="button"
-          aria-label="Previous thread"
-          onClick={() => setAt((i) => Math.max(i - 1, 0))}
-          className="rounded p-0.5 text-ink-secondary hover:text-ink-primary disabled:opacity-40"
-          disabled={at === 0}
-        >
-          <ChevronUp className="size-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Next thread"
-          onClick={() => setAt((i) => Math.min(i + 1, rows.length - 1))}
-          className="rounded p-0.5 text-ink-secondary hover:text-ink-primary disabled:opacity-40"
-          disabled={at >= rows.length - 1}
-        >
-          <ChevronDown className="size-4" />
-        </button>
-        <span className="text-ink-secondary tabular-nums">
-          {rows.length ? at + 1 : 0} of {rows.length}
-        </span>
-        <span className="text-ink-tertiary">· {ruledCount} called</span>
-        <div className="ml-auto flex gap-[3px]" aria-hidden>
-          {rows.map((r, i) => (
-            <button
-              key={r.threadId}
-              type="button"
-              tabIndex={-1}
-              onClick={() => setAt(i)}
-              title={`#${r.inputId}${grid.attempts > 1 ? ` try ${r.attempt + 1}` : ""}`}
-              className={cn(
-                "h-3 w-1.5 rounded-[2px]",
-                r.ruling === null
-                  ? "bg-primary-border"
-                  : r.ruling === r.failed
-                    ? "bg-ink-secondary"
-                    : "bg-amber-500",
-                i === at && "h-4 bg-ink-primary"
-              )}
-            />
+          <div>{input.prompt}</div>
+          {input.followUps.map((f, n) => (
+            <div key={n} className="text-ink-secondary text-xs">
+              <span className="text-ink-tertiary mr-2">Then asks</span>
+              {f}
+            </div>
           ))}
-        </div>
-      </div>
-
-      {row ? (
-        <Thread
-          key={row.threadId}
-          agent={agent}
-          row={row}
-          repeated={grid.attempts > 1}
-        />
-      ) : (
-        <p className="p-4 text-sm text-ink-tertiary">Nothing to review.</p>
-      )}
-
-      {row && (
-        <div className="space-y-2 border-t border-primary-border px-4 py-3">
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-ink-secondary">The judge said</span>
-            <span
-              className={cn(
-                "font-medium",
-                row.failed
-                  ? "text-red-600 dark:text-red-400"
-                  : "text-emerald-700 dark:text-emerald-400"
-              )}
-            >
-              {row.failed ? "fail" : "pass"}
-            </span>
-            <span className="text-ink-tertiary">
-              ({row.answer.replace(/_/g, " ")}
-              {row.confidence !== null
-                ? `, ${Math.round(row.confidence * 100)}% sure`
-                : ""}
-              )
-            </span>
-            {row.ruling !== null && row.ruling !== row.failed && (
-              <span className="ml-auto text-amber-700 dark:text-amber-400">
-                you disagree
-              </span>
-            )}
-          </div>
-          <div
-            className="grid grid-cols-2 gap-2"
-            role="group"
-            aria-label="Your call"
-          >
-            <CallButton
-              on={row.ruling === false}
-              disabled={saving}
-              onClick={() => void rule(false)}
-              hint="P"
-            >
-              Pass
-            </CallButton>
-            <CallButton
-              on={row.ruling === true}
-              disabled={saving}
-              onClick={() => void rule(true)}
-              hint="F"
-            >
-              Fail
-            </CallButton>
-          </div>
-          {error ? (
-            <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
-          ) : (
-            <p className="text-xs text-ink-tertiary">
-              <Key>J</Key> <Key>K</Key> to move · <Key>Esc</Key> to close · make
-              the same call again to take it back
-            </p>
-          )}
         </div>
       )}
     </div>
   )
 }
 
-function CallButton({
-  on,
-  disabled,
-  onClick,
-  hint,
-  children,
-}: {
-  on: boolean
-  disabled: boolean
-  onClick: () => void
-  hint: string
-  children: React.ReactNode
-}) {
+function NothingRun({ inputs, onRun }: { inputs: number; onRun: () => void }) {
   return (
-    <button
-      type="button"
-      aria-pressed={on}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        "flex h-9 items-center justify-center gap-2 rounded-md text-sm font-medium smooth-shadow-ring-xs outline-none smooth-ring-primary-border focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60",
-        on
-          ? "bg-ink-primary text-primary-bg"
-          : "text-ink-primary hover:bg-primary-bg-hover"
-      )}
-    >
-      {children}
-      <span
-        className={cn(
-          "text-xs font-normal",
-          on ? "opacity-70" : "text-ink-tertiary"
-        )}
-      >
-        {hint}
-      </span>
-    </button>
+    <section className="border-primary-border bg-primary-bg space-y-3 rounded-xl border px-5 py-5">
+      <h2 className="text-ink-primary text-[22px] font-semibold">Nothing has run yet</h2>
+      <p className="text-ink-secondary max-w-[62ch] text-sm">
+        {inputs} input{inputs === 1 ? " is" : "s are"} ready. Run a configuration to get its answers, graded against what each input
+        expects.
+      </p>
+      <button type="button" onClick={onRun} className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium">
+        Run a configuration
+      </button>
+    </section>
   )
 }
 
-function Thread({
+// ─── One answer ──────────────────────────────────────────────────────────
+
+/** A verdict's answer, in words; the raw value when there is no better one. */
+const WHY: Record<string, string> = {
+  partly_grounded: "Only partly from what it read",
+  unsupported: "Not from anything it read",
+  nothing_read: "It read nothing",
+  asked_to_clarify: "Asked a question instead of answering",
+  misses_the_point: "Misses the point of the good answer",
+  partial: "Partly matches the good answer",
+}
+
+/**
+ * One configuration's answer to one input: which try, each check with why,
+ * the whole conversation as its user saw it — tool calls and what came back
+ * — and a way to say the grader got a check wrong.
+ */
+function AnswerDrawer({
   agent,
-  row,
-  repeated,
+  grid,
+  at,
+  onClose,
+  onRuled,
 }: {
   agent: string
-  row: Row
-  repeated: boolean
+  grid: EvalGrid
+  at: { inputId: string; column: string } | null
+  onClose: () => void
+  onRuled: () => void
 }) {
+  const cells = useMemo(() => cellsOf(grid), [grid])
+  const [tryN, setTryN] = useState(0)
+  useEffect(() => setTryN(0), [at?.inputId, at?.column])
+  const cell = at ? cells.get(`${at.inputId}|${at.column}`) : undefined
+  const input = at ? grid.inputs.find((i) => i.id === at.inputId) : undefined
+  const allTries = cell?.tries ?? []
+  const pick = allTries.at(Math.min(tryN, allTries.length - 1))
+  const verdicts = pick ? grid.verdicts.filter((v) => v.threadId === pick.threadId) : []
+  const checkOf = (id: string) => grid.checks.find((c) => c.id === id)
+
+  const rule = async (v: Verdict, failed: boolean | null) => {
+    await saveEvalRulingFn({ data: { agent, threadId: v.threadId, checkId: v.checkId, failed } })
+    onRuled()
+  }
+
   return (
-    <ThreadView
-      agent={agent}
-      threadId={row.threadId}
-      caption={`Question #${row.inputId}${repeated ? `, try ${row.attempt + 1}` : ""}`}
-    >
-      <NoteBox agent={agent} threadId={row.threadId} />
-    </ThreadView>
+    <Drawer open={!!at} onOpenChange={(o) => !o && onClose()}>
+      <Drawer.Content className={EDITOR_DRAWER}>
+        {at && input && pick && (
+          <div className="flex h-full flex-col">
+            <Drawer.Header className="border-primary-border space-y-1 border-b px-5">
+              <Drawer.Description className="text-ink-tertiary text-xs tabular-nums">
+                Input {input.id} · {at.column}
+              </Drawer.Description>
+              <Drawer.Title className="text-ink-primary text-base leading-snug">{input.prompt}</Drawer.Title>
+              {allTries.length > 1 && (
+                <div className="pt-1">
+                  <Segmented
+                    value={String(tryN)}
+                    onChange={(v) => setTryN(Number(v))}
+                    options={allTries.map((t, n) => [String(n), `Try ${n + 1}${t.error ? " · broke" : ` · ${t.pass}/${t.of}`}`])}
+                  />
+                </div>
+              )}
+            </Drawer.Header>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="space-y-2 px-5 pt-4">
+                {pick.error ? (
+                  <div className="border-primary-border bg-primary-bg-hover rounded-lg border px-3 py-2.5 text-sm">
+                    <b className="text-ink-primary">This answer broke.</b>{" "}
+                    <span className="text-ink-secondary">{pick.error}</span>
+                    <p className="text-ink-tertiary mt-1 text-xs">It's left out of the score rather than counted as a fail.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="text-ink-tertiary text-xs">Checks</div>
+                    <ul className="divide-primary-border border-primary-border divide-y rounded-lg border">
+                      {verdicts.map((v) => {
+                        const c = checkOf(v.checkId)
+                        const why = WHY[v.answer] ?? ""
+                        const overruled = v.ruling !== null && v.ruling !== v.failed
+                        const shownFailed = v.ruling ?? v.failed
+                        return (
+                          <li key={v.checkId} className="grid grid-cols-[18px_minmax(0,1fr)_auto] items-baseline gap-2.5 px-3 py-2 text-[13px]">
+                            <span className={cn("font-bold", shownFailed ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]")}>{shownFailed ? "✕" : "✓"}</span>
+                            <span>
+                              <span className="text-ink-primary">{c?.label ?? v.checkId}</span>
+                              {why && <span className="text-ink-tertiary block text-xs">{why}</span>}
+                              {overruled && <span className="text-ink-tertiary block text-xs">You said the grader got this wrong</span>}
+                            </span>
+                            {c?.kind === "counted" ? (
+                              <span className="text-ink-tertiary text-[11px]">exact · tool log</span>
+                            ) : overruled ? (
+                              <button type="button" className="text-ink-secondary text-xs underline underline-offset-2" onClick={() => void rule(v, null)}>
+                                Undo
+                              </button>
+                            ) : (
+                              <button type="button" className="text-ink-secondary hover:text-ink-primary text-xs underline underline-offset-2" onClick={() => void rule(v, !v.failed)}>
+                                Wrong?
+                              </button>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </>
+                )}
+              </div>
+              <ThreadView key={pick.threadId} agent={agent} threadId={pick.threadId} caption="The conversation" />
+            </div>
+          </div>
+        )}
+      </Drawer.Content>
+    </Drawer>
   )
 }

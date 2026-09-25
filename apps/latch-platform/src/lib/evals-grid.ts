@@ -93,13 +93,16 @@ export async function computeGrid(
     const trust = trustOf(allVerdicts, rulings);
     const rulingOf = new Map(rulings.map((r) => [`${r.threadId}|${r.checkId}`, r.failed]));
     const byThread = new Map<string, ThreadRef>(threads.map((t) => [t.threadId, t]));
+    // What each column cost to answer — from the runs its threads made.
+    const costs = await evals.threadCosts(threads.map((t) => t.threadId));
+    const spentOf = (label: string) => threads.filter((t) => t.version === label).reduce((a, t) => a + (costs.get(t.threadId) ?? 0), 0);
 
     return {
       runId: columns[0].runId,
       crossRun,
       columns: columns.map((c, i) => {
         const r = runOf.get(c.runId)!;
-        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i] };
+        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i], spent: spentOf(labels[i]) };
       }),
       rubricVersion: rubric.version,
       latestVersion: latest.version,
@@ -123,6 +126,16 @@ export async function computeGrid(
           accept: th.accept,
         };
       }),
+      /** The questions, in the set's order, with what each says a good answer holds. */
+      inputs: [...inputs.values()].map((i) => ({
+        id: i.id,
+        prompt: i.prompt,
+        followUps: i.followUps ?? [],
+        answer: typeof i.facts?.answer === "string" ? i.facts.answer : null,
+        docs: Array.isArray(i.facts?.docs) ? (i.facts.docs as unknown[]).map(String) : [],
+      })),
+      /** Every answer shown, so a cell knows its tries and whether one broke. */
+      threads: threads.map((t) => ({ threadId: t.threadId, column: t.version, inputId: t.inputId ?? "", attempt: t.attempt ?? 0, error: t.error ?? null })),
       verdicts: verdicts.map((v) => {
         const t = byThread.get(v.threadId)!;
         return {

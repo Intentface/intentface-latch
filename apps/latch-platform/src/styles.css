@@ -48,6 +48,9 @@
   --eval-bad: oklch(0.83 0.1 25);
   --eval-mid: oklch(0.95 0.004 250);
   --eval-good: oklch(0.84 0.09 160);
+  /* Text on the panel, not a fill: the same hues, dark enough to read. */
+  --eval-good-ink: oklch(0.52 0.12 160);
+  --eval-bad-ink: oklch(0.55 0.16 25);
   --con: 0.3;
 
   /* State deltas (OKLCH L offsets, scale with --con).
@@ -143,6 +146,8 @@
   --eval-bad: oklch(0.42 0.11 25);
   --eval-mid: oklch(0.27 0.004 250);
   --eval-good: oklch(0.43 0.08 160);
+  --eval-good-ink: oklch(0.76 0.11 160);
+  --eval-bad-ink: oklch(0.74 0.13 25);
 
   /* State deltas flip positive in dark — surfaces sit far from
      white, so states lift toward white instead of sinking. */

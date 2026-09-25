@@ -27,9 +27,11 @@ export type EvalsSearch = {
   q?: string;
   /** Compared results, baseline first — `runId|version,runId|version`. */
   cols?: string;
+  /** Which column the headline compares with the baseline, by label. */
+  focus?: string;
 };
 
-const KEYS = ["agent", "dataset", "rubric", "run", "check", "version", "q", "cols"] as const;
+const KEYS = ["agent", "dataset", "rubric", "run", "check", "version", "q", "cols", "focus"] as const;
 
 export function validateEvalsSearch(s: Record<string, unknown>): EvalsSearch {
   const out: EvalsSearch = {};
