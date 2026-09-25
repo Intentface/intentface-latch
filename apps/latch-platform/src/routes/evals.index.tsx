@@ -12,7 +12,7 @@ import {
   startJudgeFn,
 } from "@/lib/evals-server"
 import type { EvalGrid, JobRow } from "@/lib/evals-server"
-import { AddColumn, AgainPanel } from "@/components/evals/run-menus"
+import { AddColumn, AgainPanel, EarlierAnswers } from "@/components/evals/run-menus"
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, saysItems } from "@/lib/evals/v2/expect"
@@ -611,15 +611,17 @@ function Results({
                 </th>
               ))}
               <th className="w-full px-2 py-2 text-left align-bottom">
-                <AddColumn
-                  agent={agent}
-                  datasetId={datasetId}
-                  rubricId={rubricId}
-                  shown={grid.columns.map((c) => ({ runId: c.runId, version: c.version }))}
-                  hidden={hidden}
-                  onShow={onShow}
-                  onStarted={onStarted}
-                />
+                <span className="flex items-center gap-1">
+                  <AddColumn
+                    agent={agent}
+                    datasetId={datasetId}
+                    rubricId={rubricId}
+                    shown={grid.columns.map((c) => ({ runId: c.runId, version: c.version }))}
+                    onShow={onShow}
+                    onStarted={onStarted}
+                  />
+                  <EarlierAnswers hidden={hidden} onShow={onShow} />
+                </span>
               </th>
             </tr>
           </thead>
@@ -1043,7 +1045,7 @@ function NothingRun({
           {inputs?.length ?? 0} input{inputs?.length === 1 ? " is" : "s are"} ready. Run a configuration to get its answers, graded against what each input expects.
         </p>
         {inputs && inputs.length > 0 && rubricId && (
-          <AddColumn agent={agent} datasetId={datasetId} rubricId={rubricId} shown={[]} hidden={[]} onShow={() => {}} onStarted={onStarted} first />
+          <AddColumn agent={agent} datasetId={datasetId} rubricId={rubricId} shown={[]} onShow={() => {}} onStarted={onStarted} first />
         )}
       </div>
       {inputs && inputs.length > 0 && (

@@ -413,6 +413,30 @@ export const estimateRunFn = createServerFn({ method: "POST" })
   });
 
 /**
+ * Price every configuration at once, for the Run menu: what running it on
+ * every input would cost, or — when that exact configuration already
+ * answered them — that it's free to show those answers instead.
+ */
+export const priceRunsFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; rubricId: string; labels: string[]; repeats: number }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { evals } = await getLatch();
+    const inputIds = (await evals.listInputs(data.datasetId)).map((i) => i.id);
+    const out = [];
+    for (const label of data.labels) {
+      const p = await planRun(principal, { agent: data.agent, datasetId: data.datasetId, rubricId: data.rubricId, versions: [label], inputIds, repeats: data.repeats });
+      out.push(
+        p.ok
+          ? { label, ok: true as const, cost: p.estimate.cost, basis: p.estimate.basis, answers: p.estimate.agentRuns, reuse: p.reusable[0] ?? null }
+          : { label, ok: false as const, error: p.error },
+      );
+    }
+    return { inputIds, limit: CONFIRM_TWICE_ABOVE, prices: out };
+  });
+
+/**
  * Start a run. The caller sends back the cost it was shown; if the price has
  * risen since (more history, a pricier thread), the run does not start — a
  * person confirms the number that will be spent, not an earlier one.

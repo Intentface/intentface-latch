@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { ChevronLeft, Columns2, Loader2, Play, Plus } from "lucide-react"
-import { createVariantFn, estimateAgainFn, estimateRunFn, getRunOptionsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
+import { ChevronLeft, Columns2, Loader2, Plus } from "lucide-react"
+import { createVariantFn, estimateAgainFn, getRunOptionsFn, priceRunsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
 import type { Estimate } from "@/lib/evals/v2/jobs"
 import { Popover } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
@@ -19,10 +19,10 @@ const money = (x: number) => (x < 1 ? `${Math.max(1, Math.round(x * 100))}¢` : 
 const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
 const hint = "text-ink-tertiary text-xs"
 
-function Tries({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+function Tries({ value, onChange, compact }: { value: number; onChange: (n: number) => void; compact?: boolean }) {
   return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="text-ink-secondary">Tries per input</span>
+    <div className="flex items-center gap-2 text-xs" title={value > 1 ? "Tells small changes from noise" : "Enough for big changes"}>
+      <span className="text-ink-secondary">{compact ? "Tries" : "Tries per input"}</span>
       <div role="radiogroup" className="smooth-shadow-ring-xs smooth-ring-primary-border inline-flex rounded-lg p-0.5">
         {[1, 3].map((n) => (
           <button
@@ -37,7 +37,7 @@ function Tries({ value, onChange }: { value: number; onChange: (n: number) => vo
           </button>
         ))}
       </div>
-      <span className="text-ink-tertiary">{value > 1 ? "Tells small changes from noise" : "Enough for big changes"}</span>
+      {!compact && <span className="text-ink-tertiary">{value > 1 ? "Tells small changes from noise" : "Enough for big changes"}</span>}
     </div>
   )
 }
@@ -77,37 +77,17 @@ function Bill({
   )
 }
 
-/** A heading inside the menu, so what a choice does — run, or show — is never a guess. */
-function Section({ icon, title, aside }: { icon: React.ReactNode; title: string; aside: string }) {
-  return (
-    <div className="flex items-center gap-1.5 px-2.5 pt-1.5 pb-1 text-xs">
-      <span className="text-ink-secondary">{icon}</span>
-      <span className="text-ink-primary font-medium">{title}</span>
-      <span className="text-ink-tertiary">· {aside}</span>
-    </div>
-  )
-}
-
-/** One choice: its name, and one line on what it is — the rest on hover. */
-function Choice({ title, note, onClick }: { title: string; note?: string; onClick: () => void }) {
-  return (
-    <button type="button" onClick={onClick} title={note} className="hover:bg-primary-bg-hover flex w-full min-w-0 flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
-      <span className="text-ink-primary max-w-full truncate">{title}</span>
-      {note && <span className="text-ink-tertiary max-w-full truncate text-xs">{note}</span>}
-    </button>
-  )
-}
-
 /**
- * The last header cell. Answers you already have come first — free — then
- * a configuration to run: pick it, see the price, start.
+ * The last header cell: + Run. Every configuration with its price on the
+ * right; a click runs it. One that already answered these inputs, unchanged,
+ * is shown instead — free — with "run again" beside it. Above the limit the
+ * row asks once more, in place.
  */
 export function AddColumn({
   agent,
   datasetId,
   rubricId,
   shown,
-  hidden,
   onShow,
   onStarted,
   first,
@@ -117,7 +97,6 @@ export function AddColumn({
   rubricId: string
   /** What is open now; the new column is compared with it. */
   shown: Ref[]
-  hidden: Shown[]
   onShow: (r: Ref) => void
   onStarted: (r: Ref[]) => void
   /** The big button a set with no answers yet offers, instead of the header's "+ Run". */
@@ -125,55 +104,99 @@ export function AddColumn({
 }) {
   const [open, setOpen] = useState(false)
   const [options, setOptions] = useState<Awaited<ReturnType<typeof getRunOptionsFn>>>(null)
-  const [picked, setPicked] = useState<string | null>(null)
-  const [variantOpen, setVariantOpen] = useState(false)
-  const [madeName, setMadeName] = useState<string | null>(null)
   const [tries, setTries] = useState(1)
-  const [priced, setPriced] = useState<{ estimate: Estimate; reusable: { version: string; runId: string; as: string; at: number }[]; limit: number } | null>(null)
-  const [sure, setSure] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [prices, setPrices] = useState<NonNullable<Awaited<ReturnType<typeof priceRunsFn>>> | null>(null)
+  const [confirm, setConfirm] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [variantOpen, setVariantOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
-    setPicked(null)
     setVariantOpen(false)
+    setConfirm(null)
     setError(null)
     void getRunOptionsFn({ data: { agent, datasetId } }).then(setOptions)
   }, [open, agent, datasetId])
 
-  const inputIds = options?.questions.map((q) => q.id) ?? []
+  const labels = [...(options?.versions.map((v) => v.label) ?? []), ...(options?.variants.map((v) => `~${v.id}`) ?? [])]
+  const labelKey = labels.join(",")
   useEffect(() => {
-    setPriced(null)
-    setSure(false)
-    if (!picked || !inputIds.length) return
+    setPrices(null)
+    if (!open || !labels.length) return
     let live = true
-    void estimateRunFn({ data: { agent, datasetId, rubricId, versions: [picked], inputIds, repeats: tries } }).then((r) => {
-      if (!live) return
-      if (r.ok) setPriced({ estimate: r.estimate, reusable: r.reusable, limit: r.confirmTwiceAbove })
-      else setError(r.error)
-    })
+    void priceRunsFn({ data: { agent, datasetId, rubricId, labels, repeats: tries } }).then((r) => live && setPrices(r))
     return () => {
       live = false
     }
-    // inputIds follows options; listing it would re-price on every render.
-  }, [picked, tries, options, agent, datasetId, rubricId])
+    // labels is keyed by labelKey; the array is new every render.
+  }, [open, labelKey, tries, agent, datasetId, rubricId])
 
-  const start = async () => {
-    if (!picked || !priced) return
-    setBusy(true)
+  const nameOf = (label: string) => (label.startsWith("~") ? (options?.variants.find((v) => `~${v.id}` === label)?.name ?? label) : label)
+  const run = async (label: string, force = false) => {
+    const pr = prices?.prices.find((x) => x.label === label)
+    if (!prices || !pr?.ok) return
+    if (!force && pr.cost !== null && pr.cost > prices.limit) return setConfirm(label)
+    setBusy(label)
     const r = await startRunFn({
-      data: { agent, datasetId, rubricId, versions: [picked], inputIds, repeats: tries, confirmedCost: priced.estimate.cost, compareWith: shown },
+      data: { agent, datasetId, rubricId, versions: [label], inputIds: prices.inputIds, repeats: tries, confirmedCost: pr.cost, compareWith: shown },
     })
-    setBusy(false)
+    setBusy(null)
     if (!r.ok) return setError(r.error)
     setOpen(false)
-    onStarted([{ runId: r.id, version: pickedName ?? picked }])
+    onStarted([{ runId: r.id, version: nameOf(label) }])
   }
-  const cost = priced?.estimate.cost ?? null
-  // A variant runs as `~id`; its column and every sentence here call it by name.
-  const pickedName = picked?.startsWith("~") ? (options?.variants.find((v) => `~${v.id}` === picked)?.name ?? madeName ?? picked) : picked
-  const reuse = priced?.reusable.find((x) => x.version === picked)
+  const row = (label: string, note: string | undefined) => {
+    const pr = prices?.prices.find((x) => x.label === label)
+    const reuse = pr?.ok ? pr.reuse : null
+    const price = pr?.ok ? (pr.cost === null ? "cost unknown" : `about ${money(pr.cost)}`) : null
+    return (
+      <li key={label} className="rounded-md">
+        <div className="hover:bg-primary-bg-hover flex items-center gap-3 rounded-md px-2.5 py-1.5">
+          <button
+            type="button"
+            disabled={!pr?.ok || busy !== null}
+            onClick={() => (reuse ? (setOpen(false), onShow({ runId: reuse.runId, version: reuse.as })) : void run(label))}
+            title={note}
+            className="flex min-w-0 flex-1 flex-col items-start text-left text-sm disabled:opacity-60"
+          >
+            <span className="text-ink-primary max-w-full truncate">{nameOf(label)}</span>
+            {note && <span className="text-ink-tertiary max-w-full truncate text-xs">{note}</span>}
+            {pr && !pr.ok && <span className="text-xs text-red-600 dark:text-red-400">{pr.error}</span>}
+          </button>
+          <span className="flex shrink-0 flex-col items-end text-xs tabular-nums">
+            {busy === label ? (
+              <Loader2 className="text-ink-tertiary size-3.5 animate-spin" />
+            ) : !pr ? (
+              <Loader2 className="text-ink-tertiary size-3 animate-spin" />
+            ) : reuse ? (
+              <>
+                <span className="text-ink-secondary">answered {day(reuse.at)} · free</span>
+                <button type="button" onClick={() => void run(label)} className="text-ink-tertiary hover:text-ink-primary underline underline-offset-2">
+                  run again{price ? ` · ${price.replace("about ", "")}` : ""}
+                </button>
+              </>
+            ) : (
+              <span className="text-ink-secondary">{price}</span>
+            )}
+          </span>
+        </div>
+        {confirm === label && pr?.ok && pr.cost !== null && (
+          <div className="bg-primary-bg-hover mx-1 mb-1 flex items-center gap-2 rounded-md px-2.5 py-2 text-xs">
+            <span className="text-ink-primary flex-1">
+              About {money(pr.cost)} — over ${prices?.limit}.
+            </span>
+            <button type="button" onClick={() => setConfirm(null)} className="text-ink-secondary hover:text-ink-primary">
+              Cancel
+            </button>
+            <button type="button" onClick={() => void run(label, true)} className="bg-ink-primary text-primary-bg h-6 rounded px-2.5 font-medium">
+              Run anyway
+            </button>
+          </div>
+        )}
+      </li>
+    )
+  }
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -191,7 +214,7 @@ export function AddColumn({
       >
         {first ? "Run a configuration" : <><Plus className="size-3.5" /> Run</>}
       </Popover.Trigger>
-      <Popover.Content align="start" className="w-[22rem] p-1.5">
+      <Popover.Content align="start" className="w-[24rem] p-1.5">
         {variantOpen && options ? (
           <VariantForm
             agent={agent}
@@ -199,75 +222,71 @@ export function AddColumn({
             models={options.models}
             current={{ model: options.model, effort: options.effort }}
             onBack={() => setVariantOpen(false)}
-            onMade={(id, name) => (setMadeName(name), setVariantOpen(false), setPicked(`~${id}`))}
+            onMade={() => (setVariantOpen(false), void getRunOptionsFn({ data: { agent, datasetId } }).then(setOptions))}
           />
-        ) : !picked ? (
+        ) : (
           <>
-            <Section icon={<Play className="size-3" />} title="Run new answers" aside={`on all ${inputIds.length || ""} inputs · priced first`} />
+            <div className="flex items-center gap-2 px-2.5 pt-1 pb-1.5">
+              <span className="text-ink-primary flex-1 text-xs font-medium">Run on all {prices?.inputIds.length ?? ""} inputs</span>
+              <Tries value={tries} onChange={setTries} compact />
+            </div>
             {!options ? (
               <Loader2 className="text-ink-tertiary m-2.5 size-4 animate-spin" />
             ) : (
-              <>
-                {options.versions.map((v) => (
-                  <Choice key={v.label} title={v.label} note={v.note} onClick={() => setPicked(v.label)} />
-                ))}
-                {options.variants.length > 0 && <div className="text-ink-tertiary px-2.5 pt-2 pb-0.5 text-[11px]">Variants</div>}
-                {options.variants.map((v) => (
-                  <Choice key={v.id} title={v.name} note={v.note} onClick={() => setPicked(`~${v.id}`)} />
-                ))}
-                <Choice title="+ New variant" note="A version with one thing changed — model, reasoning effort, an instruction" onClick={() => setVariantOpen(true)} />
-              </>
+              <ul>
+                {options.versions.map((v) => row(v.label, v.note))}
+                {options.variants.length > 0 && <li className="text-ink-tertiary px-2.5 pt-2 pb-0.5 text-[11px]">Variants</li>}
+                {options.variants.map((v) => row(`~${v.id}`, v.note))}
+                <li>
+                  <button type="button" onClick={() => setVariantOpen(true)} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+                    <span className="text-ink-primary">+ New variant</span>
+                    <span className="text-ink-tertiary text-xs">A version with one thing changed — model, reasoning effort, an instruction</span>
+                  </button>
+                </li>
+              </ul>
             )}
-            {hidden.length > 0 && (
-              <>
-                <div className="border-primary-border mx-1 my-1.5 border-t" />
-                <Section icon={<Columns2 className="size-3" />} title="Add answers you already have" aside="free · nothing runs" />
-                <ul className="max-h-60 overflow-y-auto">
-                  {hidden.map((h) => (
-                    <li key={`${h.runId}|${h.version}`}>
-                      <Choice
-                        title={`${h.version} · ${day(h.run.createdAt)}`}
-                        note={`${h.run.name ? `${h.run.name} · ` : ""}${h.run.questions} input${h.run.questions === 1 ? "" : "s"}${h.run.tries > 1 ? ` × ${h.run.tries} tries` : ""}`}
-                        onClick={() => (setOpen(false), onShow({ runId: h.runId, version: h.version }))}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
+            {error && <p className="px-2.5 pb-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
+            {prices?.prices[0]?.ok && <p className="text-ink-tertiary px-2.5 pt-1 pb-1 text-[11px]">{prices.prices[0].basis}</p>}
           </>
-        ) : (
-          <div className="space-y-3 p-2">
-            <button type="button" onClick={() => setPicked(null)} className="text-ink-tertiary hover:text-ink-primary flex items-center gap-1 text-xs">
-              <ChevronLeft className="size-3.5" /> Configurations
-            </button>
-            <div className="text-ink-primary text-sm font-medium">
-              Run {pickedName} on {inputIds.length} inputs
-            </div>
-            {picked.startsWith("~") && <p className={hint}>Priced from this set's past answers; on another model the real cost can differ.</p>}
-            <Tries value={tries} onChange={setTries} />
-            {reuse && (
-              <div className="bg-primary-bg-hover rounded-md px-2.5 py-2 text-xs">
-                <span className="text-ink-secondary">
-                  {pickedName} hasn't changed since {day(reuse.at)}, when it answered all of these.{" "}
-                </span>
-                <button type="button" className="text-ink-primary underline underline-offset-2" onClick={() => (setOpen(false), onShow({ runId: reuse.runId, version: reuse.as }))}>
-                  Show those instead · free
-                </button>
-              </div>
-            )}
-            <Bill estimate={priced?.estimate ?? null} limit={priced ? priced.limit : 5} sure={sure} setSure={setSure} />
-            {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
-            <button
-              type="button"
-              disabled={!priced || busy || (cost !== null && cost > priced.limit && !sure)}
-              onClick={() => void start()}
-              className="bg-ink-primary text-primary-bg h-8 w-full rounded-md text-sm font-medium tabular-nums disabled:opacity-40"
-            >
-              {busy ? "Starting…" : `Run ${pickedName}${cost !== null ? ` · about ${money(cost)}` : ""}`}
-            </button>
-          </div>
         )}
+      </Popover.Content>
+    </Popover>
+  )
+}
+
+/** Answers already on hand — a result from an earlier run — added as a column. Free: nothing runs. */
+export function EarlierAnswers({ hidden, onShow }: { hidden: Shown[]; onShow: (r: Ref) => void }) {
+  const [open, setOpen] = useState(false)
+  if (!hidden.length) return null
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Popover.Trigger
+        render={<button type="button" className="text-ink-tertiary hover:text-ink-primary flex h-7 items-center gap-1 px-1.5 text-xs whitespace-nowrap" />}
+      >
+        <Columns2 className="size-3.5" /> Earlier answers
+      </Popover.Trigger>
+      <Popover.Content align="start" className="w-80 p-1.5">
+        <div className="text-ink-tertiary px-2.5 pt-1 pb-1 text-xs">Add as a column — free, nothing runs</div>
+        <ul className="max-h-72 overflow-y-auto">
+          {hidden.map((h) => (
+            <li key={`${h.runId}|${h.version}`}>
+              <button
+                type="button"
+                onClick={() => (setOpen(false), onShow({ runId: h.runId, version: h.version }))}
+                className="hover:bg-primary-bg-hover flex w-full min-w-0 flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
+              >
+                <span className="text-ink-primary max-w-full truncate">
+                  {h.version} · {day(h.run.createdAt)}
+                </span>
+                <span className="text-ink-tertiary max-w-full truncate text-xs tabular-nums">
+                  {h.run.name ? `${h.run.name} · ` : ""}
+                  {h.run.questions} input{h.run.questions === 1 ? "" : "s"}
+                  {h.run.tries > 1 ? ` × ${h.run.tries} tries` : ""}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
       </Popover.Content>
     </Popover>
   )

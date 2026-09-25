@@ -165,7 +165,8 @@ export function reusableResults(
       const key = `${t.runId}|${t.version}`;
       const r = results.get(key) ?? results.set(key, { runId: t.runId, as: t.version, covered: new Set(), at: t.createdAt }).get(key)!;
       r.covered.add(`${t.inputId}|${t.attempt ?? 0}`);
-      r.at = Math.max(r.at, t.createdAt);
+      // When its answers were made — the run's day, not a later extra try's.
+      r.at = Math.min(r.at, t.createdAt);
     }
     const best = [...results.values()]
       .filter((r) => inputIds.every((id) => Array.from({ length: repeats }, (_, a) => r.covered.has(`${id}|${a}`)).every(Boolean)))
