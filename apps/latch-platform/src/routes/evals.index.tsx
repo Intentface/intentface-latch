@@ -278,19 +278,6 @@ const listsOf = (i: EvalGrid["inputs"][number]) => ({ mustSay: i.mustSay, mustNo
 /** How many things an input says should happen — each item of its lists counts. */
 const expectationCount = (i: EvalGrid["inputs"][number]) =>
   (i.answer ? 1 : 0) + (i.docs.length ? 1 : 0) + i.calls.length + saysItems(listsOf(i)).length
-function failedExpectations(grid: EvalGrid, exp: ReturnType<typeof expectationChecks>, inputId: string, column: string) {
-  const input = grid.inputs.find((i) => i.id === inputId)
-  if (!input) return 0
-  let failed = 0
-  for (const e of exp) {
-    const v = grid.verdicts.find((x) => x.inputId === inputId && x.version === column && x.checkId === e.checkId)
-    if (!v) continue
-    const each = eachOf(v.answer)
-    // A check over a list counts each item that didn't hold; the others count once.
-    failed += each ? each.filter((ok) => !ok).length : (v.ruling ?? v.failed) ? 1 : 0
-  }
-  return failed
-}
 
 // ─── Numbers ──────────────────────────────────────────────────────────────
 
@@ -411,7 +398,6 @@ function Results({
 }) {
   const cells = useMemo(() => cellsOf(grid), [grid])
   const [picked, setPicked] = useState<Set<string>>(new Set())
-  const [lens, setLens] = useState<string | null>(null)
   const expectations = expectationChecks(grid)
   // What is running against which column, so cells can say so instead of "—".
   const active = jobs.filter(isActive)
@@ -480,8 +466,16 @@ function Results({
 
   return (
     <section className="border-primary-border bg-primary-bg rounded-xl border" aria-label="Results">
-      <div className="border-primary-border space-y-3 border-b px-5 py-4">
+      <div className="border-primary-border space-y-3 border-b px-5 py-3">
         <div className="flex flex-wrap items-center gap-2">
+          <span className="text-ink-tertiary text-xs tabular-nums">{grid.inputs.length} inputs</span>
+          <button
+            type="button"
+            className="text-ink-secondary hover:text-ink-primary mr-2 text-xs underline underline-offset-2"
+            onClick={() => askEvalsAgent(`For ${agent}: write 10 more inputs like the ones in this set — everyday ones, tricky ones, and a few it should decline — each with what a good answer says, and add them with edit_questions.`)}
+          >
+            Generate more
+          </button>
           <Segmented
             value={filter}
             onChange={setFilter}
@@ -545,27 +539,6 @@ function Results({
           </button>
         </div>
       )}
-      <div className="text-ink-tertiary flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pt-3 pb-1 text-xs">
-        <span className="tabular-nums">{grid.inputs.length} inputs</span>
-        <button
-          type="button"
-          className="text-ink-secondary hover:text-ink-primary underline underline-offset-2"
-          onClick={() => askEvalsAgent(`For ${agent}: write 10 more inputs like the ones in this set — everyday ones, tricky ones, and a few it should decline — each with what a good answer says, and add them with edit_questions.`)}
-        >
-          Generate more
-        </button>
-        <span className="flex-1" />
-        {expectations.length > 0 && (
-          <>
-            <span>Highlight failures on</span>
-            <Segmented
-              value={lens ?? ""}
-              onChange={(v) => setLens(v || null)}
-              options={[["", "Nothing"], ...grid.columns.map((c): [string, string] => [c.label, nameOf(c)])]}
-            />
-          </>
-        )}
-      </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-full border-collapse text-[13px]">
           <thead>
@@ -658,7 +631,6 @@ function Results({
                     input={input}
                     onOpen={() => onOpenInput(input.id)}
                     count={expectationCount(input)}
-                    failed={lens ? failedExpectations(grid, expectations, input.id, lens) : 0}
                   />
                 </td>
                 {grid.columns.map((c) => (
@@ -998,7 +970,7 @@ function CellButton({
  * the table doesn't jump. The block is drawn at the page's top level: inside
  * the sticky cell it would sit under the next row's sticky cell.
  */
-function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"][number]; onOpen: () => void; count: number; failed: number }) {
+function InputText({ input, onOpen, count }: { input: EvalGrid["inputs"][number]; onOpen: () => void; count: number }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [grown, setGrown] = useState<DOMRect | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -1030,8 +1002,8 @@ function InputText({ input, onOpen, count, failed }: { input: EvalGrid["inputs"]
           {input.prompt}
         </span>
         {input.files.length > 0 && <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums" title={input.files.map((f) => f.filename).join(", ")}>📎 {input.files.length}</span>}
-        <span className={cn("shrink-0 text-[11.5px] tabular-nums", failed ? "text-[color:var(--eval-bad-ink)]" : "text-ink-tertiary")}>
-          {failed ? `${failed} failed` : count ? `${count} expectation${count === 1 ? "" : "s"}` : "No expectations"}
+        <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums">
+          {count ? `${count} expectation${count === 1 ? "" : "s"}` : "No expectations"}
         </span>
       </button>
       {grown && createPortal(
