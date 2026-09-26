@@ -359,168 +359,6 @@ function versus(grid: EvalGrid, cells: Map<string, Cell>, base: string, label: s
 const verdictFor = ({ up, down, p }: { up: number; down: number; p: number }) =>
   !up && !down ? "No change" : p < 0.05 ? (up > down ? "Clearly better" : "Clearly worse") : "No real difference"
 
-// ─── Charts ──────────────────────────────────────────────────────────────
-
-/** Share of checks passed, one bar per column, in the table's order. Clicking a bar compares it. */
-function PassRates({
-  columns,
-  focus,
-  onFocus,
-}: {
-  columns: { label: string; name: string; version: string; when: string; rate: number | null; tries: string; spent: number }[]
-  focus: string | null
-  onFocus: (label: string) => void
-}) {
-  const H = 96
-  return (
-    <figure className="min-w-0">
-      <figcaption className="text-ink-secondary mb-2 text-xs font-medium">Checks passed</figcaption>
-      <div className="flex">
-        <div className="text-ink-tertiary relative mr-2 w-8 text-right text-[10px] tabular-nums" style={{ height: H }} aria-hidden>
-          {[100, 50, 0].map((t) => (
-            <span key={t} className="absolute right-0 -translate-y-1/2" style={{ top: H - (t / 100) * H }}>
-              {t}%
-            </span>
-          ))}
-        </div>
-        <div className="relative flex items-end gap-5 px-1" style={{ height: H }}>
-          {[100, 50].map((t) => (
-            <i key={t} aria-hidden className="border-primary-border pointer-events-none absolute inset-x-0 border-t border-dashed" style={{ top: H - (t / 100) * H }} />
-          ))}
-          <i aria-hidden className="bg-ink-tertiary/60 pointer-events-none absolute inset-x-0 bottom-0 h-px" />
-          {columns.map((c, n) => {
-            const h = c.rate === null ? 0 : Math.max(2, c.rate * H)
-            const role = n === 0 ? "base" : c.label === focus ? "focus" : "other"
-            return (
-              <button
-                key={c.label}
-                type="button"
-                onClick={() => onFocus(c.label)}
-                disabled={n === 0}
-                title={`${c.name}: ${pct(c.rate)} of checks passed · ${c.tries}${c.spent ? ` · ${money(c.spent)}` : ""}`}
-                aria-label={`${c.name}: ${pct(c.rate)} of checks passed`}
-                className="group relative flex w-[72px] flex-col items-center justify-end self-stretch enabled:cursor-pointer"
-              >
-                <span className={cn("mb-1 text-xs tabular-nums", role === "base" ? "text-ink-secondary" : "text-ink-primary font-semibold")}>{pct(c.rate)}</span>
-                <span
-                  className={cn(
-                    "w-11 rounded-t-[4px] transition-opacity",
-                    role === "base" ? "bg-ink-tertiary/45" : role === "focus" ? "bg-accent-bg" : "bg-accent-bg/40 group-hover:bg-accent-bg/70",
-                  )}
-                  style={{ height: h }}
-                />
-              </button>
-            )
-          })}
-        </div>
-      </div>
-      <div className="ml-10 flex gap-5 px-1 pt-1.5">
-        {columns.map((c, n) => (
-          <span key={c.label} className="w-[72px] text-center text-[11px] leading-tight" title={c.name}>
-            <span className={cn("block truncate font-medium", c.label === focus || n === 0 ? "text-ink-primary" : "text-ink-secondary")}>{c.version}</span>
-            <span className="text-ink-tertiary block truncate text-[10px]">{n === 0 ? "baseline" : c.when}</span>
-          </span>
-        ))}
-      </div>
-    </figure>
-  )
-}
-
-/**
- * Each other column against the baseline: of the inputs both answered, how
- * many did worse, the same, better. Red and green that balance is chance;
- * a bar that tips is a change. Every segment filters the table to its inputs.
- */
-function Versus({
-  baseName,
-  rows,
-  focus,
-  filter,
-  onPick,
-}: {
-  baseName: string
-  rows: { label: string; name: string; version: string; when: string; sameSetup: boolean; up: number; down: number; same: number; p: number }[]
-  focus: string | null
-  filter: Filter
-  onPick: (label: string, f: "better" | "worse" | "same") => void
-}) {
-  return (
-    <figure className="min-w-0 max-w-[720px] flex-1 basis-[520px]">
-      <figcaption className="mb-2 text-xs">
-        <span className="text-ink-secondary font-medium">Did each input score higher or lower than the baseline?</span>{" "}
-        <span className="text-ink-tertiary">Baseline: {baseName}</span>
-      </figcaption>
-      <div className="grid grid-cols-[minmax(0,9rem)_minmax(160px,1fr)_auto] items-center gap-x-3 gap-y-2">
-        {rows.map((r) => {
-          const n = r.up + r.down + r.same
-          const verdict = verdictFor(r)
-          const segs = [
-            { f: "worse" as const, count: r.down, fill: "bg-[color:var(--eval-bad)]", word: "lower" },
-            { f: "same" as const, count: r.same, fill: "bg-ink-tertiary/25", word: "same" },
-            { f: "better" as const, count: r.up, fill: "bg-[color:var(--eval-good)]", word: "higher" },
-          ].filter((x) => x.count > 0)
-          const isFocus = r.label === focus
-          return (
-            <div key={r.label} className="contents">
-              <span className="min-w-0 truncate text-xs" title={r.name}>
-                <span className={isFocus ? "text-ink-primary font-medium" : "text-ink-secondary"}>{r.version}</span>{" "}
-                <span className="text-ink-tertiary">{r.when}</span>
-              </span>
-              <span className="flex h-6 gap-0.5 overflow-hidden rounded-[4px]" role="group" aria-label={`${r.name} against ${baseName}`}>
-                {n === 0 && <span className="text-ink-tertiary text-xs">No inputs answered by both</span>}
-                {segs.map((x) => (
-                  <button
-                    key={x.f}
-                    type="button"
-                    onClick={() => onPick(r.label, x.f)}
-                    title={`${x.count} input${x.count === 1 ? "" : "s"} scored ${x.word === "same" ? "the same" : x.word} — show ${x.count === 1 ? "it" : "them"}`}
-                    className={cn(
-                      "text-ink-primary flex min-w-[22px] items-center justify-center text-[11px] font-medium tabular-nums hover:brightness-95",
-                      x.fill,
-                      isFocus && filter === x.f && "ring-ink-primary ring-2 ring-inset",
-                    )}
-                    style={{ flexGrow: x.count, flexBasis: 0 }}
-                  >
-                    {x.count / n > 0.12 ? `${x.count} ${x.word}` : x.count}
-                  </button>
-                ))}
-              </span>
-              <span
-                title={
-                  r.sameSetup
-                    ? "The same configuration as the baseline, answered again. Every difference is the agent answering differently on its own."
-                    : verdict === "No real difference"
-                      ? "About as many inputs scored lower as higher — what answering again alone can do. More tries per input would tell."
-                      : verdict === "No change"
-                        ? "Every input scored the same."
-                        : `${r.up + r.down} inputs moved, ${Math.max(r.up, r.down)} of them the same way — more than chance would.`
-                }
-                className={cn(
-                  "rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap",
-                  r.sameSetup
-                    ? "text-ink-tertiary border-primary-border border border-dashed"
-                    : verdict === "Clearly better"
-                      ? "bg-[color:var(--eval-good)] text-ink-primary"
-                      : verdict === "Clearly worse"
-                        ? "bg-[color:var(--eval-bad)] text-ink-primary"
-                        : "border-primary-border text-ink-secondary border",
-                )}
-              >
-                {r.sameSetup ? "Same setup" : verdict}
-              </span>
-              {r.sameSetup && (
-                <span className="text-ink-tertiary col-start-2 col-end-4 -mt-1 text-[11px]">
-                  Same setup as the baseline, so these {r.up + r.down} moves are the agent answering differently on its own — the noise any change has to beat.
-                </span>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </figure>
-  )
-}
-
 // ─── Results ─────────────────────────────────────────────────────────────
 
 function Results({
@@ -643,37 +481,6 @@ function Results({
   return (
     <section className="border-primary-border bg-primary-bg rounded-xl border" aria-label="Results">
       <div className="border-primary-border space-y-3 border-b px-5 py-4">
-        <div className="flex flex-wrap items-start gap-x-10 gap-y-5">
-          <PassRates
-            columns={grid.columns.map((c) => ({ label: c.label, name: nameOf(c), version: c.version, when: whenOf(c), rate: columnRate(grid, cells, c.label), tries: triesOf(c), spent: c.spent }))}
-            focus={focus?.label ?? null}
-            onFocus={(label) => label !== base.label && onFocus(label)}
-          />
-          {rest.length > 0 && (
-            <Versus
-              baseName={nameOf(base)}
-              rows={rest.map((c) => ({ label: c.label, name: nameOf(c), version: c.version, when: whenOf(c), sameSetup: !!c.setup && c.setup === base.setup, ...versus(grid, cells, base.label, c.label) }))}
-              focus={focus?.label ?? null}
-              filter={filter}
-              onPick={(label, f) => (onFocus(label), setFilter(f))}
-            />
-          )}
-          <span className="flex-1" />
-          {focus && (
-            <button
-              type="button"
-              onClick={() => askEvalsAgent(whyPrompt(agent, datasetId, rubricId, base, focus, grid.inputs.filter((i) => (cell(i.id, focus.label)?.rate ?? 1) < 1).map((i) => i.id)))}
-              className="border-primary-border hover:bg-primary-bg-hover h-8 shrink-0 rounded-lg border px-3 text-[13px]"
-            >
-              Why do these still fail?
-            </button>
-          )}
-        </div>
-        {broken > 0 && (
-          <p className="text-ink-tertiary text-xs tabular-nums">
-            {broken} answer{broken === 1 ? "" : "s"} on {nameOf(focus!)} broke — left out of the score.
-          </p>
-        )}
         <div className="flex flex-wrap items-center gap-2">
           <Segmented
             value={filter}
@@ -686,8 +493,14 @@ function Results({
           />
           {focus && (filter === "better" || filter === "worse" || filter === "same") && (
             <button type="button" onClick={() => setFilter("all")} className="bg-primary-bg-active text-ink-primary flex h-7 items-center gap-1 rounded-md px-2.5 text-xs">
-              {shown.length} {filter} on {nameOf(focus)} <span aria-hidden className="text-ink-tertiary">✕</span>
+              {shown.length} scored {filter === "better" ? "higher" : filter === "worse" ? "lower" : "the same"} on {nameOf(focus)} <span aria-hidden className="text-ink-tertiary">✕</span>
             </button>
+          )}
+          {focus && filter !== "all" && !(filter === "better" || filter === "worse" || filter === "same") && <span className="text-ink-tertiary text-xs">on {nameOf(focus)}</span>}
+          {broken > 0 && (
+            <span className="text-ink-tertiary text-xs tabular-nums">
+              · {broken} answer{broken === 1 ? "" : "s"} on {nameOf(focus!)} broke — left out of the score
+            </span>
           )}
           <span className="flex-1" />
           {focus && (
@@ -698,6 +511,15 @@ function Results({
               className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-[13px]"
             >
               By check <ChevronDown className={cn("size-3.5 transition-transform", byCheck && "rotate-180")} />
+            </button>
+          )}
+          {focus && (
+            <button
+              type="button"
+              onClick={() => askEvalsAgent(whyPrompt(agent, datasetId, rubricId, base, focus, grid.inputs.filter((i) => (cell(i.id, focus.label)?.rate ?? 1) < 1).map((i) => i.id)))}
+              className="border-primary-border hover:bg-primary-bg-hover h-7 shrink-0 rounded-lg border px-3 text-xs"
+            >
+              Why do these still fail?
             </button>
           )}
         </div>
@@ -786,8 +608,16 @@ function Results({
                       : {})}
                     canHide={grid.columns.length > 1}
                     onBaseline={() => onBaseline(c.label)}
-                    onFocus={() => onFocus(c.label)}
                     onHide={() => onHide(c.label)}
+                    {...(n > 0
+                      ? (() => {
+                          const v = versus(grid, cells, base.label, c.label)
+                          return {
+                            moved: { up: v.up, down: v.down, verdict: verdictFor(v), sameSetup: !!c.setup && c.setup === base.setup },
+                            onShowMoved: (f: "better" | "worse") => (onFocus(c.label), setFilter(f)),
+                          }
+                        })()
+                      : {})}
                   />
                 </th>
               ))}
@@ -973,8 +803,9 @@ function ColumnMenu({
   onRename,
   canHide,
   onBaseline,
-  onFocus,
   onHide,
+  moved,
+  onShowMoved,
 }: {
   column: Column
   isBase: boolean
@@ -994,8 +825,10 @@ function ColumnMenu({
   onRename?: (name: string) => Promise<string | null>
   canHide: boolean
   onBaseline: () => void
-  onFocus: () => void
   onHide: () => void
+  /** Against the baseline: inputs that scored higher and lower, and what that adds up to. Absent on the baseline. */
+  moved?: { up: number; down: number; verdict: string; sameSetup: boolean }
+  onShowMoved?: (f: "better" | "worse") => void
 }) {
   const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
   const [open, setOpen] = useState(false)
@@ -1015,7 +848,43 @@ function ColumnMenu({
           {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : when}
           {!state && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
         </span>
+        <span className="text-ink-primary mt-0.5 block text-sm font-semibold tabular-nums" title="Share of checks passed">
+          {pct(rate)}
+        </span>
       </Popover.Trigger>
+      {moved && (
+        <span className="mt-0.5 flex items-center justify-center gap-1.5 text-[11px] tabular-nums">
+          <button type="button" disabled={!moved.up} onClick={() => onShowMoved?.("better")} title={`${moved.up} scored higher than the baseline — show them`} className="font-semibold text-[color:var(--eval-good-ink)] enabled:hover:underline disabled:opacity-40">
+            ▲{moved.up}
+          </button>
+          <button type="button" disabled={!moved.down} onClick={() => onShowMoved?.("worse")} title={`${moved.down} scored lower than the baseline — show them`} className="font-semibold text-[color:var(--eval-bad-ink)] enabled:hover:underline disabled:opacity-40">
+            ▼{moved.down}
+          </button>
+          <span
+            title={
+              moved.sameSetup
+                ? "The baseline's own configuration, answered again: every ▲ and ▼ is the agent answering differently on its own — the noise a real change has to beat."
+                : moved.verdict === "No real difference"
+                  ? "About as many scored lower as higher — what answering again alone can do. More tries per input would tell."
+                  : moved.verdict === "No change"
+                    ? "Every input scored the same as the baseline."
+                    : `${moved.up + moved.down} inputs moved, ${Math.max(moved.up, moved.down)} of them the same way — more than chance would.`
+            }
+            className={cn(
+              "rounded-full px-1.5 font-medium whitespace-nowrap",
+              moved.sameSetup
+                ? "text-ink-tertiary border-primary-border border border-dashed"
+                : moved.verdict === "Clearly better"
+                  ? "bg-[color:var(--eval-good)] text-ink-primary"
+                  : moved.verdict === "Clearly worse"
+                    ? "bg-[color:var(--eval-bad)] text-ink-primary"
+                    : "text-ink-tertiary",
+            )}
+          >
+            {moved.sameSetup ? "Same setup" : moved.verdict}
+          </span>
+        </span>
+      )}
       {stale && (
         <button type="button" onClick={onGrade} className="border-primary-border text-ink-secondary hover:text-ink-primary mx-auto mt-1 block rounded-full border border-dashed px-2 text-[10.5px] whitespace-nowrap">
           New checks · grade them
@@ -1030,11 +899,6 @@ function ColumnMenu({
         {!isBase && (
           <button type="button" className={item} onClick={pick(onBaseline)}>
             Use as baseline <span className="text-ink-tertiary text-xs">The others are compared with it</span>
-          </button>
-        )}
-        {!isBase && !isFocus && (
-          <button type="button" className={item} onClick={pick(onFocus)}>
-            Compare in the headline <span className="text-ink-tertiary text-xs">Against the baseline</span>
           </button>
         )}
         {failed.length > 0 && (
