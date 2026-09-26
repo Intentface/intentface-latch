@@ -58,7 +58,7 @@ export const Route = createFileRoute("/evals/")({
 
 type Column = EvalGrid["columns"][number]
 type Verdict = EvalGrid["verdicts"][number]
-type Filter = "all" | "changed" | "failing"
+type Filter = "all" | "changed" | "failing" | "better" | "worse" | "same"
 
 /** One configuration's answer to one input: every try, graded or not. */
 type Cell = {
@@ -338,8 +338,170 @@ function signTest(up: number, down: number) {
 }
 
 const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
 const pct = (r: number | null) => (r === null ? "—" : `${Math.round(r * 100)}%`)
 const money = (x: number) => (x < 1 ? `${Math.max(1, Math.round(x * 100))}¢` : `$${x.toFixed(2)}`)
+
+/** One column against the baseline, input by input, on the inputs both answered. */
+function versus(grid: EvalGrid, cells: Map<string, Cell>, base: string, label: string) {
+  let up = 0, down = 0, same = 0
+  for (const i of grid.inputs) {
+    const a = cells.get(`${i.id}|${base}`)?.rate ?? null
+    const b = cells.get(`${i.id}|${label}`)?.rate ?? null
+    if (a === null || b === null) continue
+    if (b > a) up++
+    else if (b < a) down++
+    else same++
+  }
+  return { up, down, same, p: signTest(up, down) }
+}
+
+const verdictFor = ({ up, down, p }: { up: number; down: number; p: number }) =>
+  !up && !down ? "No change" : p < 0.05 ? (up > down ? "Clear improvement" : "Clear regression") : "Could be chance"
+
+// ─── Charts ──────────────────────────────────────────────────────────────
+
+/** Share of checks passed, one bar per column, in the table's order. Clicking a bar compares it. */
+function PassRates({
+  columns,
+  focus,
+  onFocus,
+}: {
+  columns: { label: string; name: string; version: string; when: string; rate: number | null; tries: string; spent: number }[]
+  focus: string | null
+  onFocus: (label: string) => void
+}) {
+  const H = 96
+  return (
+    <figure className="min-w-0">
+      <figcaption className="text-ink-secondary mb-2 text-xs font-medium">Checks passed</figcaption>
+      <div className="flex">
+        <div className="text-ink-tertiary relative mr-2 w-8 text-right text-[10px] tabular-nums" style={{ height: H }} aria-hidden>
+          {[100, 50, 0].map((t) => (
+            <span key={t} className="absolute right-0 -translate-y-1/2" style={{ top: H - (t / 100) * H }}>
+              {t}%
+            </span>
+          ))}
+        </div>
+        <div className="relative flex items-end gap-5 px-1" style={{ height: H }}>
+          {[100, 50].map((t) => (
+            <i key={t} aria-hidden className="border-primary-border pointer-events-none absolute inset-x-0 border-t border-dashed" style={{ top: H - (t / 100) * H }} />
+          ))}
+          <i aria-hidden className="bg-ink-tertiary/60 pointer-events-none absolute inset-x-0 bottom-0 h-px" />
+          {columns.map((c, n) => {
+            const h = c.rate === null ? 0 : Math.max(2, c.rate * H)
+            const role = n === 0 ? "base" : c.label === focus ? "focus" : "other"
+            return (
+              <button
+                key={c.label}
+                type="button"
+                onClick={() => onFocus(c.label)}
+                disabled={n === 0}
+                title={`${c.name}: ${pct(c.rate)} of checks passed · ${c.tries}${c.spent ? ` · ${money(c.spent)}` : ""}`}
+                aria-label={`${c.name}: ${pct(c.rate)} of checks passed`}
+                className="group relative flex w-[72px] flex-col items-center justify-end self-stretch enabled:cursor-pointer"
+              >
+                <span className={cn("mb-1 text-xs tabular-nums", role === "base" ? "text-ink-secondary" : "text-ink-primary font-semibold")}>{pct(c.rate)}</span>
+                <span
+                  className={cn(
+                    "w-11 rounded-t-[4px] transition-opacity",
+                    role === "base" ? "bg-ink-tertiary/45" : role === "focus" ? "bg-accent-bg" : "bg-accent-bg/40 group-hover:bg-accent-bg/70",
+                  )}
+                  style={{ height: h }}
+                />
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <div className="ml-10 flex gap-5 px-1 pt-1.5">
+        {columns.map((c, n) => (
+          <span key={c.label} className="w-[72px] text-center text-[11px] leading-tight" title={c.name}>
+            <span className={cn("block truncate font-medium", c.label === focus || n === 0 ? "text-ink-primary" : "text-ink-secondary")}>{c.version}</span>
+            <span className="text-ink-tertiary block truncate text-[10px]">{n === 0 ? "baseline" : c.when}</span>
+          </span>
+        ))}
+      </div>
+    </figure>
+  )
+}
+
+/**
+ * Each other column against the baseline: of the inputs both answered, how
+ * many did worse, the same, better. Red and green that balance is chance;
+ * a bar that tips is a change. Every segment filters the table to its inputs.
+ */
+function Versus({
+  baseName,
+  rows,
+  focus,
+  filter,
+  onPick,
+}: {
+  baseName: string
+  rows: { label: string; name: string; version: string; when: string; up: number; down: number; same: number; p: number }[]
+  focus: string | null
+  filter: Filter
+  onPick: (label: string, f: "better" | "worse" | "same") => void
+}) {
+  return (
+    <figure className="min-w-0 max-w-[720px] flex-1 basis-[520px]">
+      <figcaption className="text-ink-secondary mb-2 text-xs font-medium">Each input, compared with {baseName}</figcaption>
+      <div className="grid grid-cols-[minmax(0,9rem)_minmax(160px,1fr)_auto] items-center gap-x-3 gap-y-2">
+        {rows.map((r) => {
+          const n = r.up + r.down + r.same
+          const verdict = verdictFor(r)
+          const segs = [
+            { f: "worse" as const, count: r.down, fill: "bg-[color:var(--eval-bad)]", word: "worse" },
+            { f: "same" as const, count: r.same, fill: "bg-ink-tertiary/25", word: "same" },
+            { f: "better" as const, count: r.up, fill: "bg-[color:var(--eval-good)]", word: "better" },
+          ].filter((x) => x.count > 0)
+          const isFocus = r.label === focus
+          return (
+            <div key={r.label} className="contents">
+              <span className="min-w-0 truncate text-xs" title={r.name}>
+                <span className={isFocus ? "text-ink-primary font-medium" : "text-ink-secondary"}>{r.version}</span>{" "}
+                <span className="text-ink-tertiary">{r.when}</span>
+              </span>
+              <span className="flex h-6 gap-0.5 overflow-hidden rounded-[4px]" role="group" aria-label={`${r.name} against ${baseName}`}>
+                {n === 0 && <span className="text-ink-tertiary text-xs">No inputs answered by both</span>}
+                {segs.map((x) => (
+                  <button
+                    key={x.f}
+                    type="button"
+                    onClick={() => onPick(r.label, x.f)}
+                    title={`${x.count} input${x.count === 1 ? "" : "s"} ${x.word} — show them`}
+                    className={cn(
+                      "text-ink-primary flex min-w-[22px] items-center justify-center text-[11px] font-medium tabular-nums hover:brightness-95",
+                      x.fill,
+                      isFocus && filter === x.f && "ring-ink-primary ring-2 ring-inset",
+                    )}
+                    style={{ flexGrow: x.count, flexBasis: 0 }}
+                  >
+                    {x.count / n > 0.12 ? `${x.count} ${x.word}` : x.count}
+                  </button>
+                ))}
+              </span>
+              <span
+                title={verdict === "Could be chance" ? "About as many inputs got worse as better. More tries per input would tell." : verdict === "No change" ? "Every input scored the same." : `${r.up + r.down} inputs changed, ${Math.max(r.up, r.down)} the same way — very unlikely to be chance.`}
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap",
+                  verdict === "Clear improvement"
+                    ? "bg-[color:var(--eval-good)] text-ink-primary"
+                    : verdict === "Clear regression"
+                      ? "bg-[color:var(--eval-bad)] text-ink-primary"
+                      : "border-primary-border text-ink-secondary border",
+                )}
+              >
+                {verdict}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </figure>
+  )
+}
 
 // ─── Results ─────────────────────────────────────────────────────────────
 
@@ -418,7 +580,14 @@ function Results({
   const focus = rest.find((c) => c.label === focusAsked) ?? rest.at(0)
   const cell = (inputId: string, label: string) => cells.get(`${inputId}|${label}`)
   // A column is called by its version; the day is added only where two share one.
-  const nameOf = (c: Column) => (grid.columns.filter((x) => x.version === c.version).length > 1 ? `${c.version} · ${day(c.at)}` : c.version)
+  // When a column was answered: the day, and the time where another column shares it.
+  const whenOf = (c: Column) => (grid.columns.some((x) => x !== c && x.version === c.version && day(x.at) === day(c.at)) ? `${day(c.at)}, ${time(c.at)}` : day(c.at))
+  // A column is called by its version; the day, then the time, only where two would share a name.
+  const nameOf = (c: Column) => {
+    const same = grid.columns.filter((x) => x.version === c.version)
+    if (same.length < 2) return c.version
+    return same.filter((x) => day(x.at) === day(c.at)).length < 2 ? `${c.version} · ${day(c.at)}` : `${c.version} · ${day(c.at)}, ${time(c.at)}`
+  }
 
   // The baseline against the column in the headline, on the inputs both answered.
   const rows = grid.inputs.map((i) => {
@@ -426,10 +595,6 @@ function Results({
     const b = focus ? (cell(i.id, focus.label)?.rate ?? null) : null
     return { input: i, d: a !== null && b !== null ? Math.sign(b - a) : null }
   })
-  const shared = rows.filter((r) => r.d !== null)
-  const up = shared.filter((r) => r.d! > 0).length
-  const down = shared.filter((r) => r.d! < 0).length
-  const p = signTest(up, down)
   // Tries per input in a column: a range, since answering one input again gives only it a second.
   const triesOf = (c: Column) => {
     const per = grid.inputs.map((i) => cell(i.id, c.label)?.tries.length ?? 0).filter((n) => n > 0)
@@ -443,7 +608,13 @@ function Results({
       ? true
       : filter === "changed"
         ? r.d !== null && r.d !== 0
-        : (cell(r.input.id, focus.label)?.rate ?? 1) < 1,
+        : filter === "better"
+          ? r.d !== null && r.d > 0
+          : filter === "worse"
+            ? r.d !== null && r.d < 0
+            : filter === "same"
+              ? r.d === 0
+              : (cell(r.input.id, focus.label)?.rate ?? 1) < 1,
   )
   const hidden = runs.flatMap((r) =>
     r.versions
@@ -454,51 +625,37 @@ function Results({
   return (
     <section className="border-primary-border bg-primary-bg rounded-xl border" aria-label="Results">
       <div className="border-primary-border space-y-3 border-b px-5 py-4">
-        <div className="flex flex-wrap items-start gap-3">
+        <div className="flex flex-wrap items-start gap-x-10 gap-y-5">
+          <PassRates
+            columns={grid.columns.map((c) => ({ label: c.label, name: nameOf(c), version: c.version, when: whenOf(c), rate: columnRate(grid, cells, c.label), tries: triesOf(c), spent: c.spent }))}
+            focus={focus?.label ?? null}
+            onFocus={(label) => label !== base.label && onFocus(label)}
+          />
+          {rest.length > 0 && (
+            <Versus
+              baseName={nameOf(base)}
+              rows={rest.map((c) => ({ label: c.label, name: nameOf(c), version: c.version, when: whenOf(c), ...versus(grid, cells, base.label, c.label) }))}
+              focus={focus?.label ?? null}
+              filter={filter}
+              onPick={(label, f) => (onFocus(label), setFilter(f))}
+            />
+          )}
+          <span className="flex-1" />
           {focus && (
             <button
               type="button"
               onClick={() => askEvalsAgent(whyPrompt(agent, datasetId, rubricId, base, focus, grid.inputs.filter((i) => (cell(i.id, focus.label)?.rate ?? 1) < 1).map((i) => i.id)))}
-              className="border-primary-border hover:bg-primary-bg-hover order-last h-8 shrink-0 rounded-lg border px-3 text-[13px]"
+              className="border-primary-border hover:bg-primary-bg-hover h-8 shrink-0 rounded-lg border px-3 text-[13px]"
             >
               Why do these still fail?
             </button>
           )}
-          <div className="min-w-0 flex-1">
-            {focus ? (
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
-                <span className="flex items-baseline gap-2.5 text-[22px] tracking-tight">
-                  <span className="text-ink-tertiary">{nameOf(base)} {pct(columnRate(grid, cells, base.label))}</span>
-                  <span className="text-ink-tertiary text-base" aria-hidden>→</span>
-                  <b className="text-ink-primary font-semibold">{nameOf(focus)} {pct(columnRate(grid, cells, focus.label))}</b>
-                </span>
-                <span className="text-ink-secondary text-[13px]">
-                  <b className="font-semibold text-[color:var(--eval-good-ink)]">{up} better</b> ·{" "}
-                  <b className="font-semibold text-[color:var(--eval-bad-ink)]">{down} worse</b> · {shared.length - up - down} same
-                </span>
-                <span
-                  title={p < 0.05 ? `${up + down} inputs changed, ${Math.max(up, down)} the same way — very unlikely to be chance.` : "Too few inputs changed to tell. Run it with more tries per input."}
-                  className={cn(
-                    "rounded-full px-2.5 py-0.5 text-xs font-medium",
-                    p < 0.05 ? "bg-[color:var(--eval-good)] text-ink-primary" : "border-primary-border text-ink-secondary border",
-                  )}
-                >
-                  {p < 0.05 ? `Clear ${up >= down ? "improvement" : "regression"}` : "Could be chance"}
-                </span>
-              </div>
-            ) : (
-              <div className="text-ink-primary text-[22px] font-semibold tabular-nums">
-                {nameOf(base)} {pct(columnRate(grid, cells, base.label))}
-              </div>
-            )}
-            <p className="text-ink-tertiary mt-1 text-xs tabular-nums">
-              {focus
-                ? `${focus.runName ?? nameOf(focus)} · compared with ${nameOf(base)} on ${shared.length} input${shared.length === 1 ? "" : "s"} · ${triesOf(focus)}${focus.runId !== base.runId ? " · answered on different days" : ""}`
-                : "Add a column to compare with it."}
-              {broken > 0 && ` · ${broken} answer${broken === 1 ? "" : "s"} broke — left out of the score`}
-            </p>
-          </div>
         </div>
+        {broken > 0 && (
+          <p className="text-ink-tertiary text-xs tabular-nums">
+            {broken} answer{broken === 1 ? "" : "s"} on {nameOf(focus!)} broke — left out of the score.
+          </p>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <Segmented
             value={filter}
@@ -509,6 +666,11 @@ function Results({
               ["failing", "Still failing"],
             ]}
           />
+          {focus && (filter === "better" || filter === "worse" || filter === "same") && (
+            <button type="button" onClick={() => setFilter("all")} className="bg-primary-bg-active text-ink-primary flex h-7 items-center gap-1 rounded-md px-2.5 text-xs">
+              {shown.length} {filter} on {nameOf(focus)} <span aria-hidden className="text-ink-tertiary">✕</span>
+            </button>
+          )}
           <span className="flex-1" />
           {focus && (
             <button
@@ -583,6 +745,7 @@ function Results({
                   <ColumnMenu
                     column={c}
                     isBase={n === 0}
+                    when={whenOf(c)}
                     isFocus={c.label === focus?.label}
                     rate={columnRate(grid, cells, c.label)}
                     tries={triesOf(c)}
@@ -780,6 +943,7 @@ function ByCheck({ grid, base, focus }: { grid: EvalGrid; base: Column; focus: C
 function ColumnMenu({
   column,
   isBase,
+  when,
   isFocus,
   rate,
   tries,
@@ -796,6 +960,8 @@ function ColumnMenu({
 }: {
   column: Column
   isBase: boolean
+  /** The day it was answered, with the time when another column shares the day. */
+  when: string
   isFocus: boolean
   rate: number | null
   tries: string
@@ -828,9 +994,8 @@ function ColumnMenu({
           <ChevronDown className="size-3" />
         </span>
         <span className={cn("block text-[11px] leading-snug tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
-          {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : <>{day(column.at)} · {pct(rate)}</>}
-          {column.spent > 0 && ` · ${money(column.spent)}`}
-          {tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
+          {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : when}
+          {!state && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
         </span>
       </Popover.Trigger>
       {stale && (
@@ -841,7 +1006,7 @@ function ColumnMenu({
       <Popover.Content align="start" className="w-80 p-1.5">
         {again ? againPanel(failed, () => setOpen(false)) : <>
         <div className="text-ink-tertiary px-2.5 pt-1 pb-1.5 text-xs">
-          {column.runName ?? "Unnamed run"} · {day(column.at)}
+          {column.runName ?? "Unnamed run"} · {when} · {pct(rate)} of checks passed
           {column.spent > 0 && ` · spent ${money(column.spent)}`}
         </div>
         {!isBase && (

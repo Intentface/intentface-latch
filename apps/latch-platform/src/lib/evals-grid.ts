@@ -59,15 +59,24 @@ export async function computeGrid(
       const order = (v: string) => (v === "live" ? "" : v);
       columns = [...run.versions].sort((a, b) => order(a).localeCompare(order(b))).map((version) => ({ runId: run.runId, version }));
     }
+    // The same result twice is one column.
+    const asked = columns;
+    columns = asked.filter((c, i) => asked.findIndex((x) => x.runId === c.runId && x.version === c.version) === i);
+    const shown = columns;
     const crossRun = new Set(columns.map((c) => c.runId)).size > 1;
     const runOf = new Map(runs.map((r) => [r.runId, r]));
     const when = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    // Across runs a column needs its run in its name; within one, the version is enough.
-    const labelOf = (c: ResultRef) => {
+    const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    // Across runs a column needs its run in its name; within one, the version
+    // is enough. Everything is keyed by the label, so two runs of one version
+    // on one day get their time too — or their answers merge into one column.
+    const short = (c: ResultRef) => {
       if (!crossRun) return c.version;
       const r = runOf.get(c.runId)!;
       return `${c.version} · ${r.name ?? when(r.createdAt)}`;
     };
+    const clash = (c: ResultRef) => shown.filter((x) => short(x) === short(c)).length > 1;
+    const labelOf = (c: ResultRef) => (clash(c) ? `${short(c)}, ${time(runOf.get(c.runId)!.createdAt)}` : short(c));
 
     const rubrics = new Map<number, Rubric>([[latest.version, latest]]);
     const rubricAt = async (v: number) => rubrics.get(v) ?? (await evals.getRubric(o.owner, data.rubricId, v).then((r) => (r && rubrics.set(v, r), r)));
