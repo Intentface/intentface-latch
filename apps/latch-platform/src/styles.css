@@ -51,6 +51,12 @@
   /* Text on the panel, not a fill: the same hues, dark enough to read. */
   --eval-good-ink: oklch(0.52 0.12 160);
   --eval-bad-ink: oklch(0.55 0.16 25);
+  /* Columns in the By check chart, in the table's order after the baseline
+     (which is always the neutral ring). Hues far apart, one lightness band. */
+  --eval-col-1: oklch(0.58 0.16 255);
+  --eval-col-2: oklch(0.68 0.16 55);
+  --eval-col-3: oklch(0.55 0.18 320);
+  --eval-col-4: oklch(0.6 0.11 185);
   --con: 0.3;
 
   /* State deltas (OKLCH L offsets, scale with --con).
@@ -148,6 +154,10 @@
   --eval-good: oklch(0.43 0.08 160);
   --eval-good-ink: oklch(0.76 0.11 160);
   --eval-bad-ink: oklch(0.74 0.13 25);
+  --eval-col-1: oklch(0.7 0.14 255);
+  --eval-col-2: oklch(0.76 0.14 60);
+  --eval-col-3: oklch(0.7 0.15 320);
+  --eval-col-4: oklch(0.74 0.1 185);
 
   /* State deltas flip positive in dark — surfaces sit far from
      white, so states lift toward white instead of sinking. */
