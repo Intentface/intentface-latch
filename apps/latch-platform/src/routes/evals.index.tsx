@@ -77,7 +77,6 @@ function EvalsPage() {
   const [grid, setGrid] = useState<EvalGrid | null>(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState<Filter>("all")
-  const [byCheck, setByCheck] = useState(true)
   const [openCell, setOpenCell] = useState<{ inputId: string; column: string } | null>(null)
   const [openInput, setOpenInput] = useState<string | null>(null)
   const [checksOpen, setChecksOpen] = useState(false)
@@ -187,8 +186,6 @@ function EvalsPage() {
             focusAsked={search.focus}
             filter={filter}
             setFilter={setFilter}
-            byCheck={byCheck}
-            setByCheck={setByCheck}
             runs={dataset?.runs ?? []}
             onOpen={setOpenCell}
             onBaseline={(label) => {
@@ -354,8 +351,6 @@ function Results({
   focusAsked,
   filter,
   setFilter,
-  byCheck,
-  setByCheck,
   runs,
   onOpen,
   onBaseline,
@@ -377,8 +372,6 @@ function Results({
   focusAsked: string | undefined
   filter: Filter
   setFilter: (f: Filter) => void
-  byCheck: boolean
-  setByCheck: (b: boolean) => void
   runs: { runId: string; versions: string[]; name: string | null; createdAt: number; questions: number; tries: number }[]
   onOpen: (at: { inputId: string; column: string }) => void
   onBaseline: (label: string) => void
@@ -498,16 +491,6 @@ function Results({
             </span>
           )}
           <span className="flex-1" />
-          {(
-            <button
-              type="button"
-              aria-expanded={byCheck}
-              onClick={() => setByCheck(!byCheck)}
-              className="text-ink-secondary hover:text-ink-primary flex items-center gap-1 text-[13px]"
-            >
-              {byCheck ? "Hide chart" : "Show chart"} <ChevronDown className={cn("size-3.5 transition-transform", byCheck && "rotate-180")} />
-            </button>
-          )}
           {focus && (
             <button
               type="button"
@@ -518,7 +501,6 @@ function Results({
             </button>
           )}
         </div>
-        {byCheck && <ByCheck grid={grid} names={grid.columns.map(nameOf)} focus={focus?.label ?? null} onFocus={onFocus} />}
       </div>
 
       {picked.size > 0 && (
@@ -559,7 +541,6 @@ function Results({
                   <ColumnMenu
                     column={c}
                     isBase={n === 0}
-                    color={columnColor(n)}
                     when={whenOf(c)}
                     isFocus={c.label === focus?.label}
                     rate={columnRate(grid, cells, c.label)}
@@ -719,97 +700,6 @@ function Segmented<T extends string>({ value, onChange, options }: { value: T; o
   )
 }
 
-/** A column's colour in the chart and its header: the baseline has none — it is the ring. */
-const columnColor = (n: number) => (n === 0 ? null : `var(--eval-col-${((n - 1) % 4) + 1})`)
-
-/**
- * Checks passed, check by check: a dot per column on one 0–100% line, the
- * baseline as a ring, a line from it to the column being compared. On the
- * inputs every column answered, so a column that answered fewer isn't
- * flattered or punished for it. Biggest move first.
- */
-function ByCheck({ grid, names, focus, onFocus }: { grid: EvalGrid; names: string[]; focus: string | null; onFocus: (label: string) => void }) {
-  const cols = grid.columns
-  const answered = (label: string) => new Set(grid.threads.filter((t) => t.column === label && !t.error).map((t) => t.inputId))
-  const sets = cols.map((c) => answered(c.label))
-  const common = new Set([...(sets[0] ?? [])].filter((id) => sets.every((x) => x.has(id))))
-  const rateOf = (checkId: string, label: string) => {
-    const vs = grid.verdicts.filter((v) => v.checkId === checkId && v.version === label && common.has(v.inputId))
-    return vs.length ? { r: vs.filter((v) => !(v.ruling ?? v.failed)).length / vs.length, pass: vs.filter((v) => !(v.ruling ?? v.failed)).length, of: vs.length } : null
-  }
-  const f = cols.findIndex((c) => c.label === focus)
-  const rows = grid.checks
-    .map((c) => ({ check: c, rates: cols.map((col) => rateOf(c.id, col.label)) }))
-    .map((x) => ({ ...x, d: f > 0 && x.rates[0] && x.rates[f] ? x.rates[f].r - x.rates[0].r : 0 }))
-    .sort((a, b) => Math.abs(b.d) - Math.abs(a.d))
-  const at = (r: number) => `calc(${r * 100}% - 5px)`
-  return (
-    <figure aria-label="Checks passed, by check">
-      <figcaption className="text-ink-secondary mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-        <span className="text-ink-primary font-medium">Checks passed, by check</span>
-        {cols.map((c, n) => (
-          <button
-            key={c.label}
-            type="button"
-            disabled={n === 0}
-            onClick={() => onFocus(c.label)}
-            title={n === 0 ? undefined : "Compare this one with the baseline"}
-            className={cn("flex items-center gap-1.5 rounded px-1 enabled:hover:bg-primary-bg-hover", n === f && "text-ink-primary font-medium")}
-          >
-            <i aria-hidden className={cn("inline-block size-2.5 rounded-full", n === 0 && "border-ink-tertiary border-2")} style={n ? { background: columnColor(n)! } : undefined} />
-            {names[n]}
-            {n === 0 && <span className="text-ink-tertiary font-normal">baseline</span>}
-          </button>
-        ))}
-        {f > 0 && <span className="text-ink-tertiary">line and change: {names[f]} against the baseline</span>}
-        {common.size < grid.inputs.length && <span className="text-ink-tertiary">on the {common.size} inputs every column answered</span>}
-      </figcaption>
-      <div className="grid grid-cols-[minmax(0,15rem)_minmax(200px,1fr)_4.5rem] items-center gap-x-4">
-        {rows.map(({ check, rates, d }) => {
-          const a = rates[0], b = f > 0 ? rates[f] : null
-          const pts = Math.round(d * 100)
-          return (
-            <div key={check.id} className="contents">
-              <span className="text-ink-secondary truncate py-1.5 text-[13px]" title={check.sentence}>
-                {check.label}
-              </span>
-              <span className="relative h-7">
-                {[0, 0.5, 1].map((t) => (
-                  <i key={t} aria-hidden className="bg-primary-border absolute top-1 bottom-1 w-px" style={{ left: `${t * 100}%` }} />
-                ))}
-                <i aria-hidden className="bg-primary-border absolute inset-x-0 top-1/2 h-px" />
-                {a && b && (
-                  <i aria-hidden className="absolute top-1/2 h-0.5 -translate-y-1/2 rounded-full opacity-60" style={{ left: `${Math.min(a.r, b.r) * 100}%`, width: `${Math.abs(b.r - a.r) * 100}%`, background: columnColor(f)! }} />
-                )}
-                {rates.map((x, n) =>
-                  x ? (
-                    <i
-                      key={n}
-                      title={`${names[n]}: ${pct(x.r)} (${x.pass}/${x.of})`}
-                      className={cn("absolute top-1/2 size-2.5 -translate-y-1/2 rounded-full shadow-[0_0_0_2px_var(--color-primary-bg)]", n === 0 ? "border-ink-tertiary bg-primary-bg z-0 border-2" : n === f ? "z-20" : "z-10")}
-                      style={{ left: at(x.r), ...(n ? { background: columnColor(n)! } : {}) }}
-                    />
-                  ) : null,
-                )}
-              </span>
-              <span className={cn("text-right text-xs font-semibold tabular-nums", pts > 0 ? "text-[color:var(--eval-good-ink)]" : pts < 0 ? "text-[color:var(--eval-bad-ink)]" : "text-ink-tertiary")}>
-                {f > 0 && a && b ? (pts > 0 ? `+${pts} pts` : pts < 0 ? `${pts} pts` : "same") : pct(a?.r ?? null)}
-              </span>
-            </div>
-          )
-        })}
-        <span />
-        <span className="text-ink-tertiary relative h-4 text-[10px] tabular-nums" aria-hidden>
-          <span className="absolute left-0">0%</span>
-          <span className="absolute left-1/2 -translate-x-1/2">50%</span>
-          <span className="absolute right-0">100%</span>
-        </span>
-        <span />
-      </div>
-    </figure>
-  )
-}
-
 function ColumnMenu({
   column,
   isBase,
@@ -827,7 +717,6 @@ function ColumnMenu({
   onBaseline,
   onHide,
   moved,
-  color,
   onShowMoved,
 }: {
   column: Column
@@ -852,8 +741,6 @@ function ColumnMenu({
   /** Against the baseline: inputs that scored higher and lower, and what that adds up to. Absent on the baseline. */
   moved?: { up: number; down: number; verdict: string; sameSetup: boolean }
   onShowMoved?: (f: "better" | "worse") => void
-  /** Its colour in the By check chart. */
-  color?: string | null
 }) {
   const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
   const [open, setOpen] = useState(false)
@@ -865,7 +752,6 @@ function ColumnMenu({
     <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(false))}>
       <Popover.Trigger render={<button type="button" className="group inline-flex flex-col items-center" />}>
         <span className={cn("flex items-center gap-1 text-xs font-semibold whitespace-nowrap", isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary")}>
-          {color && <i aria-hidden className="inline-block size-2 rounded-full" style={{ background: color }} />}
           {column.version}
           {isBase && <span className="border-primary-border text-ink-tertiary rounded-full border px-1.5 text-[10px] font-medium">baseline</span>}
           <ChevronDown className="size-3" />
