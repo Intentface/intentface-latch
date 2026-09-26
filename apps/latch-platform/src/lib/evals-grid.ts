@@ -119,6 +119,14 @@ export async function computeGrid(
     const byThread = new Map<string, ThreadRef>(threads.map((t) => [t.threadId, t]));
     // What each column cost to answer — from the runs its threads made.
     const costs = await evals.threadCosts(threads.map((t) => t.threadId));
+    // Which configuration answered — two columns with the same one differ only by chance.
+    const setupOf = (label: string) => {
+      const fp = threads.find((t) => t.version === label)?.configFingerprint;
+      if (!fp) return null;
+      let h = 5381;
+      for (let i = 0; i < fp.length; i++) h = ((h << 5) + h + fp.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(36);
+    };
     const spentOf = (label: string) => threads.filter((t) => t.version === label).reduce((a, t) => a + (costs.get(t.threadId) ?? 0), 0);
 
     return {
@@ -126,7 +134,7 @@ export async function computeGrid(
       crossRun,
       columns: columns.map((c, i) => {
         const r = runOf.get(c.runId)!;
-        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i], spent: spentOf(labels[i]) };
+        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i], spent: spentOf(labels[i]), setup: setupOf(labels[i]) };
       }),
       rubricVersion: rubric.version,
       latestVersion: latest.version,

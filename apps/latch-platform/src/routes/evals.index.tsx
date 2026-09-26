@@ -357,7 +357,7 @@ function versus(grid: EvalGrid, cells: Map<string, Cell>, base: string, label: s
 }
 
 const verdictFor = ({ up, down, p }: { up: number; down: number; p: number }) =>
-  !up && !down ? "No change" : p < 0.05 ? (up > down ? "Clear improvement" : "Clear regression") : "Could be chance"
+  !up && !down ? "No change" : p < 0.05 ? (up > down ? "Clearly better" : "Clearly worse") : "No real difference"
 
 // ─── Charts ──────────────────────────────────────────────────────────────
 
@@ -439,22 +439,25 @@ function Versus({
   onPick,
 }: {
   baseName: string
-  rows: { label: string; name: string; version: string; when: string; up: number; down: number; same: number; p: number }[]
+  rows: { label: string; name: string; version: string; when: string; sameSetup: boolean; up: number; down: number; same: number; p: number }[]
   focus: string | null
   filter: Filter
   onPick: (label: string, f: "better" | "worse" | "same") => void
 }) {
   return (
     <figure className="min-w-0 max-w-[720px] flex-1 basis-[520px]">
-      <figcaption className="text-ink-secondary mb-2 text-xs font-medium">Each input, compared with {baseName}</figcaption>
+      <figcaption className="mb-2 text-xs">
+        <span className="text-ink-secondary font-medium">Did each input score higher or lower than the baseline?</span>{" "}
+        <span className="text-ink-tertiary">Baseline: {baseName}</span>
+      </figcaption>
       <div className="grid grid-cols-[minmax(0,9rem)_minmax(160px,1fr)_auto] items-center gap-x-3 gap-y-2">
         {rows.map((r) => {
           const n = r.up + r.down + r.same
           const verdict = verdictFor(r)
           const segs = [
-            { f: "worse" as const, count: r.down, fill: "bg-[color:var(--eval-bad)]", word: "worse" },
+            { f: "worse" as const, count: r.down, fill: "bg-[color:var(--eval-bad)]", word: "lower" },
             { f: "same" as const, count: r.same, fill: "bg-ink-tertiary/25", word: "same" },
-            { f: "better" as const, count: r.up, fill: "bg-[color:var(--eval-good)]", word: "better" },
+            { f: "better" as const, count: r.up, fill: "bg-[color:var(--eval-good)]", word: "higher" },
           ].filter((x) => x.count > 0)
           const isFocus = r.label === focus
           return (
@@ -470,7 +473,7 @@ function Versus({
                     key={x.f}
                     type="button"
                     onClick={() => onPick(r.label, x.f)}
-                    title={`${x.count} input${x.count === 1 ? "" : "s"} ${x.word} — show them`}
+                    title={`${x.count} input${x.count === 1 ? "" : "s"} scored ${x.word === "same" ? "the same" : x.word} — show ${x.count === 1 ? "it" : "them"}`}
                     className={cn(
                       "text-ink-primary flex min-w-[22px] items-center justify-center text-[11px] font-medium tabular-nums hover:brightness-95",
                       x.fill,
@@ -483,18 +486,33 @@ function Versus({
                 ))}
               </span>
               <span
-                title={verdict === "Could be chance" ? "About as many inputs got worse as better. More tries per input would tell." : verdict === "No change" ? "Every input scored the same." : `${r.up + r.down} inputs changed, ${Math.max(r.up, r.down)} the same way — very unlikely to be chance.`}
+                title={
+                  r.sameSetup
+                    ? "The same configuration as the baseline, answered again. Every difference is the agent answering differently on its own."
+                    : verdict === "No real difference"
+                      ? "About as many inputs scored lower as higher — what answering again alone can do. More tries per input would tell."
+                      : verdict === "No change"
+                        ? "Every input scored the same."
+                        : `${r.up + r.down} inputs moved, ${Math.max(r.up, r.down)} of them the same way — more than chance would.`
+                }
                 className={cn(
                   "rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap",
-                  verdict === "Clear improvement"
-                    ? "bg-[color:var(--eval-good)] text-ink-primary"
-                    : verdict === "Clear regression"
-                      ? "bg-[color:var(--eval-bad)] text-ink-primary"
-                      : "border-primary-border text-ink-secondary border",
+                  r.sameSetup
+                    ? "text-ink-tertiary border-primary-border border border-dashed"
+                    : verdict === "Clearly better"
+                      ? "bg-[color:var(--eval-good)] text-ink-primary"
+                      : verdict === "Clearly worse"
+                        ? "bg-[color:var(--eval-bad)] text-ink-primary"
+                        : "border-primary-border text-ink-secondary border",
                 )}
               >
-                {verdict}
+                {r.sameSetup ? "Same setup" : verdict}
               </span>
+              {r.sameSetup && (
+                <span className="text-ink-tertiary col-start-2 col-end-4 -mt-1 text-[11px]">
+                  Same setup as the baseline, so these {r.up + r.down} moves are the agent answering differently on its own — the noise any change has to beat.
+                </span>
+              )}
             </div>
           )
         })}
@@ -634,7 +652,7 @@ function Results({
           {rest.length > 0 && (
             <Versus
               baseName={nameOf(base)}
-              rows={rest.map((c) => ({ label: c.label, name: nameOf(c), version: c.version, when: whenOf(c), ...versus(grid, cells, base.label, c.label) }))}
+              rows={rest.map((c) => ({ label: c.label, name: nameOf(c), version: c.version, when: whenOf(c), sameSetup: !!c.setup && c.setup === base.setup, ...versus(grid, cells, base.label, c.label) }))}
               focus={focus?.label ?? null}
               filter={filter}
               onPick={(label, f) => (onFocus(label), setFilter(f))}
