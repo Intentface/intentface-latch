@@ -500,6 +500,15 @@ function Results({
               Why do these still fail?
             </button>
           )}
+          <EarlierAnswers hidden={hidden} onShow={onShow} />
+          <AddColumn
+            agent={agent}
+            datasetId={datasetId}
+            rubricId={rubricId}
+            shown={grid.columns.map((c) => ({ runId: c.runId, version: c.version }))}
+            onShow={onShow}
+            onStarted={onStarted}
+          />
         </div>
       </div>
 
@@ -577,19 +586,7 @@ function Results({
                   />
                 </th>
               ))}
-              <th className="w-full px-2 py-2 text-left align-bottom">
-                <span className="flex items-center gap-1">
-                  <AddColumn
-                    agent={agent}
-                    datasetId={datasetId}
-                    rubricId={rubricId}
-                    shown={grid.columns.map((c) => ({ runId: c.runId, version: c.version }))}
-                    onShow={onShow}
-                    onStarted={onStarted}
-                  />
-                  <EarlierAnswers hidden={hidden} onShow={onShow} />
-                </span>
-              </th>
+              <th className="w-full" />
             </tr>
           </thead>
           <tbody>

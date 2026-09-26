@@ -205,16 +205,13 @@ export function AddColumn({
           first ? (
             <button type="button" className="bg-ink-primary text-primary-bg h-9 rounded-lg px-4 text-sm font-medium" />
           ) : (
-            <button
-              type="button"
-              className="border-primary-border text-ink-secondary hover:text-ink-primary hover:bg-primary-bg-hover flex h-7 items-center gap-1 rounded-full border border-dashed px-3 text-xs whitespace-nowrap"
-            />
+            <button type="button" className="bg-ink-primary text-primary-bg flex h-7 items-center gap-1 rounded-lg px-3 text-xs font-medium whitespace-nowrap hover:opacity-90" />
           )
         }
       >
         {first ? "Run a configuration" : <><Plus className="size-3.5" /> Run</>}
       </Popover.Trigger>
-      <Popover.Content align="start" className="w-[24rem] p-1.5">
+      <Popover.Content align={first ? "start" : "end"} className="w-[24rem] p-1.5">
         {variantOpen && options ? (
           <VariantForm
             agent={agent}
@@ -265,7 +262,7 @@ export function EarlierAnswers({ hidden, onShow }: { hidden: Shown[]; onShow: (r
       >
         <Columns2 className="size-3.5" /> Earlier answers
       </Popover.Trigger>
-      <Popover.Content align="start" className="w-80 p-1.5">
+      <Popover.Content align="end" className="w-80 p-1.5">
         <div className="text-ink-tertiary px-2.5 pt-1 pb-1 text-xs">Add as a column — free, nothing runs</div>
         <ul className="max-h-72 overflow-y-auto">
           {hidden.map((h) => (
