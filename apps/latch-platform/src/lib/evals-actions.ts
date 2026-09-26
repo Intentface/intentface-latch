@@ -106,7 +106,6 @@ export async function editQuestions(
         ...(u.followUps ? { followUps: u.followUps } : {}),
         ...(u.answer !== undefined ? { answer: u.answer } : {}),
         ...(u.mustNot ? { mustNot: u.mustNot } : {}),
-        ...(u.docs ? { docs: u.docs } : {}),
         ...(u.mustSay ? { mustSay: u.mustSay } : {}),
         ...(u.asks ? { asks: u.asks } : {}),
         ...(u.decline !== undefined ? { decline: u.decline } : {}),
@@ -122,7 +121,6 @@ export async function editQuestions(
         followUps: u.followUps ?? [],
         answer: u.answer ?? "",
         mustNot: u.mustNot ?? [],
-        docs: u.docs ?? [],
         mustSay: u.mustSay ?? [],
         asks: u.asks ?? [],
         decline: u.decline ?? false,
@@ -174,6 +172,8 @@ async function ensureOn(r: Rubric, inputs: Input[]) {
   const wantsSays = inputs.some((i) => saysItems(i.facts).some((x) => x.kind !== "mustNot") || (i.facts?.mustNot?.length ?? 0) > 0);
   const hasCalls = r.checks.some((c) => c.kind === "counted" && c.spec.op === "expected_calls");
   const hasSays = r.checks.some((c) => c.kind === "asked" && c.fromInput === "says");
+  const wantsAnswer = inputs.some((i) => typeof i.facts?.answer === "string" && i.facts.answer.trim());
+  const hasAnswer = r.checks.some((c) => c.kind === "asked" && c.ask.includes("REFERENCE_ANSWER"));
   const add: Check[] = [];
   const taken = r.checks.map((c) => c.id);
   if (wantsCalls && !hasCalls)
@@ -186,6 +186,24 @@ async function ensureOn(r: Rubric, inputs: Input[]) {
       ask: "What each input says the answer must say, must not say, or whether it should decline — each asked as a yes/no.",
       shape: { type: "boolean" },
       fromInput: "says",
+    });
+  if (wantsAnswer && !hasAnswer)
+    add.push({
+      kind: "asked",
+      id: checkIdFor("got-the-answer-right", taken),
+      label: "Got the answer right",
+      ask: "Compare the final answer with the REFERENCE_ANSWER. Judge the substance, not wording, length or tone.",
+      shape: {
+        type: "score",
+        levels: [
+          { name: "contradicts", means: "States something the reference contradicts." },
+          { name: "misses_the_point", means: "Does not carry the reference's central claim." },
+          { name: "partial", means: "Carries part of it, omits something load-bearing." },
+          { name: "equivalent", means: "Same substance as the reference." },
+          { name: "better", means: "Same substance plus something useful and true." },
+        ],
+        bad: 1,
+      },
     });
   if (!add.length) return [];
   await evals.saveRubric({ owner: r.owner, id: r.id, agentName: r.agentName, defaultJudge: r.defaultJudge, checks: [...r.checks, ...add] });

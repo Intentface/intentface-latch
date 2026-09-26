@@ -51,15 +51,23 @@ export function validateInputs(inputs: Input[]): Valid<Input[]> {
       if (calls.length) facts.calls = calls;
       else delete facts.calls;
     }
+    // "Reads this document" was its own kind; it is an expected call like any
+    // other — a read whose result names the document — so it is saved as one.
     if ("docs" in facts) {
-      const docs = clean(facts.docs);
-      if (docs.length) facts.docs = docs;
-      else delete facts.docs;
+      const reads = docsAsCalls(clean(facts.docs));
+      const had = Array.isArray(facts.calls) ? (facts.calls as CallExpectation[]) : [];
+      const fresh = reads.filter((r) => !had.some((c) => JSON.stringify(c) === JSON.stringify(r)));
+      if (had.length || fresh.length) facts.calls = [...had, ...fresh];
+      delete facts.docs;
     }
     out.push({ id, prompt, ...(followUps.length ? { followUps } : {}), ...(Object.keys(facts).length ? { facts } : {}) });
   }
   return { ok: true, value: out };
 }
+
+/** A document the answer is in, as the call that must read it. */
+export const docsAsCalls = (docs: string[]): CallExpectation[] =>
+  docs.map((d) => ({ tool: "*read_file", match: [{ path: "result", op: "contains", value: d }] }));
 
 /** Expected tool calls as saved: a tool each, matches with a path; an error in words otherwise. */
 function cleanCalls(raw: unknown): CallExpectation[] | string {
@@ -173,7 +181,6 @@ export interface EditableQuestion {
   followUps: string[];
   answer: string;
   mustNot: string[];
-  docs: string[];
   mustSay: string[];
   asks: string[];
   decline: boolean;
@@ -190,11 +197,11 @@ export function toEditable(i: Input): EditableQuestion {
     followUps: i.followUps ?? [],
     answer: typeof answer === "string" ? answer : "",
     mustNot: clean(mustNot),
-    docs: clean(docs),
     mustSay: clean(mustSay),
     asks: clean(asks),
     decline: decline === true,
-    calls: Array.isArray(calls) ? calls : [],
+    // An older input's documents are the reads it expects.
+    calls: [...(Array.isArray(calls) ? calls : []), ...docsAsCalls(clean(docs))],
     extra: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "{}",
   };
 }
@@ -218,7 +225,6 @@ export function fromEditable(qs: EditableQuestion[]): Valid<Input[]> {
         ...(extra as Record<string, unknown>),
         answer: q.answer,
         mustNot: q.mustNot,
-        docs: q.docs,
         mustSay: q.mustSay,
         asks: q.asks,
         decline: q.decline,

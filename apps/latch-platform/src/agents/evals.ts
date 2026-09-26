@@ -26,7 +26,6 @@ const Question = z.object({
   prompt: z.string().describe("The question, worded the way a real person would ask it"),
   answer: z.string().optional().describe("What a good answer conveys — substance, not wording"),
   mustNot: z.array(z.string()).optional().describe("Things the answer must not do, in plain words"),
-  docs: z.array(z.string()).optional().describe("File names of the documents that hold the answer"),
   followUps: z.array(z.string()).optional().describe("Further messages in the same thread after the first answer"),
   mustSay: z.array(z.string()).optional().describe("Things the answer must say, in plain words — each graded as a yes/no"),
   decline: z.boolean().optional().describe("True when the right answer is a polite refusal"),
@@ -71,7 +70,6 @@ const editable = (q: QuestionInput, id: string) => ({
   followUps: q.followUps ?? [],
   answer: q.answer ?? "",
   mustNot: q.mustNot ?? [],
-  docs: q.docs ?? [],
   mustSay: q.mustSay ?? [],
   asks: q.asks ?? [],
   decline: q.decline ?? false,
@@ -484,7 +482,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
     }),
 
     list_questions: tool({
-      description: "Every question in a set: the prompt, follow-ups, what a good answer conveys, must-nots, the documents that hold the answer, and other facts.",
+      description: "Every question in a set: the prompt, follow-ups, what a good answer conveys, must-nots, expected tool calls, and other facts.",
       inputSchema: z.object({ agent: Agent, questionSetId: z.string() }),
       execute: async ({ agent, questionSetId }) => {
         const o = await scope(agent);

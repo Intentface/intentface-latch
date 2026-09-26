@@ -27,11 +27,8 @@ const sentence = (c: Rubric["checks"][number]) =>
     : describeCounted(c).replace(/"?\{\{facts\.(\w+)\}\}"?/g, (_, k: string) => (k === "docs" ? "the document the question names" : `the question's ${k}`));
 
 /** A check that reads what each input says for itself — its good answer, its document, its lists. */
-function readsOf(c: Rubric["checks"][number]): "answer" | "docs" | "calls" | "says" | null {
-  if (c.kind === "counted") {
-    if (c.spec.op === "expected_calls") return "calls";
-    return JSON.stringify(c.spec).includes("{{facts.docs}}") ? "docs" : null;
-  }
+function readsOf(c: Rubric["checks"][number]): "answer" | "calls" | "says" | null {
+  if (c.kind === "counted") return c.spec.op === "expected_calls" ? "calls" : null;
   if (c.fromInput === "says") return "says";
   return /REFERENCE_ANSWER/.test(c.ask) ? "answer" : null;
 }
@@ -166,7 +163,6 @@ export async function computeGrid(
         prompt: i.prompt,
         followUps: i.followUps ?? [],
         answer: typeof i.facts?.answer === "string" ? i.facts.answer : null,
-        docs: Array.isArray(i.facts?.docs) ? (i.facts.docs as unknown[]).map(String) : [],
         mustNot: Array.isArray(i.facts?.mustNot) ? i.facts.mustNot.map(String) : [],
         mustSay: Array.isArray(i.facts?.mustSay) ? i.facts.mustSay.map(String) : [],
         asks: Array.isArray(i.facts?.asks) ? i.facts.asks.map(String) : [],

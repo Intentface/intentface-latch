@@ -212,7 +212,8 @@ export async function judgeThreads(opts: {
     const fromInput = asked.filter((c) => c.fromInput === "says");
     const items = saysItems(facts);
     const expanded: AskedCheck[] = [
-      ...asked.filter((c) => !c.fromInput),
+      // A check against the good answer means nothing on an input that has none.
+      ...asked.filter((c) => !c.fromInput && (!c.ask.includes("REFERENCE_ANSWER") || facts?.answer)),
       ...(items.length
         ? fromInput.flatMap((c) =>
             items.map((it, n): AskedCheck => ({ kind: "asked", id: `${c.id}${ITEM}${n}`, label: it.text, ask: it.question, shape: { type: "boolean" }, ...(c.judge ? { judge: c.judge } : {}) })),

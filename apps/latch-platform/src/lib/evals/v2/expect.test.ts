@@ -79,6 +79,19 @@ describe("an input's own expectations", () => {
     expect(vs.some((x) => x.checkId.includes("#"))).toBe(false);
   });
 
+  it("asks a check against the good answer only of inputs that have one", async () => {
+    const withAnswer = { ...rubric, checks: [{ kind: "asked" as const, id: "right", label: "Got the answer right", ask: "Compare with the REFERENCE_ANSWER.", shape: { type: "boolean" as const } }] };
+    const go = (facts: Input["facts"]) =>
+      judgeThreads({
+        rubric: withAnswer,
+        threads: [thread],
+        inputsById: new Map([["1", { id: "1", prompt: "What's the weather in Turku?", facts }]]),
+        deps: { loadHistory: () => Promise.resolve(history), judgeFor: () => judge },
+      });
+    expect((await go({ answer: "It is 4 °C." })).map((v) => v.checkId)).toEqual(["right"]);
+    expect((await go({ mustSay: ["x"] })).map((v) => v.checkId)).toEqual([]);
+  });
+
   it("skips both for an input that lists nothing", async () => {
     const vs = await run({ answer: "It's cold." });
     expect(vs.map((x) => x.checkId)).toEqual([]);

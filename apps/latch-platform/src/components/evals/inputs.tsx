@@ -82,7 +82,7 @@ function Grow(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return <textarea ref={ref} rows={1} {...props} className={cn(field, props.className)} />
 }
 
-/** A short list of lines — follow-ups, documents, things it must not say. */
+/** A short list of lines — follow-ups, things it must not say. */
 function Lines({ values, onChange, placeholder, add }: { values: string[]; onChange: (v: string[]) => void; placeholder: string; add: string }) {
   return (
     <div className="space-y-1.5">
@@ -143,7 +143,6 @@ export function InputDrawer({
       prompt: input.prompt,
       followUps: input.followUps,
       answer: input.answer ?? "",
-      docs: input.docs,
       mustNot: input.mustNot,
       mustSay: input.mustSay,
       asks: input.asks,
@@ -172,7 +171,6 @@ export function InputDrawer({
             prompt: d.prompt,
             followUps: d.followUps.filter((x) => x.trim()),
             answer: d.answer,
-            docs: d.docs.filter((x) => x.trim()),
             mustNot: d.mustNot.filter((x) => x.trim()),
             mustSay: d.mustSay.filter((x) => x.trim()),
             asks: d.asks.filter((x) => x.trim()),
@@ -259,7 +257,7 @@ export function InputDrawer({
                   draft={draft}
                   change={change}
                   tools={tools}
-                  onDraftAnswer={() => askEvalsAgent(`For ${agent}: draft what a good answer to input ${input.id} ("${input.prompt}") says, from the documents ${agent} can read, and save it to the input with edit_questions.`)}
+                  onDraftAnswer={() => askEvalsAgent(`For ${agent}: draft what a good answer to input ${input.id} ("${input.prompt}") says — from what ${agent} can look up with its tools, and what this input expects it to call — and save it to the input with edit_questions.`)}
                 />
               </div>
 
@@ -305,7 +303,6 @@ type Expectations = {
   prompt: string
   followUps: string[]
   answer: string
-  docs: string[]
   mustNot: string[]
   mustSay: string[]
   asks: string[]
@@ -459,7 +456,7 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
       </button>
     </li>
   )
-  const add = (kind: "answer" | "docs" | "mustNot" | "mustSay" | "asks" | "decline" | "calls" | "never") => {
+  const add = (kind: "answer" | "mustNot" | "mustSay" | "asks" | "decline" | "calls" | "never") => {
     setAdding(false)
     if (kind === "answer") setShowAnswer(true)
     else if (kind === "decline") change({ decline: true })
@@ -487,20 +484,11 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
             <Inline data-kind="answer" value={draft.answer} placeholder="What the answer should convey — the substance, not the wording" onChange={(e) => change({ answer: e.target.value })} />,
             () => (change({ answer: "" }), setShowAnswer(false)),
             <button type="button" onClick={onDraftAnswer} className="text-ink-secondary hover:text-ink-primary text-[11px] underline underline-offset-2">
-              Draft it from the documents
+              Draft it
             </button>,
           ),
         ]
       : []),
-    ...draft.docs.map((d, n) =>
-      row(
-        `doc-${n}`,
-        "Reads",
-        "Exact, from the tool log: a read must return this document",
-        <Inline data-kind="docs" value={d} placeholder="e.g. accessibility.md" onChange={(e) => change({ docs: draft.docs.map((x, i) => (i === n ? e.target.value : x)) })} />,
-        () => change({ docs: draft.docs.filter((_, i) => i !== n) }),
-      ),
-    ),
     ...draft.mustNot.map((m, n) =>
       row(
         `not-${n}`,
@@ -541,9 +529,6 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
               Good answer <span className="text-ink-tertiary text-xs">What the answer should convey</span>
             </button>
           )}
-          <button type="button" onClick={() => add("docs")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
-            Reads a document <span className="text-ink-tertiary text-xs">The one that holds the answer — checked exactly</span>
-          </button>
           <button type="button" onClick={() => add("calls")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
             Calls a tool <span className="text-ink-tertiary text-xs">e.g. get_weather with city Turku — checked exactly</span>
           </button>

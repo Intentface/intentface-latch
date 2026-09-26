@@ -274,7 +274,7 @@ function expectationChecks(grid: EvalGrid) {
 const listsOf = (i: EvalGrid["inputs"][number]) => ({ mustSay: i.mustSay, mustNot: i.mustNot, decline: i.decline, asks: i.asks })
 /** How many things an input says should happen — each item of its lists counts. */
 const expectationCount = (i: EvalGrid["inputs"][number]) =>
-  (i.answer ? 1 : 0) + (i.docs.length ? 1 : 0) + i.calls.length + saysItems(listsOf(i)).length
+  (i.answer ? 1 : 0) + i.calls.length + saysItems(listsOf(i)).length
 
 // ─── Numbers ──────────────────────────────────────────────────────────────
 
@@ -988,7 +988,7 @@ function NothingRun({
   const load = useCallback(() => {
     void getQuestionsFn({ data: { agent, datasetId } }).then((r) =>
       setInputs(
-        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, docs: q.docs, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, files: q.files })) ?? [],
+        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, files: q.files })) ?? [],
       ),
     )
   }, [agent, datasetId])

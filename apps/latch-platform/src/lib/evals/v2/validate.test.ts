@@ -7,7 +7,16 @@ describe("questions", () => {
     const r = validateInputs([
       { id: " 1 ", prompt: " Close ABC-12 ", followUps: ["", " why? "], facts: { answer: " ", mustNot: [" "], docs: ["a.md", ""], issueId: "ABC-12" } },
     ]);
-    expect(r).toEqual({ ok: true, value: [{ id: "1", prompt: "Close ABC-12", followUps: ["why?"], facts: { docs: ["a.md"], issueId: "ABC-12" } }] });
+    expect(r).toEqual({
+      ok: true,
+      value: [{ id: "1", prompt: "Close ABC-12", followUps: ["why?"], facts: { issueId: "ABC-12", calls: [{ tool: "*read_file", match: [{ path: "result", op: "contains", value: "a.md" }] }] } }],
+    });
+  });
+
+  it("saves a document the answer is in as the read it expects, beside its other calls", () => {
+    const read = { tool: "*read_file", match: [{ path: "result", op: "contains" as const, value: "a.md" }] };
+    const r = validateInputs([{ id: "1", prompt: "Q", facts: { docs: ["a.md"], calls: [read, { tool: "send", never: true }] } }]);
+    expect(r.ok && r.value[0].facts).toEqual({ calls: [read, { tool: "send", never: true }] });
   });
 
   it("refuses duplicates and empty questions, in words", () => {
