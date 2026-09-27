@@ -760,7 +760,7 @@ function ColumnMenu({
         </span>
         {/* 3 · the number */}
         <span className="mt-1.5 flex items-baseline gap-1">
-          <span className={cn("font-mono text-[22px] leading-none font-medium tracking-tight tabular-nums", stale ? "text-ink-secondary" : "text-ink-primary")} title="Share of checks passed">
+          <span className={cn("font-mono text-[22px] leading-none font-medium tracking-[0.04em] tabular-nums", stale ? "text-ink-secondary" : "text-ink-primary")} title="Share of checks passed">
             {pct(rate)}
           </span>
           {stale && (
