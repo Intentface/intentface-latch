@@ -748,6 +748,7 @@ function Sureness({ verdict, scale, accept }: { verdict: Verdict; scale: { level
         <i className="bg-ink-primary/60 absolute inset-y-0 w-px" style={{ left: `${tau * 100}%` }} />
       </span>
       <span className={escalate ? "text-ink-primary" : "text-ink-tertiary"}>
+        {verdict.answer !== "true" && verdict.answer !== "false" && <>Label: <span className="font-mono">{verdict.answer}</span> · </>}
         Confidence {Math.round(q * 100)}% · {escalate ? "escalate" : "accept"}
       </span>
       {verdict.escalatedTo && <span className="text-ink-tertiary">· escalated to {verdict.escalatedTo}</span>}
@@ -1175,6 +1176,7 @@ function AnswerDrawer({
   rubricId: string
   onAgain: () => void
 }) {
+  const [labelsOpen, setLabelsOpen] = useState<Set<string>>(new Set())
   const [againOpen, setAgainOpen] = useState(false)
   useEffect(() => setAgainOpen(false), [at?.inputId, at?.column])
   const cells = useMemo(() => cellsOf(grid), [grid])
@@ -1261,12 +1263,40 @@ function AnswerDrawer({
                             <span className={cn("font-bold", shownFailed ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]")}>{shownFailed ? "✕" : "✓"}</span>
                             <span>
                               <span className="text-ink-primary">{c?.label ?? v.checkId}</span>
-                              {c && (
-                                <span
-                                  title={c.type === "rule" ? "A rule on the tool log — exact, no judge" : c.type === "yes/no" ? "The judge answers yes or no" : c.type === "choice" ? "The judge picks one of a set of labels" : "The judge places it on a scale of labels"}
-                                  className="border-primary-border text-ink-tertiary ml-1.5 rounded border px-1 py-px align-[1px] font-mono text-[10px]"
-                                >
-                                  {c.type}
+                              {c &&
+                                (c.labels ? (
+                                  <button
+                                    type="button"
+                                    aria-expanded={labelsOpen.has(v.checkId)}
+                                    onClick={() => setLabelsOpen((o) => (o.has(v.checkId) ? new Set([...o].filter((x) => x !== v.checkId)) : new Set([...o, v.checkId])))}
+                                    title={c.type === "choice" ? "The judge picks one of these labels — show them" : "The judge places it on this scale — show it"}
+                                    className="border-primary-border text-ink-tertiary hover:text-ink-primary ml-1.5 rounded border px-1 py-px align-[1px] font-mono text-[10px]"
+                                  >
+                                    {c.type} · {c.labels.length} {labelsOpen.has(v.checkId) ? "▴" : "▾"}
+                                  </button>
+                                ) : (
+                                  <span
+                                    title={c.type === "rule" ? "A rule on the tool log — exact, no judge" : "The judge answers yes or no"}
+                                    className="border-primary-border text-ink-tertiary ml-1.5 rounded border px-1 py-px align-[1px] font-mono text-[10px]"
+                                  >
+                                    {c.type}
+                                  </span>
+                                ))}
+                              {c?.labels && labelsOpen.has(v.checkId) && (
+                                <span className="border-primary-border mt-1.5 block space-y-0.5 border-l-2 pl-2">
+                                  {c.labels.map((l) => {
+                                    const given = l.id === v.answer
+                                    return (
+                                      <span key={l.id} className={cn("grid grid-cols-[12px_minmax(0,1fr)] gap-1.5 text-xs", given ? "text-ink-primary" : "text-ink-tertiary")}>
+                                        <span className={l.fails ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]"}>{l.fails ? "✕" : "✓"}</span>
+                                        <span>
+                                          <span className={cn("font-mono", given && "font-semibold")}>{l.id}</span>
+                                          {given && <span className="text-ink-secondary"> ← the judge's label</span>}
+                                          <span className="block">{l.means}</span>
+                                        </span>
+                                      </span>
+                                    )
+                                  })}
                                 </span>
                               )}
                               {why && <span className="text-ink-tertiary block text-xs">{why}</span>}

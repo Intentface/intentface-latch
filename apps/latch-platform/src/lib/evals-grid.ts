@@ -159,6 +159,15 @@ export async function computeGrid(
           type: c.kind === "counted" ? ("rule" as const) : c.shape.type === "boolean" ? ("yes/no" as const) : c.shape.type,
           /** A scale check's rungs, lowest first, and how many from the bottom fail. */
           scale: c.kind === "asked" && c.shape.type === "score" ? { levels: c.shape.levels.map((l) => l.name), bad: c.shape.bad ?? 0 } : null,
+          /** Every label the judge can give, what each means, and whether it fails — for choice and score checks. */
+          labels:
+            c.kind !== "asked"
+              ? null
+              : c.shape.type === "choice"
+                ? Object.entries(c.shape.options).map(([id, means]) => ({ id, means, fails: (c.shape as { bad: string[] }).bad.includes(id) }))
+                : c.shape.type === "score"
+                  ? c.shape.levels.map((l, n) => ({ id: l.name, means: l.means, fails: n <= ((c.shape as { bad?: number }).bad ?? 0) }))
+                  : null,
         };
       }),
       /** The questions, in the set's order, with what each says a good answer holds. */
