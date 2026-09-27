@@ -340,8 +340,16 @@ function versus(grid: EvalGrid, cells: Map<string, Cell>, base: string, label: s
   return { up, down, same, p: signTest(up, down) }
 }
 
+// Clearly: chance would split them this unevenly less than 1 time in 20.
+// Maybe: it leans one way, but chance does that often enough to need more tries.
 const verdictFor = ({ up, down, p }: { up: number; down: number; p: number }) =>
-  !up && !down ? "No change" : p < 0.05 ? (up > down ? "Clearly better" : "Clearly worse") : "No real difference"
+  !up && !down
+    ? "No change"
+    : p < 0.05
+      ? up > down ? "Clearly better" : "Clearly worse"
+      : p < 0.25 && up !== down
+        ? up > down ? "Maybe better" : "Maybe worse"
+        : "No real difference"
 
 // ─── Results ─────────────────────────────────────────────────────────────
 
@@ -578,7 +586,7 @@ function Results({
                       ? (() => {
                           const v = versus(grid, cells, base.label, c.label)
                           return {
-                            moved: { up: v.up, down: v.down, verdict: verdictFor(v), sameSetup: !!c.setup && c.setup === base.setup },
+                            moved: { up: v.up, down: v.down, p: v.p, verdict: verdictFor(v), sameSetup: !!c.setup && c.setup === base.setup },
                             onShowMoved: (f: "better" | "worse") => (onFocus(c.label), setFilter(f)),
                           }
                         })()
@@ -736,7 +744,7 @@ function ColumnMenu({
   onBaseline: () => void
   onHide: () => void
   /** Against the baseline: inputs that scored higher and lower, and what that adds up to. Absent on the baseline. */
-  moved?: { up: number; down: number; verdict: string; sameSetup: boolean }
+  moved?: { up: number; down: number; p: number; verdict: string; sameSetup: boolean }
   onShowMoved?: (f: "better" | "worse") => void
 }) {
   const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
@@ -783,18 +791,24 @@ function ColumnMenu({
                 title={
                   moved.sameSetup
                     ? "The baseline's own configuration, answered again: every ▲ and ▼ is the agent answering differently on its own — the noise a real change has to beat."
-                    : moved.verdict === "No real difference"
-                      ? "About as many scored lower as higher — what answering again alone can do. More tries per input would tell."
-                      : moved.verdict === "No change"
+                    : moved.verdict.startsWith("Maybe")
+                      ? `${moved.up} scored higher, ${moved.down} lower. If nothing had changed, chance would split them this unevenly about 1 time in ${Math.max(2, Math.round(1 / moved.p))} — so it leans ${moved.up > moved.down ? "better" : "worse"}, but isn't sure. Answer again with 3 tries to settle it.`
+                      : moved.verdict === "No real difference"
+                        ? `${moved.up} scored higher, ${moved.down} lower — about what answering again alone does. More tries per input would tell.`
+                        : moved.verdict === "No change"
                         ? "Every input scored the same as the baseline."
                         : `${moved.up + moved.down} inputs moved, ${Math.max(moved.up, moved.down)} of them the same way — more than chance would.`
                 }
                 className={cn(
-                  moved.sameSetup || (moved.verdict !== "Clearly better" && moved.verdict !== "Clearly worse")
+                  moved.sameSetup || moved.verdict === "No real difference" || moved.verdict === "No change"
                     ? "text-ink-tertiary"
                     : moved.verdict === "Clearly better"
                       ? "font-medium text-[color:var(--eval-good-ink)]"
-                      : "font-medium text-[color:var(--eval-bad-ink)]",
+                      : moved.verdict === "Clearly worse"
+                        ? "font-medium text-[color:var(--eval-bad-ink)]"
+                        : moved.verdict === "Maybe better"
+                          ? "text-[color:var(--eval-good-ink)] opacity-80"
+                          : "text-[color:var(--eval-bad-ink)] opacity-80",
                 )}
               >
                 {moved.sameSetup ? "same setup" : moved.verdict.toLowerCase()}
