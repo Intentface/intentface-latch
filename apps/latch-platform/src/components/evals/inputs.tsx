@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { FileText, Loader2, Paperclip, Plus, X } from "lucide-react"
-import { editInputFilesFn, editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, saveChecksFn } from "@/lib/evals-server"
+import { editInputFilesFn, editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, saveChecksFn, tryCheckFn } from "@/lib/evals-server"
 import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_FILE_SIZE, formatFileSize } from "@/lib/ai/attachments"
 import type { EvalGrid } from "@/lib/evals-server"
 import type { CallExpectation, CallMatch, Check } from "@/lib/evals/v2/model"
@@ -646,8 +646,136 @@ export function Composer({ agent, datasetId, onAdded }: { agent: string; dataset
 
 type Draft = { key: string; check: Check }
 
+type Shape = Extract<Check, { kind: "asked" }>["shape"]
+const slug = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
+
+/**
+ * What the judge returns, in JEV's three types: yes/no (noul), one of a set
+ * of labels (choice), or a place on an ordered scale (score). A choice starts
+ * with an "other" label, as JEV advises when the list may not be exhaustive.
+ */
+function ShapeEditor({ shape, onChange }: { shape: Shape; onChange: (s: Shape) => void }) {
+  const to = (type: Shape["type"]) => {
+    if (type === shape.type) return
+    if (type === "boolean") onChange({ type: "boolean" })
+    else if (type === "choice")
+      onChange({ type: "choice", options: { good: "What a good answer looks like", bad: "What a bad one looks like", other: "None of the above" }, bad: ["bad", "other"] })
+    else
+      onChange({
+        type: "score",
+        levels: [
+          { name: "poor", means: "Fails what was asked" },
+          { name: "fair", means: "Partly there" },
+          { name: "good", means: "Does what was asked" },
+        ],
+        bad: 0,
+      })
+  }
+  const tab = (t: Shape["type"], name: string) => (
+    <button
+      key={t}
+      type="button"
+      role="radio"
+      aria-checked={shape.type === t}
+      onClick={() => to(t)}
+      className={cn("rounded px-2 py-0.5 font-mono text-[11px]", shape.type === t ? "bg-primary-bg-active text-ink-primary" : "text-ink-tertiary hover:text-ink-primary")}
+    >
+      {name}
+    </button>
+  )
+  const row = "grid grid-cols-[18px_9rem_minmax(0,1fr)_auto] items-center gap-2"
+  const small = "border-primary-border bg-primary-bg rounded border px-1.5 py-0.5 text-xs outline-none focus:border-ink-tertiary"
+  return (
+    <div className="space-y-1.5">
+      <div role="radiogroup" aria-label="The judge returns" className="flex items-center gap-1">
+        <span className="text-ink-tertiary mr-1 text-[11px]">The judge returns</span>
+        {tab("boolean", "yes/no")}
+        {tab("choice", "choice")}
+        {tab("score", "score")}
+      </div>
+      {shape.type === "choice" && (
+        <div className="space-y-1">
+          {Object.entries(shape.options).map(([id, means], n, all) => {
+            const fails = shape.bad.includes(id)
+            const set = (nextId: string, nextMeans: string, nextFails: boolean) => {
+              const options = Object.fromEntries(all.map(([k, m], i) => (i === n ? [nextId, nextMeans] : [k, m])))
+              const bad = all.flatMap(([k], i) => (i === n ? (nextFails ? [nextId] : []) : shape.bad.includes(k) ? [k] : []))
+              onChange({ type: "choice", options, bad })
+            }
+            return (
+              <div key={n} className={row}>
+                <button type="button" onClick={() => set(id, means, !fails)} title={fails ? "Counts as a fail — make it a pass" : "Counts as a pass — make it a fail"} className={cn("text-xs font-bold", fails ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]")}>
+                  {fails ? "✕" : "✓"}
+                </button>
+                <input value={id} onChange={(e) => set(slug(e.target.value) || id, means, fails)} aria-label="Label" className={cn(small, "font-mono")} />
+                <input value={means} onChange={(e) => set(id, e.target.value, fails)} aria-label="What it means" placeholder="What it means" className={small} />
+                <button type="button" aria-label={`Remove ${id}`} disabled={all.length <= 2} onClick={() => onChange({ type: "choice", options: Object.fromEntries(all.filter((_, i) => i !== n)), bad: shape.bad.filter((b) => b !== id) })} className="text-ink-tertiary hover:text-ink-primary disabled:opacity-30">
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            )
+          })}
+          <button
+            type="button"
+            onClick={() => {
+              let id = "label"
+              for (let k = 2; id in shape.options; k++) id = `label_${k}`
+              onChange({ ...shape, options: { ...shape.options, [id]: "" } })
+            }}
+            className="text-ink-secondary hover:text-ink-primary text-[11px]"
+          >
+            + label
+          </button>
+          <p className="text-ink-tertiary text-[11px]">The judge picks one. ✓ passes, ✕ fails — click to switch.</p>
+        </div>
+      )}
+      {shape.type === "score" && (
+        <div className="space-y-1">
+          {shape.levels.map((l, n) => {
+            const fails = n <= (shape.bad ?? 0)
+            const levels = (next: { name: string; means: string }[]) => onChange({ ...shape, levels: next })
+            return (
+              <div key={n}>
+                <div className={row}>
+                  <span className={cn("text-xs font-bold", fails ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]")}>{fails ? "✕" : "✓"}</span>
+                  <input value={l.name} onChange={(e) => levels(shape.levels.map((x, i) => (i === n ? { ...x, name: slug(e.target.value) || x.name } : x)))} aria-label={`Level ${n + 1}`} className={cn(small, "font-mono")} />
+                  <input value={l.means} onChange={(e) => levels(shape.levels.map((x, i) => (i === n ? { ...x, means: e.target.value } : x)))} aria-label="What it means" placeholder="What it means" className={small} />
+                  <button type="button" aria-label={`Remove ${l.name}`} disabled={shape.levels.length <= 2} onClick={() => onChange({ ...shape, levels: shape.levels.filter((_, i) => i !== n), bad: Math.min(shape.bad ?? 0, shape.levels.length - 3) })} className="text-ink-tertiary hover:text-ink-primary disabled:opacity-30">
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+                {n === (shape.bad ?? 0) && n < shape.levels.length - 1 && (
+                  <div className="text-ink-tertiary my-0.5 ml-[26px] flex items-center gap-2 text-[10px]">
+                    <i className="bg-ink-tertiary/50 h-px flex-1" /> pass line <i className="bg-ink-tertiary/50 h-px flex-1" />
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          <div className="flex items-center gap-3 text-[11px]">
+            <button type="button" onClick={() => onChange({ ...shape, levels: [...shape.levels, { name: `level_${shape.levels.length + 1}`, means: "" }] })} className="text-ink-secondary hover:text-ink-primary">
+              + level
+            </button>
+            <label className="text-ink-tertiary flex items-center gap-1">
+              Pass line above
+              <select value={shape.bad ?? 0} onChange={(e) => onChange({ ...shape, bad: Number(e.target.value) })} className={cn(small, "font-mono")}>
+                {shape.levels.slice(0, -1).map((l, n) => (
+                  <option key={n} value={n}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="text-ink-tertiary text-[11px]">Worst first. The judge places the answer on this scale; at or below the pass line fails.</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const AddMenu: { kind: "ask" | "mustnot" | "never"; name: string; hint: string }[] = [
-  { kind: "ask", name: "Ask the grader", hint: "A yes/no question about every answer — e.g. Is the tone friendly?" },
+  { kind: "ask", name: "Ask the judge", hint: "A question about every answer — yes/no, one of a set of labels, or a scale" },
   { kind: "mustnot", name: "Must not say", hint: "Something no answer may say — e.g. legal advice" },
   { kind: "never", name: "Never calls a tool", hint: "Exact, from the tool log — e.g. never send_email" },
 ]
@@ -660,18 +788,22 @@ const AddMenu: { kind: "ask" | "mustnot" | "never"; name: string; hint: string }
 export function ChecksDrawer({
   agent,
   rubricId,
+  datasetId,
   open,
   onClose,
   onSaved,
 }: {
   agent: string
   rubricId: string
+  /** Whose answers "Try it" grades. */
+  datasetId: string | undefined
   open: boolean
   onClose: () => void
   /** A new version was saved; its checks haven't graded anything yet. */
   onSaved: () => void
 }) {
   const [loaded, setLoaded] = useState<{ version: number; defaultJudge: string } | null>(null)
+  const [judges, setJudges] = useState<string[]>([])
   const [rows, setRows] = useState<Draft[]>([])
   const [adding, setAdding] = useState(false)
   const [state, setState] = useState<string | null>(null)
@@ -686,6 +818,8 @@ export function ChecksDrawer({
     void getChecksFn({ data: { agent, rubricId } }).then((r) => {
       if (!r) return setState("These checks couldn't be loaded.")
       setLoaded({ version: r.rubric.version, defaultJudge: r.rubric.defaultJudge })
+      // Judges that read text: the catalog also lists image, speech and embedding models.
+      setJudges(r.judges.filter((id) => !/image|embedding|tts|veo|lyria|realtime|-live|computer-use|deep-research|translate|audio/.test(id)))
       setRows((JSON.parse(r.rubric.checks) as Check[]).map((check) => ({ key: check.id, check })))
     })
   }, [open, agent, rubricId])
@@ -753,7 +887,16 @@ export function ChecksDrawer({
                       </button>
                     </div>
                     {c.kind === "asked" ? (
-                      <Grow value={c.ask} onChange={(e) => edit(key, { ask: e.target.value })} placeholder="A yes/no question about the answer" aria-label="Question for the grader" />
+                      <>
+                        <Grow
+                          value={c.ask}
+                          onChange={(e) => edit(key, { ask: e.target.value })}
+                          placeholder={c.shape.type === "boolean" ? "A yes/no question about the answer — phrase it so yes is good" : c.shape.type === "choice" ? "What to decide about the answer, e.g. Where does the answer's substance come from?" : "What to rate, e.g. How long is the answer for what was asked?"}
+                          aria-label="Question for the grader"
+                        />
+                        <ShapeEditor shape={c.shape} onChange={(shape) => edit(key, { shape })} />
+                        {datasetId && <TryCheck agent={agent} rubricId={rubricId} datasetId={datasetId} check={c} />}
+                      </>
                     ) : c.spec.op === "never_called" ? (
                       <input
                         value={c.spec.tool}
@@ -763,10 +906,25 @@ export function ChecksDrawer({
                         className={field}
                       />
                     ) : null}
-                    <p className="text-ink-tertiary text-[11px]">
-                      {c.kind === "counted" ? "Exact, from the tool log · free" : `Judged by the grader${c.judge ? ` (${c.judge})` : ""}`}
-                      {c.kind === "asked" && !/good answer|REFERENCE|reference/i.test(c.ask) && !c.ask.toLowerCase().includes("tool") && " · no answer to compare against, so the least reliable kind"}
-                    </p>
+                    {c.kind === "asked" && (
+                      <label className="text-ink-tertiary flex items-center gap-1.5 text-[11px]">
+                        Judge
+                        <select
+                          value={c.judge ?? ""}
+                          onChange={(e) => edit(key, { judge: e.target.value || undefined })}
+                          className="border-primary-border bg-primary-bg rounded border px-1 py-0.5 font-mono text-[11px]"
+                        >
+                          <option value="">{loaded.defaultJudge} (default)</option>
+                          {judges.filter((j) => j !== loaded.defaultJudge).map((j) => (
+                            <option key={j} value={j}>
+                              {j}
+                            </option>
+                          ))}
+                        </select>
+                        <span>{(c.judge ?? loaded.defaultJudge).startsWith("jev") ? "fast, decision-only, gives probabilities" : "a chat model — for questions that need more reasoning or context; slower, dearer"}</span>
+                      </label>
+                    )}
+                    {c.kind === "counted" && <p className="text-ink-tertiary text-[11px]">Exact, from the tool log · free</p>}
                   </li>
                 ))}
               </ul>
@@ -788,6 +946,7 @@ export function ChecksDrawer({
                 )}
               </div>
             )}
+            {loaded && <DescribeCheck agent={agent} rubricId={rubricId} onSent={onClose} />}
             <p className="text-ink-tertiary text-xs">
               For rules that hold everywhere. Anything about one input — its good answer, the document it should read — goes on that input.
             </p>
@@ -802,6 +961,81 @@ export function ChecksDrawer({
         </div>
       </Drawer.Content>
     </Drawer>
+  )
+}
+
+/**
+ * Grade the newest answer to five inputs with this check as it stands —
+ * saved or not — to see the labels the judge gives and how sure it is.
+ */
+function TryCheck({ agent, rubricId, datasetId, check }: { agent: string; rubricId: string; datasetId: string; check: Check }) {
+  const [state, setState] = useState<"idle" | "busy" | { error: string } | Extract<Awaited<ReturnType<typeof tryCheckFn>>, { ok: true }>>("idle")
+  const run = async () => {
+    setState("busy")
+    const r = await tryCheckFn({ data: { agent, rubricId, datasetId, check: JSON.stringify(check) } })
+    setState(r.ok ? r : { error: r.error })
+  }
+  return (
+    <div className="space-y-1">
+      <button type="button" disabled={state === "busy"} onClick={() => void run()} className="text-ink-secondary hover:text-ink-primary text-[11px] underline underline-offset-2 disabled:opacity-50">
+        {state === "busy" ? "Grading 5 answers…" : typeof state === "object" && "rows" in state ? "Try it again" : "Try it on 5 answers · the judge only, cents"}
+      </button>
+      {typeof state === "object" && "error" in state && <p className="text-[11px] text-red-600 dark:text-red-400">{state.error}</p>}
+      {typeof state === "object" && "rows" in state && (
+        <ul className="border-primary-border space-y-0.5 border-l-2 pl-2">
+          {state.rows.map((r) => (
+            <li key={r.inputId} className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-baseline gap-1.5 text-[11px]" title={r.prompt}>
+              <span className={r.failed === null ? "text-ink-tertiary" : r.failed ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]"}>{r.failed === null ? "–" : r.failed ? "✕" : "✓"}</span>
+              <span className="text-ink-secondary truncate">
+                #{r.inputId} {r.prompt}
+              </span>
+              <span className="text-ink-tertiary font-mono tabular-nums">
+                {r.answer ?? "not graded"}
+                {r.score !== null ? ` · ${r.score.toFixed(1)}` : r.confidence !== null ? ` · ${Math.round(r.confidence * 100)}%` : ""}
+              </span>
+            </li>
+          ))}
+          <li className="text-ink-tertiary text-[10px]">Judged by {state.judge} · not saved — the table is unchanged</li>
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/** Say what to check in words; the Evals agent picks the type, writes the labels, and asks before saving. */
+function DescribeCheck({ agent, rubricId, onSent }: { agent: string; rubricId: string; onSent: () => void }) {
+  const [text, setText] = useState("")
+  const send = () => {
+    if (!text.trim()) return
+    askEvalsAgent(
+      `For ${agent}, checks ${rubricId}: write one check every input gets, for this: "${text.trim()}". Pick what the judge returns — yes/no, choice or score — write its question and labels, then add it with edit_checks for me to approve. Say in one line why that type.`,
+    )
+    setText("")
+    onSent()
+  }
+  return (
+    <div className="border-primary-border space-y-1.5 rounded-lg border border-dashed p-2.5">
+      <div className="text-ink-secondary text-xs">Or describe it, and the Evals agent writes it</div>
+      <Grow
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault()
+            send()
+          }
+        }}
+        placeholder="e.g. whether the answer is too short, about right, or too long for what was asked"
+        aria-label="Describe a check"
+      />
+      <div className="flex items-center gap-2">
+        <span className="text-ink-tertiary text-[11px]">It picks yes/no, choice or score, and asks before saving.</span>
+        <span className="flex-1" />
+        <button type="button" disabled={!text.trim()} onClick={send} className="bg-ink-primary text-primary-bg h-7 rounded-md px-3 text-xs font-medium disabled:opacity-40">
+          Write it
+        </button>
+      </div>
+    </div>
   )
 }
 

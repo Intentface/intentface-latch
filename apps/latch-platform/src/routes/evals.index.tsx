@@ -223,7 +223,7 @@ function EvalsPage() {
           />
         )}
         {agent && rubricId && (
-          <ChecksDrawer agent={agent} rubricId={rubricId} open={checksOpen} onClose={() => setChecksOpen(false)} onSaved={reload} />
+          <ChecksDrawer agent={agent} rubricId={rubricId} datasetId={dataset?.id} open={checksOpen} onClose={() => setChecksOpen(false)} onSaved={reload} />
         )}
 
         {agent && grid && (

@@ -13,7 +13,7 @@ import type { Principal } from "./session";
 import type { Check, Variant } from "./evals/v2/model";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
 import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
-import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun } from "./evals-jobs";
+import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun, tryCheck } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
 import { createChecks, createQuestionSet, createVariant, editInputFiles, editQuestions, renameVariant } from "./evals-actions";
@@ -546,3 +546,18 @@ export const createChecksFn = createServerFn({ method: "POST" })
     return createChecks(principal, data);
   });
 
+
+/** Grade a few recent answers with an unsaved check — the judge only, cents. */
+export const tryCheckFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; rubricId: string; check: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    let check: Check;
+    try {
+      check = JSON.parse(data.check) as Check;
+    } catch {
+      return { ok: false as const, error: "That check could not be read." };
+    }
+    return tryCheck(principal, { agent: data.agent, datasetId: data.datasetId, rubricId: data.rubricId, check });
+  });

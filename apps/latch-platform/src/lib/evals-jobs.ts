@@ -17,9 +17,10 @@ import type { Principal } from "./session";
 import { evaluationModelFor } from "./evals/v2/evaluation-model";
 import { MAX_UNITS, advanceJob, estimateRun } from "./evals/v2/jobs";
 import type { EvalJob } from "./evals/v2/jobs";
-import type { ThreadRef, Variant } from "./evals/v2/model";
+import type { Check, ThreadRef, Variant } from "./evals/v2/model";
+import { validateChecks } from "./evals/v2/validate";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
-import { configFingerprint } from "./evals/v2/runner";
+import { configFingerprint, judgeThreads } from "./evals/v2/runner";
 
 /** How long one holder may work before the cron may take over. */
 const LEASE_MS = 5 * 60_000;
@@ -428,3 +429,53 @@ export async function evalJobsTick(): Promise<{ advanced: number }> {
 }
 
 export type { EvalJob };
+
+/**
+ * Grade a few recent answers with a check that is not saved yet — to see
+ * which labels the judge gives, and how sure it is, before the check grades
+ * everything. Only the judge runs, on at most `n` answers, one per input.
+ */
+export async function tryCheck(principal: Principal, d: { agent: string; datasetId: string; rubricId: string; check: Check; n?: number }) {
+  const { evals, agentStore, runtime, modelFor } = await getLatch();
+  const rec = await agentStore.getRecord(principal, normalizeAgentName(d.agent));
+  if (!rec) return { ok: false as const, error: "Only agents you can edit can be graded." };
+  const owner = agentOwnerKey(principal, rec.scope);
+  const rubric = await evals.getRubric(owner, d.rubricId);
+  if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
+  const valid = validateChecks([d.check]);
+  if (!valid.ok) return { ok: false as const, error: valid.error };
+  const inputs = new Map((await evals.listInputs(d.datasetId)).map((i) => [i.id, i]));
+  // The newest answer to each of a few inputs — a spread, not one input's tries.
+  const newest = new Map<string, ThreadRef>();
+  for (const t of (await evals.listThreads(owner, { datasetId: d.datasetId })).sort((a, b) => b.createdAt - a.createdAt))
+    if (!t.error && t.inputId && inputs.has(t.inputId) && !newest.has(t.inputId)) newest.set(t.inputId, t);
+  const picked = [...newest.values()].slice(0, Math.max(1, Math.min(10, d.n ?? 5)));
+  if (!picked.length) return { ok: false as const, error: "No answers to try it on yet — run the inputs first." };
+  const judges = new Map<string, ReturnType<typeof evaluationModelFor>>();
+  const verdicts = await judgeThreads({
+    rubric: { ...rubric, checks: valid.value },
+    threads: picked,
+    inputsById: inputs,
+    dataset: (await evals.getDataset(owner, d.datasetId)) ?? {},
+    deps: {
+      loadHistory: (chatId) => runtime.loadHistory({ chatId, principal }),
+      judgeFor: (jid) => judges.get(jid) ?? judges.set(jid, evaluationModelFor(jid, modelFor, typeSafeAi)).get(jid)!,
+    },
+  });
+  return {
+    ok: true as const,
+    judge: valid.value[0].kind === "asked" ? (valid.value[0].judge ?? rubric.defaultJudge) : "rule",
+    rows: picked.map((t) => {
+      const v = verdicts.find((x) => x.threadId === t.threadId);
+      return {
+        inputId: t.inputId!,
+        prompt: inputs.get(t.inputId!)!.prompt,
+        version: t.version,
+        answer: v?.answer ?? null,
+        confidence: v?.confidence ?? null,
+        score: v?.score ?? null,
+        failed: v?.failed ?? null,
+      };
+    }),
+  };
+}
