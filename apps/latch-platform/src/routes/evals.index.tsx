@@ -17,8 +17,8 @@ import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/ev
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
-import { configDiff, configOf, fullLineDiff, settingRows } from "@/lib/evals/v2/diff"
-import type { Change, Config } from "@/lib/evals/v2/diff"
+import { configDiff, configOf, fullLineDiff, settingRows, sideBySide } from "@/lib/evals/v2/diff"
+import type { Change, Config, Side } from "@/lib/evals/v2/diff"
 import type { Cell } from "@/lib/evals/v2/score"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -696,35 +696,62 @@ function Sureness({ verdict, scale, accept }: { verdict: Verdict; scale: { level
 }
 
 /**
- * Two setups side by side, from what each answer ran: every setting, the
- * changed ones marked, then the instructions as a diff — unchanged
- * stretches folded, a click away.
+ * Which rows to show and which to fold: an unchanged run longer than FOLD
+ * folds, keeping KEEP rows either side of a change.
  */
-function SetupDiff({ from, to, baseName, name }: { from: Config; to: Config; baseName: string; name: string }) {
-  const rows = settingRows(from, to)
-  const lines = fullLineDiff(String(from.instructions ?? ""), String(to.instructions ?? ""))
-  const [opened, setOpened] = useState<Set<number>>(new Set())
-  // Unchanged runs longer than this fold, keeping this many lines either side of a change.
+function foldBlocks(same: boolean[]) {
   const FOLD = 6, KEEP = 2
-  type Block = { kind: "lines"; from: number; to: number } | { kind: "fold"; from: number; to: number }
-  const blocks: Block[] = []
-  for (let k = 0; k < lines.length; ) {
-    if (lines[k].kind !== "same") {
-      const start = k
-      while (k < lines.length && lines[k].kind !== "same") k++
+  const blocks: { kind: "lines" | "fold"; from: number; to: number }[] = []
+  for (let k = 0; k < same.length; ) {
+    const start = k
+    if (!same[k]) {
+      while (k < same.length && !same[k]) k++
       blocks.push({ kind: "lines", from: start, to: k })
       continue
     }
-    const start = k
-    while (k < lines.length && lines[k].kind === "same") k++
-    const first = start === 0, last = k === lines.length
-    const head = first ? 0 : KEEP, tail = last ? 0 : KEEP
+    while (k < same.length && same[k]) k++
+    const head = start === 0 ? 0 : KEEP, tail = k === same.length ? 0 : KEEP
     if (k - start > FOLD) {
       if (head) blocks.push({ kind: "lines", from: start, to: start + head })
       blocks.push({ kind: "fold", from: start + head, to: k - tail })
       if (tail) blocks.push({ kind: "lines", from: k - tail, to: k })
     } else blocks.push({ kind: "lines", from: start, to: k })
   }
+  return blocks
+}
+
+/** One side of a side-by-side row: unchanged, removed (left) or added (right), with its changed words marked. */
+function SideCell({ side, kind, as }: { side: Side; kind: "same" | "change"; as: "add" | "del" }) {
+  if (!side) return <div className="bg-primary-bg-hover/60" />
+  const tone = as === "add" ? "bg-[color:var(--eval-good)]/30" : "bg-[color:var(--eval-bad)]/30"
+  const mark = as === "add" ? "bg-[color:var(--eval-good)]" : "bg-[color:var(--eval-bad)]"
+  return (
+    <div className={cn("px-3 whitespace-pre-wrap", kind === "same" ? "text-ink-secondary" : tone)}>
+      {side.words
+        ? side.words.map((w, i) => (
+            <span key={i} className={w.changed && w.text.trim() ? cn("rounded-[2px]", mark) : undefined}>
+              {w.text}
+            </span>
+          ))
+        : side.text || " "}
+    </div>
+  )
+}
+
+/**
+ * Two setups side by side, from what each answer ran: every setting, the
+ * changed ones marked, then the instructions as a diff — unchanged
+ * stretches folded, a click away.
+ */
+function SetupDiff({ from, to, baseName, name }: { from: Config; to: Config; baseName: string; name: string }) {
+  const rows = settingRows(from, to)
+  const a = String(from.instructions ?? ""), b = String(to.instructions ?? "")
+  const lines = fullLineDiff(a, b)
+  const rows2 = sideBySide(a, b)
+  const [opened, setOpened] = useState<Set<number>>(new Set())
+  const [split, setSplit] = useState(true)
+  const shown = split ? rows2 : lines
+  const blocks = foldBlocks(shown.map((x) => x.kind === "same"))
   const changedInstructions = lines.some((l) => l.kind !== "same")
   const [allSettings, setAllSettings] = useState(false)
   const unchanged = rows.filter((r) => !r.changed).length
@@ -778,16 +805,42 @@ function SetupDiff({ from, to, baseName, name }: { from: Config; to: Config; bas
         </tbody>
       </table>
       <div className="border-primary-border border-t px-4 pt-2.5 pb-3">
-        <div className="text-ink-secondary mb-1.5 text-xs font-medium">Instructions{changedInstructions ? "" : " — unchanged"}</div>
+        <div className="mb-1.5 flex items-center gap-2">
+          <span className="text-ink-secondary text-xs font-medium">Instructions{changedInstructions ? "" : " — unchanged"}</span>
+          <span className="flex-1" />
+          {changedInstructions && (
+            <Segmented
+              value={split ? "split" : "unified"}
+              onChange={(v) => (setSplit(v === "split"), setOpened(new Set()))}
+              options={[
+                ["split", "Side by side"],
+                ["unified", "One column"],
+              ]}
+            />
+          )}
+        </div>
+        {changedInstructions && split && (
+          <div className="text-ink-tertiary mb-1 grid grid-cols-2 text-[11px]">
+            <span className="px-3">{baseName}</span>
+            <span className="px-3">{name}</span>
+          </div>
+        )}
         {changedInstructions && (
           <div className="border-primary-border overflow-hidden rounded-md border font-mono text-[11.5px] leading-relaxed">
-            {blocks.map((b, n) =>
-              b.kind === "fold" && !opened.has(n) ? (
+            {blocks.map((blk, n) =>
+              blk.kind === "fold" && !opened.has(n) ? (
                 <button key={n} type="button" onClick={() => setOpened(new Set([...opened, n]))} className="text-ink-tertiary hover:text-ink-primary bg-primary-bg-hover block w-full px-3 py-1 text-left text-[11px]">
-                  ⋯ {b.to - b.from} unchanged lines
+                  ⋯ {blk.to - blk.from} unchanged lines
                 </button>
+              ) : split ? (
+                rows2.slice(blk.from, blk.to).map((r, k) => (
+                  <div key={`${n}-${k}`} className="divide-primary-border grid grid-cols-2 divide-x">
+                    <SideCell side={r.left} kind={r.kind} as="del" />
+                    <SideCell side={r.right} kind={r.kind} as="add" />
+                  </div>
+                ))
               ) : (
-                lines.slice(b.from, b.to).map((l, k) => (
+                lines.slice(blk.from, blk.to).map((l, k) => (
                   <div
                     key={`${n}-${k}`}
                     className={cn(
@@ -885,7 +938,7 @@ function ColumnMenu({
             >
               {changes.map((c) => c.summary).join(" · ")}
             </Popover.Trigger>
-            <Popover.Content align="center" className="w-[min(720px,92vw)] p-0">
+            <Popover.Content align="center" className="w-[min(1040px,94vw)] p-0">
               <SetupDiff {...setups} />
             </Popover.Content>
           </Popover>

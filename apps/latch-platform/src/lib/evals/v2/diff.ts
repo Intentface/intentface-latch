@@ -56,22 +56,7 @@ export function lineDiff(a: string, b: string): { kind: "add" | "del"; text: str
 
 /** Every line of both, marked same, added or removed — a longest-common-subsequence diff, fine for prompts. */
 export function fullLineDiff(a: string, b: string): { kind: "same" | "add" | "del"; text: string }[] {
-  const x = a.split("\n");
-  const y = b.split("\n");
-  const n = x.length;
-  const m = y.length;
-  const lcs = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) lcs[i][j] = x[i] === y[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
-  const out: { kind: "same" | "add" | "del"; text: string }[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n || j < m) {
-    if (i < n && j < m && x[i] === y[j]) (out.push({ kind: "same", text: x[i] }), i++, j++);
-    // Removed before added, as a diff reads: the old line, then what replaced it.
-    else if (i < n && (j >= m || lcs[i + 1][j] >= lcs[i][j + 1])) out.push({ kind: "del", text: x[i++] });
-    else out.push({ kind: "add", text: y[j++] });
-  }
-  return out;
+  return tokenDiff(a.split("\n"), b.split("\n"));
 }
 
 const listOf = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
@@ -140,4 +125,68 @@ export function settingRows(from: Config, to: Config): { name: string; from: str
     const delta = changed && na && nb && (na.length > 2 || nb.length > 2) ? setDiff(na, nb).join("  ") : undefined;
     return { name, from: text(a), to: text(b), changed, ...(delta ? { delta } : {}) };
   });
+}
+
+/** Sequence diff over any tokens — longest common subsequence, removed before added. */
+function tokenDiff(x: string[], y: string[]): { kind: "same" | "add" | "del"; text: string }[] {
+  const n = x.length;
+  const m = y.length;
+  const lcs = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) lcs[i][j] = x[i] === y[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+  const out: { kind: "same" | "add" | "del"; text: string }[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) (out.push({ kind: "same", text: x[i] }), i++, j++);
+    else if (i < n && (j >= m || lcs[i + 1][j] >= lcs[i][j + 1])) out.push({ kind: "del", text: x[i++] });
+    else out.push({ kind: "add", text: y[j++] });
+  }
+  return out;
+}
+
+export type Side = { text: string; words?: { text: string; changed: boolean }[] } | null;
+
+/**
+ * The instructions as side-by-side rows: an unchanged line on both sides, a
+ * removed one on the left only, an added one on the right only, and a line
+ * that replaced another on the same row — with the words that changed marked.
+ */
+export function sideBySide(a: string, b: string): { kind: "same" | "change"; left: Side; right: Side }[] {
+  const lines = fullLineDiff(a, b);
+  const rows: { kind: "same" | "change"; left: Side; right: Side }[] = [];
+  for (let k = 0; k < lines.length; ) {
+    if (lines[k].kind === "same") {
+      rows.push({ kind: "same", left: { text: lines[k].text }, right: { text: lines[k].text } });
+      k++;
+      continue;
+    }
+    const dels: string[] = [];
+    const adds: string[] = [];
+    while (k < lines.length && lines[k].kind !== "same") {
+      if (lines[k].kind === "del") dels.push(lines[k].text);
+      else adds.push(lines[k].text);
+      k++;
+    }
+    for (let r = 0; r < Math.max(dels.length, adds.length); r++) {
+      const l = r < dels.length ? dels[r] : null;
+      const rt = r < adds.length ? adds[r] : null;
+      if (l !== null && rt !== null) {
+        // Words and the spaces between them, so the text reassembles exactly.
+        const parts = tokenDiff(l.split(/(\s+)/), rt.split(/(\s+)/));
+        // A rewrite marked word by word is all marks: mark words only where most survived.
+        const words = (xs: typeof parts) => xs.filter((x) => x.text.trim()).length;
+        const kept = words(parts.filter((x) => x.kind === "same"));
+        if (kept < 0.5 * Math.max(words(parts.filter((x) => x.kind !== "add")), words(parts.filter((x) => x.kind !== "del")))) {
+          rows.push({ kind: "change", left: { text: l }, right: { text: rt } });
+          continue;
+        }
+        rows.push({
+          kind: "change",
+          left: { text: l, words: parts.filter((p) => p.kind !== "add").map((p) => ({ text: p.text, changed: p.kind === "del" })) },
+          right: { text: rt, words: parts.filter((p) => p.kind !== "del").map((p) => ({ text: p.text, changed: p.kind === "add" })) },
+        });
+      } else rows.push({ kind: "change", left: l === null ? null : { text: l }, right: rt === null ? null : { text: rt } });
+    }
+  }
+  return rows;
 }

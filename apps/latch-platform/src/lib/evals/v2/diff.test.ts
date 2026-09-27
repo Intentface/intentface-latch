@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configDiff, configOf, lineDiff } from "./diff";
+import { configDiff, configOf, lineDiff, sideBySide } from "./diff";
 
 const base = { instructions: "Be brief.\nAnswer in Celsius.", modelId: "claude-sonnet-5", maxSteps: 20, connections: ["Weather"], tools: null, exec: { providerWebTools: true } };
 
@@ -29,5 +29,25 @@ describe("what a column changed", () => {
     expect(configDiff(base, { ...base, tools: { enabled: [], approval: {} }, exec: { providerWebTools: true, defaultTools: [] } })).toEqual([]);
     expect(configOf("A")).toBeNull();
     expect(lineDiff("a\nb", "a\nb")).toEqual([]);
+  });
+});
+
+describe("instructions side by side", () => {
+  it("puts a replaced line on the same row and marks the words that changed", () => {
+    const rows = sideBySide("Be brief.\nAnswer in Celsius.", "Be brief.\nAnswer in Fahrenheit.\nNever guess.");
+    expect(rows.map((r) => [r.kind, r.left?.text ?? null, r.right?.text ?? null])).toEqual([
+      ["same", "Be brief.", "Be brief."],
+      ["change", "Answer in Celsius.", "Answer in Fahrenheit."],
+      ["change", null, "Never guess."],
+    ]);
+    expect(rows[1].left!.words!.filter((w) => w.changed).map((w) => w.text)).toEqual(["Celsius."]);
+    expect(rows[1].right!.words!.filter((w) => w.changed).map((w) => w.text)).toEqual(["Fahrenheit."]);
+    expect(rows[1].right!.words!.map((w) => w.text).join("")).toBe("Answer in Fahrenheit.");
+  });
+
+  it("leaves a rewritten line unmarked word by word — the whole line changed", () => {
+    const [row] = sideBySide("Do not answer in full.", "Run the whole procedure first, always.");
+    expect(row.kind).toBe("change");
+    expect(row.left!.words).toBeUndefined();
   });
 });
