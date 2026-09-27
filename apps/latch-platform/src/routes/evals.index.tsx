@@ -272,7 +272,7 @@ function expectationChecks(grid: EvalGrid) {
 }
 /** An input's lists, as the grader numbers them. */
 const listsOf = (i: EvalGrid["inputs"][number]) => ({ mustSay: i.mustSay, mustNot: i.mustNot, decline: i.decline, asks: i.asks })
-/** How many things an input says should happen — each item of its lists counts. */
+/** How many tests an input brings itself — each item of its lists counts. */
 const expectationCount = (i: EvalGrid["inputs"][number]) =>
   (i.answer ? 1 : 0) + i.calls.length + saysItems(listsOf(i)).length
 
@@ -287,7 +287,14 @@ function cellsOf(grid: EvalGrid): Map<string, Cell> {
     const key = `${t.inputId}|${t.column}`
     const vs = verdictsOf.get(t.threadId) ?? []
     const cell = out.get(key) ?? { tries: [], rate: null }
-    cell.tries.push({ threadId: t.threadId, attempt: t.attempt, pass: vs.filter((v) => !v.failed).length, of: vs.length, error: t.error })
+    // Tests, not checks: a check over an input's list counts each item; your ruling, where given, stands for the whole check.
+    let pass = 0, of = 0
+    for (const v of vs) {
+      const each = v.ruling === null ? eachOf(v.answer) : null
+      if (each) (pass += each.filter(Boolean).length, of += each.length)
+      else (pass += (v.ruling ?? v.failed) ? 0 : 1, of += 1)
+    }
+    cell.tries.push({ threadId: t.threadId, attempt: t.attempt, pass, of, error: t.error })
     out.set(key, cell)
   }
   for (const cell of out.values()) {
@@ -298,12 +305,17 @@ function cellsOf(grid: EvalGrid): Map<string, Cell> {
   return out
 }
 
-/** Share of all checks passed in a column, over its graded answers. */
+/**
+ * A column's score: the average input's share of tests passed. Inputs are
+ * the sample — their tests are not independent of each other — so each
+ * input weighs the same, however many tests it has.
+ */
 function columnRate(grid: EvalGrid, cells: Map<string, Cell>, label: string) {
-  let pass = 0, of = 0
-  for (const i of grid.inputs)
-    for (const t of cells.get(`${i.id}|${label}`)?.tries ?? []) if (!t.error) (pass += t.pass, of += t.of)
-  return of ? pass / of : null
+  const rates = grid.inputs.flatMap((i) => {
+    const r = cells.get(`${i.id}|${label}`)?.rate
+    return r === null || r === undefined ? [] : [r]
+  })
+  return rates.length ? rates.reduce((a, r) => a + r, 0) / rates.length : null
 }
 
 /**
@@ -619,6 +631,7 @@ function Results({
                     input={input}
                     onOpen={() => onOpenInput(input.id)}
                     count={expectationCount(input)}
+                    shared={grid.checks.filter((c) => !c.reads).length}
                   />
                 </td>
                 {grid.columns.map((c) => (
@@ -978,7 +991,7 @@ function CellButton({
  * the table doesn't jump. The block is drawn at the page's top level: inside
  * the sticky cell it would sit under the next row's sticky cell.
  */
-function InputText({ input, onOpen, count }: { input: EvalGrid["inputs"][number]; onOpen: () => void; count: number }) {
+function InputText({ input, onOpen, count, shared }: { input: EvalGrid["inputs"][number]; onOpen: () => void; count: number; shared: number }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [grown, setGrown] = useState<DOMRect | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -1010,8 +1023,8 @@ function InputText({ input, onOpen, count }: { input: EvalGrid["inputs"][number]
           {input.prompt}
         </span>
         {input.files.length > 0 && <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums" title={input.files.map((f) => f.filename).join(", ")}>📎 {input.files.length}</span>}
-        <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums">
-          {count ? `${count} expectation${count === 1 ? "" : "s"}` : "No expectations"}
+        <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums" title={`${count || "None"} of its own, ${shared} every input gets`}>
+          {count + shared} test{count + shared === 1 ? "" : "s"}
         </span>
       </button>
       {grown && createPortal(
