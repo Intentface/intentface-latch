@@ -41,5 +41,6 @@ describe("what the Results page counts", () => {
     expect(verdictFor({ up: 17, down: 0, p: 0.00001 })).toBe("Clearly better");
     expect(verdictFor({ up: 7, down: 9, p: 0.8 })).toBe("No real difference");
     expect(verdictFor({ up: 0, down: 0, p: 1 })).toBe("No change");
+    expect(verdictFor({ up: 0, down: 0, same: 0, p: 1 })).toBe("Nothing to compare");
   });
 });

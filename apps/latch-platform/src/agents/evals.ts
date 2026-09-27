@@ -104,6 +104,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { toEditable } = await import("@/lib/evals/v2/validate");
   const { computeGrid } = await import("@/lib/evals-grid");
   const { cellsOf, columnRate, versus, verdictFor } = await import("@/lib/evals/v2/score");
+  const { configDiff, configOf } = await import("@/lib/evals/v2/diff");
 
   /**
    * The Results page, as the person sees it: each column's score (the average
@@ -127,11 +128,15 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
       columns: g.columns.map((c, i) => {
         const v = i ? versus(g, cells, base.label, c.label) : null;
         const sameSetup = i > 0 && !!c.setup && c.setup === base.setup;
+        const from = configOf(base.config ?? undefined);
+        const to = configOf(c.config ?? undefined);
+        const changes = i > 0 && from && to ? configDiff(from, to) : null;
         return {
           result: c.label,
           runId: c.runId,
           version: c.version,
           score: pct(columnRate(g, cells, c.label)),
+          ...(changes ? { changesAgainstBaseline: changes.length ? changes.map((x) => (x.lines ? { change: x.summary, lines: x.lines.map((l) => `${l.kind === "add" ? "+" : "−"} ${l.text}`) } : x.summary)) : "none — the same setup" } : {}),
           ...(v
             ? {
                 vsBaseline: {

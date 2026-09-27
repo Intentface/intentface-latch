@@ -99,7 +99,9 @@ export function versus(grid: Grid, cells: Map<string, Cell>, base: string, label
  * than 1 time in 20. Maybe: it leans one way, but chance does that often
  * enough to need more tries.
  */
-export function verdictFor({ up, down, p }: { up: number; down: number; p: number }) {
+export function verdictFor({ up, down, same, p }: { up: number; down: number; same?: number; p: number }) {
+  // No input graded in both: nothing was compared, which is not "no change".
+  if (!up && !down && same === 0) return "Nothing to compare";
   if (!up && !down) return "No change";
   if (p < 0.05) return up > down ? "Clearly better" : "Clearly worse";
   if (p < 0.25 && up !== down) return up > down ? "Maybe better" : "Maybe worse";

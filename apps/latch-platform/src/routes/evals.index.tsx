@@ -17,6 +17,8 @@ import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/ev
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
+import { configDiff, configOf } from "@/lib/evals/v2/diff"
+import type { Change } from "@/lib/evals/v2/diff"
 import type { Cell } from "@/lib/evals/v2/score"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -491,6 +493,10 @@ function Results({
                     column={c}
                     isBase={n === 0}
                     when={whenOf(c)}
+                    changes={(() => {
+                      const from = configOf(base.config ?? undefined), to = configOf(c.config ?? undefined)
+                      return n > 0 && from && to ? configDiff(from, to) : null
+                    })()}
                     isFocus={c.label === focus?.label}
                     rate={columnRate(grid, cells, c.label)}
                     tries={triesOf(c)}
@@ -693,6 +699,7 @@ function ColumnMenu({
   column,
   isBase,
   when,
+  changes,
   isFocus,
   rate,
   tries,
@@ -712,6 +719,8 @@ function ColumnMenu({
   isBase: boolean
   /** The day it was answered, with the time when another column shares the day. */
   when: string
+  /** What it changes against the baseline, from what each ran; null for the baseline or an older answer. */
+  changes: Change[] | null
   isFocus: boolean
   rate: number | null
   tries: string
@@ -746,9 +755,12 @@ function ColumnMenu({
           <ChevronDown className="text-ink-tertiary group-hover:text-ink-primary size-3" />
         </Popover.Trigger>
         {/* 2 · when, how often */}
-        <span className={cn("mt-0.5 text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
-          {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : when}
-          {!state && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
+        <span
+          className={cn("mt-0.5 max-w-[168px] truncate text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : changes?.length ? "text-ink-secondary" : "text-ink-tertiary")}
+          title={[changes?.length ? `Against the baseline: ${changes.map((c) => c.summary).join("; ")}` : null, `${when}${tries !== "1 try" ? ` · ${tries}` : ""}`].filter(Boolean).join("\n")}
+        >
+          {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : changes?.length ? changes.map((c) => c.summary).join(" · ") : when}
+          {!state && !changes?.length && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
         </span>
         {/* 3 · the number */}
         <span className="mt-1.5 flex items-baseline gap-1">
@@ -779,12 +791,14 @@ function ColumnMenu({
                       ? `${moved.up} scored higher, ${moved.down} lower. If nothing had changed, chance would split them this unevenly about 1 time in ${Math.max(2, Math.round(1 / moved.p))} — so it leans ${moved.up > moved.down ? "better" : "worse"}, but isn't sure. Answer again with 3 tries to settle it.`
                       : moved.verdict === "No real difference"
                         ? `${moved.up} scored higher, ${moved.down} lower — about what answering again alone does. More tries per input would tell.`
+                        : moved.verdict === "Nothing to compare"
+                        ? "No input has a graded answer in both this column and the baseline — nothing to compare yet."
                         : moved.verdict === "No change"
                         ? "Every input scored the same as the baseline."
                         : `${moved.up + moved.down} inputs moved, ${Math.max(moved.up, moved.down)} of them the same way — more than chance would.`
                 }
                 className={cn(
-                  moved.sameSetup || moved.verdict === "No real difference" || moved.verdict === "No change"
+                  moved.sameSetup || moved.verdict === "No real difference" || moved.verdict === "No change" || moved.verdict === "Nothing to compare"
                     ? "text-ink-tertiary"
                     : moved.verdict === "Clearly better"
                       ? "font-medium text-[color:var(--eval-good-ink)]"
@@ -809,6 +823,26 @@ function ColumnMenu({
           {column.runName ?? "Unnamed run"} · {when} · {pct(rate)} of checks passed
           {column.spent > 0 && ` · spent ${money(column.spent)}`}
         </div>
+        {changes && (
+          <div className="border-primary-border mx-2.5 mb-1.5 space-y-1 border-b pb-2 text-xs">
+            <div className="text-ink-secondary font-medium">{changes.length ? "What it changes against the baseline" : "The same setup as the baseline"}</div>
+            {changes.map((c) => (
+              <div key={c.field}>
+                <div className="text-ink-primary">{c.summary}</div>
+                {c.lines && (
+                  <div className="bg-primary-bg-hover mt-0.5 max-h-40 space-y-px overflow-y-auto rounded p-1.5 font-mono text-[11px] leading-snug">
+                    {c.lines.map((l, n) => (
+                      <div key={n} className={l.kind === "add" ? "text-[color:var(--eval-good-ink)]" : "text-[color:var(--eval-bad-ink)] line-through decoration-1"}>
+                        {l.kind === "add" ? "+ " : "− "}
+                        {l.text}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {!isBase && (
           <button type="button" className={item} onClick={pick(onBaseline)}>
             Use as baseline <span className="text-ink-tertiary text-xs">The others are compared with it</span>

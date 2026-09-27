@@ -131,7 +131,7 @@ export async function computeGrid(
       crossRun,
       columns: columns.map((c, i) => {
         const r = runOf.get(c.runId)!;
-        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i], spent: spentOf(labels[i]), setup: setupOf(labels[i]) };
+        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i], spent: spentOf(labels[i]), setup: setupOf(labels[i]), config: threads.find((t) => t.version === labels[i])?.configFingerprint ?? null };
       }),
       rubricVersion: rubric.version,
       latestVersion: latest.version,
