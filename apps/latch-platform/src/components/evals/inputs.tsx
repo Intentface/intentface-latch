@@ -744,7 +744,7 @@ function JudgedEditor({ item, judge, index, onChange }: { item: JudgedItem; judg
       </label>
       {judge.rubricId && item.ask.trim() && (
         <>
-          <TryCheck agent={judge.agent} rubricId={judge.rubricId} datasetId={judge.datasetId} check={check} inputId={judge.inputId} />
+          <TryCheck agent={judge.agent} rubricId={judge.rubricId} datasetId={judge.datasetId} check={check} inputId={judge.inputId} fallback={judge.fallback} />
           {moving === "confirm" ? (
             <div className="flex flex-wrap items-center gap-2 text-[11px]">
               <span className="text-ink-secondary">Every input's answer will be judged on it from now on.</span>
@@ -1021,7 +1021,7 @@ export function ChecksDrawer({
                           aria-label="Question for the grader"
                         />
                         <ShapeEditor shape={c.shape} onChange={(shape) => edit(key, { shape })} />
-                        {datasetId && <TryCheck agent={agent} rubricId={rubricId} datasetId={datasetId} check={c} />}
+                        {datasetId && <TryCheck agent={agent} rubricId={rubricId} datasetId={datasetId} check={c} fallback={loaded.defaultJudge} />}
                       </>
                     ) : c.spec.op === "never_called" ? (
                       <input
@@ -1094,7 +1094,25 @@ export function ChecksDrawer({
  * Grade the newest answer to five inputs with this check as it stands —
  * saved or not — to see the labels the judge gives and how sure it is.
  */
-function TryCheck({ agent, rubricId, datasetId, check, inputId }: { agent: string; rubricId: string; datasetId: string; check: Check; inputId?: string }) {
+function TryCheck({
+  agent,
+  rubricId,
+  datasetId,
+  check,
+  inputId,
+  fallback,
+}: {
+  agent: string
+  rubricId: string
+  datasetId: string
+  check: Check
+  inputId?: string
+  /** The checks' default judge, used when the check names none. */
+  fallback: string
+}) {
+  const judge = check.kind === "asked" ? (check.judge ?? fallback) : "rule"
+  // A JEV judge is a decision-only call; a chat model reads the whole thread for every answer.
+  const cost = judge.startsWith("jev") ? "the judge only, cents" : `judged by ${judge} — a full model call per answer, more than cents`
   const [state, setState] = useState<"idle" | "busy" | { error: string } | Extract<Awaited<ReturnType<typeof tryCheckFn>>, { ok: true }>>("idle")
   const run = async () => {
     setState("busy")
@@ -1109,8 +1127,8 @@ function TryCheck({ agent, rubricId, datasetId, check, inputId }: { agent: strin
           : typeof state === "object" && "rows" in state
             ? "Try it again"
             : inputId
-              ? "Try it on this input's answers · the judge only, cents"
-              : "Try it on 5 answers · the judge only, cents"}
+              ? `Try it on this input's answers · ${cost}`
+              : `Try it on 5 answers · ${cost}`}
       </button>
       {typeof state === "object" && "error" in state && <p className="text-[11px] text-red-600 dark:text-red-400">{state.error}</p>}
       {typeof state === "object" && "rows" in state && (
