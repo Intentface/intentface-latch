@@ -36,7 +36,7 @@ export function configOf(fingerprint: string | undefined): Config | null {
  * Empty is absent: an agent saved with `tools: {enabled: [], approval: {}}`
  * runs exactly like one with no `tools` at all, and `false` like unset.
  */
-function plain(v: unknown): unknown {
+export function plain(v: unknown): unknown {
   if (Array.isArray(v)) return v.length ? v.map(plain) : undefined;
   if (v && typeof v === "object") {
     const kept = Object.entries(v as Record<string, unknown>)
@@ -49,24 +49,29 @@ function plain(v: unknown): unknown {
 const same = (a: unknown, b: unknown) => JSON.stringify(plain(a) ?? null) === JSON.stringify(plain(b) ?? null);
 const short = (model: string) => model.replace(/^claude-/, "").replace(/-\d{8}$/, "");
 
-/** Lines added and removed, in order — a longest-common-subsequence diff, fine for prompts. */
+/** Lines added and removed, in order — the changed lines of `fullLineDiff`. */
 export function lineDiff(a: string, b: string): { kind: "add" | "del"; text: string }[] {
+  return fullLineDiff(a, b).filter((l): l is { kind: "add" | "del"; text: string } => l.kind !== "same" && !!l.text.trim());
+}
+
+/** Every line of both, marked same, added or removed — a longest-common-subsequence diff, fine for prompts. */
+export function fullLineDiff(a: string, b: string): { kind: "same" | "add" | "del"; text: string }[] {
   const x = a.split("\n");
   const y = b.split("\n");
   const n = x.length;
   const m = y.length;
   const lcs = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) lcs[i][j] = x[i] === y[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
-  const out: { kind: "add" | "del"; text: string }[] = [];
+  const out: { kind: "same" | "add" | "del"; text: string }[] = [];
   let i = 0;
   let j = 0;
   while (i < n || j < m) {
-    if (i < n && j < m && x[i] === y[j]) (i++, j++);
+    if (i < n && j < m && x[i] === y[j]) (out.push({ kind: "same", text: x[i] }), i++, j++);
     // Removed before added, as a diff reads: the old line, then what replaced it.
     else if (i < n && (j >= m || lcs[i + 1][j] >= lcs[i][j + 1])) out.push({ kind: "del", text: x[i++] });
     else out.push({ kind: "add", text: y[j++] });
   }
-  return out.filter((l) => l.text.trim());
+  return out;
 }
 
 const listOf = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
@@ -97,4 +102,42 @@ export function configDiff(from: Config, to: Config): Change[] {
     out.push({ field: "settings", summary: keys.map(word).join(", ") });
   }
   return out;
+}
+
+/** Every setting of two configurations, side by side, as text — the rows of a diff view. */
+export function settingRows(from: Config, to: Config): { name: string; from: string; to: string; changed: boolean; delta?: string }[] {
+  const text = (v: unknown): string => {
+    const x = plain(v);
+    if (x === undefined) return "—";
+    if (Array.isArray(x)) return x.map((y) => (typeof y === "string" ? y : JSON.stringify(y))).join(", ");
+    if (x === true) return "on";
+    return typeof x === "string" || typeof x === "number" ? String(x) : JSON.stringify(x);
+  };
+  const exec = (c: Config) => (plain(c.exec) ?? {}) as Record<string, unknown>;
+  const tools = (c: Config) => (c.tools as { enabled?: unknown; approval?: unknown } | null | undefined) ?? {};
+  const rows: [string, unknown, unknown][] = [
+    ["Model", from.modelId, to.modelId],
+    ["Step limit", from.maxSteps, to.maxSteps],
+    ["Connections", from.connections, to.connections],
+    ["Tools on", tools(from).enabled, tools(to).enabled],
+    ["Needs approval", tools(from).approval, tools(to).approval],
+    ...[...new Set([...Object.keys(exec(from)), ...Object.keys(exec(to))])].map((k): [string, unknown, unknown] => [
+      k === "providerWebTools" ? "Web tools" : k === "effort" ? "Reasoning effort" : k.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()),
+      exec(from)[k],
+      exec(to)[k],
+    ]),
+  ];
+  // A list or a map of names reads better as what was added and removed than as two long values.
+  const names = (v: unknown): string[] | null => {
+    const x = plain(v);
+    if (Array.isArray(x) && x.every((y) => typeof y === "string")) return x;
+    if (x && typeof x === "object" && !Array.isArray(x)) return Object.entries(x as Record<string, unknown>).map(([k, y]) => (y === true ? k : `${k}: ${text(y)}`));
+    return x === undefined ? [] : null;
+  };
+  return rows.map(([name, a, b]) => {
+    const changed = text(a) !== text(b);
+    const na = names(a), nb = names(b);
+    const delta = changed && na && nb && (na.length > 2 || nb.length > 2) ? setDiff(na, nb).join("  ") : undefined;
+    return { name, from: text(a), to: text(b), changed, ...(delta ? { delta } : {}) };
+  });
 }

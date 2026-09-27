@@ -17,8 +17,8 @@ import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/ev
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
-import { configDiff, configOf } from "@/lib/evals/v2/diff"
-import type { Change } from "@/lib/evals/v2/diff"
+import { configDiff, configOf, fullLineDiff, settingRows } from "@/lib/evals/v2/diff"
+import type { Change, Config } from "@/lib/evals/v2/diff"
 import type { Cell } from "@/lib/evals/v2/score"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
@@ -493,9 +493,9 @@ function Results({
                     column={c}
                     isBase={n === 0}
                     when={whenOf(c)}
-                    changes={(() => {
+                    {...(() => {
                       const from = configOf(base.config ?? undefined), to = configOf(c.config ?? undefined)
-                      return n > 0 && from && to ? configDiff(from, to) : null
+                      return n > 0 && from && to ? { changes: configDiff(from, to), setups: { from, to, baseName: nameOf(base), name: nameOf(c) } } : { changes: null }
                     })()}
                     isFocus={c.label === focus?.label}
                     rate={columnRate(grid, cells, c.label)}
@@ -695,11 +695,125 @@ function Sureness({ verdict, scale, accept }: { verdict: Verdict; scale: { level
   )
 }
 
+/**
+ * Two setups side by side, from what each answer ran: every setting, the
+ * changed ones marked, then the instructions as a diff — unchanged
+ * stretches folded, a click away.
+ */
+function SetupDiff({ from, to, baseName, name }: { from: Config; to: Config; baseName: string; name: string }) {
+  const rows = settingRows(from, to)
+  const lines = fullLineDiff(String(from.instructions ?? ""), String(to.instructions ?? ""))
+  const [opened, setOpened] = useState<Set<number>>(new Set())
+  // Unchanged runs longer than this fold, keeping this many lines either side of a change.
+  const FOLD = 6, KEEP = 2
+  type Block = { kind: "lines"; from: number; to: number } | { kind: "fold"; from: number; to: number }
+  const blocks: Block[] = []
+  for (let k = 0; k < lines.length; ) {
+    if (lines[k].kind !== "same") {
+      const start = k
+      while (k < lines.length && lines[k].kind !== "same") k++
+      blocks.push({ kind: "lines", from: start, to: k })
+      continue
+    }
+    const start = k
+    while (k < lines.length && lines[k].kind === "same") k++
+    const first = start === 0, last = k === lines.length
+    const head = first ? 0 : KEEP, tail = last ? 0 : KEEP
+    if (k - start > FOLD) {
+      if (head) blocks.push({ kind: "lines", from: start, to: start + head })
+      blocks.push({ kind: "fold", from: start + head, to: k - tail })
+      if (tail) blocks.push({ kind: "lines", from: k - tail, to: k })
+    } else blocks.push({ kind: "lines", from: start, to: k })
+  }
+  const changedInstructions = lines.some((l) => l.kind !== "same")
+  const [allSettings, setAllSettings] = useState(false)
+  const unchanged = rows.filter((r) => !r.changed).length
+  return (
+    <div className="max-h-[70vh] overflow-y-auto">
+      <div className="border-primary-border bg-primary-bg sticky top-0 z-10 flex items-baseline gap-2 border-b px-4 py-2.5">
+        <span className="text-ink-primary text-sm font-semibold">{name}</span>
+        <span className="text-ink-tertiary text-xs">against {baseName}, the baseline — as each ran</span>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-ink-tertiary text-left">
+            <th className="w-36 px-4 py-1.5 font-medium">Setting</th>
+            <th className="px-2 py-1.5 font-medium">{baseName}</th>
+            <th className="px-2 py-1.5 font-medium">{name}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows
+            .filter((r) => r.changed || allSettings)
+            .map((r) => (
+              <tr key={r.name} className={cn("border-primary-border border-t align-top", r.changed ? "bg-primary-bg-hover" : "text-ink-tertiary")}>
+                <td className={cn("px-4 py-1.5", r.changed && "text-ink-primary font-medium")}>{r.name}</td>
+                {r.delta ? (
+                  <td colSpan={2} className="px-2 py-1.5 font-mono break-all">
+                    {r.delta.split("  ").map((d) => (
+                      <span key={d} className={cn("mr-3 inline-block", d.startsWith("+") ? "text-[color:var(--eval-good-ink)]" : "text-[color:var(--eval-bad-ink)]")}>
+                        {d}
+                      </span>
+                    ))}
+                  </td>
+                ) : (
+                  <>
+                    <td className={cn("line-clamp-3 px-2 py-1.5 font-mono break-all", r.changed && "text-[color:var(--eval-bad-ink)]")}>{r.from}</td>
+                    <td className={cn("px-2 py-1.5 font-mono break-all", r.changed && "text-[color:var(--eval-good-ink)]")}>
+                      <span className="line-clamp-3">{r.to}</span>
+                    </td>
+                  </>
+                )}
+              </tr>
+            ))}
+          {unchanged > 0 && (
+            <tr className="border-primary-border border-t">
+              <td colSpan={3} className="px-4 py-1.5">
+                <button type="button" onClick={() => setAllSettings(!allSettings)} className="text-ink-tertiary hover:text-ink-primary text-[11px]">
+                  {allSettings ? "Hide the unchanged settings" : `${unchanged} setting${unchanged === 1 ? "" : "s"} unchanged — show`}
+                </button>
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+      <div className="border-primary-border border-t px-4 pt-2.5 pb-3">
+        <div className="text-ink-secondary mb-1.5 text-xs font-medium">Instructions{changedInstructions ? "" : " — unchanged"}</div>
+        {changedInstructions && (
+          <div className="border-primary-border overflow-hidden rounded-md border font-mono text-[11.5px] leading-relaxed">
+            {blocks.map((b, n) =>
+              b.kind === "fold" && !opened.has(n) ? (
+                <button key={n} type="button" onClick={() => setOpened(new Set([...opened, n]))} className="text-ink-tertiary hover:text-ink-primary bg-primary-bg-hover block w-full px-3 py-1 text-left text-[11px]">
+                  ⋯ {b.to - b.from} unchanged lines
+                </button>
+              ) : (
+                lines.slice(b.from, b.to).map((l, k) => (
+                  <div
+                    key={`${n}-${k}`}
+                    className={cn(
+                      "grid grid-cols-[16px_minmax(0,1fr)] px-3 whitespace-pre-wrap",
+                      l.kind === "add" ? "bg-[color:var(--eval-good)]/35" : l.kind === "del" ? "bg-[color:var(--eval-bad)]/35" : "text-ink-secondary",
+                    )}
+                  >
+                    <span className="text-ink-tertiary select-none">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : ""}</span>
+                    <span>{l.text || " "}</span>
+                  </div>
+                ))
+              ),
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ColumnMenu({
   column,
   isBase,
   when,
   changes,
+  setups,
   isFocus,
   rate,
   tries,
@@ -721,6 +835,8 @@ function ColumnMenu({
   when: string
   /** What it changes against the baseline, from what each ran; null for the baseline or an older answer. */
   changes: Change[] | null
+  /** Both setups, for the full diff. */
+  setups?: { from: Config; to: Config; baseName: string; name: string }
   isFocus: boolean
   rate: number | null
   tries: string
@@ -746,6 +862,7 @@ function ColumnMenu({
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameError, setRenameError] = useState<string | null>(null)
   const pick = (f: () => void) => () => (setOpen(false), f())
+  const [diffOpen, setDiffOpen] = useState(false)
   return (
     <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(false))}>
       <span className="flex flex-col items-center leading-tight">
@@ -755,13 +872,32 @@ function ColumnMenu({
           <ChevronDown className="text-ink-tertiary group-hover:text-ink-primary size-3" />
         </Popover.Trigger>
         {/* 2 · when, how often */}
-        <span
-          className={cn("mt-0.5 max-w-[168px] truncate text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : changes?.length ? "text-ink-secondary" : "text-ink-tertiary")}
-          title={[changes?.length ? `Against the baseline: ${changes.map((c) => c.summary).join("; ")}` : null, `${when}${tries !== "1 try" ? ` · ${tries}` : ""}`].filter(Boolean).join("\n")}
-        >
-          {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : changes?.length ? changes.map((c) => c.summary).join(" · ") : when}
-          {!state && !changes?.length && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
-        </span>
+        {!state && setups && changes?.length ? (
+          <Popover open={diffOpen} onOpenChange={setDiffOpen}>
+            <Popover.Trigger
+              render={
+                <button
+                  type="button"
+                  title={`${when}${tries !== "1 try" ? ` · ${tries}` : ""} — see what changed`}
+                  className="text-ink-secondary hover:text-ink-primary mt-0.5 max-w-[168px] truncate text-[11px] whitespace-nowrap underline decoration-dotted underline-offset-2"
+                />
+              }
+            >
+              {changes.map((c) => c.summary).join(" · ")}
+            </Popover.Trigger>
+            <Popover.Content align="center" className="w-[min(720px,92vw)] p-0">
+              <SetupDiff {...setups} />
+            </Popover.Content>
+          </Popover>
+        ) : (
+          <span
+            className={cn("mt-0.5 max-w-[168px] truncate text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}
+            title={`${when}${tries !== "1 try" ? ` · ${tries}` : ""}`}
+          >
+            {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : changes ? `same setup · ${when}` : when}
+            {!state && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
+          </span>
+        )}
         {/* 3 · the number */}
         <span className="mt-1.5 flex items-baseline gap-1">
           <span className={cn("font-mono text-[22px] leading-none font-medium tracking-[0.04em] tabular-nums", stale ? "text-ink-secondary" : "text-ink-primary")} title="Share of checks passed">
@@ -824,23 +960,18 @@ function ColumnMenu({
           {column.spent > 0 && ` · spent ${money(column.spent)}`}
         </div>
         {changes && (
-          <div className="border-primary-border mx-2.5 mb-1.5 space-y-1 border-b pb-2 text-xs">
+          <div className="border-primary-border mx-2.5 mb-1.5 space-y-0.5 border-b pb-2 text-xs">
             <div className="text-ink-secondary font-medium">{changes.length ? "What it changes against the baseline" : "The same setup as the baseline"}</div>
             {changes.map((c) => (
-              <div key={c.field}>
-                <div className="text-ink-primary">{c.summary}</div>
-                {c.lines && (
-                  <div className="bg-primary-bg-hover mt-0.5 max-h-40 space-y-px overflow-y-auto rounded p-1.5 font-mono text-[11px] leading-snug">
-                    {c.lines.map((l, n) => (
-                      <div key={n} className={l.kind === "add" ? "text-[color:var(--eval-good-ink)]" : "text-[color:var(--eval-bad-ink)] line-through decoration-1"}>
-                        {l.kind === "add" ? "+ " : "− "}
-                        {l.text}
-                      </div>
-                    ))}
-                  </div>
-                )}
+              <div key={c.field} className="text-ink-primary">
+                {c.summary}
               </div>
             ))}
+            {changes.length > 0 && setups && (
+              <button type="button" onClick={() => (setOpen(false), setDiffOpen(true))} className="text-ink-secondary hover:text-ink-primary underline underline-offset-2">
+                See the full diff
+              </button>
+            )}
           </div>
         )}
         {!isBase && (
