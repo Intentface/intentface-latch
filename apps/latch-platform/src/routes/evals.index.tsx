@@ -747,58 +747,64 @@ function ColumnMenu({
   const pick = (f: () => void) => () => (setOpen(false), f())
   return (
     <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(false))}>
-      <Popover.Trigger render={<button type="button" className="group inline-flex flex-col items-center" />}>
-        <span className={cn("flex items-center gap-1 text-xs font-semibold whitespace-nowrap", isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary")}>
-          {column.version}
-          {isBase && <span className="border-primary-border text-ink-tertiary rounded-full border px-1.5 text-[10px] font-medium">baseline</span>}
-          <ChevronDown className="size-3" />
-        </span>
-        <span className={cn("block text-[11px] leading-snug tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
+      <span className="flex flex-col items-center leading-tight">
+        {/* 1 · the name, which opens the column's menu */}
+        <Popover.Trigger render={<button type="button" className="group flex items-center gap-0.5 rounded px-1 text-[13px] font-semibold tracking-tight whitespace-nowrap" />}>
+          <span className={isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary"}>{column.version}</span>
+          <ChevronDown className="text-ink-tertiary group-hover:text-ink-primary size-3" />
+        </Popover.Trigger>
+        {/* 2 · when, how often */}
+        <span className={cn("mt-0.5 text-[11px] whitespace-nowrap tabular-nums", state ? "text-ink-secondary" : "text-ink-tertiary")}>
           {state ? <><Loader2 className="mr-1 inline size-3 animate-spin" />{state}</> : when}
           {!state && tries !== "1 try" && ` · ${tries.replace(" each", "")}`}
         </span>
-        <span className="text-ink-primary mt-0.5 block text-sm font-semibold tabular-nums" title="Share of checks passed">
-          {pct(rate)}
-        </span>
-      </Popover.Trigger>
-      {moved && (
-        <span className="mt-0.5 flex items-center justify-center gap-1.5 text-[11px] tabular-nums">
-          <button type="button" disabled={!moved.up} onClick={() => onShowMoved?.("better")} title={`${moved.up} scored higher than the baseline — show them`} className="font-semibold text-[color:var(--eval-good-ink)] enabled:hover:underline disabled:opacity-40">
-            ▲{moved.up}
-          </button>
-          <button type="button" disabled={!moved.down} onClick={() => onShowMoved?.("worse")} title={`${moved.down} scored lower than the baseline — show them`} className="font-semibold text-[color:var(--eval-bad-ink)] enabled:hover:underline disabled:opacity-40">
-            ▼{moved.down}
-          </button>
-          <span
-            title={
-              moved.sameSetup
-                ? "The baseline's own configuration, answered again: every ▲ and ▼ is the agent answering differently on its own — the noise a real change has to beat."
-                : moved.verdict === "No real difference"
-                  ? "About as many scored lower as higher — what answering again alone can do. More tries per input would tell."
-                  : moved.verdict === "No change"
-                    ? "Every input scored the same as the baseline."
-                    : `${moved.up + moved.down} inputs moved, ${Math.max(moved.up, moved.down)} of them the same way — more than chance would.`
-            }
-            className={cn(
-              "rounded-full px-1.5 font-medium whitespace-nowrap",
-              moved.sameSetup
-                ? "text-ink-tertiary border-primary-border border border-dashed"
-                : moved.verdict === "Clearly better"
-                  ? "bg-[color:var(--eval-good)] text-ink-primary"
-                  : moved.verdict === "Clearly worse"
-                    ? "bg-[color:var(--eval-bad)] text-ink-primary"
-                    : "text-ink-tertiary",
-            )}
-          >
-            {moved.sameSetup ? "Same setup" : moved.verdict}
+        {/* 3 · the number */}
+        <span className="mt-1.5 flex items-baseline gap-1">
+          <span className={cn("text-lg leading-none font-semibold tracking-tight tabular-nums", stale ? "text-ink-secondary" : "text-ink-primary")} title="Share of checks passed">
+            {pct(rate)}
           </span>
+          {stale && (
+            <button type="button" onClick={onGrade} title="Graded with older checks — grade these answers with the current ones" className="text-ink-tertiary hover:text-ink-primary">
+              <RotateCw className="size-3" />
+            </button>
+          )}
         </span>
-      )}
-      {stale && (
-        <button type="button" onClick={onGrade} className="border-primary-border text-ink-secondary hover:text-ink-primary mx-auto mt-1 block rounded-full border border-dashed px-2 text-[10.5px] whitespace-nowrap">
-          New checks · grade them
-        </button>
-      )}
+        {/* 4 · what it adds up to */}
+        <span className="mt-1 flex h-4 items-center gap-1.5 text-[11px] whitespace-nowrap tabular-nums">
+          {moved ? (
+            <>
+              <button type="button" disabled={!moved.up} onClick={() => onShowMoved?.("better")} title={`${moved.up} scored higher than the baseline — show them`} className="font-medium text-[color:var(--eval-good-ink)] enabled:hover:underline disabled:opacity-40">
+                ▲{moved.up}
+              </button>
+              <button type="button" disabled={!moved.down} onClick={() => onShowMoved?.("worse")} title={`${moved.down} scored lower than the baseline — show them`} className="font-medium text-[color:var(--eval-bad-ink)] enabled:hover:underline disabled:opacity-40">
+                ▼{moved.down}
+              </button>
+              <span
+                title={
+                  moved.sameSetup
+                    ? "The baseline's own configuration, answered again: every ▲ and ▼ is the agent answering differently on its own — the noise a real change has to beat."
+                    : moved.verdict === "No real difference"
+                      ? "About as many scored lower as higher — what answering again alone can do. More tries per input would tell."
+                      : moved.verdict === "No change"
+                        ? "Every input scored the same as the baseline."
+                        : `${moved.up + moved.down} inputs moved, ${Math.max(moved.up, moved.down)} of them the same way — more than chance would.`
+                }
+                className={cn(
+                  moved.sameSetup || (moved.verdict !== "Clearly better" && moved.verdict !== "Clearly worse")
+                    ? "text-ink-tertiary"
+                    : moved.verdict === "Clearly better"
+                      ? "font-medium text-[color:var(--eval-good-ink)]"
+                      : "font-medium text-[color:var(--eval-bad-ink)]",
+                )}
+              >
+                {moved.sameSetup ? "same setup" : moved.verdict.toLowerCase()}
+              </span>
+            </>
+          ) : (
+            <span className="text-ink-tertiary">{isBase ? "baseline" : ""}</span>
+          )}
+        </span>
+      </span>
       <Popover.Content align="start" className="w-80 p-1.5">
         {again ? againPanel(failed, () => setOpen(false)) : <>
         <div className="text-ink-tertiary px-2.5 pt-1 pb-1.5 text-xs">
