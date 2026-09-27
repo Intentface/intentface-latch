@@ -82,7 +82,6 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   // Lazy imports avoid a static cycle (latch.ts → agents → here).
   const { getLatch } = await import("@/lib/latch");
   const { agentOwnerKey, normalizeAgentName } = await import("@/lib/agent-store");
-  const { summarize, compareVersions } = await import("@/lib/evals/v2/runner");
   const { runtime, agentStore, evals } = await getLatch();
   const { planRun, startPlannedRun } = await import("@/lib/evals-jobs");
   const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-actions");
@@ -90,6 +89,64 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { startJudgeJob } = await import("@/lib/evals-jobs");
   const { toEditable } = await import("@/lib/evals/v2/validate");
   const { computeGrid } = await import("@/lib/evals-grid");
+  const { cellsOf, columnRate, versus, verdictFor } = await import("@/lib/evals/v2/score");
+
+  /**
+   * The Results page, as the person sees it: each column's score (the average
+   * input's share of tests passed), how it moved against the baseline input
+   * by input, and every cell. Per check comes after, to see where to look.
+   */
+  const pageView = (g: NonNullable<Awaited<ReturnType<typeof computeGrid>>>) => {
+    const cells = cellsOf(g);
+    const [base] = g.columns;
+    const pct = (r: number | null) => (r === null ? "not graded" : `${Math.round(r * 100)}%`);
+    const cellText = (inputId: string, label: string) => {
+      const c = cells.get(`${inputId}|${label}`);
+      if (!c) return "not answered";
+      return c.tries.map((t) => (t.error ? "broke" : t.of ? `${t.pass}/${t.of}` : "not graded")).join(", ");
+    };
+    const judged = new Set(g.columns.map((c) => c.judgedWith));
+    return {
+      howToRead:
+        "Exactly what the person sees. A cell counts tests — each of an input's own expectations (each expected call, each must-say item) plus the checks every input gets; several tries are listed. A column's score is the average input's share of tests passed. Against the baseline, each input scored higher, lower or the same; the verdict comes from how lopsided that is (Clearly: less than 1 in 20 by chance; Maybe: less than 1 in 4).",
+      baseline: base.label,
+      columns: g.columns.map((c, i) => {
+        const v = i ? versus(g, cells, base.label, c.label) : null;
+        const sameSetup = i > 0 && !!c.setup && c.setup === base.setup;
+        return {
+          result: c.label,
+          runId: c.runId,
+          version: c.version,
+          score: pct(columnRate(g, cells, c.label)),
+          ...(v
+            ? {
+                vsBaseline: {
+                  higher: v.up,
+                  lower: v.down,
+                  same: v.same,
+                  verdict: sameSetup ? "Same setup as the baseline — the moves are noise" : verdictFor(v),
+                  p: Number(v.p.toFixed(3)),
+                },
+              }
+            : { role: "baseline" }),
+          errored: g.errors[i]?.errors ?? 0,
+          checksVersion: c.judgedWith,
+        };
+      }),
+      inputs: g.inputs.map((i) => ({
+        id: i.id,
+        prompt: i.prompt.length > 90 ? `${i.prompt.slice(0, 90)}…` : i.prompt,
+        ...Object.fromEntries(g.columns.map((c) => [c.label, cellText(i.id, c.label)])),
+      })),
+      byCheck: g.checks.map((c) => ({
+        check: c.label,
+        type: c.type,
+        ...Object.fromEntries(g.columns.map((col, i) => [col.label, `${c.cells[i].passed}/${c.cells[i].total} answers`])),
+      })),
+      ...(g.crossRun ? { caveat: "These results come from different runs, answered at different times; a change outside the agent (documents, tools, the model provider) would show up as a difference too." } : {}),
+      ...(judged.size > 1 ? { warning: `The columns were graded under different versions of the checks (${[...judged].join(", ")}). judge_run the older run under the latest checks before trusting the comparison.` } : {}),
+    };
+  };
 
   /** Question ids that failed any check in a run — what "re-run the failures" means. */
   const failedQuestions = async (owner: string, runId: string) => {
@@ -140,42 +197,14 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
 
     run_results: tool({
       description:
-        "Pass rates per check and version for one run, and the question-by-question comparison between the first two versions (improved/regressed counts, p-value). Use it to see where to look.",
+        "One run as the Results page shows it: each version's score, how it moved against the first version (live, if it ran) input by input and the verdict, every cell, then per check. Use it to see where to look.",
       inputSchema: z.object({ agent: Agent, questionSetId: z.string(), runId: z.string(), checksId: z.string() }),
       execute: async ({ agent, questionSetId, runId, checksId }) => {
-        const o = await scope(agent);
-        if ("error" in o) return o;
-        const rubric = await evals.getRubric(o.owner, checksId);
-        if (!rubric) return { error: `No checks "${checksId}".` };
-        const threads = await evals.listThreads(o.owner, { datasetId: questionSetId, runId });
-        const verdicts = await evals.listVerdicts({ threadIds: threads.map((t) => t.threadId), rubricVersion: rubric.version });
-        if (!verdicts.length) return { error: `Run ${runId} has no verdicts for ${checksId} v${rubric.version} yet.` };
-        const order = (v: string) => (v === "live" ? "" : v);
-        const s = summarize(threads, verdicts, rubric).sort((a, b) => order(a.version).localeCompare(order(b.version)));
-        const [a, b] = s.map((x) => x.version);
-        return {
-          checksVersion: rubric.version,
-          versions: s.map((x) => ({
-            version: x.version,
-            threads: x.threads,
-            errored: x.errors,
-            checks: x.checks.map((c) => ({
-              check: rubric.checks.find((k) => k.id === c.checkId)?.label ?? c.checkId,
-              passed: `${c.passed}/${c.total}`,
-              everyTry: `${c.allPassed}/${c.inputs} questions`,
-              answers: c.answers,
-            })),
-          })),
-          ...(a && b
-            ? {
-                comparison: compareVersions(threads, verdicts, rubric.checks.map((c) => c.id), a, b).map((c) => ({
-                  check: rubric.checks.find((k) => k.id === c.checkId)?.label ?? c.checkId,
-                  [`${a}→${b}`]: `+${c.improved} −${c.regressed} of ${c.pairs}`,
-                  p: Number(c.p.toFixed(3)),
-                })),
-              }
-            : {}),
-        };
+        const g = await computeGrid(principal, { agent, datasetId: questionSetId, rubricId: checksId, runId });
+        if (!g) return { error: `No results for run ${runId}: check the agent, question set, checks and run id.` };
+        if ("error" in g) return g;
+        if (g.runId !== runId) return { error: `Run ${runId} is not a run of this question set.` };
+        return pageView(g);
       },
     }),
 
@@ -601,7 +630,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
 
     compare_results: tool({
       description:
-        "Compare results from any runs question by question: the first is the baseline, each other is measured against it on the questions both answered (improved/regressed, p-value). Use it for a new @draft result against a live result from an earlier run, so live need not run again.",
+        "Compare results from any runs exactly as the Results page shows them: the first is the baseline; each column's score, how many inputs scored higher or lower than the baseline and the verdict, every cell, then per check. Use it for a new @draft result against a live result from an earlier run, so live need not run again.",
       inputSchema: z.object({
         agent: Agent,
         questionSetId: z.string(),
@@ -612,24 +641,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         const g = await computeGrid(principal, { agent, datasetId: questionSetId, rubricId: checksId, columns: results });
         if (!g) return { error: "Nothing to compare: check the agent, question set, checks and run ids." };
         if ("error" in g) return g;
-        const judged = new Set(g.columns.map((c) => c.judgedWith));
-        const [base, ...rest] = g.columns;
-        return {
-          baseline: base.label,
-          columns: g.columns.map((c, i) => ({ result: c.label, runId: c.runId, version: c.version, errored: g.errors[i]?.errors ?? 0, checksVersion: c.judgedWith })),
-          checks: g.checks.map((c) => ({
-            check: c.label,
-            ...Object.fromEntries(g.columns.map((col, i) => [col.label, `${c.cells[i].passed}/${c.cells[i].total}`])),
-            ...Object.fromEntries(
-              rest.map((col) => {
-                const x = c.changes[col.label];
-                return [`vs baseline: ${col.label}`, x ? `+${x.improved} −${x.regressed} of ${x.pairs} questions, p=${x.p.toFixed(3)}` : "no shared questions"];
-              }),
-            ),
-          })),
-          ...(g.crossRun ? { caveat: "These results come from different runs, answered at different times; a change outside the agent (documents, tools, the model provider) would show up as a difference too." } : {}),
-          ...(judged.size > 1 ? { warning: `The results were judged under different versions of the checks (${[...judged].join(", ")}). judge_run the older run under the latest checks before trusting the comparison.` } : {}),
-        };
+        return pageView(g);
       },
     }),
 

@@ -16,6 +16,8 @@ import { AddColumn, AgainPanel, EarlierAnswers } from "@/components/evals/run-me
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, saysItems } from "@/lib/evals/v2/expect"
+import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
+import type { Cell } from "@/lib/evals/v2/score"
 import { GROUND, passColor } from "@/components/evals/ui"
 import { decodeResults, encodeResults } from "@/components/evals/compare-picker"
 import type { Result } from "@/components/evals/compare-picker"
@@ -61,11 +63,6 @@ type Verdict = EvalGrid["verdicts"][number]
 type Filter = "all" | "changed" | "failing" | "better" | "worse" | "same"
 
 /** One configuration's answer to one input: every try, graded or not. */
-type Cell = {
-  tries: { threadId: string; attempt: number; pass: number; of: number; error: string | null }[]
-  /** Mean share of checks passed over the graded tries, or null when none are. */
-  rate: number | null
-}
 
 function EvalsPage() {
   const index = Route.useLoaderData()
@@ -278,90 +275,12 @@ const expectationCount = (i: EvalGrid["inputs"][number]) =>
 
 // ─── Numbers ──────────────────────────────────────────────────────────────
 
-/** Every cell of the grid, keyed "input|column". */
-function cellsOf(grid: EvalGrid): Map<string, Cell> {
-  const verdictsOf = new Map<string, Verdict[]>()
-  for (const v of grid.verdicts) verdictsOf.set(v.threadId, [...(verdictsOf.get(v.threadId) ?? []), v])
-  const out = new Map<string, Cell>()
-  for (const t of grid.threads) {
-    const key = `${t.inputId}|${t.column}`
-    const vs = verdictsOf.get(t.threadId) ?? []
-    const cell = out.get(key) ?? { tries: [], rate: null }
-    // Tests, not checks: a check over an input's list counts each item; your ruling, where given, stands for the whole check.
-    let pass = 0, of = 0
-    for (const v of vs) {
-      const each = v.ruling === null ? eachOf(v.answer) : null
-      if (each) (pass += each.filter(Boolean).length, of += each.length)
-      else (pass += (v.ruling ?? v.failed) ? 0 : 1, of += 1)
-    }
-    cell.tries.push({ threadId: t.threadId, attempt: t.attempt, pass, of, error: t.error })
-    out.set(key, cell)
-  }
-  for (const cell of out.values()) {
-    cell.tries.sort((a, b) => a.attempt - b.attempt)
-    const graded = cell.tries.filter((x) => !x.error && x.of)
-    cell.rate = graded.length ? graded.reduce((a, x) => a + x.pass / x.of, 0) / graded.length : null
-  }
-  return out
-}
-
-/**
- * A column's score: the average input's share of tests passed. Inputs are
- * the sample — their tests are not independent of each other — so each
- * input weighs the same, however many tests it has.
- */
-function columnRate(grid: EvalGrid, cells: Map<string, Cell>, label: string) {
-  const rates = grid.inputs.flatMap((i) => {
-    const r = cells.get(`${i.id}|${label}`)?.rate
-    return r === null || r === undefined ? [] : [r]
-  })
-  return rates.length ? rates.reduce((a, r) => a + r, 0) / rates.length : null
-}
-
-/**
- * How likely a split this lopsided is by chance, if the change did nothing:
- * a two-sided sign test on the inputs that moved.
- */
-function signTest(up: number, down: number) {
-  const n = up + down, k = Math.min(up, down)
-  if (!n) return 1
-  let c = 1, sum = 0
-  for (let i = 0; i <= k; i++) {
-    if (i) c = (c * (n - i + 1)) / i
-    sum += c
-  }
-  return Math.min(1, (2 * sum) / 2 ** n)
-}
-
 const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
 const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
 const pct = (r: number | null) => (r === null ? "—" : `${Math.round(r * 100)}%`)
 const money = (x: number) => (x < 1 ? `${Math.max(1, Math.round(x * 100))}¢` : `$${x.toFixed(2)}`)
 
-/** One column against the baseline, input by input, on the inputs both answered. */
-function versus(grid: EvalGrid, cells: Map<string, Cell>, base: string, label: string) {
-  let up = 0, down = 0, same = 0
-  for (const i of grid.inputs) {
-    const a = cells.get(`${i.id}|${base}`)?.rate ?? null
-    const b = cells.get(`${i.id}|${label}`)?.rate ?? null
-    if (a === null || b === null) continue
-    if (b > a) up++
-    else if (b < a) down++
-    else same++
-  }
-  return { up, down, same, p: signTest(up, down) }
-}
 
-// Clearly: chance would split them this unevenly less than 1 time in 20.
-// Maybe: it leans one way, but chance does that often enough to need more tries.
-const verdictFor = ({ up, down, p }: { up: number; down: number; p: number }) =>
-  !up && !down
-    ? "No change"
-    : p < 0.05
-      ? up > down ? "Clearly better" : "Clearly worse"
-      : p < 0.25 && up !== down
-        ? up > down ? "Maybe better" : "Maybe worse"
-        : "No real difference"
 
 // ─── Results ─────────────────────────────────────────────────────────────
 
