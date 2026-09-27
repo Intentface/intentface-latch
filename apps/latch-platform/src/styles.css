@@ -33,6 +33,31 @@
   font-display: swap;
 }
 
+/* IBM Plex Mono (SIL OFL 1.1, fonts/IBMPlexMono-LICENSE.txt) — latin, the weights in use. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   font-feature-settings:
     "liga" 1,
@@ -191,7 +216,7 @@
   --font-sans: "TASA Orbiter", ui-sans-serif, system-ui, sans-serif;
   --font-display: var(--font-sans);
   --font-heading: var(--font-sans);
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --font-weight-normal: 450;
   /* The composer/editor text weight — upstream's `font-book`. */
