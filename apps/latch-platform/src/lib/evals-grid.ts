@@ -155,6 +155,10 @@ export async function computeGrid(
           changes: Object.fromEntries(labels.slice(1).map((l) => [l, changes.get(l)?.find((x) => x.checkId === c.id) ?? null])),
           trust: trust.find((t) => t.checkId === c.id) ?? null,
           accept: th.accept,
+          /** What the judge returns: yes/no, one of a set, or a score — JEV's output types. */
+          type: c.kind === "counted" ? ("rule" as const) : c.shape.type === "boolean" ? ("yes/no" as const) : c.shape.type,
+          /** A scale check's rungs, lowest first, and how many from the bottom fail. */
+          scale: c.kind === "asked" && c.shape.type === "score" ? { levels: c.shape.levels.map((l) => l.name), bad: c.shape.bad ?? 0 } : null,
         };
       }),
       /** The questions, in the set's order, with what each says a good answer holds. */
@@ -185,6 +189,8 @@ export async function computeGrid(
           answer: v.answer,
           failed: v.failed,
           confidence: v.confidence ?? null,
+          score: v.score ?? null,
+          escalatedTo: v.escalatedTo ?? null,
           ruling: rulingOf.get(`${v.threadId}|${v.checkId}`) ?? null,
         };
       }),

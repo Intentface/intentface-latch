@@ -705,6 +705,56 @@ function Segmented<T extends string>({ value, onChange, options }: { value: T; o
   )
 }
 
+/**
+ * The judge's confidence, in JEV's terms: q, the probability of the label it
+ * gave. At or above the check's accept threshold τ the verdict is accepted;
+ * below it, escalated — to a stronger judge, or to you. τ comes from your
+ * rulings; until a check has enough, 80% stands in. For a scale check, where
+ * on the scale it landed.
+ */
+function Sureness({ verdict, scale, accept }: { verdict: Verdict; scale: { levels: string[]; bad: number } | null; accept: number | null }) {
+  const name = (l: string) => l.replace(/_/g, " ")
+  if (scale && verdict.score !== null) {
+    const top = scale.levels.length - 1
+    const at = Math.max(0, Math.min(top, verdict.score))
+    const lo = Math.floor(at), hi = Math.ceil(at)
+    const between = hi !== lo && Math.abs(at - Math.round(at)) > 0.2
+    const onLine = between && (lo <= scale.bad) !== (hi <= scale.bad)
+    return (
+      <span className="mt-1 flex items-center gap-2 text-[11px]" title={`Score ${at.toFixed(1)} on ${scale.levels.map(name).join(" · ")}. The lowest ${scale.bad + 1} fail.`}>
+        <span className="relative flex h-1.5 w-28 gap-0.5" aria-hidden>
+          {scale.levels.map((l, n) => (
+            <i key={l} className={cn("flex-1 rounded-[2px] opacity-50", n <= scale.bad ? "bg-[color:var(--eval-bad)]" : "bg-[color:var(--eval-good)]")} />
+          ))}
+          <i className="bg-ink-primary absolute -top-[3px] h-3 w-0.5 rounded" style={{ left: `calc(${((at + 0.5) / scale.levels.length) * 100}% - 1px)` }} />
+        </span>
+        <span className="text-ink-secondary">Label: {between ? `between ${name(scale.levels[lo])} and ${name(scale.levels[hi])}` : name(scale.levels[Math.round(at)])}</span>
+        {onLine && <span className="text-ink-primary">· on the pass line, escalate</span>}
+        {verdict.escalatedTo && <span className="text-ink-tertiary">· escalated to {verdict.escalatedTo}</span>}
+      </span>
+    )
+  }
+  if (verdict.confidence === null) return null
+  const q = verdict.confidence
+  const tau = accept ?? 0.8
+  const escalate = q < tau
+  return (
+    <span
+      className="mt-1 flex items-center gap-2 text-[11px] tabular-nums"
+      title={`Confidence: the judge's probability for the label it gave. Accept threshold τ ${Math.round(tau * 100)}%${accept === null ? " — a default until this check has 20 of your rulings" : ", from your rulings"}. Below it, a verdict is escalated: to a stronger judge, or to you.`}
+    >
+      <span className="bg-primary-bg-active relative h-1.5 w-28 overflow-hidden rounded-full" aria-hidden>
+        <i className={cn("absolute inset-y-0 left-0 rounded-full", escalate ? "bg-ink-tertiary" : "bg-ink-secondary")} style={{ width: `${q * 100}%` }} />
+        <i className="bg-ink-primary/60 absolute inset-y-0 w-px" style={{ left: `${tau * 100}%` }} />
+      </span>
+      <span className={escalate ? "text-ink-primary" : "text-ink-tertiary"}>
+        Confidence {Math.round(q * 100)}% · {escalate ? "escalate" : "accept"}
+      </span>
+      {verdict.escalatedTo && <span className="text-ink-tertiary">· escalated to {verdict.escalatedTo}</span>}
+    </span>
+  )
+}
+
 function ColumnMenu({
   column,
   isBase,
@@ -1211,6 +1261,14 @@ function AnswerDrawer({
                             <span className={cn("font-bold", shownFailed ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]")}>{shownFailed ? "✕" : "✓"}</span>
                             <span>
                               <span className="text-ink-primary">{c?.label ?? v.checkId}</span>
+                              {c && (
+                                <span
+                                  title={c.type === "rule" ? "A rule on the tool log — exact, no judge" : c.type === "yes/no" ? "The judge answers yes or no" : c.type === "choice" ? "The judge picks one of a set of labels" : "The judge places it on a scale of labels"}
+                                  className="border-primary-border text-ink-tertiary ml-1.5 rounded border px-1 py-px align-[1px] font-mono text-[10px]"
+                                >
+                                  {c.type}
+                                </span>
+                              )}
                               {why && <span className="text-ink-tertiary block text-xs">{why}</span>}
                               {each && (
                                 <span className="mt-1 block space-y-0.5">
@@ -1222,6 +1280,7 @@ function AnswerDrawer({
                                   ))}
                                 </span>
                               )}
+                              {c && c.kind !== "counted" && <Sureness verdict={v} scale={c.scale} accept={c.accept} />}
                               {overruled && <span className="text-ink-tertiary block text-xs">You said the grader got this wrong</span>}
                             </span>
                             {c?.kind === "counted" ? (
