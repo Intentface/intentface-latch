@@ -102,6 +102,16 @@ describe("runAgent (autonomous)", () => {
     expect([...mem.runs.values()][0]!.status).toBe("completed");
   });
 
+  it("says why a turn failed: the provider's refusal comes back as `error`, not a silent empty answer", async () => {
+    const mem = memoryStorage();
+    const refusing = new MockLanguageModelV4({
+      doStream: () => Promise.reject(new Error("'claude-haiku-4-5' does not support programmatic tool calling.")),
+    });
+    const res = await runtimeWith(mem, refusing).runAgent({ principal, agent: "writer", prompt: "go" });
+    expect(res.answer).toBe("");
+    expect(res.error).toContain("does not support programmatic tool calling");
+  });
+
   it("continues an existing thread with its history; an empty threadId mints a fresh one", async () => {
     const mem = memoryStorage();
     const rt = runtimeWith(mem, model("again."));

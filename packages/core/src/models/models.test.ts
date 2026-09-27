@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { providerFromId, providerOf } from "./provider.js";
 import { makeResolveReasoningOptions } from "./reasoning.js";
 import { makeResolvePromptCaching } from "./prompt-caching.js";
-import { loadModelCatalog } from "./catalog.js";
+import { loadModelCatalog, programmaticToolCalling } from "./catalog.js";
 import { providerDefaults } from "./defaults.js";
 import type { ModelInfo } from "./catalog.js";
 
@@ -15,6 +15,13 @@ const models: ModelInfo[] = [
   { id: "flat-model", label: "Flat", provider: "anthropic", reasoning: false },
   { id: "custom-alias", label: "Custom", provider: "openai" },
 ];
+
+describe("programmaticToolCalling", () => {
+  it("is Opus and Sonnet from 4.6 and Claude 5, never Haiku or an unknown model", () => {
+    for (const id of ["claude-sonnet-4-6", "claude-opus-4-7", "claude-sonnet-5", "claude-opus-5-5", "claude-fable-5-1"]) expect(programmaticToolCalling(id)).toBe(true);
+    for (const id of ["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-5", "claude-3-7-sonnet", "gpt-5.6"]) expect(programmaticToolCalling(id)).toBe(false);
+  });
+});
 
 describe("providerOf — one heuristic for every provider-specific hook", () => {
   it("infers from id prefixes", () => {
@@ -156,6 +163,10 @@ describe("loadModelCatalog", () => {
     expect(Object.keys(catalog.providerTools("gpt-4o"))).toEqual(["web_search"]);
     expect(Object.keys(catalog.providerTools("claude-sonnet-4-6")).sort()).toEqual(["web_fetch", "web_search"]);
     expect(Object.keys(catalog.providerTools("mistral-large"))).toEqual(["web_search"]);
+    // Haiku can't take tools called from code execution: it gets the direct-only versions.
+    const idOf = (model: string) => Object.values(catalog.providerTools(model)).map((t) => (t as { id: string }).id).sort();
+    expect(idOf("claude-haiku-4-5")).toEqual(["anthropic.web_fetch_20250910", "anthropic.web_search_20250305"]);
+    expect(idOf("claude-sonnet-5")).toEqual(["anthropic.web_fetch_20260209", "anthropic.web_search_20260209"]);
     // modelFor resolves known ids to their provider and unknown ids to the default.
     expect((catalog.modelFor("claude-sonnet-4-6") as { modelId: string }).modelId).toBe("claude-sonnet-4-6");
     expect((catalog.modelFor("nope") as { modelId: string }).modelId).toBe("gpt-4o");

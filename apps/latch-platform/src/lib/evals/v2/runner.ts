@@ -40,7 +40,7 @@ export function configFingerprint(rec: {
 }
 
 export interface RunDeps {
-  runAgent(input: { agent: string; prompt: string; files?: { url: string; mediaType: string; filename?: string }[]; threadId?: string }): Promise<{ threadId: string; answer: string }>;
+  runAgent(input: { agent: string; prompt: string; files?: { url: string; mediaType: string; filename?: string }[]; threadId?: string }): Promise<{ threadId: string; answer: string; error?: string }>;
 }
 
 export async function runDataset(opts: {
@@ -139,7 +139,7 @@ export async function runUnit(opts: {
     // An empty answer is an outage, not a result. A provider that refuses
     // can come back as a completed turn with no text; judging that yields a
     // full set of confident verdicts about nothing, with no error in sight.
-    if (!res.answer.trim()) throw new Error("the agent produced no answer — not judged");
+    if (!res.answer.trim()) throw new Error(res.error ? `the agent's turn failed: ${res.error}` : "the agent produced no answer — not judged");
     return { ...base, threadId, answer: res.answer, durationMs: Date.now() - started };
   } catch (e) {
     return {

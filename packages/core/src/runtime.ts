@@ -393,7 +393,12 @@ export interface Runtime<P> {
      * (a webhook with a user waiting) says so by passing `"chat"`.
      */
     trigger?: TurnTrigger;
-  }): Promise<{ threadId: string; answer: string }>;
+  }): Promise<{
+    threadId: string;
+    answer: string;
+    /** Why the turn failed, when it did — the model provider's refusal, a tool source that would not open. The answer is then usually empty. */
+    error?: string;
+  }>;
   /**
    * Summarize a conversation and append a compaction boundary, so later turns
    * send the model the summary instead of the turns it replaces. Stored history
@@ -1249,6 +1254,21 @@ function fireAndForget(fn: (() => void | Promise<void>) | undefined): void {
  */
 /** Keys whose values are masked when a non-`Error` throw is serialized. */
 const SECRETISH_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential/i;
+
+/** The last `error` chunk's text in a UI message stream body (SSE `data:` lines), if any. */
+function lastStreamError(body: string): string | undefined {
+  let error: string | undefined;
+  for (const line of body.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
+    try {
+      const chunk = JSON.parse(line.slice(6)) as { type?: string; errorText?: string };
+      if (chunk.type === "error" && chunk.errorText) error = chunk.errorText;
+    } catch {
+      // "[DONE]" and other non-JSON lines
+    }
+  }
+  return error;
+}
 
 export function clientErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
@@ -3541,7 +3561,7 @@ export function createRuntime<P, RC = unknown>(
     turnContext?: unknown;
     /** Progressive snapshots of the turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
-  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[] }> {
+  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
     // `||` (not `??`): an empty-string id must mint a fresh one, or the chat is
     // created with id "" and the UI can never open it.
     const chatId = o.chatId?.trim() || generateSubchatId();
@@ -3617,7 +3637,9 @@ export function createRuntime<P, RC = unknown>(
           }
         : undefined,
     });
-    await res.text();
+    // The turn's own failure travels as an `error` chunk — the stream, not a
+    // throw. Keep its text: without it a failed turn reads as a silent one.
+    const error = lastStreamError(await res.text());
 
     const after = await storage.loadMessages(o.principal, chatId);
     // The verdict is about THIS turn, so read the FINAL message only (the same
@@ -3634,6 +3656,7 @@ export function createRuntime<P, RC = unknown>(
       answer: pending.length > 0 ? "" : lastAssistantText(after),
       parked,
       ...(pending.length > 0 ? { pending } : {}),
+      ...(error ? { error } : {}),
     };
   }
 
@@ -3917,7 +3940,7 @@ export function createRuntime<P, RC = unknown>(
         promptCaching,
         trigger,
       });
-      return { threadId: r.chatId, answer: r.answer };
+      return { threadId: r.chatId, answer: r.answer, ...(r.error ? { error: r.error } : {}) };
     },
     compactChat,
     loadHistory,
