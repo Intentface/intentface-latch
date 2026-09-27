@@ -52,7 +52,7 @@ export function stateOf(input: {
   if (facts?.answer) state.REFERENCE_ANSWER = facts.answer;
   if (facts?.mustNot?.length) state.MUST_NOT = facts.mustNot.map((x) => `- ${x}`).join("\n");
   // Asked one by one by a check from the input, or read from the log: not state.
-  const asked = new Set(["answer", "mustNot", "mustSay", "decline", "asks", "calls"]);
+  const asked = new Set(["answer", "mustNot", "mustSay", "decline", "asks", "calls", "judged"]);
   for (const [k, v] of Object.entries(facts ?? {})) {
     if (asked.has(k) || v == null) continue;
     state[k.toUpperCase()] = typeof v === "string" ? v : JSON.stringify(v);

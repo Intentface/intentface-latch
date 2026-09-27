@@ -33,7 +33,21 @@ export interface InputFacts {
   asks?: string[];
   /** Tools this input should (or should never) call, read exactly from the log. */
   calls?: CallExpectation[];
+  /** Questions for the judge about this input's answer, of any type — yes/no, choice or score. */
+  judged?: JudgedItem[];
   [key: string]: unknown;
+}
+
+/**
+ * A judge question one input asks of its own answer. The same three types a
+ * shared check has; it is graded with the input's other items, under the
+ * check that reads them, and can be promoted to a shared check.
+ */
+export interface JudgedItem {
+  ask: string;
+  shape: AnswerShape;
+  /** Judge model id. Omit → the checks' default. */
+  judge?: string;
 }
 
 /**

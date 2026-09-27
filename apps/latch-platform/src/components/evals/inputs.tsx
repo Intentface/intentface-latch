@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react"
 import { FileText, Loader2, Paperclip, Plus, X } from "lucide-react"
-import { editInputFilesFn, editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, saveChecksFn, tryCheckFn } from "@/lib/evals-server"
+import { editInputFilesFn, editInputsFn, getChecksFn, getQuestionsFn, getToolArgsFn, promoteJudgedFn, saveChecksFn, tryCheckFn } from "@/lib/evals-server"
 import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_FILE_SIZE, formatFileSize } from "@/lib/ai/attachments"
 import type { EvalGrid } from "@/lib/evals-server"
-import type { CallExpectation, CallMatch, Check } from "@/lib/evals/v2/model"
+import type { CallExpectation, CallMatch, Check, JudgedItem } from "@/lib/evals/v2/model"
 import { checkIdFor } from "@/lib/evals/v2/validate"
 import Drawer from "@/components/ui/drawer"
 import { EDITOR_DRAWER } from "@/components/evals/shell"
@@ -109,6 +109,7 @@ function Lines({ values, onChange, placeholder, add }: { values: string[]; onCha
 export function InputDrawer({
   agent,
   datasetId,
+  rubricId,
   input,
   checks,
   results,
@@ -118,6 +119,8 @@ export function InputDrawer({
 }: {
   agent: string
   datasetId: string
+  /** The checks a judge question can move to, and whose judges it can use. */
+  rubricId: string | undefined
   input: Input | null
   checks: EvalGrid["checks"]
   /** How each open column did on it, to open from here. */
@@ -145,11 +148,19 @@ export function InputDrawer({
       answer: input.answer ?? "",
       mustNot: input.mustNot,
       mustSay: input.mustSay,
-      asks: input.asks,
+      // A plain yes/no question and a typed one are the same thing to edit.
+      judged: [...input.asks.map((ask): JudgedItem => ({ ask, shape: { type: "boolean" } })), ...input.judged],
       decline: input.decline,
       calls: input.calls,
     })
   }, [input])
+  const [judges, setJudges] = useState<{ list: string[]; fallback: string }>({ list: [], fallback: "jev-latest" })
+  useEffect(() => {
+    if (!openIdFor(input) || !rubricId) return
+    void getChecksFn({ data: { agent, rubricId } }).then((r) => {
+      if (r) setJudges({ list: r.judges.filter((id) => !NOT_A_JUDGE.test(id)), fallback: r.rubric.defaultJudge })
+    })
+  }, [input, agent, rubricId])
   // Once per input opened: the tools don't change while it's open.
   const openId = input?.id
   useEffect(() => {
@@ -173,7 +184,8 @@ export function InputDrawer({
             answer: d.answer,
             mustNot: d.mustNot.filter((x) => x.trim()),
             mustSay: d.mustSay.filter((x) => x.trim()),
-            asks: d.asks.filter((x) => x.trim()),
+            asks: [],
+            judged: d.judged.filter((j) => j.ask.trim()),
             decline: d.decline,
             calls: d.calls.filter((c) => c.tool.trim()),
           },
@@ -257,6 +269,26 @@ export function InputDrawer({
                   draft={draft}
                   change={change}
                   tools={tools}
+                  judge={{
+                    agent,
+                    datasetId,
+                    rubricId,
+                    inputId: input.id,
+                    judges: judges.list,
+                    fallback: judges.fallback,
+                    onPromote: async (n) => {
+                      if (!rubricId) return "No checks to move it to."
+                      clearTimeout(timer.current)
+                      if (dirty.current) await save(draft)
+                      const r = await promoteJudgedFn({ data: { agent, datasetId, rubricId, inputId: input.id, index: n } })
+                      if (!r.ok) return r.error
+                      dirty.current = false
+                      setDraft({ ...draft, judged: draft.judged.filter((_, i) => i !== n) })
+                      setState(`Moved — “${r.label}” is now a check every input gets (version ${r.version})`)
+                      onSaved()
+                      return null
+                    },
+                  }}
                   onDraftAnswer={() => askEvalsAgent(`For ${agent}: draft what a good answer to input ${input.id} ("${input.prompt}") says — from what ${agent} can look up with its tools, and what this input expects it to call — and save it to the input with edit_questions.`)}
                 />
               </div>
@@ -305,10 +337,23 @@ type Expectations = {
   answer: string
   mustNot: string[]
   mustSay: string[]
-  asks: string[]
+  judged: JudgedItem[]
   decline: boolean
   calls: CallExpectation[]
 }
+type JudgeContext = {
+  agent: string
+  datasetId: string
+  rubricId: string | undefined
+  inputId: string
+  judges: string[]
+  fallback: string
+  /** Move question n to the checks every input gets; an error in words, or null. */
+  onPromote: (n: number) => Promise<string | null>
+}
+/** Models that can't read an answer: the catalog also lists image, speech and embedding ones. */
+const NOT_A_JUDGE = /image|embedding|tts|veo|lyria|realtime|-live|computer-use|deep-research|translate|audio/
+const openIdFor = (i: { id: string } | null) => i?.id
 type Tools = NonNullable<Awaited<ReturnType<typeof getToolArgsFn>>>
 /** `edge-v2-kn_read_file` → `read_file`; a built-in like `read_file` stays whole. */
 const short = (t: string) => {
@@ -432,7 +477,19 @@ function Inline(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
  * What should happen, one row per expectation: its kind, its value edited in
  * place, how it's checked. + adds one; × removes it.
  */
-function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expectations; change: (p: Partial<Expectations>) => void; onDraftAnswer: () => void; tools: Tools }) {
+function ExpectationList({
+  draft,
+  change,
+  onDraftAnswer,
+  tools,
+  judge,
+}: {
+  draft: Expectations
+  change: (p: Partial<Expectations>) => void
+  onDraftAnswer: () => void
+  tools: Tools
+  judge: JudgeContext
+}) {
   const [adding, setAdding] = useState(false)
   const [showAnswer, setShowAnswer] = useState(!!draft.answer)
   const focusLast = useRef<string | null>(null)
@@ -456,15 +513,16 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
       </button>
     </li>
   )
-  const add = (kind: "answer" | "mustNot" | "mustSay" | "asks" | "decline" | "calls" | "never") => {
+  const add = (kind: "answer" | "mustNot" | "mustSay" | "judged" | "decline" | "calls" | "never") => {
     setAdding(false)
     if (kind === "answer") setShowAnswer(true)
     else if (kind === "decline") change({ decline: true })
     else if (kind === "calls" || kind === "never") change({ calls: [...draft.calls, { tool: "", ...(kind === "never" ? { never: true } : {}) }] })
+    else if (kind === "judged") change({ judged: [...draft.judged, { ask: "", shape: { type: "boolean" } }] })
     else change({ [kind]: [...draft[kind], ""] })
     focusLast.current = kind
   }
-  const listRow = (key: "mustSay" | "asks", kind: string, placeholder: string) =>
+  const listRow = (key: "mustSay", kind: string, placeholder: string) =>
     draft[key].map((m, n) =>
       row(
         `${key}-${n}`,
@@ -511,7 +569,20 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
     ...(draft.decline
       ? [row("decline", "Should decline", "Judged by the grader, as a yes/no", <span className="text-ink-primary text-[13px]">A polite no, pointing somewhere useful</span>, () => change({ decline: false }))]
       : []),
-    ...listRow("asks", "Ask the grader", "A yes/no question, e.g. Is the tone friendly?"),
+    ...draft.judged.map((j, n) =>
+      row(
+        `judged-${n}`,
+        "Ask the judge",
+        j.shape.type === "boolean" ? "The judge answers yes or no" : j.shape.type === "choice" ? "The judge picks one label" : "The judge places it on the scale",
+        <JudgedEditor
+          item={j}
+          judge={judge}
+          index={n}
+          onChange={(next) => change({ judged: draft.judged.map((x, i) => (i === n ? next : x)) })}
+        />,
+        () => change({ judged: draft.judged.filter((_, i) => i !== n) }),
+      ),
+    ),
   ]
   return (
     <div className="space-y-2">
@@ -546,8 +617,8 @@ function ExpectationList({ draft, change, onDraftAnswer, tools }: { draft: Expec
               Should decline <span className="text-ink-tertiary text-xs">The right answer is a polite no</span>
             </button>
           )}
-          <button type="button" onClick={() => add("asks")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
-            Ask the grader <span className="text-ink-tertiary text-xs">A yes/no question, e.g. Is the tone friendly?</span>
+          <button type="button" onClick={() => add("judged")} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+            Ask the judge <span className="text-ink-tertiary text-xs">About this answer — yes/no, one of a set of labels, or a scale</span>
           </button>
         </div>
       ) : (
@@ -647,6 +718,61 @@ export function Composer({ agent, datasetId, onAdded }: { agent: string; dataset
 type Draft = { key: string; check: Check }
 
 type Shape = Extract<Check, { kind: "asked" }>["shape"]
+
+/** One input's own judge question: what to ask, what comes back, who judges — tried on this input's answers, or moved to every input. */
+function JudgedEditor({ item, judge, index, onChange }: { item: JudgedItem; judge: JudgeContext; index: number; onChange: (j: JudgedItem) => void }) {
+  const [moving, setMoving] = useState<"idle" | "confirm" | "busy" | { error: string }>("idle")
+  const check: Check = { kind: "asked", id: "try", label: item.ask || "question", ask: item.ask, shape: item.shape, ...(item.judge ? { judge: item.judge } : {}) }
+  return (
+    <div className="space-y-1.5">
+      <Inline value={item.ask} data-kind="judged" placeholder="A question about this answer, e.g. Is the tone friendly?" onChange={(e) => onChange({ ...item, ask: e.target.value })} />
+      <ShapeEditor shape={item.shape} onChange={(shape) => onChange({ ...item, shape })} />
+      <label className="text-ink-tertiary flex items-center gap-1.5 text-[11px]">
+        Judge
+        <select
+          value={item.judge ?? ""}
+          onChange={(e) => onChange(e.target.value ? { ...item, judge: e.target.value } : { ask: item.ask, shape: item.shape })}
+          className="border-primary-border bg-primary-bg rounded border px-1 py-0.5 font-mono text-[11px]"
+        >
+          <option value="">{judge.fallback} (default)</option>
+          {judge.judges.filter((j) => j !== judge.fallback).map((j) => (
+            <option key={j} value={j}>
+              {j}
+            </option>
+          ))}
+        </select>
+      </label>
+      {judge.rubricId && item.ask.trim() && (
+        <>
+          <TryCheck agent={judge.agent} rubricId={judge.rubricId} datasetId={judge.datasetId} check={check} inputId={judge.inputId} />
+          {moving === "confirm" ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="text-ink-secondary">Every input's answer will be judged on it from now on.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setMoving("busy")
+                  void judge.onPromote(index).then((e) => setMoving(e ? { error: e } : "idle"))
+                }}
+                className="bg-ink-primary text-primary-bg rounded px-2 py-0.5 font-medium"
+              >
+                Move it
+              </button>
+              <button type="button" onClick={() => setMoving("idle")} className="text-ink-tertiary hover:text-ink-primary">
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button type="button" disabled={moving === "busy"} onClick={() => setMoving("confirm")} className="text-ink-secondary hover:text-ink-primary block text-[11px] underline underline-offset-2 disabled:opacity-50">
+              {moving === "busy" ? "Moving…" : "Use for every input"}
+            </button>
+          )}
+          {typeof moving === "object" && <p className="text-[11px] text-red-600 dark:text-red-400">{moving.error}</p>}
+        </>
+      )}
+    </div>
+  )
+}
 const slug = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
 
 /**
@@ -968,27 +1094,31 @@ export function ChecksDrawer({
  * Grade the newest answer to five inputs with this check as it stands —
  * saved or not — to see the labels the judge gives and how sure it is.
  */
-function TryCheck({ agent, rubricId, datasetId, check }: { agent: string; rubricId: string; datasetId: string; check: Check }) {
+function TryCheck({ agent, rubricId, datasetId, check, inputId }: { agent: string; rubricId: string; datasetId: string; check: Check; inputId?: string }) {
   const [state, setState] = useState<"idle" | "busy" | { error: string } | Extract<Awaited<ReturnType<typeof tryCheckFn>>, { ok: true }>>("idle")
   const run = async () => {
     setState("busy")
-    const r = await tryCheckFn({ data: { agent, rubricId, datasetId, check: JSON.stringify(check) } })
+    const r = await tryCheckFn({ data: { agent, rubricId, datasetId, check: JSON.stringify(check), ...(inputId ? { inputId } : {}) } })
     setState(r.ok ? r : { error: r.error })
   }
   return (
     <div className="space-y-1">
       <button type="button" disabled={state === "busy"} onClick={() => void run()} className="text-ink-secondary hover:text-ink-primary text-[11px] underline underline-offset-2 disabled:opacity-50">
-        {state === "busy" ? "Grading 5 answers…" : typeof state === "object" && "rows" in state ? "Try it again" : "Try it on 5 answers · the judge only, cents"}
+        {state === "busy"
+          ? "Grading…"
+          : typeof state === "object" && "rows" in state
+            ? "Try it again"
+            : inputId
+              ? "Try it on this input's answers · the judge only, cents"
+              : "Try it on 5 answers · the judge only, cents"}
       </button>
       {typeof state === "object" && "error" in state && <p className="text-[11px] text-red-600 dark:text-red-400">{state.error}</p>}
       {typeof state === "object" && "rows" in state && (
         <ul className="border-primary-border space-y-0.5 border-l-2 pl-2">
           {state.rows.map((r) => (
-            <li key={r.inputId} className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-baseline gap-1.5 text-[11px]" title={r.prompt}>
+            <li key={r.threadId} className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-baseline gap-1.5 text-[11px]" title={r.prompt}>
               <span className={r.failed === null ? "text-ink-tertiary" : r.failed ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]"}>{r.failed === null ? "–" : r.failed ? "✕" : "✓"}</span>
-              <span className="text-ink-secondary truncate">
-                #{r.inputId} {r.prompt}
-              </span>
+              <span className="text-ink-secondary truncate">{inputId ? `${r.version}${r.attempt ? ` · try ${r.attempt + 1}` : ""}` : `#${r.inputId} ${r.prompt}`}</span>
               <span className="text-ink-tertiary font-mono tabular-nums">
                 {r.answer ?? "not graded"}
                 {r.score !== null ? ` · ${r.score.toFixed(1)}` : r.confidence !== null ? ` · ${Math.round(r.confidence * 100)}%` : ""}

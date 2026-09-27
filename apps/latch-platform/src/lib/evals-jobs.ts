@@ -435,7 +435,7 @@ export type { EvalJob };
  * which labels the judge gives, and how sure it is, before the check grades
  * everything. Only the judge runs, on at most `n` answers, one per input.
  */
-export async function tryCheck(principal: Principal, d: { agent: string; datasetId: string; rubricId: string; check: Check; n?: number }) {
+export async function tryCheck(principal: Principal, d: { agent: string; datasetId: string; rubricId: string; check: Check; n?: number; inputId?: string }) {
   const { evals, agentStore, runtime, modelFor } = await getLatch();
   const rec = await agentStore.getRecord(principal, normalizeAgentName(d.agent));
   if (!rec) return { ok: false as const, error: "Only agents you can edit can be graded." };
@@ -446,11 +446,12 @@ export async function tryCheck(principal: Principal, d: { agent: string; dataset
   if (!valid.ok) return { ok: false as const, error: valid.error };
   const inputs = new Map((await evals.listInputs(d.datasetId)).map((i) => [i.id, i]));
   // The newest answer to each of a few inputs — a spread, not one input's tries.
+  const all = (await evals.listThreads(owner, { datasetId: d.datasetId })).filter((t) => !t.error && t.inputId && inputs.has(t.inputId)).sort((a, b) => b.createdAt - a.createdAt);
   const newest = new Map<string, ThreadRef>();
-  for (const t of (await evals.listThreads(owner, { datasetId: d.datasetId })).sort((a, b) => b.createdAt - a.createdAt))
-    if (!t.error && t.inputId && inputs.has(t.inputId) && !newest.has(t.inputId)) newest.set(t.inputId, t);
-  const picked = [...newest.values()].slice(0, Math.max(1, Math.min(10, d.n ?? 5)));
-  if (!picked.length) return { ok: false as const, error: "No answers to try it on yet — run the inputs first." };
+  for (const t of all) if (!newest.has(t.inputId!)) newest.set(t.inputId!, t);
+  // One input's own test: every answer it has — each column, each try. Otherwise a spread over inputs.
+  const picked = (d.inputId ? all.filter((t) => t.inputId === d.inputId) : [...newest.values()]).slice(0, Math.max(1, Math.min(10, d.n ?? 5)));
+  if (!picked.length) return { ok: false as const, error: d.inputId ? "This input has no answers yet — run it first." : "No answers to try it on yet — run the inputs first." };
   const judges = new Map<string, ReturnType<typeof evaluationModelFor>>();
   const verdicts = await judgeThreads({
     rubric: { ...rubric, checks: valid.value },
@@ -468,9 +469,11 @@ export async function tryCheck(principal: Principal, d: { agent: string; dataset
     rows: picked.map((t) => {
       const v = verdicts.find((x) => x.threadId === t.threadId);
       return {
+        threadId: t.threadId,
         inputId: t.inputId!,
         prompt: inputs.get(t.inputId!)!.prompt,
         version: t.version,
+        attempt: t.attempt ?? 0,
         answer: v?.answer ?? null,
         confidence: v?.confidence ?? null,
         score: v?.score ?? null,

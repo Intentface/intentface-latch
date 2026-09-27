@@ -549,7 +549,7 @@ export const createChecksFn = createServerFn({ method: "POST" })
 
 /** Grade a few recent answers with an unsaved check — the judge only, cents. */
 export const tryCheckFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; datasetId: string; rubricId: string; check: string }) => d)
+  .validator((d: { agent: string; datasetId: string; rubricId: string; check: string; inputId?: string }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
@@ -559,5 +559,15 @@ export const tryCheckFn = createServerFn({ method: "POST" })
     } catch {
       return { ok: false as const, error: "That check could not be read." };
     }
-    return tryCheck(principal, { agent: data.agent, datasetId: data.datasetId, rubricId: data.rubricId, check });
+    return tryCheck(principal, { agent: data.agent, datasetId: data.datasetId, rubricId: data.rubricId, check, ...(data.inputId ? { inputId: data.inputId, n: 10 } : {}) });
+  });
+
+/** Move one input's judge question to the checks every input gets. */
+export const promoteJudgedFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; rubricId: string; inputId: string; index: number }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const { promoteJudged } = await import("./evals-actions");
+    return promoteJudged(principal, data);
   });

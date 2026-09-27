@@ -2,7 +2,7 @@
  * What the editors may save. Every refusal is a sentence a person can act
  * on, because the person reading it wrote the question or the check.
  */
-import type { CallExpectation, Check, CountedSpec, Input, Matcher } from "./model";
+import type { CallExpectation, Check, CountedSpec, Input, JudgedItem, Matcher } from "./model";
 
 export type Valid<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -53,6 +53,12 @@ export function validateInputs(inputs: Input[]): Valid<Input[]> {
     }
     // "Reads this document" was its own kind; it is an expected call like any
     // other — a read whose result names the document — so it is saved as one.
+    if ("judged" in facts) {
+      const judged = cleanJudged(facts.judged);
+      if (typeof judged === "string") return { ok: false, error: `${where}: ${judged}` };
+      if (judged.length) facts.judged = judged;
+      else delete facts.judged;
+    }
     if ("docs" in facts) {
       const reads = docsAsCalls(clean(facts.docs));
       const had = Array.isArray(facts.calls) ? (facts.calls as CallExpectation[]) : [];
@@ -63,6 +69,21 @@ export function validateInputs(inputs: Input[]): Valid<Input[]> {
     out.push({ id, prompt, ...(followUps.length ? { followUps } : {}), ...(Object.keys(facts).length ? { facts } : {}) });
   }
   return { ok: true, value: out };
+}
+
+/** An input's own judge questions: each with its question, and a type that can both pass and fail. */
+function cleanJudged(raw: unknown): JudgedItem[] | string {
+  if (!Array.isArray(raw)) return [];
+  const out: JudgedItem[] = [];
+  for (const j of raw as Partial<JudgedItem>[]) {
+    const ask = String(j.ask ?? "").trim();
+    if (!ask) continue;
+    if (!j.shape) return `"${ask.slice(0, 40)}" needs a type.`;
+    const v = validateChecks([{ kind: "asked", id: "item", label: ask, ask, shape: j.shape }]);
+    if (!v.ok) return v.error;
+    out.push({ ask, shape: j.shape, ...(j.judge ? { judge: j.judge } : {}) });
+  }
+  return out;
 }
 
 /** A document the answer is in, as the call that must read it. */
@@ -185,12 +206,13 @@ export interface EditableQuestion {
   asks: string[];
   decline: boolean;
   calls: CallExpectation[];
+  judged: JudgedItem[];
   /** Other facts, as JSON — `{}` when there are none. */
   extra: string;
 }
 
 export function toEditable(i: Input): EditableQuestion {
-  const { answer, mustNot, docs, mustSay, asks, decline, calls, ...rest } = i.facts ?? {};
+  const { answer, mustNot, docs, mustSay, asks, decline, calls, judged, ...rest } = i.facts ?? {};
   return {
     id: i.id,
     prompt: i.prompt,
@@ -202,6 +224,7 @@ export function toEditable(i: Input): EditableQuestion {
     decline: decline === true,
     // An older input's documents are the reads it expects.
     calls: [...(Array.isArray(calls) ? calls : []), ...docsAsCalls(clean(docs))],
+    judged: Array.isArray(judged) ? judged : [],
     extra: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "{}",
   };
 }
@@ -229,6 +252,7 @@ export function fromEditable(qs: EditableQuestion[]): Valid<Input[]> {
         asks: q.asks,
         decline: q.decline,
         calls: q.calls,
+        judged: q.judged,
       },
     });
   }

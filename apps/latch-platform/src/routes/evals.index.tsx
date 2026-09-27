@@ -15,7 +15,7 @@ import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { AddColumn, AgainPanel, EarlierAnswers } from "@/components/evals/run-menus"
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
 import { askEvalsAgent } from "@/components/evals/agent-panel"
-import { eachOf, saysItems } from "@/lib/evals/v2/expect"
+import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
 import type { Cell } from "@/lib/evals/v2/score"
 import { GROUND, passColor } from "@/components/evals/ui"
@@ -214,6 +214,7 @@ function EvalsPage() {
           <InputDrawer
             agent={agent}
             datasetId={dataset.id}
+            rubricId={rubricId}
             input={grid.inputs.find((i) => i.id === openInput) ?? null}
             checks={grid.checks.filter((c) => !expectationChecks(grid).some((e) => e.checkId === c.id))}
             results={<InputResults grid={grid} inputId={openInput} onOpen={(column) => (setOpenInput(null), setOpenCell({ inputId: openInput!, column }))} />}
@@ -268,7 +269,7 @@ function expectationChecks(grid: EvalGrid) {
   return grid.checks.filter((c) => c.reads).map((c) => ({ checkId: c.id, reads: c.reads! }))
 }
 /** An input's lists, as the grader numbers them. */
-const listsOf = (i: EvalGrid["inputs"][number]) => ({ mustSay: i.mustSay, mustNot: i.mustNot, decline: i.decline, asks: i.asks })
+const listsOf = (i: EvalGrid["inputs"][number]) => ({ mustSay: i.mustSay, mustNot: i.mustNot, decline: i.decline, asks: i.asks, judged: i.judged })
 /** How many tests an input brings itself — each item of its lists counts. */
 const expectationCount = (i: EvalGrid["inputs"][number]) =>
   (i.answer ? 1 : 0) + i.calls.length + saysItems(listsOf(i)).length
@@ -991,7 +992,7 @@ function NothingRun({
   const load = useCallback(() => {
     void getQuestionsFn({ data: { agent, datasetId } }).then((r) =>
       setInputs(
-        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, files: q.files })) ?? [],
+        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, judged: q.judged, files: q.files })) ?? [],
       ),
     )
   }, [agent, datasetId])
@@ -1025,6 +1026,7 @@ function NothingRun({
       <InputDrawer
         agent={agent}
         datasetId={datasetId}
+        rubricId={rubricId}
         input={inputs?.find((i) => i.id === open) ?? null}
         checks={[]}
         results={<p className="text-ink-tertiary text-xs">Not run yet.</p>}
@@ -1187,6 +1189,7 @@ function AnswerDrawer({
                         const c = checkOf(v.checkId)
                         const why = WHY[v.answer] ?? ""
                         const each = eachOf(v.answer)
+                        const itemLabels = labelsOf(v.answer)
                         const items = c?.reads === "calls" ? input.calls.map(callText) : c?.reads === "says" ? saysItems(listsOf(input)).map((x) => sayText(x)) : []
                         const overruled = v.ruling !== null && v.ruling !== v.failed
                         const shownFailed = v.ruling ?? v.failed
@@ -1237,7 +1240,10 @@ function AnswerDrawer({
                                   {each.map((ok, n) => (
                                     <span key={n} className="flex gap-1.5 text-xs">
                                       <span className={ok ? "text-[color:var(--eval-good-ink)]" : "text-[color:var(--eval-bad-ink)]"}>{ok ? "✓" : "✕"}</span>
-                                      <span className="text-ink-secondary">{items[n] ?? `Item ${n + 1}`}</span>
+                                      <span className="text-ink-secondary">
+                                        {items[n] ?? `Item ${n + 1}`}
+                                        {itemLabels?.[n] && <span className="text-ink-tertiary font-mono"> → {itemLabels[n]}</span>}
+                                      </span>
                                     </span>
                                   ))}
                                 </span>

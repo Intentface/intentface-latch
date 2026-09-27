@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Experimental_EvaluationModelV4 as EvaluationModel } from "@ai-sdk/provider";
 import type { Input, Rubric, ThreadRef } from "./model";
 import { judgeThreads } from "./runner";
-import { eachOf, saysItems } from "./expect";
+import { eachOf, labelsOf, saysItems } from "./expect";
 
 const owner = "org/user";
 const history = [
@@ -38,7 +38,11 @@ const judge: EvaluationModel = {
   async doEvaluate(o) {
     return {
       answers: Object.fromEntries(
-        Object.entries(o.questions).map(([k, q]) => [k, { type: "boolean", probability: /temperature/.test(JSON.stringify(q)) ? 0.95 : 0.05 }]),
+        Object.entries(o.questions).map(([k, q]) =>
+          q.type === "choice"
+            ? [k, { type: "choice", choice: "brief", probabilities: { brief: 0.8, rambling: 0.2 } }]
+            : [k, { type: "boolean", probability: /temperature/.test(JSON.stringify(q)) ? 0.95 : 0.05 }],
+        ),
       ),
       usage: { inputTokens: 1, outputTokens: 1 },
       warnings: [],
@@ -90,6 +94,16 @@ describe("an input's own expectations", () => {
       });
     expect((await go({ answer: "It is 4 °C." })).map((v) => v.checkId)).toEqual(["right"]);
     expect((await go({ mustSay: ["x"] })).map((v) => v.checkId)).toEqual([]);
+  });
+
+  it("asks an input's own choice question as a choice, and keeps the label it got", async () => {
+    const facts = { mustSay: ["the temperature"], judged: [{ ask: "How long is the answer?", shape: { type: "choice" as const, options: { brief: "Short and complete", rambling: "Too long" }, bad: ["rambling"] } }] };
+    const vs = await run(facts);
+    const v = vs.find((x) => x.checkId === "said")!;
+    expect(saysItems(facts).map((i) => i.kind)).toEqual(["mustSay", "judged"]);
+    expect(eachOf(v.answer)).toEqual([true, true]);
+    expect(labelsOf(v.answer)).toEqual([null, "brief"]);
+    expect(v.failed).toBe(false);
   });
 
   it("skips both for an input that lists nothing", async () => {

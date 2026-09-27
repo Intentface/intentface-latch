@@ -3,6 +3,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
+import type { JudgedItem } from "@/lib/evals/v2/model";
 import { transcriptOf } from "./eval-author";
 
 /**
@@ -30,6 +31,18 @@ const Question = z.object({
   mustSay: z.array(z.string()).optional().describe("Things the answer must say, in plain words — each graded as a yes/no"),
   decline: z.boolean().optional().describe("True when the right answer is a polite refusal"),
   asks: z.array(z.string()).optional().describe('Yes/no questions for the grader about this answer, e.g. "Is the tone friendly?"'),
+  judged: z
+    .array(
+      z.object({
+        ask: z.string().describe("The question for the judge about this answer"),
+        shape: z
+          .any()
+          .describe('What the judge returns: {"type":"boolean"} | {"type":"choice","options":{"id":"meaning"},"bad":["id"]} | {"type":"score","levels":[{"name","means"}],"bad":0}'),
+        judge: z.string().optional().describe("Judge model id; omit for the default"),
+      }),
+    )
+    .optional()
+    .describe("This input's own judge questions when yes/no is not enough — a choice or a score, e.g. which of several ways it answered"),
   calls: z
     .array(
       z.object({
@@ -74,6 +87,7 @@ const editable = (q: QuestionInput, id: string) => ({
   asks: q.asks ?? [],
   decline: q.decline ?? false,
   calls: q.calls ?? [],
+  judged: (q.judged ?? []) as JudgedItem[],
   extra: q.extra ?? "{}",
 });
 

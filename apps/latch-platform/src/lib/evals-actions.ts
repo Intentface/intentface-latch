@@ -110,6 +110,7 @@ export async function editQuestions(
         ...(u.asks ? { asks: u.asks } : {}),
         ...(u.decline !== undefined ? { decline: u.decline } : {}),
         ...(u.calls ? { calls: u.calls } : {}),
+        ...(u.judged ? { judged: u.judged } : {}),
         ...(u.extra !== undefined ? { extra: u.extra } : {}),
       };
     } else {
@@ -125,6 +126,7 @@ export async function editQuestions(
         asks: u.asks ?? [],
         decline: u.decline ?? false,
         calls: u.calls ?? [],
+        judged: u.judged ?? [],
         extra: u.extra ?? "{}",
       });
       added.push(id);
@@ -332,4 +334,31 @@ export async function renameVariant(principal: Principal, d: { agent: string; fr
   if ((await evals.listVariants(o.owner, o.name)).some((x) => x.id !== v.id && x.name === name)) return { ok: false as const, error: `There is already a variant called ${name}.` };
   await evals.renameVariant(o.owner, v, name);
   return { ok: true as const, name };
+}
+
+/**
+ * One input's judge question, made a check every input gets: it joins the
+ * checks as a new version, and leaves the input, so it is not asked twice.
+ */
+export async function promoteJudged(principal: Principal, d: { agent: string; datasetId: string; rubricId: string; inputId: string; index: number }) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit have editable checks." };
+  const { evals } = await getLatch();
+  const rubric = await evals.getRubric(o.owner, d.rubricId);
+  if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
+  const inputs = await evals.listInputs(d.datasetId);
+  const input = inputs.find((i) => i.id === d.inputId);
+  const item = input?.facts?.judged?.[d.index];
+  if (!input || !item) return { ok: false as const, error: "That question is no longer on this input." };
+  const label = item.ask.replace(/\?$/, "").slice(0, 48);
+  const check: Check = { kind: "asked", id: checkIdFor(label, rubric.checks.map((c) => c.id)), label, ask: item.ask, shape: item.shape, ...(item.judge ? { judge: item.judge } : {}), because: `Moved from input ${input.id}` };
+  const valid = validateChecks([...rubric.checks, check]);
+  if (!valid.ok) return { ok: false as const, error: valid.error };
+  const saved = await evals.saveRubric({ owner: rubric.owner, id: rubric.id, agentName: rubric.agentName, defaultJudge: rubric.defaultJudge, checks: valid.value });
+  const judged = input.facts!.judged!.filter((_, n) => n !== d.index);
+  const facts = { ...input.facts };
+  if (judged.length) facts.judged = judged;
+  else delete facts.judged;
+  await evals.setInputs(d.datasetId, inputs.map((i) => (i.id === input.id ? { ...i, facts } : i)));
+  return { ok: true as const, version: saved.version, label };
 }

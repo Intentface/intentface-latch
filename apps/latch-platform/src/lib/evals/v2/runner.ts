@@ -216,7 +216,10 @@ export async function judgeThreads(opts: {
       ...asked.filter((c) => !c.fromInput && (!c.ask.includes("REFERENCE_ANSWER") || facts?.answer)),
       ...(items.length
         ? fromInput.flatMap((c) =>
-            items.map((it, n): AskedCheck => ({ kind: "asked", id: `${c.id}${ITEM}${n}`, label: it.text, ask: it.question, shape: { type: "boolean" }, ...(c.judge ? { judge: c.judge } : {}) })),
+            items.map((it, n): AskedCheck => {
+              const judge = it.judge ?? c.judge;
+              return { kind: "asked", id: `${c.id}${ITEM}${n}`, label: it.text, ask: it.question, shape: it.shape ?? { type: "boolean" }, ...(judge ? { judge } : {}) };
+            }),
           )
         : []),
     ];
@@ -255,13 +258,15 @@ export async function judgeThreads(opts: {
           const a = mine.find((x) => x.checkId === `${c.id}${ITEM}${n}`);
           return a ? !a.failed : false;
         });
+        // A choice or score item keeps the label it got, so the answer can say which.
+        const labels = items.map((it, n) => (it.shape && it.shape.type !== "boolean" ? (mine.find((x) => x.checkId === `${c.id}${ITEM}${n}`)?.answer ?? null) : null));
         const sure = mine.map((a) => a.confidence).filter((x): x is number => x !== undefined);
         answers = [
           ...answers.filter((a) => !a.checkId.startsWith(`${c.id}${ITEM}`)),
           {
             checkId: c.id,
             judgeId: mine[0].judgeId,
-            answer: JSON.stringify({ each }),
+            answer: JSON.stringify(labels.some((l) => l !== null) ? { each, labels } : { each }),
             ...(sure.length ? { confidence: Math.min(...sure) } : {}),
             failed: each.some((ok) => !ok),
           },

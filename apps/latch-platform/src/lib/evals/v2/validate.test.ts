@@ -13,6 +13,13 @@ describe("questions", () => {
     });
   });
 
+  it("keeps an input's own judge questions that can pass and fail, and refuses one that can't", () => {
+    const ok = validateInputs([{ id: "1", prompt: "Q", facts: { judged: [{ ask: " Tone? ", shape: { type: "choice", options: { warm: "Warm", cold: "Cold" }, bad: ["cold"] } }, { ask: " ", shape: { type: "boolean" } }] } }]);
+    expect(ok.ok && ok.value[0].facts).toEqual({ judged: [{ ask: "Tone?", shape: { type: "choice", options: { warm: "Warm", cold: "Cold" }, bad: ["cold"] } }] });
+    const bad = validateInputs([{ id: "1", prompt: "Q", facts: { judged: [{ ask: "Tone?", shape: { type: "choice", options: { warm: "Warm", cold: "Cold" }, bad: [] } }] } }]);
+    expect(bad.ok).toBe(false);
+  });
+
   it("saves a document the answer is in as the read it expects, beside its other calls", () => {
     const read = { tool: "*read_file", match: [{ path: "result", op: "contains" as const, value: "a.md" }] };
     const r = validateInputs([{ id: "1", prompt: "Q", facts: { docs: ["a.md"], calls: [read, { tool: "send", never: true }] } }]);

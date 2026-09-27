@@ -181,6 +181,7 @@ export async function computeGrid(
         asks: Array.isArray(i.facts?.asks) ? i.facts.asks.map(String) : [],
         decline: i.facts?.decline === true,
         calls: Array.isArray(i.facts?.calls) ? i.facts.calls : [],
+        judged: Array.isArray(i.facts?.judged) ? i.facts.judged : [],
         /** What's attached — never the contents, which can be megabytes. */
         files: (i.files ?? []).map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })),
       })),
