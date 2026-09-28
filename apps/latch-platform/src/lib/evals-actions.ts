@@ -111,6 +111,7 @@ export async function editQuestions(
         ...(u.decline !== undefined ? { decline: u.decline } : {}),
         ...(u.calls ? { calls: u.calls } : {}),
         ...(u.judged ? { judged: u.judged } : {}),
+        ...(u.tags ? { tags: u.tags } : {}),
         ...(u.extra !== undefined ? { extra: u.extra } : {}),
       };
     } else {
@@ -127,6 +128,7 @@ export async function editQuestions(
         decline: u.decline ?? false,
         calls: u.calls ?? [],
         judged: u.judged ?? [],
+        tags: u.tags ?? [],
         extra: u.extra ?? "{}",
       });
       added.push(id);

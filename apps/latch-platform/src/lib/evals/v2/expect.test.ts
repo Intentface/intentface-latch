@@ -106,6 +106,20 @@ describe("an input's own expectations", () => {
     expect(v.failed).toBe(false);
   });
 
+  it("grades a check limited to tags only on inputs that carry one of them", async () => {
+    const scoped = { ...rubric, checks: [{ kind: "counted" as const, id: "read", label: "Read", spec: { op: "called" as const, tool: "weather_get" }, appliesTo: ["pdf"] }] };
+    const go = (tags?: string[]) =>
+      judgeThreads({
+        rubric: scoped,
+        threads: [thread],
+        inputsById: new Map([["1", { id: "1", prompt: "Q", ...(tags ? { tags } : {}) }]]),
+        deps: { loadHistory: () => Promise.resolve(history), judgeFor: () => judge },
+      });
+    expect((await go(["pdf"])).map((v) => v.checkId)).toEqual(["read"]);
+    expect((await go(["rag"])).map((v) => v.checkId)).toEqual([]);
+    expect((await go()).map((v) => v.checkId)).toEqual([]);
+  });
+
   it("skips both for an input that lists nothing", async () => {
     const vs = await run({ answer: "It's cold." });
     expect(vs.map((x) => x.checkId)).toEqual([]);

@@ -76,6 +76,8 @@ export interface Input {
   facts?: InputFacts;
   /** Sent with the first message on every run — the same bytes each time, so answers compare. */
   files?: InputFile[];
+  /** Groups it belongs to — what views slice by, and what a check's `appliesTo` reads. */
+  tags?: string[];
 }
 
 /** A file an input carries, as chat sends one: a data URL. */
@@ -151,6 +153,8 @@ export interface AskedCheck {
   judge?: string;
   /** Why this check exists — a promise, a tool, an observed failure. */
   because?: string;
+  /** Only inputs with one of these tags get it; absent or empty = every input. */
+  appliesTo?: string[];
   /**
    * `says`: the question comes from each input — its must say, must not say,
    * should decline and grader questions, each asked as a yes/no. `ask` is
@@ -201,6 +205,8 @@ export interface CountedCheck {
   label: string;
   spec: CountedSpec;
   because?: string;
+  /** Only inputs with one of these tags get it; absent or empty = every input. */
+  appliesTo?: string[];
 }
 
 export type Check = AskedCheck | CountedCheck;
@@ -313,3 +319,7 @@ export interface Version {
   /** The agent reference that resolves it: `edge-v2`, `edge-v2@3`, `edge-v2@draft`. */
   ref: string;
 }
+
+/** Whether a check is one of this input's tests: untagged checks are everyone's. */
+export const appliesTo = (c: { appliesTo?: string[] }, input: { tags?: string[] } | undefined): boolean =>
+  !c.appliesTo?.length || (input?.tags ?? []).some((t) => c.appliesTo!.includes(t));

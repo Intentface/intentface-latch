@@ -66,10 +66,20 @@ export function validateInputs(inputs: Input[]): Valid<Input[]> {
       if (had.length || fresh.length) facts.calls = [...had, ...fresh];
       delete facts.docs;
     }
-    out.push({ id, prompt, ...(followUps.length ? { followUps } : {}), ...(Object.keys(facts).length ? { facts } : {}) });
+    const tags = cleanTags(raw.tags);
+    out.push({
+      id,
+      prompt,
+      ...(followUps.length ? { followUps } : {}),
+      ...(Object.keys(facts).length ? { facts } : {}),
+      ...(tags.length ? { tags } : {}),
+    });
   }
   return { ok: true, value: out };
 }
+
+/** Tags as saved: trimmed, lower case, spaces to dashes, no duplicates. */
+export const cleanTags = (xs: unknown): string[] => [...new Set(clean(xs).map((t) => t.toLowerCase().replace(/\s+/g, "-")))];
 
 /** An input's own judge questions: each with its question, and a type that can both pass and fail. */
 function cleanJudged(raw: unknown): JudgedItem[] | string {
@@ -122,6 +132,11 @@ function validMatcher(m: Matcher): string | null {
 
 export function validateChecks(checks: Check[]): Valid<Check[]> {
   if (!checks.length) return { ok: false, error: "Add at least one check." };
+  for (const c of checks) {
+    const tags = cleanTags(c.appliesTo);
+    if (tags.length) c.appliesTo = tags;
+    else delete c.appliesTo;
+  }
   const seen = new Set<string>();
   for (const c of checks) {
     const name = c.label.trim() ? `"${c.label.trim()}"` : "A check";
@@ -207,6 +222,7 @@ export interface EditableQuestion {
   decline: boolean;
   calls: CallExpectation[];
   judged: JudgedItem[];
+  tags: string[];
   /** Other facts, as JSON — `{}` when there are none. */
   extra: string;
 }
@@ -225,6 +241,7 @@ export function toEditable(i: Input): EditableQuestion {
     // An older input's documents are the reads it expects.
     calls: [...(Array.isArray(calls) ? calls : []), ...docsAsCalls(clean(docs))],
     judged: Array.isArray(judged) ? judged : [],
+    tags: i.tags ?? [],
     extra: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "{}",
   };
 }
@@ -244,6 +261,7 @@ export function fromEditable(qs: EditableQuestion[]): Valid<Input[]> {
       id: q.id,
       prompt: q.prompt,
       followUps: q.followUps,
+      tags: q.tags,
       facts: {
         ...(extra as Record<string, unknown>),
         answer: q.answer,

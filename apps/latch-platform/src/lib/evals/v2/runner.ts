@@ -1,5 +1,6 @@
 import type { Experimental_EvaluationModelV4 as EvaluationModel } from "@ai-sdk/provider";
 import type { AskedCheck, CountedCheck, Dataset, Input, Rubric, ThreadRef, Verdict, Version } from "./model";
+import { appliesTo } from "./model";
 import { evaluateBound } from "./counted";
 import { judgeAsked, stateOf, type AskedAnswer, type JudgeUsage } from "./judge";
 import { saysItems } from "./expect";
@@ -192,9 +193,11 @@ export async function judgeThreads(opts: {
   await pool(judgeable, opts.concurrency ?? 8, async (t) => {
     const view = viewOf(await opts.deps.loadHistory(t.threadId));
     const now = Date.now();
-    const facts = t.inputId ? opts.inputsById?.get(t.inputId)?.facts : undefined;
+    const input = t.inputId ? opts.inputsById?.get(t.inputId) : undefined;
+    const facts = input?.facts;
     const vs: Verdict[] = [];
-    for (const c of counted) {
+    // A check limited to tags is not one of an untagged input's tests.
+    for (const c of counted.filter((x) => appliesTo(x, input))) {
       const r = evaluateBound(c.spec, view, facts);
       if (!r) continue; // the input does not say what to look for — not applicable
       vs.push({
@@ -209,11 +212,12 @@ export async function judgeThreads(opts: {
     }
     // A check "from the input" becomes one yes/no per item the input lists,
     // asked in the same call as the rest; its verdict passes only if all do.
-    const fromInput = asked.filter((c) => c.fromInput === "says");
+    const mine = asked.filter((c) => appliesTo(c, input));
+    const fromInput = mine.filter((c) => c.fromInput === "says");
     const items = saysItems(facts);
     const expanded: AskedCheck[] = [
       // A check against the good answer means nothing on an input that has none.
-      ...asked.filter((c) => !c.fromInput && (!c.ask.includes("REFERENCE_ANSWER") || facts?.answer)),
+      ...mine.filter((c) => !c.fromInput && (!c.ask.includes("REFERENCE_ANSWER") || facts?.answer)),
       ...(items.length
         ? fromInput.flatMap((c) =>
             items.map((it, n): AskedCheck => {

@@ -43,6 +43,7 @@ const Question = z.object({
     )
     .optional()
     .describe("This input's own judge questions when yes/no is not enough — a choice or a score, e.g. which of several ways it answered"),
+  tags: z.array(z.string()).optional().describe('Groups it belongs to, e.g. ["pdf"] or ["rag", "hard"] — views slice by them, and a check can apply only to some'),
   calls: z
     .array(
       z.object({
@@ -74,6 +75,7 @@ const CheckInput = z.object({
     .describe('counted: {"op":"called"|"never_called"|"called_with"|"at_least"|"at_most"|"repeated"|"before"|"before_answering"|"stopped_for_approval","tool":"glob", ...}'),
   judge: z.string().optional(),
   because: z.string().optional().describe("Why the check exists"),
+  appliesTo: z.array(z.string()).optional().describe("Only inputs with one of these tags get this check; omit for every input"),
 });
 
 type QuestionInput = z.infer<typeof Question>;
@@ -88,6 +90,7 @@ const editable = (q: QuestionInput, id: string) => ({
   decline: q.decline ?? false,
   calls: q.calls ?? [],
   judged: (q.judged ?? []) as JudgedItem[],
+  tags: q.tags ?? [],
   extra: q.extra ?? "{}",
 });
 

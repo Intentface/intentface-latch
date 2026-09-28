@@ -17,6 +17,7 @@ import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/ev
 import { askEvalsAgent } from "@/components/evals/agent-panel"
 import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
+import { appliesTo } from "@/lib/evals/v2/model"
 import { configDiff, configOf, fullLineDiff, settingRows, sideBySide } from "@/lib/evals/v2/diff"
 import type { Change, Config, Side } from "@/lib/evals/v2/diff"
 import type { Cell } from "@/lib/evals/v2/score"
@@ -226,6 +227,7 @@ function EvalsPage() {
             agent={agent}
             datasetId={dataset.id}
             rubricId={rubricId}
+            knownTags={[...new Set(grid.inputs.flatMap((i) => i.tags))].sort()}
             input={grid.inputs.find((i) => i.id === openInput) ?? null}
             checks={grid.checks.filter((c) => !expectationChecks(grid).some((e) => e.checkId === c.id))}
             results={<InputResults grid={grid} inputId={openInput} onOpen={(column) => (setOpenInput(null), setOpenCell({ inputId: openInput!, column }))} />}
@@ -235,7 +237,7 @@ function EvalsPage() {
           />
         )}
         {agent && rubricId && (
-          <ChecksDrawer agent={agent} rubricId={rubricId} datasetId={dataset?.id} open={checksOpen} onClose={() => setChecksOpen(false)} onSaved={reload} />
+          <ChecksDrawer agent={agent} rubricId={rubricId} datasetId={dataset?.id} knownTags={[...new Set((grid?.inputs ?? []).flatMap((i) => i.tags))].sort()} open={checksOpen} onClose={() => setChecksOpen(false)} onSaved={reload} />
         )}
 
         {agent && grid && (
@@ -566,7 +568,7 @@ function Results({
                     input={input}
                     onOpen={() => onOpenInput(input.id)}
                     count={expectationCount(input)}
-                    shared={grid.checks.filter((c) => !c.reads).length}
+                    shared={grid.checks.filter((c) => !c.reads && appliesTo(c, input)).length}
                   />
                 </td>
                 {grid.columns.map((c) => (
@@ -1170,6 +1172,11 @@ function InputText({ input, onOpen, count, shared }: { input: EvalGrid["inputs"]
           {input.prompt}
         </span>
         {input.files.length > 0 && <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums" title={input.files.map((f) => f.filename).join(", ")}>📎 {input.files.length}</span>}
+        {input.tags.slice(0, 2).map((t) => (
+          <span key={t} className="bg-primary-bg-active text-ink-secondary shrink-0 rounded px-1 font-mono text-[10.5px]">
+            {t}
+          </span>
+        ))}
         <span className="text-ink-tertiary shrink-0 text-[11.5px] tabular-nums" title={`${count || "None"} of its own, ${shared} every input gets`}>
           {count + shared} test{count + shared === 1 ? "" : "s"}
         </span>
@@ -1219,7 +1226,7 @@ function NothingRun({
   const load = useCallback(() => {
     void getQuestionsFn({ data: { agent, datasetId } }).then((r) =>
       setInputs(
-        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, judged: q.judged, files: q.files })) ?? [],
+        r?.questions.map((q) => ({ id: q.id, prompt: q.prompt, followUps: q.followUps, answer: q.answer || null, mustNot: q.mustNot, mustSay: q.mustSay, asks: q.asks, decline: q.decline, calls: q.calls, judged: q.judged, tags: q.tags, files: q.files })) ?? [],
       ),
     )
   }, [agent, datasetId])

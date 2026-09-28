@@ -110,6 +110,7 @@ export function InputDrawer({
   agent,
   datasetId,
   rubricId,
+  knownTags = [],
   input,
   checks,
   results,
@@ -121,6 +122,8 @@ export function InputDrawer({
   datasetId: string
   /** The checks a judge question can move to, and whose judges it can use. */
   rubricId: string | undefined
+  /** Tags other inputs use, offered as you type. */
+  knownTags?: string[]
   input: Input | null
   checks: EvalGrid["checks"]
   /** How each open column did on it, to open from here. */
@@ -152,6 +155,7 @@ export function InputDrawer({
       judged: [...input.asks.map((ask): JudgedItem => ({ ask, shape: { type: "boolean" } })), ...input.judged],
       decline: input.decline,
       calls: input.calls,
+      tags: input.tags,
     })
   }, [input])
   const [judges, setJudges] = useState<{ list: string[]; fallback: string }>({ list: [], fallback: "jev-latest" })
@@ -188,6 +192,7 @@ export function InputDrawer({
             judged: d.judged.filter((j) => j.ask.trim()),
             decline: d.decline,
             calls: d.calls.filter((c) => c.tool.trim()),
+            tags: d.tags,
           },
         ],
       },
@@ -261,6 +266,12 @@ export function InputDrawer({
                 </div>
                 <div className={label}>Then asks</div>
                 <Lines values={draft.followUps} onChange={(followUps) => change({ followUps })} placeholder="A follow-up in the same conversation" add="Then asks" />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className={label}>Tags</div>
+                <TagsEditor tags={draft.tags} known={knownTags} onChange={(tags) => change({ tags })} />
+                <p className="text-ink-tertiary text-[11px]">Groups this input belongs to — views show a group, and a check can apply to some groups only.</p>
               </div>
 
               <div className="space-y-2">
@@ -340,6 +351,7 @@ type Expectations = {
   judged: JudgedItem[]
   decline: boolean
   calls: CallExpectation[]
+  tags: string[]
 }
 type JudgeContext = {
   agent: string
@@ -717,6 +729,52 @@ export function Composer({ agent, datasetId, onAdded }: { agent: string; dataset
 
 type Draft = { key: string; check: Check }
 
+/** Tags as chips; Enter or comma adds one, known tags are offered as you type. */
+export function TagsEditor({ tags, known, onChange, placeholder = "Add a tag, e.g. pdf" }: { tags: string[]; known: string[]; onChange: (t: string[]) => void; placeholder?: string }) {
+  const [text, setText] = useState("")
+  const clean = (t: string) => t.trim().toLowerCase().replace(/\s+/g, "-")
+  const add = (t: string) => {
+    const x = clean(t)
+    if (x && !tags.includes(x)) onChange([...tags, x])
+    setText("")
+  }
+  const offered = known.filter((k) => !tags.includes(k) && (!text || k.includes(clean(text)))).slice(0, 6)
+  return (
+    <div className="space-y-1.5">
+      <div className="border-primary-border flex flex-wrap items-center gap-1.5 rounded-lg border px-2 py-1.5">
+        {tags.map((t) => (
+          <span key={t} className="bg-primary-bg-active text-ink-primary inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px]">
+            {t}
+            <button type="button" aria-label={`Remove tag ${t}`} onClick={() => onChange(tags.filter((x) => x !== t))} className="text-ink-tertiary hover:text-ink-primary">
+              <X className="size-3" />
+            </button>
+          </span>
+        ))}
+        <input
+          value={text}
+          onChange={(e) => (e.target.value.endsWith(",") ? add(e.target.value.slice(0, -1)) : setText(e.target.value))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.preventDefault(), add(text))
+            if (e.key === "Backspace" && !text && tags.length) onChange(tags.slice(0, -1))
+          }}
+          placeholder={tags.length ? "" : placeholder}
+          aria-label="Add a tag"
+          className="min-w-[8rem] flex-1 bg-transparent text-[13px] outline-none"
+        />
+      </div>
+      {offered.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {offered.map((k) => (
+            <button key={k} type="button" onClick={() => add(k)} className="border-primary-border text-ink-secondary hover:text-ink-primary rounded border border-dashed px-1.5 py-0.5 font-mono text-[11px]">
+              + {k}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 type Shape = Extract<Check, { kind: "asked" }>["shape"]
 
 /** One input's own judge question: what to ask, what comes back, who judges — tried on this input's answers, or moved to every input. */
@@ -915,6 +973,7 @@ export function ChecksDrawer({
   agent,
   rubricId,
   datasetId,
+  knownTags = [],
   open,
   onClose,
   onSaved,
@@ -923,6 +982,8 @@ export function ChecksDrawer({
   rubricId: string
   /** Whose answers "Try it" grades. */
   datasetId: string | undefined
+  /** Tags the inputs use — what a check can be limited to. */
+  knownTags?: string[]
   open: boolean
   onClose: () => void
   /** A new version was saved; its checks haven't graded anything yet. */
@@ -1039,6 +1100,12 @@ export function ChecksDrawer({
                         className={field}
                       />
                     ) : null}
+                    <div className="flex items-start gap-2 text-[11px]">
+                      <span className="text-ink-tertiary pt-2">Applies to</span>
+                      <div className="min-w-0 flex-1">
+                        <TagsEditor tags={c.appliesTo ?? []} known={knownTags} placeholder="Every input — or limit it to tags" onChange={(appliesTo) => edit(key, { appliesTo })} />
+                      </div>
+                    </div>
                     {c.kind === "asked" && (
                       <label className="text-ink-tertiary flex items-center gap-1.5 text-[11px]">
                         Judge

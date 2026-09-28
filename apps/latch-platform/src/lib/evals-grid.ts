@@ -156,6 +156,8 @@ export async function computeGrid(
           trust: trust.find((t) => t.checkId === c.id) ?? null,
           accept: th.accept,
           /** What the judge returns: yes/no, one of a set, or a score — JEV's output types. */
+          /** Only inputs with one of these tags get it; empty = every input. */
+          appliesTo: c.appliesTo ?? [],
           type: c.kind === "counted" ? ("rule" as const) : c.shape.type === "boolean" ? ("yes/no" as const) : c.shape.type,
           /** A scale check's rungs, lowest first, and how many from the bottom fail. */
           scale: c.kind === "asked" && c.shape.type === "score" ? { levels: c.shape.levels.map((l) => l.name), bad: c.shape.bad ?? 0 } : null,
@@ -182,6 +184,7 @@ export async function computeGrid(
         decline: i.facts?.decline === true,
         calls: Array.isArray(i.facts?.calls) ? i.facts.calls : [],
         judged: Array.isArray(i.facts?.judged) ? i.facts.judged : [],
+        tags: i.tags ?? [],
         /** What's attached — never the contents, which can be megabytes. */
         files: (i.files ?? []).map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })),
       })),

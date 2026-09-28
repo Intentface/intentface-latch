@@ -20,6 +20,11 @@ describe("questions", () => {
     expect(bad.ok).toBe(false);
   });
 
+  it("cleans tags: trimmed, lower case, dashes for spaces, once each", () => {
+    const r = validateInputs([{ id: "1", prompt: "Q", tags: [" PDF ", "hard case", "pdf", ""] }]);
+    expect(r.ok && r.value[0].tags).toEqual(["pdf", "hard-case"]);
+  });
+
   it("saves a document the answer is in as the read it expects, beside its other calls", () => {
     const read = { tool: "*read_file", match: [{ path: "result", op: "contains" as const, value: "a.md" }] };
     const r = validateInputs([{ id: "1", prompt: "Q", facts: { docs: ["a.md"], calls: [read, { tool: "send", never: true }] } }]);
