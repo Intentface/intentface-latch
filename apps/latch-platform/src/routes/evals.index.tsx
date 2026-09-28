@@ -72,7 +72,7 @@ function EvalsPage() {
   const set = useSetSearch()
 
   const agent = search.agent ?? index[0]?.agent
-  const [overview, reloadOverview] = useOverview(agent)
+  const [overview, reloadOverview, unavailable] = useOverview(agent)
   const [grid, setGrid] = useState<EvalGrid | null>(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState<Filter>("all")
@@ -163,6 +163,15 @@ function EvalsPage() {
         </EvalsShell>
 
         {agent && <JobBanner agent={agent} jobs={jobs.rows} onChanged={jobs.refresh} />}
+
+        {unavailable && agent && (
+          <div className="border-primary-border bg-primary-bg max-w-2xl space-y-1 rounded-lg border px-6 py-5">
+            <h2 className="text-ink-primary text-lg font-semibold tracking-tight">{agent} can't be tested here</h2>
+            <p className="text-ink-secondary text-sm">
+              Evals run on agents you can edit. {agent} is shared with you or no longer exists — pick one of your own agents above, or ask its owner to add you as an editor.
+            </p>
+          </div>
+        )}
 
         {overview && !overview.datasets.length && agent && (
           <NoEvalsYet agent={agent} onCreated={(id) => (set({ dataset: id }), reloadOverview())} />
@@ -1437,14 +1446,24 @@ function AnswerDrawer({
                                 ))}
                               {c?.labels && labelsOpen.has(v.checkId) && (
                                 <span className="border-primary-border mt-1.5 block space-y-0.5 border-l-2 pl-2">
-                                  {c.labels.map((l) => {
+                                  {c.labels.map((l, li) => {
                                     const given = l.id === v.answer
+                                    // Choice probabilities are keyed by option id, score ones by level index.
+                                    const prob = v.probabilities?.[l.id] ?? v.probabilities?.[String(li)]
                                     return (
                                       <span key={l.id} className={cn("grid grid-cols-[12px_minmax(0,1fr)] gap-1.5 text-xs", given ? "text-ink-primary" : "text-ink-tertiary")}>
                                         <span className={l.fails ? "text-[color:var(--eval-bad-ink)]" : "text-[color:var(--eval-good-ink)]"}>{l.fails ? "✕" : "✓"}</span>
                                         <span>
                                           <span className={cn("font-mono", given && "font-semibold")}>{l.id}</span>
                                           {given && <span className="text-ink-secondary"> ← the judge's label</span>}
+                                          {prob !== undefined && (
+                                            <span className="ml-2 inline-flex items-center gap-1 align-middle tabular-nums">
+                                              <span className="bg-primary-bg-active relative inline-block h-1.5 w-16 overflow-hidden rounded-full" aria-hidden>
+                                                <i className={cn("absolute inset-y-0 left-0 rounded-full", given ? "bg-ink-secondary" : "bg-ink-tertiary/60")} style={{ width: `${prob * 100}%` }} />
+                                              </span>
+                                              <span className="text-[10.5px]">{Math.round(prob * 100)}%</span>
+                                            </span>
+                                          )}
                                           <span className="block">{l.means}</span>
                                         </span>
                                       </span>

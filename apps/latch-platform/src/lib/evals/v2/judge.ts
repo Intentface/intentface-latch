@@ -67,12 +67,18 @@ export interface AskedAnswer {
   /** Confidence in the answer GIVEN — the contract returns P(true) for yes/no. */
   confidence?: number;
   score?: number;
+  probabilities?: Record<string, number>;
   failed: boolean;
 }
 
 type RawAnswer = { type: string; probability?: number; choice?: string; score?: number; probabilities?: Record<string, number> };
 
-function read(c: AskedCheck, a: RawAnswer): Omit<AskedAnswer, "checkId" | "judgeId" | "failed"> {
+/**
+ * `confidence` is the judge's own, when it gives one — JEV's is the shape of
+ * the whole distribution (all on one label is 1.0, spread out is lower), not
+ * the top label's probability. Without it, the chosen label's probability.
+ */
+function read(c: AskedCheck, a: RawAnswer, confidence?: number): Omit<AskedAnswer, "checkId" | "judgeId" | "failed"> {
   if (a.type === "boolean") {
     const p = a.probability ?? 0;
     const yes = p >= 0.5;
@@ -80,13 +86,15 @@ function read(c: AskedCheck, a: RawAnswer): Omit<AskedAnswer, "checkId" | "judge
     // as 2% sure. Flip it into confidence in the answer actually given.
     return { answer: String(yes), confidence: yes ? p : 1 - p };
   }
+  const probabilities = a.probabilities && Object.keys(a.probabilities).length ? { probabilities: a.probabilities } : {};
   if (a.type === "choice") {
     const choice = a.choice ?? "";
-    return { answer: choice, ...(a.probabilities?.[choice] !== undefined ? { confidence: a.probabilities[choice] } : {}) };
+    const conf = confidence ?? a.probabilities?.[choice];
+    return { answer: choice, ...(conf !== undefined ? { confidence: conf } : {}), ...probabilities };
   }
   const score = a.score ?? 0;
   const rung = c.shape.type === "score" ? c.shape.levels[Math.round(score)] : undefined;
-  return { answer: rung?.name ?? String(Math.round(score)), score };
+  return { answer: rung?.name ?? String(Math.round(score)), score, ...(confidence !== undefined ? { confidence } : {}), ...probabilities };
 }
 
 export interface JudgeUsage {
@@ -115,10 +123,13 @@ export async function judgeAsked(input: {
       questions: Object.fromEntries(checks.map((c) => [c.id, toQuestion(c)])),
     });
     input.onUsage?.({ calls: 1, inputTokens: res.usage?.inputTokens ?? 0, outputTokens: res.usage?.outputTokens ?? 0 });
+    // JEV reports its own confidence per question in provider metadata.
+    const meta = res.providerMetadata as Record<string, { confidence?: Record<string, number> } | undefined> | undefined;
+    const own = meta?.typesafe?.confidence;
     for (const c of checks) {
       const a = res.answers[c.id] as RawAnswer | undefined;
       if (!a) continue;
-      const r = read(c, a);
+      const r = read(c, a, own?.[c.id]);
       out.push({ checkId: c.id, judgeId, ...r, failed: failedBy(c.shape, r.answer, r.score) });
     }
   }

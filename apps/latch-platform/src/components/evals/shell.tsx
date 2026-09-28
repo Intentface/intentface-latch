@@ -60,15 +60,22 @@ export function useSetSearch() {
 /** The selected agent's question sets and checks. Null while loading or when not editable. */
 export function useOverview(agent: string | undefined) {
   const [overview, setOverview] = useState<EvalsOverview | null>(null);
+  // Null means two things — still loading, or not an agent you can edit — and the page says different things for each.
+  const [unavailable, setUnavailable] = useState(false);
   const reload = useCallback(() => {
-    if (agent) void getEvalsOverviewFn({ data: agent }).then(setOverview);
+    if (agent)
+      void getEvalsOverviewFn({ data: agent }).then((o) => {
+        setOverview(o);
+        setUnavailable(o === null);
+      });
   }, [agent]);
   useEffect(() => {
     setOverview(null);
+    setUnavailable(false);
     reload();
   }, [reload]);
   useEvalsChanged(reload);
-  return [overview, reload] as const;
+  return [overview, reload, unavailable] as const;
 }
 
 export function EvalsShell({

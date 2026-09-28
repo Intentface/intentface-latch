@@ -1020,8 +1020,15 @@ export function ChecksDrawer({
                           placeholder={c.shape.type === "boolean" ? "A yes/no question about the answer — phrase it so yes is good" : c.shape.type === "choice" ? "What to decide about the answer, e.g. Where does the answer's substance come from?" : "What to rate, e.g. How long is the answer for what was asked?"}
                           aria-label="Question for the grader"
                         />
-                        <ShapeEditor shape={c.shape} onChange={(shape) => edit(key, { shape })} />
-                        {datasetId && <TryCheck agent={agent} rubricId={rubricId} datasetId={datasetId} check={c} fallback={loaded.defaultJudge} />}
+                        {c.fromInput ? (
+                          // Its questions are each input's own items, each with its own type — nothing to shape here.
+                          <p className="text-ink-tertiary text-[11px]">Asks each input's own items — must say, must not say, should decline, and its own judge questions — one by one. Edit them on the inputs.</p>
+                        ) : (
+                          <>
+                            <ShapeEditor shape={c.shape} onChange={(shape) => edit(key, { shape })} />
+                            {datasetId && <TryCheck agent={agent} rubricId={rubricId} datasetId={datasetId} check={c} fallback={loaded.defaultJudge} />}
+                          </>
+                        )}
                       </>
                     ) : c.spec.op === "never_called" ? (
                       <input
@@ -1074,7 +1081,7 @@ export function ChecksDrawer({
             )}
             {loaded && <DescribeCheck agent={agent} rubricId={rubricId} onSent={onClose} />}
             <p className="text-ink-tertiary text-xs">
-              For rules that hold everywhere. Anything about one input — its good answer, the document it should read — goes on that input.
+              For rules that hold everywhere. Anything about one input — its good answer, the tools it should call, what it must say — goes on that input.
             </p>
           </div>
           <div className="border-primary-border flex items-center gap-3 border-t px-5 py-3">

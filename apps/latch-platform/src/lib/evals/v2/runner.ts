@@ -281,6 +281,7 @@ export async function judgeThreads(opts: {
           answer: a.answer,
           ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
           ...(a.score !== undefined ? { score: a.score } : {}),
+          ...(a.probabilities ? { probabilities: a.probabilities } : {}),
           failed: a.failed,
           ...(a.escalatedTo ? { escalatedTo: a.escalatedTo } : {}),
           createdAt: now,

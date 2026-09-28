@@ -152,6 +152,7 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
   for (const col of ["group_name TEXT", "group_description TEXT"])
     await client.execute(`ALTER TABLE latch_eval_suggestions ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`ALTER TABLE latch_eval_inputs ADD COLUMN files TEXT`).catch(() => {});
+  await client.execute(`ALTER TABLE latch_eval_verdicts ADD COLUMN probabilities TEXT`).catch(() => {});
   for (const col of ["run_id TEXT", "attempt INTEGER"])
     await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
@@ -216,6 +217,7 @@ const toVerdict = (r: Row): Verdict => ({
   answer: String(r.answer),
   ...(r.confidence != null ? { confidence: Number(r.confidence) } : {}),
   ...(r.score != null ? { score: Number(r.score) } : {}),
+  ...(r.probabilities ? { probabilities: JSON.parse(String(r.probabilities)) as Record<string, number> } : {}),
   failed: Number(r.failed) === 1,
   ...(r.escalated_to ? { escalatedTo: String(r.escalated_to) } : {}),
   createdAt: Number(r.created_at),
@@ -433,7 +435,7 @@ export function createEvalsStore(client: Client): EvalsStore {
       await client.batch(
         vs.map((v) => ({
           sql: `INSERT INTO latch_eval_verdicts (thread_id, check_id, rubric_version, judge_id, answer,
-                  confidence, score, failed, escalated_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  confidence, score, probabilities, failed, escalated_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           args: [
             v.threadId,
             v.checkId,
@@ -442,6 +444,7 @@ export function createEvalsStore(client: Client): EvalsStore {
             v.answer,
             v.confidence ?? null,
             v.score ?? null,
+            v.probabilities ? JSON.stringify(v.probabilities) : null,
             v.failed ? 1 : 0,
             v.escalatedTo ?? null,
             v.createdAt,

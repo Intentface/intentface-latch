@@ -286,6 +286,8 @@ export interface Verdict {
   confidence?: number;
   /** Fractional rung, for a score shape. */
   score?: number;
+  /** The judge's probability for every label — option ids for a choice, level indexes ("0", "1"…) for a score. */
+  probabilities?: Record<string, number>;
   failed: boolean;
   /** Set when the cascade sent this verdict to a bigger judge. */
   escalatedTo?: string;

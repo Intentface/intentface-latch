@@ -201,6 +201,7 @@ export async function computeGrid(
           confidence: v.confidence ?? null,
           score: v.score ?? null,
           escalatedTo: v.escalatedTo ?? null,
+          probabilities: v.probabilities ?? null,
           ruling: rulingOf.get(`${v.threadId}|${v.checkId}`) ?? null,
         };
       }),
