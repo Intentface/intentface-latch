@@ -357,7 +357,7 @@ export function AgainPanel({
   return (
     <div className="space-y-3 p-2">
       <div className="text-ink-primary text-sm font-medium">
-        Answer {inputIds.length === 1 ? `input ${inputIds[0]}` : `${inputIds.length} inputs`} again
+        Answer & grade {inputIds.length === 1 ? `input ${inputIds[0]}` : `${inputIds.length} inputs`} again
       </div>
       <p className={hint}>One more try each, beside the old answers, graded with the current checks as it finishes. Old answers keep their grades. The score then counts every try.</p>
       <div className="space-y-1">
@@ -385,7 +385,7 @@ export function AgainPanel({
       {targets.length > 0 && <Bill estimate={priced?.estimate ?? null} limit={priced?.limit ?? 5} sure={sure} setSure={setSure} />}
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
       <button type="button" disabled={blocked} onClick={() => void start()} className="bg-ink-primary text-primary-bg h-8 w-full rounded-md text-sm font-medium tabular-nums disabled:opacity-40">
-        {busy ? "Starting…" : `Answer again${cost !== null ? ` · about ${money(cost)}` : ""}`}
+        {busy ? "Starting…" : `Answer & grade again${cost !== null ? ` · about ${money(cost)}` : ""}`}
       </button>
     </div>
   )

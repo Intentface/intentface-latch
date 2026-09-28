@@ -549,7 +549,7 @@ function Results({
           <b className="text-ink-primary tabular-nums">{picked.size} selected</b>
           <Popover>
             <Popover.Trigger render={<button type="button" className="border-primary-border bg-primary-bg hover:bg-primary-bg-hover flex h-7 items-center gap-1.5 rounded-md border px-2.5" />}>
-              <RotateCw className="size-3.5" /> Answer again
+              <RotateCw className="size-3.5" /> Answer & grade again
             </Popover.Trigger>
             <Popover.Content align="start" className="w-80 p-1">
               <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={[...picked]} columns={columnRefs} onStarted={() => (setPicked(new Set()), onAgain())} />
@@ -672,8 +672,8 @@ function Results({
                       render={
                         <button
                           type="button"
-                          aria-label={`Answer input ${input.id} again`}
-                          title="Answer again"
+                          aria-label={`Answer and grade input ${input.id} again`}
+                          title="Answer & grade again"
                           className="text-ink-tertiary hover:text-ink-primary hover:bg-primary-bg-hover grid size-7 place-items-center rounded-md opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
                         />
                       }
@@ -997,7 +997,7 @@ function ColumnMenu({
   onGrade: () => void
   /** Grade every answer in this column again, under the current checks. */
   onGradeAll: () => void
-  /** Every input in the table — "Answer again" on all of them. */
+  /** Every input in the table — "Answer & grade again" on all of them. */
   allInputs: string[]
   /** Graded under an older version of the checks. */
   stale: boolean
@@ -1079,7 +1079,7 @@ function ColumnMenu({
                   moved.sameSetup
                     ? "The baseline's own configuration, answered again: every ▲ and ▼ is the agent answering differently on its own — the noise a real change has to beat."
                     : moved.verdict.startsWith("Maybe")
-                      ? `${moved.up} scored higher, ${moved.down} lower. If nothing had changed, chance would split them this unevenly about 1 time in ${Math.max(2, Math.round(1 / moved.p))} — so it leans ${moved.up > moved.down ? "better" : "worse"}, but isn't sure. Answer again with 3 tries to settle it.`
+                      ? `${moved.up} scored higher, ${moved.down} lower. If nothing had changed, chance would split them this unevenly about 1 time in ${Math.max(2, Math.round(1 / moved.p))} — so it leans ${moved.up > moved.down ? "better" : "worse"}, but isn't sure. Answer & grade again with 3 tries to settle it.`
                       : moved.verdict === "No real difference"
                         ? `${moved.up} scored higher, ${moved.down} lower — about what answering again alone does. More tries per input would tell.`
                         : moved.verdict === "Nothing to compare"
@@ -1154,7 +1154,7 @@ function ColumnMenu({
           </button>
         )}
         <button type="button" className={item} onClick={() => setAgain(failed.length ? "failed" : "all")}>
-          Answer again{" "}
+          Answer & grade again{" "}
           <span className="text-ink-tertiary text-xs tabular-nums">
             One more try per input, graded when it lands — every input, or {failed.length ? `the ${failed.length} where it failed` : "where it failed"} · priced first
           </span>
@@ -1498,7 +1498,7 @@ function AnswerDrawer({
             <div className="min-h-0 flex-1 overflow-y-auto">
               <div className="flex flex-wrap items-center gap-2 px-5 pt-4">
                 <button type="button" onClick={() => setAgainOpen(!againOpen)} className="border-primary-border hover:bg-primary-bg-hover flex h-8 items-center gap-1.5 rounded-md border px-3 text-[13px]">
-                  <RotateCw className="size-3.5" /> Answer again
+                  <RotateCw className="size-3.5" /> Answer & grade again
                 </button>
                 {!pick.error && !verdicts.length && (
                   <button
