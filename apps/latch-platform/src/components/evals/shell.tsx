@@ -59,6 +59,8 @@ export function useSetSearch() {
   );
 }
 
+const LAST_AGENT = "latch:evals-agent";
+
 /** The selected agent's question sets and checks. Null while loading or when not editable. */
 export function useOverview(agent: string | undefined) {
   const [overview, setOverview] = useState<EvalsOverview | null>(null);
@@ -98,6 +100,19 @@ export function EvalsShell({
   const set = useSetSearch();
   const agent = search.agent ?? index[0]?.agent;
   const here = PAGES.find((p) => p.page === page)!;
+  // The sidebar's links carry no agent: remember the one you had open, and
+  // return to it rather than to the first agent in the list.
+  useEffect(() => {
+    try {
+      if (search.agent) localStorage.setItem(LAST_AGENT, search.agent);
+      else {
+        const kept = localStorage.getItem(LAST_AGENT);
+        if (kept && index.some((a) => a.agent === kept)) set({ agent: kept });
+      }
+    } catch {
+      /* private mode: the first agent opens */
+    }
+  }, [search.agent, index, set]);
   // Carry the subject across pages; a cell or a selected question is page-local.
   const carry = { agent: search.agent, dataset: search.dataset, rubric: search.rubric };
 

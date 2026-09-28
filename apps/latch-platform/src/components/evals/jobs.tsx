@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react"
 import { cancelJobFn, listJobsFn } from "@/lib/evals-server"
 import type { JobRow } from "@/lib/evals-server"
 import { cn } from "@/lib/utils"
+import { useEvalsChanged } from "@/components/evals/events"
 
 /**
  * Runs in progress for a question set: polled while any is going, with a
@@ -11,18 +12,32 @@ import { cn } from "@/lib/utils"
 
 export const isActive = (j: JobRow) => j.status === "running" || j.status === "judging"
 
-/** Recent jobs for this set, polled while any is running; `onFinished` fires once per job that completes. */
+/**
+ * Recent jobs for this set, polled while any is running. `onFinished` fires
+ * once per job that completes; `onAppeared` once per run that starts after the
+ * page loaded — the Evals agent's, say — so the page can show it.
+ */
 export function useJobs(
   agent: string | undefined,
   datasetId: string | undefined,
-  onFinished: (j: JobRow) => void
+  onFinished: (j: JobRow) => void,
+  onAppeared?: (j: JobRow) => void,
 ) {
   const [rows, setRows] = useState<JobRow[]>([])
   const seen = useRef(new Map<string, JobRow["status"]>())
+  const loaded = useRef(false)
   const finished = useRef(onFinished)
   finished.current = onFinished
+  const appeared = useRef(onAppeared)
+  appeared.current = onAppeared
   const [tick, setTick] = useState(0)
   const refresh = useCallback(() => setTick((t) => t + 1), [])
+  // Something outside the page (the Evals agent) may have started a run.
+  useEvalsChanged(refresh)
+  useEffect(() => {
+    seen.current = new Map()
+    loaded.current = false
+  }, [agent, datasetId])
 
   useEffect(() => {
     if (!agent || !datasetId) return setRows([])
@@ -34,8 +49,10 @@ export function useJobs(
       for (const j of next) {
         const was = seen.current.get(j.id)
         if (was && was !== "done" && j.status === "done") finished.current(j)
+        if (!was && loaded.current && isActive(j)) appeared.current?.(j)
         seen.current.set(j.id, j.status)
       }
+      loaded.current = true
       setRows(next)
       if (next.some(isActive)) timer = setTimeout(() => void load(), 2500)
     }

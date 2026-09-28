@@ -88,6 +88,22 @@ function EvalsPage() {
     overview?.datasets[0]
   const rubricId = search.rubric ?? overview?.rubrics[0]?.id
   const columnsAsked = useMemo(() => decodeResults(search.cols), [search.cols])
+  // The columns live in the URL, and links between the Evals pages (and the
+  // sidebar) don't carry them: remember them per agent and set, and bring them
+  // back when the URL has none.
+  const colsKey = agent && dataset ? `latch:evals-cols:${agent}:${dataset.id}` : null
+  useEffect(() => {
+    if (!colsKey) return
+    try {
+      if (search.cols) localStorage.setItem(colsKey, search.cols)
+      else {
+        const kept = localStorage.getItem(colsKey)
+        if (kept) set({ cols: kept })
+      }
+    } catch {
+      /* private mode: the default columns show */
+    }
+  }, [colsKey, search.cols, set])
   // A view is a slice of the inputs; the table scores every column on it alone.
   const views = dataset?.views ?? []
   const view = views.find((v) => v.id === search.view)
@@ -108,14 +124,18 @@ function EvalsPage() {
     [grid, view],
   )
 
+  // Only the latest load may land: an earlier one finishing later (the
+  // default columns, before remembered ones were restored) must not win.
+  const gridSeq = useRef(0)
   const reload = useCallback(() => {
+    const n = ++gridSeq.current
     if (!agent || !dataset || !rubricId || !dataset.runs.length) return setGrid(null)
     setLoading(true)
     void getEvalGridFn({
       data: { agent, datasetId: dataset.id, rubricId, ...(columnsAsked.length ? { columns: columnsAsked } : {}) },
     })
-      .then(setGrid)
-      .finally(() => setLoading(false))
+      .then((g) => n === gridSeq.current && setGrid(g))
+      .finally(() => n === gridSeq.current && setLoading(false))
   }, [agent, dataset, rubricId, columnsAsked])
   useEffect(reload, [reload])
   useEvalsChanged(reload)
@@ -133,6 +153,16 @@ function EvalsPage() {
         focus: undefined,
       })
     else reload()
+  }, (started) => {
+    // A run started elsewhere — by the Evals agent — opens as columns, as one started from + Run does.
+    if (started.kind === "run" && !started.again)
+      set({
+        cols: encodeResults([
+          ...(started.compareWith ?? []),
+          ...started.versions.map((version) => ({ runId: started.runId, version })),
+        ]),
+        focus: undefined,
+      })
   })
 
   // While something runs, answers land every few seconds: show them as they do.
