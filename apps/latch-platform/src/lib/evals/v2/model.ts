@@ -323,3 +323,12 @@ export interface Version {
 /** Whether a check is one of this input's tests: untagged checks are everyone's. */
 export const appliesTo = (c: { appliesTo?: string[] }, input: { tags?: string[] } | undefined): boolean =>
   !c.appliesTo?.length || (input?.tags ?? []).some((t) => c.appliesTo!.includes(t));
+
+/** A saved slice of a set: the inputs with any of these tags. A tab above the table. */
+export interface View {
+  datasetId: string;
+  id: string;
+  name: string;
+  tags: string[];
+  createdAt: number;
+}

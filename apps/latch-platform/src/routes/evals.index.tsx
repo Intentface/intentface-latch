@@ -27,6 +27,7 @@ import type { Result } from "@/components/evals/compare-picker"
 import { useEvalsChanged } from "@/components/evals/events"
 import { ThreadView } from "@/components/evals/thread-view"
 import { JobBanner, useJobs } from "@/components/evals/jobs"
+import { ViewTabs } from "@/components/evals/views"
 import Drawer from "@/components/ui/drawer"
 import { Popover } from "@/components/ui/popover"
 import {
@@ -87,6 +88,13 @@ function EvalsPage() {
     overview?.datasets[0]
   const rubricId = search.rubric ?? overview?.rubrics[0]?.id
   const columnsAsked = useMemo(() => decodeResults(search.cols), [search.cols])
+  // A view is a slice of the inputs; the table scores every column on it alone.
+  const views = dataset?.views ?? []
+  const view = views.find((v) => v.id === search.view)
+  const viewGrid = useMemo(
+    () => (grid && view ? { ...grid, inputs: grid.inputs.filter((i) => i.tags.some((t) => view.tags.includes(t))) } : grid),
+    [grid, view],
+  )
 
   const reload = useCallback(() => {
     if (!agent || !dataset || !rubricId || !dataset.runs.length) return setGrid(null)
@@ -188,10 +196,25 @@ function EvalsPage() {
           />
         )}
 
-        {grid ? (
+        {grid && dataset && (
+          <ViewTabs
+            agent={agent}
+            datasetId={dataset.id}
+            views={views}
+            value={view?.id ?? "all"}
+            counts={Object.fromEntries([["all", grid.inputs.length], ...views.map((v) => [v.id, grid.inputs.filter((i) => i.tags.some((t) => v.tags.includes(t))).length])])}
+            knownTags={[...new Set(grid.inputs.flatMap((i) => i.tags))].sort()}
+            onChange={(id) => set({ view: id === "all" ? undefined : id })}
+            onSaved={(id) => (reloadOverview(), id && set({ view: id }))}
+          />
+        )}
+
+        {grid && viewGrid ? (
           <Results
             agent={agent}
-            grid={grid}
+            grid={viewGrid}
+            viewTags={view?.tags}
+            {...(view ? { viewName: view.name } : {})}
             focusAsked={search.focus}
             filter={filter}
             setFilter={setFilter}
@@ -319,6 +342,8 @@ function Results({
   onOpenChecks,
   onAdded,
   onRenamed,
+  viewTags,
+  viewName,
 }: {
   agent: string
   grid: EvalGrid
@@ -341,6 +366,10 @@ function Results({
   onAdded: (id: string) => void
   /** A variant got a new name: its column follows it. */
   onRenamed: (c: Column, name: string) => void
+  /** The open view's tags: an input added here joins it. */
+  viewTags?: string[]
+  /** The open view's name; + Run then answers only its inputs. */
+  viewName?: string
 }) {
   const cells = useMemo(() => cellsOf(grid), [grid])
   const [picked, setPicked] = useState<Set<string>>(new Set())
@@ -458,6 +487,7 @@ function Results({
             agent={agent}
             datasetId={datasetId}
             rubricId={rubricId}
+            {...(viewName ? { inputIds: grid.inputs.map((i) => i.id), scope: viewName } : {})}
             shown={grid.columns.map((c) => ({ runId: c.runId, version: c.version }))}
             onShow={onShow}
             onStarted={onStarted}
@@ -607,7 +637,7 @@ function Results({
         </table>
       </div>
       <div className="border-primary-border border-t px-4 py-3">
-        <Composer agent={agent} datasetId={datasetId} onAdded={onAdded} />
+        <Composer agent={agent} datasetId={datasetId} onAdded={onAdded} {...(viewTags?.length ? { tags: viewTags } : {})} />
       </div>
       <div className="text-ink-tertiary border-primary-border flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-5 py-2.5 text-xs">
         <span className="tabular-nums">{grid.inputs.length} inputs</span>

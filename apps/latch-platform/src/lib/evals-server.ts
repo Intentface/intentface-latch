@@ -65,6 +65,7 @@ export const getEvalsOverviewFn = createServerFn({ method: "GET" })
           name: d.name,
           inputs: (await evals.listInputs(d.id)).length,
           runs: await evals.listRuns(o.owner, d.id),
+          views: (await evals.listViews(d.id)).map((v) => ({ id: v.id, name: v.name, tags: v.tags })),
         })),
       ),
       rubrics: rubrics.map((r) => ({ id: r.id, version: r.version, checks: r.checks.length })),
@@ -418,12 +419,14 @@ export const estimateRunFn = createServerFn({ method: "POST" })
  * answered them — that it's free to show those answers instead.
  */
 export const priceRunsFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; datasetId: string; rubricId: string; labels: string[]; repeats: number }) => d)
+  .validator((d: { agent: string; datasetId: string; rubricId: string; labels: string[]; repeats: number; inputIds?: string[] }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return null;
     const { evals } = await getLatch();
-    const inputIds = (await evals.listInputs(data.datasetId)).map((i) => i.id);
+    // A view runs its own inputs; otherwise every input.
+    const all = (await evals.listInputs(data.datasetId)).map((i) => i.id);
+    const inputIds = data.inputIds?.length ? all.filter((id) => data.inputIds!.includes(id)) : all;
     const out = [];
     for (const label of data.labels) {
       const p = await planRun(principal, { agent: data.agent, datasetId: data.datasetId, rubricId: data.rubricId, versions: [label], inputIds, repeats: data.repeats });
@@ -570,4 +573,22 @@ export const promoteJudgedFn = createServerFn({ method: "POST" })
     if (!principal) return { ok: false as const, error: "Sign in again." };
     const { promoteJudged } = await import("./evals-actions");
     return promoteJudged(principal, data);
+  });
+
+export const saveViewFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; id?: string; name: string; tags: string[] }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const { saveView } = await import("./evals-actions");
+    return saveView(principal, data);
+  });
+
+export const removeViewFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; datasetId: string; id: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const { removeView } = await import("./evals-actions");
+    return removeView(principal, data);
   });

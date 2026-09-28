@@ -646,7 +646,7 @@ function ExpectationList({
  * The composer: an input as a user would send it. Enter adds it; its drawer
  * opens so what should happen can be said straight away.
  */
-export function Composer({ agent, datasetId, onAdded }: { agent: string; datasetId: string; onAdded: (id: string) => void }) {
+export function Composer({ agent, datasetId, onAdded, tags }: { agent: string; datasetId: string; onAdded: (id: string) => void; tags?: string[] }) {
   const [text, setText] = useState("")
   const [turns, setTurns] = useState<string[]>([])
   const [picked, setPicked] = useState<File[]>([])
@@ -656,7 +656,8 @@ export function Composer({ agent, datasetId, onAdded }: { agent: string; dataset
     if (!text.trim() || busy) return
     setBusy(true)
     setError(null)
-    const r = await editInputsFn({ data: { agent, datasetId, upserts: [{ prompt: text.trim(), followUps: turns.filter((t) => t.trim()) }] } })
+    // Added inside a view, it joins that view.
+    const r = await editInputsFn({ data: { agent, datasetId, upserts: [{ prompt: text.trim(), followUps: turns.filter((t) => t.trim()), ...(tags?.length ? { tags } : {}) }] } })
     if (!r.ok) return (setBusy(false), setError(r.error))
     const id = r.added[0]
     // The input exists now; its files go on one at a time.

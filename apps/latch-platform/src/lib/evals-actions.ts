@@ -9,7 +9,7 @@ import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Check, Input, InputFile, Rubric, Variant } from "./evals/v2/model";
 import { saysItems } from "./evals/v2/expect";
-import { checkIdFor, fromEditable, nextInputId, toEditable, validateChecks } from "./evals/v2/validate";
+import { checkIdFor, cleanTags, fromEditable, nextInputId, toEditable, validateChecks } from "./evals/v2/validate";
 import type { EditableQuestion } from "./evals/v2/validate";
 
 async function ownerFor(principal: Principal, agent: string) {
@@ -363,4 +363,35 @@ export async function promoteJudged(principal: Principal, d: { agent: string; da
   else delete facts.judged;
   await evals.setInputs(d.datasetId, inputs.map((i) => (i.id === input.id ? { ...i, facts } : i)));
   return { ok: true as const, version: saved.version, label };
+}
+
+/**
+ * Save a view — a name and the tags whose inputs it shows. A new one gets an
+ * id from its name; the same id updates it.
+ */
+export async function saveView(principal: Principal, d: { agent: string; datasetId: string; id?: string; name: string; tags: string[] }) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit have views." };
+  const { evals } = await getLatch();
+  if (!(await evals.getDataset(o.owner, d.datasetId))) return { ok: false as const, error: "That set no longer exists." };
+  const name = d.name.trim();
+  if (!name) return { ok: false as const, error: "Give the view a name." };
+  const tags = cleanTags(d.tags);
+  if (!tags.length) return { ok: false as const, error: "Pick at least one tag — a view shows the inputs that carry it." };
+  const views = await evals.listViews(d.datasetId);
+  // Saving the same name again updates that view — a repeated click or a
+  // retry must never stack up copies.
+  const existing = (d.id ? views.find((v) => v.id === d.id) : undefined) ?? views.find((v) => v.name.toLowerCase() === name.toLowerCase());
+  const id = existing?.id ?? checkIdFor(name, [...views.map((v) => v.id), "all", "overview"]);
+  await evals.saveView({ datasetId: d.datasetId, id, name, tags, createdAt: existing?.createdAt ?? Date.now() });
+  return { ok: true as const, id };
+}
+
+export async function removeView(principal: Principal, d: { agent: string; datasetId: string; id: string }) {
+  const o = await ownerFor(principal, d.agent);
+  if (!o) return { ok: false as const, error: "Only agents you can edit have views." };
+  const { evals } = await getLatch();
+  if (!(await evals.getDataset(o.owner, d.datasetId))) return { ok: false as const, error: "That set no longer exists." };
+  await evals.removeView(d.datasetId, d.id);
+  return { ok: true as const };
 }

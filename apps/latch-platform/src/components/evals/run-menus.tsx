@@ -91,10 +91,16 @@ export function AddColumn({
   onShow,
   onStarted,
   first,
+  inputIds,
+  scope,
 }: {
   agent: string
   datasetId: string
   rubricId: string
+  /** Only these inputs — the open view's; absent = all. */
+  inputIds?: string[]
+  /** What they are called, e.g. the view's name. */
+  scope?: string
   /** What is open now; the new column is compared with it. */
   shown: Ref[]
   onShow: (r: Ref) => void
@@ -121,16 +127,17 @@ export function AddColumn({
 
   const labels = [...(options?.versions.map((v) => v.label) ?? []), ...(options?.variants.map((v) => `~${v.id}`) ?? [])]
   const labelKey = labels.join(",")
+  const inputKey = inputIds?.join(",") ?? ""
   useEffect(() => {
     setPrices(null)
     if (!open || !labels.length) return
     let live = true
-    void priceRunsFn({ data: { agent, datasetId, rubricId, labels, repeats: tries } }).then((r) => live && setPrices(r))
+    void priceRunsFn({ data: { agent, datasetId, rubricId, labels, repeats: tries, ...(inputIds ? { inputIds } : {}) } }).then((r) => live && setPrices(r))
     return () => {
       live = false
     }
-    // labels is keyed by labelKey; the array is new every render.
-  }, [open, labelKey, tries, agent, datasetId, rubricId])
+    // labels and inputIds are keyed by their joined strings; the arrays are new every render.
+  }, [open, labelKey, tries, agent, datasetId, rubricId, inputKey])
 
   const nameOf = (label: string) => (label.startsWith("~") ? (options?.variants.find((v) => `~${v.id}` === label)?.name ?? label) : label)
   const run = async (label: string, force = false) => {
@@ -224,7 +231,7 @@ export function AddColumn({
         ) : (
           <>
             <div className="flex items-center gap-2 px-2.5 pt-1 pb-1.5">
-              <span className="text-ink-primary flex-1 text-xs font-medium">Run on all {prices?.inputIds.length ?? ""} inputs</span>
+              <span className="text-ink-primary flex-1 text-xs font-medium">{scope ? `Run on the ${prices?.inputIds.length ?? ""} inputs in ${scope}` : `Run on all ${prices?.inputIds.length ?? ""} inputs`}</span>
               <Tries value={tries} onChange={setTries} compact />
             </div>
             {!options ? (

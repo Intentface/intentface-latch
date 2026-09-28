@@ -1,5 +1,5 @@
 import type { Client } from "@libsql/client";
-import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, Variant, InputFile } from "./model";
+import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, Variant, InputFile, View } from "./model";
 import type { EvalJob } from "./jobs";
 import type { FailureMode, Note, Suggestion } from "./failures";
 
@@ -80,6 +80,10 @@ export interface EvalsStore {
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
   deleteRuling: (threadId: string, checkId: string) => Promise<void>;
   saveVariant: (v: Variant) => Promise<void>;
+  /** A set's saved views, oldest first — the order of the tabs. */
+  listViews: (datasetId: string) => Promise<View[]>;
+  saveView: (v: View) => Promise<void>;
+  removeView: (datasetId: string, id: string) => Promise<void>;
   getVariant: (owner: Owner, id: string) => Promise<Variant | null>;
   listVariants: (owner: Owner, agentName: string) => Promise<Variant[]>;
   /** The variant and every answer filed under its old name, in one go. */
@@ -137,6 +141,9 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       owner TEXT NOT NULL, thread_id TEXT NOT NULL PRIMARY KEY, agent_name TEXT NOT NULL,
       text TEXT NOT NULL, ok INTEGER NOT NULL, why TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS latch_eval_suggestions_agent ON latch_eval_suggestions (owner, agent_name, status)`,
+    `CREATE TABLE IF NOT EXISTS latch_eval_views (
+      dataset_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, tags TEXT NOT NULL,
+      created_at INTEGER NOT NULL, PRIMARY KEY (dataset_id, id))`,
     `CREATE TABLE IF NOT EXISTS latch_eval_variants (
       owner TEXT NOT NULL, id TEXT NOT NULL, agent_name TEXT NOT NULL, base TEXT NOT NULL, name TEXT NOT NULL,
       change TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (owner, id))`,
@@ -665,6 +672,25 @@ export function createEvalsStore(client: Client): EvalsStore {
       await client.execute({ sql: `UPDATE latch_eval_suggestions SET status = ? WHERE owner = ? AND thread_id = ?`, args: [status, owner, threadId] });
     },
 
+    async listViews(datasetId) {
+      return (await rows(`SELECT * FROM latch_eval_views WHERE dataset_id = ? ORDER BY created_at`, [datasetId])).map((r) => ({
+        datasetId: String(r.dataset_id),
+        id: String(r.id),
+        name: String(r.name),
+        tags: parse<string[]>(r.tags, []),
+        createdAt: Number(r.created_at),
+      }));
+    },
+    async saveView(v) {
+      await client.execute({
+        sql: `INSERT INTO latch_eval_views (dataset_id, id, name, tags, created_at) VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(dataset_id, id) DO UPDATE SET name = excluded.name, tags = excluded.tags`,
+        args: [v.datasetId, v.id, v.name, JSON.stringify(v.tags), v.createdAt],
+      });
+    },
+    async removeView(datasetId, id) {
+      await client.execute({ sql: `DELETE FROM latch_eval_views WHERE dataset_id = ? AND id = ?`, args: [datasetId, id] });
+    },
     async saveVariant(v) {
       await client.execute({
         sql: `INSERT INTO latch_eval_variants (owner, id, agent_name, base, name, change, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
