@@ -44,6 +44,10 @@ export interface EvalJob {
   tryOf?: Record<string, number>;
   /** A `judge` job limited to these threads; all of the run's when absent. */
   threadIds?: string[];
+  /** Grade again from scratch: the threads' grades under the current checks are cleared first, then made anew. */
+  regrade?: boolean;
+  /** Set once the old grades are cleared, so a restarted job doesn't clear its own new ones. */
+  cleared?: boolean;
   status: JobStatus;
   /** Units planned / produced (including failed) — for `judge` jobs, threads to judge. */
   total: number;
@@ -130,6 +134,8 @@ export interface JobDeps {
   saveThread: (t: ThreadRef) => Promise<void>;
   verdictsOf: (threadIds: string[], rubricVersion: number) => Promise<Verdict[]>;
   saveVerdicts: (vs: Verdict[]) => Promise<void>;
+  /** Remove the threads' grades under one version of the checks — for grading again from scratch. */
+  clearVerdicts: (threadIds: string[], rubricVersion: number) => Promise<void>;
   /** Persist progress; returns the job as stored, so a cancel made elsewhere is seen. */
   update: (patch: Partial<EvalJob>) => Promise<EvalJob | null>;
 }
@@ -181,6 +187,10 @@ export async function advanceJob(job: EvalJob, deps: JobDeps, opts: { deadline: 
       const [inputs, dataset] = await Promise.all([deps.loadInputs(), deps.loadDataset()]);
       const only = current.threadIds ? new Set(current.threadIds) : null;
       const threads = (await deps.threadsOf(current.runId)).filter((t) => !t.error && (!only || only.has(t.threadId)));
+      if (current.regrade && !current.cleared) {
+        await deps.clearVerdicts(threads.map((t) => t.threadId), rubric.version);
+        if (!(await stillWanted({ cleared: true }))) return current;
+      }
       const judged = new Set((await deps.verdictsOf(threads.map((t) => t.threadId), rubric.version)).map((v) => v.threadId));
       const todo = threads.filter((t) => !judged.has(t.threadId));
       if (current.kind === "judge" && current.total !== threads.length) await stillWanted({ total: threads.length, done: judged.size });

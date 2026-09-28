@@ -317,7 +317,7 @@ export async function startAgain(principal: Principal, d: AgainRequest, confirme
 }
 
 /** Re-score an existing run under the latest checks. Only the judge runs, never the agent. */
-export async function startJudgeJob(principal: Principal, data: { agent: string; datasetId: string; rubricId: string; runId: string; threadIds?: string[] }) {
+export async function startJudgeJob(principal: Principal, data: { agent: string; datasetId: string; rubricId: string; runId: string; threadIds?: string[]; regrade?: boolean }) {
   const { agentStore } = await getLatch();
   const rec = await agentStore.getRecord(principal, normalizeAgentName(data.agent));
   const o = rec ? { owner: agentOwnerKey(principal, rec.scope), name: rec.name } : null;
@@ -342,6 +342,7 @@ export async function startJudgeJob(principal: Principal, data: { agent: string;
     inputIds: [],
     repeats: 1,
     ...(only ? { threadIds: [...only] } : {}),
+    ...(data.regrade ? { regrade: true } : {}),
     status: "running",
     total: ok,
     done: 0,
@@ -396,6 +397,7 @@ export async function processJob(owner: string, id: string): Promise<void> {
         saveThread: (t) => evals.saveThread(t),
         verdictsOf: (threadIds, v) => evals.listVerdicts({ threadIds, rubricVersion: v }),
         saveVerdicts: (vs) => evals.saveVerdicts(vs),
+        clearVerdicts: (ids, v) => evals.deleteVerdicts(ids, v),
         update: (patch) => evals.updateJob(id, patch),
       },
       { deadline: now + SLICE_MS },

@@ -596,6 +596,11 @@ function Results({
                       <AgainPanel agent={agent} datasetId={datasetId} rubricId={rubricId} inputIds={ids} columns={columnRefs} preset={[c.label]} onStarted={() => (done(), onAgain())} />
                     )}
                     onGrade={() => void gradeUngraded(null)}
+                    allInputs={grid.inputs.map((i) => i.id)}
+                    onGradeAll={() => {
+                      const threadIds = grid.threads.filter((t) => t.column === c.label && !t.error && grid.inputs.some((i) => i.id === t.inputId)).map((t) => t.threadId)
+                      if (threadIds.length) void startJudgeFn({ data: { agent, datasetId, rubricId, runId: c.runId, threadIds, regrade: true } }).then(onAgain)
+                    }}
                     stale={c.judgedWith < grid.latestVersion && !grading(c)}
                     {...(c.version !== "live" && !c.version.startsWith("@")
                       ? {
@@ -964,6 +969,8 @@ function ColumnMenu({
   failed,
   againPanel,
   onGrade,
+  onGradeAll,
+  allInputs,
   stale,
   onRename,
   canHide,
@@ -988,6 +995,10 @@ function ColumnMenu({
   failed: string[]
   againPanel: (inputIds: string[], done: () => void) => React.ReactNode
   onGrade: () => void
+  /** Grade every answer in this column again, under the current checks. */
+  onGradeAll: () => void
+  /** Every input in the table — "Answer again" on all of them. */
+  allInputs: string[]
   /** Graded under an older version of the checks. */
   stale: boolean
   /** A variant's column can be renamed; versions keep their names. */
@@ -1001,13 +1012,14 @@ function ColumnMenu({
 }) {
   const item = "hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
   const [open, setOpen] = useState(false)
-  const [again, setAgain] = useState(false)
+  // Answering again: every input, or only where it failed.
+  const [again, setAgain] = useState<"all" | "failed" | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameError, setRenameError] = useState<string | null>(null)
   const pick = (f: () => void) => () => (setOpen(false), f())
   const [diffOpen, setDiffOpen] = useState(false)
   return (
-    <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(false))}>
+    <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(null))}>
       <span className="flex flex-col items-center leading-tight">
         {/* 1 · the name, which opens the column's menu */}
         <Popover.Trigger render={<button type="button" className="group flex items-center gap-0.5 rounded px-1 text-[13px] font-semibold tracking-tight whitespace-nowrap" />}>
@@ -1097,7 +1109,26 @@ function ColumnMenu({
         </span>
       </span>
       <Popover.Content align="start" className="w-80 p-1.5">
-        {again ? againPanel(failed, () => setOpen(false)) : <>
+        {again ? (
+          <div>
+            <div role="radiogroup" aria-label="Which inputs" className="mx-2.5 mt-1 mb-1 inline-flex rounded-lg p-0.5 text-xs smooth-shadow-ring-xs smooth-ring-primary-border">
+              {([["all", `Every input · ${allInputs.length}`], ["failed", `Where it failed · ${failed.length}`]] as const).map(([k, l]) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={again === k}
+                  disabled={k === "failed" && !failed.length}
+                  onClick={() => setAgain(k)}
+                  className={cn("rounded-md px-2.5 py-1 disabled:opacity-40", again === k ? "bg-primary-bg-active text-ink-primary font-medium" : "text-ink-secondary hover:text-ink-primary")}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+            {againPanel(again === "all" ? allInputs : failed, () => setOpen(false))}
+          </div>
+        ) : <>
         <div className="text-ink-tertiary px-2.5 pt-1 pb-1.5 text-xs">
           {column.runName ?? "Unnamed run"} · {when} · {pct(rate)} of checks passed
           {column.spent > 0 && ` · spent ${money(column.spent)}`}
@@ -1122,13 +1153,14 @@ function ColumnMenu({
             Use as baseline <span className="text-ink-tertiary text-xs">The others are compared with it</span>
           </button>
         )}
-        {failed.length > 0 && (
-          <button type="button" className={item} onClick={() => setAgain(true)}>
-            Answer again where it failed <span className="text-ink-tertiary text-xs tabular-nums">{failed.length} input{failed.length === 1 ? "" : "s"} · another try each</span>
-          </button>
-        )}
-        <button type="button" className={item} onClick={pick(onGrade)}>
-          Grade what isn't graded <span className="text-ink-tertiary text-xs">Answers without a grade under the current checks · cents</span>
+        <button type="button" className={item} onClick={() => setAgain(failed.length ? "failed" : "all")}>
+          Answer again{" "}
+          <span className="text-ink-tertiary text-xs tabular-nums">
+            One more try per input — every input, or {failed.length ? `the ${failed.length} where it failed` : "where it failed"} · priced first
+          </span>
+        </button>
+        <button type="button" className={item} onClick={pick(onGradeAll)}>
+          Grade again <span className="text-ink-tertiary text-xs">Every answer in this column, with the current checks · the judge only, cents</span>
         </button>
         {onRename &&
           (renaming === null ? (

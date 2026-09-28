@@ -43,6 +43,7 @@ export interface EvalsStore {
   ) => Promise<{ runId: string; threads: number; versions: string[]; questions: number; tries: number; name: string | null; createdAt: number }[]>;
 
   saveVerdicts: (vs: Verdict[]) => Promise<void>;
+  deleteVerdicts: (threadIds: string[], rubricVersion: number) => Promise<void>;
   /** Latest verdict per (thread, check) for one rubric version. */
   listVerdicts: (q: { threadIds: string[]; rubricVersion?: number }) => Promise<Verdict[]>;
 
@@ -440,6 +441,13 @@ export function createEvalsStore(client: Client): EvalsStore {
       }));
     },
 
+    async deleteVerdicts(threadIds, rubricVersion) {
+      if (!threadIds.length) return;
+      await client.batch(
+        threadIds.map((id) => ({ sql: `DELETE FROM latch_eval_verdicts WHERE thread_id = ? AND rubric_version = ?`, args: [id, rubricVersion] })),
+        "write",
+      );
+    },
     async saveVerdicts(vs) {
       if (!vs.length) return;
       await client.batch(

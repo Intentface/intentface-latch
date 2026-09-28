@@ -89,6 +89,7 @@ function deps(id = "run_a", onAgent?: () => void): JobDeps {
     saveThread: (t) => store.saveThread(t),
     verdictsOf: (threadIds, v) => store.listVerdicts({ threadIds, rubricVersion: v }),
     saveVerdicts: (vs) => store.saveVerdicts(vs),
+    clearVerdicts: (ids, v) => store.deleteVerdicts(ids, v),
     update: (patch) => store.updateJob(id, patch),
   };
 }
@@ -175,6 +176,20 @@ describe("jobs", () => {
     await store.saveJob(j);
     const end = await advanceJob(j, { ...deps("judge_b"), loadRubric: () => Promise.resolve({ ...rubric, version: 3 }) }, { deadline: Date.now() + 60_000 });
     expect(end).toMatchObject({ status: "done", total: 1, done: 1 });
+  });
+
+  it("grading again replaces the grades under the same checks, never doubles them", async () => {
+    await store.saveJob(job());
+    await advanceJob(job(), deps(), { deadline: Date.now() + 60_000 });
+    const ids = (await store.listThreads(owner, { runId: "run_a" })).map((t) => t.threadId);
+    const j = job({ id: "regrade_a", runId: "run_a", kind: "judge", total: 0, threadIds: ids, regrade: true });
+    await store.saveJob(j);
+    const end = await advanceJob(j, deps("regrade_a"), { deadline: Date.now() + 60_000 });
+    expect(end).toMatchObject({ status: "done", total: 6, done: 6, cleared: true });
+    expect(await store.listVerdicts({ threadIds: ids, rubricVersion: 1 })).toHaveLength(12);
+    // Resuming a finished regrade clears nothing: its fresh grades stay.
+    await advanceJob((await store.getJob(owner, "regrade_a"))!, deps("regrade_a"), { deadline: Date.now() + 60_000 });
+    expect(await store.listVerdicts({ threadIds: ids, rubricVersion: 1 })).toHaveLength(12);
   });
 
   it("only one holder gets the lease", async () => {

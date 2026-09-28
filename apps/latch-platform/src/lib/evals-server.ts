@@ -478,7 +478,7 @@ export const startAgainFn = createServerFn({ method: "POST" })
   });
 
 export const startJudgeFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; datasetId: string; rubricId: string; runId: string; threadIds?: string[] }) => d)
+  .validator((d: { agent: string; datasetId: string; rubricId: string; runId: string; threadIds?: string[]; regrade?: boolean }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
