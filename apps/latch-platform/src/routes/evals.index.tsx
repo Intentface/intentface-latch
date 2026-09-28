@@ -14,7 +14,7 @@ import {
 import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { AddColumn, AgainPanel, EarlierAnswers } from "@/components/evals/run-menus"
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
-import { askEvalsAgent } from "@/components/evals/agent-panel"
+import { askEvalsAgent, updateEvalsPageContext } from "@/components/evals/agent-panel"
 import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
 import { appliesTo } from "@/lib/evals/v2/model"
@@ -91,6 +91,18 @@ function EvalsPage() {
   // A view is a slice of the inputs; the table scores every column on it alone.
   const views = dataset?.views ?? []
   const view = views.find((v) => v.id === search.view)
+  // What is on screen, for the Evals agent: it reads this with every message.
+  useEffect(() => {
+    updateEvalsPageContext({
+      page: "results",
+      questionSet: dataset?.id,
+      checks: rubricId,
+      view: view ? { name: view.name, tags: view.tags } : undefined,
+      openAnswer: openCell ?? undefined,
+      openInput: openInput ?? undefined,
+      filter: filter === "all" ? undefined : filter,
+    })
+  }, [dataset?.id, rubricId, view, openCell, openInput, filter])
   const viewGrid = useMemo(
     () => (grid && view ? { ...grid, inputs: grid.inputs.filter((i) => i.tags.some((t) => view.tags.includes(t))) } : grid),
     [grid, view],
@@ -396,6 +408,13 @@ function Results({
   const [base, ...rest] = grid.columns
   // Compared by default: the first column that changed something — a re-run of the baseline's own setup only shows noise.
   const focus = rest.find((c) => c.label === focusAsked) ?? rest.find((c) => !c.setup || c.setup !== base.setup) ?? rest.at(0)
+  const columnKey = grid.columns.map((c) => `${c.runId}|${c.version}|${c.label}`).join(",")
+  useEffect(() => {
+    updateEvalsPageContext({
+      columns: grid.columns.map((c, n) => ({ label: c.label, runId: c.runId, version: c.version, role: n === 0 ? "baseline" : c.label === focus?.label ? "compared" : "other" })),
+    })
+    // columnKey stands for the columns; grid is new on every load.
+  }, [columnKey, focus?.label])
   const cell = (inputId: string, label: string) => cells.get(`${inputId}|${label}`)
   // A column is called by its version; the day is added only where two share one.
   // When a column was answered: the day, and the time where another column shares it.

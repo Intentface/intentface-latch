@@ -98,6 +98,27 @@ export function askEvalsAgent(prompt: string) {
 
 export type PanelContext = { agent: string; questionSet?: string; run?: string; checks?: string };
 
+/**
+ * What the Evals page shows right now — sent with every message, so "this",
+ * "these" and "the draft" mean what the person is looking at and the agent
+ * never has to ask which agent. Set by the page, read at send time.
+ */
+export type EvalsPageContext = {
+  page?: "results" | "failures";
+  questionSet?: string;
+  checks?: string;
+  view?: { name: string; tags: string[] };
+  columns?: { label: string; runId: string; version: string; role: "baseline" | "compared" | "other" }[];
+  openAnswer?: { inputId: string; column: string };
+  openInput?: string;
+  filter?: string;
+};
+let pageContext: EvalsPageContext = {};
+/** Merge what one part of the page knows; `undefined` clears a field. */
+export function updateEvalsPageContext(patch: EvalsPageContext) {
+  pageContext = { ...pageContext, ...patch };
+}
+
 function startersFor(c: PanelContext) {
   const run = c.run ? `run ${c.run}` : c.questionSet ? `the latest run of ${c.questionSet}` : "the latest run";
   const checks = c.checks ? ` (checks: ${c.checks})` : "";
@@ -184,6 +205,7 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
               embedded
               starters={startersFor(context)}
               onTurnFinished={notifyEvalsChanged}
+              extraBody={() => ({ evalsPage: { agent: context.agent, ...pageContext } })}
               {...(pending ? { autoSend: pending } : {})}
             />
           ) : (

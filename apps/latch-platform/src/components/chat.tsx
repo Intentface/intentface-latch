@@ -121,6 +121,7 @@ export function Chat({
   starters,
   autoSend,
   onTurnFinished,
+  extraBody,
 }: {
   chatId: string
   agent: string
@@ -136,9 +137,17 @@ export function Chat({
   autoSend?: string
   /** After each turn settles — the host may need to reload what the turn changed. */
   onTurnFinished?: () => void
+  /**
+   * More fields for every request body, read at send time — what the host
+   * page shows, say. The runtime hands the body to the agent as its
+   * per-turn context; never persisted.
+   */
+  extraBody?: () => Record<string, unknown>
 }) {
   const onTurnFinishedRef = useRef(onTurnFinished)
   onTurnFinishedRef.current = onTurnFinished
+  const extraBodyRef = useRef(extraBody)
+  extraBodyRef.current = extraBody
   const router = useRouter()
   const [deciding, setDeciding] = useState(false)
   // A failed secret write (e.g. not an org admin): shown in the composer form,
@@ -192,9 +201,9 @@ export function Chat({
               ...last.metadata,
             },
           }
-          return { body: { ...body, message } }
+          return { body: { ...body, ...extraBodyRef.current?.(), message } }
         }
-        return { body: { ...body, id, messages: all, trigger, messageId } }
+        return { body: { ...body, ...extraBodyRef.current?.(), id, messages: all, trigger, messageId } }
       },
     }),
     onFinish: () => {

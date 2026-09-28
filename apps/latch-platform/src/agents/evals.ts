@@ -2,6 +2,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
 import { defineAgent } from "@intentface/latch-core";
+import type { AgentConfig } from "@intentface/latch-core";
 import type { Principal } from "@/lib/session";
 import type { JudgedItem } from "@/lib/evals/v2/model";
 import { transcriptOf } from "./eval-author";
@@ -741,8 +742,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   };
 }
 
-export const evalsAgent = defineAgent<Principal, { orgId: string }>(
-  {
+const evalsConfig = {
     // Reading threads for the failure that takes judgment, and deciding
     // whether a fix is real, is the hard part of evals — worth the strongest model.
     model: anthropic("claude-opus-5-5"),
@@ -780,7 +780,7 @@ What you never do: accept your own suggestions, rule on whether the judge was ri
 Be brief. Lead with what you found ("4 of 6 failures end with a question instead of an answer"), then the evidence. Name threads by question number and version ("#3 on @draft"), not ids, unless asked.`,
     toolSources: [
       {
-        async open(principal) {
+        async open(principal: Principal) {
           return { tools: await evalsTools(principal), close: async () => {} };
         },
       },
@@ -796,7 +796,42 @@ Be brief. Lead with what you found ("4 of 6 failures end with a question instead
       edit_checks: "user-approval",
     },
     smoothStream: true,
-  },
+} satisfies AgentConfig<Principal>;
+
+/**
+ * What the person has open on the Evals page, from the request — a hint for
+ * what "this", "these" and "the draft" mean, never permission: every tool
+ * still checks the caller's own access.
+ */
+export function pageSection(turnContext: unknown): string {
+  const page = (turnContext as { evalsPage?: Record<string, unknown> } | undefined)?.evalsPage;
+  if (!page || typeof page.agent !== "string") return "";
+  const p = page as {
+    agent: string;
+    page?: string;
+    questionSet?: string;
+    checks?: string;
+    view?: { name: string; tags: string[] };
+    columns?: { label: string; runId: string; version: string; role: string }[];
+    openAnswer?: { inputId: string; column: string };
+    openInput?: string;
+    filter?: string;
+  };
+  const lines = [
+    `Agent under test: ${p.agent}${p.questionSet ? ` · question set ${p.questionSet}` : ""}${p.checks ? ` · checks ${p.checks}` : ""}${p.page ? ` · on the ${p.page} page` : ""}`,
+    ...(p.view ? [`View: ${p.view.name} — only inputs tagged ${p.view.tags.join(" or ")}`] : []),
+    ...(p.columns?.length
+      ? [`Columns, baseline first: ${p.columns.map((c) => `${c.label} (run ${c.runId}, version ${c.version}${c.role === "baseline" ? ", baseline" : c.role === "compared" ? ", compared with the baseline" : ""})`).join("; ")}`]
+      : []),
+    ...(p.filter ? [`Table filtered to: ${p.filter}`] : []),
+    ...(p.openAnswer ? [`Open: the answer to input ${p.openAnswer.inputId} on ${p.openAnswer.column}`] : []),
+    ...(p.openInput ? [`Open: the editor for input ${p.openInput}`] : []),
+  ];
+  return `\n\n## What the person is looking at now\n${lines.map((l) => `- ${l}`).join("\n")}\nWhen they say "this", "these", "the draft", "the new column" or "it", they mean what is on screen. Use these ids with your tools; don't ask which agent, set or run unless it is ambiguous.`;
+}
+
+export const evalsAgent = defineAgent<Principal, { orgId: string }>(
+  ({ turnContext }) => ({ ...evalsConfig, instructions: evalsConfig.instructions + pageSection(turnContext) }),
   {
     title: "Evals",
     description: "Reads an agent's eval threads, finds what went wrong, and helps fix it: suggests notes, drafts fixes and checks, re-runs failures — with your approval.",
