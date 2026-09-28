@@ -3,7 +3,7 @@
  *
  *   pnpm evals import  --org O --user U --agent A --name N --file ax.json
  *   pnpm evals rubric  --org O --user U --agent A --file advisory.json
- *   pnpm evals run     --org O --user U --dataset ID --versions live,@draft [--repeats 3] [--only id,id] [--concurrency 4]
+ *   pnpm evals run     --org O --user U --dataset ID --versions live,@c_ab12 [--repeats 3] [--only id,id] [--concurrency 4]
  *   pnpm evals judge   --org O --user U --dataset ID --rubric ID [--run ID] [--times 3] [--judge jev-latest] [--escalate MODEL]
  *   pnpm evals review  --org O --user U --dataset ID --rubric ID [--run ID] [--n 15] [--by NAME]
  *   pnpm evals trust   --org O --user U --dataset ID --rubric ID
@@ -16,7 +16,7 @@
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { typeSafeAi } from "@ai-sdk/typesafe-ai";
-import { parseAgentRef } from "@intentface/latch-agent-builder";
+import { resolveVersions } from "../lib/evals-jobs";
 import { getLatch } from "../lib/latch";
 import { agentOwnerKey as ownerKey } from "../lib/agent-store";
 import type { Principal } from "../lib/session";
@@ -25,7 +25,7 @@ import { evaluationModelFor } from "../lib/evals/v2/evaluation-model";
 import { rulingQueue, thresholdFor, trustOf } from "../lib/evals/v2/alignment";
 import { describeCounted } from "../lib/evals/v2/counted";
 import { finalAnswer, viewOf } from "../lib/evals/v2/thread";
-import { compareVersions, configFingerprint, consistency, judgeThreads, runDataset, summarize } from "../lib/evals/v2/runner";
+import { compareVersions, consistency, judgeThreads, runDataset, summarize } from "../lib/evals/v2/runner";
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];
@@ -110,19 +110,9 @@ async function main() {
   if (cmd === "run") {
     const labels = (flag("versions") ?? "live").split(",").map((s) => s.trim());
     const versions: (Version & { fingerprint: string })[] = [];
-    for (const label of labels) {
-      const ref = label === "live" ? dataset.agentName : label.startsWith("@") ? `${dataset.agentName}${label}` : label;
-      const p = parseAgentRef(ref);
-      const live = await agentStore.getRecord(principal, p.name);
-      const scope = live?.scope ?? "user";
-      const rec =
-        p.at === undefined
-          ? live
-          : p.at === "draft"
-            ? (await agentStore.getDraft(principal, p.name, scope))?.record
-            : await agentStore.getVersion(principal, p.name, scope, p.at);
-      if (!rec) throw new Error(`${label} (${ref}) does not resolve`);
-      versions.push({ label, ref, fingerprint: configFingerprint(rec) });
+    // live, @7, or a candidate (@c_…, or its title) — filed under a label that never moves.
+    for (const v of await resolveVersions(agentStore, principal, dataset.agentName, labels)) {
+      versions.push({ label: v.label, ref: v.ref, fingerprint: v.fingerprint });
     }
     // Two labels for one configuration measure noise, not a change.
     const byPrint = new Map<string, string[]>();

@@ -10,13 +10,14 @@ import { getPrincipal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Principal } from "./session";
-import type { Check, Variant } from "./evals/v2/model";
+import type { Check } from "./evals/v2/model";
+import type { Change } from "./candidates";
 import { fromEditable, toEditable, validateChecks } from "./evals/v2/validate";
 import { CONFIRM_TWICE_ABOVE } from "./evals/v2/jobs";
 import { planAgain, planRun, startAgain, startJudgeJob, startPlannedRun, tryCheck } from "./evals-jobs";
 import { computeGrid } from "./evals-grid";
 import type { ResultRef } from "./evals-grid";
-import { createChecks, createQuestionSet, createVariant, editInputFiles, editQuestions, renameVariant } from "./evals-actions";
+import { createCandidate, createChecks, createQuestionSet, editInputFiles, editQuestions } from "./evals-actions";
 import type { AgainRequest, RunRequest } from "./evals-jobs";
 import type { EditableQuestion } from "./evals/v2/validate";
 import { configFingerprint } from "./evals/v2/runner";
@@ -58,13 +59,16 @@ export const getEvalsOverviewFn = createServerFn({ method: "GET" })
     const { evals } = await getLatch();
     const datasets = await evals.listDatasets(o.owner, o.name);
     const rubrics = await evals.listRubrics(o.owner, o.name);
+    // Runs file answers under ids (`@c_…`); what people call each is its title.
+    const { candidatesOf, titleOf } = await import("./candidates");
+    const candidates = (await candidatesOf(principal, o.name, { closed: true }))?.candidates ?? [];
     return {
       datasets: await Promise.all(
         datasets.map(async (d) => ({
           id: d.id,
           name: d.name,
           inputs: (await evals.listInputs(d.id)).length,
-          runs: await evals.listRuns(o.owner, d.id),
+          runs: (await evals.listRuns(o.owner, d.id)).map((r) => ({ ...r, names: Object.fromEntries(r.versions.map((v) => [v, titleOf(v, candidates)])) as Record<string, string> })),
           views: (await evals.listViews(d.id)).map((v) => ({ id: v.id, name: v.name, tags: v.tags })),
         })),
       ),
@@ -324,28 +328,67 @@ export const saveChecksFn = createServerFn({ method: "POST" })
 
 // ─── Running and judging ───────────────────────────────────────────────────
 
-/** What a new run can be made of: the versions that exist, and the questions. */
 /**
- * Save a variant — a version with one thing changed — so it can be run as a
- * column. Its name says what changed; the same change on the same base is the
- * same variant, so running it again reuses its answers.
+ * A candidate with one thing changed from a base — the model, the reasoning
+ * effort or a line of instructions — to run as its own column. The same
+ * change on the same base is the same candidate, so running it again reuses
+ * its answers. It opens in the agent editor like any other.
  */
-export const createVariantFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; base: string; change: Variant["change"]; name?: string }) => d)
+export const createCandidateFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; base: string; change: Change; name?: string }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
-    return createVariant(principal, data);
+    return createCandidate(principal, data);
   });
 
-export const renameVariantFn = createServerFn({ method: "POST" })
-  .validator((d: { agent: string; from: string; name: string }) => d)
+/** Rename a candidate from its column — the editor shows the new name too. */
+export const renameCandidateFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; label: string; name: string }) => d)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "Sign in again." };
-    return renameVariant(principal, data);
+    const { agentStore } = await getLatch();
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(data.agent));
+    if (!rec) return { ok: false as const, error: "Only agents you can edit." };
+    const { renameCandidate } = await import("./candidates");
+    return renameCandidate(principal, rec.name, rec.scope, data.label.replace(/^@/, ""), data.name);
   });
 
+/**
+ * Make a column's configuration what people get: a candidate is published as
+ * the next version (refused once if someone published since it was started,
+ * unless `force`); an older version is made live again, appending nothing.
+ */
+export const makeLiveFn = createServerFn({ method: "POST" })
+  .validator((d: { agent: string; label: string; force?: boolean; message?: string }) => d)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "Sign in again." };
+    const { agentStore } = await getLatch();
+    const rec = await agentStore.getRecord(principal, normalizeAgentName(data.agent));
+    if (!rec) return { ok: false as const, error: "Only agents you can edit." };
+    const { publishRecord, liveVersionOf } = await import("./candidates");
+    const pinned = /^@(\d+)$/.exec(data.label);
+    if (pinned) {
+      const n = Number(pinned[1]);
+      if ((await liveVersionOf(principal, rec.name, rec.scope)) === n) return { ok: true as const, version: n };
+      await agentStore.activateVersion(principal, rec.name, rec.scope, n, { actor: principal.userId });
+      return { ok: true as const, version: n };
+    }
+    const c = await agentStore.getCandidate(principal, rec.name, rec.scope, data.label.replace(/^@/, ""));
+    if (!c) return { ok: false as const, error: "Only a published version or a candidate can be made live." };
+    if (c.closedAt) return { ok: false as const, error: c.publishedAs ? `Already published as v${c.publishedAs}.` : "This candidate was discarded." };
+    return publishRecord(principal, {
+      record: c.record,
+      message: data.message ?? `Published “${c.title}” from Evals`,
+      ...(c.baseVersion != null ? { baseVersion: c.baseVersion } : {}),
+      force: data.force,
+      candidateId: c.id,
+    });
+  });
+
+/** What a new run can be made of: live, the candidates, past versions — and the questions. */
 export const getRunOptionsFn = createServerFn({ method: "GET" })
   .validator((d: { agent: string; datasetId: string }) => d)
   .handler(async ({ data }) => {
@@ -354,45 +397,39 @@ export const getRunOptionsFn = createServerFn({ method: "GET" })
     const o = await ownerFor(principal, data.agent);
     if (!o) return null;
     const { evals, agentStore } = await getLatch();
-    const rec = await agentStore.getRecord(principal, o.name);
-    if (!rec) return null;
-    const [draft, history, inputs] = await Promise.all([
-      agentStore.getDraft(principal, o.name, rec.scope),
-      agentStore.listVersions(principal, o.name, rec.scope),
-      evals.listInputs(data.datasetId),
-    ]);
-    // Say which listed version IS live: picking both compares a configuration with itself.
+    const { candidatesOf } = await import("./candidates");
+    const found = await candidatesOf(principal, o.name);
+    if (!found) return null;
+    const { rec, candidates, liveVersion } = found;
+    const [history, inputs] = await Promise.all([agentStore.listVersions(principal, o.name, rec.scope), evals.listInputs(data.datasetId)]);
+    // Say which listed configuration IS live: picking both compares it with itself.
     const livePrint = configFingerprint(rec);
-    const recent = history.slice().sort((a, b) => b.version - a.version).slice(0, 12);
+    const recent = history.slice().sort((a, b) => b.version - a.version).filter((v) => v.version !== liveVersion).slice(0, 12);
     const prints = await Promise.all(
       recent.map(async (v) => {
         const r = await agentStore.getVersion(principal, o.name, rec.scope, v.version);
         return r ? configFingerprint(r) : null;
       }),
     );
-    const sameAsLive = (print: string | null) => print === livePrint;
+    const me = agentOwnerKey(principal, "user");
     return {
       versions: [
-        { label: "live", note: "what users get now" },
-        ...(draft
-          ? [{ label: "@draft", note: sameAsLive(configFingerprint(draft.record)) ? "same as live — no changes yet" : "unpublished changes" }]
-          : []),
+        { label: "live", title: liveVersion == null ? "live" : `live · @${liveVersion}`, kind: "live" as const, note: "what users get now" },
+        ...candidates.map((c) => ({
+          label: `@${c.id}`,
+          title: c.title,
+          kind: "candidate" as const,
+          note: configFingerprint(c.record) === livePrint ? "same as live — no changes yet" : c.author === me ? "your candidate" : "a teammate's candidate",
+        })),
         ...recent.map((v, i) => ({
           label: `@${v.version}`,
-          note: sameAsLive(prints[i] ?? null)
-            ? "same as live"
-            : (v.message ?? (v.changedFields?.length ? `changed ${v.changedFields.join(", ")}` : "")),
+          title: `@${v.version}`,
+          kind: "version" as const,
+          note: prints[i] === livePrint ? "same as live" : (v.message ?? (v.changedFields?.length ? `changed ${v.changedFields.join(", ")}` : "")),
         })),
       ],
       questions: inputs.map((i) => ({ id: i.id, prompt: i.prompt })),
-      /** Saved variants, runnable as `~id`. */
-      variants: (await evals.listVariants(o.owner, o.name)).map((v) => ({
-        id: v.id,
-        name: v.name,
-        base: v.base,
-        note: v.change.model ? `on ${v.change.model}` : v.change.effort ? `${v.change.effort} reasoning effort` : `adds: ${v.change.addInstructions}`,
-      })),
-      /** What a variant may switch to. */
+      /** What a new candidate may switch to. */
       // Models an agent can run on: the catalog also lists image, speech,
       // embedding and video models, which have no place in a chat turn.
       models: (await getLatch()).models
@@ -432,7 +469,7 @@ export const priceRunsFn = createServerFn({ method: "POST" })
       const p = await planRun(principal, { agent: data.agent, datasetId: data.datasetId, rubricId: data.rubricId, versions: [label], inputIds, repeats: data.repeats });
       out.push(
         p.ok
-          ? { label, ok: true as const, cost: p.estimate.cost, basis: p.estimate.basis, answers: p.estimate.agentRuns, reuse: p.reusable[0] ?? null }
+          ? { label, ok: true as const, filedAs: p.versions[0].label, cost: p.estimate.cost, basis: p.estimate.basis, answers: p.estimate.agentRuns, reuse: p.reusable[0] ?? null }
           : { label, ok: false as const, error: p.error },
       );
     }

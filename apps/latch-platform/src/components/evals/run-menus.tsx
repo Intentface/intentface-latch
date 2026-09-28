@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { ChevronLeft, Columns2, Loader2, Plus } from "lucide-react"
-import { createVariantFn, estimateAgainFn, getRunOptionsFn, priceRunsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
+import { createCandidateFn, estimateAgainFn, getRunOptionsFn, priceRunsFn, startAgainFn, startRunFn } from "@/lib/evals-server"
 import type { Estimate } from "@/lib/evals/v2/jobs"
 import { Popover } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils"
  */
 
 export type Ref = { runId: string; version: string }
-type Shown = { runId: string; version: string; run: { name: string | null; createdAt: number; questions: number; tries: number } }
+type Shown = { runId: string; version: string; name: string; run: { name: string | null; createdAt: number; questions: number; tries: number } }
 
 const money = (x: number) => (x < 1 ? `${Math.max(1, Math.round(x * 100))}¢` : `$${x.toFixed(2)}`)
 const day = (at: number) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
@@ -114,18 +114,18 @@ export function AddColumn({
   const [prices, setPrices] = useState<NonNullable<Awaited<ReturnType<typeof priceRunsFn>>> | null>(null)
   const [confirm, setConfirm] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [variantOpen, setVariantOpen] = useState(false)
+  const [newOpen, setNewOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
-    setVariantOpen(false)
+    setNewOpen(false)
     setConfirm(null)
     setError(null)
     void getRunOptionsFn({ data: { agent, datasetId } }).then(setOptions)
   }, [open, agent, datasetId])
 
-  const labels = [...(options?.versions.map((v) => v.label) ?? []), ...(options?.variants.map((v) => `~${v.id}`) ?? [])]
+  const labels = options?.versions.map((v) => v.label) ?? []
   const labelKey = labels.join(",")
   const inputKey = inputIds?.join(",") ?? ""
   useEffect(() => {
@@ -139,7 +139,7 @@ export function AddColumn({
     // labels and inputIds are keyed by their joined strings; the arrays are new every render.
   }, [open, labelKey, tries, agent, datasetId, rubricId, inputKey])
 
-  const nameOf = (label: string) => (label.startsWith("~") ? (options?.variants.find((v) => `~${v.id}` === label)?.name ?? label) : label)
+  const nameOf = (label: string) => options?.versions.find((v) => v.label === label)?.title ?? label
   const run = async (label: string, force = false) => {
     const pr = prices?.prices.find((x) => x.label === label)
     if (!prices || !pr?.ok) return
@@ -151,7 +151,8 @@ export function AddColumn({
     setBusy(null)
     if (!r.ok) return setError(r.error)
     setOpen(false)
-    onStarted([{ runId: r.id, version: nameOf(label) }])
+    // Filed under what it ran as — `live` as its version, `@7` — so the column never moves.
+    onStarted([{ runId: r.id, version: pr.filedAs }])
   }
   const row = (label: string, note: string | undefined) => {
     const pr = prices?.prices.find((x) => x.label === label)
@@ -219,14 +220,14 @@ export function AddColumn({
         {first ? "Run a configuration" : <><Plus className="size-3.5" /> Run</>}
       </Popover.Trigger>
       <Popover.Content align={first ? "start" : "end"} className="w-[24rem] p-1.5">
-        {variantOpen && options ? (
-          <VariantForm
+        {newOpen && options ? (
+          <CandidateForm
             agent={agent}
-            versions={options.versions.map((v) => v.label)}
+            versions={options.versions.map((v) => ({ label: v.label, title: v.title }))}
             models={options.models}
             current={{ model: options.model, effort: options.effort }}
-            onBack={() => setVariantOpen(false)}
-            onMade={() => (setVariantOpen(false), void getRunOptionsFn({ data: { agent, datasetId } }).then(setOptions))}
+            onBack={() => setNewOpen(false)}
+            onMade={() => (setNewOpen(false), void getRunOptionsFn({ data: { agent, datasetId } }).then(setOptions))}
           />
         ) : (
           <>
@@ -238,15 +239,17 @@ export function AddColumn({
               <Loader2 className="text-ink-tertiary m-2.5 size-4 animate-spin" />
             ) : (
               <ul>
-                {options.versions.map((v) => row(v.label, v.note))}
-                {options.variants.length > 0 && <li className="text-ink-tertiary px-2.5 pt-2 pb-0.5 text-[11px]">Variants</li>}
-                {options.variants.map((v) => row(`~${v.id}`, v.note))}
+                {options.versions.filter((v) => v.kind === "live").map((v) => row(v.label, v.note))}
+                {options.versions.some((v) => v.kind === "candidate") && <li className="text-ink-tertiary px-2.5 pt-2 pb-0.5 text-[11px]">Candidates — not live yet</li>}
+                {options.versions.filter((v) => v.kind === "candidate").map((v) => row(v.label, v.note))}
                 <li>
-                  <button type="button" onClick={() => setVariantOpen(true)} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
-                    <span className="text-ink-primary">+ New variant</span>
-                    <span className="text-ink-tertiary text-xs">A version with one thing changed — model, reasoning effort, an instruction</span>
+                  <button type="button" onClick={() => setNewOpen(true)} className="hover:bg-primary-bg-hover flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm">
+                    <span className="text-ink-primary">+ New candidate</span>
+                    <span className="text-ink-tertiary text-xs">One thing changed — model, reasoning effort, an instruction. Edit it further in the agent editor.</span>
                   </button>
                 </li>
+                {options.versions.some((v) => v.kind === "version") && <li className="text-ink-tertiary px-2.5 pt-2 pb-0.5 text-[11px]">Earlier versions</li>}
+                {options.versions.filter((v) => v.kind === "version").map((v) => row(v.label, v.note))}
               </ul>
             )}
             {error && <p className="px-2.5 pb-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
@@ -280,7 +283,7 @@ export function EarlierAnswers({ hidden, onShow }: { hidden: Shown[]; onShow: (r
                 className="hover:bg-primary-bg-hover flex w-full min-w-0 flex-col items-start rounded-md px-2.5 py-1.5 text-left text-sm"
               >
                 <span className="text-ink-primary max-w-full truncate">
-                  {h.version} · {day(h.run.createdAt)}
+                  {h.name} · {day(h.run.createdAt)}
                 </span>
                 <span className="text-ink-tertiary max-w-full truncate text-xs tabular-nums">
                   {h.run.name ? `${h.run.name} · ` : ""}
@@ -391,8 +394,8 @@ export function AgainPanel({
   )
 }
 
-/** A variant: pick the version it starts from, and the one thing that differs. */
-function VariantForm({
+/** A new candidate: pick what it starts from, and the one thing that differs. */
+function CandidateForm({
   agent,
   versions,
   models,
@@ -401,13 +404,14 @@ function VariantForm({
   onMade,
 }: {
   agent: string
-  versions: string[]
+  versions: { label: string; title: string }[]
   models: string[]
   current: { model: string; effort: string | null }
   onBack: () => void
   onMade: (id: string, name: string) => void
 }) {
-  const [base, setBase] = useState(versions[0] ?? "live")
+  const [base, setBase] = useState(versions[0]?.label ?? "live")
+  const baseTitle = versions.find((v) => v.label === base)?.title.replace(/^live · .*/, "live") ?? base
   const [what, setWhat] = useState<"model" | "effort" | "instructions">("model")
   // Start on a sibling of the current model — the usual question is "a smaller or bigger one of these?"
   const family = current.model.replace(/-[^-]*$/, "")
@@ -420,7 +424,7 @@ function VariantForm({
   const box = "border-primary-border bg-primary-bg w-full rounded-md border px-2 py-1.5 text-[13px] outline-none"
   const make = async () => {
     setBusy(true)
-    const r = await createVariantFn({
+    const r = await createCandidateFn({
       data: { agent, base, name, change: what === "model" ? { model } : what === "effort" ? { effort } : { addInstructions: line } },
     })
     setBusy(false)
@@ -432,13 +436,15 @@ function VariantForm({
       <button type="button" onClick={onBack} className="text-ink-tertiary hover:text-ink-primary flex items-center gap-1 text-xs">
         <ChevronLeft className="size-3.5" /> Configurations
       </button>
-      <div className="text-ink-primary text-sm font-medium">New variant</div>
-      <p className={hint}>Nothing is saved to the agent and users aren't affected. If it wins, make it a version in the agent builder.</p>
+      <div className="text-ink-primary text-sm font-medium">New candidate</div>
+      <p className={hint}>Users aren't affected. It opens in the agent editor like any candidate, and if it wins, make it live from its column.</p>
       <label className="block space-y-1">
         <span className={hint}>Based on</span>
         <select value={base} onChange={(e) => setBase(e.target.value)} className={box}>
           {versions.map((v) => (
-            <option key={v}>{v}</option>
+            <option key={v.label} value={v.label}>
+              {v.title}
+            </option>
           ))}
         </select>
       </label>
@@ -478,7 +484,7 @@ function VariantForm({
       )}
       <label className="block space-y-1">
         <span className={hint}>Name — optional, as its column will show it</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={48} className={box} placeholder={what === "model" ? `${base} · ${model.replace(/^claude-/, "")}` : what === "effort" ? `${base} · ${effort} effort` : `${base} + stricter sourcing`} />
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={48} className={box} placeholder={what === "model" ? `${baseTitle} · ${model.replace(/^claude-/, "")}` : what === "effort" ? `${baseTitle} · ${effort} effort` : `${baseTitle} + stricter sourcing`} />
       </label>
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
       <button

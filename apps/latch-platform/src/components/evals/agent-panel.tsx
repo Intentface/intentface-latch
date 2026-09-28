@@ -123,7 +123,7 @@ const CHANGES = new Set([
   "start_run",
   "judge_run",
   "stop_run",
-  "create_variant",
+  "create_candidate",
   "propose_fix",
   "suggest_note",
   "find_patterns",
@@ -149,8 +149,8 @@ function startersFor(c: PanelContext) {
       prompt: `For ${c.agent}, on ${run}: read up to 5 threads that failed a check and suggest a note on each.`,
     },
     {
-      label: "Where does @draft differ from live?",
-      prompt: `For ${c.agent}, on ${run}: where does @draft differ from live, question by question? Read the threads that changed.`,
+      label: "Where do the columns differ?",
+      prompt: `For ${c.agent}, on ${run}: where does each column differ from the baseline, question by question? Read the threads that changed.`,
     },
     {
       label: "Triage the failure modes",

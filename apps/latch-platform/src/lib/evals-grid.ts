@@ -8,7 +8,8 @@ import type { Principal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import type { Rubric, ThreadRef, Verdict } from "./evals/v2/model";
-import { compareVersions, summarize } from "./evals/v2/runner";
+import { compareVersions, configFingerprint, summarize } from "./evals/v2/runner";
+import { candidatesOf, titleOf } from "./candidates";
 import { thresholdFor, trustOf } from "./evals/v2/alignment";
 import { describeCounted } from "./evals/v2/counted";
 
@@ -42,6 +43,10 @@ export async function computeGrid(
     const latest = await evals.getRubric(o.owner, data.rubricId);
     if (!latest) return null;
     const runs = await evals.listRuns(o.owner, data.datasetId);
+    // Results are filed under ids that never move (`@7`, `@c_…`); columns show names.
+    const found = await candidatesOf(principal, o.name, { closed: true });
+    const candidates = found?.candidates ?? [];
+    const liveLabel = found?.liveVersion != null ? `@${found.liveVersion}` : "live";
 
     // Columns: as asked, or every version of one run (the latest by default).
     let columns: ResultRef[] = (data.columns ?? []).filter((c) => runs.some((r) => r.runId === c.runId && r.versions.includes(c.version)));
@@ -53,7 +58,8 @@ export async function computeGrid(
       const complete = runs.find((r) => r.questions >= Math.floor(size * 0.9) && r.threads >= r.versions.length * r.questions);
       const run = runs.find((r) => r.runId === data.runId) ?? complete ?? runs.at(0);
       if (!run) return null;
-      const order = (v: string) => (v === "live" ? "" : v);
+      // Live first, the baseline; then versions, then candidates.
+      const order = (v: string) => (v === liveLabel || v === "live" ? "0" : v.startsWith("@c_") ? `2${titleOf(v, candidates)}` : `1${v}`);
       columns = [...run.versions].sort((a, b) => order(a).localeCompare(order(b))).map((version) => ({ runId: run.runId, version }));
     }
     // The same result twice is one column.
@@ -68,9 +74,10 @@ export async function computeGrid(
     // is enough. Everything is keyed by the label, so two runs of one version
     // on one day get their time too — or their answers merge into one column.
     const short = (c: ResultRef) => {
-      if (!crossRun) return c.version;
+      const name = titleOf(c.version, candidates);
+      if (!crossRun) return name;
       const r = runOf.get(c.runId)!;
-      return `${c.version} · ${r.name ?? when(r.createdAt)}`;
+      return `${name} · ${r.name ?? when(r.createdAt)}`;
     };
     const clash = (c: ResultRef) => shown.filter((x) => short(x) === short(c)).length > 1;
     const labelOf = (c: ResultRef) => (clash(c) ? `${short(c)}, ${time(runOf.get(c.runId)!.createdAt)}` : short(c));
@@ -131,7 +138,32 @@ export async function computeGrid(
       crossRun,
       columns: columns.map((c, i) => {
         const r = runOf.get(c.runId)!;
-        return { ...c, label: labels[i], runName: r.name, at: r.createdAt, judgedWith: judgedWith[i], spent: spentOf(labels[i]), setup: setupOf(labels[i]), config: threads.find((t) => t.version === labels[i])?.configFingerprint ?? null };
+        const config = threads.find((t) => t.version === labels[i])?.configFingerprint ?? null;
+        const cand = c.version.startsWith("@c_") ? candidates.find((x) => `@${x.id}` === c.version) : undefined;
+        return {
+          ...c,
+          label: labels[i],
+          runName: r.name,
+          at: r.createdAt,
+          judgedWith: judgedWith[i],
+          spent: spentOf(labels[i]),
+          setup: setupOf(labels[i]),
+          config,
+          /** Whether this is what people get now. */
+          live: c.version === liveLabel,
+          /** A candidate's state: still open, published as a version, or discarded — and whether it changed since these answers. */
+          candidate: cand
+            ? {
+                id: cand.id,
+                title: cand.title,
+                /** Where it opens in the agent editor. */
+                scope: found!.rec.scope,
+                publishedAs: cand.publishedAs ?? null,
+                discarded: !!cand.closedAt && !cand.publishedAs,
+                edited: !cand.closedAt && config !== null && configFingerprint(cand.record) !== config,
+              }
+            : null,
+        };
       }),
       rubricVersion: rubric.version,
       latestVersion: latest.version,

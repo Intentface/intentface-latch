@@ -103,7 +103,8 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
   const { runtime, agentStore, evals } = await getLatch();
   const { planRun, startPlannedRun } = await import("@/lib/evals-jobs");
   const { groupNotes, draftCheck, addCheckFromMode } = await import("@/lib/failures-actions");
-  const { createQuestionSet, editQuestions, createChecks, editChecks, createVariant } = await import("@/lib/evals-actions");
+  const { createQuestionSet, editQuestions, createChecks, editChecks, createCandidate } = await import("@/lib/evals-actions");
+  const { resolveLabel, uniqueTitle, liveVersionOf } = await import("@/lib/candidates");
   const { startJudgeJob } = await import("@/lib/evals-jobs");
   const { toEditable } = await import("@/lib/evals/v2/validate");
   const { computeGrid } = await import("@/lib/evals-grid");
@@ -298,18 +299,17 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
 
     read_agent: tool({
       description:
-        "The agent's configuration — instructions, model, its connection tools AND the built-in tools its settings switch on (sandbox, default tools, web, memory, authored tools, subagents) — as live, as the unpublished draft, or at a published version. Read it before writing questions, so they exercise what the agent can actually do.",
-      inputSchema: z.object({ agent: Agent, version: z.string().default("live").describe('"live", "@draft" or "@3"') }),
+        "The agent's configuration — instructions, model, its connection tools AND the built-in tools its settings switch on (sandbox, default tools, web, memory, authored tools, subagents) — as live, as a candidate, or at a published version. Read it before writing questions, so they exercise what the agent can actually do.",
+      inputSchema: z.object({ agent: Agent, version: z.string().default("live").describe('"live", "@3", or a candidate: its title or "@c_…"') }),
       execute: async ({ agent, version }) => {
         const o = await scope(agent);
         if ("error" in o) return o;
-        const rec =
-          version === "live"
-            ? o.rec
-            : version === "@draft"
-              ? (await agentStore.getDraft(principal, o.name, o.rec.scope))?.record
-              : await agentStore.getVersion(principal, o.name, o.rec.scope, Number(version.replace("@", "")));
-        if (!rec) return { error: `${o.name} has no ${version}.` };
+        let rec;
+        try {
+          rec = (await resolveLabel(principal, o.name, version)).record;
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
         const { builtInToolsOf } = await import("@/lib/agent-tools");
         return {
           version,
@@ -378,7 +378,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         agent: Agent,
         questionSetId: z.string(),
         checksId: z.string(),
-        versions: z.array(z.string()).describe('e.g. ["live", "@draft"]'),
+        versions: z.array(z.string()).describe('e.g. ["live", "@c_ab12"] — see list_versions'),
         questions: z.array(z.string()).optional().describe("Question ids; omit with onlyFailedIn or for all"),
         onlyFailedIn: z.string().optional().describe("A run id: re-run only the questions that failed a check in it"),
         repeats: z.number().int().min(1).max(5).default(1),
@@ -417,7 +417,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
       description:
         "Run questions against versions and judge them. Costs money, so a person approves it first — put the plan and the cost from estimate_run in `summary`. Returns a job id; follow it with job_status.",
       inputSchema: z.object({
-        summary: z.string().describe('For the person approving, e.g. "Re-run the 4 questions that failed, on live and @draft, once each: 8 agent runs, about $0.60."'),
+        summary: z.string().describe('For the person approving, e.g. "Re-run the 4 questions that failed, on live and “stricter sourcing”, once each: 8 agent runs, about $0.60."'),
         name: z.string().optional().describe('What the run tests, as the Run picker will show it, e.g. "stricter read-failure rule"'),
         agent: Agent,
         questionSetId: z.string(),
@@ -464,24 +464,35 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
 
     propose_fix: tool({
       description:
-        "Change the agent's instructions in its unpublished DRAFT (@draft) — never the live agent. Each edit replaces one exact passage (quote it from read_agent) or appends. A person approves the diff first, and only a person publishes. Then compare live and @draft with estimate_run/start_run on the questions that failed.",
+        "Change the agent's instructions in a CANDIDATE — never the live agent. Pass `candidate` (its title or @c_… id) to edit one, or `newCandidate` to start one from live. Each edit replaces one exact passage (quote it from read_agent) or appends. A person approves the diff first, and only a person publishes. Then run live and the candidate with estimate_run/start_run on the questions that failed.",
       inputSchema: z.object({
         summary: z.string().describe("For the person approving: what changes and which failure it should fix."),
         agent: Agent,
+        candidate: z.string().optional().describe("An existing candidate's title or @c_… id, to edit"),
+        newCandidate: z.string().optional().describe("A short title for a new candidate started from live, e.g. \"stricter sourcing\""),
         edits: z
           .array(
             z.object({
-              find: z.string().optional().describe("Exact passage to replace, copied from the current draft (or live if there is no draft). Omit to append."),
+              find: z.string().optional().describe("Exact passage to replace, copied from the candidate (or live, for a new one). Omit to append."),
               replace: z.string().describe("The new text"),
             }),
           )
           .min(1),
       }),
-      execute: async ({ agent, edits }) => {
+      execute: async ({ agent, candidate, newCandidate, edits }) => {
         const o = await scope(agent);
         if ("error" in o) return o;
-        const draft = await agentStore.getDraft(principal, o.name, o.rec.scope);
-        const base = draft?.record ?? o.rec;
+        let target;
+        if (candidate) {
+          try {
+            target = (await resolveLabel(principal, o.name, candidate)).candidate;
+          } catch (e) {
+            return { error: e instanceof Error ? e.message : String(e) };
+          }
+          if (!target) return { error: `${candidate} is not a candidate. Name one, or pass newCandidate to start one.` };
+          if (target.closedAt) return { error: `“${target.title}” was ${target.publishedAs ? `published as @${target.publishedAs}` : "discarded"}; start a new candidate.` };
+        }
+        const base = target?.record ?? o.rec;
         let instructions = base.instructions;
         for (const e of edits) {
           if (!e.find) {
@@ -489,13 +500,19 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
             continue;
           }
           const at = instructions.indexOf(e.find);
-          if (at < 0) return { error: `Passage not found in the ${draft ? "draft" : "live"} instructions: "${e.find.slice(0, 80)}…". Read them again with read_agent.` };
+          if (at < 0) return { error: `Passage not found in the ${target ? `“${target.title}”` : "live"} instructions: "${e.find.slice(0, 80)}…". Read them again with read_agent.` };
           if (instructions.indexOf(e.find, at + 1) >= 0) return { error: `Passage appears more than once; quote more of it: "${e.find.slice(0, 80)}…"` };
           instructions = instructions.slice(0, at) + e.replace + instructions.slice(at + e.find.length);
         }
-        const published = (await agentStore.listVersions(principal, o.name, o.rec.scope)).find((v) => v.published)?.version;
-        await agentStore.saveDraft(principal, o.name, o.rec.scope, { ...base, instructions }, draft?.baseVersion ?? published);
-        return { saved: "@draft", startedFrom: draft ? "the existing draft" : "live", note: "Not published. A person publishes from the agent editor." };
+        const open = await agentStore.listCandidates(principal, o.name, o.rec.scope);
+        const published = await liveVersionOf(principal, o.name, o.rec.scope);
+        const saved = await agentStore.saveCandidate(principal, o.name, o.rec.scope, {
+          ...(target ? { id: target.id } : {}),
+          title: target?.title ?? uniqueTitle(newCandidate ?? "Evals fix", open),
+          record: { ...base, instructions },
+          ...(target ? {} : published != null ? { baseVersion: published } : {}),
+        });
+        return { saved: saved.title, runAs: `@${saved.id}`, startedFrom: target ? "the candidate" : "live", note: "Not published. A person publishes it — from its Evals column or the agent editor." };
       },
     }),
 
@@ -625,35 +642,42 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         editChecks(principal, { agent, checksId, ...(upserts ? { upserts } : {}), ...(deletes ? { deletes } : {}) }),
     }),
 
-    list_variants: tool({
-      description: "The agent's saved variants — versions with one thing changed (model, reasoning effort, an added instruction line). Run one with estimate_run/start_run using version `~<id>`.",
+    list_versions: tool({
+      description: "What can be run as a column: live (and which version it is), the agent's candidates — named, unpublished configurations — and recent published versions. Run any with estimate_run/start_run using its `runAs`.",
       inputSchema: z.object({ agent: Agent }),
       execute: async ({ agent }) => {
         const o = await scope(agent);
         if ("error" in o) return o;
-        return (await evals.listVariants(o.owner, o.name)).map((v) => ({ id: v.id, runAs: `~${v.id}`, name: v.name, base: v.base, change: v.change }));
+        const live = await liveVersionOf(principal, o.name, o.rec.scope);
+        const candidates = await agentStore.listCandidates(principal, o.name, o.rec.scope);
+        const versions = (await agentStore.listVersions(principal, o.name, o.rec.scope)).slice(0, 8);
+        return {
+          live: live == null ? "live" : `@${live}`,
+          candidates: candidates.map((c) => ({ title: c.title, runAs: `@${c.id}`, model: c.record.modelId, startedFrom: c.baseVersion == null ? null : `@${c.baseVersion}` })),
+          versions: versions.map((v) => ({ runAs: `@${v.version}`, live: v.published, ...(v.message ? { note: v.message } : {}) })),
+        };
       },
     }),
 
-    create_variant: tool({
+    create_candidate: tool({
       description:
-        "Save a variant: a version (live, @draft, @3) with ONE thing changed — the model, the reasoning effort, or a line added to the instructions — to run as its own column without saving a version or touching @draft. Free; returns `runAs` for estimate_run/start_run.",
+        "Save a candidate: live, a version (@3) or another candidate with ONE thing changed — the model, the reasoning effort, or a line added to the instructions — to run as its own column. Nothing goes live. Free; returns `runAs` for estimate_run/start_run. For bigger changes to the instructions use propose_fix.",
       inputSchema: z.object({
         agent: Agent,
-        base: z.string().describe('The version it starts from: "live", "@draft", "@3"'),
+        base: z.string().describe('What it starts from: "live", "@3", or a candidate\'s title'),
         model: z.string().optional().describe("A model id to run on instead"),
         effort: z.enum(["minimal", "low", "medium", "high"]).optional().describe("Reasoning effort instead"),
         addInstructions: z.string().optional().describe("A line appended to the instructions"),
       }),
       execute: async ({ agent, base, model, effort, addInstructions }) => {
-        const r = await createVariant(principal, { agent, base, change: { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(addInstructions ? { addInstructions } : {}) } });
-        return r.ok ? { ...r, runAs: `~${r.id}`, next: "estimate_run with versions [runAs] on the inputs it should fix, then start_run." } : r;
+        const r = await createCandidate(principal, { agent, base, change: { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(addInstructions ? { addInstructions } : {}) } });
+        return r.ok ? { title: r.name, runAs: r.label, next: "estimate_run with versions [runAs] on the inputs it should fix, then start_run." } : r;
       },
     }),
 
     compare_results: tool({
       description:
-        "Compare results from any runs exactly as the Results page shows them: the first is the baseline; each column's score, how many inputs scored higher or lower than the baseline and the verdict, every cell, then per check. Use it for a new @draft result against a live result from an earlier run, so live need not run again.",
+        "Compare results from any runs exactly as the Results page shows them: the first is the baseline; each column's score, how many inputs scored higher or lower than the baseline and the verdict, every cell, then per check. Use it for a new candidate's result against a live result from an earlier run, so live need not run again.",
       inputSchema: z.object({
         agent: Agent,
         questionSetId: z.string(),
@@ -755,13 +779,13 @@ How to work:
 - Some failures need knowledge you do not have: what the business wants, what this user needed. When you are unsure, say that in the note's why rather than guessing, and leave it to the person.
 
 Deciding what to do (after people have accepted notes): find_patterns, then triage each failure mode.
-- "fix" when the cause is plain — an instruction that is missing, wrong or ambiguous; a tool that fails. Do not build a check for these: propose_fix on @draft, then re-run ONLY the questions that failed (estimate_run with onlyFailedIn) on @draft, and report question by question whether it helped and whether anything got worse.
+- "fix" when the cause is plain — an instruction that is missing, wrong or ambiguous; a tool that fails. Do not build a check for these: propose_fix into a candidate, then re-run ONLY the questions that failed (estimate_run with onlyFailedIn) on that candidate, and report question by question whether it helped and whether anything got worse.
 - Do not re-run a baseline that has not changed. estimate_run says when a version (usually live) already answered these questions in an earlier run (alreadyAnswered): run only the changed version, pass the old result as compareWith, then compare_results. Re-run the baseline only when something outside the agent may have changed since (its documents, tools, connections, or a long time), when the person asks, or when a result came from a different number of tries; say that the comparison spans runs.
 - "measure" when it is subjective, recurring or risky — something that could come back after other changes. propose_check, show the person the draft, and add_check once they agree.
 - "leave" when it is rare and harmless. Say so; not every failure is worth effort.
 A fix is judged by whether the failed questions pass now without others breaking — a handful of re-runs cannot prove it; say how many questions it rests on, and when a full run would be worth its cost.
 
-Money and changes: estimate_run is free; always call it and put the cost in start_run's summary. start_run, propose_fix and add_check wait for the person's approval. propose_fix only ever writes @draft.
+Money and changes: estimate_run is free; always call it and put the cost in start_run's summary. start_run, propose_fix and add_check wait for the person's approval. propose_fix only ever writes a candidate; only a person makes anything live.
 
 The tests themselves: you can read, create and edit question sets (list_questions, create_question_set, edit_questions) and checks (list_checks, create_checks, edit_checks), each behind the person's approval. Never loosen a check or a question so that a failing agent passes — the tests measure the agent, not the other way round. Change a test when it is wrong: it asks the wrong thing, a good answer it describes is out of date, or it cannot be judged from the thread; say which. After editing checks, judge_run re-scores a run under the new version (judge only, a few cents).
 
@@ -771,13 +795,13 @@ Writing a judge check — pick what the judge returns, in JEV's three types:
 - score ({"type":"score","levels":[...],"bad":n}): a place on an ordered spectrum, worst first — too short / about right / too long is NOT a score (both ends are bad): use choice. Give every level a meaning a reviewer could apply, and set the pass line (levels at or below "bad" fail).
 One check measures one thing: a check that mixes two ("accurate and concise") gives low-confidence answers. Leave "judge" out to use the default (a JEV model: fast, decision-only, returns probabilities); set a chat model id only when the question needs reasoning over long context, and say why in "because".
 
-How the Evals page is laid out, so you can point people at it: inputs are the rows, configurations are the columns — live, @draft, a published @3, or a variant (a version with one thing changed, run as \`~id\`). A column's answers are graded; the first column is the baseline. "Answer & grade again" adds a graded try to a column; "Grade again" re-grades a column's answers with the current checks; a new configuration is a new column.
+How the Evals page is laid out, so you can point people at it: inputs are the rows, configurations are the columns — a published version (@7, tagged "live" when it is what people get) or a candidate: a named, unpublished configuration, shown by its title, that anyone editing the agent can open in the agent editor. A candidate column tagged "edited" changed after those answers; run it again for a fresh column. A column's menu can make it live. A column's answers are graded; the first column is the baseline. "Answer & grade again" adds a graded try to a column; "Grade again" re-grades a column's answers with the current checks; a new configuration is a new column.
 - Each input says what should happen for itself: a good answer, the document that holds it, tool calls it should or shouldn't make (calls), what it must say, must not say, whether it should decline, and yes/no questions for the grader (asks). When a failure is specific to some inputs, put the expectation on those inputs (edit_questions) rather than adding a check every input gets.
-- To try a model, reasoning-effort or single-instruction change without touching @draft, create_variant and run it on just the inputs it should fix. To change the instructions or tools for real, propose_fix on @draft.
+- To try a model, reasoning-effort or single-instruction change, create_candidate and run it on just the inputs it should fix. To change the instructions for real, propose_fix into a candidate (a new one, or one the person names).
 
 What you never do: accept your own suggestions, rule on whether the judge was right, or publish the agent. Those belong to the person.
 
-Be brief. Lead with what you found ("4 of 6 failures end with a question instead of an answer"), then the evidence. Name threads by question number and version ("#3 on @draft"), not ids, unless asked.`,
+Be brief. Lead with what you found ("4 of 6 failures end with a question instead of an answer"), then the evidence. Name threads by question number and version ("#3 on stricter sourcing"), not ids, unless asked.`,
     toolSources: [
       {
         async open(principal: Principal) {

@@ -1,5 +1,5 @@
 import type { Client } from "@libsql/client";
-import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, Variant, InputFile, View } from "./model";
+import type { Check, Dataset, Input, Owner, Rubric, Ruling, ThreadRef, Verdict, InputFile, View } from "./model";
 import type { EvalJob } from "./jobs";
 import type { FailureMode, Note, Suggestion } from "./failures";
 
@@ -80,15 +80,10 @@ export interface EvalsStore {
   saveRuling: (r: Ruling) => Promise<void>;
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
   deleteRuling: (threadId: string, checkId: string) => Promise<void>;
-  saveVariant: (v: Variant) => Promise<void>;
   /** A set's saved views, oldest first — the order of the tabs. */
   listViews: (datasetId: string) => Promise<View[]>;
   saveView: (v: View) => Promise<void>;
   removeView: (datasetId: string, id: string) => Promise<void>;
-  getVariant: (owner: Owner, id: string) => Promise<Variant | null>;
-  listVariants: (owner: Owner, agentName: string) => Promise<Variant[]>;
-  /** The variant and every answer filed under its old name, in one go. */
-  renameVariant: (owner: Owner, v: Variant, name: string) => Promise<void>;
   listRulings: (q: { threadIds?: string[]; checkIds?: string[] }) => Promise<Ruling[]>;
 }
 
@@ -145,9 +140,6 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
     `CREATE TABLE IF NOT EXISTS latch_eval_views (
       dataset_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, tags TEXT NOT NULL,
       created_at INTEGER NOT NULL, PRIMARY KEY (dataset_id, id))`,
-    `CREATE TABLE IF NOT EXISTS latch_eval_variants (
-      owner TEXT NOT NULL, id TEXT NOT NULL, agent_name TEXT NOT NULL, base TEXT NOT NULL, name TEXT NOT NULL,
-      change TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (owner, id))`,
     `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
       thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
       by TEXT, created_at INTEGER NOT NULL,
@@ -233,16 +225,6 @@ const toVerdict = (r: Row): Verdict => ({
 });
 
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(",");
-
-const variantOf = (r: Record<string, unknown>): Variant => ({
-  owner: String(r.owner),
-  id: String(r.id),
-  agentName: String(r.agent_name),
-  base: String(r.base),
-  name: String(r.name),
-  change: JSON.parse(String(r.change)) as Variant["change"],
-  createdAt: Number(r.created_at),
-});
 
 export function createEvalsStore(client: Client): EvalsStore {
   const rows = async (sql: string, args: unknown[] = []) =>
@@ -698,29 +680,6 @@ export function createEvalsStore(client: Client): EvalsStore {
     },
     async removeView(datasetId, id) {
       await client.execute({ sql: `DELETE FROM latch_eval_views WHERE dataset_id = ? AND id = ?`, args: [datasetId, id] });
-    },
-    async saveVariant(v) {
-      await client.execute({
-        sql: `INSERT INTO latch_eval_variants (owner, id, agent_name, base, name, change, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(owner, id) DO UPDATE SET base = excluded.base, name = excluded.name, change = excluded.change`,
-        args: [v.owner, v.id, v.agentName, v.base, v.name, JSON.stringify(v.change), v.createdAt],
-      });
-    },
-    async getVariant(owner, id) {
-      const r = (await rows(`SELECT * FROM latch_eval_variants WHERE owner = ? AND id = ?`, [owner, id]))[0];
-      return r ? variantOf(r) : null;
-    },
-    async renameVariant(owner, v, name) {
-      await client.batch(
-        [
-          { sql: `UPDATE latch_eval_variants SET name = ? WHERE owner = ? AND id = ?`, args: [name, owner, v.id] },
-          { sql: `UPDATE latch_eval_threads SET version = ? WHERE owner = ? AND agent_name = ? AND version = ?`, args: [name, owner, v.agentName, v.name] },
-        ],
-        "write",
-      );
-    },
-    async listVariants(owner, agentName) {
-      return (await rows(`SELECT * FROM latch_eval_variants WHERE owner = ? AND agent_name = ? ORDER BY created_at DESC`, [owner, agentName])).map(variantOf);
     },
     async deleteRuling(threadId, checkId) {
       await client.execute({ sql: `DELETE FROM latch_eval_rulings WHERE thread_id = ? AND check_id = ?`, args: [threadId, checkId] });

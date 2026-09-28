@@ -227,24 +227,6 @@ export interface Rubric {
   createdAt: number;
 }
 
-/**
- * A version with one thing changed, run without saving a version: the model,
- * the reasoning effort, or a line added to the instructions. It resolves as
- * `name[@base]~id`, and its fingerprint is that of the changed configuration,
- * so it is its own column, reused and compared like any other.
- */
-export interface Variant {
-  owner: Owner;
-  id: string;
-  agentName: string;
-  /** `live`, `@draft`, `@3`. */
-  base: string;
-  /** What the column says, e.g. `live · sonnet-5`. */
-  name: string;
-  change: { model?: string; effort?: "minimal" | "low" | "medium" | "high"; addInstructions?: string };
-  createdAt: number;
-}
-
 // ─── Threads, verdicts, rulings ────────────────────────────────────────────
 
 /**
@@ -267,7 +249,7 @@ export interface ThreadRef {
   runId?: string;
   /** Which repeat of this (input, version) — 0-based. */
   attempt?: number;
-  /** What the column says: `live`, `@3`, `@draft`. */
+  /** What the answers are filed under: `@3`, or a candidate `@c_…` (older results: `live`). */
   version: string;
   /** Hash of everything behaviour can turn on — see `configFingerprint`. */
   configFingerprint: string;
@@ -314,9 +296,9 @@ export interface Ruling {
 
 /** A configuration under test — what a column in a report is. */
 export interface Version {
-  /** `live`, `@3`, `@draft`. */
+  /** What its answers are filed under: `@3`, or a candidate `@c_…`. */
   label: string;
-  /** The agent reference that resolves it: `edge-v2`, `edge-v2@3`, `edge-v2@draft`. */
+  /** The agent reference that resolves it: `edge-v2@3`, `edge-v2@c_…`. */
   ref: string;
 }
 

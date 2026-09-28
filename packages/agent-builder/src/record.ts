@@ -199,11 +199,16 @@ export const normalizeAgentName = (s: string): string =>
  * `org:`/`user:` prefix (stored names never contain `:` — normalizeAgentName
  * strips it). Split a possibly-pinned reference.
  */
+export type AgentRefAt = number | "draft" | `c_${string}`;
+
+/** A candidate's id — the `c_…` in `name@c_…`. */
+export const isCandidateId = (s: string): s is `c_${string}` => /^c_[a-z0-9]+$/.test(s);
+
 export function parseAgentRef(ref: string): {
   name: string;
   scope?: AgentScope;
-  /** A published version, or the author's draft. Omitted → whatever is live. */
-  at?: number | "draft";
+  /** A published version, the author's draft, or a candidate (`c_…`). Omitted → whatever is live. */
+  at?: AgentRefAt;
 } {
   const scoped = /^(org|user):(.+)$/.exec(ref);
   const scope = scoped ? (scoped[1] as AgentScope) : undefined;
@@ -211,9 +216,9 @@ export function parseAgentRef(ref: string): {
   // `name@7` / `name@draft` pins the CONFIGURATION. Without it, measuring an
   // old version means publishing it first, which nobody does — so a
   // comparison quietly becomes two runs of whatever happened to be live.
-  const pinned = /^(.+)@(draft|\d+)$/.exec(rest);
+  const pinned = /^(.+)@(draft|\d+|c_[a-z0-9]+)$/.exec(rest);
   if (!pinned) return scope ? { name: rest, scope } : { name: rest };
-  const at = pinned[2] === "draft" ? ("draft" as const) : Number(pinned[2]);
+  const at: AgentRefAt = pinned[2] === "draft" ? "draft" : isCandidateId(pinned[2]!) ? pinned[2] : Number(pinned[2]);
   return scope ? { name: pinned[1]!, scope, at } : { name: pinned[1]!, at };
 }
 

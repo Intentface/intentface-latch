@@ -10,14 +10,13 @@
  *     deadline, a crashed process, a dev-server restart.
  */
 import { typeSafeAi } from "@ai-sdk/typesafe-ai";
-import { parseAgentRef } from "@intentface/latch-agent-builder";
-import type { AgentRecord, AgentStore } from "./agent-store";
+import type { AgentStore } from "./agent-store";
 import { getLatch } from "./latch";
 import type { Principal } from "./session";
 import { evaluationModelFor } from "./evals/v2/evaluation-model";
 import { MAX_UNITS, advanceJob, estimateRun } from "./evals/v2/jobs";
 import type { EvalJob } from "./evals/v2/jobs";
-import type { Check, ThreadRef, Variant } from "./evals/v2/model";
+import type { Check, ThreadRef } from "./evals/v2/model";
 import { validateChecks } from "./evals/v2/validate";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
 import { configFingerprint, judgeThreads } from "./evals/v2/runner";
@@ -27,51 +26,19 @@ const LEASE_MS = 5 * 60_000;
 /** Stop STARTING work this long into a slice; Vercel functions are cut at 300s. */
 const SLICE_MS = 4 * 60_000;
 
-/** A record with a variant's one change applied — what its fingerprint is taken from. */
-export function applyVariant(rec: AgentRecord, change: Variant["change"]): AgentRecord {
-  const add = change.addInstructions?.trim();
-  return {
-    ...rec,
-    ...(change.model ? { modelId: change.model } : {}),
-    ...(change.effort ? { exec: { ...rec.exec, effort: change.effort } } : {}),
-    ...(add ? { instructions: `${rec.instructions}\n\n${add}` } : {}),
-  };
-}
-
 /**
- * Resolve `live`, `@draft`, `@3` — or a variant, `~id` — to the
- * configurations they name, right now. A variant's label is its name.
+ * Resolve `live`, `@3`, a candidate (`@c_…`, or its title) to the
+ * configurations they name, right now. Each comes back filed under a label
+ * that never moves: `live` as the version it is, `@7`.
  */
-export async function resolveVersions(agentStore: AgentStore, principal: Principal, agentName: string, labels: string[]) {
-  const out: { label: string; ref: string; fingerprint: string; modelId?: string }[] = [];
-  const live = await agentStore.getRecord(principal, agentName);
-  const scope = live?.scope ?? "user";
+export async function resolveVersions(_agentStore: AgentStore, principal: Principal, agentName: string, labels: string[]) {
+  const { resolveLabel } = await import("./candidates");
+  const out: { label: string; ref: string; fingerprint: string; modelId?: string; title: string }[] = [];
   for (const asked of labels) {
-    let label = asked;
-    let variant: Variant | null = null;
-    // A variant, by id (`~v_ab12`) or by the name its column shows.
-    if (asked.startsWith("~") || (asked !== "live" && !asked.startsWith("@"))) {
-      const { evals } = await getLatch();
-      const owner = agentOwnerKey(principal, scope);
-      variant = asked.startsWith("~")
-        ? await evals.getVariant(owner, asked.slice(1))
-        : ((await evals.listVariants(owner, agentName)).find((v) => v.name === asked) ?? null);
-      if (!variant) throw new Error(asked.startsWith("~") ? "That variant no longer exists." : `${asked} does not exist for ${agentName}.`);
-      label = variant.base;
-    }
-    const ref = label === "live" ? agentName : `${agentName}${label}`;
-    const p = parseAgentRef(ref);
-    const rec =
-      p.at === undefined
-        ? live
-        : p.at === "draft"
-          ? (await agentStore.getDraft(principal, p.name, scope))?.record
-          : await agentStore.getVersion(principal, p.name, scope, p.at);
-    if (!rec) throw new Error(`${label} does not exist for ${agentName}.`);
-    if (variant) {
-      const applied = applyVariant(rec, variant.change);
-      out.push({ label: variant.name, ref: `${ref}~${variant.id}`, fingerprint: configFingerprint(applied), modelId: applied.modelId });
-    } else out.push({ label, ref, fingerprint: configFingerprint(rec), modelId: rec.modelId });
+    const r = await resolveLabel(principal, agentName, asked);
+    // Two names for one configuration are one column.
+    if (out.some((o) => o.label === r.label)) continue;
+    out.push({ label: r.label, ref: r.label === "live" ? agentName : `${agentName}${r.label}`, fingerprint: configFingerprint(r.record), modelId: r.record.modelId, title: r.title });
   }
   return out;
 }

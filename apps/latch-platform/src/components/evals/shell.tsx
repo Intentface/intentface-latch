@@ -183,7 +183,7 @@ export function EvalsEmpty() {
       </p>
       <pre className="smooth-shadow-ring-xs smooth-ring-primary-border bg-primary-bg text-ink-secondary overflow-x-auto rounded-lg p-3 text-xs">
         {`pnpm evals import --agent NAME --name QUESTIONS --file questions.json
-pnpm evals run    --dataset ID --versions live,@draft --only 1,2,3
+pnpm evals run    --dataset ID --versions live,@c_ab12 --only 1,2,3
 pnpm evals judge  --dataset ID --rubric CHECKS`}
       </pre>
     </div>
@@ -313,7 +313,7 @@ export function NoEvalsYet({ agent, onCreated }: { agent: string; onCreated: (da
           the first answers on the Failures page.
         </li>
         <li>
-          <span className="text-ink-primary font-medium">3. A first run.</span> A few questions on live (and @draft, if it has one), priced before it
+          <span className="text-ink-primary font-medium">3. A first run.</span> A few questions on live (and any candidates), priced before it
           starts.
         </li>
       </ol>

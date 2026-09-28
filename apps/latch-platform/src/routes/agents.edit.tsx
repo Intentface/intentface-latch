@@ -34,11 +34,13 @@ import {
   listChannelBotsFn,
   registerChannelWebhookFn,
   deleteAgentFn,
-  discardAgentDraftFn,
-  getAgentDraftFn,
+  closeCandidateFn,
   getAgentVersionFn,
-  saveAgentDraftFn,
+  getCandidateFn,
+  listCandidatesFn,
+  renameCandidateFn,
   saveAgentFn,
+  saveCandidateFn,
   saveChannelBotCredentialsFn,
   setSlackConfigTokenFn,
   slackAppChannelsFn,
@@ -50,6 +52,8 @@ import {
   unbindSlackAppFn,
 } from "@/lib/server";
 import { AgentVersionsDrawer } from "@/components/agent-versions-drawer";
+import { CandidateSwitcher } from "@/components/candidate-switcher";
+import type { CandidateSummary } from "@/lib/server";
 import { DiffView } from "@/components/record-diff-view";
 import { diffRecords, type RecordDiff } from "@/lib/record-diff";
 import { Dialog } from "@/components/ui/dialog";
@@ -67,7 +71,7 @@ import {
   toSavePayload,
   toggleGroup,
 } from "@/lib/agent-form";
-import type { AgentRecord, MemoryLevel } from "@/lib/agent-form";
+import type { AgentRecord, AgentRecordInput, MemoryLevel } from "@/lib/agent-form";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,7 +86,9 @@ export const Route = createFileRoute("/agents/edit")({
   validateSearch: (s: Record<string, unknown>) => ({
     name: typeof s.name === "string" ? s.name : undefined,
     scope: s.scope === "org" ? ("org" as const) : s.scope === "user" ? ("user" as const) : undefined,
-  }),
+    // The candidate being edited, or "live"; absent = your latest candidate, else live.
+    ...(typeof s.candidate === "string" ? { candidate: s.candidate } : {}),
+  }) as { name: string | undefined; scope: "org" | "user" | undefined; candidate?: string },
   component: AgentEditor,
 });
 
@@ -106,7 +112,7 @@ function AgentEditor() {
   const { records, allAgents, models, connections, status, authoredTools } = useLoaderData({
     from: "/agents",
   });
-  const { name: editName, scope: editScope } = Route.useSearch();
+  const { name: editName, scope: editScope, candidate: candidateParam } = Route.useSearch();
   const navigate = useNavigate();
   const router = useRouter();
 
@@ -171,20 +177,30 @@ function AgentEditor() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ── Draft / publish state ────────────────────────────────────────────────
-  // The live record is `latch_agents`; what is typed here is a per-user draft
-  // that autosaves and affects nothing until Publish. `baseVersion` is the
-  // version the draft started from — compared against what is live at publish
-  // time so a colleague's work can't be silently reverted.
+  // ── Candidate / publish state ────────────────────────────────────────────
+  // The live record is `latch_agents`; what is typed here goes into a
+  // CANDIDATE — a named, unpublished configuration the agent's editors share —
+  // that autosaves and affects nothing until published. Typing on live starts
+  // one. `baseVersion` is the version it started from, compared against what
+  // is live at publish time so a colleague's work can't be silently reverted.
   const [liveVersion, setLiveVersion] = useState<number | null>(null);
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
-  const [othersEditing, setOthersEditing] = useState(0);
-  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
-  const [hasDraft, setHasDraft] = useState(false);
+  const [candidates, setCandidates] = useState<CandidateSummary[]>([]);
+  const [candidateId, setCandidateId] = useState<string | null>(null);
+  const [candidateTitle, setCandidateTitle] = useState("");
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [stale, setStale] = useState<{ liveVersion: number; author?: string } | null>(null);
   const [staleDiff, setStaleDiff] = useState<RecordDiff | null>(null);
+  /** The first autosave CREATES the candidate; later ones must wait for its id, or two get made. */
+  const creating = useRef<Promise<string | null> | null>(null);
+  /**
+   * What the form holds — "live" or a candidate id. When the URL catches up
+   * with it (a candidate just created, a redirect), nothing is reloaded:
+   * reloading would overwrite keystrokes typed during the round trip.
+   */
+  const loaded = useRef<string | null>(null);
   /**
    * Whether the form holds a change the USER made.
    *
@@ -192,9 +208,8 @@ function AgentEditor() {
    * without anyone editing it — `applyToolList` rebuilds `tools` (with a fresh
    * object identity) once the connections finish listing, loading a draft
    * replaces the whole record, and learning the live version moves
-   * `baseVersion`. Treating any of those as an edit would create a draft for
-   * someone who only opened the editor, which would light the "unpublished
-   * draft" badge and tell colleagues a phantom edit is in progress.
+   * `baseVersion`. Treating any of those as an edit would create a candidate
+   * for someone who only opened the editor.
    *
    * So only the user-edit funnel (`patch`) and a deliberate restore set this.
    */
@@ -270,35 +285,93 @@ function AgentEditor() {
       toolList,
     });
 
-  // On open: adopt the caller's unpublished draft if there is one, so closing
-  // the tab mid-edit loses nothing — on any device, since the draft is stored
-  // server-side rather than in this browser.
+  /**
+   * What a candidate stores: the save payload, so it runs and publishes as
+   * it would go live. `toSavePayload` drops the tool selection while the
+   * tool list is still loading, so until it has loaded the editor's own
+   * selection is kept as-is (an explicit list, which means the same).
+   */
+  const candidatePayload = (r: AgentRecord): AgentRecordInput => {
+    const out = payloadOf(r);
+    return toolList.length === 0 && r.tools ? { ...out, tools: r.tools } : out;
+  };
+
+  const refreshCandidates = useCallback(async () => {
+    if (!initial) return null;
+    const status = await listCandidatesFn({ data: { name: initial.name, scope: initial.scope } });
+    if (status) {
+      setCandidates(status.candidates);
+      setLiveVersion(status.liveVersion);
+    }
+    return status;
+  }, [initial?.name, initial?.scope]);
+
+  /** Show live, or a candidate — in the URL too, so a reload or a link lands on it. */
+  const showCandidate = (id: string | null) =>
+    void navigate({
+      to: "/agents/edit",
+      search: { name: initial?.name, scope: initial?.scope, candidate: id ?? "live" },
+      replace: true,
+    });
+
+  // On open, and on switching: load what is being edited. With nothing in the
+  // URL, your most recent candidate opens, so closing the tab mid-edit loses
+  // nothing — on any device, since candidates are stored server-side.
   useEffect(() => {
     if (!editing) return;
-    let cancelled = false;
-    if (!initial) return;
-    getAgentDraftFn({ data: { name: initial.name, scope: initial.scope } })
-      .then((status) => {
-        if (cancelled || !status) return;
-        setLiveVersion(status.liveVersion);
-        setOthersEditing(status.othersEditing);
-        setBaseVersion(status.draft?.baseVersion ?? status.liveVersion ?? undefined);
-        if (status.draft) {
-          dirty.current = false;
-          // Raw, NOT through `loadAgentRecord`: a draft stores editor state, so
-          // it restores as editor state. Re-applying the load conventions to
-          // something that already went through them would corrupt it.
-          setRec(status.draft.record as AgentRecord);
-          setHasDraft(true);
-        }
-      })
-      .catch(() => {
-        /* The editor still works on the published record without a draft. */
-      });
+    if (candidateParam && candidateParam === loaded.current) return;
+    const alive = { current: true };
+    void (async () => {
+      const status = await refreshCandidates();
+      if (!alive.current || !status) return;
+      const id = candidateParam === "live" ? null : (candidateParam ?? status.candidates.find((c) => c.mine)?.id ?? null);
+      const c = id ? await getCandidateFn({ data: { name: initial.name, scope: initial.scope, id } }) : null;
+      if (!alive.current) return;
+      dirty.current = false;
+      creating.current = null;
+      setSavedAt(null);
+      if (c) {
+        loaded.current = c.id;
+        setCandidateId(c.id);
+        setCandidateTitle(c.title);
+        setBaseVersion(c.baseVersion ?? status.liveVersion ?? undefined);
+        setRec(loadAgentRecord(c.record));
+        if (candidateParam !== c.id) showCandidate(c.id);
+      } else {
+        loaded.current = "live";
+        setCandidateId(null);
+        setCandidateTitle("");
+        setBaseVersion(status.liveVersion ?? undefined);
+        setRec(loadAgentRecord(initial));
+        if (candidateParam !== "live") showCandidate(null);
+      }
+    })().catch(() => {
+      /* The editor still works on the published record. */
+    });
     return () => {
-      cancelled = true;
+      alive.current = false;
     };
-  }, [editing, initial?.name, initial?.scope]);
+  }, [editing, initial?.name, initial?.scope, candidateParam]);
+
+  /** Save into the candidate, creating it on the first edit of live. */
+  const saveCandidate = async (r: AgentRecord, title?: string): Promise<string | null> => {
+    const id = candidateId ?? (await creating.current);
+    if (id) {
+      const res = await saveCandidateFn({ data: { id, record: candidatePayload(r), baseVersion } });
+      return res.ok ? res.id : null;
+    }
+    const made = saveCandidateFn({ data: { record: candidatePayload(r), title: title ?? "Draft", baseVersion } }).then((res) => {
+      if (!res.ok) return null;
+      loaded.current = res.id;
+      setCandidateId(res.id);
+      setCandidateTitle(res.title);
+      showCandidate(res.id);
+      void refreshCandidates();
+      return res.id;
+    });
+    creating.current = made;
+    return made;
+  };
 
   // Autosave, debounced. Publishing is the deliberate act; saving is not, so it
   // never blocks, never confirms, and never touches what is running.
@@ -306,18 +379,8 @@ function AgentEditor() {
     if (!editing) return;
     if (!dirty.current) return;
     const id = setTimeout(() => {
-      // The EDITOR record, not `payloadOf(rec)`. `toSavePayload` drops the whole
-      // tool selection while `ctx.toolList` is still empty, and that list loads
-      // asynchronously (it opens the connections live) — so autosaving through
-      // it would silently wipe an agent's tools for anyone who starts typing
-      // before it arrives. A draft is editor state; it round-trips as-is.
-      void saveAgentDraftFn({ data: { record: rec, baseVersion } })
-        .then((res) => {
-          if (res.ok) {
-            setDraftSavedAt(Date.now());
-            setHasDraft(true);
-          }
-        })
+      void saveCandidate(rec)
+        .then((saved) => saved && setSavedAt(Date.now()))
         .catch(() => {
           /* Autosave is best-effort; the next keystroke retries. */
         });
@@ -325,23 +388,47 @@ function AgentEditor() {
     return () => clearTimeout(id);
   }, [rec, editing, baseVersion]);
 
-  async function discardDraft() {
+  /** A fresh candidate from what is live. */
+  async function newCandidate() {
     if (!editing) return;
-    if (!confirm("Discard your unpublished changes and go back to the live version?")) return;
+    const res = await saveCandidateFn({ data: { record: candidatePayload(loadAgentRecord(initial)), title: "Draft", baseVersion: liveVersion ?? undefined } });
+    if (res.ok) {
+      await refreshCandidates();
+      showCandidate(res.id);
+    }
+  }
+
+  async function renameCandidate(title: string): Promise<string | null> {
+    if (!editing || !candidateId) return null;
+    const res = await renameCandidateFn({ data: { name: initial.name, scope: initial.scope, id: candidateId, title } });
+    if (!res.ok) return res.error;
+    setCandidateTitle(res.title);
+    await refreshCandidates();
+    return null;
+  }
+
+  async function discardCandidate() {
+    if (!editing || !candidateId) return;
+    if (!confirm(`Discard “${candidateTitle}”? Its Evals results keep their name.`)) return;
     setBusy(true);
     try {
-      await discardAgentDraftFn({ data: { name: initial.name, scope: initial.scope } });
+      await closeCandidateFn({ data: { name: initial.name, scope: initial.scope, id: candidateId } });
+      await refreshCandidates();
+      loaded.current = "live";
+      showCandidate(null);
+      setCandidateId(null);
+      setCandidateTitle("");
+      setSavedAt(null);
+      setBaseVersion(liveVersion ?? undefined);
+      creating.current = null;
       dirty.current = false;
       setRec(loadAgentRecord(initial));
-      setHasDraft(false);
-      setDraftSavedAt(null);
-      setBaseVersion(liveVersion ?? undefined);
     } finally {
       setBusy(false);
     }
   }
 
-  /** Load a past version into the draft. Publishing stays the user's call. */
+  /** Load a past version into the candidate. Publishing stays the user's call. */
   function restoreVersion(record: AgentRecord, version: number) {
     dirty.current = true; // a deliberate change, so it SHOULD autosave
     setRec(loadAgentRecord(record));
@@ -362,11 +449,11 @@ function AgentEditor() {
     setError(null);
     try {
       const res = await saveAgentFn({
-        data: { record: payload, message: message.trim() || undefined, baseVersion, force },
+        data: { record: payload, message: message.trim() || undefined, baseVersion, force, candidateId: candidateId ?? (await creating.current) ?? undefined },
       });
       if (!res.ok) {
         if ("stale" in res && res.stale) {
-          // Someone published while this draft was open. Show what they changed
+          // Someone published while this candidate was open. Show what they changed
           // before offering to overwrite it.
           const live = await getAgentVersionFn({
             // `rec` rather than `initial`: name and scope are locked while
@@ -378,7 +465,7 @@ function AgentEditor() {
           setStale({ liveVersion: res.liveVersion, author: res.author });
           return;
         }
-        setError(res.error ?? "Failed to publish");
+        setError("error" in res ? res.error : "Failed to publish");
         return;
       }
       // Re-run the /agents loader so the list (and a re-open of this editor)
@@ -415,32 +502,34 @@ function AgentEditor() {
         </p>
 
         {editing && (
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-            {liveVersion != null && (
-              <span className="text-ink-secondary">
-                <span className="text-ink-primary font-medium">v{liveVersion}</span> live
-              </span>
-            )}
-            {hasDraft && (
-              <span className="rounded-full bg-amber-500/15 px-2 py-0.5 font-medium text-amber-700 dark:text-amber-400">
-                Draft{draftSavedAt ? " · saved" : ""}
-              </span>
-            )}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <CandidateSwitcher
+              liveVersion={liveVersion}
+              candidates={candidates}
+              current={candidateId}
+              title={candidateTitle}
+              saved={savedAt != null}
+              onPick={showCandidate}
+              onNew={() => void newCandidate()}
+              onRename={renameCandidate}
+            />
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="h-6 px-2"
+              className="h-6 px-2 text-xs"
               onClick={() => setHistoryOpen(true)}
             >
               <History className="size-3" /> History
             </Button>
-            {othersEditing > 0 && (
-              <span className="text-ink-secondary">
-                {othersEditing === 1
-                  ? "Someone else has an unpublished draft"
-                  : `${othersEditing} others have unpublished drafts`}
-              </span>
+            {candidateId && (
+              <Link
+                to="/evals"
+                search={{ agent: initial.name }}
+                className="text-ink-secondary hover:text-ink-primary text-xs underline underline-offset-2"
+              >
+                Test in Evals
+              </Link>
             )}
           </div>
         )}
@@ -895,16 +984,16 @@ function AgentEditor() {
               Delete agent
             </Button>
           )}
-          {editing && hasDraft && (
-            <Button type="button" variant="ghost" disabled={busy} onClick={discardDraft}>
-              Discard draft
+          {editing && candidateId && (
+            <Button type="button" variant="ghost" disabled={busy} onClick={discardCandidate}>
+              Discard candidate
             </Button>
           )}
           <Button type="button" variant="ghost" render={<Link to="/agents" />}>
             Cancel
           </Button>
           <Button type="submit" disabled={busy || !rec.name.trim() || !rec.instructions.trim()}>
-            {editing ? "Publish changes" : "Create agent"}
+            {!editing ? "Create agent" : candidateId ? `Publish “${candidateTitle}”` : "Publish changes"}
           </Button>
         </div>
 
@@ -917,8 +1006,8 @@ function AgentEditor() {
               placeholder="tightened the refund wording"
             />
             <p className="text-ink-secondary text-xs">
-              Shown in version history. Your edits autosave as a draft — nothing goes live until
-              you publish.
+              Shown in version history. Edits autosave into a candidate your teammates can see
+              and test in Evals — nothing goes live until you publish.
             </p>
           </div>
         )}
@@ -933,10 +1022,7 @@ function AgentEditor() {
           onRestore={restoreVersion}
           onActivated={async () => {
             // The pointer moved, so the editor's idea of what is live is stale.
-            const status = await getAgentDraftFn({
-              data: { name: initial.name, scope: initial.scope },
-            });
-            if (status) setLiveVersion(status.liveVersion);
+            await refreshCandidates();
             await router.invalidate();
           }}
         />
@@ -950,7 +1036,7 @@ function AgentEditor() {
             </h2>
             <p className="text-ink-secondary mt-1 text-xs">
               {stale.author ? `${stale.author} published` : "Someone published"} v
-              {stale.liveVersion}. Your draft is based on v{baseVersion}. Publishing now would
+              {stale.liveVersion}. This candidate is based on v{baseVersion}. Publishing now would
               replace their changes with yours.
             </p>
             <div className="mt-3 max-h-72 overflow-auto">
@@ -966,7 +1052,7 @@ function AgentEditor() {
                 disabled={busy}
                 onClick={async () => {
                   setStale(null);
-                  await discardDraft();
+                  await discardCandidate();
                 }}
               >
                 Discard mine

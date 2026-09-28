@@ -7,7 +7,9 @@
 import type { Principal } from "./session";
 import { getLatch } from "./latch";
 import { agentOwnerKey, normalizeAgentName } from "./agent-store";
-import type { Check, Input, InputFile, Rubric, Variant } from "./evals/v2/model";
+import type { Check, Input, InputFile, Rubric } from "./evals/v2/model";
+import type { Change } from "./candidates";
+import { configFingerprint } from "./evals/v2/runner";
 import { saysItems } from "./evals/v2/expect";
 import { checkIdFor, cleanTags, fromEditable, nextInputId, toEditable, validateChecks } from "./evals/v2/validate";
 import type { EditableQuestion } from "./evals/v2/validate";
@@ -283,59 +285,39 @@ export async function editChecks(
 }
 
 /**
- * Save a variant — a version with one thing changed — so it can be run as a
- * column. Its name says what changed; the same change on the same base is the
- * same variant, so running it again reuses its answers.
+ * A candidate with one thing changed from a base — Evals' "New candidate" and
+ * the Evals agent's create_candidate. Its title says what changed; the same
+ * change on the same base is the same candidate, so running it again reuses
+ * its answers.
  */
-/** A short name for what a variant changes: "live · gpt-5.6", "live · high effort", "live + sourcing rules". */
-export function variantName(base: string, change: Variant["change"]) {
-  if (change.model) return `${base} · ${change.model.replace(/^claude-/, "")}`;
-  if (change.effort) return `${base} · ${change.effort} effort`;
-  const text = (change.addInstructions ?? "").trim();
-  // The line's own heading when it has one ("Sourcing rules: …"), else its first words.
-  const head = /^([^:.\n]{3,32}):/.exec(text)?.[1] ?? text.split(/\s+/).slice(0, 3).join(" ");
-  return `${base} + ${head.toLowerCase()}`;
-}
-
-export async function createVariant(principal: Principal, data: { agent: string; base: string; change: Variant["change"]; name?: string }) {
-    const o = await ownerFor(principal, data.agent);
-    if (!o) return { ok: false as const, error: "Only agents you can edit." };
-    const { evals, models } = await getLatch();
-    const change: Variant["change"] = {
-      ...(data.change.model ? { model: data.change.model } : {}),
-      ...(data.change.effort ? { effort: data.change.effort } : {}),
-      ...(data.change.addInstructions?.trim() ? { addInstructions: data.change.addInstructions.trim() } : {}),
-    };
-    if (!Object.keys(change).length) return { ok: false as const, error: "Change one thing: the model, the reasoning effort or the instructions." };
-    if (change.model && !models.some((m) => m.id === change.model)) return { ok: false as const, error: `No model ${change.model} is configured.` };
-    const existing = await evals.listVariants(o.owner, o.name);
-    const same = existing.find((v) => v.base === data.base && JSON.stringify(v.change) === JSON.stringify(change));
-    if (same) return { ok: true as const, id: same.id, name: same.name };
-    const wanted = data.name?.trim().slice(0, 48) || variantName(data.base, change);
-    let name = wanted;
-    for (let n = 2; existing.some((v) => v.name === name); n++) name = `${wanted} ${n}`;
-    const id = `v_${Math.random().toString(36).slice(2, 8)}`;
-    await evals.saveVariant({ owner: o.owner, id, agentName: o.name, base: data.base, name, change, createdAt: Date.now() });
-    return { ok: true as const, id, name };
-  }
-
-/**
- * Rename a variant. Its answers are filed under its name, so they are
- * renamed with it — the column keeps them.
- */
-export async function renameVariant(principal: Principal, d: { agent: string; from: string; name: string }) {
-  const o = await ownerFor(principal, d.agent);
+export async function createCandidate(principal: Principal, data: { agent: string; base: string; change: Change; name?: string }) {
+  const o = await ownerFor(principal, data.agent);
   if (!o) return { ok: false as const, error: "Only agents you can edit." };
-  const { evals } = await getLatch();
-  // A column knows its variant by name.
-  const v = (await evals.listVariants(o.owner, o.name)).find((x) => x.name === d.from) ?? null;
-  if (!v) return { ok: false as const, error: "That variant no longer exists." };
-  const name = d.name.trim().slice(0, 48);
-  if (!name || name === v.name) return { ok: true as const, name: v.name };
-  if (name === "live" || name.startsWith("@") || name.startsWith("~")) return { ok: false as const, error: "That name belongs to a version." };
-  if ((await evals.listVariants(o.owner, o.name)).some((x) => x.id !== v.id && x.name === name)) return { ok: false as const, error: `There is already a variant called ${name}.` };
-  await evals.renameVariant(o.owner, v, name);
-  return { ok: true as const, name };
+  const { agentStore, models } = await getLatch();
+  const { applyChange, changeTitle, resolveLabel, uniqueTitle, liveVersionOf } = await import("./candidates");
+  const change: Change = {
+    ...(data.change.model ? { model: data.change.model } : {}),
+    ...(data.change.effort ? { effort: data.change.effort } : {}),
+    ...(data.change.addInstructions?.trim() ? { addInstructions: data.change.addInstructions.trim() } : {}),
+  };
+  if (!Object.keys(change).length) return { ok: false as const, error: "Change one thing: the model, the reasoning effort or the instructions." };
+  if (change.model && !models.some((m) => m.id === change.model)) return { ok: false as const, error: `No model ${change.model} is configured.` };
+  let base;
+  try {
+    base = await resolveLabel(principal, o.name, data.base);
+  } catch (e) {
+    return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+  }
+  const rec = await agentStore.getRecord(principal, o.name);
+  const scope = rec!.scope;
+  const record = applyChange(base.record, change);
+  const open = await agentStore.listCandidates(principal, o.name, scope);
+  const same = open.find((c) => configFingerprint(c.record) === configFingerprint(record));
+  if (same) return { ok: true as const, id: same.id, label: `@${same.id}`, name: same.title };
+  const title = uniqueTitle(data.name?.trim() || changeTitle(base.title, change), open);
+  const baseVersion = base.candidate?.baseVersion ?? (/^@\d+$/.test(base.label) ? Number(base.label.slice(1)) : await liveVersionOf(principal, o.name, scope));
+  const c = await agentStore.saveCandidate(principal, o.name, scope, { title, record, ...(baseVersion != null ? { baseVersion } : {}) });
+  return { ok: true as const, id: c.id, label: `@${c.id}`, name: c.title };
 }
 
 /**

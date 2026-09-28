@@ -40,7 +40,7 @@ import { createConnectionStore  } from "./connection-store";
 import type {ConnectionStore} from "./connection-store";
 import { createDynamicConnections  } from "./dynamic-connections";
 import type {DynamicConnections} from "./dynamic-connections";
-import { agentOwnerKey, agentOwnerSegments, evalOwnerOfRecord, parseAgentRef } from "./agent-store";
+import { agentOwnerSegments, evalOwnerOfRecord } from "./agent-store";
 import type { AgentStore } from "./agent-store";
 import { memoryAgentOf } from "./memory/agent-identity";
 import { isOrgMember } from "./auth";
@@ -455,29 +455,12 @@ export async function getLatch(): Promise<{
     // Resolve each agent's `connections: [...]` across code-declared MCP +
     // OpenAPI and the UI-added (Vault-stored) connections.
     connections: allConnections,
-    // UI-created agents (not in the static `agents` registry) — and eval
-    // variants of them: `name[@base]~id` is that base with one thing changed
-    // (model, reasoning effort, an added instruction line), never saved as a
-    // version. Only evals run them.
+    // UI-created agents (not in the static `agents` registry). `name@7` and
+    // `name@c_…` pin a published version or a candidate, read-only — how
+    // Evals runs a configuration without making it live.
     dynamicAgents: {
       list: (p) => agentStore.list(p),
-      resolve: async (name, p) => {
-        const cut = name.indexOf("~");
-        if (cut < 0) return agentStore.resolve(name, p);
-        const base = name.slice(0, cut);
-        const cfg = await agentStore.resolve(base, p);
-        const rec = await agentStore.getRecord(p, parseAgentRef(base).name);
-        if (!cfg || !rec) return undefined;
-        const v = await evals.getVariant(agentOwnerKey(p, rec.scope), name.slice(cut + 1));
-        if (!v) return undefined;
-        const add = v.change.addInstructions?.trim();
-        return {
-          ...cfg,
-          ...(v.change.model ? { model: catalog.modelFor(v.change.model) } : {}),
-          ...(v.change.effort ? { effort: v.change.effort } : {}),
-          ...(add ? { instructions: `${cfg.instructions ?? ""}\n\n${add}` } : {}),
-        };
-      },
+      resolve: (name, p) => agentStore.resolve(name, p),
     },
     // Persistent agent memory: injects the compiled index + memory tools into
     // any agent (code or UI) that declares `memory`.

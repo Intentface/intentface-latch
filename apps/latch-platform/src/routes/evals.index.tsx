@@ -7,7 +7,8 @@ import {
   getEvalGridFn,
   getEvalsIndexFn,
   getQuestionsFn,
-  renameVariantFn,
+  makeLiveFn,
+  renameCandidateFn,
   saveEvalRulingFn,
   startJudgeFn,
 } from "@/lib/evals-server"
@@ -277,10 +278,7 @@ function EvalsPage() {
             onOpenInput={setOpenInput}
             onOpenChecks={() => setChecksOpen(true)}
             onAdded={(id) => (reload(), reloadOverview(), setOpenInput(id))}
-            onRenamed={(c, name) => {
-              setColumns(refs.map((r) => (r.runId === c.runId && r.version === c.version ? { ...r, version: name } : r)))
-              reloadOverview()
-            }}
+            onChanged={() => (reload(), reloadOverview())}
           />
         ) : (
           loading && <Loader2 className="text-ink-tertiary size-4 animate-spin" />
@@ -383,7 +381,7 @@ function Results({
   onOpenInput,
   onOpenChecks,
   onAdded,
-  onRenamed,
+  onChanged,
   viewTags,
   viewName,
 }: {
@@ -392,7 +390,7 @@ function Results({
   focusAsked: string | undefined
   filter: Filter
   setFilter: (f: Filter) => void
-  runs: { runId: string; versions: string[]; name: string | null; createdAt: number; questions: number; tries: number }[]
+  runs: { runId: string; versions: string[]; name: string | null; createdAt: number; questions: number; tries: number; names: Record<string, string> }[]
   onOpen: (at: { inputId: string; column: string }) => void
   onBaseline: (label: string) => void
   onFocus: (label: string) => void
@@ -407,7 +405,8 @@ function Results({
   onOpenChecks: () => void
   onAdded: (id: string) => void
   /** A variant got a new name: its column follows it. */
-  onRenamed: (c: Column, name: string) => void
+  /** A candidate was renamed or published: names and "live" moved. */
+  onChanged: () => void
   /** The open view's tags: an input added here joins it. */
   viewTags?: string[]
   /** The open view's name; + Run then answers only its inputs. */
@@ -486,7 +485,7 @@ function Results({
   const hidden = runs.flatMap((r) =>
     r.versions
       .filter((v) => !grid.columns.some((c) => c.runId === r.runId && c.version === v))
-      .map((v) => ({ runId: r.runId, version: v, run: r })),
+      .map((v) => ({ runId: r.runId, version: v, name: r.names[v] ?? v, run: r })),
   )
 
   return (
@@ -602,16 +601,26 @@ function Results({
                       if (threadIds.length) void startJudgeFn({ data: { agent, datasetId, rubricId, runId: c.runId, threadIds, regrade: true } }).then(onAgain)
                     }}
                     stale={c.judgedWith < grid.latestVersion && !grading(c)}
-                    {...(c.version !== "live" && !c.version.startsWith("@")
+                    {...(c.candidate && !c.candidate.publishedAs && !c.candidate.discarded
                       ? {
                           onRename: async (name: string) => {
-                            const r = await renameVariantFn({ data: { agent, from: c.version, name } })
+                            const r = await renameCandidateFn({ data: { agent, label: c.version, name } })
                             if (!r.ok) return r.error
-                            onRenamed(c, r.name)
+                            onChanged()
                             return null
                           },
                         }
                       : {})}
+                    {...((c.candidate ? !c.candidate.publishedAs && !c.candidate.discarded && !c.candidate.edited : /^@\d+$/.test(c.version) && !c.live)
+                      ? {
+                          onMakeLive: async (force: boolean) => {
+                            const r = await makeLiveFn({ data: { agent, label: c.version, force } })
+                            if (r.ok) onChanged()
+                            return r
+                          },
+                        }
+                      : {})}
+                    agent={agent}
                     canHide={grid.columns.length > 1}
                     onBaseline={() => onBaseline(c.label)}
                     onHide={() => onHide(c.label)}
@@ -956,6 +965,36 @@ function SetupDiff({ from, to, baseName, name }: { from: Config; to: Config; bas
   )
 }
 
+/** What a column's configuration is now: live, a candidate edited since, published, discarded. */
+function ColumnTag({ column }: { column: Column }) {
+  const c = column.candidate
+  const [text, tone, title] = column.live
+    ? ["live", "good", "What people get now"]
+    : !c
+      ? [null, null, null]
+      : c.publishedAs
+        ? [`→ @${c.publishedAs}`, "muted", `Published as version ${c.publishedAs}`]
+        : c.discarded
+          ? ["discarded", "muted", "This candidate was discarded; its answers are kept"]
+          : c.edited
+            ? ["edited", "warn", "Edited after these answers — run it again to test the edits"]
+            : [null, null, null]
+  if (!text) return null
+  return (
+    <span
+      title={title}
+      className={cn(
+        "ml-1 rounded-full px-1.5 py-px text-[10px] font-medium tracking-normal",
+        tone === "good" && "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+        tone === "warn" && "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+        tone === "muted" && "bg-primary-bg-active text-ink-tertiary",
+      )}
+    >
+      {text}
+    </span>
+  )
+}
+
 function ColumnMenu({
   column,
   isBase,
@@ -973,6 +1012,8 @@ function ColumnMenu({
   allInputs,
   stale,
   onRename,
+  onMakeLive,
+  agent,
   canHide,
   onBaseline,
   onHide,
@@ -1001,8 +1042,11 @@ function ColumnMenu({
   allInputs: string[]
   /** Graded under an older version of the checks. */
   stale: boolean
-  /** A variant's column can be renamed; versions keep their names. */
+  /** A candidate's column can be renamed — in the editor too; versions keep their names. */
   onRename?: (name: string) => Promise<string | null>
+  /** Publish this candidate, or make this version live again. */
+  onMakeLive?: (force: boolean) => Promise<{ ok: true } | { ok: false; error: string } | { ok: false; stale: true; liveVersion: number; baseVersion: number }>
+  agent: string
   canHide: boolean
   onBaseline: () => void
   onHide: () => void
@@ -1015,16 +1059,19 @@ function ColumnMenu({
   // Answering again: every input, or only where it failed.
   const [again, setAgain] = useState<"all" | "failed" | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
+  // Making it live: asked once, and again if someone published in between.
+  const [going, setGoing] = useState<null | "ask" | { stale: number; base: number } | { error: string }>(null)
   const [renameError, setRenameError] = useState<string | null>(null)
   const pick = (f: () => void) => () => (setOpen(false), f())
   const [diffOpen, setDiffOpen] = useState(false)
   return (
-    <Popover open={open} onOpenChange={(o) => (setOpen(o), o || setAgain(null))}>
+    <Popover open={open} onOpenChange={(o) => (setOpen(o), o || (setAgain(null), setGoing(null)))}>
       <span className="flex flex-col items-center leading-tight">
         {/* 1 · the name, which opens the column's menu */}
         <Popover.Trigger render={<button type="button" className="group flex items-center gap-0.5 rounded px-1 text-[13px] font-semibold tracking-tight whitespace-nowrap" />}>
-          <span className={isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary"}>{column.version}</span>
+          <span className={isFocus || isBase ? "text-ink-primary" : "text-ink-secondary group-hover:text-ink-primary"}>{column.candidate?.title ?? column.version}</span>
           <ChevronDown className="text-ink-tertiary group-hover:text-ink-primary size-3" />
+          <ColumnTag column={column} />
         </Popover.Trigger>
         {/* 2 · when, how often */}
         {!state && setups && changes?.length ? (
@@ -1153,19 +1200,75 @@ function ColumnMenu({
             Use as baseline <span className="text-ink-tertiary text-xs">The others are compared with it</span>
           </button>
         )}
-        <button type="button" className={item} onClick={() => setAgain(failed.length ? "failed" : "all")}>
-          Answer & grade again{" "}
-          <span className="text-ink-tertiary text-xs tabular-nums">
-            One more try per input, graded when it lands — every input, or {failed.length ? `the ${failed.length} where it failed` : "where it failed"} · priced first
-          </span>
-        </button>
+        {column.candidate?.edited ? (
+          <div className="px-2.5 py-1.5 text-sm">
+            <span className="text-ink-secondary">Answer & grade again</span>
+            <span className="text-ink-tertiary block text-xs">
+              “{column.candidate.title}” was edited after these answers, so a new try would mix two setups in one column. Run it again from + Run — it gets its own column.
+            </span>
+          </div>
+        ) : (
+          <button type="button" className={item} onClick={() => setAgain(failed.length ? "failed" : "all")}>
+            Answer & grade again{" "}
+            <span className="text-ink-tertiary text-xs tabular-nums">
+              One more try per input, graded when it lands — every input, or {failed.length ? `the ${failed.length} where it failed` : "where it failed"} · priced first
+            </span>
+          </button>
+        )}
         <button type="button" className={item} onClick={pick(onGradeAll)}>
           Grade again <span className="text-ink-tertiary text-xs">Every answer in this column, with the current checks · the judge only, cents</span>
         </button>
+        {onMakeLive &&
+          (going === null ? (
+            <button type="button" className={item} onClick={() => setGoing("ask")}>
+              Make this live{" "}
+              <span className="text-ink-tertiary text-xs">
+                {column.candidate ? `Publish “${column.candidate.title}” as the next version — people get it on their next message` : `Go back to ${column.version} — nothing is lost, and it can be undone`}
+              </span>
+            </button>
+          ) : (
+            <div className="space-y-1.5 px-2.5 py-1.5 text-xs">
+              <p className="text-ink-primary">
+                {"error" in (going as object)
+                  ? (going as { error: string }).error
+                  : typeof going === "object"
+                    ? `Someone published v${(going as { stale: number }).stale} after this candidate was started from v${(going as { base: number }).base}. Publishing it replaces their changes.`
+                    : column.candidate
+                      ? `Publish “${column.candidate.title}”? Everyone using ${agent} gets it on their next message.`
+                      : `Make ${column.version} live again? Everyone using ${agent} gets it on their next message.`}
+              </p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setGoing(null)} className="text-ink-secondary hover:text-ink-primary h-6">
+                  Cancel
+                </button>
+                {!(typeof going === "object" && "error" in going) && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onMakeLive(typeof going === "object").then((r) =>
+                        r.ok ? (setGoing(null), setOpen(false)) : "stale" in r ? setGoing({ stale: r.liveVersion, base: r.baseVersion }) : setGoing({ error: r.error }),
+                      )
+                    }
+                    className="bg-ink-primary text-primary-bg h-6 rounded px-2.5 font-medium"
+                  >
+                    {typeof going === "object" ? "Publish anyway" : column.candidate ? "Publish" : "Make live"}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        {column.candidate && !column.candidate.publishedAs && !column.candidate.discarded && (
+          <a
+            href={`/agents/edit?name=${encodeURIComponent(agent)}&scope=${column.candidate.scope}&candidate=${column.candidate.id}`}
+            className={item}
+          >
+            Open in the agent editor <span className="text-ink-tertiary text-xs">Change anything — instructions, tools, model — then run it again</span>
+          </a>
+        )}
         {onRename &&
           (renaming === null ? (
-            <button type="button" className={item} onClick={() => (setRenaming(column.version), setRenameError(null))}>
-              Rename <span className="text-ink-tertiary text-xs">A variant's name, as its column shows it</span>
+            <button type="button" className={item} onClick={() => (setRenaming(column.candidate?.title ?? column.version), setRenameError(null))}>
+              Rename <span className="text-ink-tertiary text-xs">The candidate's name — here and in the agent editor</span>
             </button>
           ) : (
             <form
