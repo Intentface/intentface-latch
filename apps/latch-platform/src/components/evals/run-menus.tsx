@@ -359,7 +359,7 @@ export function AgainPanel({
       <div className="text-ink-primary text-sm font-medium">
         Answer {inputIds.length === 1 ? `input ${inputIds[0]}` : `${inputIds.length} inputs`} again
       </div>
-      <p className={hint}>One more try each, beside the old answers. The score then counts every try.</p>
+      <p className={hint}>One more try each, beside the old answers, graded with the current checks as it finishes. Old answers keep their grades. The score then counts every try.</p>
       <div className="space-y-1">
         {columns.map((c) => (
           <label key={c.label} className="flex items-center gap-2 text-sm">

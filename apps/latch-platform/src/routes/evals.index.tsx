@@ -1156,7 +1156,7 @@ function ColumnMenu({
         <button type="button" className={item} onClick={() => setAgain(failed.length ? "failed" : "all")}>
           Answer again{" "}
           <span className="text-ink-tertiary text-xs tabular-nums">
-            One more try per input — every input, or {failed.length ? `the ${failed.length} where it failed` : "where it failed"} · priced first
+            One more try per input, graded when it lands — every input, or {failed.length ? `the ${failed.length} where it failed` : "where it failed"} · priced first
           </span>
         </button>
         <button type="button" className={item} onClick={pick(onGradeAll)}>
