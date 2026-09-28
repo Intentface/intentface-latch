@@ -113,6 +113,23 @@ export type EvalsPageContext = {
   openInput?: string;
   filter?: string;
 };
+/** The agent's tools that change what the Evals pages show: the page reloads the moment one returns. */
+const CHANGES = new Set([
+  "create_question_set",
+  "edit_questions",
+  "create_checks",
+  "edit_checks",
+  "add_check",
+  "start_run",
+  "judge_run",
+  "stop_run",
+  "create_variant",
+  "propose_fix",
+  "suggest_note",
+  "find_patterns",
+  "triage",
+  "rename_failure_mode",
+]);
 let pageContext: EvalsPageContext = {};
 /** Merge what one part of the page knows; `undefined` clears a field. */
 export function updateEvalsPageContext(patch: EvalsPageContext) {
@@ -206,6 +223,7 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
               starters={startersFor(context)}
               onTurnFinished={notifyEvalsChanged}
               extraBody={() => ({ evalsPage: { agent: context.agent, ...pageContext } })}
+              onToolResult={(tool) => CHANGES.has(tool) && notifyEvalsChanged()}
               {...(pending ? { autoSend: pending } : {})}
             />
           ) : (

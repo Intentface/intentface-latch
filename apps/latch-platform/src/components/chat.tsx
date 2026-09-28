@@ -122,6 +122,7 @@ export function Chat({
   autoSend,
   onTurnFinished,
   extraBody,
+  onToolResult,
 }: {
   chatId: string
   agent: string
@@ -143,11 +144,21 @@ export function Chat({
    * per-turn context; never persisted.
    */
   extraBody?: () => Record<string, unknown>
+  /**
+   * Each time a tool call gets its result, live — mid-turn, before the agent
+   * has finished writing. Calls already in the history when the chat opened
+   * don't count.
+   */
+  onToolResult?: (toolName: string) => void
 }) {
   const onTurnFinishedRef = useRef(onTurnFinished)
   onTurnFinishedRef.current = onTurnFinished
   const extraBodyRef = useRef(extraBody)
   extraBodyRef.current = extraBody
+  const onToolResultRef = useRef(onToolResult)
+  onToolResultRef.current = onToolResult
+  // Tool calls whose result has been seen — seeded with the history, so opening a chat fires nothing.
+  const seenResults = useRef<Set<string> | null>(null)
   const router = useRouter()
   const [deciding, setDeciding] = useState(false)
   // A failed secret write (e.g. not an org admin): shown in the composer form,
@@ -223,6 +234,25 @@ export function Chat({
   const showOverlays = useSettingsStore((s) => s.showOverlays)
   const showScrollButton = useSettingsStore((s) => s.showScrollButton)
   const panel = useChatPanelState(messages, status)
+
+  useEffect(() => {
+    const done: { id: string; tool: string }[] = []
+    for (const m of messages)
+      for (const part of m.parts as { type: string; state?: string; toolCallId?: string; toolName?: string }[]) {
+        if (part.state !== "output-available" || !part.toolCallId) continue
+        const tool = part.type === "dynamic-tool" ? (part.toolName ?? "") : part.type.startsWith("tool-") ? part.type.slice(5) : ""
+        if (tool) done.push({ id: part.toolCallId, tool })
+      }
+    if (!seenResults.current) {
+      seenResults.current = new Set(done.map((d) => d.id))
+      return
+    }
+    for (const d of done)
+      if (!seenResults.current.has(d.id)) {
+        seenResults.current.add(d.id)
+        onToolResultRef.current?.(d.tool)
+      }
+  }, [messages])
 
   // Latest messages, for the seed of an approval-continuation stream and for the
   // whole-transcript lookups a row does while rendering (a click handler or a
@@ -382,6 +412,9 @@ export function Chat({
       const updated = await loadHistory(chatId)
       setMessages(updated)
       router.invalidate()
+      // A continuation (after an approval, an answer, a secret) is a turn
+      // settling too — the host reloads what it changed.
+      onTurnFinishedRef.current?.()
     },
     [chatId, router, setMessages]
   )

@@ -1280,6 +1280,8 @@ function NothingRun({
     )
   }, [agent, datasetId])
   useEffect(load, [load])
+  // The Evals agent adding inputs shows here too.
+  useEvalsChanged(load)
   return (
     <section className="border-primary-border bg-primary-bg rounded-xl border">
       <div className="space-y-3 px-5 py-5">
