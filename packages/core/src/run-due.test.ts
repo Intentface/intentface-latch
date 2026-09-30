@@ -101,7 +101,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     expect(order).toEqual(["consume", "fire"]);
     expect(advanced).toEqual({ nextRunAt: NEXT, lastRunAt: 100, enabled: true });
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0, rejected: 0 });
   });
 
   it("disables a one-shot (cron: null) at consume time", async () => {
@@ -140,7 +140,49 @@ describe("runDue consumes the occurrence before firing", () => {
     const res = await rt.runDue({ now: 100 });
 
     expect(firedHook).toBe(false);
-    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
+  });
+
+  it("fences the consume on the claim it holds, not just the owner id", async () => {
+    // Two passes on one instance share an owner id; the claim's own lease
+    // expiry is what tells a late first pass from the re-claiming second.
+    let fence: unknown;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [{ ...SCHEDULE, leaseOwner: "node_a", leaseExpiresAt: 30_100 }],
+      completeSchedule: async (_id, _patch, _owner, claim) => {
+        fence = claim;
+        return true;
+      },
+    });
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: async () => true });
+
+    await rt.runDue({ now: 100 });
+
+    expect(fence).toEqual({ leaseExpiresAt: 30_100 });
+  });
+
+  it("does NOT fire when the fence rejects the consume (another node holds the claim)", async () => {
+    // The claim lease is never renewed: if it lapsed before the consume (a slow
+    // `reconstructPrincipal` runs inside it), another node re-claimed and owns
+    // the occurrence. The fenced write no-ops and reports false; firing anyway
+    // would be the duplicate paid turn. The owner accounts for it, not us.
+    let firedHook = false;
+    const { storage } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => false,
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        firedHook = true;
+        return true;
+      },
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(firedHook).toBe(false);
+    expect(res).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 });
   });
 
   it("stamps the fire's chat via noteScheduleFire so the next occurrence can see it", async () => {
@@ -189,7 +231,7 @@ describe("runDue consumes the occurrence before firing", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0 });
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
     expect(consumed).toBe(1); // consumed exactly once — never re-written after the failure
   });
 });
@@ -233,7 +275,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1, parked: 0 });
+    expect(res).toEqual({ fired: 0, errors: 0, skipped: 1, parked: 0, rejected: 0 });
     expect(firedHook).toBe(false); // the host hook is skipped too — nothing runs
     expect(consumed).toBe(1); // the occurrence is spent, so the row isn't hot-looped
   });
@@ -248,7 +290,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0, rejected: 0 });
   });
 
   it("a settled predecessor fires normally", async () => {
@@ -276,7 +318,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0, rejected: 0 });
   });
 
   it("a failed parked-check never blocks the fire", async () => {
@@ -291,7 +333,7 @@ describe("onParked: the parked-predecessor guard", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0, rejected: 0 });
   });
 });
 
@@ -314,7 +356,7 @@ describe("a runSchedule host can join the same accounting", () => {
 
     const res = await rt.runDue({ now: 100 });
 
-    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1 });
+    expect(res).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 1, rejected: 0 });
     expect(stamps).toEqual([["sch_1", { lastChatId: "chat_slack_thread", firedAt: 100 }]]);
   });
 
@@ -332,6 +374,7 @@ describe("a runSchedule host can join the same accounting", () => {
       errors: 0,
       skipped: 0,
       parked: 0,
+      rejected: 0,
     });
   });
 

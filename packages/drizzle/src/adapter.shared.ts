@@ -659,8 +659,8 @@ export function makeStorageAdapter<P>(
       return claimed.map(rowToSchedule);
     },
 
-    async completeSchedule(id, patch, owner) {
-      await db
+    async completeSchedule(id, patch, owner, claim) {
+      const applied = await db
         .update(s.schedules)
         .set({
           nextRunAt: patch.nextRunAt,
@@ -671,9 +671,19 @@ export function makeStorageAdapter<P>(
         })
         // Fenced by the claim lease: if our lease expired mid-fire and another
         // node re-claimed the schedule, this no-ops instead of clobbering it.
+        // The claim's own expiry tells a re-claim by the SAME owner apart
+        // (see StorageAdapter.completeSchedule).
         .where(
-          and(eq(s.schedules.id, id), eq(s.schedules.leaseOwner, owner)),
-        );
+          and(
+            eq(s.schedules.id, id),
+            eq(s.schedules.leaseOwner, owner),
+            claim ? eq(s.schedules.leaseExpiresAt, claim.leaseExpiresAt) : undefined,
+          ),
+        )
+        .returning({ id: s.schedules.id });
+      // Reported, not swallowed: a no-op here means a newer claim holds the
+      // occurrence, and the runtime must not fire it too.
+      return applied.length > 0;
     },
 
     async noteScheduleFire(id, patch) {

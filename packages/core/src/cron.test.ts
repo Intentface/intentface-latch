@@ -53,7 +53,7 @@ describe("runtime.cron()", () => {
       durability: { enabled: true },
     });
     const out = await rt.cron({ maxAttempts: 5 });
-    expect(out.due).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0 });
+    expect(out.due).toEqual({ fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 });
     expect(out.reaped).toEqual([reapedRun]);
     expect(out.resumed).toEqual([]); // poison cap: attempt 9 ≥ 5
     expect(out.errors).toEqual([]);
@@ -69,7 +69,7 @@ describe("runtime.cron()", () => {
       agents: {},
     });
     const out = await rt.cron();
-    expect(out).toEqual({ due: { fired: 0, errors: 0, skipped: 0, parked: 0 }, reaped: [], resumed: [], errors: [] });
+    expect(out).toEqual({ due: { fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 }, reaped: [], resumed: [], errors: [] });
     expect(calls).toEqual(["claimDueSchedules"]);
   });
 
