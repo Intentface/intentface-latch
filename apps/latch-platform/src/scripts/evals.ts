@@ -76,7 +76,7 @@ async function main() {
         ...(q.internalSource?.length ? { docs: q.internalSource } : {}),
       },
     }));
-    await evals.setInputs(id, inputs);
+    await evals.setInputs(owner, id, inputs);
     console.log(`dataset ${id}: ${inputs.length} inputs for ${agent}`);
     return;
   }
@@ -105,7 +105,7 @@ async function main() {
   if (!dataset) throw new Error(`no dataset ${datasetId}`);
   const only = flag("only")?.split(",").map((x) => x.trim());
   // --only narrows a run to a few inputs: a cheap check before a full one.
-  const inputs = (await evals.listInputs(dataset.id)).filter((i) => !only || only.includes(i.id));
+  const inputs = (await evals.listInputs(dataset.owner, dataset.id)).filter((i) => !only || only.includes(i.id));
 
   if (cmd === "run") {
     const labels = (flag("versions") ?? "live").split(",").map((s) => s.trim());

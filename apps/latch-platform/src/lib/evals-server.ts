@@ -67,9 +67,9 @@ export const getEvalsOverviewFn = createServerFn({ method: "GET" })
         datasets.map(async (d) => ({
           id: d.id,
           name: d.name,
-          inputs: (await evals.listInputs(d.id)).length,
+          inputs: (await evals.listInputs(d.owner, d.id)).length,
           runs: (await evals.listRuns(o.owner, d.id)).map((r) => ({ ...r, names: Object.fromEntries(r.versions.map((v) => [v, titleOf(v, candidates)])) as Record<string, string> })),
-          views: (await evals.listViews(d.id)).map((v) => ({ id: v.id, name: v.name, tags: v.tags })),
+          views: (await evals.listViews(d.owner, d.id)).map((v) => ({ id: v.id, name: v.name, tags: v.tags })),
         })),
       ),
       rubrics: rubrics.map((r) => ({ id: r.id, version: r.version, checks: r.checks.length })),
@@ -108,7 +108,7 @@ export const getEvalThreadFn = createServerFn({ method: "GET" })
     const t = await evals.getThread(o.owner, data.threadId);
     if (!t) return null;
     const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal }));
-    const input = t.datasetId && t.inputId ? (await evals.listInputs(t.datasetId)).find((i) => i.id === t.inputId) : undefined;
+    const input = t.datasetId && t.inputId ? (await evals.listInputs(t.owner, t.datasetId)).find((i) => i.id === t.inputId) : undefined;
     return {
       version: t.version,
       prompt: input?.prompt ?? view.inputs[0],
@@ -156,7 +156,7 @@ export const getQuestionsFn = createServerFn({ method: "GET" })
     if (!d) return null;
     return {
       dataset: { id: d.id, name: d.name, audience: d.audience ?? "", note: d.note ?? "" },
-      questions: (await evals.listInputs(d.id)).map((i) => ({
+      questions: (await evals.listInputs(d.owner, d.id)).map((i) => ({
         ...toEditable(i),
         files: (i.files ?? []).map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })),
       })),
@@ -180,7 +180,7 @@ export const saveQuestionsFn = createServerFn({ method: "POST" })
     if (!d) return { ok: false as const, error: "This question set no longer exists." };
     const valid = fromEditable(data.questions);
     if (!valid.ok) return valid;
-    const filesOf = new Map((await evals.listInputs(d.id)).map((i) => [i.id, i.files]));
+    const filesOf = new Map((await evals.listInputs(d.owner, d.id)).map((i) => [i.id, i.files]));
     for (const i of valid.value) {
       const f = filesOf.get(i.id);
       if (f?.length) i.files = f;
@@ -194,7 +194,7 @@ export const saveQuestionsFn = createServerFn({ method: "POST" })
       ...(data.audience.trim() ? { audience: data.audience.trim() } : {}),
       ...(data.note.trim() ? { note: data.note.trim() } : {}),
     });
-    await evals.setInputs(d.id, valid.value);
+    await evals.setInputs(d.owner, d.id, valid.value);
     return { ok: true as const, questions: valid.value.map(toEditable) };
   });
 
@@ -401,7 +401,7 @@ export const getRunOptionsFn = createServerFn({ method: "GET" })
     const found = await candidatesOf(principal, o.name);
     if (!found) return null;
     const { rec, candidates, liveVersion } = found;
-    const [history, inputs] = await Promise.all([agentStore.listVersions(principal, o.name, rec.scope), evals.listInputs(data.datasetId)]);
+    const [history, inputs] = await Promise.all([agentStore.listVersions(principal, o.name, rec.scope), evals.listInputs(o.owner, data.datasetId)]);
     // Say which listed configuration IS live: picking both compares it with itself.
     const livePrint = configFingerprint(rec);
     const recent = history.slice().sort((a, b) => b.version - a.version).filter((v) => v.version !== liveVersion).slice(0, 12);
@@ -460,9 +460,11 @@ export const priceRunsFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return null;
+    const o = await ownerFor(principal, data.agent);
+    if (!o) return null;
     const { evals } = await getLatch();
     // A view runs its own inputs; otherwise every input.
-    const all = (await evals.listInputs(data.datasetId)).map((i) => i.id);
+    const all = (await evals.listInputs(o.owner, data.datasetId)).map((i) => i.id);
     const inputIds = data.inputIds?.length ? all.filter((id) => data.inputIds!.includes(id)) : all;
     const out = [];
     for (const label of data.labels) {

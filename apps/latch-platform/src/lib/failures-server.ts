@@ -53,7 +53,7 @@ export const getFailuresFn = createServerFn({ method: "GET" })
     const byThread = new Map(threads.map((t) => [t.threadId, t]));
     const prompts = new Map<string, string>();
     for (const d of new Set(threads.map((t) => t.datasetId).filter((x): x is string => !!x)))
-      for (const i of await evals.listInputs(d)) prompts.set(`${d}|${i.id}`, i.prompt);
+      for (const i of await evals.listInputs(o.owner, d)) prompts.set(`${d}|${i.id}`, i.prompt);
     return {
       readTarget: READ_TARGET,
       minToCluster: MIN_NOTES_TO_CLUSTER,

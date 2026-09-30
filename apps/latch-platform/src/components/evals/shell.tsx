@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Drawer from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -66,12 +66,17 @@ export function useOverview(agent: string | undefined) {
   const [overview, setOverview] = useState<EvalsOverview | null>(null);
   // Null means two things — still loading, or not an agent you can edit — and the page says different things for each.
   const [unavailable, setUnavailable] = useState(false);
+  // Only the newest request's answer lands: switching agents while one is in
+  // flight must not leave the last agent's sets on this one's page.
+  const seq = useRef(0);
   const reload = useCallback(() => {
-    if (agent)
-      void getEvalsOverviewFn({ data: agent }).then((o) => {
-        setOverview(o);
-        setUnavailable(o === null);
-      });
+    if (!agent) return;
+    const mine = ++seq.current;
+    void getEvalsOverviewFn({ data: agent }).then((o) => {
+      if (mine !== seq.current) return;
+      setOverview(o);
+      setUnavailable(o === null);
+    });
   }, [agent]);
   useEffect(() => {
     setOverview(null);

@@ -102,7 +102,10 @@ export function NoteBox({
 
   useEffect(() => {
     setState("loading");
+    // A late answer for the thread before must not become this thread's note.
+    let live = true;
     void getNoteFn({ data: { agent, threadId } }).then((r) => {
+      if (!live) return;
       const n = r?.note;
       setSuggestion(r?.suggestion ?? null);
       saved.current = { text: n?.text ?? "", ok: n?.ok ?? false };
@@ -110,6 +113,9 @@ export function NoteBox({
       setOk(saved.current.ok);
       setState("idle");
     });
+    return () => {
+      live = false;
+    };
   }, [agent, threadId]);
 
   const save = useCallback(

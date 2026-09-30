@@ -140,6 +140,10 @@ export function InputDrawer({
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const dirty = useRef(false)
 
+  // Keyed by the input's id, not the object: the grid reloads — every poll
+  // while a job runs, whenever the Evals agent changes something — and each
+  // reload is a new object. Resetting on that would wipe what is being typed.
+  const openId = input?.id
   useEffect(() => {
     if (!input) return setDraft(null)
     dirty.current = false
@@ -157,16 +161,15 @@ export function InputDrawer({
       calls: input.calls,
       tags: input.tags,
     })
-  }, [input])
+  }, [openId])
   const [judges, setJudges] = useState<{ list: string[]; fallback: string }>({ list: [], fallback: "jev-latest" })
   useEffect(() => {
-    if (!openIdFor(input) || !rubricId) return
+    if (!openId || !rubricId) return
     void getChecksFn({ data: { agent, rubricId } }).then((r) => {
       if (r) setJudges({ list: r.judges.filter((id) => !NOT_A_JUDGE.test(id)), fallback: r.rubric.defaultJudge })
     })
-  }, [input, agent, rubricId])
+  }, [openId, agent, rubricId])
   // Once per input opened: the tools don't change while it's open.
-  const openId = input?.id
   useEffect(() => {
     if (!openId) return
     void getToolArgsFn({ data: { agent, datasetId } }).then((t) => setTools(t ?? []))
@@ -216,17 +219,22 @@ export function InputDrawer({
   const attach = async (picked: File[]) => {
     if (!input) return
     setUploading(true)
-    for (const f of picked) {
-      if (f.size > ATTACHMENT_MAX_FILE_SIZE) {
-        setState(`${f.name} is over ${formatFileSize(ATTACHMENT_MAX_FILE_SIZE)}.`)
-        continue
+    try {
+      for (const f of picked) {
+        if (f.size > ATTACHMENT_MAX_FILE_SIZE) {
+          setState(`${f.name} is over ${formatFileSize(ATTACHMENT_MAX_FILE_SIZE)}.`)
+          continue
+        }
+        const r = await editInputFilesFn({ data: { agent, datasetId, inputId: input.id, add: await readFile(f) } })
+        if (!r.ok) setState(r.error)
+        else setFiles(r.files)
       }
-      const r = await editInputFilesFn({ data: { agent, datasetId, inputId: input.id, add: await readFile(f) } })
-      if (!r.ok) setState(r.error)
-      else setFiles(r.files)
+      dirty.current = true
+    } catch (e) {
+      setState(`Couldn't attach: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setUploading(false)
     }
-    setUploading(false)
-    dirty.current = true
   }
   const detach = async (n: number) => {
     if (!input) return
@@ -365,7 +373,6 @@ type JudgeContext = {
 }
 /** Models that can't read an answer: the catalog also lists image, speech and embedding ones. */
 const NOT_A_JUDGE = /image|embedding|tts|veo|lyria|realtime|-live|computer-use|deep-research|translate|audio/
-const openIdFor = (i: { id: string } | null) => i?.id
 type Tools = NonNullable<Awaited<ReturnType<typeof getToolArgsFn>>>
 /** `edge-v2-kn_read_file` → `read_file`; a built-in like `read_file` stays whole. */
 const short = (t: string) => {
@@ -656,20 +663,25 @@ export function Composer({ agent, datasetId, onAdded, tags }: { agent: string; d
     if (!text.trim() || busy) return
     setBusy(true)
     setError(null)
-    // Added inside a view, it joins that view.
-    const r = await editInputsFn({ data: { agent, datasetId, upserts: [{ prompt: text.trim(), followUps: turns.filter((t) => t.trim()), ...(tags?.length ? { tags } : {}) }] } })
-    if (!r.ok) return (setBusy(false), setError(r.error))
-    const id = r.added[0]
-    // The input exists now; its files go on one at a time.
-    for (const f of id ? picked : []) {
-      const a = await editInputFilesFn({ data: { agent, datasetId, inputId: id, add: await readFile(f) } })
-      if (!a.ok) setError(a.error)
+    try {
+      // Added inside a view, it joins that view.
+      const r = await editInputsFn({ data: { agent, datasetId, upserts: [{ prompt: text.trim(), followUps: turns.filter((t) => t.trim()), ...(tags?.length ? { tags } : {}) }] } })
+      if (!r.ok) return setError(r.error)
+      const id = r.added[0]
+      // The input exists now; its files go on one at a time.
+      for (const f of id ? picked : []) {
+        const a = await editInputFilesFn({ data: { agent, datasetId, inputId: id, add: await readFile(f) } })
+        if (!a.ok) setError(a.error)
+      }
+      setText("")
+      setTurns([])
+      setPicked([])
+      if (id) onAdded(id)
+    } catch (e) {
+      setError(`Couldn't add it: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
     }
-    setBusy(false)
-    setText("")
-    setTurns([])
-    setPicked([])
-    if (id) onAdded(id)
   }
   return (
     <div className="border-primary-border bg-primary-bg focus-within:border-ink-tertiary rounded-xl border px-3 pt-2 pb-1.5">
@@ -1036,8 +1048,14 @@ export function ChecksDrawer({
       // A question with no name is named by its first words.
       r.check.label.trim() ? r.check : { ...r.check, label: r.check.kind === "asked" ? r.check.ask.replace(/\?$/, "").slice(0, 48) : r.check.label },
     )
-    const r = await saveChecksFn({ data: { agent, rubricId, defaultJudge: loaded.defaultJudge, checks: JSON.stringify(checks) } })
-    setBusy(false)
+    let r
+    try {
+      r = await saveChecksFn({ data: { agent, rubricId, defaultJudge: loaded.defaultJudge, checks: JSON.stringify(checks) } })
+    } catch (e) {
+      return setState(`Couldn't save: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
     if (!r.ok) return setState(r.error)
     setLoaded({ ...loaded, version: r.version })
     setDirty(false)

@@ -119,7 +119,7 @@ function FailuresPage() {
     if (decision === "fix") {
       const questions = [...new Set(p.items.map((s) => s.inputId))].join(", ")
       askEvalsAgent(
-        `For ${agent}: fix the failure mode "${p.name}" (questions ${questions}). Read the failing threads and the agent's configuration, propose_fix on @draft, then estimate re-running only those questions on @draft and compare with the existing live result.`
+        `For ${agent}: fix the failure mode "${p.name}" (questions ${questions}). Read the failing threads and the agent's configuration, propose_fix into a new candidate (newCandidate, named for the failure), then estimate re-running only those questions on that candidate and compare with the existing live result.`
       )
     }
     if (decision === "measure" && mode) setToCheck(mode)
@@ -552,7 +552,7 @@ const OUTCOMES = [
   [
     "fix",
     "Fix it",
-    "The evals agent drafts a change to @draft for you to approve, then re-runs these questions on it.",
+    "The evals agent drafts a change in a new candidate for you to approve, then re-runs these questions on it.",
   ],
   [
     "measure",
@@ -822,7 +822,7 @@ function SuggestionList({
     setBusy(true)
     // One at a time: each is its own note, and a failure should not take the rest with it.
     for (const threadId of threadIds)
-      await resolveSuggestionFn({ data: { agent, threadId, accept } })
+      await resolveSuggestionFn({ data: { agent, threadId, accept } }).catch((e: unknown) => console.warn(`[failures] ${threadId}:`, e))
     setBusy(false)
     setPicked(new Set())
     onResolved()

@@ -204,7 +204,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
             sets.map(async (d) => ({
               id: d.id,
               name: d.name,
-              questions: (await evals.listInputs(d.id)).length,
+              questions: (await evals.listInputs(d.owner, d.id)).length,
               runs: (await evals.listRuns(o.owner, d.id)).slice(0, 8).map((r) => ({
                 runId: r.runId,
                 ...(r.name ? { name: r.name } : {}),
@@ -284,7 +284,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         const t = await evals.getThread(o.owner, threadId);
         if (!t) return { error: `No eval thread "${threadId}" for ${o.name}.` };
         const history = await runtime.loadHistory({ chatId: threadId, principal });
-        const input = t.datasetId && t.inputId ? (await evals.listInputs(t.datasetId)).find((i) => i.id === t.inputId) : undefined;
+        const input = t.datasetId && t.inputId ? (await evals.listInputs(t.owner, t.datasetId)).find((i) => i.id === t.inputId) : undefined;
         const verdicts = await evals.listVerdicts({ threadIds: [threadId] });
         return {
           version: t.version,
@@ -388,7 +388,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         if ("error" in o) return o;
         const inputIds = onlyFailedIn
           ? await failedQuestions(o.owner, onlyFailedIn)
-          : questions ?? (await evals.listInputs(questionSetId)).map((i) => i.id);
+          : questions ?? (await evals.listInputs(o.owner, questionSetId)).map((i) => i.id);
         const p = await planRun(principal, { agent, datasetId: questionSetId, rubricId: checksId, versions, inputIds, repeats });
         if (!p.ok) return p;
         return {
@@ -562,7 +562,7 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
           name: set.name,
           whoIsAsking: set.audience ?? null,
           howAnswersShouldRead: set.note ?? null,
-          questions: (await evals.listInputs(set.id)).map(toEditable),
+          questions: (await evals.listInputs(set.owner, set.id)).map(toEditable),
         };
       },
     }),
@@ -812,6 +812,8 @@ Be brief. Lead with what you found ("4 of 6 failures end with a question instead
     // What spends money or changes something a person relies on waits for them.
     toolApproval: {
       start_run: "user-approval",
+      // A few cents a time, and it writes grades — cheap is not free.
+      judge_run: "user-approval",
       propose_fix: "user-approval",
       add_check: "user-approval",
       create_question_set: "user-approval",

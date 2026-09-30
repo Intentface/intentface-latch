@@ -61,7 +61,7 @@ export async function createQuestionSet(
     ...(d.audience?.trim() ? { audience: d.audience.trim() } : {}),
     ...(d.note?.trim() ? { note: d.note.trim() } : {}),
   });
-  await evals.setInputs(id, valid.value);
+  await evals.setInputs(o.owner, id, valid.value);
   // A question set is only runnable with checks to judge it by. An agent's
   // first set gets the starter checks, so its first run needs no other step.
   let checksId: string | undefined;
@@ -89,7 +89,7 @@ export async function editQuestions(
   const { evals } = await getLatch();
   const set = await evals.getDataset(o.owner, d.questionSetId);
   if (!set) return { ok: false as const, error: `No question set "${d.questionSetId}".` };
-  const before = await evals.listInputs(set.id);
+  const before = await evals.listInputs(set.owner, set.id);
   // Files never travel through the editors: they stay with the input by id.
   const filesOf = new Map(before.map((i) => [i.id, i.files]));
   let list = before.map(toEditable);
@@ -152,7 +152,7 @@ export async function editQuestions(
       ...((d.audience ?? set.audience)?.trim() ? { audience: (d.audience ?? set.audience)!.trim() } : {}),
       ...((d.note ?? set.note)?.trim() ? { note: (d.note ?? set.note)!.trim() } : {}),
     });
-  await evals.setInputs(set.id, valid.value);
+  await evals.setInputs(set.owner, set.id, valid.value);
   const checks = await ensureExpectationChecks(principal, { agent: d.agent, datasetId: set.id });
   return { ok: true as const, questions: valid.value.length, added, deleted: [...gone], checksAdded: checks.added };
 }
@@ -166,7 +166,7 @@ export async function ensureExpectationChecks(principal: Principal, d: { agent: 
   const o = await ownerFor(principal, d.agent);
   if (!o) return { added: [] as string[] };
   const { evals } = await getLatch();
-  const inputs = await evals.listInputs(d.datasetId);
+  const inputs = await evals.listInputs(o.owner, d.datasetId);
   const added: string[] = [];
   for (const r of await evals.listRubrics(o.owner, o.name)) added.push(...(await ensureOn(r, inputs)));
   return { added };
@@ -230,7 +230,7 @@ export async function editInputFiles(
   const { evals } = await getLatch();
   const set = await evals.getDataset(o.owner, d.datasetId);
   if (!set) return { ok: false as const, error: "This set no longer exists." };
-  const inputs = await evals.listInputs(set.id);
+  const inputs = await evals.listInputs(set.owner, set.id);
   const input = inputs.find((i) => i.id === d.inputId);
   if (!input) return { ok: false as const, error: `No input ${d.inputId}.` };
   let files = input.files ?? [];
@@ -242,7 +242,7 @@ export async function editInputFiles(
     files = [...files, { ...d.add, size }];
   }
   if (d.remove !== undefined) files = files.filter((_, i) => i !== d.remove);
-  await evals.setInputs(set.id, inputs.map((i) => (i.id === input.id ? { ...i, files } : i)));
+  await evals.setInputs(set.owner, set.id, inputs.map((i) => (i.id === input.id ? { ...i, files } : i)));
   return { ok: true as const, files: files.map((f) => ({ filename: f.filename, mediaType: f.mediaType, size: f.size })) };
 }
 
@@ -330,7 +330,7 @@ export async function promoteJudged(principal: Principal, d: { agent: string; da
   const { evals } = await getLatch();
   const rubric = await evals.getRubric(o.owner, d.rubricId);
   if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
-  const inputs = await evals.listInputs(d.datasetId);
+  const inputs = await evals.listInputs(o.owner, d.datasetId);
   const input = inputs.find((i) => i.id === d.inputId);
   const item = input?.facts?.judged?.[d.index];
   if (!input || !item) return { ok: false as const, error: "That question is no longer on this input." };
@@ -343,7 +343,7 @@ export async function promoteJudged(principal: Principal, d: { agent: string; da
   const facts = { ...input.facts };
   if (judged.length) facts.judged = judged;
   else delete facts.judged;
-  await evals.setInputs(d.datasetId, inputs.map((i) => (i.id === input.id ? { ...i, facts } : i)));
+  await evals.setInputs(o.owner, d.datasetId, inputs.map((i) => (i.id === input.id ? { ...i, facts } : i)));
   return { ok: true as const, version: saved.version, label };
 }
 
@@ -360,12 +360,12 @@ export async function saveView(principal: Principal, d: { agent: string; dataset
   if (!name) return { ok: false as const, error: "Give the view a name." };
   const tags = cleanTags(d.tags);
   if (!tags.length) return { ok: false as const, error: "Pick at least one tag — a view shows the inputs that carry it." };
-  const views = await evals.listViews(d.datasetId);
+  const views = await evals.listViews(o.owner, d.datasetId);
   // Saving the same name again updates that view — a repeated click or a
   // retry must never stack up copies.
   const existing = (d.id ? views.find((v) => v.id === d.id) : undefined) ?? views.find((v) => v.name.toLowerCase() === name.toLowerCase());
   const id = existing?.id ?? checkIdFor(name, [...views.map((v) => v.id), "all", "overview"]);
-  await evals.saveView({ datasetId: d.datasetId, id, name, tags, createdAt: existing?.createdAt ?? Date.now() });
+  await evals.saveView(o.owner, { datasetId: d.datasetId, id, name, tags, createdAt: existing?.createdAt ?? Date.now() });
   return { ok: true as const, id };
 }
 
@@ -374,6 +374,6 @@ export async function removeView(principal: Principal, d: { agent: string; datas
   if (!o) return { ok: false as const, error: "Only agents you can edit have views." };
   const { evals } = await getLatch();
   if (!(await evals.getDataset(o.owner, d.datasetId))) return { ok: false as const, error: "That set no longer exists." };
-  await evals.removeView(d.datasetId, d.id);
+  await evals.removeView(o.owner, d.datasetId, d.id);
   return { ok: true as const };
 }

@@ -179,7 +179,10 @@ export async function decidePattern(
   const o = await ownerFor(principal, data.agent);
   if (!o) return { ok: false as const, error: "Only agents you can edit." };
   const { evals } = await getLatch();
-  const mine = (await evals.listSuggestions(o.owner, o.name, "open")).filter((x) => x.group?.name === data.name);
+  // A person's note always stands: threads they have written on are not the
+  // pattern's to overwrite (the page already leaves them out of it).
+  const noted = new Set((await evals.listNotes(o.owner, o.name)).map((n) => n.threadId));
+  const mine = (await evals.listSuggestions(o.owner, o.name, "open")).filter((x) => x.group?.name === data.name && !noted.has(x.threadId));
   if (!mine.length) return { ok: false as const, error: "That pattern is gone. Refresh the page." };
   if (data.decision === "disagree") {
     for (const x of mine) await evals.setSuggestionStatus(o.owner, x.threadId, "rejected");

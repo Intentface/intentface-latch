@@ -89,18 +89,18 @@ describe("evals v2 end to end (fake agent, fake judge, real store)", () => {
     await migrateEvalsV2(client); // idempotent
     store = createEvalsStore(client);
     await store.saveDataset(dataset);
-    await store.setInputs(dataset.id, inputs);
+    await store.setInputs(owner, dataset.id, inputs);
   });
 
   it("round-trips inputs, including follow-ups and facts", async () => {
-    const back = await store.listInputs(dataset.id);
+    const back = await store.listInputs(owner, dataset.id);
     expect(back.map((i) => i.id)).toEqual(["i1", "i2", "i3"]);
     expect(back[1]!.followUps).toEqual(["and tell me why"]);
     expect(back[0]!.facts?.mustNot).toEqual(["delete anything"]);
   });
 
   it("refuses duplicate input ids — a duplicate silently merges two rows across runs", async () => {
-    await expect(store.setInputs("dsX", [inputs[0]!, inputs[0]!])).rejects.toThrow(/duplicate/);
+    await expect(store.setInputs(owner, "dsX", [inputs[0]!, inputs[0]!])).rejects.toThrow(/duplicate/);
   });
 
   it("appends rubric versions rather than overwriting", async () => {

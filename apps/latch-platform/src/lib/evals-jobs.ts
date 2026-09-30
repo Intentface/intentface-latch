@@ -23,6 +23,8 @@ import { configFingerprint, judgeThreads } from "./evals/v2/runner";
 
 /** How long one holder may work before the cron may take over. */
 const LEASE_MS = 5 * 60_000;
+/** How often a working holder renews its lease — well inside LEASE_MS. */
+const HEARTBEAT_MS = 60_000;
 /** Stop STARTING work this long into a slice; Vercel functions are cut at 300s. */
 const SLICE_MS = 4 * 60_000;
 
@@ -67,7 +69,7 @@ export async function planRun(principal: Principal, d: RunRequest) {
   const rubric = await evals.getRubric(owner, d.rubricId);
   if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
   const repeats = Math.max(1, Math.min(5, Math.floor(d.repeats)));
-  const inputs = new Set((await evals.listInputs(d.datasetId)).map((i) => i.id));
+  const inputs = new Set((await evals.listInputs(owner, d.datasetId)).map((i) => i.id));
   const inputIds = [...new Set(d.inputIds)].filter((id) => inputs.has(id));
   if (!d.versions.length) return { ok: false as const, error: "Pick at least one version." };
   if (!inputIds.length) return { ok: false as const, error: "Pick at least one question." };
@@ -208,7 +210,7 @@ export async function planAgain(principal: Principal, d: AgainRequest) {
   const owner = agentOwnerKey(principal, rec.scope);
   const rubric = await evals.getRubric(owner, d.rubricId);
   if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
-  const inputs = new Set((await evals.listInputs(d.datasetId)).map((i) => i.id));
+  const inputs = new Set((await evals.listInputs(owner, d.datasetId)).map((i) => i.id));
   const targets = [];
   for (const t of d.targets) {
     const inputIds = [...new Set(t.inputIds)].filter((id) => inputs.has(id));
@@ -335,6 +337,10 @@ export async function processJob(owner: string, id: string): Promise<void> {
     if (!job) return;
     const principal = job.principal as Principal;
     const judges = new Map<string, ReturnType<typeof evaluationModelFor>>();
+    // Units started before the slice's deadline keep running past it, and an
+    // agent run can take minutes: renew the lease while working, or it lapses
+    // and the cron starts the same units again — paying for them twice.
+    const heartbeat = setInterval(() => void evals.updateJob(id, { leaseUntil: Date.now() + LEASE_MS }).catch(() => null), HEARTBEAT_MS);
     const end = await advanceJob(
       job,
       {
@@ -357,7 +363,7 @@ export async function processJob(owner: string, id: string): Promise<void> {
           loadHistory: (chatId) => runtime.loadHistory({ chatId, principal }),
           judgeFor: (jid) => judges.get(jid) ?? judges.set(jid, evaluationModelFor(jid, modelFor, typeSafeAi)).get(jid)!,
         },
-        loadInputs: () => evals.listInputs(job.datasetId),
+        loadInputs: () => evals.listInputs(owner, job.datasetId),
         loadDataset: async () => (await evals.getDataset(owner, job.datasetId)) ?? { id: job.datasetId, agentName: job.agentName },
         loadRubric: () => evals.getRubric(owner, job.rubricId),
         threadsOf: (runId) => evals.listThreads(owner, { runId }),
@@ -368,10 +374,12 @@ export async function processJob(owner: string, id: string): Promise<void> {
         update: (patch) => evals.updateJob(id, patch),
       },
       { deadline: now + SLICE_MS },
-    ).catch((e: unknown) => {
-      console.error(`[evals] job ${id} failed:`, e);
-      return null;
-    });
+    )
+      .catch((e: unknown) => {
+        console.error(`[evals] job ${id} failed:`, e);
+        return null;
+      })
+      .finally(() => clearInterval(heartbeat));
     // Hand the lease back, so the next tick need not wait for it to lapse.
     await evals.updateJob(id, { leaseUntil: 0 }).catch(() => null);
     if (!end || end.status === "done" || end.status === "failed" || end.status === "cancelled") return;
@@ -413,7 +421,7 @@ export async function tryCheck(principal: Principal, d: { agent: string; dataset
   if (!rubric) return { ok: false as const, error: "These checks no longer exist." };
   const valid = validateChecks([d.check]);
   if (!valid.ok) return { ok: false as const, error: valid.error };
-  const inputs = new Map((await evals.listInputs(d.datasetId)).map((i) => [i.id, i]));
+  const inputs = new Map((await evals.listInputs(owner, d.datasetId)).map((i) => [i.id, i]));
   // The newest answer to each of a few inputs — a spread, not one input's tries.
   const all = (await evals.listThreads(owner, { datasetId: d.datasetId })).filter((t) => !t.error && t.inputId && inputs.has(t.inputId)).sort((a, b) => b.createdAt - a.createdAt);
   const newest = new Map<string, ThreadRef>();

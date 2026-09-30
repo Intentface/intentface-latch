@@ -53,7 +53,7 @@ export async function computeGrid(
     if (!columns.length) {
       // By default the newest COMPLETE run: one that was stopped, or answered
       // only a few inputs, is a poor thing to land on.
-      const size = (await evals.listInputs(data.datasetId)).length;
+      const size = (await evals.listInputs(o.owner, data.datasetId)).length;
       // A set grows after a run, so "complete" is nearly every input it has now.
       const complete = runs.find((r) => r.questions >= Math.floor(size * 0.9) && r.threads >= r.versions.length * r.questions);
       const run = runs.find((r) => r.runId === data.runId) ?? complete ?? runs.at(0);
@@ -110,7 +110,7 @@ export async function computeGrid(
     const all = await evals.listThreads(o.owner, { datasetId: data.datasetId });
     const allVerdicts = await evals.listVerdicts({ threadIds: all.map((t) => t.threadId), rubricVersion: rubric.version });
     const rulings = await evals.listRulings({ threadIds: all.map((t) => t.threadId) });
-    const inputs = new Map((await evals.listInputs(data.datasetId)).map((i) => [i.id, i]));
+    const inputs = new Map((await evals.listInputs(o.owner, data.datasetId)).map((i) => [i.id, i]));
 
     const labels = columns.map(labelOf);
     const byLabel = new Map(summarize(threads, verdicts, rubric).map((s) => [s.version, s]));

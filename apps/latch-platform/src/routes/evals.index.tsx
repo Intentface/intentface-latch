@@ -331,7 +331,7 @@ function whyPrompt(agent: string, datasetId: string, rubricId: string, base: Col
   return [
     `For ${agent}, question set ${datasetId}, checks ${rubricId}: the column ${focus.label} (run ${focus.runId}, version ${focus.version}) still fails a check on ${failing.length} input${failing.length === 1 ? "" : "s"}: ${failing.join(", ")}. The baseline is ${base.label} (run ${base.runId}).`,
     "Read those threads and find the first thing that went wrong in each. Group them by cause and list each group with the inputs it covers, biggest first.",
-    "Then propose ONE fix for the biggest group, as a new configuration: an edit to @draft (propose_fix) when the instructions or a tool are at fault, or a variant (create_variant) when it's a question of model or reasoning effort. If the failure is specific to some inputs, say which per-input expectation would catch it.",
+    "Then propose ONE fix for the biggest group, as a new configuration: an instructions edit in a candidate (propose_fix — into the column's candidate if it is one, else a new one) when the instructions or a tool are at fault, or a candidate with one thing changed (create_candidate) when it's a question of model or reasoning effort. If the failure is specific to some inputs, say which per-input expectation would catch it.",
     "Don't run anything yet: price re-running only the failing inputs with estimate_run and tell me the cost.",
   ].join("\n\n")
 }

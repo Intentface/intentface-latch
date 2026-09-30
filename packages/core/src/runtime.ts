@@ -1745,6 +1745,9 @@ export function createRuntime<P, RC = unknown>(
             depth: depth + 1,
             autoApprove,
             blockGated,
+            // Memory off stays off down the tree: an eval turn's delegate must
+            // not recall earlier inputs or save new memory either.
+            ...(memoryOn ? {} : { memory: false }),
             onProgress,
             // Telemetry linkage: this turn is the parent; carry the root chat
             // down so the subagent's trace nests under this conversation.

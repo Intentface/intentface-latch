@@ -20,11 +20,13 @@ export interface EvalsStore {
   deleteDataset: (owner: Owner, id: string) => Promise<void>;
 
   /** Replace a dataset's inputs wholesale — the editor saves the list. */
-  setInputs: (datasetId: string, inputs: Input[]) => Promise<void>;
-  listInputs: (datasetId: string) => Promise<Input[]>;
+  // Inputs, members and views are always read and written under their set's
+  // owner: a set id from another owner finds nothing, whoever forgot a check.
+  setInputs: (owner: Owner, datasetId: string, inputs: Input[]) => Promise<void>;
+  listInputs: (owner: Owner, datasetId: string) => Promise<Input[]>;
   /** For a thread dataset: the threads it holds. */
-  setMembers: (datasetId: string, threadIds: string[]) => Promise<void>;
-  listMembers: (datasetId: string) => Promise<string[]>;
+  setMembers: (owner: Owner, datasetId: string, threadIds: string[]) => Promise<void>;
+  listMembers: (owner: Owner, datasetId: string) => Promise<string[]>;
 
   /** Append a new rubric version; returns it. */
   saveRubric: (r: { owner: Owner; id: string; agentName: string; defaultJudge: string; checks: Check[] }) => Promise<Rubric>;
@@ -81,9 +83,9 @@ export interface EvalsStore {
   /** Take a ruling back — a misclick must not stay in the alignment numbers. */
   deleteRuling: (threadId: string, checkId: string) => Promise<void>;
   /** A set's saved views, oldest first — the order of the tabs. */
-  listViews: (datasetId: string) => Promise<View[]>;
-  saveView: (v: View) => Promise<void>;
-  removeView: (datasetId: string, id: string) => Promise<void>;
+  listViews: (owner: Owner, datasetId: string) => Promise<View[]>;
+  saveView: (owner: Owner, v: View) => Promise<void>;
+  removeView: (owner: Owner, datasetId: string, id: string) => Promise<void>;
   listRulings: (q: { threadIds?: string[]; checkIds?: string[] }) => Promise<Ruling[]>;
 }
 
@@ -94,13 +96,8 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       kind TEXT NOT NULL, audience TEXT, note TEXT,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
       PRIMARY KEY (owner, id))`,
-    `CREATE TABLE IF NOT EXISTS latch_eval_inputs (
-      dataset_id TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
-      prompt TEXT NOT NULL, follow_ups TEXT, facts TEXT,
-      PRIMARY KEY (dataset_id, id))`,
-    `CREATE TABLE IF NOT EXISTS latch_eval_members (
-      dataset_id TEXT NOT NULL, thread_id TEXT NOT NULL,
-      PRIMARY KEY (dataset_id, thread_id))`,
+    INPUTS_DDL,
+    MEMBERS_DDL,
     `CREATE TABLE IF NOT EXISTS latch_eval_rubrics (
       owner TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, agent_name TEXT NOT NULL,
       default_judge TEXT NOT NULL, checks TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -137,9 +134,7 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
       owner TEXT NOT NULL, thread_id TEXT NOT NULL PRIMARY KEY, agent_name TEXT NOT NULL,
       text TEXT NOT NULL, ok INTEGER NOT NULL, why TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS latch_eval_suggestions_agent ON latch_eval_suggestions (owner, agent_name, status)`,
-    `CREATE TABLE IF NOT EXISTS latch_eval_views (
-      dataset_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, tags TEXT NOT NULL,
-      created_at INTEGER NOT NULL, PRIMARY KEY (dataset_id, id))`,
+    VIEWS_DDL,
     `CREATE TABLE IF NOT EXISTS latch_eval_rulings (
       thread_id TEXT NOT NULL, check_id TEXT NOT NULL, failed INTEGER NOT NULL,
       by TEXT, created_at INTEGER NOT NULL,
@@ -151,12 +146,44 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
     await client.execute(`ALTER TABLE latch_eval_modes ADD COLUMN ${col}`).catch(() => {});
   for (const col of ["group_name TEXT", "group_description TEXT"])
     await client.execute(`ALTER TABLE latch_eval_suggestions ADD COLUMN ${col}`).catch(() => {});
+  // (Before owner scoping, which rebuilds the table with them.)
   await client.execute(`ALTER TABLE latch_eval_inputs ADD COLUMN files TEXT`).catch(() => {});
   await client.execute(`ALTER TABLE latch_eval_inputs ADD COLUMN tags TEXT`).catch(() => {});
   await client.execute(`ALTER TABLE latch_eval_verdicts ADD COLUMN probabilities TEXT`).catch(() => {});
   for (const col of ["run_id TEXT", "attempt INTEGER"])
     await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
+  // Tables from before they were owner-scoped: rebuild once, each row taking
+  // its set's owner.
+  await ownerScope(client, "latch_eval_inputs", INPUTS_DDL, "dataset_id, id, position, prompt, follow_ups, facts, files, tags");
+  await ownerScope(client, "latch_eval_members", MEMBERS_DDL, "dataset_id, thread_id");
+  await ownerScope(client, "latch_eval_views", VIEWS_DDL, "dataset_id, id, name, tags, created_at");
+}
+
+const INPUTS_DDL = `CREATE TABLE IF NOT EXISTS latch_eval_inputs (
+      owner TEXT NOT NULL, dataset_id TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
+      prompt TEXT NOT NULL, follow_ups TEXT, facts TEXT, files TEXT, tags TEXT,
+      PRIMARY KEY (owner, dataset_id, id))`;
+const MEMBERS_DDL = `CREATE TABLE IF NOT EXISTS latch_eval_members (
+      owner TEXT NOT NULL, dataset_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+      PRIMARY KEY (owner, dataset_id, thread_id))`;
+const VIEWS_DDL = `CREATE TABLE IF NOT EXISTS latch_eval_views (
+      owner TEXT NOT NULL, dataset_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, tags TEXT NOT NULL,
+      created_at INTEGER NOT NULL, PRIMARY KEY (owner, dataset_id, id))`;
+
+async function ownerScope(client: Client, table: string, ddl: string, cols: string) {
+  const info = await client.execute(`PRAGMA table_info(${table})`);
+  if (info.rows.some((r) => r.name === "owner")) return;
+  const old = `${table}_unscoped`;
+  await client.batch(
+    [
+      `ALTER TABLE ${table} RENAME TO ${old}`,
+      ddl,
+      `INSERT OR IGNORE INTO ${table} (owner, ${cols}) SELECT d.owner, ${cols.split(", ").map((c) => `o.${c}`).join(", ")} FROM ${old} o JOIN latch_eval_datasets d ON d.id = o.dataset_id`,
+      `DROP TABLE ${old}`,
+    ],
+    "write",
+  );
 }
 
 const parse = <T>(v: unknown, fallback: T): T => {
@@ -263,7 +290,7 @@ export function createEvalsStore(client: Client): EvalsStore {
       );
     },
 
-    async setInputs(datasetId, inputs) {
+    async setInputs(owner, datasetId, inputs) {
       const seen = new Set<string>();
       for (const i of inputs) {
         // A duplicate id collapses two inputs into one across runs, and a
@@ -273,10 +300,11 @@ export function createEvalsStore(client: Client): EvalsStore {
       }
       await client.batch(
         [
-          { sql: `DELETE FROM latch_eval_inputs WHERE dataset_id = ?`, args: [datasetId] },
+          { sql: `DELETE FROM latch_eval_inputs WHERE owner = ? AND dataset_id = ?`, args: [owner, datasetId] },
           ...inputs.map((i, position) => ({
-            sql: `INSERT INTO latch_eval_inputs (dataset_id, id, position, prompt, follow_ups, facts, files, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            sql: `INSERT INTO latch_eval_inputs (owner, dataset_id, id, position, prompt, follow_ups, facts, files, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             args: [
+              owner,
               datasetId,
               i.id,
               position,
@@ -291,8 +319,8 @@ export function createEvalsStore(client: Client): EvalsStore {
         "write",
       );
     },
-    async listInputs(datasetId) {
-      return (await rows(`SELECT * FROM latch_eval_inputs WHERE dataset_id = ? ORDER BY position`, [datasetId])).map(
+    async listInputs(owner, datasetId) {
+      return (await rows(`SELECT * FROM latch_eval_inputs WHERE owner = ? AND dataset_id = ? ORDER BY position`, [owner, datasetId])).map(
         (r): Input => ({
           id: String(r.id),
           prompt: String(r.prompt),
@@ -303,20 +331,20 @@ export function createEvalsStore(client: Client): EvalsStore {
         }),
       );
     },
-    async setMembers(datasetId, threadIds) {
+    async setMembers(owner, datasetId, threadIds) {
       await client.batch(
         [
-          { sql: `DELETE FROM latch_eval_members WHERE dataset_id = ?`, args: [datasetId] },
+          { sql: `DELETE FROM latch_eval_members WHERE owner = ? AND dataset_id = ?`, args: [owner, datasetId] },
           ...[...new Set(threadIds)].map((t) => ({
-            sql: `INSERT INTO latch_eval_members (dataset_id, thread_id) VALUES (?, ?)`,
-            args: [datasetId, t],
+            sql: `INSERT INTO latch_eval_members (owner, dataset_id, thread_id) VALUES (?, ?, ?)`,
+            args: [owner, datasetId, t],
           })),
         ],
         "write",
       );
     },
-    async listMembers(datasetId) {
-      return (await rows(`SELECT thread_id FROM latch_eval_members WHERE dataset_id = ?`, [datasetId])).map((r) =>
+    async listMembers(owner, datasetId) {
+      return (await rows(`SELECT thread_id FROM latch_eval_members WHERE owner = ? AND dataset_id = ?`, [owner, datasetId])).map((r) =>
         String(r.thread_id),
       );
     },
@@ -662,8 +690,8 @@ export function createEvalsStore(client: Client): EvalsStore {
       await client.execute({ sql: `UPDATE latch_eval_suggestions SET status = ? WHERE owner = ? AND thread_id = ?`, args: [status, owner, threadId] });
     },
 
-    async listViews(datasetId) {
-      return (await rows(`SELECT * FROM latch_eval_views WHERE dataset_id = ? ORDER BY created_at`, [datasetId])).map((r) => ({
+    async listViews(owner, datasetId) {
+      return (await rows(`SELECT * FROM latch_eval_views WHERE owner = ? AND dataset_id = ? ORDER BY created_at`, [owner, datasetId])).map((r) => ({
         datasetId: String(r.dataset_id),
         id: String(r.id),
         name: String(r.name),
@@ -671,15 +699,15 @@ export function createEvalsStore(client: Client): EvalsStore {
         createdAt: Number(r.created_at),
       }));
     },
-    async saveView(v) {
+    async saveView(owner, v) {
       await client.execute({
-        sql: `INSERT INTO latch_eval_views (dataset_id, id, name, tags, created_at) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(dataset_id, id) DO UPDATE SET name = excluded.name, tags = excluded.tags`,
-        args: [v.datasetId, v.id, v.name, JSON.stringify(v.tags), v.createdAt],
+        sql: `INSERT INTO latch_eval_views (owner, dataset_id, id, name, tags, created_at) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(owner, dataset_id, id) DO UPDATE SET name = excluded.name, tags = excluded.tags`,
+        args: [owner, v.datasetId, v.id, v.name, JSON.stringify(v.tags), v.createdAt],
       });
     },
-    async removeView(datasetId, id) {
-      await client.execute({ sql: `DELETE FROM latch_eval_views WHERE dataset_id = ? AND id = ?`, args: [datasetId, id] });
+    async removeView(owner, datasetId, id) {
+      await client.execute({ sql: `DELETE FROM latch_eval_views WHERE owner = ? AND dataset_id = ? AND id = ?`, args: [owner, datasetId, id] });
     },
     async deleteRuling(threadId, checkId) {
       await client.execute({ sql: `DELETE FROM latch_eval_rulings WHERE thread_id = ? AND check_id = ?`, args: [threadId, checkId] });

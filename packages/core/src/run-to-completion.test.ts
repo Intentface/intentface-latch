@@ -309,6 +309,37 @@ describe("delegation inherits the parent's restrictions", () => {
   });
 });
 
+describe("delegation inherits memory off", () => {
+  it("runAgent({ memory: false }) spawns a child with memory off too: no recall, no memory tools", async () => {
+    const mem = memoryStorage();
+    const asked: string[] = [];
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      memory: {
+        instructionsFor: async ({ agent }) => (asked.push(agent), "remembered things"),
+        toolsFor: ({ agent }) => (asked.push(`${agent}:tools`), {}),
+      },
+      agents: {
+        lead: defineAgent({
+          model: model("delegated.", { name: "spawn_agent", input: '{"agent":"writer","prompt":"write x"}' }),
+          instructions: "delegate",
+          subagents: ["writer"],
+          memory: { scope: "agent-user", connection: "mem" } as never,
+        }),
+        writer: defineAgent({
+          model: model("did it."),
+          instructions: "write",
+          memory: { scope: "agent-user", connection: "mem" } as never,
+        }),
+      },
+    });
+    const res = await rt.runAgent({ principal, agent: "lead", prompt: "go", memory: false });
+    expect(res.answer).toBe("delegated.");
+    expect(asked).toEqual([]);
+  });
+});
+
 /**
  * Every continuation path re-runs the model over history whose last message is
  * the assistant turn that paused. `applyApproval` and `applyToolResult` trim
