@@ -576,7 +576,13 @@ export function Chat({
       supersedePendingApprovals()
       // The composer submits generic attachment items; adapt them to AI SDK file
       // parts (inlining blob URLs) at this app boundary.
-      const fileParts = await prepareAttachmentsForSend(files)
+      let fileParts
+      try {
+        fileParts = await prepareAttachmentsForSend(files)
+      } catch (e) {
+        setSendError(e instanceof Error ? e.message : String(e))
+        return
+      }
       // Fold quoted passages in as blockquote context above the message.
       const quoted = selections
         .map((selection) =>
