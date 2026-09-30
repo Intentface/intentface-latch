@@ -25,6 +25,13 @@ describe("inputs, members and views belong to their set's owner", () => {
     await store.setMembers("orgA", "ds_weather", ["t1"]);
     await store.setMembers("orgB", "ds_weather", ["t2"]);
     expect(await store.listMembers("orgA", "ds_weather")).toEqual(["t1"]);
+
+    // Deleting A's set takes A's rows only, views included.
+    await store.deleteDataset("orgA", "ds_weather");
+    expect(await store.listInputs("orgA", "ds_weather")).toEqual([]);
+    expect(await store.listViews("orgA", "ds_weather")).toEqual([]);
+    expect((await store.listInputs("orgB", "ds_weather")).map((i) => i.prompt)).toEqual(["B's question"]);
+    expect(await store.listMembers("orgB", "ds_weather")).toEqual(["t2"]);
   });
 
   it("tables from before owner scoping are rebuilt once, each row taking its set's owner", async () => {

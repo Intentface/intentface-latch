@@ -282,8 +282,9 @@ export function createEvalsStore(client: Client): EvalsStore {
     async deleteDataset(owner, id) {
       await client.batch(
         [
-          { sql: `DELETE FROM latch_eval_inputs WHERE dataset_id = ?`, args: [id] },
-          { sql: `DELETE FROM latch_eval_members WHERE dataset_id = ?`, args: [id] },
+          { sql: `DELETE FROM latch_eval_inputs WHERE owner = ? AND dataset_id = ?`, args: [owner, id] },
+          { sql: `DELETE FROM latch_eval_members WHERE owner = ? AND dataset_id = ?`, args: [owner, id] },
+          { sql: `DELETE FROM latch_eval_views WHERE owner = ? AND dataset_id = ?`, args: [owner, id] },
           { sql: `DELETE FROM latch_eval_datasets WHERE owner = ? AND id = ?`, args: [owner, id] },
         ],
         "write",
