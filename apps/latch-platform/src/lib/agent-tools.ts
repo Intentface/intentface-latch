@@ -34,6 +34,10 @@ export function builtInToolsOf(rec: Pick<AgentRecord, "exec" | "subagents">): Bu
     out.push({ name: "memory_save", from: "memory", description: "Save a durable fact to remember" });
   }
   for (const name of exec.authoredTools ?? []) out.push({ name, from: "authored tool", description: "" });
-  if (rec.subagents?.length) out.push({ name: "spawn_agent", from: "subagents", description: `Delegate to: ${rec.subagents.join(", ")}` });
-  return out;
+  // `disableTools` takes these out at run time too (core deletes them from the
+  // turn's tools) — so they are not the agent's to call, or to check for.
+  const callable = out.filter((t) => !off.has(t.name));
+  // spawn_agent is added after core applies disableTools, so it always stays.
+  if (rec.subagents?.length) callable.push({ name: "spawn_agent", from: "subagents", description: `Delegate to: ${rec.subagents.join(", ")}` });
+  return callable;
 }

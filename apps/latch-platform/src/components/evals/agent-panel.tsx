@@ -104,6 +104,8 @@ export type PanelContext = { agent: string; questionSet?: string; run?: string; 
  * never has to ask which agent. Set by the page, read at send time.
  */
 export type EvalsPageContext = {
+  /** Which agent the page is on: context for another agent is never sent. */
+  agent?: string;
   page?: "results" | "failures";
   questionSet?: string;
   checks?: string;
@@ -135,6 +137,17 @@ let pageContext: EvalsPageContext = {};
 export function updateEvalsPageContext(patch: EvalsPageContext) {
   pageContext = { ...pageContext, ...patch };
 }
+/**
+ * Forget what a part of the page set, when it goes away — or the agent keeps
+ * hearing about columns and answers that are no longer on screen.
+ */
+export function clearEvalsPageContext(keys: (keyof EvalsPageContext)[]) {
+  const next = { ...pageContext };
+  for (const k of keys) delete next[k];
+  pageContext = next;
+}
+/** What to send for this agent: nothing set on another agent's page. */
+const contextFor = (agent: string) => (pageContext.agent === agent ? pageContext : {});
 
 function startersFor(c: PanelContext) {
   const run = c.run ? `run ${c.run}` : c.questionSet ? `the latest run of ${c.questionSet}` : "the latest run";
@@ -183,6 +196,9 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
     window.addEventListener("evals:ask", onAsk);
     return () => window.removeEventListener("evals:ask", onAsk);
   });
+  // A request was for the agent it was asked on: switching agents drops it,
+  // or it would be sent into the other agent's empty conversation.
+  useEffect(() => setPending(null), [context.agent]);
 
   const header = (
     <div className="border-primary-border flex items-center gap-1.5 border-b px-3 py-2">
@@ -222,7 +238,7 @@ export function EvalsAgentDock({ context }: { context: PanelContext }) {
               embedded
               starters={startersFor(context)}
               onTurnFinished={notifyEvalsChanged}
-              extraBody={() => ({ evalsPage: { agent: context.agent, ...pageContext } })}
+              extraBody={() => ({ evalsPage: { ...contextFor(context.agent), agent: context.agent } })}
               onToolResult={(tool) => CHANGES.has(tool) && notifyEvalsChanged()}
               {...(pending ? { autoSend: pending } : {})}
             />

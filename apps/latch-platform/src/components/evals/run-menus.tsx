@@ -5,6 +5,9 @@ import type { Estimate } from "@/lib/evals/v2/jobs"
 import { Popover } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 
+/** A request that threw (the network, a crash) reads as a refusal, so the menu never stays stuck busy. */
+const unreachable = (e: unknown) => ({ ok: false as const, error: `Couldn't reach the server — ${e instanceof Error ? e.message : String(e)}. Try again.` })
+
 /**
  * Running from the results table: adding a column (a configuration answers
  * every input) and answering again (one more try for some inputs, into the
@@ -147,7 +150,7 @@ export function AddColumn({
     setBusy(label)
     const r = await startRunFn({
       data: { agent, datasetId, rubricId, versions: [label], inputIds: prices.inputIds, repeats: tries, confirmedCost: pr.cost, compareWith: shown },
-    })
+    }).catch(unreachable)
     setBusy(null)
     if (!r.ok) return setError(r.error)
     setOpen(false)
@@ -349,7 +352,7 @@ export function AgainPanel({
   const start = async () => {
     if (!priced) return
     setBusy(true)
-    const r = await startAgainFn({ data: { agent, datasetId, rubricId, targets, confirmedCost: priced.estimate.cost } })
+    const r = await startAgainFn({ data: { agent, datasetId, rubricId, targets, confirmedCost: priced.estimate.cost } }).catch(unreachable)
     setBusy(false)
     if (!r.ok) return setError(r.error)
     onStarted()
@@ -426,7 +429,7 @@ function CandidateForm({
     setBusy(true)
     const r = await createCandidateFn({
       data: { agent, base, name, change: what === "model" ? { model } : what === "effort" ? { effort } : { addInstructions: line } },
-    })
+    }).catch(unreachable)
     setBusy(false)
     if (!r.ok) return setError(r.error)
     onMade(r.id, r.name)

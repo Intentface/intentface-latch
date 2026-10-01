@@ -55,6 +55,17 @@ describe("readPath", () => {
     expect(readPath(c, "result.files[0].name")).toBe("accessibility.md");
     expect(readPath(c, "result.nope.deeper")).toBeUndefined();
   });
+
+  it("strips args/result only as a whole first segment", () => {
+    const call = { tool: "t", args: { results: 3, arguments: "x", resultLimit: 5, list: [7] }, result: [9] } as Parameters<typeof readPath>[0];
+    expect(readPath(call, "results")).toBe(3);
+    expect(readPath(call, "arguments")).toBe("x");
+    expect(readPath(call, "resultLimit")).toBe(5);
+    expect(readPath(call, "args.list[0]")).toBe(7);
+    expect(readPath(call, "args[list]")).toEqual([7]);
+    expect(readPath(call, "result[0]")).toBe(9);
+    expect(readPath(call, "result")).toEqual([9]);
+  });
 });
 
 describe("the nine operators", () => {

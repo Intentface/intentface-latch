@@ -296,7 +296,8 @@ export async function startJudgeJob(principal: Principal, data: { agent: string;
   const threads = (await evals.listThreads(o.owner, { datasetId: data.datasetId, runId: data.runId })).filter((t) => !only || only.has(t.threadId));
   if (!threads.length) return { ok: false as const, error: "That run has no threads." };
   const now = Date.now();
-  const id = `judge_${now.toString(36)}`;
+  // Ids are global: two started in one millisecond (a double click, two tenants) must not collide.
+  const id = `judge_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const ok = threads.filter((t) => !t.error).length;
   await evals.saveJob({
     owner: o.owner,
@@ -326,12 +327,19 @@ export async function startJudgeJob(principal: Principal, data: { agent: string;
 }
 
 /** Advance one job while this caller holds its lease. Never throws. */
-export async function processJob(owner: string, id: string): Promise<void> {
+export async function processJob(owner: string, id: string, opts?: { budgetFrom?: number }): Promise<void> {
   const { evals, runtime, modelFor } = await getLatch();
   // In a long-lived process keep going slice after slice; on Vercel one
   // slice per invocation, and the cron continues.
+  // A slice inside a request that already spent time (the cron's other
+  // phases) gets what is left of it: Vercel cuts the request, not the slice.
+  let budgetFrom = opts?.budgetFrom;
   for (;;) {
     const now = Date.now();
+    const deadline = Math.min(now, budgetFrom ?? now) + SLICE_MS;
+    budgetFrom = undefined;
+    // Too little left to start anything: the next tick has a whole slice.
+    if (deadline - now < 30_000) return;
     if (!(await evals.claimJob(id, now, LEASE_MS))) return;
     const job = await evals.getJob(owner, id);
     if (!job) return;
@@ -373,7 +381,7 @@ export async function processJob(owner: string, id: string): Promise<void> {
         clearVerdicts: (ids, v) => evals.deleteVerdicts(ids, v),
         update: (patch) => evals.updateJob(id, patch),
       },
-      { deadline: now + SLICE_MS },
+      { deadline },
     )
       .catch((e: unknown) => {
         console.error(`[evals] job ${id} failed:`, e);
@@ -397,11 +405,11 @@ export async function kickJob(owner: string, id: string) {
 }
 
 /** The cron's share: pick up jobs whose lease lapsed. */
-export async function evalJobsTick(): Promise<{ advanced: number }> {
+export async function evalJobsTick(opts?: { requestStartedAt?: number }): Promise<{ advanced: number }> {
   const { evals } = await getLatch();
   const open = await evals.claimableJobs(Date.now());
   // In parallel: each holds its own lease, and one long job must not starve the rest.
-  await Promise.all(open.map((j) => processJob(j.owner, j.id)));
+  await Promise.all(open.map((j) => processJob(j.owner, j.id, { budgetFrom: opts?.requestStartedAt })));
   return { advanced: open.length };
 }
 

@@ -69,7 +69,10 @@ export async function createQuestionSet(
     const c = await createChecks(principal, { agent: d.agent, name: "checks" });
     if (c.ok) checksId = c.id;
   }
-  return { ok: true as const, id, questions: valid.value.length, ...(checksId ? { checksId } : {}) };
+  // Questions that arrive with expectations (calls, things to say, a good
+  // answer) need the checks that grade them — as editing them would add.
+  const { added } = await ensureExpectationChecks(principal, { agent: d.agent, datasetId: id });
+  return { ok: true as const, id, questions: valid.value.length, ...(checksId ? { checksId } : {}), ...(added.length ? { checksAdded: added } : {}) };
 }
 
 /** Add, change or delete questions, and the set's audience and note. Ids never change: past results hang on them. */

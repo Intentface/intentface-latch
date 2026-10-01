@@ -189,6 +189,8 @@ function AgentEditor() {
   const [candidateId, setCandidateId] = useState<string | null>(null);
   const [candidateTitle, setCandidateTitle] = useState("");
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  /** Why the last autosave didn't land — said, so nobody believes an edit is saved when it isn't. */
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [stale, setStale] = useState<{ liveVersion: number; author?: string } | null>(null);
@@ -355,13 +357,14 @@ function AgentEditor() {
 
   /** Save into the candidate, creating it on the first edit of live. */
   const saveCandidate = async (r: AgentRecord, title?: string): Promise<string | null> => {
-    const id = candidateId ?? (await creating.current);
+    const id = candidateId ?? (await creating.current?.catch(() => null));
     if (id) {
       const res = await saveCandidateFn({ data: { id, record: candidatePayload(r), baseVersion } });
-      return res.ok ? res.id : null;
+      if (!res.ok) throw new Error(res.error);
+      return res.id;
     }
     const made = saveCandidateFn({ data: { record: candidatePayload(r), title: title ?? "Draft", baseVersion } }).then((res) => {
-      if (!res.ok) return null;
+      if (!res.ok) throw new Error(res.error);
       loaded.current = res.id;
       setCandidateId(res.id);
       setCandidateTitle(res.title);
@@ -370,6 +373,8 @@ function AgentEditor() {
       return res.id;
     });
     creating.current = made;
+    // A failed create is retried by the next save, not waited on forever.
+    made.catch(() => creating.current === made && (creating.current = null));
     return made;
   };
 
@@ -380,10 +385,9 @@ function AgentEditor() {
     if (!dirty.current) return;
     const id = setTimeout(() => {
       void saveCandidate(rec)
-        .then((saved) => saved && setSavedAt(Date.now()))
-        .catch(() => {
-          /* Autosave is best-effort; the next keystroke retries. */
-        });
+        .then(() => (setSavedAt(Date.now()), setSaveError(null)))
+        // The next keystroke retries; until then it says it isn't saved.
+        .catch((e: unknown) => (setSavedAt(null), setSaveError(e instanceof Error ? e.message : String(e))));
     }, 800);
     return () => clearTimeout(id);
   }, [rec, editing, baseVersion]);
@@ -449,7 +453,7 @@ function AgentEditor() {
     setError(null);
     try {
       const res = await saveAgentFn({
-        data: { record: payload, message: message.trim() || undefined, baseVersion, force, candidateId: candidateId ?? (await creating.current) ?? undefined },
+        data: { record: payload, message: message.trim() || undefined, baseVersion, force, candidateId: candidateId ?? (await creating.current?.catch(() => null)) ?? undefined },
       });
       if (!res.ok) {
         if ("stale" in res && res.stale) {
@@ -509,6 +513,7 @@ function AgentEditor() {
               current={candidateId}
               title={candidateTitle}
               saved={savedAt != null}
+              saveError={saveError}
               onPick={showCandidate}
               onNew={() => void newCandidate()}
               onRename={renameCandidate}

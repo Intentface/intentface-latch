@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Menu, PanelLeft } from "lucide-react";
+import { useRouterState } from "@tanstack/react-router";
 import { Shell, useShell } from "@intentface/chat/shell";
 import type { ShellStore } from "@intentface/chat/shell";
 import { AppSidebarContent } from "@/components/app-sidebar";
@@ -53,6 +54,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [store] = useState(() => Shell.createStore());
   const [width, setWidth] = useState<number | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Navigating from the drawer closes it, or it keeps covering the page.
+  const href = useRouterState({ select: (r) => r.location.href });
+  useEffect(() => setMobileOpen(false), [href]);
   // The sidebar reports its width as soon as it mounts — the default, before
   // the stored one is restored. Writing that would overwrite what was saved,
   // so nothing is written until the restore has run.
@@ -83,7 +87,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
         <Drawer side="left" open={mobileOpen} onOpenChange={setMobileOpen}>
-          <Drawer.Content side="left" className="bg-base-bg w-[min(18rem,85vw)] gap-0 outline-none [&>button]:hidden">
+          <Drawer.Content
+            side="left"
+            className="bg-base-bg w-[min(18rem,85vw)] gap-0 outline-none [&>button]:hidden"
+            // A link to the page already open changes nothing to close on.
+            onClickCapture={(e: React.MouseEvent) => (e.target as HTMLElement).closest("a[href]") && setMobileOpen(false)}
+          >
             <AppSidebarContent />
           </Drawer.Content>
         </Drawer>

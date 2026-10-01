@@ -15,7 +15,7 @@ import {
 import type { EvalGrid, JobRow } from "@/lib/evals-server"
 import { AddColumn, AgainPanel, EarlierAnswers } from "@/components/evals/run-menus"
 import { ChecksDrawer, Composer, InputDrawer, SetDetails } from "@/components/evals/inputs"
-import { askEvalsAgent, updateEvalsPageContext } from "@/components/evals/agent-panel"
+import { askEvalsAgent, clearEvalsPageContext, updateEvalsPageContext } from "@/components/evals/agent-panel"
 import { eachOf, labelsOf, saysItems } from "@/lib/evals/v2/expect"
 import { cellsOf, columnRate, verdictFor, versus } from "@/lib/evals/v2/score"
 import { appliesTo } from "@/lib/evals/v2/model"
@@ -111,6 +111,7 @@ function EvalsPage() {
   // What is on screen, for the Evals agent: it reads this with every message.
   useEffect(() => {
     updateEvalsPageContext({
+      agent,
       page: "results",
       questionSet: dataset?.id,
       checks: rubricId,
@@ -119,7 +120,9 @@ function EvalsPage() {
       openInput: openInput ?? undefined,
       filter: filter === "all" ? undefined : filter,
     })
-  }, [dataset?.id, rubricId, view, openCell, openInput, filter])
+  }, [agent, dataset?.id, rubricId, view, openCell, openInput, filter])
+  // Leaving the page (to Failures, say) takes what it set with it.
+  useEffect(() => () => clearEvalsPageContext(["page", "questionSet", "checks", "view", "openAnswer", "openInput", "filter"]), [])
   const viewGrid = useMemo(
     () => (grid && view ? { ...grid, inputs: grid.inputs.filter((i) => i.tags.some((t) => view.tags.includes(t))) } : grid),
     [grid, view],
@@ -444,6 +447,7 @@ function Results({
     })
     // columnKey stands for the columns; grid is new on every load.
   }, [columnKey, focus?.label])
+  useEffect(() => () => clearEvalsPageContext(["columns"]), [])
   const cell = (inputId: string, label: string) => cells.get(`${inputId}|${label}`)
   // A column is called by its version; the day is added only where two share one.
   // When a column was answered: the day, and the time where another column shares it.

@@ -24,6 +24,7 @@ export function CandidateSwitcher({
   current,
   title,
   saved,
+  saveError,
   onPick,
   onNew,
   onRename,
@@ -34,6 +35,8 @@ export function CandidateSwitcher({
   current: string | null;
   title: string;
   saved: boolean;
+  /** Why the last autosave failed, if it did. */
+  saveError?: string | null;
   onPick: (id: string | null) => void;
   onNew: () => void;
   onRename: (title: string) => Promise<string | null>;
@@ -107,7 +110,11 @@ export function CandidateSwitcher({
             onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
             className="border-primary-border text-ink-primary h-7 w-48 rounded-md border bg-transparent px-2 text-sm"
           />
-          <span className="text-ink-tertiary">{saved ? "Saved · not live" : "Not live"}</span>
+          {saveError ? (
+            <span className="text-red-600 dark:text-red-400">Not saved — {saveError}</span>
+          ) : (
+            <span className="text-ink-tertiary">{saved ? "Saved · not live" : "Not live"}</span>
+          )}
           {renameError && <span className="text-red-600 dark:text-red-400">{renameError}</span>}
         </>
       )}

@@ -36,7 +36,7 @@ import {
 } from "@/components/evals/shell"
 import { useEvalsChanged } from "@/components/evals/events"
 import { Key, NoteBox, ThreadView } from "@/components/evals/thread-view"
-import { askEvalsAgent } from "@/components/evals/agent-panel"
+import { askEvalsAgent, clearEvalsPageContext, updateEvalsPageContext } from "@/components/evals/agent-panel"
 
 /**
  * Error discovery, before measurement: read threads, write down the first
@@ -87,6 +87,11 @@ function FailuresPage() {
   }, [load])
   // The Evals agent may have suggested notes, grouped them or triaged a mode.
   useEvalsChanged(load)
+  // What is on screen, for the Evals agent: this page, for this agent.
+  useEffect(() => {
+    updateEvalsPageContext({ agent, page: "failures" })
+    return () => clearEvalsPageContext(["agent", "page"])
+  }, [agent])
 
   // New readings from the evals agent are grouped into the patterns it
   // proposes as soon as they appear — once per set of readings.
@@ -219,7 +224,7 @@ function FailuresPage() {
                   const s = data.suggested.find((x) => x.threadId === threadId)
                   if (s) setReading([s])
                 }}
-                onDecide={(p, d) => void decidePattern(p, d)}
+                onDecide={(p, d) => decidePattern(p, d)}
                 onResolved={load}
               />
             )}
@@ -583,16 +588,20 @@ function PatternList({
   proposing: boolean
   agent: string
   onOpen: (threadId: string) => void
-  onDecide: (p: Pattern, d: "fix" | "measure" | "leave" | "disagree") => void
+  onDecide: (p: Pattern, d: "fix" | "measure" | "leave" | "disagree") => Promise<unknown>
   onResolved: () => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  // Busy until the decision is saved: a second click must not send it twice
+  // (or, on "Fix it", ask the agent twice).
   const decide = (p: Pattern, d: "fix" | "measure" | "leave" | "disagree") => {
+    if (busy) return
     setBusy(p.name)
-    onDecide(p, d)
+    void onDecide(p, d)
+      .catch((e: unknown) => console.warn("[failures] decide:", e))
+      .finally(() => setBusy(null))
   }
-  useEffect(() => setBusy(null), [patterns])
   const drop = async (threadId: string) => {
     await resolveSuggestionFn({ data: { agent, threadId, accept: false } })
     onResolved()

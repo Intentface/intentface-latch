@@ -32,7 +32,8 @@ const callsOf = (v: ThreadView, tool: string): ToolCall[] => {
 export function readPath(call: ToolCall, path: string): unknown {
   const onResult = path === "result" || path.startsWith("result.") || path.startsWith("result[");
   let cur: unknown = onResult ? call.result : call.args;
-  const rest = path.replace(/^(args|result)\.?/, "");
+  // Only a whole leading segment: `results` and `arguments` are argument names.
+  const rest = path.replace(/^(args|result)(\.|(?=\[)|$)/, "");
   for (const key of rest.split(/[.[\]]/).filter(Boolean)) {
     if (cur == null) return undefined;
     cur = (cur as Record<string, unknown>)[/^\d+$/.test(key) ? Number(key) : key];
