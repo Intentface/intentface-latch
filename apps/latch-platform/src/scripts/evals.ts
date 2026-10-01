@@ -149,7 +149,8 @@ async function main() {
           }),
       },
       onThread: async (t, done, total) => {
-        await evals.saveThread(t);
+        // The chat is this principal's: teammates read it as them (ThreadRef.ranAs).
+        await evals.saveThread({ ...t, ranAs: principal });
         console.log(`[${String(done).padStart(3)}/${total}] ${t.error ? "!" : "·"} ${t.version.padEnd(8)} ${t.inputId}${repeats > 1 ? `#${t.attempt}` : ""}${t.error ? `  ${t.error}` : ""}`);
       },
     });
@@ -262,7 +263,8 @@ async function main() {
         threads: current,
         inputsById,
         dataset,
-        deps: { loadHistory: (chatId) => runtime.loadHistory({ chatId, principal }), judgeFor },
+        // Each answer read as whoever ran it — a teammate's run is not ours to read as us.
+        deps: { loadHistory: (chatId) => runtime.loadHistory({ chatId, principal: current.find((t) => t.threadId === chatId)?.ranAs ?? principal }), judgeFor },
         ...(escalate ? { escalate } : {}),
         onUsage: (u) => ((usage.calls += u.calls), (usage.inputTokens += u.inputTokens)),
       });
