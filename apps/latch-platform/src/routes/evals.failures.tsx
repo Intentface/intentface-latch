@@ -116,7 +116,12 @@ function FailuresPage() {
     decision: "fix" | "measure" | "leave" | "disagree"
   ) => {
     if (!agent) return
-    const r = await decidePatternFn({ data: { agent, name: p.name, decision } })
+    setMessage(null)
+    // A request that throws is said like a refusal, not just logged.
+    const r = await decidePatternFn({ data: { agent, name: p.name, decision } }).catch((e: unknown) => ({
+      ok: false as const,
+      error: `Couldn't save the decision — ${e instanceof Error ? e.message : String(e)}. Try again.`,
+    }))
     if (!r.ok) return setMessage({ text: r.error, bad: true })
     const next = await getFailuresFn({ data: agent })
     setData(next)
