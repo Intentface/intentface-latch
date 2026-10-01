@@ -110,14 +110,12 @@ export function CandidateSwitcher({
             onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
             className="border-primary-border text-ink-primary h-7 w-48 rounded-md border bg-transparent px-2 text-sm"
           />
-          {saveError ? (
-            <span className="text-red-600 dark:text-red-400">Not saved — {saveError}</span>
-          ) : (
-            <span className="text-ink-tertiary">{saved ? "Saved · not live" : "Not live"}</span>
-          )}
+          {!saveError && <span className="text-ink-tertiary">{saved ? "Saved · not live" : "Not live"}</span>}
           {renameError && <span className="text-red-600 dark:text-red-400">{renameError}</span>}
         </>
       )}
+      {/* Outside the candidate's own controls: the first save from live can fail before one exists. */}
+      {saveError && <span className="text-red-600 dark:text-red-400">Not saved — {saveError}</span>}
     </div>
   );
 }
