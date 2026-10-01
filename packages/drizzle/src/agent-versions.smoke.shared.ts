@@ -395,6 +395,10 @@ export async function agentVersionsSmoke<P>({
       (await store.resolve(`helper@${a.id}`, p))?.instructions === "short",
       "name@c_id runs the candidate",
     );
+    assert(
+      (await store.resolve(`helper@${a.id}`, p))?.configVersion === undefined,
+      "a candidate run is attributed to no published version",
+    );
     const b = await store.saveCandidate(p, "helper", "user", { title: "Longer", record: rec({ instructions: "long" }) });
     assert((await store.listCandidates(p, "helper", "user")).length === 2, "several at once");
 
@@ -442,6 +446,10 @@ export async function agentVersionsSmoke<P>({
     const rolledBack = await store.resolve("helper", p);
     assert(rolledBack?.configVersion === 1, "it follows a rollback");
     assert(rolledBack?.instructions === "one", "and matches the content served");
+
+    // A pinned run is filed under the version it ran, not whatever is live.
+    const pinned = await store.resolve("helper@2", p);
+    assert(pinned?.configVersion === 2 && pinned.instructions === "two", "name@2 runs and is attributed to v2 while v1 is live");
   }
 
   // The editor's whole lifecycle, in the order a person actually does it. This

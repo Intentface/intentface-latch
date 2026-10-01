@@ -368,7 +368,12 @@ export async function processJob(owner: string, id: string, opts?: { budgetFrom?
             }),
         },
         judge: {
-          loadHistory: (chatId) => runtime.loadHistory({ chatId, principal }),
+          // Each answer is read as whoever ran it — grading a teammate's
+          // column as yourself would read empty transcripts.
+          loadHistory: async (chatId) => {
+            const t = await evals.getThread(owner, chatId);
+            return runtime.loadHistory({ chatId, principal: t?.ranAs ?? principal });
+          },
           judgeFor: (jid) => judges.get(jid) ?? judges.set(jid, evaluationModelFor(jid, modelFor, typeSafeAi)).get(jid)!,
         },
         loadInputs: () => evals.listInputs(owner, job.datasetId),
@@ -444,7 +449,7 @@ export async function tryCheck(principal: Principal, d: { agent: string; dataset
     inputsById: inputs,
     dataset: (await evals.getDataset(owner, d.datasetId)) ?? {},
     deps: {
-      loadHistory: (chatId) => runtime.loadHistory({ chatId, principal }),
+      loadHistory: (chatId) => runtime.loadHistory({ chatId, principal: picked.find((t) => t.threadId === chatId)?.ranAs ?? principal }),
       judgeFor: (jid) => judges.get(jid) ?? judges.set(jid, evaluationModelFor(jid, modelFor, typeSafeAi)).get(jid)!,
     },
   });

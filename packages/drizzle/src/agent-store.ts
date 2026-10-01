@@ -401,6 +401,11 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
       // into two runs of whatever happened to be current.
       const rec = ref.at === undefined ? recordOf(row) : await pinnedRecord(row, ref.at, principal);
       if (!rec) return undefined;
+      // Which published version this config IS — what the run row and its
+      // trace say produced the answer. Live: the pointer. `@7`: 7. A draft or
+      // a candidate was never published, so it is no version at all.
+      const configVersion =
+        ref.at === undefined ? (row.publishedVersion ?? undefined) : typeof ref.at === "number" ? ref.at : undefined;
       const decorate = opts.decorateResolve ?? ((cfg: AgentConfig<P>) => cfg);
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
@@ -433,7 +438,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
           // Which stored version this config is a copy of — recorded on the run
           // and emitted as a trace tag, so an answer can be traced back to the
           // configuration that produced it.
-          configVersion: row.publishedVersion ?? undefined,
+          configVersion,
           model: opts.modelFor(rec.modelId),
           instructions: rec.instructions,
           connections: rec.connections,

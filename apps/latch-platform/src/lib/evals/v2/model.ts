@@ -254,6 +254,12 @@ export interface ThreadRef {
   /** Hash of everything behaviour can turn on — see `configFingerprint`. */
   configFingerprint: string;
   origin: "run" | "production";
+  /**
+   * Who the run ran as — the chat is theirs. Anyone who can see these
+   * results reads the transcript as them: a teammate on an org agent would
+   * otherwise get an empty one (and a teammate's "grade again" grade nothing).
+   */
+  ranAs?: { orgId: string; userId?: string };
   /** The agent's final answer, kept here so a report never re-reads the thread. */
   answer: string;
   /** Set when the run itself failed — not a failed grade. Such threads are not judged. */

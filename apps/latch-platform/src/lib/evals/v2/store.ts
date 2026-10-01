@@ -150,7 +150,7 @@ export async function migrateEvalsV2(client: Client): Promise<void> {
   await client.execute(`ALTER TABLE latch_eval_inputs ADD COLUMN files TEXT`).catch(() => {});
   await client.execute(`ALTER TABLE latch_eval_inputs ADD COLUMN tags TEXT`).catch(() => {});
   await client.execute(`ALTER TABLE latch_eval_verdicts ADD COLUMN probabilities TEXT`).catch(() => {});
-  for (const col of ["run_id TEXT", "attempt INTEGER"])
+  for (const col of ["run_id TEXT", "attempt INTEGER", "ran_as TEXT"])
     await client.execute(`ALTER TABLE latch_eval_threads ADD COLUMN ${col}`).catch(() => {});
   await client.execute(`CREATE INDEX IF NOT EXISTS latch_eval_threads_run ON latch_eval_threads (run_id)`);
   // Tables from before they were owner-scoped: rebuild once, each row taking
@@ -234,6 +234,7 @@ const toThread = (r: Row): ThreadRef => ({
   answer: String(r.answer),
   ...(r.error ? { error: String(r.error) } : {}),
   ...(r.duration_ms != null ? { durationMs: Number(r.duration_ms) } : {}),
+  ...(r.ran_as ? { ranAs: parse<{ orgId: string; userId?: string }>(r.ran_as, { orgId: "" }) } : {}),
   createdAt: Number(r.created_at),
 });
 
@@ -384,8 +385,8 @@ export function createEvalsStore(client: Client): EvalsStore {
     async saveThread(t) {
       await client.execute({
         sql: `INSERT INTO latch_eval_threads (owner, thread_id, agent_name, dataset_id, input_id, run_id, attempt,
-                version, config_fingerprint, origin, answer, error, duration_ms, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                version, config_fingerprint, origin, answer, error, duration_ms, created_at, ran_as)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(owner, thread_id) DO UPDATE SET dataset_id = excluded.dataset_id,
                 input_id = excluded.input_id, answer = excluded.answer, error = excluded.error`,
         args: [
@@ -403,6 +404,7 @@ export function createEvalsStore(client: Client): EvalsStore {
           t.error ?? null,
           t.durationMs ?? null,
           t.createdAt,
+          t.ranAs ? JSON.stringify(t.ranAs) : null,
         ],
       });
     },

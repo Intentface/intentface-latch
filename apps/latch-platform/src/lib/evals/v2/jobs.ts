@@ -168,7 +168,7 @@ export async function advanceJob(job: EvalJob, deps: JobDeps, opts: { deadline: 
         // Never START a unit past the deadline; one in flight finishes and is kept.
         if (stop || Date.now() > opts.deadline) return;
         const t = await runUnit({ owner: current.owner, dataset, runId: current.runId, deps: deps.run, ...u });
-        await deps.saveThread(t);
+        await deps.saveThread({ ...t, ranAs: current.principal });
         done += 1;
         if (t.error) failed += 1;
         if (!(await stillWanted({ done, failed }))) stop = true;

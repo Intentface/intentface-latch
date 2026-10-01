@@ -87,6 +87,7 @@ export function llmEvaluationModel(model: LanguageModel, modelId = "llm"): Evalu
       // not have that problem — this adapter pays for the difference.
       const usage = { inputTokens: 0, outputTokens: 0 };
       const answers: Result["answers"] = {};
+      const warnings: Result["warnings"] = [];
       await Promise.all(
         entries.map(async ([id, q]) => {
           const schema =
@@ -106,23 +107,37 @@ export function llmEvaluationModel(model: LanguageModel, modelId = "llm"): Evalu
           if (q.type === "boolean") {
             answers[id] = { type: "boolean", probability: pTrue(v.answer, v.confidence) };
           } else if (q.type === "choice") {
-            // A model that invents an option name must not fail the run — the
-            // nearest declared option is a normalization job, not a verdict.
-            const names = Object.keys(q.criteria);
-            const hit =
-              names.find((n) => n === v.choice) ??
-              names.find((n) => v.choice?.toLowerCase().includes(n.toLowerCase())) ??
-              names[0]!;
-            answers[id] = { type: "choice", choice: hit };
+            // A model that writes an option slightly differently ("Partly
+            // grounded") still means that option. One that names no option is
+            // left ungraded — guessing would often guess the passing one.
+            const hit = matchChoice(Object.keys(q.criteria), v.choice ?? "");
+            if (hit) answers[id] = { type: "choice", choice: hit };
+            else warnings.push({ type: "other", message: `"${v.choice}" is none of ${Object.keys(q.criteria).join(", ")}; left ungraded.` });
           } else {
             const max = q.criteria.length - 1;
             answers[id] = { type: "score", score: Math.max(0, Math.min(max, v.level)) };
           }
         }),
       );
-      return { answers, usage, warnings: [] };
+      return { answers, usage, warnings };
     },
   };
+}
+
+/**
+ * The declared option a judge's answer names: exactly, then ignoring case and
+ * separators, then the LONGEST option it contains — "partly_grounded" must
+ * win over "grounded". Null when it names none.
+ */
+export function matchChoice(names: string[], said: string): string | null {
+  const norm = (x: string) => x.trim().toLowerCase().replace(/[\s_-]+/g, "_");
+  const n = norm(said);
+  return (
+    names.find((x) => x === said) ??
+    names.find((x) => norm(x) === n) ??
+    [...names].sort((a, b) => b.length - a.length).find((x) => n.includes(norm(x))) ??
+    null
+  );
 }
 
 /** Jev — purpose-built, one forward pass for every question, cheap. */

@@ -283,7 +283,8 @@ async function evalsTools(principal: Principal): Promise<Record<string, unknown>
         if ("error" in o) return o;
         const t = await evals.getThread(o.owner, threadId);
         if (!t) return { error: `No eval thread "${threadId}" for ${o.name}.` };
-        const history = await runtime.loadHistory({ chatId: threadId, principal });
+        // Read as whoever ran it: the chat is theirs (see ThreadRef.ranAs).
+        const history = await runtime.loadHistory({ chatId: threadId, principal: t.ranAs ?? principal });
         const input = t.datasetId && t.inputId ? (await evals.listInputs(t.owner, t.datasetId)).find((i) => i.id === t.inputId) : undefined;
         const verdicts = await evals.listVerdicts({ threadIds: [threadId] });
         return {

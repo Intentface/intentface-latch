@@ -34,6 +34,17 @@ describe("inputs, members and views belong to their set's owner", () => {
     expect(await store.listMembers("orgB", "ds_weather")).toEqual(["t2"]);
   });
 
+  it("a thread remembers who it ran as, so a teammate reads it as them", async () => {
+    const client = createClient({ url: ":memory:" });
+    await migrateEvalsV2(client);
+    const store = createEvalsStore(client);
+    const t = { owner: "orgA", threadId: "c1", agentName: "a", version: "@1", configFingerprint: "x", origin: "run" as const, answer: "hi", createdAt: 0 };
+    await store.saveThread({ ...t, ranAs: { orgId: "orgA", userId: "alice" } });
+    await store.saveThread({ ...t, threadId: "c2" });
+    expect((await store.getThread("orgA", "c1"))?.ranAs).toEqual({ orgId: "orgA", userId: "alice" });
+    expect((await store.getThread("orgA", "c2"))?.ranAs).toBeUndefined();
+  });
+
   it("tables from before owner scoping are rebuilt once, each row taking its set's owner", async () => {
     const client = createClient({ url: ":memory:" });
     await client.batch(

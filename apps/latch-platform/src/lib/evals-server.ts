@@ -96,7 +96,10 @@ export const getEvalGridFn = createServerFn({ method: "GET" })
 
 export type EvalGrid = NonNullable<Awaited<ReturnType<typeof computeGrid>>>;
 
-/** One thread as a reviewer needs it: question, tools, answer, reference. */
+/**
+ * One thread as a reviewer needs it: question, tools, answer, reference.
+ * Transcripts are read as whoever ran them (`ranAs`): the chat is theirs.
+ */
 export const getEvalThreadFn = createServerFn({ method: "GET" })
   .validator((d: { agent: string; threadId: string }) => d)
   .handler(async ({ data }) => {
@@ -107,7 +110,7 @@ export const getEvalThreadFn = createServerFn({ method: "GET" })
     const { evals, runtime } = await getLatch();
     const t = await evals.getThread(o.owner, data.threadId);
     if (!t) return null;
-    const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal }));
+    const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal: t.ranAs ?? principal }));
     const input = t.datasetId && t.inputId ? (await evals.listInputs(t.owner, t.datasetId)).find((i) => i.id === t.inputId) : undefined;
     return {
       version: t.version,
@@ -239,7 +242,7 @@ export const getToolArgsFn = createServerFn({ method: "GET" })
     const threads = (await evals.listThreads(o.owner, { datasetId: data.datasetId })).filter((t) => !t.error).slice(0, 30);
     const seen = new Map<string, Map<string, { type: string; values: Map<string, number> }>>();
     for (const t of threads) {
-      const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal }));
+      const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal: t.ranAs ?? principal }));
       for (const c of view.calls) {
         const args = seen.get(c.tool) ?? seen.set(c.tool, new Map()).get(c.tool)!;
         if (!c.args || typeof c.args !== "object") continue;

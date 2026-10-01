@@ -133,11 +133,14 @@ async function main() {
       repeats,
       runId,
       deps: {
-        runAgent: ({ agent, prompt, threadId }) =>
+        // Files go with the prompt, as in the platform's runs — or a CLI run
+        // of the same input answers without its PDFs and images.
+        runAgent: ({ agent, prompt, files, threadId }) =>
           runtime.runAgent({
             principal,
             agent,
             prompt,
+            ...(files?.length ? { files } : {}),
             ...(threadId ? { threadId } : {}),
             blockGated: "simulate-success",
             // Rows must be independent observations: memory written on input
@@ -193,7 +196,7 @@ async function main() {
       const t = byId.get(item.threadId)!;
       const check = rubric.checks.find((c) => c.id === item.checkId)!;
       const verdict = verdicts.find((v) => v.threadId === item.threadId && v.checkId === item.checkId)!;
-      const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal }));
+      const view = viewOf(await runtime.loadHistory({ chatId: t.threadId, principal: t.ranAs ?? principal }));
       const input = t.inputId ? inputsById.get(t.inputId) : undefined;
       console.log(`\n${"─".repeat(72)}\n${check.label}  ·  ${t.version}  ·  input ${t.inputId}  ·  ${item.reason}`);
       console.log(`\nASKED  ${input?.prompt ?? view.inputs[0] ?? ""}`);
