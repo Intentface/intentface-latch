@@ -1,5 +1,68 @@
 # @intentface/latch-agent-builder
 
+## 0.13.0
+
+### Minor Changes
+
+- 41647d1: Candidates: named, unpublished configurations of an agent that everyone who can edit it shares — "haiku with shorter instructions", "new tools". Unlike a draft, which belongs to one person, a candidate belongs to the agent: `saveCandidate` / `getCandidate` / `listCandidates` / `closeCandidate` on the store, and `name@c_<id>` resolves one read-only, the way `name@7` pins a version, so it can be run (and measured) without going live. Closing one — discarded, or published with `publishedAs` — keeps it, so anything filed under it keeps its name and still resolves. New table `latch_agent_candidates` (SQLite and Postgres, created by `migrate`). `parseAgentRef` returns `at: "c_…"` for a candidate ref, and `isCandidateId` tells one apart.
+  
+  A pinned resolve (`name@7`, a draft, a candidate) now reports the version that actually runs as `configVersion` — `7`, or none for a draft or candidate — instead of the live one, so run records and traces attribute pinned answers correctly.
+  
+  **Upgrading:**
+  
+  - **A store of your own no longer type-checks.** `AgentBuilderStore` has four new required methods: `listCandidates`, `getCandidate`, `saveCandidate`, `closeCandidate`. Nothing calls them unless you use candidates, so a store that doesn't support them can throw from all four; `@intentface/latch-drizzle` implements them.
+  - **Run `migrate`, or add the table yourself.** `migrate` creates `latch_agent_candidates`. If you build migrations from the exported schema (e.g. drizzle-kit) instead, generate one for `agentCandidates`. It is only read when candidates are used.
+- 015e0a1: Safe-mode runs stop stubbing tools the agent explicitly waived, and gain three
+  per-turn levers for measurement. Agent references can pin a version.
+  
+  **Fix — a waived tool is not a gated one.** `blockGated` decided what to stub
+  with a truthiness check. The SDK spells a waiver as the string
+  `"not-applicable"` — and the drizzle store writes exactly that for every tool
+  an agent sets to `false` — so every tool an agent had explicitly waived was
+  stubbed in every safe-mode run. On an agent whose reads are waived to override
+  a connection default, that is every read tool: the agent could not reach its
+  own corpus, and an evaluation graded a model with no access to its tools.
+  `gatedBy` now treats only `true`, `"user-approval"`, an object or a function
+  as a gate.
+  
+  **Upgrading — waived tools now run in safe-mode runs.** A tool whose approval
+  the agent turned off (`false`, `"not-applicable"`) was stubbed in every
+  `runAgent` test run; it now executes, exactly as it does in a normal turn.
+  Gated tools are still stubbed. If a test run relied on a waived tool that
+  writes never being called, gate that tool or keep the run out of production
+  data.
+  
+  **`blockGated: "simulate-success"`** stubs gated tools with a success-shaped
+  result instead of a "blocked" one. A blocked result makes the agent narrate
+  the failure into its answer ("I couldn't record this internally"), which then
+  lands in the text being graded.
+  
+  **`memory: false`** on `runAgent` disables recall and memory tools for one
+  turn. A sweep over many inputs under one principal otherwise has row 1's
+  memory in context by row 20 — the rows stop being independent observations.
+  
+  **`model`** on `runAgent` overrides the agent's model for one turn; the
+  telemetry model id follows it.
+  
+  **`parseAgentRef` reads `name@7` and `name@draft`**, and `resolve()` honours
+  the pin read-only. Measuring an old version must never make it live; without
+  this the only way to run v3 was to publish it.
+  
+  Platform (unpublished): a local SQLite file now runs WAL with a 10s busy
+  timeout. `busy_timeout = 0` made a second writer fail instantly rather than
+  wait, and a durable runtime writes a checkpoint per step — four agents in
+  parallel lost checkpoints, which is not a crash but a silently truncated
+  transcript.
+
+### Patch Changes
+
+- Updated dependencies [3b0dbfb]
+- Updated dependencies [71630e1]
+- Updated dependencies [80f1630]
+- Updated dependencies [015e0a1]
+- Updated dependencies [96013b6]
+  - @intentface/latch-core@0.13.0
+
 ## 0.12.0
 
 ### Patch Changes
