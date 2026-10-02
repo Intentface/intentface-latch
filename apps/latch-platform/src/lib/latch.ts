@@ -460,7 +460,8 @@ export async function getLatch(): Promise<{
     // Evals runs a configuration without making it live.
     dynamicAgents: {
       list: (p) => agentStore.list(p),
-      resolve: (name, p) => agentStore.resolve(name, p),
+      // The resolve context (who spawned a subagent thread) passes through.
+      resolve: (name, p, ctx) => agentStore.resolve(name, p, ctx),
     },
     // Persistent agent memory: injects the compiled index + memory tools into
     // any agent (code or UI) that declares `memory`.

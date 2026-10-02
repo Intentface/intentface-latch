@@ -312,12 +312,21 @@ const workingModel = () =>
 function runtimeOver(
   history: AppMessage[],
   model: ReturnType<typeof workingModel>,
-  opts: { siblings?: RunRecord[] } = {},
+  opts: {
+    siblings?: RunRecord[];
+    /** Make "assistant" a dynamic agent spawned by this parent, recording each resolve's context. */
+    spawnedBy?: { parent: string; seen: unknown[] };
+  } = {},
 ) {
   const patches: Array<Record<string, unknown>> = [];
   const appended: AppMessage[][] = [];
   let row: RunRecord = { ...RUN };
   const { storage, calls } = stubStorage({
+    // Recovery reads the chat for its parentAgent (DynamicAgentResolveContext).
+    getChat: async () =>
+      opts.spawnedBy
+        ? { id: RUN.chatId, owner: "org_a", agent: RUN.agent, kind: "internal", parentAgent: opts.spawnedBy.parent, createdAt: 0, updatedAt: 0 }
+        : null,
     async reclaimRun() {
       return row;
     },
@@ -346,7 +355,15 @@ function runtimeOver(
   const runtime = createRuntime<P, Record<string, never>>({
     storage,
     context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
-    agents: { assistant: defineAgent(() => ({ model, instructions: "be brief" })) },
+    agents: opts.spawnedBy ? {} : { assistant: defineAgent(() => ({ model, instructions: "be brief" })) },
+    ...(opts.spawnedBy
+      ? {
+          dynamicAgents: {
+            list: () => [{ name: "assistant" }],
+            resolve: (_name: string, _p: P, ctx?: unknown) => (opts.spawnedBy!.seen.push(ctx), { model, instructions: "be brief" }),
+          },
+        }
+      : {}),
     reconstructPrincipal: (identity) => identity as P,
     durability: { enabled: true, instanceId: "node_a" },
   });
@@ -387,6 +404,21 @@ describe("resumeRun", () => {
     // over — `onFinish` leaves it unset for one, so this must clear it. `null`
     // rather than `undefined`, which the adapters drop from the patch.
     expect(patches[0]).toEqual({ status: "awaiting_input", error: null, endedAt: null });
+  });
+
+  it("a recovered subagent run resolves with the parent read off its thread", async () => {
+    const seen: unknown[] = [];
+    const history = [
+      USER,
+      msg("assistant", [
+        { type: "step-start" },
+        { type: "tool-web_fetch", toolCallId: "c1", state: "output-available", input: { url: "u" }, output: { text: "…" } },
+      ]),
+    ];
+    const { runtime } = runtimeOver(history, workingModel(), { spawnedBy: { parent: "lead", seen } });
+    // Crash recovery and `sweep` both land in resumeRun.
+    expect((await runtime.resume("run_1"))?.status).toBe("completed");
+    expect(seen.at(-1)).toMatchObject({ parentAgent: "lead" });
   });
 
   it("still re-runs the model when work is genuinely left", async () => {
@@ -467,6 +499,8 @@ describe("resumeRun", () => {
     const finished: string[] = [];
     let row: RunRecord = { ...RUN };
     const { storage } = stubStorage({
+      // Recovery reads the chat for its parentAgent (DynamicAgentResolveContext).
+      getChat: async () => null,
       async reclaimRun() {
         return row;
       },
@@ -626,6 +660,8 @@ describe("resumeRun", () => {
     const reported: string[] = [];
     let row: RunRecord = { ...RUN, agent: "deleted_agent" };
     const { storage } = stubStorage({
+      // Recovery reads the chat for its parentAgent (DynamicAgentResolveContext).
+      getChat: async () => null,
       async reclaimRun() {
         return row;
       },
@@ -669,6 +705,8 @@ describe("resumeRun", () => {
     const finished: Array<{ status: string; cost?: number }> = [];
     let row: RunRecord = { ...RUN };
     const { storage } = stubStorage({
+      // Recovery reads the chat for its parentAgent (DynamicAgentResolveContext).
+      getChat: async () => null,
       async reclaimRun() {
         return row;
       },

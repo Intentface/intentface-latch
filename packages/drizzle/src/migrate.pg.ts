@@ -4,7 +4,7 @@ import type { PgDatabase } from "drizzle-orm/pg-core";
 const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_chats (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL,
-     title TEXT, kind TEXT NOT NULL DEFAULT 'user',
+     title TEXT, kind TEXT NOT NULL DEFAULT 'user', parent_agent TEXT,
      created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   // NOTE: composite PK — message ids are only unique within a chat, and the
@@ -141,6 +141,7 @@ const ALTERS = [
   `ALTER TABLE latch_usage ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER`,
   `ALTER TABLE latch_usage ADD COLUMN IF NOT EXISTS cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'`,
+  `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS parent_agent TEXT`,
   `ALTER TABLE latch_memory_chat_state ADD COLUMN IF NOT EXISTS last_extracted_key TEXT`,
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS attached_evals JSONB`,
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS published_version INTEGER`,
