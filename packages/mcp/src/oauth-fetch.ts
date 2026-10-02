@@ -36,7 +36,9 @@ export interface OAuthDiscoveryFetchOptions {
    * Force this scheme on the URLs inside discovery documents (issuer,
    * authorization/token/registration endpoints, advertised resource and
    * authorization servers). Use `"https"` for the common proxied-http case.
-   * Omit to leave schemes as published.
+   * Omit to leave schemes as published. Never applied to loopback hosts
+   * (`localhost`, `127.0.0.1`, `[::1]`): no TLS proxy fronts those, and
+   * forcing https on a local http server breaks the SDK's resource check.
    */
   forceScheme?: "https" | "http";
   /**
@@ -45,6 +47,9 @@ export interface OAuthDiscoveryFetchOptions {
    */
   hosts?: string[];
 }
+
+/** No TLS-terminating proxy sits in front of these, so their schemes are left as published. */
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** Well-known suffixes for the two discovery document kinds we touch. */
 const PROTECTED_RESOURCE = "oauth-protected-resource";
@@ -152,9 +157,12 @@ export function createOAuthDiscoveryFetch(
     }
     if (typeof doc !== "object" || doc === null) return response;
 
+    // Trailing-slash cleanup applies everywhere; the forced scheme does not
+    // reach a local server, whose http address is exactly what it serves.
+    const scheme = LOOPBACK.has(url.hostname.toLowerCase()) ? undefined : options.forceScheme;
     const normalized = isProtectedResource
-      ? normalizeProtectedResource(doc as Record<string, unknown>, options.forceScheme)
-      : normalizeAuthorizationServer(doc as Record<string, unknown>, options.forceScheme);
+      ? normalizeProtectedResource(doc as Record<string, unknown>, scheme)
+      : normalizeAuthorizationServer(doc as Record<string, unknown>, scheme);
 
     // Preserve status/headers; replace only the body.
     const headers = new Headers(response.headers);
