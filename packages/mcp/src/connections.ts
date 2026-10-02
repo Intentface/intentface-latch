@@ -487,6 +487,22 @@ export function createMcpConnections<P>(
     };
   }
 
+  /** Open just one connection — so a probe or a tool listing never touches the other servers. */
+  async function openOne(name: string, principal: P) {
+    const def = config.connections[name];
+    if (!def) throw new Error(`Unknown connection: ${name}`);
+    const probe = createMcpHost<P>({
+      secrets: config.secrets,
+      allowedHosts: config.allowedHosts,
+      onConnectionError: config.onConnectionError,
+      connections: async (p) => {
+        const all = await resolveConnections(p);
+        return all.filter((c) => c.name === name);
+      },
+    });
+    return { def, opened: await probe.open(principal) };
+  }
+
   return {
     host: makeHost(),
     hostFor: (names) => makeHost(new Set(names)),
@@ -510,19 +526,7 @@ export function createMcpConnections<P>(
       return out;
     },
     async testTools(name, principal) {
-      const def = config.connections[name];
-      if (!def) throw new Error(`Unknown connection: ${name}`);
-      // Open a one-connection host so the probe doesn't touch other servers.
-      const probe = createMcpHost<P>({
-        secrets: config.secrets,
-        allowedHosts: config.allowedHosts,
-        onConnectionError: config.onConnectionError,
-        connections: async (p) => {
-          const all = await resolveConnections(p);
-          return all.filter((c) => c.name === name);
-        },
-      });
-      const opened = await probe.open(principal);
+      const { opened } = await openOne(name, principal);
       try {
         return Object.keys(opened.tools);
       } finally {
@@ -530,18 +534,7 @@ export function createMcpConnections<P>(
       }
     },
     async listTools(name, principal) {
-      const def = config.connections[name];
-      if (!def) throw new Error(`Unknown connection: ${name}`);
-      const probe = createMcpHost<P>({
-        secrets: config.secrets,
-        allowedHosts: config.allowedHosts,
-        onConnectionError: config.onConnectionError,
-        connections: async (p) => {
-          const all = await resolveConnections(p);
-          return all.filter((c) => c.name === name);
-        },
-      });
-      const opened = await probe.open(principal);
+      const { def, opened } = await openOne(name, principal);
       try {
         // Same allow/block the turn applies (makeHost), on the server-local name.
         return Object.values(opened.toolInfos).filter((info) =>

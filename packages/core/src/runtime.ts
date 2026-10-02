@@ -3688,6 +3688,12 @@ export function createRuntime<P, RC = unknown>(
         ...(o.parentAgent ? { parentAgent: o.parentAgent } : {}),
       });
     }
+    // A spawn may only continue a thread its own agent delegated. Otherwise
+    // agent B could pass agent A's sub-thread id and have the child resolved
+    // under A — borrowing whatever a host grants A's subagents.
+    if (o.parentAgent && chat.parentAgent && chat.parentAgent !== o.parentAgent) {
+      throw new Error(`Thread ${chatId} was delegated by another agent; omit threadId to start a new one.`);
+    }
     const prior = await storage.loadMessages(o.principal, chatId);
     // Same rule as handleChat: a new message while the thread is parked on an
     // approval IS the decision — close the stale gate as declined (persisted)
@@ -3704,8 +3710,10 @@ export function createRuntime<P, RC = unknown>(
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
     const { cfg, modelId, runtimeCtx, run, lease } = await withReservation(admitted, async () => {
       const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext, {
-        // A continued thread keeps the parent it was created under; an adapter
-        // that doesn't persist the column falls back to this call's value.
+        // A continued thread keeps the parent it was created under (a mismatch
+        // was refused above). Without a stored one — an adapter that doesn't
+        // persist the column — the spawner of THIS turn is the parent: a host
+        // that restricts a subagent by its parent must never see none.
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
       });

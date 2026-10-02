@@ -120,6 +120,29 @@ describe("parentAgent on every resolve of a subagent's thread", () => {
     expect(seen.at(-1)?.parentAgent).toBe("lead");
   });
 
+  it("refuses a spawn that continues a thread another agent delegated", async () => {
+    const { mem, rt, seen } = setup();
+    await mem.storage.createChat(principal, { id: "sub_theirs", agent: "writer", kind: "internal", parentAgent: "other" });
+    const lead = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        lead: defineAgent({
+          model: model("delegated.", { name: "spawn_agent", input: '{"agent":"writer","prompt":"x","threadId":"sub_theirs"}' }),
+          instructions: "delegate",
+          subagents: ["writer"],
+        }),
+      },
+      dynamicAgents: { list: () => [{ name: "writer" }], resolve: (_n, _p, ctx) => (seen.push(ctx), { model: model("written."), instructions: "w" }) },
+    });
+    void rt;
+    seen.length = 0;
+    await lead.runAgent({ principal, agent: "lead", prompt: "go" });
+    // The child never resolved under "other" — the spawn was refused.
+    expect(seen.some((c) => c?.parentAgent === "other")).toBe(false);
+    expect(mem.messages.get("sub_theirs") ?? []).toHaveLength(0);
+  });
+
   it("is absent on a thread nobody spawned", async () => {
     const { rt, seen } = setup();
     await (await rt.handleChat({ agent: "writer", principal, message: user("hi") })).text();
