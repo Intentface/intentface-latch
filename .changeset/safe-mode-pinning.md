@@ -17,6 +17,13 @@ own corpus, and an evaluation graded a model with no access to its tools.
 `gatedBy` now treats only `true`, `"user-approval"`, an object or a function
 as a gate.
 
+**Upgrading — waived tools now run in safe-mode runs.** A tool whose approval
+the agent turned off (`false`, `"not-applicable"`) was stubbed in every
+`runAgent` test run; it now executes, exactly as it does in a normal turn.
+Gated tools are still stubbed. If a test run relied on a waived tool that
+writes never being called, gate that tool or keep the run out of production
+data.
+
 **`blockGated: "simulate-success"`** stubs gated tools with a success-shaped
 result instead of a "blocked" one. A blocked result makes the agent narrate
 the failure into its answer ("I couldn't record this internally"), which then
