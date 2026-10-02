@@ -149,6 +149,12 @@ export function createDynamicConnections(opts: {
   // Same shared fetch goes to both the OAuth flow and the host (on-401 re-auth).
   const discoveryFetch = createOAuthDiscoveryFetch({ forceScheme: "https" });
 
+  // Development only: let user-added MCP connections reach a private or
+  // loopback address — a local MCP server on localhost. Never in production,
+  // whatever the env says: a user-added connection reaching internal
+  // addresses is exactly what the host's private-address check prevents.
+  const allowPrivateHost = process.env.LATCH_ALLOW_PRIVATE_HOSTS === "1" && process.env.NODE_ENV !== "production";
+
   // Cache the OpenAPI registry per (name+spec+baseUrl) so the spec is fetched
   // and dereferenced once, not every turn.
   const openapiCache = new Map<
@@ -344,7 +350,7 @@ export function createDynamicConnections(opts: {
         return createMcpHost<Principal>({
           allowedHosts: [hostOf(url)],
           onConnectionError,
-          connections: [{ name: conn.name, url, auth }],
+          connections: [{ name: conn.name, url, auth, allowPrivateHost }],
         }).open(principal);
       },
     };
@@ -366,7 +372,7 @@ export function createDynamicConnections(opts: {
           allowedHosts: [hostOf(url)],
           onConnectionError,
           connections: [
-            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch },
+            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch, allowPrivateHost },
           ],
         }).open(principal);
       },
