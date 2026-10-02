@@ -1,5 +1,67 @@
 # @intentface/latch-core
 
+## 0.13.0
+
+### Minor Changes
+
+- 71630e1: Parent-aware subagent resolution and connection tool listing.
+  
+  - core: `ChatRecord.parentAgent` records which agent spawned a sub-thread. `spawn_agent` sets it, and every resolve of that thread passes `{ parentAgent, autoApprove }` to `DynamicAgentStore.resolve(name, principal, ctx?)` — the first sub-turn, a continuation (`runAgent({ threadId })`, the chat surface), approval resumes (on the sub-thread or bubbled through the parent), client tool results, compaction, and crash recovery (`resume` / `sweep`). A host can shape a subagent per parent (e.g. which of a connector's tools a given agent may use) without the shaping lapsing on a later turn. Optional third argument; stores that ignore it behave as before.
+  - drizzle: `latch_chats.parent_agent` column (SQLite + Postgres; idempotent ALTER in `migrate`).
+  - mcp: `McpConnections.listTools(name, principal)` returns the caller's tool set for one connection with descriptions and annotations (`OpenMcp.toolInfos`, `McpToolInfo.description`) — optional on the interface, like `close`, so a hand-built registry need not offer it; `bearer({ header?, prefix? })` sends the token in a custom header (e.g. `X-API-Key`).
+  
+  **Upgrading:** a host with its own `StorageAdapter` should accept `parentAgent` in `createChat` and return it from `getChat`. Without that, the parent is known only on the turn that spawns the thread, and any later resolve of it sees none.
+- 015e0a1: Safe-mode runs stop stubbing tools the agent explicitly waived, and gain three
+  per-turn levers for measurement. Agent references can pin a version.
+  
+  **Fix — a waived tool is not a gated one.** `blockGated` decided what to stub
+  with a truthiness check. The SDK spells a waiver as the string
+  `"not-applicable"` — and the drizzle store writes exactly that for every tool
+  an agent sets to `false` — so every tool an agent had explicitly waived was
+  stubbed in every safe-mode run. On an agent whose reads are waived to override
+  a connection default, that is every read tool: the agent could not reach its
+  own corpus, and an evaluation graded a model with no access to its tools.
+  `gatedBy` now treats only `true`, `"user-approval"`, an object or a function
+  as a gate.
+  
+  **Upgrading — waived tools now run in safe-mode runs.** A tool whose approval
+  the agent turned off (`false`, `"not-applicable"`) was stubbed in every
+  `runAgent` test run; it now executes, exactly as it does in a normal turn.
+  Gated tools are still stubbed. If a test run relied on a waived tool that
+  writes never being called, gate that tool or keep the run out of production
+  data.
+  
+  **`blockGated: "simulate-success"`** stubs gated tools with a success-shaped
+  result instead of a "blocked" one. A blocked result makes the agent narrate
+  the failure into its answer ("I couldn't record this internally"), which then
+  lands in the text being graded.
+  
+  **`memory: false`** on `runAgent` disables recall and memory tools for one
+  turn. A sweep over many inputs under one principal otherwise has row 1's
+  memory in context by row 20 — the rows stop being independent observations.
+  
+  **`model`** on `runAgent` overrides the agent's model for one turn; the
+  telemetry model id follows it.
+  
+  **`parseAgentRef` reads `name@7` and `name@draft`**, and `resolve()` honours
+  the pin read-only. Measuring an old version must never make it live; without
+  this the only way to run v3 was to publish it.
+  
+  Platform (unpublished): a local SQLite file now runs WAL with a 10s busy
+  timeout. `busy_timeout = 0` made a second writer fail instantly rather than
+  wait, and a durable runtime writes a checkpoint per step — four agents in
+  parallel lost checkpoints, which is not a crash but a silently truncated
+  transcript.
+
+### Patch Changes
+
+- 3b0dbfb: Provider web tools work on Claude Haiku. Anthropic's 20260209 web search and web fetch tools can be called from code execution, and Anthropic refuses them to a model without programmatic tool calling — every Haiku turn with `providerWebTools` failed with "does not support programmatic tool calling". Those models now get the direct-only versions (`webSearch_20250305`, `webFetch_20250910`); Opus and Sonnet from 4.6 and Claude 5 keep the newer ones.
+  
+  `runAgent` says why a turn failed: it returns `error` (the stream's error text — a provider refusal, a tool source that would not open) beside the usually empty `answer`, where a failed turn used to look like a silent one.
+- 80f1630: `runAgent` takes optional `files` — sent with the prompt as file parts in the user message, the way chat sends attachments. Omitted, nothing changes.
+- 96013b6: `memory: false` reaches delegated agents. A turn run with memory off (as evals run every input, so each is an independent observation) used to spawn subagents with memory back on: they recalled earlier inputs and could save new memory. `spawn_agent` now passes memory off down the tree, like it already does `blockGated`.
+- @intentface/latch-net@0.13.0
+
 ## 0.12.0
 
 ### Minor Changes
