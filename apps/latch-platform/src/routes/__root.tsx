@@ -7,10 +7,9 @@ import {
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools"
 import { TanStackDevtools } from "@tanstack/react-devtools"
 import { ThemeProvider } from "next-themes"
-import { Sidebar } from "@/components/ui/sidebar"
 import { ThemeOverridesApplier } from "@/components/theme-overrides-applier"
 
-import { AppSidebar } from "@/components/app-sidebar"
+import { AppShell } from "@/components/app-shell"
 import { Toaster } from "@/components/ui/sonner"
 import { ThemeContrast } from "@/components/theme-contrast"
 import appCss from "../styles.css?url"
@@ -104,20 +103,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             ) : (
               // Sidebar system: grey app canvas, collapsible offcanvas sidebar, and
               // a floating white content panel (the Inset + Viewport).
-              <Sidebar.Provider>
-                <AppSidebar />
-                <Sidebar.Inset>
-                  <Sidebar.Viewport>
-                    {/* No trigger out here: the sidebar's own header carries it
-                      while open, and collapsed it comes back by resting the
-                      pointer at the left edge (hover-peek) or Cmd/Ctrl+B. */}
-                    {/* Sidebar.Viewport is a flex row, so this pane has to claim
-                      the space explicitly — as a shrink-to-fit flex item it
-                      collapses to the thread's min-width instead of filling. */}
-                  <div className="h-full min-w-0 flex-1 overflow-auto">{children}</div>
-                  </Sidebar.Viewport>
-                </Sidebar.Inset>
-              </Sidebar.Provider>
+              // The app frame: sidebar (Shell + Nav from @intentface/chat) beside a
+              // floating content panel. See components/app-shell.tsx.
+              <AppShell>{children}</AppShell>
             )}
           </div>
           <Toaster />

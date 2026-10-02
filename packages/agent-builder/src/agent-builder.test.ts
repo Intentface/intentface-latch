@@ -197,6 +197,12 @@ function makeDeps(): AgentBuilderDeps<P> & {
       },
       listDrafts: async () =>
         drafts.map((x) => ({ name: x.name, scope: x.scope, mine: true, updatedAt: x.updatedAt })),
+      listCandidates: async () => [],
+      getCandidate: async () => undefined,
+      saveCandidate: async () => {
+        throw new Error("not in these tests");
+      },
+      closeCandidate: async () => {},
     },
     models: [
       { id: "m-1", label: "Model One", provider: "anthropic", reasoning: true },

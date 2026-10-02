@@ -52,6 +52,7 @@ import type { ChannelStore } from "./channel-store";
 import { createToolStore, migrateAuthoredTools  } from "./tools/store";
 import type {ToolStore} from "./tools/store";
 import { createEvalStore, migrateEvals } from "./evals/store";
+import { createEvalsStore, migrateEvalsV2, type EvalsStore } from "./evals/v2/store";
 import type {EvalStore} from "./evals/store";
 import { createRunScoresStore, migrateRunScores } from "./observability/run-scores-store";
 import type {RunScoresStore} from "./observability/run-scores-store";
@@ -107,9 +108,12 @@ let cached:
       toolStore: ToolStore;
       authoredTools: AuthoredToolsApi;
       evalStore: EvalStore;
+      evals: EvalsStore;
       runScores: RunScoresStore;
       models: ModelInfo[];
       modelFor: (id: string) => LanguageModel;
+      /** USD per 1M tokens by model id — what an estimate on another model scales by. */
+      pricing: (id: string) => { inputPer1M: number; outputPer1M: number } | undefined;
       /** Per-agent prompt-cache stats + lint for /caching. */
       cachingStats: ReturnType<typeof createCachingStats>;
       /** The adapter's serialized owner key for a principal (raw-SQL scoping). */
@@ -136,9 +140,11 @@ export async function getLatch(): Promise<{
   toolStore: ToolStore;
   authoredTools: AuthoredToolsApi;
   evalStore: EvalStore;
+  evals: EvalsStore;
   runScores: RunScoresStore;
   models: ModelInfo[];
   modelFor: (id: string) => LanguageModel;
+  pricing: (id: string) => { inputPer1M: number; outputPer1M: number } | undefined;
   cachingStats: ReturnType<typeof createCachingStats>;
   ownerKeyFor: (p: Principal) => string;
   handler: LatchHandler;
@@ -149,15 +155,30 @@ export async function getLatch(): Promise<{
   if (cached) return cached;
 
   // Local dev → a file DB; prod → a hosted libsql (Turso) URL + auth token.
-  const client = createClient({
-    url: process.env.DATABASE_URL ?? "file:./latch.db",
-    authToken: process.env.TURSO_AUTH_TOKEN,
-  });
+  const url = process.env.DATABASE_URL ?? "file:./latch.db";
+  const client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN });
+  // A local SQLite file defaults to the rollback journal and, worse, to
+  // `busy_timeout = 0`: a second writer gets SQLITE_BUSY immediately instead of
+  // waiting its turn. Any concurrent work then fails rather than queues, and a
+  // durable runtime writes a checkpoint per step — so four agents in parallel
+  // lost checkpoints, which is not a crash but a silently truncated transcript.
+  //
+  // WAL lets readers run while one writer commits; the timeout makes the second
+  // writer wait rather than give up. Remote libsql handles its own concurrency,
+  // so this applies only to a file.
+  if (url.startsWith("file:")) {
+    await client.execute("PRAGMA journal_mode = WAL");
+    await client.execute("PRAGMA busy_timeout = 10000");
+    // NORMAL is the recommended pairing with WAL: durable across process
+    // crashes, and does not fsync on every single commit.
+    await client.execute("PRAGMA synchronous = NORMAL");
+  }
   await migrate(client); // creates latch_* tables (incl. latch_agents) alongside the auth tables
   await migrateSlack(client); // latch_slack_app + latch_slack_thread (Slack-only state)
   await migrateChannels(client); // shared channel tables (bots, identities, pendings, dedupe, turn/ask/thread) + legacy carry-over
   await migrateAuthoredTools(client); // latch_tools (authored, sandboxed fetch+compute tools)
   await migrateEvals(client); // latch_eval_sets + latch_eval_runs (agent eval loop)
+  await migrateEvalsV2(client); // datasets, inputs, rubrics, threads, verdicts, rulings (evals v2)
   await migrateRunScores(client); // latch_run_scores (fast local mirror for the chat evals panel)
 
   // The ownership key — the isolation boundary. With a userId it's per-user
@@ -208,6 +229,7 @@ export async function getLatch(): Promise<{
   const channelStore = createChannelStore(client);
   // Eval sets + persisted runs for the Agent Builder's evaluate→improve loop.
   const evalStore = createEvalStore(client);
+  const evals = createEvalsStore(client);
   // Fast local mirror of per-run eval verdicts (the chat evals panel reads it).
   const runScores = createRunScoresStore(client);
 
@@ -433,8 +455,13 @@ export async function getLatch(): Promise<{
     // Resolve each agent's `connections: [...]` across code-declared MCP +
     // OpenAPI and the UI-added (Vault-stored) connections.
     connections: allConnections,
-    // UI-created agents (not in the static `agents` registry).
-    dynamicAgents: agentStore,
+    // UI-created agents (not in the static `agents` registry). `name@7` and
+    // `name@c_…` pin a published version or a candidate, read-only — how
+    // Evals runs a configuration without making it live.
+    dynamicAgents: {
+      list: (p) => agentStore.list(p),
+      resolve: (name, p) => agentStore.resolve(name, p),
+    },
     // Persistent agent memory: injects the compiled index + memory tools into
     // any agent (code or UI) that declares `memory`.
     memory: memoryProvider,
@@ -652,6 +679,15 @@ export async function getLatch(): Promise<{
       },
       onError: (e) => console.warn("memory sweep failed:", e),
     }).start();
+    // Eval runs interrupted by a dev-server restart. Lazy import — evals-jobs imports this module back.
+    createIntervalScheduler({
+      intervalMs: 30_000,
+      onTick: async () => {
+        const m = await import("./evals-jobs");
+        await m.evalJobsTick();
+      },
+      onError: (e) => console.warn("eval jobs tick failed:", e),
+    }).start();
   }
 
   cached = {
@@ -670,9 +706,11 @@ export async function getLatch(): Promise<{
     toolStore,
     authoredTools,
     evalStore,
+    evals,
     runScores,
     models: catalog.models,
     modelFor: catalog.modelFor,
+    pricing: catalog.pricing,
     cachingStats: createCachingStats({ client, pricing: catalog.pricing }),
     ownerKeyFor: ownerKeyStr,
     handler,

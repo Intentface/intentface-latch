@@ -52,10 +52,19 @@ export interface ModelCatalogOptions {
   fetch?: typeof fetch;
 }
 
+/**
+ * Anthropic models that accept tools called from code execution: Opus and
+ * Sonnet from 4.6, and every Claude 5 model but Haiku. Anything else —
+ * Haiku, older models, ids we don't know — is treated as not, which is safe:
+ * the direct-only tool versions work on every model.
+ */
+export const programmaticToolCalling = (modelId: string): boolean => /claude-(opus|sonnet|fable)-(4-[6-9]|[5-9])/.test(modelId);
+
 /** What core needs from one provider SDK, loaded on demand. */
 interface ProviderFactory {
   model: (id: string) => LanguageModel;
-  webTools: () => Record<string, unknown>;
+  /** The provider's own web search/fetch tools, in a version the model accepts. */
+  webTools: (modelId: string) => Record<string, unknown>;
 }
 
 /**
@@ -68,10 +77,14 @@ const LOADERS: Record<ProviderId, () => Promise<ProviderFactory>> = {
     const { anthropic } = await import("@ai-sdk/anthropic");
     return {
       model: (id) => anthropic(id),
-      webTools: () => ({
-        web_search: anthropic.tools.webSearch_20260209(),
-        web_fetch: anthropic.tools.webFetch_20260209(),
-      }),
+      // The 20260209 tools may be called from code execution, and Anthropic
+      // refuses them to a model without programmatic tool calling (Haiku 4.5:
+      // "does not support programmatic tool calling"). Those get the earlier,
+      // direct-only versions; unknown models too, since those work everywhere.
+      webTools: (id) =>
+        programmaticToolCalling(id)
+          ? { web_search: anthropic.tools.webSearch_20260209(), web_fetch: anthropic.tools.webFetch_20260209() }
+          : { web_search: anthropic.tools.webSearch_20250305(), web_fetch: anthropic.tools.webFetch_20250910() },
     };
   },
   openai: async () => {
@@ -153,7 +166,7 @@ function buildResolvers(
     providerTools: (id) => {
       // Unknown ids default to the default model's provider (historically Anthropic's tools).
       const provider = providerOfId(id) ?? defaultProvider;
-      return factories.get(provider)?.webTools() ?? {};
+      return factories.get(provider)?.webTools(id) ?? {};
     },
   };
 }

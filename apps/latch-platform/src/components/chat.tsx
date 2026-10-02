@@ -117,11 +117,48 @@ export function Chat({
   chatId,
   agent,
   initialMessages,
+  embedded = false,
+  starters,
+  autoSend,
+  onTurnFinished,
+  extraBody,
+  onToolResult,
 }: {
   chatId: string
   agent: string
   initialMessages?: AppMessage[]
+  /**
+   * Hosted inside another page (the Evals panel) rather than the Chats route:
+   * no chat-page controls in the corner, no per-chat evals drawer.
+   */
+  embedded?: boolean
+  /** Prompts offered while the chat is empty; a click sends one as the first message. */
+  starters?: { label: string; prompt: string }[]
+  /** Sent once as the first message when the conversation is empty — "ask the agent to do X" from elsewhere in the app. */
+  autoSend?: string
+  /** After each turn settles — the host may need to reload what the turn changed. */
+  onTurnFinished?: () => void
+  /**
+   * More fields for every request body, read at send time — what the host
+   * page shows, say. The runtime hands the body to the agent as its
+   * per-turn context; never persisted.
+   */
+  extraBody?: () => Record<string, unknown>
+  /**
+   * Each time a tool call gets its result, live — mid-turn, before the agent
+   * has finished writing. Calls already in the history when the chat opened
+   * don't count.
+   */
+  onToolResult?: (toolName: string) => void
 }) {
+  const onTurnFinishedRef = useRef(onTurnFinished)
+  onTurnFinishedRef.current = onTurnFinished
+  const extraBodyRef = useRef(extraBody)
+  extraBodyRef.current = extraBody
+  const onToolResultRef = useRef(onToolResult)
+  onToolResultRef.current = onToolResult
+  // Tool calls whose result has been seen — seeded with the history, so opening a chat fires nothing.
+  const seenResults = useRef<Set<string> | null>(null)
   const router = useRouter()
   const [deciding, setDeciding] = useState(false)
   // A failed secret write (e.g. not an org admin): shown in the composer form,
@@ -175,12 +212,15 @@ export function Chat({
               ...last.metadata,
             },
           }
-          return { body: { ...body, message } }
+          return { body: { ...body, ...extraBodyRef.current?.(), message } }
         }
-        return { body: { ...body, id, messages: all, trigger, messageId } }
+        return { body: { ...body, ...extraBodyRef.current?.(), id, messages: all, trigger, messageId } }
       },
     }),
-    onFinish: () => router.invalidate(),
+    onFinish: () => {
+      void router.invalidate()
+      onTurnFinishedRef.current?.()
+    },
     // Without this a rejected send is swallowed whole: `sendMessage` only ever
     // added the user bubble to client state, so a failed turn looked like it was
     // accepted until a reload made the message vanish. Surface it instead.
@@ -194,6 +234,25 @@ export function Chat({
   const showOverlays = useSettingsStore((s) => s.showOverlays)
   const showScrollButton = useSettingsStore((s) => s.showScrollButton)
   const panel = useChatPanelState(messages, status)
+
+  useEffect(() => {
+    const done: { id: string; tool: string }[] = []
+    for (const m of messages)
+      for (const part of m.parts as { type: string; state?: string; toolCallId?: string; toolName?: string }[]) {
+        if (part.state !== "output-available" || !part.toolCallId) continue
+        const tool = part.type === "dynamic-tool" ? (part.toolName ?? "") : part.type.startsWith("tool-") ? part.type.slice(5) : ""
+        if (tool) done.push({ id: part.toolCallId, tool })
+      }
+    if (!seenResults.current) {
+      seenResults.current = new Set(done.map((d) => d.id))
+      return
+    }
+    for (const d of done)
+      if (!seenResults.current.has(d.id)) {
+        seenResults.current.add(d.id)
+        onToolResultRef.current?.(d.tool)
+      }
+  }, [messages])
 
   // Latest messages, for the seed of an approval-continuation stream and for the
   // whole-transcript lookups a row does while rendering (a click handler or a
@@ -353,6 +412,9 @@ export function Chat({
       const updated = await loadHistory(chatId)
       setMessages(updated)
       router.invalidate()
+      // A continuation (after an approval, an answer, a secret) is a turn
+      // settling too — the host reloads what it changed.
+      onTurnFinishedRef.current?.()
     },
     [chatId, router, setMessages]
   )
@@ -514,7 +576,13 @@ export function Chat({
       supersedePendingApprovals()
       // The composer submits generic attachment items; adapt them to AI SDK file
       // parts (inlining blob URLs) at this app boundary.
-      const fileParts = await prepareAttachmentsForSend(files)
+      let fileParts
+      try {
+        fileParts = await prepareAttachmentsForSend(files)
+      } catch (e) {
+        setSendError(e instanceof Error ? e.message : String(e))
+        return
+      }
       // Fold quoted passages in as blockquote context above the message.
       const quoted = selections
         .map((selection) =>
@@ -533,6 +601,14 @@ export function Chat({
     },
     [clearSelections, selections, sendMessage, supersedePendingApprovals]
   )
+
+  // Sent once, and only into an empty conversation: a reload must not repeat it.
+  const autoSent = useRef(false)
+  useEffect(() => {
+    if (!autoSend || autoSent.current || messages.length > 0) return
+    autoSent.current = true
+    void submitMessage(autoSend, [])
+  }, [autoSend, messages.length, submitMessage])
 
   const answerQuestions = useCallback(
     (answers: ComposerAnswerEntry[]) => {
@@ -664,6 +740,7 @@ export function Chat({
       <div className="flex h-full min-w-0">
         <div className="relative flex h-full min-w-0 flex-1 flex-col">
           {/* Chat-area controls, floating over the thread's top-right corner. */}
+          {!embedded && (
           <div className="absolute top-2 right-2 z-20 flex items-center gap-2">
             {editable && (
               <button
@@ -680,13 +757,29 @@ export function Chat({
             )}
             <DisplaySettings />
           </div>
+          )}
 
           <Thread autoScroll={scrollMode}>
             {showOverlays && <Thread.Overlay direction="top" />}
             <Thread.Viewport>
               {messages.length === 0 ? (
                 <Thread.Placeholder>
-                  <ChatPlaceholder agent={agent} />
+                  {starters?.length ? (
+                    <div className="flex w-full flex-col gap-2">
+                      {starters.map((s) => (
+                        <button
+                          key={s.label}
+                          type="button"
+                          onClick={() => void submitMessage(s.prompt, [])}
+                          className="rounded-xl border border-primary-border bg-primary-bg px-3 py-2 text-left text-sm text-ink-primary hover:bg-primary-bg-hover"
+                        >
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <ChatPlaceholder agent={agent} />
+                  )}
                 </Thread.Placeholder>
               ) : (
                 <>
@@ -806,7 +899,7 @@ export function Chat({
           />
         </div>
 
-        {showEvals && (
+        {showEvals && !embedded && (
           <EvalsDrawer
             agent={agent}
             draft={draft}

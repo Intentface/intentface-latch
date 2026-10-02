@@ -31,7 +31,9 @@ const DrawerContent = ({
 }) => {
   return (
     <DrawerPrimitive.Portal>
-      <DrawerPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/50 data-closed:animate-out data-closed:fade-out-0 data-open:animate-in data-open:fade-in-0" />
+      {/* A transition, not a keyframe animation: an exit animation snaps back to
+          full opacity in the frames before unmount, which reads as a flash. */}
+      <DrawerPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-200 ease-in-out data-ending-style:opacity-0 data-starting-style:opacity-0" />
       <DrawerPrimitive.Popup
         className={cn(
           "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition-transform duration-200 ease-in-out",

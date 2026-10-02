@@ -11,6 +11,7 @@ export type {
   AgentActivation,
   AgentActivationSource,
   AgentBuilderStore,
+  AgentCandidate,
   AgentDraft,
   AgentDraftSummary,
   AgentPublishOptions,
@@ -26,11 +27,12 @@ export {
   MemoryConfigSchema,
   MemoryScopeSchema,
   EffortSchema,
+  isCandidateId,
   normalizeAgentName,
   normalizeAgentRecord,
   parseAgentRecord,
   parseAgentRef,
 } from "./record.js";
-export type { AgentRecord, AgentRecordInput, AgentScope, AttachedEval } from "./record.js";
+export type { AgentRecord, AgentRecordInput, AgentRefAt, AgentScope, AttachedEval } from "./record.js";
 export { sharedReadTools } from "./shared-read-tools.js";
 export type { SharedReadDeps } from "./shared-read-tools.js";

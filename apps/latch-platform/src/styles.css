@@ -33,6 +33,31 @@
   font-display: swap;
 }
 
+/* IBM Plex Mono (SIL OFL 1.1, fonts/IBMPlexMono-LICENSE.txt) — latin, the weights in use. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   font-feature-settings:
     "liga" 1,
@@ -42,6 +67,15 @@
   --bg: #ffffff;
   --fg: #1a1a1a;
   --acc: #0169cc;
+
+  /* Evals pass-rate scale: fail → neutral → pass. Tints light enough that
+     ink-primary stays readable on every cell; values are always printed. */
+  --eval-bad: oklch(0.83 0.1 25);
+  --eval-mid: oklch(0.95 0.004 250);
+  --eval-good: oklch(0.84 0.09 160);
+  /* Text on the panel, not a fill: the same hues, dark enough to read. */
+  --eval-good-ink: oklch(0.52 0.12 160);
+  --eval-bad-ink: oklch(0.55 0.16 25);
   --con: 0.3;
 
   /* State deltas (OKLCH L offsets, scale with --con).
@@ -126,7 +160,6 @@
 
   --radius: 8px;
 
-  --sidebar-width: 224px;
   --thread-width: 672px;
 }
 
@@ -134,6 +167,12 @@
   --bg: #111111;
   --fg: #fcfcfc;
   --acc: #4a9eed;
+
+  --eval-bad: oklch(0.42 0.11 25);
+  --eval-mid: oklch(0.27 0.004 250);
+  --eval-good: oklch(0.43 0.08 160);
+  --eval-good-ink: oklch(0.76 0.11 160);
+  --eval-bad-ink: oklch(0.74 0.13 25);
 
   /* State deltas flip positive in dark — surfaces sit far from
      white, so states lift toward white instead of sinking. */
@@ -177,7 +216,7 @@
   --font-sans: "TASA Orbiter", ui-sans-serif, system-ui, sans-serif;
   --font-display: var(--font-sans);
   --font-heading: var(--font-sans);
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --font-weight-normal: 450;
   /* The composer/editor text weight — upstream's `font-book`. */
@@ -469,4 +508,43 @@
 .dark .shiki,
 .dark .shiki span {
   color: var(--shiki-dark);
+}
+
+/* ─── App sidebar nav (Nav primitive) ───────────────────────────────────────
+   After the @intentface/chat Nav reference: nested lists indent under their
+   parent's icon, animate open and closed, and draw a rail down their left
+   edge. The rail lives in the list's padding, not the row's, so an active
+   row's background never covers it. */
+.app-nav {
+  --rail: color-mix(in oklch, var(--color-ink-tertiary) 45%, transparent);
+}
+.app-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
+  overflow: hidden;
+  opacity: 1;
+  transition: height 200ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease-out;
+}
+.app-nav [data-nav-list][data-starting-style],
+.app-nav [data-nav-list][data-ending-style] { height: 0; opacity: 0; }
+.app-nav [data-nav-list] > * { flex-shrink: 0; }
+.app-nav [data-nav-list][data-indent] {
+  --nav-row: 2rem;
+  margin-top: 2px;
+  margin-left: 15px;
+  padding-left: 7px;
+}
+.app-nav [data-nav-list][data-rail] > * { position: relative; overflow: visible; }
+.app-nav [data-nav-list][data-rail] > *::before,
+.app-nav [data-nav-list][data-rail] > *::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  border-color: var(--rail);
+  border-left-width: 1px;
+}
+.app-nav [data-nav-list][data-rail] > *::before { top: -2px; width: 6px; height: calc(var(--nav-row) / 2 + 2px); }
+.app-nav [data-nav-list][data-rail] > *::after { top: calc(var(--nav-row) / 2 - 6px); bottom: -2px; }
+.app-nav [data-nav-list][data-rail] > *:last-child::after { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .app-nav [data-nav-group] > [data-nav-list] { transition: none; }
 }

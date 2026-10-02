@@ -1,7 +1,7 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import {
   currentPrincipalFn,
-  listAgentDraftsFn,
+  listCandidateCountsFn,
   listAgentRecordsFn,
   listAgentsFn,
   listModelsFn,
@@ -39,7 +39,7 @@ export const Route = createFileRoute("/agents")({
         connectionsStatusFn(),
         listConnectionsFn(),
         listAuthoredToolNamesFn(),
-        listAgentDraftsFn(),
+        listCandidateCountsFn(),
       ]);
     const status: ConnStatus = {};
     for (const c of codeStatus) status[c.name] = { oauth: c.oauth, authorized: c.authorized };

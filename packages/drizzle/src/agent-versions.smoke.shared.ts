@@ -381,6 +381,52 @@ export async function agentVersionsSmoke<P>({
     );
   }
 
+  // Candidates: named, shared, never live, runnable by ref, and kept when closed.
+  {
+    const { store } = await newEnv();
+    await store.upsert(p, rec({ instructions: "published" }));
+    const a = await store.saveCandidate(p, "helper", "user", { title: "Shorter", record: rec({ instructions: "short" }), baseVersion: 1 });
+    assert(/^c_[a-z0-9]+$/.test(a.id), "a candidate gets a c_ id");
+    assert(
+      (await store.resolve("helper", p))?.instructions === "published",
+      "a candidate does NOT affect the running agent",
+    );
+    assert(
+      (await store.resolve(`helper@${a.id}`, p))?.instructions === "short",
+      "name@c_id runs the candidate",
+    );
+    assert(
+      (await store.resolve(`helper@${a.id}`, p))?.configVersion === undefined,
+      "a candidate run is attributed to no published version",
+    );
+    const b = await store.saveCandidate(p, "helper", "user", { title: "Longer", record: rec({ instructions: "long" }) });
+    assert((await store.listCandidates(p, "helper", "user")).length === 2, "several at once");
+
+    // Edit and rename keep the id, the author and the base.
+    await store.saveCandidate(p, "helper", "user", { id: a.id, title: "Terse", record: rec({ instructions: "terse" }) });
+    const edited = (await store.getCandidate(p, "helper", "user", a.id))!;
+    assert(edited.title === "Terse" && edited.record.instructions === "terse", "edit and rename round-trip");
+    assert(edited.baseVersion === 1 && edited.createdAt === a.createdAt, "the base and creation survive an edit");
+
+    // Closing hides it from the list, keeps it resolvable, and freezes it.
+    await store.closeCandidate(p, "helper", "user", a.id, { publishedAs: 2 });
+    const open = await store.listCandidates(p, "helper", "user");
+    assert(open.length === 1 && open[0]!.id === b.id, "closed candidates leave the list");
+    const all = await store.listCandidates(p, "helper", "user", { closed: true });
+    assert(all.find((c) => c.id === a.id)?.publishedAs === 2, "a closed one says what it became");
+    assert((await store.resolve(`helper@${a.id}`, p))?.instructions === "terse", "a closed candidate still resolves");
+    let refused = false;
+    try {
+      await store.saveCandidate(p, "helper", "user", { id: a.id, title: "Again", record: rec() });
+    } catch {
+      refused = true;
+    }
+    assert(refused, "a closed candidate can't be edited");
+
+    await store.remove(p, "user", "helper");
+    assert(!(await store.getCandidate(p, "helper", "user", b.id)), "delete cascades to candidates");
+  }
+
   // `resolve` carries the live version onto the config, which is how a run and
   // its trace end up attributable to an exact configuration.
   {
@@ -400,6 +446,10 @@ export async function agentVersionsSmoke<P>({
     const rolledBack = await store.resolve("helper", p);
     assert(rolledBack?.configVersion === 1, "it follows a rollback");
     assert(rolledBack?.instructions === "one", "and matches the content served");
+
+    // A pinned run is filed under the version it ran, not whatever is live.
+    const pinned = await store.resolve("helper@2", p);
+    assert(pinned?.configVersion === 2 && pinned.instructions === "two", "name@2 runs and is attributed to v2 while v1 is live");
   }
 
   // The editor's whole lifecycle, in the order a person actually does it. This

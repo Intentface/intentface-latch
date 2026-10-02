@@ -3,10 +3,11 @@ import type { PgDatabase } from "drizzle-orm/pg-core";
 import { desc, eq, inArray, and, like, sql } from "drizzle-orm";
 import type { LanguageModel } from "ai";
 import type { AgentConfig, AgentInfo } from "@intentface/latch-core";
-import { parseAgentRef } from "@intentface/latch-agent-builder";
+import { isCandidateId, parseAgentRef } from "@intentface/latch-agent-builder";
 import type {
   AgentActivation,
   AgentBuilderStore,
+  AgentCandidate,
   AgentDraft,
   AgentDraftSummary,
   AgentPublishOptions,
@@ -208,6 +209,20 @@ interface AgentDraftRow {
   updatedAt: number;
 }
 
+interface AgentCandidateRow {
+  owner: string;
+  name: string;
+  id: string;
+  title: string;
+  record: unknown;
+  baseVersion: number | null;
+  author: string | null;
+  publishedAs: number | null;
+  closedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** The dialect seam: a few queries + one upsert. */
 interface AgentQueries {
   /** Rows for these owners, optionally one name only (filtered at the query, not in memory). */
@@ -264,7 +279,26 @@ interface AgentQueries {
   /** Every draft under these owners (all editors) — metadata for badges. */
   draftsByOwners(owners: string[]): Promise<AgentDraftRow[]>;
   removeDrafts(owner: string, name: string): Promise<void>;
+  candidates(owner: string, name: string): Promise<AgentCandidateRow[]>;
+  candidate(owner: string, name: string, id: string): Promise<AgentCandidateRow | undefined>;
+  /** Insert or replace the whole row. */
+  putCandidate(row: AgentCandidateRow): Promise<void>;
+  removeCandidates(owner: string, name: string): Promise<void>;
 }
+
+const candidateOf = (r: AgentCandidateRow): AgentCandidate => ({
+  id: r.id as `c_${string}`,
+  title: r.title,
+  record: recordFromJson(r.record),
+  baseVersion: r.baseVersion ?? undefined,
+  author: r.author ?? undefined,
+  publishedAs: r.publishedAs ?? undefined,
+  closedAt: r.closedAt ?? undefined,
+  createdAt: r.createdAt,
+  updatedAt: r.updatedAt,
+});
+
+const newCandidateId = (): `c_${string}` => `c_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
 
 /** Column value (INTEGER) ↔ AgentRecord.maxSteps: NULL=default, 0=unlimited, N=cap. */
 const maxStepsToCol = (m: AgentRecord["maxSteps"]): number | null =>
@@ -309,6 +343,35 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
     return personal ?? rows[0];
   }
 
+  /**
+   * The record as of a published version, or the editor's draft.
+   *
+   * Reads through `queries` rather than the store's own methods: those take a
+   * principal and re-derive the owner key, and the row in hand already knows
+   * which owner matched — personal or org — so re-deriving could resolve the
+   * other one.
+   */
+  async function pinnedRecord(
+    row: AgentRow,
+    at: number | "draft" | `c_${string}`,
+    principal: P,
+  ): Promise<AgentRecord | undefined> {
+    if (typeof at === "string" && isCandidateId(at)) {
+      // Closed candidates still resolve: results filed under one can be
+      // answered again, and a published one is exactly what it became.
+      const c = await queries.candidate(row.owner, row.name, at);
+      return c ? recordFromJson(c.record) : undefined;
+    }
+    if (at === "draft") {
+      // A draft belongs to an EDITOR, not to the owner: two admins of one org
+      // have different half-written prompts, and `@draft` means the caller's.
+      const draft = await queries.draft(row.owner, row.name, editorKey(principal));
+      return draft ? recordFromJson(draft.record) : undefined;
+    }
+    const version = await queries.versionAt(row.owner, row.name, at);
+    return version ? recordFromJson(version.record) : undefined;
+  }
+
   async function find(p: P, name: string, scope?: AgentScope): Promise<AgentRecord | undefined> {
     // Personal wins over org on a name clash — unless pinned to one scope.
     const owners =
@@ -332,7 +395,17 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
       const ref = parseAgentRef(name);
       const row = await findRow(principal, ref.name, ref.scope);
       if (!row) return undefined;
-      const rec = recordOf(row);
+      // `name@7` / `name@draft` resolves a PINNED configuration, read-only.
+      // Measuring an old version must never make it live, and without this the
+      // only way to run one is to publish it first — which turns a comparison
+      // into two runs of whatever happened to be current.
+      const rec = ref.at === undefined ? recordOf(row) : await pinnedRecord(row, ref.at, principal);
+      if (!rec) return undefined;
+      // Which published version this config IS — what the run row and its
+      // trace say produced the answer. Live: the pointer. `@7`: 7. A draft or
+      // a candidate was never published, so it is no version at all.
+      const configVersion =
+        ref.at === undefined ? (row.publishedVersion ?? undefined) : typeof ref.at === "number" ? ref.at : undefined;
       const decorate = opts.decorateResolve ?? ((cfg: AgentConfig<P>) => cfg);
       const sel = rec.tools;
       const approvalEntries = Object.entries(sel?.approval ?? {});
@@ -365,7 +438,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
           // Which stored version this config is a copy of — recorded on the run
           // and emitted as a trace tag, so an answer can be traced back to the
           // configuration that produced it.
-          configVersion: row.publishedVersion ?? undefined,
+          configVersion,
           model: opts.modelFor(rec.modelId),
           instructions: rec.instructions,
           connections: rec.connections,
@@ -442,6 +515,7 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
       await queries.removeVersions(owner, name);
       await queries.removeActivations(owner, name);
       await queries.removeDrafts(owner, name);
+      await queries.removeCandidates(owner, name);
     },
 
     async listVersions(principal, name, scope) {
@@ -541,6 +615,51 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
           updatedAt: r.updatedAt,
         }),
       );
+    },
+
+    async listCandidates(principal, name, scope, o) {
+      const rows = await queries.candidates(ownerKey(principal, scope), name);
+      return rows
+        .filter((r) => o?.closed || r.closedAt == null)
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map(candidateOf);
+    },
+
+    async getCandidate(principal, name, scope, id) {
+      const row = await queries.candidate(ownerKey(principal, scope), name, id);
+      return row ? candidateOf(row) : undefined;
+    },
+
+    async saveCandidate(principal, name, scope, c) {
+      const owner = ownerKey(principal, scope);
+      const now = Date.now();
+      const old = c.id ? await queries.candidate(owner, name, c.id) : undefined;
+      if (c.id && !old) throw new Error(`No candidate ${c.id} of agent "${name}".`);
+      if (old?.closedAt != null) throw new Error(`Candidate "${old.title}" is closed.`);
+      const row: AgentCandidateRow = {
+        owner,
+        name,
+        id: old?.id ?? newCandidateId(),
+        title: c.title.trim() || old?.title || "Untitled",
+        // Pinned like a draft: a record claiming another name would publish elsewhere.
+        record: { ...c.record, name, scope },
+        baseVersion: c.baseVersion ?? old?.baseVersion ?? null,
+        author: old ? old.author : editorKey(principal),
+        publishedAs: null,
+        closedAt: null,
+        createdAt: old?.createdAt ?? now,
+        updatedAt: now,
+      };
+      await queries.putCandidate(row);
+      return candidateOf(row);
+    },
+
+    async closeCandidate(principal, name, scope, id, o) {
+      const owner = ownerKey(principal, scope);
+      const old = await queries.candidate(owner, name, id);
+      if (!old || old.closedAt != null) return;
+      const now = Date.now();
+      await queries.putCandidate({ ...old, publishedAs: o?.publishedAs ?? null, closedAt: now, updatedAt: now });
     },
   };
 
@@ -738,6 +857,7 @@ export function createSqliteAgentBuilderStore<P>(
   const v = sqliteSchema.agentVersions;
   const a = sqliteSchema.agentActivations;
   const d = sqliteSchema.agentDrafts;
+  const c = sqliteSchema.agentCandidates;
   return createStore<P>(
     {
       async byOwners(owners, name) {
@@ -854,6 +974,24 @@ export function createSqliteAgentBuilderStore<P>(
       },
       async removeDrafts(owner, name) {
         await db.delete(d).where(and(eq(d.owner, owner), eq(d.name, name)));
+      },
+      async candidates(owner, name) {
+        return (await db.select().from(c).where(and(eq(c.owner, owner), eq(c.name, name)))) as AgentCandidateRow[];
+      },
+      async candidate(owner, name, id) {
+        const rows = (await db
+          .select()
+          .from(c)
+          .where(and(eq(c.owner, owner), eq(c.name, name), eq(c.id, id)))
+          .limit(1)) as AgentCandidateRow[];
+        return rows[0];
+      },
+      async putCandidate(row) {
+        const { owner: _o, name: _n, id: _i, ...set } = row;
+        await db.insert(c).values(row).onConflictDoUpdate({ target: [c.owner, c.name, c.id], set });
+      },
+      async removeCandidates(owner, name) {
+        await db.delete(c).where(and(eq(c.owner, owner), eq(c.name, name)));
       },
     },
     opts,
@@ -869,6 +1007,7 @@ export function createPostgresAgentBuilderStore<P>(
   const v = pgSchema.agentVersions;
   const a = pgSchema.agentActivations;
   const d = pgSchema.agentDrafts;
+  const c = pgSchema.agentCandidates;
   return createStore<P>(
     {
       async byOwners(owners, name) {
@@ -985,6 +1124,24 @@ export function createPostgresAgentBuilderStore<P>(
       },
       async removeDrafts(owner, name) {
         await db.delete(d).where(and(eq(d.owner, owner), eq(d.name, name)));
+      },
+      async candidates(owner, name) {
+        return (await db.select().from(c).where(and(eq(c.owner, owner), eq(c.name, name)))) as AgentCandidateRow[];
+      },
+      async candidate(owner, name, id) {
+        const rows = (await db
+          .select()
+          .from(c)
+          .where(and(eq(c.owner, owner), eq(c.name, name), eq(c.id, id)))
+          .limit(1)) as AgentCandidateRow[];
+        return rows[0];
+      },
+      async putCandidate(row) {
+        const { owner: _o, name: _n, id: _i, ...set } = row;
+        await db.insert(c).values(row).onConflictDoUpdate({ target: [c.owner, c.name, c.id], set });
+      },
+      async removeCandidates(owner, name) {
+        await db.delete(c).where(and(eq(c.owner, owner), eq(c.name, name)));
       },
     },
     opts,

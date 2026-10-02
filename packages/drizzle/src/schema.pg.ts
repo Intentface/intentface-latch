@@ -271,6 +271,25 @@ export const agentDrafts = pgTable(
   ],
 );
 
+/** Named, shared, unpublished configurations — see the SQLite schema for semantics. */
+export const agentCandidates = pgTable(
+  "latch_agent_candidates",
+  {
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    id: text("id").notNull(),
+    title: text("title").notNull(),
+    record: jsonb("record").notNull(),
+    baseVersion: integer("base_version"),
+    author: text("author"),
+    publishedAs: integer("published_as"),
+    closedAt: bigint("closed_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.owner, t.name, t.id] })],
+);
+
 /** Memory-sweep state per chat — see the SQLite schema for semantics. */
 export const memoryChatState = pgTable(
   "latch_memory_chat_state",

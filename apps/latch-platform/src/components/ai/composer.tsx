@@ -36,6 +36,7 @@ import {
   ATTACHMENT_ACCEPT,
   ATTACHMENT_MAX_FILE_SIZE,
   ATTACHMENT_MAX_FILES,
+  revokeAttachmentLater,
 } from "@/lib/ai/attachments"
 import {
   CHIP_ICONS,
@@ -133,6 +134,7 @@ const ComposerAttachments = ({
       accept={accept}
       maxFiles={maxFiles}
       maxFileSize={maxFileSize}
+      destroy={revokeAttachmentLater}
       {...props}
     >
       <AnimatePresence initial={false}>

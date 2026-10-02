@@ -1,0 +1,493 @@
+import type { Experimental_EvaluationModelV4 as EvaluationModel } from "@ai-sdk/provider";
+import type { AskedCheck, CountedCheck, Dataset, Input, Rubric, ThreadRef, Verdict, Version } from "./model";
+import { appliesTo } from "./model";
+import { evaluateBound } from "./counted";
+import { judgeAsked, stateOf, type AskedAnswer, type JudgeUsage } from "./judge";
+import { saysItems } from "./expect";
+import { finalAnswer, viewOf } from "./thread";
+
+/**
+ * Running and judging, kept apart on purpose.
+ *
+ * The two halves have different costs and lifetimes. Running the agent is
+ * dollars and minutes and happens once per (input, version); judging is
+ * fractions of a cent and seconds and happens every time a check changes. So
+ * `runDataset` produces threads and nothing else, and `judgeThreads` can be
+ * called on those threads as often as the rubric moves — the behaviour being
+ * graded is byte-identical each time, which a re-run could never promise.
+ */
+
+/**
+ * Everything an agent's behaviour can turn on, and nothing else — no version
+ * number or timestamp, which would make two identical configurations look
+ * different. `live` and `@3` are one configuration whenever v3 is published.
+ */
+export function configFingerprint(rec: {
+  instructions?: unknown;
+  modelId?: unknown;
+  maxSteps?: unknown;
+  connections?: unknown[];
+  tools?: unknown;
+  exec?: unknown;
+}): string {
+  return JSON.stringify({
+    instructions: rec.instructions ?? "",
+    modelId: rec.modelId ?? "",
+    maxSteps: rec.maxSteps ?? null,
+    connections: [...((rec.connections as string[] | undefined) ?? [])].sort(),
+    tools: rec.tools ?? null,
+    exec: rec.exec ?? null,
+  });
+}
+
+export interface RunDeps {
+  runAgent(input: { agent: string; prompt: string; files?: { url: string; mediaType: string; filename?: string }[]; threadId?: string }): Promise<{ threadId: string; answer: string; error?: string }>;
+}
+
+export async function runDataset(opts: {
+  owner: string;
+  dataset: Dataset;
+  inputs: Input[];
+  versions: (Version & { fingerprint: string })[];
+  deps: RunDeps;
+  concurrency?: number;
+  /**
+   * Run each (input, version) this many times. One attempt per input cannot
+   * separate a change from the agent's own variance: the same configuration
+   * scored 17%, 26%, 30% and 30% on one check across four single-attempt
+   * runs. Repeats turn each input into a rate, which is what can be compared.
+   */
+  repeats?: number;
+  /** Groups the threads of this run. Generated when omitted. */
+  runId?: string;
+  onThread?: (t: ThreadRef, done: number, total: number) => void;
+}): Promise<ThreadRef[]> {
+  const repeats = Math.max(1, opts.repeats ?? 1);
+  const runId = opts.runId ?? `run_${Date.now().toString(36)}`;
+  const units = opts.versions.flatMap((v) =>
+    opts.inputs.flatMap((input) => Array.from({ length: repeats }, (_, attempt) => ({ v, input, attempt }))),
+  );
+  const out: ThreadRef[] = new Array(units.length);
+  let done = 0;
+  await pool(units, opts.concurrency ?? 4, async (u, i) => {
+    out[i] = await runUnit({ owner: opts.owner, dataset: opts.dataset, runId, deps: opts.deps, ...u });
+    opts.onThread?.(out[i], ++done, units.length);
+  });
+  return out;
+}
+
+/**
+ * One input, once, against one version: the unit a run is made of. Never
+ * throws — a failure is a ThreadRef with `error`, so a job can record it and
+ * move on, and never re-runs it.
+ */
+/**
+ * An input's first message with its files. PDFs and images travel as file
+ * parts; text files go in the message itself, named — providers that read a
+ * PDF often refuse a text/plain part.
+ */
+export function withFiles(input: Pick<Input, "prompt" | "files">): { prompt: string; files: { url: string; mediaType: string; filename: string }[] } {
+  const files: { url: string; mediaType: string; filename: string }[] = [];
+  const texts: string[] = [];
+  for (const f of input.files ?? []) {
+    const isText = f.mediaType.startsWith("text/") || f.mediaType === "application/json";
+    const comma = f.url.indexOf(",");
+    if (isText && f.url.startsWith("data:") && comma > 0) {
+      const body = f.url.slice(comma + 1);
+      const text = f.url.slice(0, comma).endsWith(";base64")
+        ? new TextDecoder().decode(Uint8Array.from(atob(body), (c) => c.charCodeAt(0)))
+        : decodeURIComponent(body);
+      texts.push(`<file name="${f.filename}">\n${text}\n</file>`);
+    } else files.push({ url: f.url, mediaType: f.mediaType, filename: f.filename });
+  }
+  return { prompt: texts.length ? `${texts.join("\n\n")}\n\n${input.prompt}` : input.prompt, files };
+}
+
+export async function runUnit(opts: {
+  owner: string;
+  dataset: Pick<Dataset, "id" | "agentName">;
+  runId: string;
+  v: Version & { fingerprint: string };
+  input: Input;
+  attempt: number;
+  deps: RunDeps;
+}): Promise<ThreadRef> {
+  const { v, input, attempt, runId } = opts;
+  const started = Date.now();
+  const base = {
+    owner: opts.owner,
+    agentName: opts.dataset.agentName,
+    datasetId: opts.dataset.id,
+    inputId: input.id,
+    runId,
+    attempt,
+    version: v.label,
+    configFingerprint: v.fingerprint,
+    origin: "run" as const,
+    createdAt: started,
+  };
+  let threadId = "";
+  try {
+    // An input's files go with its first message, as a user would attach them.
+    const { files, prompt } = withFiles(input);
+    let res = await opts.deps.runAgent({ agent: v.ref, prompt, ...(files.length ? { files } : {}) });
+    threadId = res.threadId;
+    // Follow-ups go into the SAME thread: the failures worth catching are
+    // usually on turn two, after the agent has something to lose track of.
+    for (const f of input.followUps ?? []) {
+      res = await opts.deps.runAgent({ agent: v.ref, prompt: f, threadId });
+    }
+    // An empty answer is an outage, not a result. A provider that refuses
+    // can come back as a completed turn with no text; judging that yields a
+    // full set of confident verdicts about nothing, with no error in sight.
+    if (!res.answer.trim()) throw new Error(res.error ? `the agent's turn failed: ${res.error}` : "the agent produced no answer — not judged");
+    return { ...base, threadId, answer: res.answer, durationMs: Date.now() - started };
+  } catch (e) {
+    return {
+      ...base,
+      threadId: threadId || `failed:${runId}:${v.label}:${input.id}:${attempt}`,
+      answer: "",
+      error: e instanceof Error ? e.message : String(e),
+      durationMs: Date.now() - started,
+    };
+  }
+}
+
+export interface JudgeDeps {
+  loadHistory(threadId: string): Promise<unknown[]>;
+  judgeFor(id: string): EvaluationModel;
+}
+
+/**
+ * Judge threads against one rubric version. Counted checks run locally;
+ * asked checks go to their judges, grouped so each judge sees one state once.
+ * Errored threads are skipped — there is nothing to judge, and scoring them
+ * would average an outage into the result.
+ */
+/** Joins a check's id to one of its input-listed items: `said-what-it-should#2`. */
+const ITEM = "#";
+
+export async function judgeThreads(opts: {
+  rubric: Rubric;
+  threads: ThreadRef[];
+  inputsById?: Map<string, Input>;
+  dataset?: Pick<Dataset, "audience" | "note">;
+  deps: JudgeDeps;
+  concurrency?: number;
+  /**
+   * The cascade. A check with a threshold (derived from rulings — see
+   * `thresholdFor`) re-asks every verdict below it of `judge`, and the
+   * bigger judge's answer stands, marked `escalatedTo`. Checks without a
+   * threshold are never escalated: with no rulings there is no evidence that
+   * the cheap judge is wrong where it is unsure, only that it is unsure.
+   */
+  escalate?: { judge: string; below: Map<string, number> };
+  onUsage?: (u: JudgeUsage) => void;
+  onThread?: (threadId: string, verdicts: Verdict[], done: number, total: number) => void;
+}): Promise<Verdict[]> {
+  const counted = opts.rubric.checks.filter((c): c is CountedCheck => c.kind === "counted");
+  const asked = opts.rubric.checks.filter((c): c is AskedCheck => c.kind === "asked");
+  const judgeable = opts.threads.filter((t) => !t.error);
+  const all: Verdict[] = [];
+  let done = 0;
+  await pool(judgeable, opts.concurrency ?? 8, async (t) => {
+    const view = viewOf(await opts.deps.loadHistory(t.threadId));
+    const now = Date.now();
+    const input = t.inputId ? opts.inputsById?.get(t.inputId) : undefined;
+    const facts = input?.facts;
+    const vs: Verdict[] = [];
+    // A check limited to tags is not one of an untagged input's tests.
+    for (const c of counted.filter((x) => appliesTo(x, input))) {
+      const r = evaluateBound(c.spec, view, facts);
+      if (!r) continue; // the input does not say what to look for — not applicable
+      vs.push({
+        threadId: t.threadId,
+        checkId: c.id,
+        rubricVersion: opts.rubric.version,
+        judgeId: "counted",
+        answer: r.each ? JSON.stringify({ each: r.each }) : String(r.passed),
+        failed: !r.passed,
+        createdAt: now,
+      });
+    }
+    // A check "from the input" becomes one yes/no per item the input lists,
+    // asked in the same call as the rest; its verdict passes only if all do.
+    const mine = asked.filter((c) => appliesTo(c, input));
+    const fromInput = mine.filter((c) => c.fromInput === "says");
+    const items = saysItems(facts);
+    const expanded: AskedCheck[] = [
+      // A check against the good answer means nothing on an input that has none.
+      ...mine.filter((c) => !c.fromInput && (!c.ask.includes("REFERENCE_ANSWER") || facts?.answer)),
+      ...(items.length
+        ? fromInput.flatMap((c) =>
+            items.map((it, n): AskedCheck => {
+              const judge = it.judge ?? c.judge;
+              return { kind: "asked", id: `${c.id}${ITEM}${n}`, label: it.text, ask: it.question, shape: it.shape ?? { type: "boolean" }, ...(judge ? { judge } : {}) };
+            }),
+          )
+        : []),
+    ];
+    if (expanded.length && finalAnswer(view)) {
+      const state = stateOf({ view, ...(facts ? { facts } : {}), ...(opts.dataset ? { dataset: opts.dataset } : {}) });
+      const ask = (checks: AskedCheck[], defaultJudge: string) =>
+        judgeAsked({
+          checks,
+          state,
+          defaultJudge,
+          judgeFor: opts.deps.judgeFor,
+          ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
+        });
+      let answers = await ask(expanded, opts.rubric.defaultJudge);
+      const esc = opts.escalate;
+      const unsure = esc
+        ? answers.filter((a) => {
+            const cut = esc.below.get(a.checkId);
+            return cut !== undefined && a.judgeId !== esc.judge && (a.confidence ?? 1) < cut;
+          })
+        : [];
+      if (esc && unsure.length) {
+        const ids = new Set(unsure.map((a) => a.checkId));
+        const again = await ask(
+          asked.filter((c) => ids.has(c.id)).map((c) => ({ ...c, judge: esc.judge })),
+          esc.judge,
+        );
+        const byCheck = new Map(again.map((a) => [a.checkId, { ...a, escalatedTo: esc.judge }]));
+        answers = answers.map((a) => byCheck.get(a.checkId) ?? a);
+      }
+      // Fold each input-listed item back into its check's one verdict.
+      for (const c of fromInput) {
+        const mine = answers.filter((a) => a.checkId.startsWith(`${c.id}${ITEM}`));
+        if (!mine.length) continue;
+        const each = items.map((_, n) => {
+          const a = mine.find((x) => x.checkId === `${c.id}${ITEM}${n}`);
+          return a ? !a.failed : false;
+        });
+        // A choice or score item keeps the label it got, so the answer can say which.
+        const labels = items.map((it, n) => (it.shape && it.shape.type !== "boolean" ? (mine.find((x) => x.checkId === `${c.id}${ITEM}${n}`)?.answer ?? null) : null));
+        const sure = mine.map((a) => a.confidence).filter((x): x is number => x !== undefined);
+        answers = [
+          ...answers.filter((a) => !a.checkId.startsWith(`${c.id}${ITEM}`)),
+          {
+            checkId: c.id,
+            judgeId: mine[0].judgeId,
+            answer: JSON.stringify(labels.some((l) => l !== null) ? { each, labels } : { each }),
+            ...(sure.length ? { confidence: Math.min(...sure) } : {}),
+            failed: each.some((ok) => !ok),
+          },
+        ];
+      }
+      for (const a of answers as (AskedAnswer & { escalatedTo?: string })[]) {
+        vs.push({
+          threadId: t.threadId,
+          checkId: a.checkId,
+          rubricVersion: opts.rubric.version,
+          judgeId: a.judgeId,
+          answer: a.answer,
+          ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
+          ...(a.score !== undefined ? { score: a.score } : {}),
+          ...(a.probabilities ? { probabilities: a.probabilities } : {}),
+          failed: a.failed,
+          ...(a.escalatedTo ? { escalatedTo: a.escalatedTo } : {}),
+          createdAt: now,
+        });
+      }
+    }
+    all.push(...vs);
+    opts.onThread?.(t.threadId, vs, ++done, judgeable.length);
+  });
+  return all;
+}
+
+// ─── Reading the results ───────────────────────────────────────────────────
+
+export interface CheckSummary {
+  checkId: string;
+  /** Verdicts that passed / verdicts given — the mean rate across attempts. */
+  passed: number;
+  total: number;
+  /**
+   * Inputs where EVERY attempt passed, over inputs with a verdict. With one
+   * attempt this equals the rate; with several it is pass^k — can it do it
+   * every time, which is what a user gets, not whether it can do it at all.
+   */
+  allPassed: number;
+  inputs: number;
+  /** Answer → count. For a pick-one check this is the diagnosis a rate discards. */
+  answers: Record<string, number>;
+}
+
+export interface VersionSummary {
+  version: string;
+  threads: number;
+  errors: number;
+  checks: CheckSummary[];
+}
+
+export function summarize(threads: ThreadRef[], verdicts: Verdict[], rubric: Rubric): VersionSummary[] {
+  const byThread = new Map(threads.map((t) => [t.threadId, t]));
+  const labels = [...new Set(threads.map((t) => t.version))];
+  return labels.map((version) => {
+    const ts = threads.filter((t) => t.version === version);
+    const mine = verdicts.filter((v) => byThread.get(v.threadId)?.version === version);
+    return {
+      version,
+      threads: ts.length,
+      errors: ts.filter((t) => t.error).length,
+      checks: rubric.checks.map((c) => {
+        const vs = mine.filter((v) => v.checkId === c.id);
+        const answers: Record<string, number> = {};
+        const perInput = new Map<string, boolean>();
+        for (const v of vs) {
+          answers[v.answer] = (answers[v.answer] ?? 0) + 1;
+          const key = byThread.get(v.threadId)?.inputId ?? v.threadId;
+          perInput.set(key, (perInput.get(key) ?? true) && !v.failed);
+        }
+        return {
+          checkId: c.id,
+          passed: vs.filter((v) => !v.failed).length,
+          total: vs.length,
+          allPassed: [...perInput.values()].filter(Boolean).length,
+          inputs: perInput.size,
+          answers,
+        };
+      }),
+    };
+  });
+}
+
+export interface PairedComparison {
+  checkId: string;
+  /** Inputs where both versions produced at least one verdict. */
+  pairs: number;
+  /** Inputs whose pass rate went up from A to B. */
+  improved: number;
+  /** Inputs whose pass rate went down. */
+  regressed: number;
+  /** Mean per-input rate on A and B, over the paired inputs. */
+  rateA: number;
+  rateB: number;
+  /**
+   * Exact two-sided sign test over the inputs that moved. With one attempt
+   * per input this is McNemar; with several, it compares rates rather than
+   * single draws. Conservative at small n, which is the honest direction.
+   */
+  p: number;
+}
+
+/**
+ * Two versions over the SAME inputs, compared input by input.
+ *
+ * Pairing removes how hard each question is from the comparison; only the
+ * inputs that moved carry information. Threads should come from one run —
+ * mixing runs mixes conditions, and the agent's variance between runs is
+ * larger than most changes worth measuring.
+ */
+export function compareVersions(
+  threads: ThreadRef[],
+  verdicts: Verdict[],
+  checkIds: string[],
+  a: string,
+  b: string,
+): PairedComparison[] {
+  const byThread = new Map(threads.map((t) => [t.threadId, t]));
+  return checkIds.map((checkId) => {
+    const tally = new Map<string, { a: [number, number]; b: [number, number] }>();
+    for (const v of verdicts) {
+      if (v.checkId !== checkId) continue;
+      const t = byThread.get(v.threadId);
+      if (!t?.inputId || (t.version !== a && t.version !== b)) continue;
+      const slot = tally.get(t.inputId) ?? { a: [0, 0], b: [0, 0] };
+      const side = t.version === a ? slot.a : slot.b;
+      side[0] += v.failed ? 0 : 1;
+      side[1] += 1;
+      tally.set(t.inputId, slot);
+    }
+    let improved = 0;
+    let regressed = 0;
+    let pairs = 0;
+    let sumA = 0;
+    let sumB = 0;
+    for (const s of tally.values()) {
+      if (!s.a[1] || !s.b[1]) continue;
+      pairs += 1;
+      const ra = s.a[0] / s.a[1];
+      const rb = s.b[0] / s.b[1];
+      sumA += ra;
+      sumB += rb;
+      if (rb > ra) improved += 1;
+      if (rb < ra) regressed += 1;
+    }
+    return {
+      checkId,
+      pairs,
+      improved,
+      regressed,
+      rateA: pairs ? sumA / pairs : 0,
+      rateB: pairs ? sumB / pairs : 0,
+      p: mcnemar(improved, regressed),
+    };
+  });
+}
+
+export function mcnemar(b: number, c: number): number {
+  const n = b + c;
+  if (n === 0) return 1;
+  const k = Math.min(b, c);
+  let tail = 0;
+  for (let i = 0; i <= k; i++) tail += choose(n, i);
+  return Math.min(1, (2 * tail) / 2 ** n);
+}
+
+function choose(n: number, k: number): number {
+  let r = 1;
+  for (let i = 1; i <= k; i++) r = (r * (n - k + i)) / i;
+  return r;
+}
+
+/**
+ * How often the judge agrees with ITSELF: the same threads judged several
+ * times. This bounds everything else — a check whose judge wanders cannot
+ * resolve a change smaller than its own noise, however many inputs you run.
+ * Nearly free, because only the judging is repeated.
+ */
+export function consistency(passes: Verdict[][]): { checkId: string; agreement: number; unanimous: number; items: number }[] {
+  const seen = new Map<string, string[]>();
+  for (const pass of passes)
+    for (const v of pass) {
+      const key = `${v.checkId}|${v.threadId}`;
+      (seen.get(key) ?? seen.set(key, []).get(key)!).push(v.answer);
+    }
+  const byCheck = new Map<string, string[][]>();
+  for (const [key, answers] of seen) {
+    const checkId = key.split("|")[0]!;
+    (byCheck.get(checkId) ?? byCheck.set(checkId, []).get(checkId)!).push(answers);
+  }
+  return [...byCheck].map(([checkId, items]) => {
+    let agree = 0;
+    let unanimous = 0;
+    for (const answers of items) {
+      if (new Set(answers).size === 1) unanimous += 1;
+      let pairs = 0;
+      let same = 0;
+      for (let i = 0; i < answers.length; i++)
+        for (let j = i + 1; j < answers.length; j++) {
+          pairs += 1;
+          if (answers[i] === answers[j]) same += 1;
+        }
+      agree += pairs ? same / pairs : 1;
+    }
+    return { checkId, agreement: items.length ? agree / items.length : 1, unanimous, items: items.length };
+  });
+}
+
+export async function pool<T>(items: T[], limit: number, fn: (item: T, i: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        await fn(items[i]!, i);
+      }
+    }),
+  );
+}

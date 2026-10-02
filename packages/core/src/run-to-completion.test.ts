@@ -102,6 +102,16 @@ describe("runAgent (autonomous)", () => {
     expect([...mem.runs.values()][0]!.status).toBe("completed");
   });
 
+  it("says why a turn failed: the provider's refusal comes back as `error`, not a silent empty answer", async () => {
+    const mem = memoryStorage();
+    const refusing = new MockLanguageModelV4({
+      doStream: () => Promise.reject(new Error("'claude-haiku-4-5' does not support programmatic tool calling.")),
+    });
+    const res = await runtimeWith(mem, refusing).runAgent({ principal, agent: "writer", prompt: "go" });
+    expect(res.answer).toBe("");
+    expect(res.error).toContain("does not support programmatic tool calling");
+  });
+
   it("continues an existing thread with its history; an empty threadId mints a fresh one", async () => {
     const mem = memoryStorage();
     const rt = runtimeWith(mem, model("again."));
@@ -296,6 +306,37 @@ describe("delegation inherits the parent's restrictions", () => {
       output?: { __blocked?: boolean };
     }>;
     expect(parts.find((p) => p.type === "tool-write_thing")?.output?.__blocked).toBe(true);
+  });
+});
+
+describe("delegation inherits memory off", () => {
+  it("runAgent({ memory: false }) spawns a child with memory off too: no recall, no memory tools", async () => {
+    const mem = memoryStorage();
+    const asked: string[] = [];
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      memory: {
+        instructionsFor: async ({ agent }) => (asked.push(agent), "remembered things"),
+        toolsFor: ({ agent }) => (asked.push(`${agent}:tools`), {}),
+      },
+      agents: {
+        lead: defineAgent({
+          model: model("delegated.", { name: "spawn_agent", input: '{"agent":"writer","prompt":"write x"}' }),
+          instructions: "delegate",
+          subagents: ["writer"],
+          memory: { scope: "agent-user", connection: "mem" } as never,
+        }),
+        writer: defineAgent({
+          model: model("did it."),
+          instructions: "write",
+          memory: { scope: "agent-user", connection: "mem" } as never,
+        }),
+      },
+    });
+    const res = await rt.runAgent({ principal, agent: "lead", prompt: "go", memory: false });
+    expect(res.answer).toBe("delegated.");
+    expect(asked).toEqual([]);
   });
 });
 

@@ -2,13 +2,15 @@ import { timingSafeEqual } from "node:crypto";
 import { createFileRoute } from "@tanstack/react-router";
 import { getLatch } from "@/lib/latch";
 import { memorySweep } from "@/lib/memory/sweep";
+import { evalJobsTick } from "@/lib/evals-jobs";
 
 /**
  * System cron entrypoint (prod replacement for the dev in-process tick).
- * Point Vercel Cron at `/api/cron` (see vercel.json). It does two things:
+ * Point Vercel Cron at `/api/cron` (see vercel.json). It does three things:
  *   • runtime.cron() — fire all tenants' due scheduled agents, then reap
  *                      lease-expired/crashed runs and resume them (durability)
  *   • memorySweep()  — extract idle chats into episodic memory + consolidate
+ *   • evalJobsTick() — advance eval runs whose lease lapsed
  *
  * Guarded by Vercel's `CRON_SECRET` (Vercel sends it as `Authorization:
  * Bearer …`). Unauthenticated and system-wide, so it fails CLOSED: in production
@@ -16,6 +18,8 @@ import { memorySweep } from "@/lib/memory/sweep";
  * schedules runnable by anyone. Only dev runs it unguarded.
  */
 async function runCron(request: Request): Promise<Response> {
+  // Vercel's 300s limit counts from here; eval slices get what's left.
+  const requestStartedAt = Date.now();
   const forbidden = () => new Response("Forbidden", { status: 403 });
   const secret = process.env.CRON_SECRET;
   if (!secret) {
@@ -43,7 +47,10 @@ async function runCron(request: Request): Promise<Response> {
     process.env.NODE_ENV !== "production" &&
     new URL(request.url).searchParams.get("force") === "1";
   const memory = await memorySweep({ force }).catch((e: unknown) => ({ error: String(e) }));
-  return Response.json({ ok: true, latch, memory });
+  // Eval runs that outlived the request that started them — in what is left
+  // of this request's time, since the phases above already spent some.
+  const evals = await evalJobsTick({ requestStartedAt }).catch((e: unknown) => ({ error: String(e) }));
+  return Response.json({ ok: true, latch, memory, evals });
 }
 
 export const Route = createFileRoute("/api/cron")({

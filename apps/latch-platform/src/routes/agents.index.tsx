@@ -24,10 +24,10 @@ const countLabel = (n: number) =>
 
 function AgentsList() {
   const { records, drafts } = useLoaderData({ from: "/agents" });
-  // Agents this user has unpublished changes on — so a draft left for tomorrow
-  // is discoverable rather than forgotten. (No navigation blocker: leaving
-  // loses nothing, because the draft is already saved.)
-  const draftNames = new Set(drafts.map((d) => `${d.scope}:${d.name}`));
+  // Agents with unpublished candidates — so work left for tomorrow is
+  // discoverable rather than forgotten. (No navigation blocker: leaving loses
+  // nothing, because a candidate is already saved.)
+  const candidateCount = new Map(drafts.map((d) => [`${d.scope}:${d.name}`, d.count]));
   const { slack } = Route.useSearch();
   const navigate = useNavigate();
 
@@ -104,12 +104,12 @@ function AgentsList() {
                 </Settings.Description>
               </Settings.LabelGroup>
               <Settings.Value className="text-xs">
-                {draftNames.has(`${agent.scope}:${agent.name}`) && (
+                {candidateCount.has(`${agent.scope}:${agent.name}`) && (
                   <span
                     className="mr-2 rounded-full bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-700 dark:text-amber-400"
-                    title="You have unpublished changes"
+                    title="Unpublished candidates — named versions to try before they go live"
                   >
-                    draft
+                    {candidateCount.get(`${agent.scope}:${agent.name}`) === 1 ? "1 candidate" : `${candidateCount.get(`${agent.scope}:${agent.name}`)} candidates`}
                   </span>
                 )}
                 {agent.scope === "org" ? "org" : "personal"}

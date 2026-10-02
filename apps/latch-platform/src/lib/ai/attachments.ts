@@ -35,6 +35,15 @@ export const ATTACHMENT_MAX_FILE_SIZE = 10 * 1024 * 1024
 // composer submits generic items; this adapter runs in the app's onSubmit.
 // ---------------------------------------------------------------------------
 
+/**
+ * Revoke an attachment's object URL a minute from now, not at once. The
+ * composer clears its items — destroying them — BEFORE handing them to
+ * onSubmit, so an immediate revoke leaves send reading a dead `blob:` URL.
+ */
+export const revokeAttachmentLater = (item: Pick<AttachmentItem, "url">) => {
+  if (item.url.startsWith("blob:")) setTimeout(() => URL.revokeObjectURL(item.url), 60_000)
+}
+
 const convertBlobUrlToDataUrl = async (url: string): Promise<string | null> => {
   try {
     const response = await fetch(url)
@@ -55,9 +64,9 @@ export const prepareAttachmentsForSend = async (
 ): Promise<FilePart[]> =>
   Promise.all(
     attachments.map(async (item): Promise<FilePart> => {
-      const url = item.url.startsWith("blob:")
-        ? ((await convertBlobUrlToDataUrl(item.url)) ?? item.url)
-        : item.url
+      // A `blob:` URL means nothing off this page: never send one.
+      const url = item.url.startsWith("blob:") ? await convertBlobUrlToDataUrl(item.url) : item.url
+      if (!url) throw new Error(`Couldn't read ${item.filename ?? "an attachment"} — attach it again.`)
       return {
         type: "file",
         url,

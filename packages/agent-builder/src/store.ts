@@ -12,7 +12,8 @@ import type { AgentRecord, AgentScope } from "./record.js";
  */
 
 export type { AgentRecord, AgentScope, AttachedEval, AgentRecordInput } from "./record.js";
-export { normalizeAgentName, parseAgentRef } from "./record.js";
+export { isCandidateId, normalizeAgentName, parseAgentRef } from "./record.js";
+export type { AgentRefAt } from "./record.js";
 
 /** How a version came to be published — provenance only, never behaviour. */
 export type AgentPublishSource = "editor" | "builder-agent" | "api" | "backfill";
@@ -71,6 +72,28 @@ export interface AgentDraft {
    * published since and publishing blind would silently revert them.
    */
   baseVersion?: number;
+  updatedAt: number;
+}
+
+/**
+ * A named, unpublished configuration of an agent. Unlike a draft it belongs to
+ * the AGENT, not to one person: everyone who can edit the agent sees it, runs
+ * it as `name@c_<id>`, and may publish it. Closing keeps it — discarded, or
+ * published as a version — so anything filed under it keeps its name.
+ */
+export interface AgentCandidate {
+  /** `c_…`, stable across renames. */
+  id: `c_${string}`;
+  title: string;
+  record: AgentRecord;
+  /** The version it was started from — the same publish guard as a draft's. */
+  baseVersion?: number;
+  /** Host editor key of whoever created it. */
+  author?: string;
+  /** The version it became, once published. */
+  publishedAs?: number;
+  closedAt?: number;
+  createdAt: number;
   updatedAt: number;
 }
 
@@ -166,6 +189,34 @@ export interface AgentBuilderStore<P> extends DynamicAgentStore<P> {
    * the caller's to read.
    */
   listDrafts: (p: P) => Promise<AgentDraftSummary[]>;
+
+  /** The agent's candidates, newest first; closed ones only when asked. */
+  listCandidates: (
+    p: P,
+    name: string,
+    scope: AgentScope,
+    opts?: { closed?: boolean },
+  ) => Promise<AgentCandidate[]>;
+  getCandidate: (p: P, name: string, scope: AgentScope, id: string) => Promise<AgentCandidate | undefined>;
+  /**
+   * Create (no `id`) or update one. Never touches the live record. Returns the
+   * saved candidate. Updating a closed candidate is refused: what was
+   * published or discarded stays as it was.
+   */
+  saveCandidate: (
+    p: P,
+    name: string,
+    scope: AgentScope,
+    c: { id?: string; title: string; record: AgentRecord; baseVersion?: number },
+  ) => Promise<AgentCandidate>;
+  /** Close it — discarded, or published as `publishedAs`. It still resolves. */
+  closeCandidate: (
+    p: P,
+    name: string,
+    scope: AgentScope,
+    id: string,
+    opts?: { publishedAs?: number },
+  ) => Promise<void>;
   /**
    * SYSTEM op (principal-free, cross-tenant): distinct names of records that
    * look memory-enabled — a cheap prefilter for a background memory sweep. The

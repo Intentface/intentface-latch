@@ -86,6 +86,12 @@ const DDL = [
      record TEXT NOT NULL, base_version INTEGER, updated_at INTEGER NOT NULL,
      PRIMARY KEY (owner, name, editor))`,
   `CREATE INDEX IF NOT EXISTS latch_agent_drafts_owner_idx ON latch_agent_drafts (owner)`,
+  // Named, shared, unpublished configurations of an agent (`name@c_<id>`).
+  `CREATE TABLE IF NOT EXISTS latch_agent_candidates (
+     owner TEXT NOT NULL, name TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
+     record TEXT NOT NULL, base_version INTEGER, author TEXT, published_as INTEGER,
+     closed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+     PRIMARY KEY (owner, name, id))`,
   `CREATE TABLE IF NOT EXISTS latch_schedules (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity TEXT,
      cron TEXT, timezone TEXT, prompt TEXT NOT NULL, delivery TEXT,

@@ -358,8 +358,34 @@ export interface Runtime<P> {
     principal: P;
     agent: string;
     prompt: string;
+    /**
+     * Files sent with the prompt, as chat sends them: `url` is a data URL or
+     * a URL the model provider can fetch. They precede the text in the user
+     * message. Omit for a text-only turn — nothing changes.
+     */
+    files?: { url: string; mediaType: string; filename?: string }[];
     threadId?: string;
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
+    /**
+     * Per-turn memory override. `false` = no recall and no memory tools this
+     * run, whatever the agent's `exec.memory` says.
+     *
+     * For measurement. A sweep runs one agent over many inputs under one
+     * principal, so agent-scoped memory written on row 1 is in context by row
+     * 20 — the rows stop being independent observations, the arm that ran
+     * first advantages or poisons the one after it, and a re-run gives
+     * different numbers. Turning it off costs a caveat (production has it on)
+     * and buys a comparison that means something.
+     */
+    memory?: boolean;
+    /**
+     * Per-turn model override.
+     *
+     * For measurement, and the cheapest ablation there is: same prompt, same
+     * tools, same inputs, one variable. It also unblocks a sweep when the
+     * agent's own provider is unavailable, without editing the agent.
+     */
+    model?: LanguageModel;
     /**
      * Per-turn request payload, passed to `context.build` and the agent
      * factory (see `HandleChatInput.turnContext`). Ephemeral — never persisted,
@@ -379,7 +405,12 @@ export interface Runtime<P> {
      * (a webhook with a user waiting) says so by passing `"chat"`.
      */
     trigger?: TurnTrigger;
-  }): Promise<{ threadId: string; answer: string }>;
+  }): Promise<{
+    threadId: string;
+    answer: string;
+    /** Why the turn failed, when it did — the model provider's refusal, a tool source that would not open. The answer is then usually empty. */
+    error?: string;
+  }>;
   /**
    * Summarize a conversation and append a compaction boundary, so later turns
    * send the model the summary instead of the turns it replaces. Stored history
@@ -1239,6 +1270,21 @@ function fireAndForget(fn: (() => void | Promise<void>) | undefined): void {
 /** Keys whose values are masked when a non-`Error` throw is serialized. */
 const SECRETISH_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential/i;
 
+/** The last `error` chunk's text in a UI message stream body (SSE `data:` lines), if any. */
+function lastStreamError(body: string): string | undefined {
+  let error: string | undefined;
+  for (const line of body.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
+    try {
+      const chunk = JSON.parse(line.slice(6)) as { type?: string; errorText?: string };
+      if (chunk.type === "error" && chunk.errorText) error = chunk.errorText;
+    } catch {
+      // "[DONE]" and other non-JSON lines
+    }
+  }
+  return error;
+}
+
 export function clientErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
   if (message) return message.length > 500 ? `${message.slice(0, 499)}…` : message;
@@ -1339,7 +1385,11 @@ export function createRuntime<P, RC = unknown>(
      * to return a "blocked" result — so a trial run has no real side effects.
      * Only meaningful with `autoApprove` (an autonomous run).
      */
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
+    /** Per-turn memory override; `false` disables recall and memory tools. */
+    memory?: boolean;
+    /** Per-turn model override — replaces the agent's own for this turn. */
+    model?: LanguageModel;
     /**
      * Per-turn prompt-caching override (defaults on when the runtime has a
      * `resolvePromptCaching` hook). `false` = set no caching options this turn
@@ -1369,7 +1419,16 @@ export function createRuntime<P, RC = unknown>(
     /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
     admitted?: Admitted;
   }): Promise<Response> {
-    const { resolvedChatId, principal, modelId, cfg, run, lease, runtimeCtx } = args;
+    const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
+    // A per-turn model override replaces the agent's own, and the telemetry id
+    // with it — a run row that says the agent's model while a different one
+    // answered makes every later comparison a lie.
+    const cfg = args.model ? { ...args.cfg, model: args.model } : args.cfg;
+    const modelId = args.model
+      ? typeof args.model === "string"
+        ? args.model
+        : ((args.model as { modelId?: string }).modelId ?? "unknown")
+      : args.modelId;
     // Mutable: the start moments below may inject, replace or rewrite history
     // before the model runs. From here on this is the turn's transcript.
     let uiMessages = args.uiMessages;
@@ -1572,7 +1631,8 @@ export function createRuntime<P, RC = unknown>(
     // append the provider's compiled-index block to the instructions. A
     // provider failure degrades to a turn without memory, never a dead turn.
     let instructions = cfg.instructions;
-    if (cfg.memory && config.memory) {
+    const memoryOn = args.memory ?? true;
+    if (memoryOn && cfg.memory && config.memory) {
       const memArgs = { principal, agent: run.agent, memory: cfg.memory };
       try {
         // Resolve both hooks BEFORE mutating the toolset, so a failure in
@@ -1685,6 +1745,9 @@ export function createRuntime<P, RC = unknown>(
             depth: depth + 1,
             autoApprove,
             blockGated,
+            // Memory off stays off down the tree: an eval turn's delegate must
+            // not recall earlier inputs or save new memory either.
+            ...(memoryOn ? {} : { memory: false }),
             onProgress,
             // Telemetry linkage: this turn is the parent; carry the root chat
             // down so the subagent's trace nests under this conversation.
@@ -1754,14 +1817,34 @@ export function createRuntime<P, RC = unknown>(
       // Test runs: stub the approval-gated (mutating) tools so a trial has no
       // real side effects. Gated set = connection defaults + the agent's policy.
       if (blockGated) {
+        /**
+         * Does this approval value actually gate the tool?
+         *
+         * NOT a truthiness check. The SDK spells a waiver as the STRING
+         * `"not-applicable"` — which is truthy — so `if (v)` treated every
+         * tool an agent had explicitly waived as gated and stubbed it. On an
+         * agent whose reads are waived to override a connection default, that
+         * is every read tool: the agent could not retrieve anything, and an
+         * eval run measured a model with no access to its own corpus.
+         *
+         * Gated: `true`, `"user-approval"`, an object (approval with a
+         * reason), a function. Waived: `false`, `undefined`,
+         * `"not-applicable"`.
+         */
+        const gatedBy = (v: unknown): boolean =>
+          v === true ||
+          v === "user-approval" ||
+          typeof v === "function" ||
+          (typeof v === "object" && v !== null);
+
         const gated = new Set<string>();
-        for (const [k, v] of Object.entries(harnessApproval)) if (v) gated.add(k);
+        for (const [k, v] of Object.entries(harnessApproval)) if (gatedBy(v)) gated.add(k);
         for (const o of opened) {
-          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (v) gated.add(k);
+          for (const [k, v] of Object.entries(o.toolApproval ?? {})) if (gatedBy(v)) gated.add(k);
         }
         if (cfg.toolApproval && typeof cfg.toolApproval !== "function") {
           for (const [k, v] of Object.entries(cfg.toolApproval as Record<string, unknown>)) {
-            if (v) gated.add(k);
+            if (gatedBy(v)) gated.add(k);
             else gated.delete(k);
           }
         } else if (typeof cfg.toolApproval === "function") {
@@ -1775,12 +1858,21 @@ export function createRuntime<P, RC = unknown>(
           if (t && typeof t.execute === "function") {
             tools[name] = {
               ...(t as object),
-              execute: async (input: unknown) => ({
-                __blocked: true,
-                tool: name,
-                input,
-                reason: "approval-gated tool blocked during test run (no real side effects)",
-              }),
+              execute: async (input: unknown) =>
+                blockGated === "simulate-success"
+                  ? {
+                      ok: true,
+                      __stubbed: true,
+                      tool: name,
+                      input,
+                    }
+                  : {
+                      __blocked: true,
+                      tool: name,
+                      input,
+                      reason:
+                        "approval-gated tool blocked during test run (no real side effects)",
+                    },
             };
           }
         }
@@ -1938,7 +2030,7 @@ export function createRuntime<P, RC = unknown>(
         : config.resolvePromptCaching
           ? config.resolvePromptCaching(modelId, {
               agent: run.agent,
-              memoryScoped: !!(cfg.memory && config.memory),
+              memoryScoped: !!(memoryOn && cfg.memory && config.memory),
               principal,
             })
           : // No hook → caching is ON by default for first-party Anthropic /
@@ -3446,11 +3538,14 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /** A fresh user message from plain text (for cron-fired turns). */
-  function userMessageOf(text: string): AppMessage {
+  function userMessageOf(text: string, files?: { url: string; mediaType: string; filename?: string }[]): AppMessage {
     return {
       id: generateMessageId(),
       role: "user",
-      parts: [{ type: "text", text }],
+      parts: [
+        ...(files ?? []).map((f) => ({ type: "file" as const, url: f.url, mediaType: f.mediaType, ...(f.filename ? { filename: f.filename } : {}) })),
+        { type: "text", text },
+      ],
       metadata: { visibility: "user", createdAt: Date.now() },
     } as AppMessage;
   }
@@ -3507,7 +3602,11 @@ export function createRuntime<P, RC = unknown>(
     message: AppMessage;
     chatId?: string;
     autoApprove: boolean;
-    blockGated?: boolean;
+    blockGated?: boolean | "simulate-success";
+    /** Per-turn memory override (see buildTurn) — `false` disables recall. */
+    memory?: boolean;
+    /** Per-turn model override (see buildTurn). */
+    model?: LanguageModel;
     /** Per-turn prompt-caching override (see buildTurn). */
     promptCaching?: boolean;
     /** Delegation depth of this turn (top-level = 0); guards `spawn_agent`. */
@@ -3525,7 +3624,7 @@ export function createRuntime<P, RC = unknown>(
     turnContext?: unknown;
     /** Progressive snapshots of the turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
-  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[] }> {
+  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
     // `||` (not `??`): an empty-string id must mint a fresh one, or the chat is
     // created with id "" and the UI can never open it.
     const chatId = o.chatId?.trim() || generateSubchatId();
@@ -3572,6 +3671,8 @@ export function createRuntime<P, RC = unknown>(
       admitted,
       autoApprove: o.autoApprove,
       blockGated: o.blockGated,
+      memory: o.memory,
+      model: o.model,
       promptCaching: o.promptCaching,
       depth: o.depth ?? 0,
       parentRunId: o.parentRunId,
@@ -3599,7 +3700,9 @@ export function createRuntime<P, RC = unknown>(
           }
         : undefined,
     });
-    await res.text();
+    // The turn's own failure travels as an `error` chunk — the stream, not a
+    // throw. Keep its text: without it a failed turn reads as a silent one.
+    const error = lastStreamError(await res.text());
 
     const after = await storage.loadMessages(o.principal, chatId);
     // The verdict is about THIS turn, so read the FINAL message only (the same
@@ -3616,6 +3719,7 @@ export function createRuntime<P, RC = unknown>(
       answer: pending.length > 0 ? "" : lastAssistantText(after),
       parked,
       ...(pending.length > 0 ? { pending } : {}),
+      ...(error ? { error } : {}),
     };
   }
 
@@ -3922,8 +4026,11 @@ export function createRuntime<P, RC = unknown>(
       principal,
       agent,
       prompt,
+      files,
       threadId,
       blockGated = true,
+      memory,
+      model,
       turnContext,
       promptCaching,
       // No client stream: assume unattended unless the host says otherwise, so
@@ -3933,17 +4040,19 @@ export function createRuntime<P, RC = unknown>(
       const r = await runToCompletion({
         principal,
         agent,
-        message: userMessageOf(prompt),
+        message: userMessageOf(prompt, files),
         chatId: threadId,
         depth: 1,
         // Autonomous: no human to authorize (blockGated stubs the gated tools).
         autoApprove: true,
         blockGated,
+        memory,
+        model,
         turnContext,
         promptCaching,
         trigger,
       });
-      return { threadId: r.chatId, answer: r.answer };
+      return { threadId: r.chatId, answer: r.answer, ...(r.error ? { error: r.error } : {}) };
     },
     compactChat,
     loadHistory,

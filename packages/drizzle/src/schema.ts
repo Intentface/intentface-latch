@@ -277,6 +277,36 @@ export const agentDrafts = sqliteTable(
 );
 
 /**
+ * Candidates: named, unpublished configurations of an agent — "haiku with
+ * shorter instructions", "new tools". Unlike a draft, a candidate belongs to
+ * the AGENT, not to one person: everyone who can edit the agent sees it, runs
+ * it (`name@c_<id>`) and can publish it. Closing one — discarded, or published
+ * as a version — keeps the row, so results filed under it keep their name
+ * and can still be answered again.
+ */
+export const agentCandidates = sqliteTable(
+  "latch_agent_candidates",
+  {
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    /** `c_…` — the ref suffix, stable across renames. */
+    id: text("id").notNull(),
+    /** What people call it; renamable. */
+    title: text("title").notNull(),
+    record: text("record", { mode: "json" }).notNull(),
+    /** The version it was started from — the same publish guard as a draft's. */
+    baseVersion: integer("base_version"),
+    author: text("author"),
+    /** Set when it was published: the version it became. */
+    publishedAs: integer("published_as"),
+    closedAt: integer("closed_at"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.owner, t.name, t.id] })],
+);
+
+/**
  * Memory-sweep state, per chat: which messages have been extracted into
  * episodic memory. Lease columns mirror `latch_schedules` (claim/complete,
  * fenced by lease owner). `next_eligible_at` ALWAYS advances on completion —

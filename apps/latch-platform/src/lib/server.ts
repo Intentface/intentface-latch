@@ -25,10 +25,9 @@ import { getPrincipal } from "./session";
 import type { Principal } from "./session";
 import { isOrgAdmin } from "./auth";
 import { getLatch, ownerTagOf } from "./latch";
-import { AgentRecordSchema, normalizeAgentRecord } from "@intentface/latch-agent-builder";
 import type { AgentRecord, AgentRecordInput } from "@intentface/latch-agent-builder";
 import type { AgentScope } from "./agent-store";
-import { normalizeAgentName, evalOwnerKeysOf, rubricsOf } from "./agent-store";
+import { agentOwnerKey, normalizeAgentName, evalOwnerKeysOf, rubricsOf } from "./agent-store";
 import type { AttachedEval } from "./agent-store";
 import { resolveRunners, type Runner } from "./observability/runners";
 import { validateRubrics } from "./observability/rubrics";
@@ -526,12 +525,12 @@ export const connectionToolsFn = createServerFn({ method: "GET" })
   });
 
 /**
- * Create or update a UI agent at its scope. The record schema owns the shape
- * and the host-independent invariants (memory connection wired, org-shared
- * memory needs an org agent, index schemas are outlines); what stays here is
- * platform policy — the reserved `memory-*` prefix and the org-tools rule.
+ * Create or update a UI agent at its scope, publishing it as the next
+ * version. The record schema owns the shape and the host-independent
+ * invariants; what stays in `publishRecord` is platform policy — the reserved
+ * `memory-*` prefix and the org-tools rule. Publishing a candidate closes it,
+ * saying which version it became.
  */
-/** What the editor sends when publishing: the record, plus publish metadata. */
 export interface SaveAgentInput {
   record: AgentRecordInput;
   /** Optional one-line note for the history row. */
@@ -544,174 +543,132 @@ export interface SaveAgentInput {
   baseVersion?: number;
   /** Publish anyway, after the user has seen what changed. */
   force?: boolean;
+  /** The candidate being published, if any. */
+  candidateId?: string;
 }
 
-/** Refused because someone else published while this editor was away. */
-export interface StalePublish {
-  ok: false;
-  stale: true;
-  /** What is live now. */
-  liveVersion: number;
-  /** What this editor's draft was based on. */
-  baseVersion: number;
-  author?: string;
-  at?: number;
-}
-
-/** A one-line cap on the history note, so a stray paste can't fill the column. */
-const MESSAGE_MAX = 500;
+export type { StalePublish } from "./candidates";
 
 export const saveAgentFn = createServerFn({ method: "POST" })
   .validator((data: SaveAgentInput) => data)
-  .handler(async ({ data: input }) => {
-    const data = input.record;
+  .handler(async ({ data }) => {
     const principal = await getPrincipal();
-    if (!principal) return { ok: false, error: "unauthorized" };
-    const parsed = AgentRecordSchema.safeParse(data);
-    if (!parsed.success) {
-      const first = parsed.error.issues[0];
-      return {
-        ok: false,
-        error: first ? `${first.path.join(".") || "agent"}: ${first.message}` : "invalid agent",
-      };
-    }
-    const rec = normalizeAgentRecord(parsed.data);
-    // `memory-*` is reserved for the platform's memory system agents —
-    // listAgentsFn hides the whole prefix, so a user agent named this way
-    // would save fine and then vanish from every picker.
-    if (rec.name.startsWith("memory-")) {
-      return { ok: false, error: `"${rec.name}" is reserved (memory-* are platform system agents).` };
-    }
-    const { agentStore, authoredTools, models } = await getLatch();
-    // The record schema keeps a rubric's `trigger` opaque; if the caller
-    // supplies rubrics, run the platform's real validation (trigger AST, judge
-    // model in the catalog) — the same gate attach_evals and the drawer use.
-    if (rec.attachedEvals) {
-      const valid = validateRubrics(rubricsOf(rec), (id) => models.some((m) => m.id === id));
-      if (!valid.ok) return { ok: false, error: valid.error };
-      rec.attachedEvals = valid.rubrics;
-    }
-    // An org agent can only attach ORG-scoped tools — a personal tool wouldn't
-    // resolve for other members. Validate before persisting.
-    const attached = rec.exec?.authoredTools ?? [];
-    if (rec.scope === "org" && attached.length) {
-      const orgTools = new Set(
-        (await authoredTools.listFor(principal)).filter((t) => t.scope === "org").map((t) => t.name),
-      );
-      const personal = attached.filter((n) => !orgTools.has(n));
-      if (personal.length) {
-        return {
-          ok: false,
-          error: `Org agents can only use org-scoped tools. Make these org-scoped first: ${personal.join(", ")}.`,
-        };
-      }
-    }
-    // The editor doesn't manage attached evals — carry them over so a save
-    // never silently wipes the agent's online-eval rubrics. Pinned to the
-    // record's scope: a same-named agent in the other scope must not donate.
-    const existing = await agentStore.getRecord(principal, `${rec.scope}:${rec.name}`);
-
-    // Someone else published while this editor was away? Publishing blind would
-    // silently revert them. Refuse once, with enough detail for the UI to show
-    // what changed, and let the user decide.
-    if (existing && input.baseVersion != null && !input.force) {
-      const live = (await agentStore.listVersions(principal, rec.name, rec.scope)).find(
-        (v) => v.published,
-      );
-      if (live && live.version !== input.baseVersion) {
-        return {
-          ok: false,
-          stale: true,
-          liveVersion: live.version,
-          baseVersion: input.baseVersion,
-          author: live.author,
-          at: live.createdAt,
-        } satisfies StalePublish;
-      }
-    }
-
-    await agentStore.upsert(
-      principal,
-      { ...rec, attachedEvals: rec.attachedEvals ?? existing?.attachedEvals },
-      {
-        source: "editor",
-        author: principal.userId,
-        message: input.message?.slice(0, MESSAGE_MAX),
-      },
-    );
-    // Published — the working copy has served its purpose.
-    await agentStore.discardDraft(principal, rec.name, rec.scope);
-    return { ok: true };
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { publishRecord } = await import("./candidates");
+    return publishRecord(principal, data);
   });
 
+/** What the editor shows about one candidate. Its record is loaded separately. */
+export type CandidateSummary = {
+  id: string;
+  title: string;
+  baseVersion: number | null;
+  mine: boolean;
+  updatedAt: number;
+};
+
 /**
- * The caller's unpublished working copy, plus what it needs to be shown safely:
- * which version is live, and whether a colleague is mid-edit on the same agent.
+ * The agent's open candidates and its live version — the editor's switcher.
+ * A per-person draft from before candidates becomes one here.
  */
-export const getAgentDraftFn = createServerFn({ method: "POST" })
+export const listCandidatesFn = createServerFn({ method: "POST" })
   .validator((data: { name: string; scope: AgentScope }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return null;
     const { agentStore } = await getLatch();
+    const { adoptLegacyDraft, liveVersionOf } = await import("./candidates");
     const name = normalizeAgentName(data.name);
-    const [draft, versions, drafts] = await Promise.all([
-      agentStore.getDraft(principal, name, data.scope),
-      agentStore.listVersions(principal, name, data.scope),
-      agentStore.listDrafts(principal),
-    ]);
-    const live = versions.find((v) => v.published);
-    // Attached evals are stripped on the way out for the same reason
-    // `listAgentRecordsFn` strips them: the editor doesn't manage them, and
-    // their host-defined `trigger` is opaque to the wire type.
-    const draftRecord = draft ? { ...draft.record, attachedEvals: undefined } : null;
+    await adoptLegacyDraft(principal, name, data.scope);
+    const me = agentOwnerKey(principal, "user");
+    const candidates = await agentStore.listCandidates(principal, name, data.scope);
     return {
-      draft: draftRecord ? { record: draftRecord, baseVersion: draft!.baseVersion } : null,
-      liveVersion: live?.version ?? null,
-      // Colleagues mid-edit on this same agent. Existence only — their
-      // in-progress text is not this caller's to read.
-      othersEditing: drafts.filter(
-        (d) => d.name === name && d.scope === data.scope && !d.mine,
-      ).length,
+      liveVersion: await liveVersionOf(principal, name, data.scope),
+      candidates: candidates.map(
+        (c): CandidateSummary => ({ id: c.id, title: c.title, baseVersion: c.baseVersion ?? null, mine: c.author === me, updatedAt: c.updatedAt }),
+      ),
     };
   });
 
-/** Autosave. Never touches the live record. */
-export const saveAgentDraftFn = createServerFn({ method: "POST" })
-  .validator((data: { record: AgentRecordInput; baseVersion?: number }) => data)
+/** One candidate's record, to edit. Closed ones are not editable, so not returned. */
+export const getCandidateFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: AgentScope; id: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return null;
+    const { agentStore } = await getLatch();
+    const c = await agentStore.getCandidate(principal, normalizeAgentName(data.name), data.scope, data.id);
+    if (!c || c.closedAt) return null;
+    // Attached evals are stripped like listAgentRecordsFn's: the editor
+    // doesn't manage them, and their `trigger` is opaque to the wire type.
+    const { attachedEvals: _evals, ...record } = c.record;
+    return { id: c.id, title: c.title, baseVersion: c.baseVersion ?? null, record };
+  });
+
+/**
+ * Create (no `id`) or autosave a candidate. Never touches the live record.
+ * A draft is work in progress, so it is not held to the full record schema —
+ * half-written is the normal state; publishing validates properly.
+ */
+export const saveCandidateFn = createServerFn({ method: "POST" })
+  .validator((data: { record: AgentRecordInput; id?: string; title?: string; baseVersion?: number }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const, error: "unauthorized" };
-    // A draft is work in progress, so it is NOT held to the full record schema —
-    // half-written is the normal state. Only the identity it is filed under has
-    // to be sound, and publishing validates properly.
     const rec = data.record as AgentRecord;
     const name = normalizeAgentName(rec?.name ?? "");
-    if (!name || (rec.scope !== "org" && rec.scope !== "user")) {
-      return { ok: false as const, error: "invalid draft" };
-    }
+    if (!name || (rec.scope !== "org" && rec.scope !== "user")) return { ok: false as const, error: "invalid candidate" };
     const { agentStore } = await getLatch();
-    await agentStore.saveDraft(principal, name, rec.scope, rec, data.baseVersion);
-    return { ok: true as const };
+    const { uniqueTitle } = await import("./candidates");
+    const open = await agentStore.listCandidates(principal, name, rec.scope);
+    const old = data.id ? open.find((c) => c.id === data.id) : undefined;
+    if (data.id && !old) return { ok: false as const, error: "This candidate was published or discarded." };
+    const title = uniqueTitle(data.title ?? old?.title ?? "Draft", open, data.id);
+    // Carry attached evals over: the editor never sees them.
+    const live = await agentStore.getRecord(principal, `${rec.scope}:${name}`);
+    const c = await agentStore.saveCandidate(principal, name, rec.scope, {
+      ...(data.id ? { id: data.id } : {}),
+      title,
+      record: { ...rec, attachedEvals: live?.attachedEvals },
+      ...(data.baseVersion != null ? { baseVersion: data.baseVersion } : {}),
+    });
+    return { ok: true as const, id: c.id, title: c.title };
   });
 
-/** Throw the working copy away and fall back to what is published. */
-export const discardAgentDraftFn = createServerFn({ method: "POST" })
-  .validator((data: { name: string; scope: AgentScope }) => data)
+/** Rename a candidate. Its Evals columns follow: they are filed under its id. */
+export const renameCandidateFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: AgentScope; id: string; title: string }) => data)
+  .handler(async ({ data }) => {
+    const principal = await getPrincipal();
+    if (!principal) return { ok: false as const, error: "unauthorized" };
+    const { renameCandidate } = await import("./candidates");
+    return renameCandidate(principal, normalizeAgentName(data.name), data.scope, data.id, data.title);
+  });
+
+/** Discard a candidate. It is kept closed, so results filed under it keep their name. */
+export const closeCandidateFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; scope: AgentScope; id: string }) => data)
   .handler(async ({ data }) => {
     const principal = await getPrincipal();
     if (!principal) return { ok: false as const };
     const { agentStore } = await getLatch();
-    await agentStore.discardDraft(principal, normalizeAgentName(data.name), data.scope);
+    await agentStore.closeCandidate(principal, normalizeAgentName(data.name), data.scope, data.id);
     return { ok: true as const };
   });
 
-/** Agents the caller has an unpublished draft on — the list page's badge. */
-export const listAgentDraftsFn = createServerFn({ method: "GET" }).handler(async () => {
+/** How many open candidates each agent has — the list page's badge. */
+export const listCandidateCountsFn = createServerFn({ method: "GET" }).handler(async () => {
   const principal = await getPrincipal();
   if (!principal) return [];
   const { agentStore } = await getLatch();
-  return (await agentStore.listDrafts(principal)).filter((d) => d.mine);
+  const { adoptLegacyDraft } = await import("./candidates");
+  const out: { name: string; scope: AgentScope; count: number }[] = [];
+  for (const r of await agentStore.listRecords(principal)) {
+    await adoptLegacyDraft(principal, r.name, r.scope);
+    const count = (await agentStore.listCandidates(principal, r.name, r.scope)).length;
+    if (count) out.push({ name: r.name, scope: r.scope, count });
+  }
+  return out;
 });
 
 /** Publish history for one agent, newest first. */
