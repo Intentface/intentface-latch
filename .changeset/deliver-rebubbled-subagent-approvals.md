@@ -1,5 +1,5 @@
 ---
-"@intentface/latch-core": minor
+"@intentface/latch-core": patch
 ---
 
 Deciding a bubbled subagent approval now streams what the resume does, and a delegation paused on an approval ends the parent's turn.
