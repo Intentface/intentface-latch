@@ -188,6 +188,22 @@ describe("deciding a bubbled subagent approval", () => {
     expect(progress[0]!.data).toMatchObject({ toolCallId: "tc1", agent: "writer", threadId: "sub_1" });
   });
 
+  it("ignores the same decision once the subagent approval is resolved", async () => {
+    const mem = memoryStorage();
+    const lead = says("all done.");
+    const writer = says("written.");
+    const rt = runtime(mem, { lead, writer });
+    await pausedDelegation(mem);
+    await chunks(await approve(rt));
+    const calls = lead.doStreamCalls.length + writer.doStreamCalls.length;
+    const before = JSON.stringify(mem.messages.get("c_parent"));
+    // A double click on the bubbled card: the subagent already resumed.
+    const res = await approve(rt);
+    expect(await res.text()).toBe("");
+    expect(lead.doStreamCalls.length + writer.doStreamCalls.length).toBe(calls);
+    expect(JSON.stringify(mem.messages.get("c_parent"))).toBe(before);
+  });
+
   it("streams the folded spawn_agent result, then the parent's continuation", async () => {
     const mem = memoryStorage();
     const rt = runtime(mem, { lead: says("all done."), writer: says("written.") });

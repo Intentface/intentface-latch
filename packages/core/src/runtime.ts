@@ -962,6 +962,21 @@ function approvalIsLast(messages: AppMessage[], approvalId: string): boolean {
   );
 }
 
+/**
+ * Whether an approval still awaits the agent: a gated call waiting for a
+ * decision or decided but not yet run (no outcome recorded), or a bubbled
+ * subagent approval not yet `resolved`.
+ */
+function approvalIsOpen(messages: AppMessage[], approvalId: string): boolean {
+  for (const m of messages) {
+    for (const p of (m.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
+      if (p.approval?.id === approvalId) return p.state === "approval-requested" || p.state === "approval-responded";
+      if (p.type === "data-subagent-approval" && p.data?.approvalId === approvalId) return !p.data.resolved;
+    }
+  }
+  return false;
+}
+
 function applyDecisions(
   messages: AppMessage[],
   decisions: ApprovalDecision[],
@@ -3281,7 +3296,17 @@ export function createRuntime<P, RC = unknown>(
     // next message declined it. Continuing anyway would run the agent again
     // and append an answer nobody asked for. A real retry (a crash or a busy
     // chat after the decision was saved) still finds its approval last.
-    const live = decisions.filter((d) => approvalIsLast(messages, d.approvalId));
+    //
+    // And only for a call the agent hasn't acted on yet — the same rule the AI
+    // SDK's own chat client applies before it sends a decision: still waiting
+    // (`approval-requested`), or decided but never continued, after a crash or
+    // a busy chat (`approval-responded`). Once a call has an outcome
+    // (`output-available` / `output-denied` / …), or a bubbled subagent
+    // approval is `resolved`, the decision was already acted on: a double
+    // click, Slack re-sending a button press, a second tab. Continuing would
+    // answer the same thing again. (A call auto-declined because the user
+    // moved on stays `approval-responded`; the last-message rule retires it.)
+    const live = decisions.filter((d) => approvalIsLast(messages, d.approvalId) && approvalIsOpen(messages, d.approvalId));
     if (live.length === 0) return new Response(null, { status: 200 });
     decisions = live;
     const changed = applyDecisions(messages, decisions);
