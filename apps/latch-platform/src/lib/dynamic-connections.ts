@@ -149,11 +149,22 @@ export function createDynamicConnections(opts: {
   // Same shared fetch goes to both the OAuth flow and the host (on-401 re-auth).
   const discoveryFetch = createOAuthDiscoveryFetch({ forceScheme: "https" });
 
-  // Development only: let user-added MCP connections reach a private or
-  // loopback address — a local MCP server on localhost. Never in production,
-  // whatever the env says: a user-added connection reaching internal
-  // addresses is exactly what the host's private-address check prevents.
-  const allowPrivateHost = process.env.LATCH_ALLOW_PRIVATE_HOSTS === "1" && process.env.NODE_ENV !== "production";
+  // Development only: let user-added MCP connections reach a server on THIS
+  // machine — a local MCP server on localhost. Loopback only: the rest of the
+  // private ranges (cloud metadata at 169.254.169.254, internal services) stay
+  // blocked even with the flag on, so a shared dev or staging deployment that
+  // sets it can't be pointed at its own network. Never in production.
+  const localhostAllowed =
+    process.env.LATCH_ALLOW_LOCALHOST_MCP === "1" && process.env.NODE_ENV !== "production";
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  const allowPrivateHostFor = (url: string) => {
+    if (!localhostAllowed) return false;
+    try {
+      return LOOPBACK.has(new URL(url).hostname.toLowerCase());
+    } catch {
+      return false;
+    }
+  };
 
   // Cache the OpenAPI registry per (name+spec+baseUrl) so the spec is fetched
   // and dereferenced once, not every turn.
@@ -350,7 +361,7 @@ export function createDynamicConnections(opts: {
         return createMcpHost<Principal>({
           allowedHosts: [hostOf(url)],
           onConnectionError,
-          connections: [{ name: conn.name, url, auth, allowPrivateHost }],
+          connections: [{ name: conn.name, url, auth, allowPrivateHost: allowPrivateHostFor(url) }],
         }).open(principal);
       },
     };
@@ -372,7 +383,7 @@ export function createDynamicConnections(opts: {
           allowedHosts: [hostOf(url)],
           onConnectionError,
           connections: [
-            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch, allowPrivateHost },
+            { name: conn.name, url, authProvider: o.provider(principal), fetch: discoveryFetch, allowPrivateHost: allowPrivateHostFor(url) },
           ],
         }).open(principal);
       },
