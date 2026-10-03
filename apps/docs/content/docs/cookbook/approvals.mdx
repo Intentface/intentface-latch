@@ -110,6 +110,8 @@ const continuation = await runtime.applyApproval({
 - **Two gated calls in one step** — the first decision returns an empty `200`; the other card stays live for its own decision.
 - **Who may click** — in a shared Slack thread only the person whose turn raised the gate, because the tool runs with their credentials; buttons are signed and bound to that actor.
 - **A gate three subagents deep** — bubbles up to the human at the top as a part on the parent's message, and the decision routes back down.
+- **The subagent stops at a second gate after you approve the first** — the decision's response streams the new card into the same message, alongside the subagent's progress while it resumes.
+- **The parent tries to delegate again while it waits** — its turn stops at the paused delegation, so one decision means one card.
 - **Nobody is there** — a scheduled run reaching a gate parks: `status: "awaiting_input"`, `trigger: "schedule"`. `runAgent` defaults to `blockGated: true`, stubbing gated tools so an unattended test has no side effects.
 - **Which tools need a gate** — MCP tools marked destructive or non-read-only arrive gated from their own annotations.
 - **OAuth connects** — a `connect_<name>` call is an approval whose resolution is a redirect, with the principal pinned when the flow starts.

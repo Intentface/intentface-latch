@@ -161,7 +161,9 @@ If other client tool calls in the same step still need results, this returns an 
 
 ### Through subagents
 
-A gated tool *inside* a subagent suspends the parent turn and surfaces to the same human — it does not auto-approve out of sight.
+A gated tool *inside* a subagent suspends the parent turn and surfaces to the same human — it does not auto-approve out of sight. It arrives as a `data-subagent-approval` part on the parent's message, the parent's tool loop stops there as it would at a gate of its own, and the decision goes through the same `applyApproval`.
+
+That decision resumes the subagent first, and its response streams what the resume does, continuing the paused message: the delegation's live progress (the `data-subagent-progress` part `spawn_agent` already streamed, updated in place), then either a **fresh `data-subagent-approval`** when the subagent stops at another gate, or the delegation's result followed by the parent's continuation. Render the response like any turn's stream and a second gate shows up as a second card, with no reload. A failure during the resume arrives as an `error` chunk in that stream.
 
 `runAgent` runs a turn with no client consuming the stream, so there is no one to ask. It defaults to **`blockGated: true`**: approval-gated tools are stubbed rather than executed, and the agent is told they were unavailable. That's the safe default — an unattended turn can't quietly perform the very actions you gated.
 
