@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-server",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "The mountable Latch HTTP surface — one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath.",
   "keywords": [
     "ai",

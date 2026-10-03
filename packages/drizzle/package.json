@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-drizzle",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Latch StorageAdapter on Drizzle (SQLite/libsql first, Postgres next).",
   "keywords": [
     "ai",
