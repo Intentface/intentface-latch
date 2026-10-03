@@ -10,10 +10,10 @@ import { memoryStorage } from "./__tests__/memory-storage.js";
 
 /**
  * A decision only applies to the message a turn is paused on — the chat's
- * last. One for an approval further back (an old tab, an old Slack card, a
- * late retry after the user moved on) is a no-op: that approval was already
- * settled when the next message declined it, and continuing would run the
- * agent again and append an answer nobody asked for.
+ * last — and only to a call the agent hasn't acted on yet. Anything else (an
+ * old tab, an old Slack card, a double click, a re-sent button press) is a
+ * no-op: continuing would run the agent again and append an answer nobody
+ * asked for. A decision saved but never continued (a crash) still continues.
  */
 
 type P = { orgId: string };
@@ -82,6 +82,31 @@ describe("applyApproval and stale approvals", () => {
     await (await rt.handleChat({ agent: "a", chatId: "c", principal, message: user("send it") })).text();
     await (await rt.applyApproval({ chatId: "c", principal, decisions: [{ approvalId: approvalId(), approved: true }] })).text();
     expect(sent).toEqual(["x"]);
+  });
+
+  it("ignores the same decision once the agent acted on it — approve twice, decline twice, or flip it", async () => {
+    for (const [first, second] of [[true, true], [false, false], [false, true]] as const) {
+      const { mem, rt, model, sent, approvalId } = setup();
+      await (await rt.handleChat({ agent: "a", chatId: "c", principal, message: user("send it") })).text();
+      const id = approvalId();
+      await (await rt.applyApproval({ chatId: "c", principal, decisions: [{ approvalId: id, approved: first }] })).text();
+      const calls = model.doStreamCalls.length;
+      const before = JSON.stringify(mem.messages.get("c"));
+      // A double click, Slack re-sending the button press, a second tab.
+      const res = await rt.applyApproval({ chatId: "c", principal, decisions: [{ approvalId: id, approved: second }] });
+      expect(await res.text()).toBe("");
+      expect(model.doStreamCalls).toHaveLength(calls);
+      expect(JSON.stringify(mem.messages.get("c"))).toBe(before);
+      expect(sent).toEqual(first ? ["x"] : []);
+    }
+  });
+
+  it("ignores a decision for an approval that doesn't exist", async () => {
+    const { rt, model } = setup();
+    await (await rt.handleChat({ agent: "a", chatId: "c", principal, message: user("send it") })).text();
+    const calls = model.doStreamCalls.length;
+    expect(await (await rt.applyApproval({ chatId: "c", principal, decisions: [{ approvalId: "nope", approved: true }] })).text()).toBe("");
+    expect(model.doStreamCalls).toHaveLength(calls);
   });
 
   it("still continues a retry of a decision that was saved but never acted on", async () => {
