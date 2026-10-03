@@ -332,6 +332,25 @@ describe("runAgent says why a turn failed", () => {
     expect(run.error).toContain("mcp server down");
   });
 
+  it("says so when the failed run couldn't be settled either", async () => {
+    const mem = memoryStorage();
+    const storage = { ...mem.storage, updateRun: async () => { throw new Error("db down"); } };
+    const rt = createRuntime<P>({
+      storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        writer: defineAgent({
+          model: model("written."),
+          instructions: "write",
+          toolSources: [{ open: async () => { throw new Error("mcp server down"); } }],
+        }),
+      },
+    });
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "go" });
+    expect(res.error).toContain("mcp server down");
+    expect(res.error).toContain("could not be marked failed: db down");
+  });
+
   it("a failure with no error chunk in the stream is read off the run", async () => {
     const mem = memoryStorage();
     const rt = createRuntime<P>({

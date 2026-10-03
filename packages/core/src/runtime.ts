@@ -3211,10 +3211,29 @@ export function createRuntime<P, RC = unknown>(
     // A recovered subagent run must resolve exactly as its spawner shaped it —
     // crash recovery and `sweep` both land here.
     const chat = await storage.getChat(principal, run.chatId);
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal, undefined, undefined, {
+    // And on the agent VERSION it started on (`RunRecord.agentVersion`): a
+    // publish between the crash and the recovery must not change what finishes
+    // the turn — a new model, new instructions. Pinned as `name@7`, the same
+    // read-only pin a measured version uses. Code-declared agents have no
+    // stored version, and an agent already pinned (`name@7`, `name@c_…`) keeps
+    // the pin it ran under.
+    const pinnedAgent =
+      run.agentVersion != null && !config.agents[run.agent] && !run.agent.includes("@")
+        ? `${run.agent}@${run.agentVersion}`
+        : run.agent;
+    const resolveCtx = {
       parentAgent: chat?.parentAgent,
       ...(settings.autoApprove !== undefined ? { autoApprove: settings.autoApprove } : {}),
-    });
+    };
+    // A store that records versions but can't resolve a pin falls back to the
+    // agent as it is now — what recovery always did — rather than failing it.
+    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(pinnedAgent, principal, undefined, undefined, resolveCtx).catch(
+      (e: unknown) => {
+        if (pinnedAgent === run.agent) throw e;
+        console.warn(`[resume] run ${run.id}: ${pinnedAgent} did not resolve; resuming on ${run.agent} as it is now`);
+        return resolveAgentConfig(run.agent, principal, undefined, undefined, resolveCtx);
+      },
+    );
 
     // A resume was admitted when the turn first ran — never refuse it (the
     // half-done work would strand), but its tokens still settle against the
@@ -3953,11 +3972,20 @@ export function createRuntime<P, RC = unknown>(
       // say why the way a failed turn does: as `error`, not a throw. Admission
       // refusals never get here — they throw before any run exists.
       const error = clientErrorMessage(e);
-      await storage
+      // If settling fails too, say so: the run then stays active (holding the
+      // chat until its lease lapses), and a caller told only the setup error
+      // would retry into a busy chat without knowing why.
+      const unsettled = await storage
         .updateRun(run.id, { status: "errored", error, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null }, lease)
-        .catch(() => {});
+        .then(() => undefined, (settleError: unknown) => clientErrorMessage(settleError));
       await releaseReservation(admitted);
-      return { chatId, answer: "", parked: false, error };
+      if (unsettled) console.error(`[runAgent] run ${run.id} failed during setup and could not be settled: ${unsettled}`);
+      return {
+        chatId,
+        answer: "",
+        parked: false,
+        error: unsettled ? `${error} (and the run could not be marked failed: ${unsettled})` : error,
+      };
     }
     // The turn's own failure travels as an `error` chunk — the stream, not a
     // throw. Keep its text: without it a failed turn reads as a silent one.

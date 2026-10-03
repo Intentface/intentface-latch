@@ -334,8 +334,10 @@ function runtimeOver(
   model: ReturnType<typeof workingModel>,
   opts: {
     siblings?: RunRecord[];
-    /** Make "assistant" a dynamic agent spawned by this parent, recording each resolve's context. */
-    spawnedBy?: { parent: string; seen: unknown[] };
+    /** Make "assistant" a dynamic agent spawned by this parent, recording each resolve's context (and name). */
+    spawnedBy?: { parent: string; seen: unknown[]; names?: string[] };
+    /** The stored agent version the crashed run started on. */
+    agentVersion?: number;
     /** How the crashed turn was asked to run (RunRecord.settings). */
     settings?: RunSettings;
     /** Give "assistant" a gated `send` tool; each real execution is recorded. */
@@ -344,7 +346,11 @@ function runtimeOver(
 ) {
   const patches: Array<Record<string, unknown>> = [];
   const appended: AppMessage[][] = [];
-  let row: RunRecord = { ...RUN, ...(opts.settings ? { settings: opts.settings } : {}) };
+  let row: RunRecord = {
+    ...RUN,
+    ...(opts.settings ? { settings: opts.settings } : {}),
+    ...(opts.agentVersion != null ? { agentVersion: opts.agentVersion } : {}),
+  };
   const { storage, calls } = stubStorage({
     // Recovery reads the chat for its parentAgent (DynamicAgentResolveContext).
     getChat: async () =>
@@ -397,7 +403,9 @@ function runtimeOver(
       ? {
           dynamicAgents: {
             list: () => [{ name: "assistant" }],
-            resolve: (_name: string, _p: P, ctx?: unknown) => (opts.spawnedBy!.seen.push(ctx), { model, instructions: "be brief" }),
+            resolve: (name: string, _p: P, ctx?: unknown) => (
+              opts.spawnedBy!.seen.push(ctx), opts.spawnedBy!.names?.push(name), { model, instructions: "be brief" }
+            ),
           },
         }
       : {}),
@@ -479,6 +487,20 @@ describe("resumeRun", () => {
     // …and not run for real: a stubbed test run stays stubbed.
     expect(executed).toEqual([]);
     expect(send.some((p) => p.state === "output-available")).toBe(true);
+  });
+
+  it("resumes on the agent version the run started on, not whatever was published since", async () => {
+    const names: string[] = [];
+    const history = [
+      USER,
+      msg("assistant", [
+        { type: "step-start" },
+        { type: "tool-web_fetch", toolCallId: "c1", state: "output-available", input: { url: "u" }, output: { text: "…" } },
+      ]),
+    ];
+    const { runtime } = runtimeOver(history, workingModel(), { spawnedBy: { parent: "lead", seen: [], names }, agentVersion: 4 });
+    expect((await runtime.resume("run_1"))?.status).toBe("completed");
+    expect(names.at(-1)).toBe("assistant@4");
   });
 
   it("refuses to resume a run that started on a per-turn model override", async () => {
