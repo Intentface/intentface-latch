@@ -351,6 +351,24 @@ describe("runAgent says why a turn failed", () => {
     expect(res.error).toContain("could not be marked failed: db down");
   });
 
+  it("says so when the lease guard refuses the settlement", async () => {
+    const mem = memoryStorage();
+    const storage = { ...mem.storage, updateRun: async () => false };
+    const rt = createRuntime<P>({
+      storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        writer: defineAgent({
+          model: model("written."),
+          instructions: "write",
+          toolSources: [{ open: async () => { throw new Error("mcp server down"); } }],
+        }),
+      },
+    });
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "go" });
+    expect(res.error).toContain("could not be marked failed: its lease is held elsewhere");
+  });
+
   it("a failure with no error chunk in the stream is read off the run", async () => {
     const mem = memoryStorage();
     const rt = createRuntime<P>({

@@ -3977,7 +3977,11 @@ export function createRuntime<P, RC = unknown>(
       // would retry into a busy chat without knowing why.
       const unsettled = await storage
         .updateRun(run.id, { status: "errored", error, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null }, lease)
-        .then(() => undefined, (settleError: unknown) => clientErrorMessage(settleError));
+        .then(
+          // `false`: the lease guard refused the write — another worker holds the run now.
+          (applied) => (applied === false ? "its lease is held elsewhere" : undefined),
+          (settleError: unknown) => clientErrorMessage(settleError),
+        );
       await releaseReservation(admitted);
       if (unsettled) console.error(`[runAgent] run ${run.id} failed during setup and could not be settled: ${unsettled}`);
       return {
