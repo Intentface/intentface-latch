@@ -950,6 +950,18 @@ function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
  * Record decisions onto matching `approval-requested` parts (→ `approval-responded`).
  * Mutates in place and returns the messages that changed (to re-persist).
  */
+/**
+ * Whether an approval belongs to the chat's LAST message — the only one a turn
+ * can be paused on. Matches a gated tool part's `approval.id` or a bubbled
+ * subagent approval's `data.approvalId`.
+ */
+function approvalIsLast(messages: AppMessage[], approvalId: string): boolean {
+  const last = messages.at(-1);
+  return ((last?.parts ?? []) as (ApprovalPart & SubApprovalPart)[]).some(
+    (p) => p.approval?.id === approvalId || (p.type === "data-subagent-approval" && p.data?.approvalId === approvalId),
+  );
+}
+
 function applyDecisions(
   messages: AppMessage[],
   decisions: ApprovalDecision[],
@@ -3263,6 +3275,15 @@ export function createRuntime<P, RC = unknown>(
     // Merge the decisions onto the persisted assistant message, then re-persist
     // only what changed. The agent continues from this updated history.
     const messages = await storage.loadMessages(principal, chatId);
+    // A decision only means something for the message the turn paused on —
+    // the LAST one. An approval from further back (an old tab, an old Slack
+    // card, a late retry after the user moved on) was already settled: the
+    // next message declined it. Continuing anyway would run the agent again
+    // and append an answer nobody asked for. A real retry (a crash or a busy
+    // chat after the decision was saved) still finds its approval last.
+    const live = decisions.filter((d) => approvalIsLast(messages, d.approvalId));
+    if (live.length === 0) return new Response(null, { status: 200 });
+    decisions = live;
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
 
