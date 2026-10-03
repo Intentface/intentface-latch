@@ -78,6 +78,8 @@ export function withStructuredContentFallback(
 /** MCP tool annotations (sensitivity hints) the server may advertise. */
 export interface McpToolInfo {
   name: string;
+  /** The server's tool description (what the model reads). */
+  description?: string;
   annotations?: {
     readOnlyHint?: boolean;
     destructiveHint?: boolean;
@@ -346,6 +348,12 @@ export interface OpenMcp {
    * Merged into the agent's `toolApproval` by the runtime.
    */
   toolApproval: Record<string, McpToolApprovalValue>;
+  /**
+   * What each opened tool IS, keyed by the same namespaced name as `tools`:
+   * the server-local name, description and annotations. For settings surfaces
+   * that list a connection's tools (the `tools` values are opaque SDK objects).
+   */
+  toolInfos: Record<string, McpToolInfo>;
   /** Close every underlying client. Call when the turn finishes. */
   close(): Promise<void>;
 }
@@ -403,6 +411,7 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
       const ownedFetches: GuardedFetch[] = [];
       const tools: Record<string, unknown> = {};
       const toolApproval: Record<string, McpToolApprovalValue> = {};
+      const toolInfos: Record<string, McpToolInfo> = {};
       const closeAll = () =>
         Promise.all([
           ...clients.map((c) => c.close().catch(() => {})),
@@ -476,11 +485,16 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
           // toolsFromDefinitions(listTools()), so this builds identical tools.
           const defs = await client.listTools();
           const serverTools = client.toolsFromDefinitions(defs);
-          const annotations = new Map<string, McpToolInfo["annotations"]>(
-            (defs.tools ?? []).map((t) => [t.name, t.annotations]),
+          const defByName = new Map(
+            (defs.tools ?? []).map((t) => [t.name, t] as const),
           );
           for (const [name, tool] of Object.entries(serverTools)) {
-            const info: McpToolInfo = { name, annotations: annotations.get(name) };
+            const def = defByName.get(name);
+            const info: McpToolInfo = {
+              name,
+              description: def?.description,
+              annotations: def?.annotations,
+            };
             // A hidden tool is dropped entirely (no tool, no approval entry) —
             // the primitive for a hard block, which approval can't express.
             if (conn.visible && !conn.visible(info)) continue;
@@ -493,6 +507,7 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
               ...sdkTool,
               toModelOutput: withStructuredContentFallback(sdkTool.toModelOutput),
             };
+            toolInfos[key] = info;
             const approvalValue = mcpApprovalValue(conn.approval, info);
             if (approvalValue !== undefined) toolApproval[key] = approvalValue;
           }
@@ -501,7 +516,7 @@ export function createMcpHost<P>(config: McpHostConfig<P>): McpHost<P> {
         }
       }
 
-      return { tools, toolApproval, close: closeAll };
+      return { tools, toolApproval, toolInfos, close: closeAll };
     },
   };
 }

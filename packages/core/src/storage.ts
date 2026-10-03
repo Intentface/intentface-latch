@@ -80,6 +80,15 @@ export interface ChatRecord {
    */
   kind?: string;
   /**
+   * For a runtime-created sub-thread: the agent that spawned it (the parent's
+   * registry name at `spawn_agent` time). Persisted so every later resolve of
+   * this chat — approval resume, crash recovery, continuation — can hand the
+   * same `parentAgent` to `DynamicAgentStore.resolve`, letting a host shape a
+   * subagent per parent (e.g. which of a connector's tools this parent may
+   * use). Absent on top-level chats.
+   */
+  parentAgent?: string;
+  /**
    * Status of the chat's most recent run, derived at READ time by `listChats`
    * (never stored — the message log stays the source of truth). Lets a list UI
    * flag chats parked on a human (`awaiting_input` = an approval or question is
@@ -247,6 +256,8 @@ export interface StorageAdapter<P> {
       title?: string;
       /** Chat kind (see `ChatRecord.kind`). Defaults to `'user'`. */
       kind?: string;
+      /** Spawning agent of a sub-thread (see `ChatRecord.parentAgent`). */
+      parentAgent?: string;
     },
   ): Promise<ChatRecord>;
   /** Scoped: returns null if the chat isn't the caller's. */

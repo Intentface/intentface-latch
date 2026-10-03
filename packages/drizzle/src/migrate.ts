@@ -4,7 +4,7 @@ import type { Client } from "@libsql/client";
 const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_chats (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL,
-     title TEXT, kind TEXT NOT NULL DEFAULT 'user',
+     title TEXT, kind TEXT NOT NULL DEFAULT 'user', parent_agent TEXT,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   // NOTE: composite PK — message ids are only unique within a chat, and the
@@ -146,6 +146,7 @@ const ALTERS = [
   `ALTER TABLE latch_usage ADD COLUMN cache_read_tokens INTEGER`,
   `ALTER TABLE latch_usage ADD COLUMN cache_write_tokens INTEGER`,
   `ALTER TABLE latch_chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`,
+  `ALTER TABLE latch_chats ADD COLUMN parent_agent TEXT`,
   `ALTER TABLE latch_memory_chat_state ADD COLUMN last_extracted_key TEXT`,
   `ALTER TABLE latch_agents ADD COLUMN attached_evals TEXT`,
   `ALTER TABLE latch_agents ADD COLUMN published_version INTEGER`,

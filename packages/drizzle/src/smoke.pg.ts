@@ -25,6 +25,11 @@ async function main() {
   const me: P = { org: "org_a", user: "user_1" };
   const chat = await store.createChat(me, { agent: "support" });
 
+  // A sub-thread remembers who spawned it — every later resolve reads it back.
+  const sub = await store.createChat(me, { agent: "writer", kind: "internal", parentAgent: "support" });
+  if ((await store.getChat(me, sub.id))?.parentAgent !== "support") throw new Error("parentAgent did not round-trip");
+  if ((await store.getChat(me, chat.id))?.parentAgent !== undefined) throw new Error("a top-level chat has no parentAgent");
+
   const userMsg: AppMessage = {
     id: "msg_1",
     role: "user",
