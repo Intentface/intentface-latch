@@ -660,6 +660,65 @@ export interface SubagentProgressData {
   messages: AppMessage[];
 }
 
+/**
+ * The `data-subagent-progress` writer for one delegation: `now` sends a
+ * snapshot immediately, `throttled` at most every 250ms (each write re-sends
+ * the whole snapshot). Shared by `spawn_agent` and the approval resume so both
+ * write the SAME part id — a resumed delegation updates the one the client is
+ * already showing instead of adding a second.
+ */
+function subagentProgressWriter(
+  writer: TurnWriter,
+  ids: { toolCallId?: string; agent: string; threadId: string },
+): { now: (messages: AppMessage[]) => void; throttled: (messages: AppMessage[]) => void } {
+  const now = (messages: AppMessage[]) => {
+    writer.write({
+      type: "data-subagent-progress",
+      id: `subagent_${ids.toolCallId ?? ids.threadId}`,
+      data: { ...ids, messages } satisfies SubagentProgressData,
+    });
+  };
+  let lastWrite = 0;
+  const throttled = (messages: AppMessage[]) => {
+    const t = Date.now();
+    if (t - lastWrite < 250) return;
+    lastWrite = t;
+    now(messages);
+  };
+  return { now, throttled };
+}
+
+/**
+ * A `buildTurn` `observeStream` that folds the turn's UI chunks into message
+ * snapshots and hands each to `onProgress` as `[...lead, ...assistant]`.
+ * `continuing` is the assistant message a resume extends, so the snapshot keeps
+ * the parts it already had. Observation must never break the run: errors are
+ * swallowed, and the primary stream is drained independently.
+ */
+function progressObserver(
+  lead: AppMessage[],
+  onProgress: (messages: AppMessage[]) => void,
+  continuing?: AppMessage,
+): (observed: ReadableStream<unknown>) => void {
+  return (observed) => {
+    void (async () => {
+      try {
+        const byId = new Map<string, AppMessage>();
+        for await (const m of readUIMessageStream({
+          stream: observed as Parameters<typeof readUIMessageStream>[0]["stream"],
+          ...(continuing ? { message: structuredClone(continuing) as never } : {}),
+        })) {
+          const msg = m as unknown as AppMessage;
+          byId.set(msg.id, msg);
+          onProgress([...lead, ...byId.values()]);
+        }
+      } catch {
+        // ignore — live progress is best-effort
+      }
+    })();
+  };
+}
+
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
 /** Sub-thread chat ids start with `sub_` so the host can keep them out of the
@@ -1385,14 +1444,24 @@ export function createRuntime<P, RC = unknown>(
     return { cfg, modelId, runtimeCtx };
   }
 
+  /** `buildTurnStream` as an SSE `Response` — what every chat-facing path returns. */
+  async function buildTurn(args: Parameters<typeof buildTurnStream>[0]): Promise<Response> {
+    return createUIMessageStreamResponse({
+      stream: (await buildTurnStream(args)) as Parameters<typeof createUIMessageStreamResponse>[0]["stream"],
+      consumeSseStream: consumeStream,
+    });
+  }
+
   /**
    * Build (and start) one turn's stream — shared by a fresh chat turn and a
    * resume. With durability on, it heartbeats the lease and aborts if it's
    * lost; onFinish writes are fenced by `lease`. The caller decides whether to
    * hand the stream to a client (handleChat) or drive it to completion
-   * server-side (resume).
+   * server-side (resume). Returned as the bare chunk stream (see `buildTurn`
+   * for the `Response`) so `applyApproval`, which may already be streaming a
+   * subagent resume, can merge the continuation into that response.
    */
-  async function buildTurn(args: {
+  async function buildTurnStream(args: {
     resolvedChatId: string;
     principal: P;
     modelId: string;
@@ -1441,7 +1510,7 @@ export function createRuntime<P, RC = unknown>(
     observeStream?: (stream: ReadableStream<unknown>) => void;
     /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
     admitted?: Admitted;
-  }): Promise<Response> {
+  }): Promise<ReadableStream<unknown>> {
     const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
     // A per-turn model override replaces the agent's own, and the telemetry id
     // with it — a run row that says the agent's model while a different one
@@ -1731,29 +1800,15 @@ export function createRuntime<P, RC = unknown>(
           const subChatId = threadId?.trim() || generateSubchatId();
           let onProgress: ((messages: AppMessage[]) => void) | undefined;
           if (writer) {
-            const write = (messages: AppMessage[]) => {
-              writer.write({
-                type: "data-subagent-progress",
-                id: `subagent_${options.toolCallId ?? subChatId}`,
-                data: {
-                  toolCallId: options.toolCallId,
-                  agent,
-                  threadId: subChatId,
-                  messages,
-                } satisfies SubagentProgressData,
-              });
-            };
-            write([]);
-            // Each write re-sends the whole snapshot — throttle the re-sends.
+            const progress = subagentProgressWriter(writer, {
+              toolCallId: options.toolCallId,
+              agent,
+              threadId: subChatId,
+            });
+            progress.now([]);
             // The trailing tokens are covered by the tool RESULT (the client
             // switches to the persisted thread once output lands).
-            let lastWrite = 0;
-            onProgress = (messages) => {
-              const now = Date.now();
-              if (now - lastWrite < 250) return;
-              lastWrite = now;
-              write(messages);
-            };
+            onProgress = progress.throttled;
           }
           // Propagate the PARENT turn's execution mode AS A SET: interactive →
           // the subagent gates its tools (a pending write bubbles up here);
@@ -1969,7 +2024,23 @@ export function createRuntime<P, RC = unknown>(
             steps.reduce((n, st) => n + (st.usage?.inputTokens ?? 0) + (st.usage?.outputTokens ?? 0), 0) >=
             tokenBudget
         : undefined;
-    const baseStopWhen = budgetStop ? [stepCap ?? stepCountIs(20), budgetStop] : stepCap;
+    // A delegation that paused on the user's approval ends the turn, exactly as
+    // a gated tool of the agent's own does. A gated call has no result, so the
+    // SDK stops there by itself; `spawn_agent` RETURNS one (`awaiting_approval`),
+    // so without this the loop continues and only the result's note stands
+    // between the model and a second delegation — another bubbled card per
+    // step, up to the step cap. Added only when the agent can delegate, so
+    // other agents' stop conditions stay exactly as configured.
+    const subagentPauseStop = tools.spawn_agent
+      ? ({ steps }: { steps: { toolResults?: { toolName: string; output?: unknown }[] }[] }) =>
+          (steps.at(-1)?.toolResults ?? []).some(
+            (r) =>
+              r.toolName === "spawn_agent" &&
+              (r.output as { status?: unknown } | undefined)?.status === "awaiting_approval",
+          )
+      : undefined;
+    const extraStops = [budgetStop, subagentPauseStop].filter((s) => s !== undefined);
+    const baseStopWhen = extraStops.length > 0 ? [stepCap ?? stepCountIs(20), ...extraStops] : stepCap;
 
     // --- step boundaries for the seam -------------------------------------------
     // A step ends twice from here: on the model side (`agent.stream`'s
@@ -2676,10 +2747,7 @@ export function createRuntime<P, RC = unknown>(
       out = main;
       args.observeStream(observed);
     }
-    return createUIMessageStreamResponse({
-      stream: out as Parameters<typeof createUIMessageStreamResponse>[0]["stream"],
-      consumeSseStream: consumeStream,
-    });
+    return out;
   }
 
   async function reapTick(opts?: { now?: number; error?: string }) {
@@ -3198,58 +3266,114 @@ export function createRuntime<P, RC = unknown>(
     const changed = applyDecisions(messages, decisions);
     if (changed.length > 0) await storage.appendMessages(chatId, changed);
 
+    // Continue this chat from the decided history.
+    const continueTurn = async () => {
+      const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+        chat.agent,
+        principal,
+        request,
+        turnContext,
+        { parentAgent: chat.parentAgent },
+      );
+      const admitted = await admitContinuation(principal, chat.agent, "decision");
+      const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
+      return buildTurnStream({
+        resolvedChatId: chatId,
+        principal,
+        modelId,
+        cfg,
+        run,
+        lease,
+        // Resume: strip the paused turn's trailing text so the model call ends on
+        // the tool result (a user turn), not an assistant prefill.
+        uiMessages: trimTrailingAssistantPrefill(messages),
+        runtimeCtx,
+        // A human just decided something, so a human is present — even if this
+        // turn parks again on the NEXT gate (see TurnTrigger).
+        trigger: "decision",
+        admitted,
+      });
+    };
+
     // Route any just-decided SUBAGENT approvals (bubbled up via spawn_agent):
     // resume the sub thread with the decision, then fold its answer back into
     // the parent's spawn_agent result so this turn continues with the digest.
+    //
+    // All of it streams in THIS response, which is the only channel back to a
+    // client already showing the paused message. The resume can run for
+    // minutes, pause on a SECOND gate, or fold an answer the client has never
+    // seen — answered with an empty body instead, the user saw their approval
+    // land and then nothing: no progress, and no card for the next gate, while
+    // the chat sat awaiting a decision it never offered.
     const subApprovals = collectDecidedSubagentApprovals(messages);
     if (subApprovals.length > 0) {
-      for (const sa of subApprovals) {
-        const resumed = await resumeSubagentApproval(
-          principal,
-          sa.subChatId,
-          sa.subApprovalIds.map((id) => ({
-            approvalId: id,
-            approved: sa.approved as boolean,
-            reason: sa.reason,
-          })),
-          { parentRunId: sa.parentRunId, rootChatId: sa.rootChatId },
-        );
-        if (resumed.pending?.length) {
-          // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
-          // fresh data-subagent-approval part on the same parent message. The
-          // undecided part keeps this chat awaiting_input (hasPendingApproval
-          // below), and the next decision routes through here again, so
-          // bubbling recurses per round.
-          const nextApprovalId = generateSubApprovalId();
-          appendSubagentApprovalPart(messages, sa.approvalId, {
-            approvalId: nextApprovalId,
-            subChatId: sa.subChatId,
-            subApprovalIds: resumed.pending.map((p) => p.approvalId),
-            spawnToolCallId: sa.spawnToolCallId,
-            summaries: resumed.pending.map((p) => p.summary),
-            // Carry the linkage forward so each further resume stays nested.
-            parentRunId: sa.parentRunId,
-            rootChatId: sa.rootChatId,
-          });
-          if (sa.spawnToolCallId) {
-            overwriteToolResult(messages, sa.spawnToolCallId, {
-              status: "awaiting_approval",
-              threadId: sa.subChatId,
-              pending: resumed.pending.map((p) => p.summary),
-              note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
-            });
+      const stream = createUIMessageStream({
+        execute: async ({ writer }: { writer: TurnWriter }) => {
+          for (const sa of subApprovals) {
+            const resumed = await resumeSubagentApproval(
+              principal,
+              sa.subChatId,
+              sa.subApprovalIds.map((id) => ({
+                approvalId: id,
+                approved: sa.approved as boolean,
+                reason: sa.reason,
+              })),
+              { parentRunId: sa.parentRunId, rootChatId: sa.rootChatId },
+              { writer, spawnToolCallId: sa.spawnToolCallId },
+            );
+            let output: unknown;
+            if (resumed.pending?.length) {
+              // The resumed sub paused on ANOTHER gated tool — re-bubble it as a
+              // fresh data-subagent-approval part on the same parent message. The
+              // undecided part keeps this chat awaiting_input (hasPendingApproval
+              // below), and the next decision routes through here again, so
+              // bubbling recurses per round.
+              const data: NonNullable<SubApprovalPart["data"]> = {
+                approvalId: generateSubApprovalId(),
+                subChatId: sa.subChatId,
+                subApprovalIds: resumed.pending.map((p) => p.approvalId),
+                spawnToolCallId: sa.spawnToolCallId,
+                summaries: resumed.pending.map((p) => p.summary),
+                // Carry the linkage forward so each further resume stays nested.
+                parentRunId: sa.parentRunId,
+                rootChatId: sa.rootChatId,
+              };
+              appendSubagentApprovalPart(messages, sa.approvalId, data);
+              // Same id as the stored part, so the client reconciles it into the
+              // paused message exactly as a reload would show it.
+              writer.write({ type: "data-subagent-approval", id: data.approvalId, data });
+              output = {
+                status: "awaiting_approval",
+                threadId: sa.subChatId,
+                pending: resumed.pending.map((p) => p.summary),
+                note: "Awaiting the user's approval — do not retry; stop here, the user will decide and you'll continue automatically.",
+              };
+            } else {
+              output = { threadId: sa.subChatId, answer: resumed.answer };
+            }
+            if (sa.spawnToolCallId) {
+              overwriteToolResult(messages, sa.spawnToolCallId, output);
+              writer.write({ type: "tool-output-available", toolCallId: sa.spawnToolCallId, output });
+            }
+            markSubagentApprovalResolved(messages, sa.approvalId);
           }
-        } else if (sa.spawnToolCallId) {
-          overwriteToolResult(messages, sa.spawnToolCallId, {
-            threadId: sa.subChatId,
-            answer: resumed.answer,
-          });
-        }
-        markSubagentApprovalResolved(messages, sa.approvalId);
-      }
-      // Persist the folded spawn_agent result (or re-bubbled approval part)
-      // + resolved markers.
-      await storage.appendMessages(chatId, messages);
+          // Persist the folded spawn_agent result (or re-bubbled approval part)
+          // + resolved markers.
+          await storage.appendMessages(chatId, messages);
+          if (hasPendingApproval(messages)) {
+            writer.write({ type: "finish" });
+            return;
+          }
+          writer.merge(await continueTurn());
+        },
+        onError: (error: unknown) => clientErrorMessage(error),
+      } as Parameters<typeof createUIMessageStream>[0]);
+      return createUIMessageStreamResponse({
+        stream: stream as Parameters<typeof createUIMessageStreamResponse>[0]["stream"],
+        // Drain server-side even if the client leaves: the resume must finish
+        // and persist either way, as every turn does (see buildTurnStream).
+        consumeSseStream: consumeStream,
+      });
     }
 
     // If the step had several gated calls and some are still undecided, DON'T
@@ -3260,31 +3384,9 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
-      chat.agent,
-      principal,
-      request,
-      turnContext,
-      { parentAgent: chat.parentAgent },
-    );
-    const admitted = await admitContinuation(principal, chat.agent, "decision");
-    const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
-
-    return buildTurn({
-      resolvedChatId: chatId,
-      principal,
-      modelId,
-      cfg,
-      run,
-      lease,
-      // Resume: strip the paused turn's trailing text so the model call ends on
-      // the tool result (a user turn), not an assistant prefill.
-      uiMessages: trimTrailingAssistantPrefill(messages),
-      runtimeCtx,
-      // A human just decided something, so a human is present — even if this
-      // turn parks again on the NEXT gate (see TurnTrigger).
-      trigger: "decision",
-      admitted,
+    return createUIMessageStreamResponse({
+      stream: (await continueTurn()) as Parameters<typeof createUIMessageStreamResponse>[0]["stream"],
+      consumeSseStream: consumeStream,
     });
   }
 
@@ -3741,26 +3843,8 @@ export function createRuntime<P, RC = unknown>(
       rootChatId: o.rootChatId,
       trigger: o.trigger,
       // Forward progressive UI-message snapshots to the caller (spawn_agent
-      // streams them into the parent turn). Observation must never break the
-      // run — the primary stream is drained independently below.
-      observeStream: onProgress
-        ? (observed) => {
-            void (async () => {
-              try {
-                const byId = new Map<string, AppMessage>();
-                for await (const m of readUIMessageStream({
-                  stream: observed as Parameters<typeof readUIMessageStream>[0]["stream"],
-                })) {
-                  const msg = m as unknown as AppMessage;
-                  byId.set(msg.id, msg);
-                  onProgress([o.message, ...byId.values()]);
-                }
-              } catch {
-                // ignore — live progress is best-effort
-              }
-            })();
-          }
-        : undefined,
+      // streams them into the parent turn).
+      observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
     });
     // The turn's own failure travels as an `error` chunk — the stream, not a
     // throw. Keep its text: without it a failed turn reads as a silent one.
@@ -3801,6 +3885,12 @@ export function createRuntime<P, RC = unknown>(
     decisions: ApprovalDecision[],
     /** Telemetry linkage of the original sub-turn, so the trace stays nested. */
     linkage?: { parentRunId?: string; rootChatId?: string },
+    /**
+     * Stream the resumed sub-turn into the parent's response as the same
+     * `data-subagent-progress` part `spawn_agent` wrote, so the delegation the
+     * user just approved visibly runs again instead of sitting silent.
+     */
+    live?: { writer: TurnWriter; spawnToolCallId?: string },
   ): Promise<{ answer: string; pending?: SubagentPending[] }> {
     const subChat = await storage.getChat(principal, subChatId);
     if (!subChat) return { answer: "" };
@@ -3821,6 +3911,23 @@ export function createRuntime<P, RC = unknown>(
     );
     const admitted = await admitContinuation(principal, subChat.agent, "decision");
     const { run, lease } = await openRun(principal, subChatId, subChat.agent, cfg.configVersion);
+    const resumeFrom = trimTrailingAssistantPrefill(subMessages);
+    let observeStream: ((observed: ReadableStream<unknown>) => void) | undefined;
+    if (live) {
+      const progress = subagentProgressWriter(live.writer, {
+        toolCallId: live.spawnToolCallId,
+        agent: subChat.agent,
+        threadId: subChatId,
+      });
+      // The exchange being resumed: its prompt and the paused assistant
+      // message, which the resumed turn extends in place.
+      const last = resumeFrom[resumeFrom.length - 1];
+      const continuing = last?.role === "assistant" ? last : undefined;
+      const prompt = resumeFrom.findLast((m) => m.role === "user");
+      const lead = prompt ? [prompt] : [];
+      progress.now(continuing ? [...lead, continuing] : lead);
+      observeStream = progressObserver(lead, progress.throttled, continuing);
+    }
     const res = await buildTurn({
       resolvedChatId: subChatId,
       principal,
@@ -3832,7 +3939,7 @@ export function createRuntime<P, RC = unknown>(
       // Resume: same prefill guard as applyApproval — the paused sub turn may
       // have narrated after its gated call, and that text must not reach the
       // model as an assistant prefill.
-      uiMessages: trimTrailingAssistantPrefill(subMessages),
+      uiMessages: resumeFrom,
       runtimeCtx,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
@@ -3841,6 +3948,7 @@ export function createRuntime<P, RC = unknown>(
       rootChatId: linkage?.rootChatId,
       // Reached only by a human deciding the bubbled-up approval.
       trigger: "decision",
+      observeStream,
     });
     await res.text();
     const after = await storage.loadMessages(principal, subChatId);

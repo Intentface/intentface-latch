@@ -141,9 +141,9 @@ async function subagentRuntime(): Promise<Runtime<P>> {
   const parentModel = new MockLanguageModelV3({
     doStream: async () => {
       subParentCalls += 1;
-      // Call 1 spawns; call 2 is the tool loop continuing on the
-      // `awaiting_approval` result (still turn 1); call 3 is the redirected
-      // turn. Distinct texts so the assertions can tell them apart.
+      // Call 1 spawns, and turn 1 ends there: a delegation paused on the
+      // user's approval stops the tool loop, as a gated tool does. Call 2 is
+      // the redirected turn.
       const parts =
         subParentCalls === 1
           ? [
@@ -157,9 +157,7 @@ async function subagentRuntime(): Promise<Runtime<P>> {
               },
               { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
             ]
-          : subParentCalls === 2
-            ? sayText("Waiting on that approval.")
-            : sayText("Sure — directly, then.");
+          : sayText("Sure — directly, then.");
       return { stream: streamFrom(parts) };
     },
   });

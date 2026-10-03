@@ -42,6 +42,13 @@ finishes with a pending approval → `awaiting_input` (existing behavior). The
 user sees the summaries. `pendingApprovals` and `applyApproval` key off
 `type === "data-subagent-approval"` and `data.approvalId`.
 
+The parent's tool loop **stops** after a step in which `spawn_agent` returned
+`awaiting_approval`, as it does at one of its own gated calls. A gated call has
+no result, so the SDK stops there by itself; `spawn_agent` *returns* one, and
+without the stop the model was left to obey the result's "stop here" note — a
+model that didn't delegated again, one more bubbled card per step, up to the
+step cap. (Added only for agents that can delegate.)
+
 ### 4. `applyApproval` routes a sub-approval to the child, then resumes the parent
 
 When `applyApproval(parentChat, decisions)` sees a `data-subagent-approval`
@@ -56,6 +63,32 @@ part whose `data.approvalId` matches the decision:
 Denial: step 1 records `approved:false`; the sub tool returns a denied result;
 the sub completes with a "not performed" digest; parent continues.
 
+### 5. The decision's response carries the whole resume
+
+The `applyApproval` response is the only channel back to a client already
+showing the paused message, so everything the routing does is **streamed**
+there, continuing that message, in order:
+
+| Chunk | When |
+|---|---|
+| `data-subagent-progress` (id `subagent_<spawnToolCallId>`) | while the sub runs — the same part `spawn_agent` streamed, updated in place |
+| `data-subagent-approval` (id = its `approvalId`) | the resumed sub paused on **another** gated tool — a fresh card |
+| `tool-output-available` for the `spawn_agent` call | the folded result: the digest, or `awaiting_approval` again |
+| the parent's continuation (`start` … `finish`) | only once nothing is pending |
+
+When the sub pauses again, the stream ends after the new card and the chat stays
+`awaiting_input`; the next decision routes through here again, so bubbling
+recurses one round per decision. Until 0.14 that case answered an empty `200`:
+the new card reached storage but not the client, which showed the approval
+landing and then nothing — while the run waited on a decision it never offered.
+
+A host renders these like any other parts; nothing subagent-specific is needed
+beyond what `spawn_agent`'s own stream already requires. A failure during the
+resume (the sub chat busy, a model error) arrives as an `error` chunk in that
+stream rather than as a thrown error, because the response has already started.
+The empty `200` remains for one case only: a step with several gated calls,
+some still undecided — the client already holds those cards.
+
 ### Invariants preserved
 - **Isolation:** raw sub-tool output stays in the `sub_…` thread; the parent
   only ever sees the digest + the approval summary.
@@ -68,7 +101,9 @@ the sub completes with a "not performed" digest; parent continues.
 - `spawn_agent` execute: propagate `autoApprove`; on `pending`, write the tagged
   approval-requested part.
 - `runSubagent`: accept `autoApprove`; detect `hasPendingApproval`; return pending.
-- `applyApproval`: branch on `subChatId`-tagged approvals → sub-resume → parent-resume.
+- `applyApproval`: branch on `subChatId`-tagged approvals → sub-resume → parent-resume,
+  streamed (§5).
+- `buildTurn`'s tool loop: stop on a paused delegation (§3).
 - Helpers: tag/detect the sub-approval metadata on the part.
 
 ### Test
@@ -76,3 +111,7 @@ the sub completes with a "not performed" digest; parent continues.
 a subagent whose tool is gated → assert the PARENT run is `awaiting_input` with
 the sub summary; `applyApproval(approve)` → sub write executes → parent completes
 with the digest; a second run with `deny` → write not performed.
+
+`packages/core/src/subagent-approval-delivery.test.ts` pins what the client
+receives: the re-bubbled card, the resume's progress, the folded result before
+the parent's continuation, and the parent stopping at a paused delegation.
