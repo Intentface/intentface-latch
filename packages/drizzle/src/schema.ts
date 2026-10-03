@@ -85,6 +85,8 @@ export const runs = sqliteTable(
     /** The agent-record version (`latch_agent_versions.version`) this turn ran.
      * NULL for code-declared agents, which have no stored record. */
     agentVersion: integer("agent_version"),
+    /** How the turn was asked to run (RunRecord.settings), so recovery resumes it the same way. */
+    settings: text("settings", { mode: "json" }),
     error: text("error"),
     startedAt: integer("started_at").notNull(),
     endedAt: integer("ended_at"),

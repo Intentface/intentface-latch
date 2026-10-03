@@ -54,6 +54,7 @@ import type {
   ChatRecord,
   RunLease,
   RunRecord,
+  RunSettings,
   RunStatus,
   ScheduleRecord,
   StorageAdapter,
@@ -717,6 +718,27 @@ function progressObserver(
       }
     })();
   };
+}
+
+/**
+ * What an unattended turn records on its run (`RunRecord.settings`): only what
+ * differs from an attended chat turn's defaults, so a plain turn stores none.
+ */
+function runSettingsOf(o: {
+  autoApprove: boolean;
+  blockGated?: boolean | "simulate-success";
+  memory?: boolean;
+  promptCaching?: boolean;
+  model?: LanguageModel;
+}): RunSettings | undefined {
+  const settings: RunSettings = {
+    ...(o.autoApprove ? { autoApprove: true } : {}),
+    ...(o.blockGated ? { blockGated: o.blockGated } : {}),
+    ...(o.memory === false ? { memory: false } : {}),
+    ...(o.promptCaching === false ? { promptCaching: false } : {}),
+    ...(o.model ? { modelOverride: typeof o.model === "string" ? o.model : `${o.model.provider}:${o.model.modelId}` } : {}),
+  };
+  return Object.keys(settings).length ? settings : undefined;
 }
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
@@ -2855,6 +2877,12 @@ export function createRuntime<P, RC = unknown>(
    * resolution or run creation failed): the window counts turns that RAN, or a
    * user retrying into a busy chat would exhaust their own turn cap.
    */
+  /** A run's stored error, when it ended `errored` — the fallback when its stream said nothing. */
+  async function terminalError(runId: string): Promise<string | undefined> {
+    const row = await storage.getRun(runId).catch(() => null);
+    return row?.status === "errored" && row.error ? row.error : undefined;
+  }
+
   async function releaseReservation(admitted: Admitted | undefined): Promise<void> {
     if (!admitted?.counted || !config.limits) return;
     await config.limits.store
@@ -2901,6 +2929,8 @@ export function createRuntime<P, RC = unknown>(
     agentName: string,
     messages: AppMessage[],
     agentVersion?: number,
+    /** Recorded on the run so recovery resumes it the same way (`RunRecord.settings`). */
+    settings?: RunSettings,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
     if (storage.openTurn) {
       const run = await storage.openTurn(principal, {
@@ -2908,6 +2938,7 @@ export function createRuntime<P, RC = unknown>(
         agent: agentName,
         messages,
         agentVersion: agentVersion ?? null,
+        ...(settings ? { settings } : {}),
         ...(dur.enabled ? { lease: { owner: dur.instanceId, ttlMs: dur.leaseTtlMs } } : {}),
       });
       return {
@@ -2915,7 +2946,7 @@ export function createRuntime<P, RC = unknown>(
         lease: dur.enabled ? { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } : undefined,
       };
     }
-    const opened = await openRun(principal, chatId, agentName, agentVersion);
+    const opened = await openRun(principal, chatId, agentName, agentVersion, settings);
     if (messages.length > 0) await storage.appendMessages(chatId, messages);
     return opened;
   }
@@ -2925,6 +2956,7 @@ export function createRuntime<P, RC = unknown>(
     chatId: string,
     agentName: string,
     agentVersion?: number,
+    settings?: RunSettings,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
     if (dur.enabled) {
       const run = await storage.claimRun({
@@ -2934,6 +2966,7 @@ export function createRuntime<P, RC = unknown>(
         owner: dur.instanceId,
         ttlMs: dur.leaseTtlMs,
         agentVersion: agentVersion ?? null,
+        ...(settings ? { settings } : {}),
       });
       return { run, lease: { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } };
     }
@@ -2943,6 +2976,7 @@ export function createRuntime<P, RC = unknown>(
         agent: agentName,
         kind: "turn",
         agentVersion: agentVersion ?? null,
+        ...(settings ? { settings } : {}),
       }),
       lease: undefined,
     };
@@ -3028,14 +3062,11 @@ export function createRuntime<P, RC = unknown>(
       owner: dur.instanceId,
       fencingToken: run.fencingToken ?? 1,
     };
-    if (principal === null) {
-      // Refused (see `ReconstructPrincipal`): the identity may no longer act, so
-      // nothing below — not even reading its history — runs as it. End the run
-      // instead of returning early with the lease held: an `active` row would be
-      // reaped and re-refused every tick until `maxAttempts`, and a throw here
-      // would abort the rest of `sweep`'s loop. No `onRunFinished`: its meta
-      // carries the principal, and there is none to report.
-      const error = "principal rejected: reconstructPrincipal refused the run's identity";
+    // End a run recovery won't resume. Settled rather than returned early with
+    // the lease held: an `active` row would be reaped and re-refused every tick
+    // until `maxAttempts`, and a throw would abort the rest of `sweep`'s loop.
+    // No `onRunFinished`: nothing ran.
+    const refuse = async (error: string): Promise<RunOutcome> => {
       await storage.updateRun(
         run.id,
         {
@@ -3058,6 +3089,11 @@ export function createRuntime<P, RC = unknown>(
         status: settled?.status ?? "errored",
         attempt: settled?.attempt ?? run.attempt ?? null,
       };
+    };
+    if (principal === null) {
+      // Refused (see `ReconstructPrincipal`): the identity may no longer act, so
+      // nothing below — not even reading its history — runs as it.
+      return refuse("principal rejected: reconstructPrincipal refused the run's identity");
     }
 
     const uiMessages = await storage.loadMessages(principal, run.chatId);
@@ -3161,11 +3197,23 @@ export function createRuntime<P, RC = unknown>(
     // reconcilable even if its (dynamic, DB-stored) agent was since deleted.
     // Before this ordering that throw also aborted `sweep`'s loop, so one such
     // run held up recovery for every other run until its attempts ran out.
+    // Resume the turn the way it was asked to run (`RunRecord.settings`): an
+    // unattended run stays unattended — and keeps its `blockGated`, or its
+    // gated tools would run for real — memory off stays off. A run on a
+    // per-turn model override can't be resumed on that model (the object
+    // isn't stored), and finishing it on the agent's own would quietly change
+    // what answered: refuse it instead.
+    const settings = run.settings ?? {};
+    if (settings.modelOverride) {
+      return refuse(`can't resume on the per-turn model it started with (${settings.modelOverride})`);
+    }
+
     // A recovered subagent run must resolve exactly as its spawner shaped it —
     // crash recovery and `sweep` both land here.
     const chat = await storage.getChat(principal, run.chatId);
     const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(run.agent, principal, undefined, undefined, {
       parentAgent: chat?.parentAgent,
+      ...(settings.autoApprove !== undefined ? { autoApprove: settings.autoApprove } : {}),
     });
 
     // A resume was admitted when the turn first ran — never refuse it (the
@@ -3191,6 +3239,10 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: trimTrailingAssistantPrefill(uiMessages, { unanchored: true }),
       runtimeCtx,
       admitted,
+      ...(settings.autoApprove !== undefined ? { autoApprove: settings.autoApprove } : {}),
+      ...(settings.blockGated !== undefined ? { blockGated: settings.blockGated } : {}),
+      ...(settings.memory !== undefined ? { memory: settings.memory } : {}),
+      ...(settings.promptCaching !== undefined ? { promptCaching: settings.promptCaching } : {}),
       // Crash recovery, driven server-side: nobody is watching this stream.
       trigger: "resume",
     });
@@ -3865,36 +3917,54 @@ export function createRuntime<P, RC = unknown>(
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
       });
-      const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion);
+      const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
     const onProgress = o.onProgress;
-    const res = await buildTurn({
-      resolvedChatId: chatId,
-      principal: o.principal,
-      modelId,
-      cfg,
-      run,
-      lease,
-      uiMessages: [...prior, o.message],
-      runtimeCtx,
-      admitted,
-      autoApprove: o.autoApprove,
-      blockGated: o.blockGated,
-      memory: o.memory,
-      model: o.model,
-      promptCaching: o.promptCaching,
-      depth: o.depth ?? 0,
-      parentRunId: o.parentRunId,
-      rootChatId: o.rootChatId,
-      trigger: o.trigger,
-      // Forward progressive UI-message snapshots to the caller (spawn_agent
-      // streams them into the parent turn).
-      observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
-    });
+    let res: Response;
+    try {
+      res = await buildTurn({
+        resolvedChatId: chatId,
+        principal: o.principal,
+        modelId,
+        cfg,
+        run,
+        lease,
+        uiMessages: [...prior, o.message],
+        runtimeCtx,
+        admitted,
+        autoApprove: o.autoApprove,
+        blockGated: o.blockGated,
+        memory: o.memory,
+        model: o.model,
+        promptCaching: o.promptCaching,
+        depth: o.depth ?? 0,
+        parentRunId: o.parentRunId,
+        rootChatId: o.rootChatId,
+        trigger: o.trigger,
+        // Forward progressive UI-message snapshots to the caller (spawn_agent
+        // streams them into the parent turn).
+        observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
+      });
+    } catch (e) {
+      // Setup failed after the run opened — a tool source that would not
+      // open, say. Settle the run (left `active`, it would hold the chat until
+      // its lease or the stale timeout lapsed), give back the reservation, and
+      // say why the way a failed turn does: as `error`, not a throw. Admission
+      // refusals never get here — they throw before any run exists.
+      const error = clientErrorMessage(e);
+      await storage
+        .updateRun(run.id, { status: "errored", error, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null }, lease)
+        .catch(() => {});
+      await releaseReservation(admitted);
+      return { chatId, answer: "", parked: false, error };
+    }
     // The turn's own failure travels as an `error` chunk — the stream, not a
     // throw. Keep its text: without it a failed turn reads as a silent one.
-    const error = lastStreamError(await res.text());
+    // A failure that ends the run without an error chunk (a final-step
+    // `step_end` handler, caught in onFinish) is only on the run row: read it
+    // back so a failed turn never looks like a silent one.
+    const error = lastStreamError(await res.text()) ?? (await terminalError(run.id));
 
     const after = await storage.loadMessages(o.principal, chatId);
     // The verdict is about THIS turn, so read the FINAL message only (the same

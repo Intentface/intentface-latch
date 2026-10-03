@@ -156,9 +156,34 @@ export interface RunRecord {
    * publish shows both on one trace.
    */
   agentVersion?: number | null;
+  /**
+   * How the turn was asked to run, when that differs from an attended chat
+   * turn (`runAgent`, cron, an autonomous delegation). Kept on the row so
+   * crash recovery resumes it the SAME way — an unattended eval resumed as
+   * attended would park on a gate nobody will answer; one resumed without
+   * its `blockGated` would run its gated tools for real. Null/absent = an
+   * attended turn's defaults.
+   */
+  settings?: RunSettings | null;
   error?: string | null;
   startedAt: number;
   endedAt?: number | null;
+}
+
+/** A turn's execution settings, as stored on its run (see `RunRecord.settings`). */
+export interface RunSettings {
+  autoApprove?: boolean;
+  blockGated?: boolean | "simulate-success";
+  /** `false` = the turn ran with memory off. */
+  memory?: boolean;
+  /** `false` = the turn ran with prompt caching off. */
+  promptCaching?: boolean;
+  /**
+   * The id of a per-turn model override, when the turn ran on one. The model
+   * object itself can't be stored, so recovery refuses such a run rather than
+   * silently finishing it on the agent's own model.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -288,7 +313,7 @@ export interface StorageAdapter<P> {
    */
   createRun(
     principal: P,
-    input: { chatId: string; agent: string; kind?: string; agentVersion?: number | null },
+    input: { chatId: string; agent: string; kind?: string; agentVersion?: number | null; settings?: RunSettings | null },
   ): Promise<RunRecord>;
   /**
    * T2 durable: create a run already leased to `owner` (fencingToken starts at 1,
@@ -302,6 +327,7 @@ export interface StorageAdapter<P> {
     owner: string;
     ttlMs: number;
     agentVersion?: number | null;
+    settings?: RunSettings | null;
   }): Promise<RunRecord>;
   /**
    * Open a turn ATOMICALLY: the run row (the one-active-run-per-chat check) and
@@ -323,6 +349,7 @@ export interface StorageAdapter<P> {
       messages: AppMessage[];
       lease?: { owner: string; ttlMs: number };
       agentVersion?: number | null;
+      settings?: RunSettings | null;
     },
   ): Promise<RunRecord>;
   // ↑ Same one-active-run-per-chat rule as `createRun`: a live lease on another

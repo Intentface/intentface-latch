@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
-import { simulateReadableStream } from "ai";
+import { simulateReadableStream, tool } from "ai";
+import { z } from "zod";
 import { createRuntime, resumeShapeOf, supersededBy, trimTrailingAssistantPrefill } from "./runtime.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
 import { toModelMessages } from "./projections.js";
 import type { AppMessage } from "./message.js";
-import type { RunRecord, StorageAdapter } from "./storage.js";
+import type { RunRecord, RunSettings, StorageAdapter } from "./storage.js";
 
 /**
  * Crash recovery, for the window nobody sees until it bites: the per-step
@@ -309,6 +310,25 @@ const workingModel = () =>
     })) as never,
   });
 
+/** A model that calls the gated `send` once, then answers — per resume. */
+const sendingModel = () => {
+  let n = 0;
+  const finish = (r: string) => ({ type: "finish", finishReason: { unified: r, raw: r }, usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } } });
+  return new MockLanguageModelV4({
+    modelId: "mock-model",
+    doStream: (async () => ({
+      stream: simulateReadableStream({
+        initialDelayInMs: 0,
+        chunkDelayInMs: 0,
+        chunks:
+          n++ === 0
+            ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "s1", toolName: "send", input: '{"to":"x"}' }, finish("tool-calls")]
+            : [{ type: "stream-start", warnings: [] }, { type: "text-start", id: "0" }, { type: "text-delta", id: "0", delta: "done" }, { type: "text-end", id: "0" }, finish("stop")],
+      } as never),
+    })) as never,
+  });
+};
+
 function runtimeOver(
   history: AppMessage[],
   model: ReturnType<typeof workingModel>,
@@ -316,11 +336,15 @@ function runtimeOver(
     siblings?: RunRecord[];
     /** Make "assistant" a dynamic agent spawned by this parent, recording each resolve's context. */
     spawnedBy?: { parent: string; seen: unknown[] };
+    /** How the crashed turn was asked to run (RunRecord.settings). */
+    settings?: RunSettings;
+    /** Give "assistant" a gated `send` tool; each real execution is recorded. */
+    gated?: string[];
   } = {},
 ) {
   const patches: Array<Record<string, unknown>> = [];
   const appended: AppMessage[][] = [];
-  let row: RunRecord = { ...RUN };
+  let row: RunRecord = { ...RUN, ...(opts.settings ? { settings: opts.settings } : {}) };
   const { storage, calls } = stubStorage({
     // Recovery reads the chat for its parentAgent (DynamicAgentResolveContext).
     getChat: async () =>
@@ -355,7 +379,20 @@ function runtimeOver(
   const runtime = createRuntime<P, Record<string, never>>({
     storage,
     context: defineContext<P, Record<string, never>>({ build: () => ({}) }),
-    agents: opts.spawnedBy ? {} : { assistant: defineAgent(() => ({ model, instructions: "be brief" })) },
+    agents: opts.spawnedBy
+      ? {}
+      : {
+          assistant: defineAgent(() => ({
+            model,
+            instructions: "be brief",
+            ...(opts.gated
+              ? {
+                  tools: { send: tool({ description: "send", inputSchema: z.object({ to: z.string() }), execute: async ({ to }) => (opts.gated!.push(to), { sent: true }) }) },
+                  toolApproval: { send: "user-approval" as const },
+                }
+              : {}),
+          })),
+        },
     ...(opts.spawnedBy
       ? {
           dynamicAgents: {
@@ -419,6 +456,43 @@ describe("resumeRun", () => {
     // Crash recovery and `sweep` both land in resumeRun.
     expect((await runtime.resume("run_1"))?.status).toBe("completed");
     expect(seen.at(-1)).toMatchObject({ parentAgent: "lead" });
+  });
+
+  it("resumes an unattended test run the way it started: approvals waived, gated tools still stubbed", async () => {
+    const executed: string[] = [];
+    const history = [
+      USER,
+      msg("assistant", [
+        { type: "step-start" },
+        { type: "tool-web_fetch", toolCallId: "c1", state: "output-available", input: { url: "u" }, output: { text: "…" } },
+      ]),
+    ];
+    const { runtime, appended } = runtimeOver(history, sendingModel(), {
+      settings: { autoApprove: true, blockGated: "simulate-success", memory: false },
+      gated: executed,
+    });
+    expect((await runtime.resume("run_1"))?.status).toBe("completed");
+    const parts = appended.flat().flatMap((m) => m.parts) as { type: string; state?: string }[];
+    const send = parts.filter((p) => p.type === "tool-send");
+    // Not parked on a gate nobody will answer…
+    expect(send.some((p) => p.state === "approval-requested")).toBe(false);
+    // …and not run for real: a stubbed test run stays stubbed.
+    expect(executed).toEqual([]);
+    expect(send.some((p) => p.state === "output-available")).toBe(true);
+  });
+
+  it("refuses to resume a run that started on a per-turn model override", async () => {
+    const history = [
+      USER,
+      msg("assistant", [
+        { type: "step-start" },
+        { type: "tool-web_fetch", toolCallId: "c1", state: "output-available", input: { url: "u" }, output: { text: "…" } },
+      ]),
+    ];
+    const { runtime, patches } = runtimeOver(history, forbiddenModel(), { settings: { autoApprove: true, modelOverride: "anthropic:claude-haiku-4-5" } });
+    const outcome = await runtime.resume("run_1");
+    expect(outcome?.status).toBe("errored");
+    expect(patches).toEqual([expect.objectContaining({ status: "errored", error: expect.stringContaining("anthropic:claude-haiku-4-5") })]);
   });
 
   it("still re-runs the model when work is genuinely left", async () => {

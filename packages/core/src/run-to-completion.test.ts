@@ -7,6 +7,7 @@ import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
 import type { AppMessage } from "./message.js";
 import { memoryStorage } from "./__tests__/memory-storage.js";
+import { defineExtension, type Extension } from "./extensions/extension.js";
 
 /**
  * The single non-streaming turn path (`runToCompletion`) as seen through its
@@ -306,6 +307,66 @@ describe("delegation inherits the parent's restrictions", () => {
       output?: { __blocked?: boolean };
     }>;
     expect(parts.find((p) => p.type === "tool-write_thing")?.output?.__blocked).toBe(true);
+  });
+});
+
+describe("runAgent says why a turn failed", () => {
+  it("a turn that fails while it is set up returns the error and settles the run", async () => {
+    const mem = memoryStorage();
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        writer: defineAgent({
+          model: model("written."),
+          instructions: "write",
+          toolSources: [{ open: async () => { throw new Error("mcp server down"); } }],
+        }),
+      },
+    });
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "go" });
+    expect(res.error).toContain("mcp server down");
+    expect(res.answer).toBe("");
+    const run = [...mem.runs.values()].at(-1)!;
+    expect(run.status).toBe("errored");
+    expect(run.error).toContain("mcp server down");
+  });
+
+  it("a failure with no error chunk in the stream is read off the run", async () => {
+    const mem = memoryStorage();
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      // A critical extension failing at the last step ends the run errored in
+      // onFinish — after the stream has nothing more to say.
+      extensions: [
+        defineExtension(
+          "db",
+          (ext) =>
+            ext.on("step_end", () => {
+              throw new Error("connection reset");
+            }),
+          { critical: true },
+        ) as Extension,
+      ],
+      agents: { writer: defineAgent({ model: model("written."), instructions: "write" }) },
+    });
+    const res = await rt.runAgent({ principal, agent: "writer", prompt: "go" });
+    expect([...mem.runs.values()].at(-1)!.status).toBe("errored");
+    expect(res.error).toContain("connection reset");
+  });
+});
+
+describe("run settings", () => {
+  it("an unattended run records how it ran, so recovery can resume it the same way; a chat turn records nothing", async () => {
+    const mem = memoryStorage();
+    const rt = runtimeWith(mem, model("done."));
+    await rt.runAgent({ principal, agent: "writer", prompt: "go", blockGated: "simulate-success", memory: false });
+    const chatTurn = await rt.handleChat({ agent: "writer", principal, message: { id: "u_chat", role: "user", parts: [{ type: "text", text: "hi" }] } });
+    await chatTurn.text();
+    const [unattended, attended] = [...mem.runs.values()];
+    expect(unattended!.settings).toEqual({ autoApprove: true, blockGated: "simulate-success", memory: false });
+    expect(attended!.settings).toBeUndefined();
   });
 });
 
