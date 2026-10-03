@@ -1,5 +1,15 @@
 # @intentface/latch-mcp
 
+## 0.13.1
+
+### Patch Changes
+
+- a88de67: `createOAuthDiscoveryFetch({ forceScheme: "https" })` no longer rewrites a local server's discovery documents. Forcing https is for servers behind a TLS-terminating proxy that advertise `http://` addresses — but it applied to every host, so a local MCP server's `http://localhost:3011/mcp` came back as `https://…`, the SDK's resource check refused it ("Protected resource … does not match expected …"), and connecting failed with a bare "authorize failed". Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) keep their published scheme; the trailing-slash cleanup still applies everywhere.
+- Updated dependencies [6fed7fa]
+- Updated dependencies [cf10a1c]
+  - @intentface/latch-core@0.13.1
+  - @intentface/latch-net@0.13.1
+
 ## 0.13.0
 
 ### Minor Changes
