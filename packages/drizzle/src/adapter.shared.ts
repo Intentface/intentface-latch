@@ -11,12 +11,14 @@ import {
   ne,
   or,
   sql,
+  type SQL,
 } from "drizzle-orm";
 import {
   ChatBusyError,
   ChatConflictError,
   type AppMessage,
   type ChatRecord,
+  type RunFence,
   type RunRecord,
   type RunSettings,
   type RunStatus,
@@ -64,6 +66,18 @@ export interface SharedAdapterOptions<P> {
   batch?: (stmts: any[]) => Promise<any[]>;
   /** A synchronous transaction (sync SQLite drivers): the builders' `.run()`/`.get()` inside it are atomic. */
   syncTx?: <T>(fn: (tx: any) => T) => T;
+  /**
+   * The database's current time in epoch ms, as SQL. Every lease time — set,
+   * renewed, compared — comes from this one clock, so skew between app servers
+   * can't make one node reap a run another is still renewing.
+   */
+  nowMs: SQL;
+  /**
+   * Postgres: lock the run row (`for share`) while a fenced write checks it, so
+   * a concurrent reclaim waits for the write to commit (and a write that waited
+   * on a reclaim re-reads the bumped token). SQLite serializes writers already.
+   */
+  lockFencedRun?: boolean;
 }
 
 function newId(prefix: string): string {
@@ -77,12 +91,21 @@ function newId(prefix: string): string {
  * `23505`), two levels down for libsql.
  */
 export function isUniqueViolation(error: unknown): boolean {
+  return violates(error, /^SQLITE_CONSTRAINT/i, "23505", /unique constraint|primary key|duplicate key|sqlite_constraint/i);
+}
+
+/** True if a driver error is a NOT NULL violation (libsql `SQLITE_CONSTRAINT_NOTNULL`, pg `23502`). */
+function isNotNullViolation(error: unknown): boolean {
+  return violates(error, /^SQLITE_CONSTRAINT_NOTNULL/i, "23502", /not null constraint|null value in column/i);
+}
+
+function violates(error: unknown, sqliteCode: RegExp, pgCode: string, text: RegExp): boolean {
   let e: unknown = error;
   for (let depth = 0; e && depth < 5; depth++) {
     const code = (e as { code?: unknown }).code;
-    if (typeof code === "string" && (/^SQLITE_CONSTRAINT/i.test(code) || code === "23505")) return true;
+    if (typeof code === "string" && (sqliteCode.test(code) || code === pgCode)) return true;
     const message = e instanceof Error ? e.message : typeof e === "string" ? e : "";
-    if (/unique constraint|primary key|duplicate key|sqlite_constraint/i.test(message)) return true;
+    if (text.test(message)) return true;
     e = (e as { cause?: unknown }).cause;
   }
   return false;
@@ -106,6 +129,7 @@ export function makeStorageAdapter<P>(
   opts: SharedAdapterOptions<P>,
 ): StorageAdapter<P> {
   const ownerKey = (p: P) => ownerKeyOf(opts.owner, p);
+  const nowMs = opts.nowMs;
 
   const rowToChat = (r: any): ChatRecord => ({
     id: r.id,
@@ -190,20 +214,32 @@ export function makeStorageAdapter<P>(
         leaseOwner: null,
         fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
       })
-      .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active"), lt(liveUntil, now)));
+      .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active"), lt(liveUntil, nowMs)));
   async function supersedeStale(exec: any, chatId: string, now: number): Promise<void> {
     await supersedeStaleQuery(chatId, now, exec);
   }
 
-  /** One message upsert (seq computed in-statement) as a query, for batching. */
-  const messageInsert = (chatId: string, m: AppMessage, exec: any = db) =>
-    exec
+  /** Whether `fence`'s run still holds its lease — evaluated inside the write it guards. */
+  const fenceHolds = (fence: RunFence) =>
+    sql`exists (select 1 from ${s.runs} where ${s.runs.id} = ${fence.runId} and ${s.runs.leaseOwner} = ${fence.owner} and ${s.runs.fencingToken} = ${fence.fencingToken}${opts.lockFencedRun ? sql` for share` : sql``})`;
+
+  /**
+   * One message upsert (seq computed in-statement) as a query, for batching.
+   *
+   * With `fence`, the lease check is part of the same statement, so nothing can
+   * slip between check and write: a refused insert computes a NULL seq and
+   * fails the NOT NULL constraint (rolling back its batch or transaction), and
+   * a refused update of an existing message matches no row.
+   */
+  const messageInsert = (chatId: string, m: AppMessage, exec: any = db, fence?: RunFence) => {
+    const nextSeq = sql`(select coalesce(max(${s.messages.seq}), -1) + 1 from ${s.messages} where ${s.messages.chatId} = ${chatId})`;
+    return exec
       .insert(s.messages)
       .values({
         id: m.id,
         chatId,
         runId: null,
-        seq: sql`(select coalesce(max(${s.messages.seq}), -1) + 1 from ${s.messages} where ${s.messages.chatId} = ${chatId})` as unknown as number,
+        seq: (fence ? sql`case when ${fenceHolds(fence)} then ${nextSeq} end` : nextSeq) as unknown as number,
         role: m.role,
         parts: m.parts,
         metadata: m.metadata ?? null,
@@ -215,7 +251,9 @@ export function makeStorageAdapter<P>(
       .onConflictDoUpdate({
         target: [s.messages.chatId, s.messages.id],
         set: { parts: m.parts, metadata: m.metadata ?? null },
+        ...(fence ? { setWhere: fenceHolds(fence) } : {}),
       });
+  };
 
   /**
    * Insert a run row. A LIVE active run in the chat trips the partial unique
@@ -234,14 +272,13 @@ export function makeStorageAdapter<P>(
   }
 
   /** The busy refusal with the live run's remaining time, computed on the main connection. */
-  async function busyError(chatId: string, now: number): Promise<ChatBusyError> {
+  async function busyError(chatId: string): Promise<ChatBusyError> {
     const live: any[] = await db
-      .select({ until: liveUntil })
+      .select({ left: sql`${liveUntil} - ${nowMs}` })
       .from(s.runs)
       .where(and(eq(s.runs.chatId, chatId), eq(s.runs.status, "active")))
       .limit(1);
-    const until = live[0] ? Number(live[0].until) : now;
-    return new ChatBusyError(chatId, Math.max(1, until - now));
+    return new ChatBusyError(chatId, Math.max(1, live[0] ? Number(live[0].left) : 1));
   }
 
   /** `insertRun` for the non-transactional entry points: turn the placeholder into the real refusal. */
@@ -250,7 +287,7 @@ export function makeStorageAdapter<P>(
     try {
       return await insertRun(db, row);
     } catch (error) {
-      if (error instanceof ChatBusyError) throw await busyError(chatId, now);
+      if (error instanceof ChatBusyError) throw await busyError(chatId);
       throw error;
     }
   }
@@ -282,9 +319,9 @@ export function makeStorageAdapter<P>(
     ...(input.lease
       ? {
           leaseOwner: input.lease.owner,
-          leaseExpiresAt: now + input.lease.ttlMs,
+          leaseExpiresAt: sql`${nowMs} + ${input.lease.ttlMs}`,
           fencingToken: 1,
-          heartbeatAt: now,
+          heartbeatAt: nowMs,
           attempt: 1,
         }
       : {}),
@@ -295,6 +332,42 @@ export function makeStorageAdapter<P>(
     for (const m of msgs) await messageInsert(chatId, m, exec);
     // Chat activity: keep `updatedAt` fresh so `listChats` orders by it.
     await exec.update(s.chats).set({ updatedAt: Date.now() }).where(eq(s.chats.id, chatId));
+  }
+
+  /**
+   * The fenced append, all-or-nothing in every driver: each statement checks
+   * the fence itself, and they run as one batch / transaction so a refusal
+   * part-way leaves nothing behind. Resolves whether every message landed.
+   */
+  async function appendFenced(chatId: string, msgs: AppMessage[], fence: RunFence): Promise<boolean> {
+    const touch = (exec: any) =>
+      exec.update(s.chats).set({ updatedAt: Date.now() }).where(and(eq(s.chats.id, chatId), fenceHolds(fence)));
+    const upserts = (exec: any) => msgs.map((m) => messageInsert(chatId, m, exec, fence).returning({ id: s.messages.id }));
+    try {
+      let landed: any[][];
+      if (opts.batch) {
+        landed = (await opts.batch([...upserts(db), touch(db)])).slice(0, msgs.length) as any[][];
+      } else if (opts.syncTx) {
+        landed = opts.syncTx((tx) => {
+          const rows = upserts(tx).map((q: any) => q.all());
+          touch(tx).run();
+          return rows;
+        });
+      } else {
+        landed = await opts.withTx(async (tx) => {
+          const rows: any[][] = [];
+          for (const q of upserts(tx)) rows.push(await q);
+          await touch(tx);
+          return rows;
+        });
+      }
+      // A refused update of an existing message matches no row instead of
+      // failing; the fence is read once per transaction, so it refuses all.
+      return landed.every((rows) => rows.length > 0);
+    } catch (error) {
+      if (isNotNullViolation(error)) return false;
+      throw error;
+    }
   }
 
   return {
@@ -375,7 +448,8 @@ export function makeStorageAdapter<P>(
       );
     },
 
-    async appendMessages(chatId, msgs) {
+    async appendMessages(chatId, msgs, fence) {
+      if (fence) return msgs.length === 0 || appendFenced(chatId, msgs, fence);
       if (msgs.length === 0) return;
       // The next seq is computed INSIDE each INSERT (a single statement), so
       // two concurrent appenders can't both read the same max(seq) and then
@@ -428,7 +502,7 @@ export function makeStorageAdapter<P>(
         return rowToRun(inserted);
       } catch (error) {
         if (error instanceof ChatBusyError || isUniqueViolation(error)) {
-          throw await busyError(input.chatId, now);
+          throw await busyError(input.chatId);
         }
         throw error;
       }
@@ -456,10 +530,9 @@ export function makeStorageAdapter<P>(
     },
 
     async heartbeatRun(id, owner, ttlMs, fencingToken) {
-      const now = Date.now();
       const updated = await db
         .update(s.runs)
-        .set({ leaseExpiresAt: now + ttlMs, heartbeatAt: now })
+        .set({ leaseExpiresAt: sql`${nowMs} + ${ttlMs}`, heartbeatAt: nowMs })
         .where(
           and(
             eq(s.runs.id, id),
@@ -475,7 +548,6 @@ export function makeStorageAdapter<P>(
     },
 
     async reclaimRun(id, owner, ttlMs) {
-      const now = Date.now();
       let updated: any[];
       try {
         updated = await db
@@ -483,8 +555,8 @@ export function makeStorageAdapter<P>(
         .set({
           status: "active" as RunStatus,
           leaseOwner: owner,
-          leaseExpiresAt: now + ttlMs,
-          heartbeatAt: now,
+          leaseExpiresAt: sql`${nowMs} + ${ttlMs}`,
+          heartbeatAt: nowMs,
           error: null,
           endedAt: null,
           fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
@@ -499,7 +571,7 @@ export function makeStorageAdapter<P>(
             // be seizable; a reaped run keeps its (expired) leaseExpiresAt
             // even though the reaper cleared leaseOwner, so it still matches.
             isNotNull(s.runs.leaseExpiresAt),
-            lt(s.runs.leaseExpiresAt, now),
+            lt(s.runs.leaseExpiresAt, nowMs),
           ),
         )
         .returning();
@@ -534,19 +606,21 @@ export function makeStorageAdapter<P>(
     },
 
     async reapExpiredRuns(now, opts) {
+      // `now` only to simulate time (tests); otherwise the database's clock.
+      const at = now ?? nowMs;
       const reaped = await db
         .update(s.runs)
         .set({
           status: "errored" as RunStatus,
           error: opts?.error ?? "lease expired",
-          endedAt: now,
+          endedAt: at,
           leaseOwner: null,
           fencingToken: sql`${s.runs.fencingToken} + 1`,
         })
         .where(
           and(
             eq(s.runs.status, "active"),
-            lt(s.runs.leaseExpiresAt, now),
+            lt(s.runs.leaseExpiresAt, at),
           ),
         )
         .returning();

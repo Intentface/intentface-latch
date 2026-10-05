@@ -40,12 +40,13 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "smoke": "tsx src/smoke.ts",
     "smoke:pg": "tsx src/smoke.pg.ts",
     "smoke:agents": "tsx src/agent-store.smoke.ts",
     "smoke:agent-versions": "tsx src/agent-versions.smoke.ts",
-    "smoke:agent-versions:pg": "tsx src/agent-versions.smoke.pg.ts"
+    "smoke:agent-versions:pg": "tsx src/agent-versions.smoke.pg.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@intentface/latch-agent-builder": "workspace:^",
@@ -61,7 +62,8 @@
     "@electric-sql/pglite": "^0.2.0",
     "ai": "^7.0.106",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4"
   },
   "repository": {
     "type": "git",

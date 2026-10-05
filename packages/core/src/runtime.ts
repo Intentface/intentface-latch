@@ -53,6 +53,7 @@ import {
 import type {
   ChatRecord,
   RunLease,
+  RunFence,
   RunRecord,
   RunSettings,
   RunStatus,
@@ -2304,14 +2305,20 @@ export function createRuntime<P, RC = unknown>(
     // at most the write in flight and the one queued behind it. A failed write
     // logs and releases the chain — the next checkpoint still runs.
     let checkpoints: Promise<void> = Promise.resolve();
+    // Message writes of a leased turn carry the lease, so the adapter refuses
+    // them atomically once the run was reaped and re-claimed elsewhere.
+    const fence: RunFence | undefined = lease ? { runId: run.id, ...lease } : undefined;
     const checkpoint = (message: AppMessage) => {
       if (!dur.enabled || abort.signal.aborted) return;
       checkpoints = checkpoints
-        .then(() => {
+        .then(async () => {
           // Re-checked at write time: the lease may have gone while this
           // checkpoint waited behind the previous one.
           if (abort.signal.aborted) return;
-          return storage.appendMessages(resolvedChatId, [message]);
+          const landed = await storage.appendMessages(resolvedChatId, [message], fence);
+          // Refused by the fence: another worker owns the run now. Stop like
+          // a lost heartbeat does, before this turn spends another step.
+          if (landed === false) abort.abort(new Error("lease lost"));
         })
         .catch((e) => console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e));
     };
@@ -2601,17 +2608,12 @@ export function createRuntime<P, RC = unknown>(
       // (with any completed tool results) so a crash mid-turn doesn't repeat
       // them on resume. Durable turns only — keeps T1 write counts unchanged.
       //
-      // Guarded on the turn's abort signal: `appendMessages` has no lease
-      // fence (only `updateRun` does), so once this worker has lost the lease
-      // a reclaimed copy of the run may be replaying into this same chat —
-      // an un-guarded checkpoint from the zombie would interleave with it,
-      // and every later resume replays the polluted history.
-      //
-      // Best-effort, not a fence: the lease can be lost between this check and
-      // the write committing. Closing that window needs a lease/fencing-token
-      // check inside the storage write itself — an adapter interface change,
-      // tracked as a follow-up. With the heartbeat now aborting within one TTL
-      // of losing contact, the exposure is bounded to ~leaseTtlMs.
+      // Fenced: once this worker has lost the lease, a reclaimed copy of the
+      // run may be replaying into this same chat — a checkpoint from the
+      // zombie would interleave with it, and every later resume replays the
+      // polluted history. The write carries the lease (`fence`) and the
+      // adapter checks it atomically with the insert; the abort-signal check
+      // only saves a doomed write.
       onStepEnd:
         dur.enabled || hooks.has("step_end")
           ? ({ responseMessage }: { responseMessage: AppMessage }) => {
@@ -2747,7 +2749,9 @@ export function createRuntime<P, RC = unknown>(
           lease,
         );
         if (applied) {
-          await storage.appendMessages(resolvedChatId, messages);
+          // Fenced too: the run row and the message are separate writes, and
+          // the lease can be lost between them.
+          await storage.appendMessages(resolvedChatId, messages, fence);
           await storage.recordUsage(principal, {
             runId: run.id,
             model: modelId,
@@ -2800,7 +2804,7 @@ export function createRuntime<P, RC = unknown>(
   }
 
   async function reapTick(opts?: { now?: number; error?: string }) {
-    const reaped = await storage.reapExpiredRuns(opts?.now ?? Date.now(), {
+    const reaped = await storage.reapExpiredRuns(opts?.now, {
       error: opts?.error,
     });
     return { reaped };
