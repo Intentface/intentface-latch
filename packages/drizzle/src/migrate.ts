@@ -151,6 +151,7 @@ const ALTERS = [
   `ALTER TABLE latch_agents ADD COLUMN attached_evals TEXT`,
   `ALTER TABLE latch_agents ADD COLUMN published_version INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN agent_version INTEGER`,
+  `ALTER TABLE latch_runs ADD COLUMN settings TEXT`,
   `ALTER TABLE latch_agent_versions ADD COLUMN changed_fields TEXT`,
   `ALTER TABLE latch_agent_versions ADD COLUMN change_message TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.

@@ -146,6 +146,7 @@ const ALTERS = [
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS attached_evals JSONB`,
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS published_version INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS agent_version INTEGER`,
+  `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS settings JSONB`,
   `ALTER TABLE latch_agent_versions ADD COLUMN IF NOT EXISTS changed_fields JSONB`,
   `ALTER TABLE latch_agent_versions ADD COLUMN IF NOT EXISTS change_message TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.

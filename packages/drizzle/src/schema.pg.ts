@@ -84,6 +84,8 @@ export const runs = pgTable(
     /** The agent-record version (`latch_agent_versions.version`) this turn ran.
      * NULL for code-declared agents, which have no stored record. */
     agentVersion: integer("agent_version"),
+    /** How the turn was asked to run (RunRecord.settings), so recovery resumes it the same way. */
+    settings: jsonb("settings"),
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }).notNull(),
     endedAt: bigint("ended_at", { mode: "number" }),

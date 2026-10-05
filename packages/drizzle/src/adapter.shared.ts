@@ -18,6 +18,7 @@ import {
   type AppMessage,
   type ChatRecord,
   type RunRecord,
+  type RunSettings,
   type RunStatus,
   type ScheduleRecord,
   type StorageAdapter,
@@ -136,6 +137,7 @@ export function makeStorageAdapter<P>(
     kind: r.kind,
     toolsHash: r.toolsHash,
     agentVersion: r.agentVersion,
+    settings: r.settings ?? null,
     error: r.error,
     startedAt: r.startedAt,
     endedAt: r.endedAt,
@@ -260,6 +262,7 @@ export function makeStorageAdapter<P>(
       agent: string;
       kind?: string;
       agentVersion?: number | null;
+      settings?: RunSettings | null;
       lease?: { owner: string; ttlMs: number };
     },
     now: number,
@@ -273,6 +276,8 @@ export function makeStorageAdapter<P>(
     // Stamped at OPEN, so a run that errors or crashes still says which agent
     // version it ran — the terminal update it never reaches cannot record it.
     agentVersion: input.agentVersion ?? null,
+    // Also stamped at open: recovery needs it most when the run never settled.
+    settings: input.settings ?? null,
     startedAt: now,
     ...(input.lease
       ? {
@@ -442,6 +447,7 @@ export function makeStorageAdapter<P>(
           chatId: input.chatId,
           agent: input.agent,
           agentVersion: input.agentVersion,
+          settings: input.settings,
           lease: { owner: input.owner, ttlMs: input.ttlMs },
         },
         now,

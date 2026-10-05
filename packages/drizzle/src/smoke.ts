@@ -30,6 +30,15 @@ async function main() {
   if ((await store.getChat(me, sub.id))?.parentAgent !== "support") throw new Error("parentAgent did not round-trip");
   if ((await store.getChat(me, chat.id))?.parentAgent !== undefined) throw new Error("a top-level chat has no parentAgent");
 
+  // A run remembers how it was asked to run, so recovery resumes it the same way.
+  const unattended = await store.createRun(me, { chatId: sub.id, agent: "writer", settings: { autoApprove: true, blockGated: "simulate-success", memory: false } });
+  const back = await store.getRun(unattended.id);
+  // Key order isn't preserved (Postgres jsonb reorders); the values are what count.
+  const st = back?.settings;
+  if (st?.autoApprove !== true || st.blockGated !== "simulate-success" || st.memory !== false || Object.keys(st).length !== 3)
+    throw new Error(`run settings did not round-trip: ${JSON.stringify(st)}`);
+  await store.updateRun(unattended.id, { status: "completed", endedAt: Date.now() });
+
   const userMsg: AppMessage = {
     id: "msg_1",
     role: "user",

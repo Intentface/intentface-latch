@@ -58,6 +58,7 @@ export function memoryStorage<P = { orgId: string }>() {
         status: "active",
         startedAt: Date.now(),
         kind: input.kind,
+        ...(input.settings ? { settings: input.settings } : {}),
       } as RunRecord;
       runs.set(run.id, run);
       return run;
