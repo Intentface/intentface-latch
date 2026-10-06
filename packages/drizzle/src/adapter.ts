@@ -1,4 +1,5 @@
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 import type { StorageAdapter } from "@intentface/latch-core";
 import * as schema from "./schema.js";
 import { makeStorageAdapter } from "./adapter.shared.js";
@@ -25,6 +26,9 @@ export function createSqliteAdapter<P>(
 ): StorageAdapter<P> {
   return makeStorageAdapter<P>(db, schema, {
     owner: opts.owner,
+    // Lease times from the database's clock. `julianday` rather than
+    // `unixepoch('subsec')` so older SQLite builds work too.
+    nowMs: sql`cast(round((julianday('now') - 2440587.5) * 86400000) as integer)`,
     // No interactive transaction: this adapter also serves synchronous drivers
     // (better-sqlite3), whose transaction API rejects an async callback — and
     // libsql opens a transaction on a NEW connection, which for an in-memory

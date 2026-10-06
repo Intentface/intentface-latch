@@ -36,6 +36,11 @@
       "development": "./src/harness/index.ts",
       "types": "./dist/harness/index.d.ts",
       "import": "./dist/harness/index.js"
+    },
+    "./testing": {
+      "development": "./src/testing/index.ts",
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
     }
   },
   "files": [
@@ -61,6 +66,10 @@
       "./harness": {
         "types": "./dist/harness/index.d.ts",
         "import": "./dist/harness/index.js"
+      },
+      "./testing": {
+        "types": "./dist/testing/index.d.ts",
+        "import": "./dist/testing/index.js"
       }
     }
   },

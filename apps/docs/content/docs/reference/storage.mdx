@@ -63,6 +63,12 @@ Get this wrong and you get double-fired schedules and two workers streaming into
 
 The scenario: a worker's lease expires (it was slow, not dead), the reaper reassigns the run, and then the original worker wakes up and tries to write. Without fencing it overwrites newer state. This is why the token exists and why it must be checked in the `WHERE` clause, not in application code.
 
+Message writes are fenced too. A durable turn passes `appendMessages(chatId, messages, fence)`, where `fence` is `{ runId, owner, fencingToken }`. The write lands only while that run still holds the lease, checked **in the same statement or transaction as the write**: a check followed by a separate insert leaves a window in which a reclaim can slip between the two. A refused write persists nothing and returns `false`, and the runtime then stops the turn as if its heartbeat had failed. Without `fence` the write is unconditional, as before. The shipped adapters evaluate the lease inside each upsert, and on Postgres also lock the run row `FOR SHARE`, so a reclaim waits for an in-flight write to commit.
+
+### Lease times come from one clock
+
+Every node must agree when a lease expires. If each app server stamped and compared leases with its own clock, a server running 20 seconds fast would reap runs that their owner is still renewing. The shipped adapters take every lease time — claim, heartbeat, reclaim, supersede, reap — from the **database's** clock (`clock_timestamp()` on Postgres, `julianday('now')` on SQLite). `reapExpiredRuns(now?)` uses the adapter's clock when `now` is omitted, which is how the runtime calls it; pass `now` only to simulate time in a test.
+
 ### A schedule consume reports whether it applied
 
 `claimDueSchedules` stamps a lease that is never renewed, so a slow pass can lose its claim before it consumes the occurrence — to another node, or to a later `runDue` pass on the same instance (same owner id). `completeSchedule` is the write that settles which claimant fires:
@@ -117,6 +123,23 @@ const storage = createSqliteAdapter(db, { owner });
 
 The adapter takes the db, not a connection string — your app owns the connection and the pool. Tables are prefixed `latch_*`, and the package ships the migrations; consume those rather than hand-declaring the schema in your own migration folder.
 
-<Callout title="A concurrency test is worth more than a unit test here">
-The failure modes above are invisible to single-threaded tests. `apps/example/src/durability.smoke.ts` and `resume.smoke.ts` exercise claim, heartbeat, reap and resume against a real database; point them at a new adapter before trusting it.
-</Callout>
+## Testing your own adapter
+
+The failure modes above are invisible in normal use: an adapter that skips a fence or races a claim works until two nodes meet the same run. `@intentface/latch-core/testing` packages the guarantees as runnable checks: tenant scoping, message ordering, one active run per chat, racing claims and reclaims, heartbeats, the reaper, and fenced message writes. It runs under Vitest, Jest or `node:test`:
+
+```ts
+import { describe, it } from "vitest";
+import { registerStorageConformance } from "@intentface/latch-core/testing";
+
+registerStorageConformance({ describe, it }, "my adapter", async () => {
+  const db = await openTestDatabase();
+  return {
+    store: createMyAdapter(db, { owner: (p) => [p.org] }),
+    // Two principals your adapter maps to different owners.
+    principals: [{ org: "a" }, { org: "b" }],
+    close: () => db.close(),
+  };
+});
+```
+
+Each check opens a fresh target. The shipped SQLite and Postgres adapters run the same suite in CI.

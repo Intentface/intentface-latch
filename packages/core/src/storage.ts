@@ -196,6 +196,14 @@ export interface RunLease {
   fencingToken: number;
 }
 
+/**
+ * A {@link RunLease} on a named run: what a durable turn passes to
+ * `appendMessages` so its message writes are fenced like its run updates.
+ */
+export interface RunFence extends RunLease {
+  runId: string;
+}
+
 export interface UsageRecord {
   id: string;
   /** Opaque ownership key (for per-tenant billing/quota rollups). */
@@ -300,8 +308,20 @@ export interface StorageAdapter<P> {
   // messages (the source of truth)
   /** Scoped read of the conversation, oldest first. */
   loadMessages(principal: P, chatId: string): Promise<AppMessage[]>;
-  /** Upsert messages by id (incremental per-step persistence is allowed). */
-  appendMessages(chatId: string, messages: AppMessage[]): Promise<void>;
+  /**
+   * Upsert messages by id (incremental per-step persistence is allowed).
+   *
+   * With `fence`, the write is part of a durable turn and must be fenced like
+   * `updateRun`'s guard: it lands only while run `fence.runId` still holds
+   * `(leaseOwner, fencingToken)`, checked atomically WITH the write — a worker
+   * whose lease was reaped and re-claimed elsewhere must not write into a chat
+   * the new owner is running. A refused write persists nothing and returns
+   * `false`. Without `fence`, the write is unconditional (return value unused).
+   *
+   * An adapter that ignores `fence` still works, but a zombie worker can then
+   * write for up to one lease TTL after losing its run.
+   */
+  appendMessages(chatId: string, messages: AppMessage[], fence?: RunFence): Promise<void | boolean>;
 
   // runs (per-turn execution record)
   /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */
@@ -405,9 +425,14 @@ export interface StorageAdapter<P> {
    * `errored`, clear the owner, and bump the fencing token (invalidating any
    * zombie holder). Returns the reaped runs. Safe to run on many nodes — each
    * row transitions once (the UPDATE is atomic per row).
+   *
+   * `now` omitted → the adapter's own clock. Lease times should come from ONE
+   * clock shared by every node (the shipped adapters use the database's), or
+   * skew between app servers lets one reap a run another is still renewing.
+   * Pass `now` only to simulate time (tests).
    */
   reapExpiredRuns(
-    now: number,
+    now?: number,
     opts?: { error?: string },
   ): Promise<RunRecord[]>;
 

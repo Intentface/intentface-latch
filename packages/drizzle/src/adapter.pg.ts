@@ -1,4 +1,5 @@
 import type { PgDatabase } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type { StorageAdapter } from "@intentface/latch-core";
 import * as schema from "./schema.pg.js";
 import { makeStorageAdapter } from "./adapter.shared.js";
@@ -15,6 +16,10 @@ export function createPostgresAdapter<P>(
 ): StorageAdapter<P> {
   return makeStorageAdapter<P>(db, schema, {
     owner: opts.owner,
+    // Lease times from the database's clock: `clock_timestamp()`, not `now()`,
+    // which is frozen at transaction start.
+    nowMs: sql`(extract(epoch from clock_timestamp()) * 1000)::bigint`,
+    lockFencedRun: true,
     // One transaction per message batch: the max(seq) reads and the inserts
     // commit (or roll back) together, so a crash mid-batch can't leave a
     // partial write and a concurrent appender can't interleave into the same
