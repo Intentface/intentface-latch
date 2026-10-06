@@ -291,10 +291,13 @@ function checks<P>(): ConformanceCheck<P>[] {
       name: "fenced message writes land for the holder and are refused for a zombie",
       async run({ store, principals: [me] }) {
         const chat = await store.createChat(me, { agent: "a" });
-        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 1 });
+        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 60_000 });
         const first = fenceOf(run, "n1");
         check((await store.appendMessages(chat.id, [msg("a1", "draft", "assistant")], first)) === true, "the holder's write lands (returns true)");
 
+        // Only now let the lease run out: the first write must not depend on
+        // whether an adapter's fence also checks expiry.
+        check(await store.heartbeatRun(run.id, "n1", 1, first.fencingToken), "the holder shortens its lease");
         await sleep(EXPIRE);
         await store.reapExpiredRuns();
         const back = (await store.reclaimRun(run.id, "n2", 60_000))!;
