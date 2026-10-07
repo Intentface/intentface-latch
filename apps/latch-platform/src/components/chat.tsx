@@ -186,12 +186,10 @@ export function Chat({
     messages: initialMessages,
     transport: new DefaultChatTransport<AppMessage>({
       api: chatApi(chatId, agent),
-      // Send new submissions as an explicit `{ message }` so the server keeps
-      // our metadata (e.g. the voice-message marker) — the default `{ messages }`
-      // body shape gets its metadata rebuilt server-side (and its parts reduced
-      // to text, which silently dropped attachments). Keep text AND file parts:
-      // the explicit path forwards them as-is, so attachments actually reach
-      // the agent.
+      // Send new submissions as an explicit `{ message }`: one message instead
+      // of the whole conversation. The server normalizes either body shape the
+      // same way — text and file parts, its own metadata plus the voice-message
+      // marker, our id when the chat doesn't hold it yet.
       prepareSendMessagesRequest: ({
         id,
         messages: all,

@@ -15,6 +15,16 @@ The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web 
 
 `resolveContext(request)` turns a request into your `Principal` (bring-your-own auth). A Hono adapter is exported from the `/hono` subpath.
 
+## Sending a message
+
+`POST /agents/:agent/:id` accepts the AI SDK `useChat` default body (`{ messages }`, of which the last is the new one), an explicit `{ message }`, or `{ text }`. The body is turned into a **user** message server-side, whatever it claims:
+
+- `text` and `file` parts are kept (so attachments reach the model); every other part type is dropped.
+- `role` is always `user`, and `metadata` is the server's (`visibility: "user"`, `createdAt`). The one client field kept is `metadata.voice` (`{ durationMs }`), which only changes how the message renders.
+- The client's message `id` is kept when it is a plain id (`[A-Za-z0-9_-]`, at most 128 characters) that the chat doesn't already hold, so your optimistic message and the stored one match; otherwise a fresh id is minted.
+
+Per-request extras that aren't message content belong in the body itself: the whole parsed body reaches `context.build` as `turnContext`.
+
 ## OAuth callback identity
 
 The connection callback is the one route that does NOT authenticate via

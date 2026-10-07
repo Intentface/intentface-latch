@@ -1,6 +1,7 @@
-import type { ApprovalDecision, AppMessage, Runtime } from "@intentface/latch-core";
+import type { ApprovalDecision, Runtime } from "@intentface/latch-core";
 import type { McpConnections } from "@intentface/latch-mcp";
 import { decodeOAuthState } from "@intentface/latch-mcp";
+import { toUserMessage } from "./user-message.js";
 
 /**
  * The mountable Latch HTTP surface — one framework-agnostic Web handler.
@@ -205,30 +206,6 @@ function segmentsUnder(pathname: string, basePath: string): string[] | null {
   if (pathname === base) return [];
   if (!pathname.startsWith(base + "/")) return null;
   return pathname.slice(base.length + 1).split("/").filter(Boolean);
-}
-
-/** Accept `{ message }`, `{ text }`, or a `useChat`-style `{ messages }` (last). */
-function toUserMessage(body: Record<string, unknown>): AppMessage {
-  const explicit = body.message as AppMessage | undefined;
-  if (explicit?.parts) return explicit;
-  let text = "";
-  if (typeof body.text === "string") {
-    text = body.text;
-  } else if (Array.isArray(body.messages)) {
-    const last = body.messages[body.messages.length - 1] as
-      | AppMessage
-      | undefined;
-    text = (last?.parts ?? [])
-      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-      .map((p) => p.text)
-      .join("");
-  }
-  return {
-    id: crypto.randomUUID(),
-    role: "user",
-    parts: [{ type: "text", text }],
-    metadata: { visibility: "user", createdAt: Date.now() },
-  };
 }
 
 /**

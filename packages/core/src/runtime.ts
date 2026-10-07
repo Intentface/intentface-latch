@@ -343,7 +343,10 @@ export interface HandleChatInput<P> {
   chatId?: string;
   /** Resolved by the caller's ContextResolver (isolation flows from this). */
   principal: P;
-  /** The incoming user message. */
+  /**
+   * The incoming user message. Stored as given, except that an id the chat
+   * already holds is replaced with a fresh one (messages upsert by id).
+   */
   message: AppMessage;
   /** Optional original request, passed to context.build. */
   request?: Request;
@@ -744,6 +747,19 @@ function runSettingsOf(o: {
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
 const generateMessageId = createIdGenerator({ prefix: "msg", separator: "_" });
+/**
+ * The message that starts a turn, with an id the chat doesn't already hold.
+ *
+ * Messages upsert by (chat, id), so a new message reusing an existing id would
+ * not be appended: it would overwrite that earlier message's parts in place —
+ * an assistant answer included — while the turn ran with both copies. A caller
+ * that reuses one (a `useChat` regenerate resends the last user message; a
+ * client can send any id it likes) gets a fresh id instead; one that doesn't
+ * keeps its own, so a client's optimistic message matches the stored one.
+ */
+function withUnusedId(message: AppMessage, prior: AppMessage[]): AppMessage {
+  return prior.some((m) => m.id === message.id) ? { ...message, id: generateMessageId() } : message;
+}
 /** Sub-thread chat ids start with `sub_` so the host can keep them out of the
  * main chat list (they're nested under the parent's spawn_agent tool calls). */
 const generateSubchatId = createIdGenerator({ prefix: "sub", separator: "_" });
@@ -2990,7 +3006,7 @@ export function createRuntime<P, RC = unknown>(
     agent: agentName,
     chatId,
     principal,
-    message,
+    message: sent,
     request,
     turnContext,
   }: HandleChatInput<P>): Promise<Response> {
@@ -3001,7 +3017,7 @@ export function createRuntime<P, RC = unknown>(
         id: chatId, // use the provided id (create-or-continue); generated if omitted
         agent: agentName,
         // Title from the first user message — for the chat list.
-        title: firstText(message)?.slice(0, 80),
+        title: firstText(sent)?.slice(0, 80),
       });
     }
     const resolvedChatId = chat.id;
@@ -3017,6 +3033,7 @@ export function createRuntime<P, RC = unknown>(
     );
 
     const prior = await storage.loadMessages(principal, resolvedChatId);
+    const message = withUnusedId(sent, prior);
 
     // A new message while the last turn is parked on an approval is itself the
     // decision: the user declined to answer and wants to steer elsewhere. Close
@@ -3918,6 +3935,7 @@ export function createRuntime<P, RC = unknown>(
       throw new Error(`Thread ${chatId} was delegated by another agent; omit threadId to start a new one.`);
     }
     const prior = await storage.loadMessages(o.principal, chatId);
+    const message = withUnusedId(o.message, prior);
     // Same rule as handleChat: a new message while the thread is parked on an
     // approval IS the decision — close the stale gate as declined (persisted)
     // and carry on. Otherwise a continued thread (`runAgent({ threadId })`,
@@ -3940,7 +3958,7 @@ export function createRuntime<P, RC = unknown>(
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
       });
-      const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
+      const opened = await openTurn(o.principal, chatId, o.agent, [message], resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
     const onProgress = o.onProgress;
@@ -3953,7 +3971,7 @@ export function createRuntime<P, RC = unknown>(
         cfg,
         run,
         lease,
-        uiMessages: [...prior, o.message],
+        uiMessages: [...prior, message],
         runtimeCtx,
         admitted,
         autoApprove: o.autoApprove,
@@ -3967,7 +3985,7 @@ export function createRuntime<P, RC = unknown>(
         trigger: o.trigger,
         // Forward progressive UI-message snapshots to the caller (spawn_agent
         // streams them into the parent turn).
-        observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
+        observeStream: onProgress ? progressObserver([message], onProgress) : undefined,
       });
     } catch (e) {
       // Setup failed after the run opened — a tool source that would not
