@@ -416,6 +416,30 @@ function runtimeOver(
 }
 
 describe("resumeRun", () => {
+  it("answers in a new, visible message when a regenerate hid the previous answer", async () => {
+    // Crashed after a regenerate hid the old answer, before the new one was written.
+    const hiddenAnswer: AppMessage = {
+      id: "m_old_answer",
+      role: "assistant",
+      parts: [{ type: "step-start" }, { type: "text", text: "the old answer" }],
+      metadata: { visibility: "internal", sendToModel: false },
+    } as AppMessage;
+    const { runtime, appended } = runtimeOver([USER, hiddenAnswer], workingModel());
+
+    const outcome = await runtime.resume("run_1");
+
+    expect(outcome?.status).toBe("completed");
+    const written = appended.flat();
+    // The hidden answer is never rewritten…
+    expect(written.find((m) => m.id === hiddenAnswer.id)).toBeUndefined();
+    // …and the recovered answer is a separate message the user can see.
+    const answer = written.find((m) => m.role === "assistant");
+    expect(answer).toBeDefined();
+    expect(answer!.id).not.toBe(hiddenAnswer.id);
+    expect(answer!.metadata?.visibility ?? "user").toBe("user");
+    expect(answer!.metadata?.sendToModel).not.toBe(false);
+  });
+
   it("settles a finished-but-unrecorded turn without calling the model", async () => {
     const history = [USER, msg("assistant", [{ type: "step-start" }, { type: "text", text: "It is 4." }])];
     const { runtime, patches, appended, calls } = runtimeOver(history, forbiddenModel());

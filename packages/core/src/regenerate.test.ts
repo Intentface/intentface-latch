@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
 import { createRuntime, resumeShapeOf } from "./runtime.js";
+import { DAY_MS, LimitExceededError, usageKey, type LimitStore, type LimitUsage } from "./limits.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
 import { isInvalidMessageError, type AppMessage } from "./message.js";
@@ -44,13 +45,37 @@ function answering() {
   return { model, prompts };
 }
 
-function setup() {
+/** Counters in memory, atomic enough for a single-threaded test. */
+function memoryLimits(): LimitStore {
+  const rows = new Map<string, LimitUsage>();
+  return {
+    async read(refs) {
+      return Object.fromEntries(refs.map((r) => [usageKey(r), rows.get(usageKey(r)) ?? { turns: 0, tokens: 0, cost: 0 }]));
+    },
+    async add(entries) {
+      const out: Record<string, LimitUsage> = {};
+      for (const e of entries) {
+        const k = usageKey(e);
+        const cur = rows.get(k) ?? { turns: 0, tokens: 0, cost: 0 };
+        const next = { turns: cur.turns + (e.usage.turns ?? 0), tokens: cur.tokens + (e.usage.tokens ?? 0), cost: cur.cost + (e.usage.cost ?? 0) };
+        rows.set(k, next);
+        out[k] = next;
+      }
+      return out;
+    },
+  };
+}
+
+function setup(opts: { maxTurns?: number } = {}) {
   const mem = memoryStorage();
   const { model, prompts } = answering();
   const rt = createRuntime<P>({
     storage: mem.storage,
     context: defineContext<P, unknown>({ build: async () => ({}) }),
     agents: { a: defineAgent({ model }) },
+    ...(opts.maxTurns
+      ? { limits: { store: memoryLimits(), limitsFor: () => [{ key: "org:org_a", windowMs: DAY_MS, max: { turns: opts.maxTurns } }] } }
+      : {}),
   });
   const send = async (message: AppMessage) => (await rt.handleChat({ agent: "a", chatId: "c", principal, message })).text();
   return { mem, rt, prompts, send };
@@ -115,6 +140,16 @@ describe("regenerate", () => {
     // The last question, changed: that would rewrite what was asked.
     await expect(send(user("u2", "something else"))).rejects.toSatisfy(isInvalidMessageError);
     expect(JSON.stringify(mem.messages.get("c"))).toBe(before);
+  });
+});
+
+describe("a regenerate that can't run", () => {
+  it("leaves the previous answer visible", async () => {
+    const { send, rt } = setup({ maxTurns: 1 });
+    await send(user("u1", "hi"));
+    // The usage limit refuses the second turn.
+    await expect(send(user("u1", "hi"))).rejects.toBeInstanceOf(LimitExceededError);
+    expect(texts(await rt.loadHistory({ chatId: "c", principal }))).toEqual(["user: hi", "assistant: answer 1"]);
   });
 });
 

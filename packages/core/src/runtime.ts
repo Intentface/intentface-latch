@@ -1226,6 +1226,19 @@ export function supersededBy(
  * What a reclaimed run's OWN history says it needs. Pure: whether the chat has
  * since moved on is `supersededBy`'s question, answered from the runs table.
  */
+/**
+ * The history to continue a run from, without a hidden tail: answers a
+ * regenerate replaced (`sendToModel: false`) after the last message the turn
+ * actually builds on. Left at the end, the AI SDK would treat such an answer
+ * as the message to continue and write the new answer into it, where it would
+ * stay hidden. The hidden answers stay stored; they're only left out here.
+ */
+function withoutHiddenTail(messages: AppMessage[]): AppMessage[] {
+  let end = messages.length;
+  while (end > 0 && messages[end - 1]!.metadata?.sendToModel === false) end--;
+  return end === messages.length ? messages : messages.slice(0, end);
+}
+
 export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   // Compaction markers are not turns, so the tail is read past them: a summary
   // appended after a reaped run's finished message must not make that message
@@ -3059,7 +3072,8 @@ export function createRuntime<P, RC = unknown>(
       { parentAgent: chat.parentAgent },
     );
 
-    if (replaced.length > 0) await storage.appendMessages(resolvedChatId, replaced);
+    // The replaced answers are hidden by the same write that opens the new turn
+    // (below), so a turn refused for a limit or a busy chat hides nothing.
     const hidden = new Set(replaced.map((m) => m.id));
     const prior = (await storage.loadMessages(principal, resolvedChatId)).filter((m) => !hidden.has(m.id));
 
@@ -3081,7 +3095,7 @@ export function createRuntime<P, RC = unknown>(
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
     // lands in history — the client retries it (with its turn reservation released).
     const { run, lease } = await withReservation(admitted, () =>
-      openTurn(principal, resolvedChatId, agentName, [userMessage], cfg.configVersion),
+      openTurn(principal, resolvedChatId, agentName, [...replaced, userMessage], cfg.configVersion),
     );
 
     return buildTurn({
@@ -3146,7 +3160,7 @@ export function createRuntime<P, RC = unknown>(
       return refuse("principal rejected: reconstructPrincipal refused the run's identity");
     }
 
-    const uiMessages = await storage.loadMessages(principal, run.chatId);
+    const uiMessages = withoutHiddenTail(await storage.loadMessages(principal, run.chatId));
 
     // What does this run actually need? A crash between the last step's
     // checkpoint and `onFinish`'s `updateRun` leaves a FINISHED turn on an
@@ -3410,7 +3424,7 @@ export function createRuntime<P, RC = unknown>(
 
     // Merge the decisions onto the persisted assistant message, then re-persist
     // only what changed. The agent continues from this updated history.
-    const messages = await storage.loadMessages(principal, chatId);
+    const messages = withoutHiddenTail(await storage.loadMessages(principal, chatId));
     // A decision only means something for the message the turn paused on —
     // the LAST one. An approval from further back (an old tab, an old Slack
     // card, a late retry after the user moved on) was already settled: the
@@ -3583,7 +3597,7 @@ export function createRuntime<P, RC = unknown>(
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
 
-    const messages = await storage.loadMessages(principal, chatId);
+    const messages = withoutHiddenTail(await storage.loadMessages(principal, chatId));
     const changed = recordToolResult(messages, toolCallId, output);
     // Unknown or already-answered call: nothing to resume. Makes a duplicate
     // submit (double-tapped button, redelivered webhook) a no-op instead of a
