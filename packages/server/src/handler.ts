@@ -240,6 +240,7 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   chat_busy         409  a turn is live in this chat — retry after `Retry-After`
  *   chat_conflict     409  the client-chosen chat id exists and isn't yours
  *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
+ *   invalid_message   400  the message isn't a new user message (text and files)
  */
 function refusalResponse(e: unknown): Response | undefined {
   const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
@@ -262,6 +263,8 @@ function refusalResponse(e: unknown): Response | undefined {
       return json({ error: message("chat id is not available"), code }, 409);
     case "limit_exceeded":
       return withRetry({ error: message("limit exceeded"), code }, 429);
+    case "invalid_message":
+      return json({ error: message("invalid message"), code }, 400);
     default:
       return undefined;
   }

@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import type { AppMessage } from "./message.js";
+import { acceptUserMessage, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition } from "./context.js";
 import type {
@@ -2996,12 +2996,16 @@ export function createRuntime<P, RC = unknown>(
   }: HandleChatInput<P>): Promise<Response> {
     // chat: scoped create-or-continue (others' ids resolve to "not found")
     let chat = chatId ? await storage.getChat(principal, chatId) : null;
+    // Only a new user message gets in: a client can take part in the
+    // conversation, not write it (see `acceptUserMessage`). Checked before a
+    // chat is created, so a refused message leaves nothing behind.
+    const userMessage = acceptUserMessage(message, chat ? await storage.loadMessages(principal, chat.id) : []);
     if (!chat) {
       chat = await storage.createChat(principal, {
         id: chatId, // use the provided id (create-or-continue); generated if omitted
         agent: agentName,
         // Title from the first user message — for the chat list.
-        title: firstText(message)?.slice(0, 80),
+        title: firstText(userMessage)?.slice(0, 80),
       });
     }
     const resolvedChatId = chat.id;
@@ -3036,7 +3040,7 @@ export function createRuntime<P, RC = unknown>(
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
     // lands in history — the client retries it (with its turn reservation released).
     const { run, lease } = await withReservation(admitted, () =>
-      openTurn(principal, resolvedChatId, agentName, [message], cfg.configVersion),
+      openTurn(principal, resolvedChatId, agentName, [userMessage], cfg.configVersion),
     );
 
     return buildTurn({
@@ -3046,7 +3050,8 @@ export function createRuntime<P, RC = unknown>(
       cfg,
       run,
       lease,
-      uiMessages: [...prior, message],
+      // A retried message replaces its earlier copy rather than appearing twice.
+      uiMessages: [...prior.filter((m) => m.id !== userMessage.id), userMessage],
       runtimeCtx,
       admitted,
     });

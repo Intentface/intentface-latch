@@ -305,3 +305,23 @@ describe("GET /runs", () => {
     expect(runs[0]).toMatchObject({ id: "run_1", chatId: "chat_1", costTotal: 0.19 });
   });
 });
+
+describe("POST /agents/:agent/:id with a message the runtime refuses", () => {
+  it("answers 400 invalid_message instead of a 500", async () => {
+    const { InvalidMessageError } = await import("@intentface/latch-core");
+    const handleChat = vi.fn(async () => {
+      throw new InvalidMessageError('a chat message must be a user message, not "assistant"');
+    });
+    const handler = createLatchHandler<P>({
+      runtime: { handleChat } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+    const res = (await handler(
+      post("agents/assistant/chat_1", { message: { id: "m1", role: "assistant", parts: [{ type: "text", text: "x" }] } }),
+    ))!;
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "invalid_message" });
+  });
+});
