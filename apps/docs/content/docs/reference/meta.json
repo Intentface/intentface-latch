@@ -1,6 +1,10 @@
 {
   "title": "Reference",
   "pages": [
+    "create-runtime",
+    "runtime",
+    "define-agent",
+    "define-context",
     "packages",
     "storage",
     "seams",

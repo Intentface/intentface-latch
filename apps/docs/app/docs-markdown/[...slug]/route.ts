@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { expandTypeTables } from "@/lib/type-tables";
 
 /**
  * Serves a doc page's raw `.mdx` as `text/plain`, so appending `.md` to any
@@ -28,7 +29,7 @@ export async function GET(
   for (const file of candidates) {
     if (!path.resolve(file).startsWith(path.resolve(base))) continue;
     try {
-      const text = await readFile(file, "utf8");
+      const text = expandTypeTables(await readFile(file, "utf8"));
       return new Response(text, {
         headers: {
           "content-type": "text/markdown; charset=utf-8",

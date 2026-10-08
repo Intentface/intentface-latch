@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { source } from "@/lib/source";
+import { expandTypeTables } from "@/lib/type-tables";
 
 /**
  * The whole documentation as one markdown file — for a model with a large
@@ -37,7 +38,7 @@ export async function GET(request: Request): Promise<Response> {
     }
     if (text === undefined) continue;
     // Drop the frontmatter block; the title is repeated as a heading with the URL.
-    const body = text.replace(/^---\n[\s\S]*?\n---\n/, "");
+    const body = expandTypeTables(text.replace(/^---\n[\s\S]*?\n---\n/, ""));
     parts.push("", "---", "", `# ${page.data.title}`, "", `Source: ${site}${page.url}`, "", body.trim(), "");
   }
   return new Response(parts.join("\n"), {

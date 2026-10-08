@@ -1,0 +1,65 @@
+---
+title: createRuntime
+description: Every option createRuntime takes, with what it does and what happens without it.
+---
+
+`createRuntime(config)` builds the runtime: the object your server calls to run chat turns, apply approvals, resume crashed runs and fire schedules. Create it once per process and reuse it.
+
+```ts
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createPostgresAdapter } from "@intentface/latch-drizzle";
+
+export const runtime = createRuntime<Principal>({
+  storage: createPostgresAdapter(db, { owner: (p) => [p.orgId, p.userId] }),
+  context: defineContext({ build: ({ principal }) => ({ orgId: principal.orgId }) }),
+  agents: {
+    support: defineAgent({ model: anthropic("claude-sonnet-4-6"), instructions: "…" }),
+  },
+});
+```
+
+Only `storage`, `context` and `agents` are required. Every other option switches a capability on; leave it out and that capability doesn't exist. Click a row to see its full type and description.
+
+## Options
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RuntimeConfig" />
+
+## durability
+
+Crash recovery. Turn it on, then call `runtime.cron()` on a timer: that is what finds and resumes interrupted runs.
+
+```ts
+createRuntime({ …, durability: { enabled: true } });
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="DurabilityConfig" />
+
+## limits
+
+Usage limits. `limitsFor` returns the limits a run counts against; each limit is a counter, a window and caps.
+
+```ts
+import { DAY_MS } from "@intentface/latch-core";
+import { createPostgresLimitStore } from "@intentface/latch-drizzle";
+
+createRuntime({
+  …,
+  limits: {
+    store: createPostgresLimitStore(db),
+    limitsFor: ({ principal }) => [
+      { key: `org:${principal.orgId}`, windowMs: 30 * DAY_MS, max: { tokens: 5_000_000 }, label: "your organization's monthly budget" },
+      { key: `user:${principal.orgId}:${principal.userId}`, windowMs: DAY_MS, max: { turns: 200 }, label: "your daily requests" },
+    ],
+  },
+});
+```
+
+<auto-type-table path="../../../../../packages/core/src/limits.ts" name="LatchLimits" />
+
+Each limit:
+
+<auto-type-table path="../../../../../packages/core/src/limits.ts" name="LimitPolicy" />
+
+<Callout title="Which caps hold under load">
+Request caps (`turns`) are counted before a run is allowed, so many requests arriving together can't all slip through. Token and cost caps are checked against usage already recorded: runs that are still going can take the total over by what they spend.
+</Callout>

@@ -1,0 +1,29 @@
+---
+title: defineContext
+description: What your tools receive on every turn, and how to build it.
+---
+
+`defineContext` builds the context for each turn from the caller's principal. What `build` returns reaches every tool as `options.context`, together with `principal`, so a tool can read data and credentials for exactly this person, and never anyone else's.
+
+```ts
+import { defineContext } from "@intentface/latch-core";
+
+const context = defineContext<Principal, { orgId: string; plan: "free" | "pro" }>({
+  build: async ({ principal }) => {
+    const org = await db.orgs.find(principal.orgId);
+    return { orgId: org.id, plan: org.plan };
+  },
+});
+
+const list_invoices = tool({
+  description: "List this organization's invoices.",
+  inputSchema: z.object({}),
+  execute: async (_input, { context }) => db.invoices.forOrg(context.orgId),
+});
+```
+
+<auto-type-table path="../../../../../packages/core/src/context.ts" name="ContextDefinition" />
+
+<Callout title="Build it from the principal, not the request">
+A resumed or scheduled run calls `build` again with no request. Anything you read from the request or `turnContext` will be missing then; anything you look up from ids on the principal will be the same.
+</Callout>

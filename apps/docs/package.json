@@ -4,15 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev --port 3100",
-    "build": "next build",
+    "dev": "node scripts/type-tables.mjs && next dev --port 3100",
+    "build": "node scripts/type-tables.mjs && next build",
     "start": "next start --port 3100",
     "postinstall": "fumadocs-mdx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "type-tables": "node scripts/type-tables.mjs"
   },
   "dependencies": {
     "fumadocs-core": "^16.10.7",
     "fumadocs-mdx": "^15.0.12",
+    "fumadocs-typescript": "^5.4.1",
     "fumadocs-ui": "^16.10.7",
     "next": "16.2.12",
     "react": "^19.2.6",

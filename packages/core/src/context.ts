@@ -53,17 +53,21 @@ export type ContextFunction<P, RuntimeContext> = (args: {
 /** @deprecated Pass a plain function to `createRuntime({ context })`; see {@link ContextFunction}. */
 export interface ContextDefinition<P, RuntimeContext> {
   /**
-   * Build the shared runtime context for a request from its principal.
+   * Builds the context for one turn from the caller's principal. Whatever it
+   * returns reaches every tool as `options.context`, together with
+   * `principal`, so tools can look up data and credentials for exactly this
+   * person.
    *
-   * `turnContext` is the per-turn request payload (e.g. the parsed POST body or
-   * a caller-supplied object) — EPHEMERAL by design. Unlike the principal it is
-   * never persisted with a run, so a resumed/cron-fired turn rebuilds context
-   * without it: derive anything durable from the principal, and treat
-   * `turnContext` as optional per-turn enrichment only.
+   * Look things up by ids on the principal rather than from `request` or
+   * `turnContext`: a resumed or scheduled run calls `build` again with no
+   * request and no `turnContext`, and must get the same context.
    */
   build: (args: {
+    /** Who the turn is for. */
     principal: P;
+    /** The incoming request. Absent for resumed and scheduled runs. */
     request?: Request;
+    /** The `turnContext` passed to `handleChat` or `runAgent`. Absent for resumed and scheduled runs. */
     turnContext?: unknown;
   }) => RuntimeContext | Promise<RuntimeContext>;
 }

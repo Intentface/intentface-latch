@@ -1,0 +1,34 @@
+---
+title: defineAgent
+description: Every option an agent takes.
+---
+
+`defineAgent` declares an agent: its model, instructions and what it may do. Pass a config object, or a function that returns one when the agent depends on who is asking.
+
+```ts
+import { defineAgent } from "@intentface/latch-core";
+
+// The same for everyone:
+const support = defineAgent({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: "You answer support questions.",
+  tools: { search_docs, create_ticket },
+  toolApproval: { create_ticket: "user-approval" },
+});
+
+// Depends on the caller: built per turn from the context.
+const assistant = defineAgent(({ context }) => ({
+  model: context.plan === "pro" ? anthropic("claude-sonnet-4-6") : anthropic("claude-haiku-4-5"),
+  instructions: `You work for ${context.orgName}.`,
+}), { title: "Assistant", description: "Answers questions about your account." });
+```
+
+## Options
+
+<auto-type-table path="../../../../../packages/core/src/agent.ts" name="AgentConfig" />
+
+## Display
+
+The second argument says how the agent appears in a picker:
+
+<auto-type-table path="../../../../../packages/core/src/agent.ts" name="AgentMeta" />
