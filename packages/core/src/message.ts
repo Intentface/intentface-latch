@@ -66,6 +66,40 @@ export function isInvalidMessageError(e: unknown): e is InvalidMessageError {
   return e instanceof InvalidMessageError || (e as { code?: unknown } | null)?.code === "invalid_message";
 }
 
+/**
+ * A part a person can send, rebuilt from its known fields: what they typed
+ * (`text`) and what they attached (`file`). Anything else on the part
+ * (`state`, `providerMetadata`, which would become options on the model call)
+ * is left behind. Null for anything that isn't a well-formed text or file part.
+ */
+function userPart(part: unknown): AppMessage["parts"][number] | null {
+  const p = part as { type?: unknown; text?: unknown; mediaType?: unknown; url?: unknown; filename?: unknown } | null;
+  if (p?.type === "text" && typeof p.text === "string") return { type: "text", text: p.text };
+  if (p?.type === "file" && typeof p.mediaType === "string" && typeof p.url === "string") {
+    return { type: "file", mediaType: p.mediaType, url: p.url, ...(typeof p.filename === "string" ? { filename: p.filename } : {}) };
+  }
+  return null;
+}
+
+const sameParts = (a: readonly unknown[], b: readonly unknown[]) =>
+  JSON.stringify(a.map(userPart)) === JSON.stringify(b.map(userPart));
+
+/**
+ * The answers a regenerate replaces: when `message` resends the chat's last
+ * user message unchanged (what `useChat`'s `regenerate()` does), every
+ * assistant message after it, marked hidden from the user and the model. Empty
+ * for anything that isn't a regenerate. The messages are kept, not deleted,
+ * so history and usage stay intact.
+ */
+export function answersReplacedBy(message: AppMessage, prior: readonly AppMessage[]): AppMessage[] {
+  const at = prior.findIndex((m) => m.id === message.id);
+  if (at === -1 || prior[at]!.role !== "user") return [];
+  const after = prior.slice(at + 1);
+  if (after.length === 0 || after.some((m) => m.role !== "assistant")) return [];
+  if (!sameParts(prior[at]!.parts, message.parts)) return [];
+  return after.map((m) => ({ ...m, metadata: { ...m.metadata, visibility: "internal" as const, sendToModel: false } }));
+}
+
 /** The parts a person can send: what they typed and what they attached. */
 const USER_PART_TYPES = new Set(["text", "file"]);
 
@@ -80,13 +114,15 @@ const USER_PART_TYPES = new Set(["text", "file"]);
  * the model trusts; a reused id overwrites a message already in the history.
  *
  * So a message is accepted only as a new user message:
- *  - role `user`, with text and file parts only;
+ *  - role `user`, with text and file parts only, each rebuilt from its known
+ *    fields;
  *  - metadata rebuilt: `visibility` is always `user`, and only `createdAt` and
  *    `voice` are kept from the client;
- *  - an id already in the chat only as a retry of the chat's last message,
- *    when that is a user message (a client resending after a dropped
- *    response). Any other existing id is someone else's message, or one of the
- *    agent's.
+ *  - an id already in the chat only as a resend of the latest exchange: a
+ *    retry of the chat's last message when that is a user message (a client
+ *    resending after a dropped response), or a regenerate (the last user
+ *    message resent unchanged, see `answersReplacedBy`). Any other existing id
+ *    is someone else's message, or one of the agent's.
  *
  * Decisions on approvals go through `applyApproval`, which takes ids only.
  * (`handleChat` also takes `useChat`'s own approval message, but reads only
@@ -99,14 +135,21 @@ export function acceptUserMessage(message: AppMessage, prior: readonly AppMessag
   }
   if (typeof message.id !== "string" || message.id.length === 0) throw new InvalidMessageError("message id is required");
   if (!Array.isArray(message.parts) || message.parts.length === 0) throw new InvalidMessageError("message has no parts");
+  const parts: AppMessage["parts"] = [];
   for (const part of message.parts) {
     const type = (part as { type?: unknown } | null)?.type;
     if (typeof type !== "string" || !USER_PART_TYPES.has(type)) {
       throw new InvalidMessageError(`a user message can only contain text and files, not "${String(type)}"`);
     }
+    const clean = userPart(part);
+    if (!clean) throw new InvalidMessageError(`a ${type} part is missing its ${type === "text" ? "text" : "mediaType or url"}`);
+    parts.push(clean);
   }
+  // An id already in the chat is only a resend of the chat's latest exchange:
+  // a retry of the last message, or a regenerate (`answersReplacedBy`).
   const existing = prior.findIndex((m) => m.id === message.id);
-  if (existing !== -1 && !(existing === prior.length - 1 && prior[existing]!.role === "user")) {
+  const retry = existing === prior.length - 1 && prior[existing]?.role === "user";
+  if (existing !== -1 && !retry && answersReplacedBy({ ...message, parts }, prior).length === 0) {
     throw new InvalidMessageError(`message id "${message.id}" is already in this chat`);
   }
   const sent = message.metadata;
@@ -115,7 +158,7 @@ export function acceptUserMessage(message: AppMessage, prior: readonly AppMessag
   return {
     id: message.id,
     role: "user",
-    parts: message.parts,
+    parts,
     metadata: {
       visibility: "user",
       ...(typeof createdAt === "number" && Number.isFinite(createdAt) ? { createdAt } : {}),

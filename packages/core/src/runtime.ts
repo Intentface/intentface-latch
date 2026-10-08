@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, InvalidMessageError, type AppMessage } from "./message.js";
+import { acceptUserMessage, answersReplacedBy, InvalidMessageError, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition } from "./context.js";
 import type {
@@ -1233,7 +1233,9 @@ export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   // regenerate against the summary). `compactChat` refuses while a gate or
   // client tool is pending, so a marker can never sit after an undecided one.
   let end = messages.length;
-  while (end > 0 && isCompactionMarker(messages[end - 1])) end--;
+  // Hidden from the model too: an answer a regenerate replaced. If the crash
+  // came after it was hidden, the turn still has to run from the user message.
+  while (end > 0 && (isCompactionMarker(messages[end - 1]) || messages[end - 1]!.metadata?.sendToModel === false)) end--;
   const turns = end === messages.length ? messages : messages.slice(0, end);
   // Checked next: a pending gate outranks the tail's shape, and its own tail
   // (narration after the gated call) would otherwise read as `loop-finished`.
@@ -3031,7 +3033,12 @@ export function createRuntime<P, RC = unknown>(
     // Only a new user message gets in: a client can take part in the
     // conversation, not write it (see `acceptUserMessage`). Checked before a
     // chat is created, so a refused message leaves nothing behind.
-    const userMessage = acceptUserMessage(message, chat ? await storage.loadMessages(principal, chat.id) : []);
+    const existing = chat ? await storage.loadMessages(principal, chat.id) : [];
+    const userMessage = acceptUserMessage(message, existing);
+    // A regenerate (`useChat`'s `regenerate()` resends the last user message):
+    // the answers it replaces are hidden from the user and the model, not
+    // deleted, before the turn runs again from that message.
+    const replaced = answersReplacedBy(userMessage, existing);
     if (!chat) {
       chat = await storage.createChat(principal, {
         id: chatId, // use the provided id (create-or-continue); generated if omitted
@@ -3052,7 +3059,9 @@ export function createRuntime<P, RC = unknown>(
       { parentAgent: chat.parentAgent },
     );
 
-    const prior = await storage.loadMessages(principal, resolvedChatId);
+    if (replaced.length > 0) await storage.appendMessages(resolvedChatId, replaced);
+    const hidden = new Set(replaced.map((m) => m.id));
+    const prior = (await storage.loadMessages(principal, resolvedChatId)).filter((m) => !hidden.has(m.id));
 
     // A new message while the last turn is parked on an approval is itself the
     // decision: the user declined to answer and wants to steer elsewhere. Close
