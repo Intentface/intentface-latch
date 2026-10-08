@@ -89,6 +89,8 @@ const USER_PART_TYPES = new Set(["text", "file"]);
  *    agent's.
  *
  * Decisions on approvals go through `applyApproval`, which takes ids only.
+ * (`handleChat` also takes `useChat`'s own approval message, but reads only
+ * the decisions from it and hands them to `applyApproval`.)
  */
 export function acceptUserMessage(message: AppMessage, prior: readonly AppMessage[]): AppMessage {
   if (!message || typeof message !== "object") throw new InvalidMessageError("message is required");
