@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, type AppMessage } from "./message.js";
+import { acceptUserMessage, InvalidMessageError, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition } from "./context.js";
 import type {
@@ -810,6 +810,28 @@ function collectPendingApprovals(messages: AppMessage[]): SubagentPending[] {
 }
 
 /** The concatenated text of a message's text parts (for a chat title). */
+/**
+ * The decisions on an assistant message `useChat` sent back after
+ * `addToolApprovalResponse`: each tool part the client marked
+ * `approval-responded`, as `{ approvalId, approved, reason }`. Nothing else in
+ * the message is read. A message carrying no decision is refused.
+ */
+function approvalDecisionsIn(message: AppMessage): ApprovalDecision[] {
+  const decisions: ApprovalDecision[] = [];
+  for (const part of (Array.isArray(message.parts) ? message.parts : []) as Array<{
+    state?: unknown;
+    approval?: { id?: unknown; approved?: unknown; reason?: unknown };
+  }>) {
+    const a = part?.approval;
+    if (part?.state !== "approval-responded" || typeof a?.id !== "string" || typeof a.approved !== "boolean") continue;
+    decisions.push({ approvalId: a.id, approved: a.approved, ...(typeof a.reason === "string" ? { reason: a.reason } : {}) });
+  }
+  if (decisions.length === 0) {
+    throw new InvalidMessageError("an assistant message is only accepted when it carries approval decisions");
+  }
+  return decisions;
+}
+
 function firstText(message: AppMessage): string | undefined {
   const text = (message.parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -2994,6 +3016,16 @@ export function createRuntime<P, RC = unknown>(
     request,
     turnContext,
   }: HandleChatInput<P>): Promise<Response> {
+    // `useChat`'s own approvals (`addToolApprovalResponse` +
+    // `sendAutomaticallyWhen`) send the paused assistant message back with the
+    // decisions on it. Only the decisions are taken from it, and they go
+    // through `applyApproval` like any other: the client's copy of the
+    // message, inputs included, is never stored or run.
+    if ((message as { role?: unknown } | null)?.role === "assistant") {
+      if (!chatId) throw new InvalidMessageError("approval decisions need the chat they belong to");
+      return applyApproval({ chatId, principal, decisions: approvalDecisionsIn(message), request, turnContext });
+    }
+
     // chat: scoped create-or-continue (others' ids resolve to "not found")
     let chat = chatId ? await storage.getChat(principal, chatId) : null;
     // Only a new user message gets in: a client can take part in the
