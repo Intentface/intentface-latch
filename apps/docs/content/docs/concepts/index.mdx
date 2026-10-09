@@ -1,0 +1,44 @@
+---
+title: Overview
+description: The parts of Latch, what happens when a message arrives, and why each part exists.
+---
+
+Latch is a handful of parts that each do one job. Here's what happens when a user sends a message, and which part does what.
+
+```text
+ Browser / Slack / cron
+        │  message
+        ▼
+ Your route ──── your login decides who is asking ──► Principal
+        │
+        ▼
+ Runtime.handleChat()
+   1. loads the conversation ...................... Storage
+   2. builds what tools receive, for this person .. Context
+   3. runs the agent: model, tools, approvals ..... Agent (+ Tools & connections)
+   4. saves every step, holds a lease on the run .. Storage
+        │
+        ▼
+ Streamed answer (AI SDK format) ──► useChat / Slack / Telegram
+```
+
+**Your route** stays yours: Latch never handles login. You turn the request into a **principal**, a small object saying who is asking.
+
+**The runtime** is the one object your code calls. It ties everything else together and guarantees the hard parts: one answer at a time per chat, crash recovery, approvals, limits.
+
+**Storage** is where conversations, runs, usage and schedules live: your own database, through an adapter.
+
+**The agent** is the model, its instructions and what it may do. **Context** is what its tools get: this customer's data, nothing else. **Tools and connections** are what it can act on: your functions, MCP servers, other services.
+
+Around those sit optional parts: the **server** if you don't want to write routes, **channels** for Slack, Telegram and WhatsApp, and **extensions** to hook into a run.
+
+<Cards>
+  <Card href="/docs/concepts/runtime" title="Runtime" description="The one object your code calls." />
+  <Card href="/docs/concepts/agents" title="Agents" description="A model, its instructions, and what it may do." />
+  <Card href="/docs/concepts/principal-context" title="Principal and context" description="Who is asking, and what tools receive." />
+  <Card href="/docs/concepts/storage" title="Storage" description="Where everything lives, in your database." />
+  <Card href="/docs/concepts/tools-connections" title="Tools and connections" description="Your functions, MCP servers, and signed-in accounts." />
+  <Card href="/docs/concepts/server" title="Server" description="Ready-made HTTP routes, if you want them." />
+  <Card href="/docs/concepts/channels" title="Channels" description="The same agent in Slack, Telegram and WhatsApp." />
+  <Card href="/docs/concepts/extensions" title="Extensions" description="Your own hooks into a run." />
+</Cards>

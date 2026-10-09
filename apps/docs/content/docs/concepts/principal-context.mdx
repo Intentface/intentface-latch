@@ -1,0 +1,48 @@
+---
+title: Principal and context
+description: Who is asking, and what the agent's tools receive. Built from your login, carried everywhere.
+---
+
+**The principal says who is asking. The context is what that person's tools receive.** Both are your own types; Latch never interprets them, it carries them everywhere.
+
+## Why they exist
+
+Every read, write and tool call in a multi-customer product needs to know whose data it's touching. That includes runs where nobody is logged in: a schedule firing at 9:00, a crashed answer resuming at 3:00. Latch carries the principal through all of them, so nothing has to be passed around by hand.
+
+## The principal
+
+A small object, built by your route from your login:
+
+```ts
+type Principal = { orgId: string; userId: string };
+
+runtime.handleChat({ agent, chatId, message, principal: { orgId: user.orgId, userId: user.id } });
+```
+
+Keep it to plain ids. It's saved with every run and schedule, so background work knows whom it's acting for. Anything that can change (names, plans, permissions) belongs in the context.
+
+## The context
+
+Built fresh on every turn from the principal, and handed to every tool:
+
+```ts
+const context = defineContext<Principal, Ctx>({
+  build: async ({ principal }) => ({
+    orders: ordersFor(principal.orgId), // already bound to this customer
+    plan: await planOf(principal.orgId),
+  }),
+});
+
+const find_order = tool({
+  description: "Find an order",
+  inputSchema: z.object({ id: z.string() }),
+  execute: async ({ id }, { context }) => (context as Ctx).orders.get(id),
+});
+```
+
+Because the context is rebuilt from ids, a scheduled or resumed run gets the same, current values, even with no request.
+
+## Go deeper
+
+- Private, shared and team conversations: [Who sees what](/docs/hard-parts/access)
+- Every option: [defineContext reference](/docs/reference/define-context)

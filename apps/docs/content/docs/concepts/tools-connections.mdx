@@ -1,0 +1,57 @@
+---
+title: Tools and connections
+description: What an agent can act on. Your own functions, MCP servers, other services, and the credentials it never sees.
+---
+
+**Tools are what an agent can act on.** Your own functions, the tools of an MCP server, or another service the user has signed in to.
+
+## Why they need more than the AI SDK's `tool()`
+
+A tool in a product acts for one customer, often with that customer's credentials. Three things have to be right: the tool reaches only that customer's data, the credential never reaches the model, and a user who hasn't signed in to a service is asked to, instead of the agent failing.
+
+## Your own tools
+
+Plain AI SDK tools. They receive the [context](/docs/concepts/principal-context), so they act for the right customer:
+
+```ts
+const refund = tool({
+  description: "Refund an order",
+  inputSchema: z.object({ orderId: z.string() }),
+  execute: async ({ orderId }, { context }) => (context as Ctx).orders.refund(orderId),
+});
+```
+
+## Connections: tools from other services
+
+Name a service on the agent, and its tools appear for each person who has access:
+
+```ts
+import { createMcpConnections, oauth } from "@intentface/latch-mcp";
+
+createRuntime({
+  …,
+  connections: createMcpConnections({
+    vault,
+    allowedHosts: ["mcp.linear.app"],
+    callbackBaseUrl: "https://app.example.com/api/latch/connections",
+    connections: { linear: { url: "https://mcp.linear.app/mcp", auth: oauth() } },
+  }),
+});
+
+defineAgent({ …, connections: ["linear"] });
+```
+
+A user who hasn't connected Linear yet sees the agent ask them to, and the conversation continues after they sign in. Their tokens are stored encrypted in the **vault** and used on their behalf; the model never sees them. Tools that change things (by the server's own description) need approval by default.
+
+## Secrets for your own tools
+
+The same vault holds API keys your tools need, per customer:
+
+```ts
+const key = await vault.resolver(context.principal, "crm_api_key");
+```
+
+## Go deeper
+
+- What signing in involves: [Connecting accounts](/docs/hard-parts/connections)
+- OpenAPI specs as tools: `@intentface/latch-openapi`

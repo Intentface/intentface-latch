@@ -1,0 +1,43 @@
+---
+title: Extensions
+description: Your own hooks into a run. Block a tool, add a line the user sees, answer a command, without changing Latch.
+---
+
+**An extension hooks into the moments of a run**: before the model starts, before a tool runs, after each step. Each hook returns what it wants to change, and Latch applies it.
+
+## Why it exists
+
+Every product ends up with a few rules of its own: this tool needs the Team plan, show the user what each answer cost, answer `/stats` without calling the model, keep an audit log. Without extensions, each one means forking the runtime or wrapping every tool. With them, each is one small file.
+
+## The smallest version
+
+```ts
+import { defineExtension } from "@intentface/latch-core";
+
+export const plans = defineExtension("plans", (ext) => {
+  // Refuse a tool. The reason reaches the model, so it can explain instead of retrying.
+  ext.on("tool_call", ({ toolName }, run) => {
+    if (toolName === "export_data" && planOf(run.principal) === "free")
+      return { block: true, reason: "Exporting needs the Team plan." };
+  });
+
+  // A slash command, answered without the model.
+  ext.registerCommand("stats", {
+    description: "Messages in this chat",
+    handler: async (_args, { messages }) => `${messages.length} messages so far.`,
+  });
+});
+
+createRuntime({ …, extensions: [plans] });     // every agent
+defineAgent({ …, extensions: [plans] });       // or just one
+```
+
+## The rules that keep them safe
+
+- **Each moment allows certain changes.** A `tool_call` hook can block a tool; it can't rewrite history. That's what keeps two extensions from fighting.
+- **What's stored stays true.** Changing what the *user sees* never changes what's saved, unless a hook is explicitly about the saved record.
+- **A broken extension doesn't break the run.** A hook that throws is reported and skipped, unless you mark the extension as critical.
+
+## Go deeper
+
+- Every moment and what it can change: [Extensions in depth](/docs/extensions)

@@ -1,0 +1,4 @@
+{
+  "title": "How it fits together",
+  "pages": ["index", "runtime", "agents", "principal-context", "storage", "tools-connections", "server", "channels", "extensions"]
+}
