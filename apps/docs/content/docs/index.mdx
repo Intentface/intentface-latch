@@ -11,30 +11,74 @@ It's a library, not a service. It runs inside your own server, on the Postgres o
 
 An agent that helps customers with their orders, and asks before refunding:
 
-<Tabs items={["Server", "Chat route", "Chat UI"]}>
+<Tabs items={["Server", "Tools", "Chat route", "Chat UI"]}>
 <Tab value="Server">
 
 ```ts title="lib/latch.ts"
 import { anthropic } from "@ai-sdk/anthropic";
-import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createPostgresAdapter } from "@intentface/latch-drizzle";
+import { context, find_order, refund } from "./tools";
+
+export type Principal = { orgId: string; userId: string };
 
 export const runtime = createRuntime<Principal>({
   // Every conversation belongs to one person in one organization.
-  storage: createPostgresAdapter(db, { owner: (p) => [p.orgId, p.userId] }),
-  // What tools receive: this customer's data, and nobody else's.
-  context: defineContext({
-    build: ({ principal }) => ({ orders: ordersFor(principal.orgId) }),
+  storage: createPostgresAdapter(db, {
+    owner: (p) => [p.orgId, p.userId],
   }),
+  // What tools receive on each turn (see the Tools tab).
+  context,
   agents: {
     support: defineAgent({
       model: anthropic("claude-sonnet-4-6"),
       instructions: "You help customers with their orders.",
       tools: { find_order, refund },
-      toolApproval: { refund: "user-approval" }, // a person clicks Approve first
+      // A person clicks Approve before a refund runs.
+      toolApproval: { refund: "user-approval" },
     }),
   },
-  durability: { enabled: true }, // a crashed answer is finished by another server
+  // A crashed answer is finished by another server.
+  durability: { enabled: true },
+});
+```
+
+</Tab>
+<Tab value="Tools">
+
+```ts title="lib/tools.ts"
+import { defineContext } from "@intentface/latch-core";
+import { tool } from "ai";
+import { z } from "zod";
+import type { Principal } from "./latch";
+
+// Your own data access, bound to one organization. A tool gets this
+// object, never an org id it could change, so it can't reach another
+// customer's orders.
+const ordersFor = (orgId: string) => ({
+  get: (orderId: string) => db.orders.findOne({ orgId, orderId }),
+  refund: (orderId: string) => payments.refund({ orgId, orderId }),
+});
+
+type Ctx = { orders: ReturnType<typeof ordersFor> };
+
+// Built at the start of every turn, from the principal your route passed.
+export const context = defineContext<Principal, Ctx>({
+  build: ({ principal }) => ({ orders: ordersFor(principal.orgId) }),
+});
+
+export const find_order = tool({
+  description: "Look up an order",
+  inputSchema: z.object({ orderId: z.string() }),
+  execute: async ({ orderId }, { context }) =>
+    (context as Ctx).orders.get(orderId),
+});
+
+export const refund = tool({
+  description: "Refund an order",
+  inputSchema: z.object({ orderId: z.string() }),
+  execute: async ({ orderId }, { context }) =>
+    (context as Ctx).orders.refund(orderId),
 });
 ```
 
