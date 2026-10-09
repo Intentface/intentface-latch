@@ -69,17 +69,41 @@ export function isInvalidMessageError(e: unknown): e is InvalidMessageError {
 
 /**
  * A part a person can send, rebuilt from its known fields: what they typed
- * (`text`) and what they attached (`file`). Anything else on the part
- * (`state`, `providerMetadata`, which would become options on the model call)
- * is left behind. Null for anything that isn't a well-formed text or file part.
+ * (`text`) and what they attached (`file`, in every form the AI SDK accepts:
+ * a hosted or data URL, and a `providerReference` from the SDK's `uploadFile`).
+ * Anything else on the part is left behind: `state`, and `providerMetadata`,
+ * which would become options on the model call. Null for anything that isn't a
+ * well-formed text or file part.
  */
 function userPart(part: unknown): AppMessage["parts"][number] | null {
-  const p = part as { type?: unknown; text?: unknown; mediaType?: unknown; url?: unknown; filename?: unknown } | null;
+  const p = part as {
+    type?: unknown;
+    text?: unknown;
+    mediaType?: unknown;
+    url?: unknown;
+    filename?: unknown;
+    providerReference?: unknown;
+  } | null;
   if (p?.type === "text" && typeof p.text === "string") return { type: "text", text: p.text };
   if (p?.type === "file" && typeof p.mediaType === "string" && typeof p.url === "string") {
-    return { type: "file", mediaType: p.mediaType, url: p.url, ...(typeof p.filename === "string" ? { filename: p.filename } : {}) };
+    const ref = providerReferenceOf(p.providerReference);
+    return {
+      type: "file",
+      mediaType: p.mediaType,
+      url: p.url,
+      ...(typeof p.filename === "string" ? { filename: p.filename } : {}),
+      ...(ref ? { providerReference: ref } : {}),
+    };
   }
   return null;
+}
+
+/** A `providerReference` as the SDK defines it: provider name → file id, all strings. */
+function providerReferenceOf(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0 || entries.some(([k, v]) => k === "type" || typeof v !== "string")) return undefined;
+  return Object.fromEntries(entries) as Record<string, string>;
 }
 
 const sameParts = (a: readonly unknown[], b: readonly unknown[]) =>

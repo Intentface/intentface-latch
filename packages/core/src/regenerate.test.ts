@@ -102,6 +102,18 @@ describe("parts a client sends", () => {
     ]);
   });
 
+  it("keep a provider file id from the SDK's uploadFile", async () => {
+    const { send, mem } = setup();
+    await send({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "file", mediaType: "application/pdf", url: "https://example.com/r.pdf", providerReference: { anthropic: "file_011C" } }],
+    } as unknown as AppMessage);
+    expect(mem.messages.get("c")![0]!.parts).toEqual([
+      { type: "file", mediaType: "application/pdf", url: "https://example.com/r.pdf", providerReference: { anthropic: "file_011C" } },
+    ]);
+  });
+
   it("are refused when a text or file part is missing what makes it one", async () => {
     const { send } = setup();
     await expect(send({ id: "u1", role: "user", parts: [{ type: "file", url: "x" }] } as unknown as AppMessage)).rejects.toSatisfy(isInvalidMessageError);
