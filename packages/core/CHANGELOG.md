@@ -1,5 +1,26 @@
 # @intentface/latch-core
 
+## 0.16.0
+
+### Minor Changes
+
+- a8e7b0d: Safer file handling, ahead of the attachment store (#179).
+  
+  - **Downloading file URLs for the model is bounded, and refused where it can't be checked.** When a model can't fetch a file part's URL itself, the server downloads it. On Node this still uses the AI SDK's download, which checks the URL, every redirect and the address actually connected to. Latch now caps each file at 50 MB (the SDK allowed 2 GiB) and 60 seconds, redirects and body included. On runtimes where the SDK can only check the URL text (Bun, Deno, edge, workerd), Latch refuses such downloads instead of risking a request to a private address. Send the file inline there, or use a model that fetches URLs itself. URLs the model fetches itself are unaffected. This applies to chat turns and to compaction.
+  - **Files sent inline are capped.** A user message's inline files (`data:` URLs, in any letter case, how `useChat` sends attachments by default) may total at most `maxInlineFileBytes` (a new runtime option, default 20 MB). A message over that is refused with `InvalidMessageError` (HTTP 400) before anything is stored. Files sent by URL are not counted.
+  
+  **Upgrading:** if your users send more than 20 MB of files inline in one message, raise `maxInlineFileBytes`. On Bun, Deno or edge runtimes, file URLs a model can't fetch itself now fail instead of being downloaded unchecked.
+
+### Patch Changes
+
+- d655b0c: Stock `useChat` clients work fully with the chat route.
+  
+  - **Attachments and message ids survive `useChat`'s default body.** With the default transport (`{ messages }`), the server used to rebuild the newest message as text only, under a new id: images and files never reached the model and disappeared from the chat. The newest message now goes to `handleChat` as sent, which keeps its id and its files (and `useChat`'s approval answers).
+  - **The last question can be regenerated or edited.** `regenerate()` resends the last question unchanged; `sendMessage({ messageId })` resends it edited. Either way, what it replaces (the answers after it, and an edit's earlier wording) is hidden from the user and the model but stays stored, and the agent answers again. The edited question keeps its id, so it can be edited again. Since 0.15.0 both were refused with 400. Crash recovery and approvals never continue a hidden answer, a refused turn (a limit, a busy chat) hides nothing, and memory extraction skips hidden messages.
+  - **An earlier question is refused with 409 `rewind_not_supported`** (`RewindNotSupportedError`) instead of a generic 400. Changing it in place would hide everything after it, including what the agent did since. Fork the chat at that question instead.
+  - **User message parts are rebuilt from their known fields:** text keeps `text`; a file keeps `mediaType`, `url`, `filename` and a `providerReference` (from the SDK's `uploadFile`). Other fields are dropped, such as `providerMetadata`, which would become options on the model call. A text or file part missing its required fields is refused.
+- @intentface/latch-net@0.16.0
+
 ## 0.15.0
 
 ### Minor Changes

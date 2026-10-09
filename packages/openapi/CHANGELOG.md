@@ -1,5 +1,14 @@
 # @intentface/latch-openapi
 
+## 0.16.0
+
+### Patch Changes
+
+- Updated dependencies [a8e7b0d]
+- Updated dependencies [d655b0c]
+  - @intentface/latch-core@0.16.0
+  - @intentface/latch-net@0.16.0
+
 ## 0.15.0
 
 ### Patch Changes
