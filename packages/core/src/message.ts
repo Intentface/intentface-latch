@@ -179,6 +179,7 @@ const USER_PART_TYPES = new Set(["text", "file"]);
  * So a message is accepted only as a new user message:
  *  - role `user`, with text and file parts only, each rebuilt from its known
  *    fields;
+ *  - files sent inline (`data:` URLs) total at most `maxInlineFileBytes`;
  *  - metadata rebuilt: `visibility` is always `user`, and only `createdAt` and
  *    `voice` are kept from the client;
  *  - an id already in the chat only as a resend of the latest exchange: a
@@ -192,7 +193,31 @@ const USER_PART_TYPES = new Set(["text", "file"]);
  * (`handleChat` also takes `useChat`'s own approval message, but reads only
  * the decisions from it and hands them to `applyApproval`.)
  */
-export function acceptUserMessage(message: AppMessage, prior: readonly AppMessage[]): AppMessage {
+/** Default cap on files sent inline (as `data:` URLs) in one message: 20 MB. */
+export const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
+
+/** The decoded size of a `data:` URL, or 0 for any other URL. */
+function inlineBytes(url: string): number {
+  if (!url.startsWith("data:")) return 0;
+  const comma = url.indexOf(",");
+  if (comma === -1) return 0;
+  const body = url.slice(comma + 1);
+  if (/;base64$/i.test(url.slice(0, comma))) {
+    const padding = body.endsWith("==") ? 2 : body.endsWith("=") ? 1 : 0;
+    return Math.floor((body.length * 3) / 4) - padding;
+  }
+  try {
+    return new TextEncoder().encode(decodeURIComponent(body)).byteLength;
+  } catch {
+    return body.length;
+  }
+}
+
+export function acceptUserMessage(
+  message: AppMessage,
+  prior: readonly AppMessage[],
+  opts: { maxInlineFileBytes?: number } = {},
+): AppMessage {
   if (!message || typeof message !== "object") throw new InvalidMessageError("message is required");
   if (message.role !== "user") {
     throw new InvalidMessageError(`a chat message must be a user message, not "${String(message.role)}"`);
@@ -208,6 +233,16 @@ export function acceptUserMessage(message: AppMessage, prior: readonly AppMessag
     const clean = userPart(part);
     if (!clean) throw new InvalidMessageError(`a ${type} part is missing its ${type === "text" ? "text" : "mediaType or url"}`);
     parts.push(clean);
+  }
+  // Files sent inline travel in the request and are stored in the message
+  // row, then reloaded on every turn: cap them. Larger files belong in
+  // storage, referenced by URL.
+  const maxInline = opts.maxInlineFileBytes ?? MAX_INLINE_FILE_BYTES;
+  const inline = parts.reduce((n, p) => n + (p.type === "file" ? inlineBytes(p.url) : 0), 0);
+  if (inline > maxInline) {
+    throw new InvalidMessageError(
+      `files sent inline total ${inline} bytes, over the ${maxInline}-byte limit: send larger files by URL`,
+    );
   }
   // An id already in the chat is only a resend of the chat's latest exchange:
   // a retry of the last message, or the last question regenerated or edited
