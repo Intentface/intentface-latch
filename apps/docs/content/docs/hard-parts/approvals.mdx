@@ -1,0 +1,53 @@
+---
+title: Approvals
+description: An Approve button is one line. Clicking it tomorrow, twice, from Slack, is the rest.
+---
+
+Some tools shouldn't run until a person says yes: sending an email, issuing a refund, deleting a page. The AI SDK gives you the button: mark the tool, and the run pauses with an approval request.
+
+What happens after the click is where it gets interesting.
+
+**Tomorrow.** The user closes the laptop and approves the next morning, on their phone. If the paused run lived in a server's memory or a websocket, it's gone.
+
+**Twice.** A double click, or the same card open in two tabs. The second click shouldn't send the email again.
+
+**Too late.** A card in a tab left open since yesterday, from a conversation that has moved on. Approving it shouldn't restart an old answer.
+
+**From somewhere else.** The approval arrives as a Slack button, or a subagent deep in a delegation needs one. The browser that started the run isn't involved at all.
+
+**Forged.** The approval comes from the client. If the server trusts the client's copy of the paused message, a client can approve a refund it was never shown, with an amount of its choosing.
+
+## What Latch does
+
+**The pause lives in the conversation.** A paused run is just its message, waiting for a decision. It survives restarts and deploys, and the decision can come from any device or channel, any time later.
+
+**Only the decision comes from the client.** Latch takes which approval and yes or no, nothing else. The tool runs with the input the agent asked for, as stored.
+
+**Repeats and stale cards are ignored.** A decision for an approval that's already handled, or that the conversation has moved past, does nothing.
+
+**Several at once.** If one step asks for three approvals, the run waits until all three are answered, then runs exactly the approved ones and tells the agent which were declined.
+
+**Subagents ask in the parent chat.** An approval needed by a subagent appears where the user actually is.
+
+```ts
+defineAgent({
+  model,
+  tools: { send_email, refund },
+  toolApproval: { send_email: "user-approval", refund: "user-approval" },
+});
+```
+
+```tsx
+// The client: the AI SDK's own approval flow, nothing custom.
+const { addToolApprovalResponse } = useChat({
+  transport,
+  sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+});
+<button onClick={() => addToolApprovalResponse({ id: part.approval.id, approved: true })}>Approve</button>;
+```
+
+Decisions from elsewhere, like a Slack button, go to `runtime.applyApproval({ chatId, principal, decisions })`.
+
+<Callout title="Approval is consent, not permission">
+An approval says "the user agreed". It doesn't say the action is allowed. A tool that moves money should still check its own rules on the server: is this the customer's order, is the amount within the total, may this user issue refunds at all.
+</Callout>

@@ -1,14 +1,15 @@
 ---
-title: Your first agent in ten minutes
-description: One file on createLatchHonoApp — a chat that streams, an agent that asks before acting, and a run that survives a restart.
+title: Quickstart
+description: A chat agent that remembers, in one file and five minutes.
 ---
 
-`createLatchApp` is the whole backend in one call: durability on, an in-process cron on a long-running process (on serverless it is switched off and a platform cron calls `POST /cron/run` instead — see step 4), the models.dev catalog with pricing and prompt caching, the harness tools, and the HTTP handler. `createLatchHonoApp` is the same call with a Hono app already mounted, which is what this page uses. It gets the backend answering, then adds the two things that make it more than a demo: an approval gate and a crash you can walk away from.
+You'll run a small server with one agent, talk to it, and see it remember the conversation.
 
 ## 1. Install
 
 ```bash
-pnpm add @intentface/latch-core @intentface/latch-drizzle @intentface/latch-server ai @ai-sdk/anthropic @libsql/client drizzle-orm @hono/node-server hono
+pnpm add @intentface/latch-core @intentface/latch-drizzle @intentface/latch-server \
+  ai @ai-sdk/anthropic @libsql/client drizzle-orm hono @hono/node-server
 export ANTHROPIC_API_KEY=sk-ant-…
 ```
 
@@ -22,31 +23,21 @@ import { defineAgent } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { createLatchHonoApp } from "@intentface/latch-server/hono";
 
-// Your identity type. Latch never interprets it — it only scopes storage by it.
-interface Principal {
-  orgId: string;
-  userId?: string;
-}
+type Principal = { userId: string };
 
 const client = createClient({ url: "file:./latch.db" });
 await migrate(client);
-const db = drizzle(client, { schema });
 
 const { app } = await createLatchHonoApp<Principal>({
-  storage: createSqliteAdapter<Principal>(db, {
-    owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
+  storage: createSqliteAdapter<Principal>(drizzle(client, { schema }), {
+    owner: (p) => [p.userId], // each user sees only their own chats
   }),
-  // BYO auth: request → principal, or null → 401. LOCAL DEMO ONLY — a header
-  // is impersonation by construction; a real app derives this from its session.
-  resolveContext: async (req) => {
-    const org = req.headers.get("x-org");
-    return org ? { orgId: org, userId: req.headers.get("x-user") ?? undefined } : null;
-  },
+  // Who is asking. A demo shortcut: in your app, read your real session here.
+  resolveContext: async (req) => ({ userId: req.headers.get("x-user") ?? "demo" }),
   agents: (models) => ({
     assistant: defineAgent<Principal>({
       model: models.modelFor("claude-sonnet-4-6"),
-      instructions: "You are a concise, friendly assistant.",
-      defaultTools: true, // web_fetch, askUser, list_schedules, cancel_schedule
+      instructions: "You are a friendly, concise assistant.",
     }),
   }),
 });
@@ -56,62 +47,42 @@ serve({ fetch: app.fetch, port: 8787 });
 
 ```bash
 npx tsx server.ts
-curl -N http://localhost:8787/agents/assistant/chat-1 \
-  -H 'content-type: application/json' -H 'x-org: acme' -H 'x-user: u1' \
-  -d '{"text":"In one sentence, what is Latch?"}'
 ```
 
-The response is a stream of AI SDK `UIMessage` parts. Send a second message to the same `chat-1` and the agent has the first in context: the conversation is in `latch.db`, and so is a run row with the turn's token usage and cost.
-
-## 3. Make it ask first
-
-Give the agent a tool with consequences and gate it:
-
-```ts title="server.ts (agent only)"
-import { tool } from "ai";
-import { z } from "zod";
-
-assistant: defineAgent<Principal>({
-  model: models.modelFor("claude-sonnet-4-6"),
-  instructions: "You help with refunds. Always confirm the amount.",
-  tools: {
-    refund: tool({
-      description: "Refund a customer.",
-      inputSchema: z.object({ customerId: z.string(), amountCents: z.number().int().positive() }),
-      execute: async ({ customerId, amountCents }) => ({ ok: true, customerId, amountCents }),
-    }),
-  },
-  toolApproval: { refund: "user-approval" },
-}),
-```
-
-Ask it to refund someone. The stream ends with an assistant message carrying a part in `state: "approval-requested"` and an `approval.id`; the tool did **not** run. Decide:
+## 3. Talk to it
 
 ```bash
-curl -X POST http://localhost:8787/agents/assistant/chat-1/approvals \
-  -H 'content-type: application/json' -H 'x-org: acme' -H 'x-user: u1' \
-  -d '{"decisions":[{"approvalId":"<the id>","approved":true}]}'
+curl -N localhost:8787/agents/assistant/chat-1 -H 'content-type: application/json' \
+  -d '{"text":"Hi! My name is Anna."}'
+
+curl -N localhost:8787/agents/assistant/chat-1 -H 'content-type: application/json' \
+  -d '{"text":"What is my name?"}'
 ```
 
-The tool executes and the turn continues as a stream. Nothing was held open in between: stop the server after the first request, start it again, and the decision still works, because the pending approval is part of the conversation. [Guide: an agent that asks before acting](/docs/cookbook/approvals) covers denial, subagents, OAuth connects and the client side.
+The second answer knows your name. The conversation is saved in `latch.db`, together with what each answer cost, so it survives a restart.
 
-## 4. Kill it mid-answer
+The answer streams in the AI SDK's format, so a React page served from the same app can use `useChat` as is:
 
-Ask something that takes a while, and kill the process while it streams. Start it again. Within 30 seconds the in-process cron reaps the abandoned run's lease and resumes it from its own log; the answer finishes and is persisted. Nothing was queued anywhere.
+```tsx
+const { messages, sendMessage } = useChat({
+  transport: new DefaultChatTransport({ api: "/agents/assistant/chat-1" }),
+});
+```
 
-On serverless there is no in-process cron: point a platform cron at `POST /cron/run` with the `x-latch-cron-secret` header instead (`LATCH_CRON_SECRET` in the environment). That single route fires due schedules and resumes crashed runs. [Hosting](/docs/hosting) has the details.
+## What you just got
 
-## What you have
+That one file is already more than a demo:
 
-Persisted conversations, priced runs, approvals as a run state, durability, and a scheduler — behind your own auth, in a SQLite file you can inspect. Swap `createSqliteAdapter` for `createPostgresAdapter` when you outgrow it; nothing in the agent changes.
-
-<Callout title="Prefer the pieces?">
-`createLatchApp` is `createRuntime` + `createLatchHandler` with every default filled in. When you want a different framework, no HTTP at all, or tier-0 stateless use, [Runtime](/docs/runtime) and [Hosting](/docs/hosting) show the same wiring by hand.
-</Callout>
+- **Conversations are saved and scoped per user.** Two tabs can't scramble one chat.
+- **Crash recovery is on.** Stop the server in the middle of an answer and start it again: the answer finishes on its own.
+- **Costs are recorded** for every answer.
 
 ## Next
 
-- [Guide: an agent that asks before acting](/docs/cookbook/approvals)
-- [Guide: a scheduled brief delivered to a channel](/docs/cookbook/scheduled-brief)
-- [Principals](/docs/foundations/principals) — turn `x-org` into your real tenancy model
-- [Packages](/docs/reference/packages) — what to add next, and when
+Each of these takes a few lines on top of this file:
+
+- [Ask before risky actions](/docs/hard-parts/approvals): a person approves before a tool runs.
+- [Your real users](/docs/hard-parts/access): replace the `x-user` header with your login, and decide who sees which chats.
+- [Usage limits](/docs/hard-parts/limits): requests and tokens per user, per day.
+- [Running on many servers](/docs/hard-parts/durability): what changes on Vercel or behind a load balancer.
+- [Files and images](/docs/hard-parts/attachments): what happens when users attach them.

@@ -1,0 +1,19 @@
+---
+title: Overview
+description: The parts of an agent product that seem like an afternoon's work, and what they turn into once real users arrive.
+---
+
+Most of what an agent product needs sounds simple. Save the conversation. Ask before sending an email. Keep going if the server restarts.
+
+Each one is simple in a demo. Then a user opens a second tab, a server restarts in the middle of an answer, a teammate approves from Slack while someone else approves in the browser, and the simple version starts doing things nobody intended. Often quietly: nothing errors, you just pay twice, or show the wrong answer.
+
+These pages walk through those parts one at a time: what the simple version misses, and what Latch does instead. Each ends with the few lines it takes.
+
+<Cards>
+  <Card href="/docs/hard-parts/history" title="Conversation history" description="Saving messages is easy. Two tabs, retries and forged messages are not." />
+  <Card href="/docs/hard-parts/approvals" title="Approvals" description="An Approve button, clicked tomorrow, twice, from Slack." />
+  <Card href="/docs/hard-parts/durability" title="Running on many servers" description="A crash mid-answer, five servers, and exactly one of them finishing it." />
+  <Card href="/docs/hard-parts/access" title="Who sees what" description="Customers, users, teams, and the runs nobody is logged in for." />
+  <Card href="/docs/hard-parts/limits" title="Usage limits" description="Caps that hold when five requests arrive in the same moment." />
+  <Card href="/docs/hard-parts/attachments" title="Files and images" description="Where files live, how they reach the model, and what never leaves your servers." />
+</Cards>

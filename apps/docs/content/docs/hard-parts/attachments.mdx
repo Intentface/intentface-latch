@@ -1,0 +1,47 @@
+---
+title: Files and images
+description: Where files live, how they reach the model, and what never leaves your servers.
+---
+
+A user drops a screenshot into the chat and asks what's wrong with it. The file has to reach the model now, show up in the chat next week, and not cause trouble in between.
+
+The simple version keeps the file inside the message. It works, until it doesn't:
+
+**It gets heavy.** A file inside a message is stored as text, a third bigger than the file. A conversation with a few screenshots can weigh tens of megabytes, and every answer loads all of it again.
+
+**It doesn't fit.** The file travels inside the chat request, and serverless functions cap request size (4.5 MB on Vercel).
+
+**Links expire.** Store a signed S3 link instead, and the conversation shows broken images a day later.
+
+**Someone else downloads it.** If a file is just a URL the model can't fetch itself, your server downloads it. A URL that quietly points at an internal address turns that into a request into your private network.
+
+**It ends up somewhere you didn't choose.** Uploading files to the model provider's own storage is one function call, and then they live there, under the provider's retention rules.
+
+## What Latch does today
+
+**Every file form the AI SDK supports works as is**: a file inline, a URL, or a file id you uploaded to a provider yourself. Your `useChat` setup doesn't change.
+
+**Inline files are capped,** at 20 MB per message by default. Larger ones are refused before anything is saved, so one message can't fill your database.
+
+```ts
+createRuntime({ …, maxInlineFileBytes: 10 * 1024 * 1024 });
+```
+
+**Downloads for the model are checked.** When the model can't fetch a URL itself, the download checks where the address actually leads, stops at 50 MB and 60 seconds, and stops with its run. On runtimes where that check isn't possible (Bun, Deno, edge), Latch refuses the download rather than guess.
+
+**Nothing is uploaded to a model provider** unless you do it yourself.
+
+## Coming next: your storage, plain links
+
+The next step lets files live in storage you choose, so messages carry only a small link that never expires:
+
+```ts
+createRuntime({ …, attachments: myS3Store }); // put, get and delete; about 20 lines for S3
+```
+
+- The model gets each file the best way it can take it: a fresh signed link, or the bytes.
+- Links are reused while they're valid, so prompt caching keeps working.
+- People see files through a link that checks they may see that chat.
+- Deleting a chat deletes its files.
+
+This part is designed but not built yet.

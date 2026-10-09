@@ -1,0 +1,42 @@
+---
+title: Running on many servers
+description: A server dies mid-answer. Exactly one other server should finish it, not zero and not two.
+---
+
+An answer can take a minute: the agent thinks, calls tools, thinks again. Somewhere in that minute a deploy restarts the server, or the process crashes. The user is left with half an answer, or none.
+
+"Resume after a crash" sounds like saving progress and picking it up again. On one server, it nearly is. Production is rarely one server.
+
+**Five servers behind a load balancer.** A request can land on any of them. When one dies mid-answer, which of the other four picks it up? If two do, the answer is written twice and every tool it calls runs twice.
+
+**The server that wasn't dead.** A long pause, a network blip: everyone decides a server is gone, another one takes over its run, and then the first one wakes up and carries on writing.
+
+**Clocks that disagree.** If each server judges "has this run been abandoned?" by its own clock, a server running a few seconds fast takes over a run that's still alive.
+
+## What Latch does
+
+**The database is the referee.** A running answer holds a lease on its run, a claim that expires unless renewed. The server running it renews it every few seconds. If the server dies, the lease runs out, and on the next tick exactly one other server takes the run over and finishes the answer. Servers never need to know about each other.
+
+**A server that lost its run is fenced out.** Each takeover gets a new number, and every write carries the number of the run it belongs to. A server that wakes up with an old number finds its writes refused, notices, and stops.
+
+**One clock.** Lease times come from the database's clock, so servers whose clocks drift apart still agree.
+
+**Answers survive the browser too.** A closed tab doesn't stop an answer: it keeps going on the server and is saved, ready when the user comes back.
+
+```ts
+createRuntime({ …, durability: { enabled: true } });
+
+// Every minute: from a cron route on serverless,
+// or an interval on a long-running server.
+await runtime.cron();
+```
+
+With `createLatchApp` from `@intentface/latch-server`, both are on by default. On serverless, point your platform's cron at `POST /cron/run`.
+
+<Callout title="Already on Temporal or Durable Objects?">
+If your platform already guarantees one instance per conversation, it covers this part. Latch's job there is the rest: conversations, approvals, limits, channels.
+</Callout>
+
+<Callout type="warn" title="A tool that was running when the server died">
+Recovery picks the answer up from the last finished step. A tool that was in the middle of running at the crash may run again. Tools with side effects, like sending email or charging a card, should be safe to repeat: check whether the action already happened, or pass an idempotency key to the service you call.
+</Callout>

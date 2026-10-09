@@ -1,0 +1,56 @@
+---
+title: Who sees what
+description: Customers, users, teams, and the runs nobody is logged in for.
+---
+
+Every agent demo has one user. Then you add a second customer, and every place that reads or writes data needs to know whose data it is.
+
+It looks like adding `WHERE org_id = ?` everywhere. With agents, "everywhere" is bigger than it looks.
+
+**The model chooses what to read.** A tool that forgets to filter by customer doesn't fail. It answers, with someone else's data.
+
+**Nobody is logged in.** A scheduled run fires at 9:00, a crashed answer resumes at 3:00. There's no request and no session. Whose data may it touch, and is that person still allowed to?
+
+**Not everything is private.** A support desk wants one shared set of conversations for the whole team, next to each person's private assistant.
+
+**Identity goes stale.** A schedule created in March still carries March's view of the person. They might have changed roles, or left.
+
+## What Latch does
+
+**You describe who is asking; Latch carries it everywhere.** The principal is your own type, for example `{ orgId, userId }`. You build it from your login on each request, and Latch passes it to every storage call, every tool and every background run.
+
+**Storage is scoped by design.** Each conversation is stamped with an owner when it's created, and every read checks it. A chat id from another customer simply isn't found.
+
+```ts
+createPostgresAdapter(db, {
+  owner: (p) => [p.orgId, p.userId], // private: each person sees their own chats
+  // owner: (p) => [p.orgId],        // shared: the whole team sees the same chats
+});
+```
+
+**Tools get the right customer, not a way to choose one.** What `defineContext` returns reaches every tool, built fresh from the principal on every turn. Hand tools clients that are already bound to this customer, and a tool can't reach anyone else's rows.
+
+```ts
+defineContext<Principal, Ctx>({
+  build: async ({ principal }) => ({
+    orders: ordersFor(principal.orgId), // this customer's orders, nobody else's
+    can: (action: string) => permissions.check(principal, action),
+  }),
+});
+```
+
+**Background runs check again.** When nobody is there, Latch rebuilds the principal from what it stored and asks you whether it's still valid. Return `null` and the schedule stops, or the resumed run ends.
+
+```ts
+createRuntime({
+  …,
+  reconstructPrincipal: async (identity) => {
+    const { orgId, userId } = identity as Principal;
+    return (await isMember(orgId, userId)) ? { orgId, userId } : null;
+  },
+});
+```
+
+<Callout title="Ids in the principal, names in the context">
+The principal is saved with every run and schedule, so keep it to plain ids. Look up names, plans and permissions in `defineContext`, which runs again on every turn and always reads the current values.
+</Callout>
