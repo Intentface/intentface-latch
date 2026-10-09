@@ -147,12 +147,14 @@ export const DocsNav = ({ groups }: { groups: NavGroup[] }) => {
   }
 
   return (
-    <Sidebar.Content className="gap-[18px]">
+    // Closed sections sit close together; an open one keeps room below it,
+    // inside the panel, so it folds away with the section.
+    <Sidebar.Content className="gap-0.5">
       {groups.map((group, index) => {
         const key = groupKey(group, index);
         if (!group.label) {
           return (
-            <Sidebar.Group key={key}>
+            <Sidebar.Group key={key} className="mb-2">
               <GroupItems items={group.items} />
             </Sidebar.Group>
           );
@@ -175,7 +177,9 @@ export const DocsNav = ({ groups }: { groups: NavGroup[] }) => {
               />
             </Sidebar.GroupLabel>
             <Collapsible.Panel className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] data-[ending-style]:h-0 data-[starting-style]:h-0">
-              <GroupItems items={group.items} />
+              <div className="pb-3">
+                <GroupItems items={group.items} />
+              </div>
             </Collapsible.Panel>
           </Collapsible>
         );
