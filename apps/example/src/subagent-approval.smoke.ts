@@ -28,7 +28,10 @@ const finish = (reason: string) => ({
   usage: { inputTokens: { total: 5 }, outputTokens: { total: 2 } },
 });
 
-/** Main agent: step 1 delegates via spawn_agent; later steps just emit text. */
+/**
+ * Main agent: step 1 delegates via spawn_agent; the turn then stops on the
+ * bubbled approval, so step 2 is the answer after the decision resumes it.
+ */
 function mainMock() {
   return new MockLanguageModelV4({
     modelId: "mock-main",
@@ -40,13 +43,6 @@ function mainMock() {
         { type: "tool-input-end", id: "c1" },
         { type: "tool-call", toolCallId: "c1", toolName: "spawn_agent", input: '{"agent":"crm","prompt":"update the deal"}' },
         finish("tool-calls"),
-      ]),
-      step([
-        { type: "stream-start", warnings: [] },
-        { type: "text-start", id: "0" },
-        { type: "text-delta", id: "0", delta: "Requested your approval." },
-        { type: "text-end", id: "0" },
-        finish("stop"),
       ]),
       step([
         { type: "stream-start", warnings: [] },
