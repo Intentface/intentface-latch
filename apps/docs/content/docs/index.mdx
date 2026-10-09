@@ -50,6 +50,7 @@ export async function POST(req: Request) {
   return runtime.handleChat({
     agent: "support",
     chatId: id,
+    // Who is asking. Latch carries it everywhere from here.
     principal: { orgId: user.orgId, userId: user.id },
     message,
   });
@@ -75,6 +76,8 @@ const { messages, sendMessage, addToolApprovalResponse } = useChat({
 </Tabs>
 
 That's the whole integration. The conversation is saved, the refund waits for a click (today, tomorrow, from another device), and if a server dies mid-answer, another one finishes it.
+
+The `principal` you pass once is what keeps customers apart. Storage scopes every read and write by it, every tool receives it through the context, your limits are keyed from it, connected accounts are stored under it, and it's saved with each run and schedule, so a resumed answer or a 9:00 report still acts as the right person. More in [Principal and context](/docs/concepts/principal-context).
 
 ## What you get
 
