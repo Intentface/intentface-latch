@@ -208,25 +208,25 @@ function segmentsUnder(pathname: string, basePath: string): string[] | null {
 }
 
 /** Accept `{ message }`, `{ text }`, or a `useChat`-style `{ messages }` (last). */
+/**
+ * The message a chat request carries, in each body shape a client sends:
+ * `{ message }` (one message), `{ messages }` (`useChat`'s default transport,
+ * the whole conversation; its last entry is the new one), or `{ text }`.
+ *
+ * A message object goes to the runtime as it is: `handleChat` decides what it
+ * may contain (a new user message with text and files, or `useChat`'s
+ * approval answers), so its id, attachments and approval decisions all
+ * survive. Only `{ text }` is built here.
+ */
 function toUserMessage(body: Record<string, unknown>): AppMessage {
-  const explicit = body.message as AppMessage | undefined;
-  if (explicit?.parts) return explicit;
-  let text = "";
-  if (typeof body.text === "string") {
-    text = body.text;
-  } else if (Array.isArray(body.messages)) {
-    const last = body.messages[body.messages.length - 1] as
-      | AppMessage
-      | undefined;
-    text = (last?.parts ?? [])
-      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-      .map((p) => p.text)
-      .join("");
-  }
+  const isMessage = (m: unknown): m is AppMessage =>
+    !!m && typeof m === "object" && Array.isArray((m as { parts?: unknown }).parts);
+  if (isMessage(body.message)) return body.message;
+  if (Array.isArray(body.messages) && isMessage(body.messages.at(-1))) return body.messages.at(-1) as AppMessage;
   return {
     id: crypto.randomUUID(),
     role: "user",
-    parts: [{ type: "text", text }],
+    parts: [{ type: "text", text: typeof body.text === "string" ? body.text : "" }],
     metadata: { visibility: "user", createdAt: Date.now() },
   };
 }
@@ -241,6 +241,7 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   chat_conflict     409  the client-chosen chat id exists and isn't yours
  *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
  *   invalid_message   400  the message isn't a new user message (text and files)
+ *   rewind_not_supported 409  an earlier question was regenerated or edited: fork instead
  */
 function refusalResponse(e: unknown): Response | undefined {
   const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
@@ -265,6 +266,8 @@ function refusalResponse(e: unknown): Response | undefined {
       return withRetry({ error: message("limit exceeded"), code }, 429);
     case "invalid_message":
       return json({ error: message("invalid message"), code }, 400);
+    case "rewind_not_supported":
+      return json({ error: message("only the last question can be regenerated or edited"), code }, 409);
     default:
       return undefined;
   }

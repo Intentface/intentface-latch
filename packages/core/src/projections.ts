@@ -114,6 +114,10 @@ export const COMPACTION_PART_TYPE = "data-compaction";
 export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
   for (let i = messages.length - 1; i >= 0; i--) {
     const parts = (messages[i] as { parts?: { type?: unknown }[] }).parts;
+    // A summary hidden from the model (replaced by a regenerate or an edit of
+    // the question before it) is no longer a boundary: the context reaches back
+    // to the previous one, as it did before that summary was written.
+    if (messages[i]!.metadata?.sendToModel === false) continue;
     if (Array.isArray(parts) && parts.some((p) => p.type === COMPACTION_PART_TYPE)) {
       return messages.slice(i);
     }

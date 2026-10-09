@@ -325,3 +325,61 @@ describe("POST /agents/:agent/:id with a message the runtime refuses", () => {
     expect(await res.json()).toMatchObject({ code: "invalid_message" });
   });
 });
+
+describe("POST /agents/:agent/:id with useChat's default body ({ messages })", () => {
+  function route() {
+    const handleChat = vi.fn(async (_input: { message: unknown }) => new Response("ok"));
+    const handler = createLatchHandler<P>({
+      runtime: { handleChat } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+    return { handler, handleChat };
+  }
+
+  it("passes the newest message on with its id and attachments", async () => {
+    const { handler, handleChat } = route();
+    const newest = {
+      id: "m2",
+      role: "user",
+      parts: [
+        { type: "file", mediaType: "image/png", url: "data:image/png;base64,AAAA" },
+        { type: "text", text: "what is this?" },
+      ],
+    };
+    await handler(post("agents/assistant/chat_1", { id: "chat_1", trigger: "submit-message", messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "earlier" }] }, newest] }));
+    expect(handleChat.mock.calls[0]![0].message).toEqual(newest);
+  });
+
+  it("passes useChat's approval answers on unchanged, for the runtime to read", async () => {
+    const { handler, handleChat } = route();
+    const answers = { id: "a1", role: "assistant", parts: [{ type: "tool-refund", toolCallId: "t1", state: "approval-responded", input: {}, approval: { id: "ap1", approved: true } }] };
+    await handler(post("agents/assistant/chat_1", { messages: [answers] }));
+    expect(handleChat.mock.calls[0]![0].message).toEqual(answers);
+  });
+
+  it("still builds a message from { text }", async () => {
+    const { handler, handleChat } = route();
+    await handler(post("agents/assistant/chat_1", { text: "hello" }));
+    expect(handleChat.mock.calls[0]![0].message).toMatchObject({ role: "user", parts: [{ type: "text", text: "hello" }] });
+  });
+});
+
+describe("POST /agents/:agent/:id regenerating or editing an earlier question", () => {
+  it("answers 409 rewind_not_supported", async () => {
+    const { RewindNotSupportedError } = await import("@intentface/latch-core");
+    const handleChat = vi.fn(async () => {
+      throw new RewindNotSupportedError("m1");
+    });
+    const handler = createLatchHandler<P>({
+      runtime: { handleChat } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+    const res = (await handler(post("agents/assistant/chat_1", { message: { id: "m1", role: "user", parts: [{ type: "text", text: "x" }] } })))!;
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "rewind_not_supported" });
+  });
+});

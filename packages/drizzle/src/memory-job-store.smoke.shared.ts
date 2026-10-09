@@ -236,4 +236,14 @@ export async function memoryJobStoreSmoke<P extends { org: string; user?: string
   const b = usage.find((u) => u.memoryId === "m-bbbbbb");
   assert(a?.usageCount === 2 && a.lastUsedAt === t1 + 5, "usage upsert increments + stamps");
   assert(b?.usageCount === 1, "new memory id starts at 1");
+
+  // An answer a regenerate replaced is hidden from the model: memory must not learn from it.
+  const hiddenChat = await store.createChat(me, { agent: "mem-coach" });
+  await store.appendMessages(hiddenChat.id, [
+    msg("h1", "user", "question"),
+    { ...msg("h2", "assistant", "rejected answer"), metadata: { visibility: "internal", sendToModel: false } },
+    msg("h3", "assistant", "kept answer"),
+  ]);
+  const seen = (await jobs.messagesAfter(hiddenChat.id, -1, 10_000)).map((m) => m.text);
+  assert(seen.join("|") === "question|kept answer", `messagesAfter skips hidden messages (${seen.join("|")})`);
 }

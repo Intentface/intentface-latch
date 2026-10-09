@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, InvalidMessageError, type AppMessage } from "./message.js";
+import { acceptUserMessage, InvalidMessageError, isHidden, lastQuestionResent, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition } from "./context.js";
 import type {
@@ -1226,6 +1226,19 @@ export function supersededBy(
  * What a reclaimed run's OWN history says it needs. Pure: whether the chat has
  * since moved on is `supersededBy`'s question, answered from the runs table.
  */
+/**
+ * The history to continue a run from, without a hidden tail: answers a
+ * regenerate replaced (`sendToModel: false`) after the last message the turn
+ * actually builds on. Left at the end, the AI SDK would treat such an answer
+ * as the message to continue and write the new answer into it, where it would
+ * stay hidden. The hidden answers stay stored; they're only left out here.
+ */
+function withoutHiddenTail(messages: AppMessage[]): AppMessage[] {
+  let end = messages.length;
+  while (end > 0 && messages[end - 1]!.metadata?.sendToModel === false) end--;
+  return end === messages.length ? messages : messages.slice(0, end);
+}
+
 export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   // Compaction markers are not turns, so the tail is read past them: a summary
   // appended after a reaped run's finished message must not make that message
@@ -1233,7 +1246,9 @@ export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   // regenerate against the summary). `compactChat` refuses while a gate or
   // client tool is pending, so a marker can never sit after an undecided one.
   let end = messages.length;
-  while (end > 0 && isCompactionMarker(messages[end - 1])) end--;
+  // Hidden from the model too: an answer a regenerate replaced. If the crash
+  // came after it was hidden, the turn still has to run from the user message.
+  while (end > 0 && (isCompactionMarker(messages[end - 1]) || messages[end - 1]!.metadata?.sendToModel === false)) end--;
   const turns = end === messages.length ? messages : messages.slice(0, end);
   // Checked next: a pending gate outranks the tail's shape, and its own tail
   // (narration after the gated call) would otherwise read as `loop-finished`.
@@ -3031,7 +3046,12 @@ export function createRuntime<P, RC = unknown>(
     // Only a new user message gets in: a client can take part in the
     // conversation, not write it (see `acceptUserMessage`). Checked before a
     // chat is created, so a refused message leaves nothing behind.
-    const userMessage = acceptUserMessage(message, chat ? await storage.loadMessages(principal, chat.id) : []);
+    const existing = chat ? await storage.loadMessages(principal, chat.id) : [];
+    const userMessage = acceptUserMessage(message, existing);
+    // The last question regenerated (`useChat`'s `regenerate()`) or edited:
+    // what it replaces is hidden from the user and the model, not deleted,
+    // and the turn runs again from that question.
+    const replaced = lastQuestionResent(userMessage, existing) ?? [];
     if (!chat) {
       chat = await storage.createChat(principal, {
         id: chatId, // use the provided id (create-or-continue); generated if omitted
@@ -3052,7 +3072,11 @@ export function createRuntime<P, RC = unknown>(
       { parentAgent: chat.parentAgent },
     );
 
-    const prior = await storage.loadMessages(principal, resolvedChatId);
+    // The replaced answers are hidden by the same write that opens the new turn
+    // (below), so a turn refused for a limit or a busy chat hides nothing.
+    const hidden = new Set(replaced.map((m) => m.id));
+    // Hidden messages, from this resend or earlier ones, take no part in the turn.
+    const prior = (await storage.loadMessages(principal, resolvedChatId)).filter((m) => !hidden.has(m.id) && !isHidden(m));
 
     // A new message while the last turn is parked on an approval is itself the
     // decision: the user declined to answer and wants to steer elsewhere. Close
@@ -3072,7 +3096,7 @@ export function createRuntime<P, RC = unknown>(
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
     // lands in history — the client retries it (with its turn reservation released).
     const { run, lease } = await withReservation(admitted, () =>
-      openTurn(principal, resolvedChatId, agentName, [userMessage], cfg.configVersion),
+      openTurn(principal, resolvedChatId, agentName, [...replaced, userMessage], cfg.configVersion),
     );
 
     return buildTurn({
@@ -3137,7 +3161,7 @@ export function createRuntime<P, RC = unknown>(
       return refuse("principal rejected: reconstructPrincipal refused the run's identity");
     }
 
-    const uiMessages = await storage.loadMessages(principal, run.chatId);
+    const uiMessages = withoutHiddenTail(await storage.loadMessages(principal, run.chatId));
 
     // What does this run actually need? A crash between the last step's
     // checkpoint and `onFinish`'s `updateRun` leaves a FINISHED turn on an
@@ -3401,7 +3425,7 @@ export function createRuntime<P, RC = unknown>(
 
     // Merge the decisions onto the persisted assistant message, then re-persist
     // only what changed. The agent continues from this updated history.
-    const messages = await storage.loadMessages(principal, chatId);
+    const messages = withoutHiddenTail(await storage.loadMessages(principal, chatId));
     // A decision only means something for the message the turn paused on —
     // the LAST one. An approval from further back (an old tab, an old Slack
     // card, a late retry after the user moved on) was already settled: the
@@ -3574,7 +3598,7 @@ export function createRuntime<P, RC = unknown>(
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
 
-    const messages = await storage.loadMessages(principal, chatId);
+    const messages = withoutHiddenTail(await storage.loadMessages(principal, chatId));
     const changed = recordToolResult(messages, toolCallId, output);
     // Unknown or already-answered call: nothing to resume. Makes a duplicate
     // submit (double-tapped button, redelivered webhook) a no-op instead of a
