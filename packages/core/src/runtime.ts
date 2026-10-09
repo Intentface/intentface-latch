@@ -449,7 +449,21 @@ export interface HandleChatInput<P> {
    * client input.
    */
   principal: P;
-  /** The user's message, as `useChat` sends it. */
+  /**
+   * The user's message, as `useChat` sends it. Accepted:
+   * - a new user message with text and files (files sent inline count
+   *   against `maxInlineFileBytes`);
+   * - the chat's last question resent unchanged (`regenerate()`) or edited
+   *   (`sendMessage({ messageId })`): the old answer is hidden, not deleted,
+   *   and the agent answers again;
+   * - the paused assistant message with approval answers on it
+   *   (`addToolApprovalResponse` with `sendAutomaticallyWhen`): only the
+   *   decisions are read, as `applyApproval` would.
+   *
+   * Anything else is refused: another role or part type (`InvalidMessageError`,
+   * 400), or an earlier question regenerated or edited
+   * (`RewindNotSupportedError`, 409; fork the chat instead).
+   */
   message: AppMessage;
   /**
    * What the chat is about, for an agent that declares `params` (see
