@@ -1500,7 +1500,6 @@ export function createRuntime<P, RC = unknown>(
   const { storage } = config;
   const reconstructPrincipal: ReconstructPrincipal<P> =
     config.reconstructPrincipal ?? ((identity) => identity as P);
-  const fileDownload = safeFileDownload();
   const dur = {
     enabled: config.durability?.enabled ?? false,
     leaseTtlMs: config.durability?.leaseTtlMs ?? 30_000,
@@ -2281,9 +2280,10 @@ export function createRuntime<P, RC = unknown>(
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
-      // File URLs the model can't fetch itself are downloaded through
-      // latch-net, which checks resolved addresses (see `file-download.ts`).
-      experimental_download: fileDownload,
+      // File URLs the model can't fetch itself: capped, refused where
+      // addresses can't be checked, and stopped with the run (see
+      // `file-download.ts`). Not with the request: a run outlives its client.
+      experimental_download: safeFileDownload({ signal: abort.signal }),
       // Every agent gets a trailing "today's date" line — after the memory
       // block, so it stays the tail. Day-granularity by design — see
       // `currentDateLine` for the prompt-cache reasoning. With a caching plan,

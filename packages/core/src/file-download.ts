@@ -41,7 +41,17 @@ function addressCheckedRuntime(): boolean {
 
 /** The download function every turn's agent and compaction use (`experimental_download`). */
 export function safeFileDownload(
-  opts: { maxBytes?: number; timeoutMs?: number; download?: ReturnType<typeof createDownload> } = {},
+  opts: {
+    maxBytes?: number;
+    timeoutMs?: number;
+    /**
+     * Stops every download when it aborts: the run's own signal, so a run
+     * that is cancelled or loses its lease stops downloading too. (The
+     * AI SDK passes its abort signal only to its default downloader.)
+     */
+    signal?: AbortSignal;
+    download?: ReturnType<typeof createDownload>;
+  } = {},
 ): DownloadFunction {
   const maxBytes = opts.maxBytes ?? MAX_FILE_DOWNLOAD_BYTES;
   const timeoutMs = opts.timeoutMs ?? FILE_DOWNLOAD_TIMEOUT_MS;
@@ -55,7 +65,11 @@ export function safeFileDownload(
       );
     }
     return Promise.all(
-      requests.map((r) => (r.isUrlSupportedByModel ? null : download({ url: r.url, abortSignal: AbortSignal.timeout(timeoutMs) }))),
+      requests.map((r) => {
+        if (r.isUrlSupportedByModel) return null;
+        const deadline = AbortSignal.timeout(timeoutMs);
+        return download({ url: r.url, abortSignal: opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline });
+      }),
     );
   };
 }

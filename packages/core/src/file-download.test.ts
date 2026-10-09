@@ -58,3 +58,14 @@ describe("safeFileDownload", () => {
     expect(await safeFileDownload({ download })([req("https://cdn.example.com/b.png", true)])).toEqual([null]);
   });
 });
+
+describe("safeFileDownload and its run", () => {
+  it("stops a download when the run aborts", async () => {
+    const run = new AbortController();
+    const download = ({ abortSignal }: { url: URL; abortSignal?: AbortSignal }) =>
+      new Promise<never>((_ok, fail) => abortSignal?.addEventListener("abort", () => fail(abortSignal.reason)));
+    const pending = safeFileDownload({ download, signal: run.signal, timeoutMs: 60_000 })([req("https://files.example.com/a.png")]);
+    run.abort(new Error("lease lost"));
+    await expect(pending).rejects.toThrow("lease lost");
+  });
+});
