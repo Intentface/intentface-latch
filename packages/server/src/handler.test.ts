@@ -383,3 +383,42 @@ describe("POST /agents/:agent/:id regenerating or editing an earlier question", 
     expect(await res.json()).toMatchObject({ code: "rewind_not_supported" });
   });
 });
+
+describe("POST /agents/:agent/:id with params", () => {
+  function route(impl: (input: { params?: unknown }) => Promise<Response>) {
+    const handleChat = vi.fn(impl);
+    const handler = createLatchHandler<P>({
+      runtime: { handleChat } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+    return { handler, handleChat };
+  }
+  const message = { id: "m1", role: "user", parts: [{ type: "text", text: "x" }] };
+
+  it("passes body.params to the runtime, and nothing when absent", async () => {
+    const { handler, handleChat } = route(async () => new Response("ok"));
+    await handler(post("agents/support/chat_1", { message, params: { ticketId: "T-9" } }));
+    await handler(post("agents/support/chat_1", { message }));
+    expect(handleChat.mock.calls[0]![0].params).toEqual({ ticketId: "T-9" });
+    expect("params" in handleChat.mock.calls[1]![0]).toBe(false);
+  });
+
+  it("answers 400 invalid_params and 409 params_fixed", async () => {
+    const { InvalidParamsError, ParamsFixedError } = await import("@intentface/latch-core");
+    const invalid = route(async () => {
+      throw new InvalidParamsError('params for "support" don\'t match its schema');
+    });
+    const bad = (await invalid.handler(post("agents/support/chat_1", { message, params: {} })))!;
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ code: "invalid_params" });
+
+    const fixed = route(async () => {
+      throw new ParamsFixedError("chat_1");
+    });
+    const changed = (await fixed.handler(post("agents/support/chat_1", { message, params: { ticketId: "T-10" } })))!;
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({ code: "params_fixed" });
+  });
+});

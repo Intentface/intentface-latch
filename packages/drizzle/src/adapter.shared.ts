@@ -138,6 +138,7 @@ export function makeStorageAdapter<P>(
     title: r.title ?? undefined,
     kind: r.kind,
     parentAgent: r.parentAgent ?? undefined,
+    ...(r.params != null ? { params: r.params } : {}),
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   });
@@ -180,6 +181,7 @@ export function makeStorageAdapter<P>(
     lastRunAt: r.lastRunAt,
     onParked: (r.onParked ?? undefined) as ScheduleRecord["onParked"],
     lastChatId: r.lastChatId,
+    ...(r.params != null ? { params: r.params } : {}),
     enabled: r.enabled === 1,
     leaseOwner: r.leaseOwner,
     leaseExpiresAt: r.leaseExpiresAt,
@@ -380,6 +382,7 @@ export function makeStorageAdapter<P>(
         title: input.title ?? null,
         kind: input.kind ?? "user",
         parentAgent: input.parentAgent ?? null,
+        params: input.params ?? null,
         createdAt: now,
         updatedAt: now,
       };
@@ -675,6 +678,7 @@ export function makeStorageAdapter<P>(
         nextRunAt: input.nextRunAt,
         lastRunAt: null,
         onParked: input.onParked ?? null,
+        params: input.params ?? null,
         lastChatId: null,
         enabled: 1,
         leaseOwner: null,

@@ -89,6 +89,13 @@ export interface ChatRecord {
    */
   parentAgent?: string;
   /**
+   * What the chat is about, as its first message set it: the agent's `params`
+   * (see `defineAgent`), validated against the agent's schema. Fixed for the
+   * chat's life, and handed to the agent on every turn, including resumed
+   * ones and approvals. Absent for an agent that declares no params.
+   */
+  params?: unknown;
+  /**
    * Status of the chat's most recent run, derived at READ time by `listChats`
    * (never stored — the message log stays the source of truth). Lets a list UI
    * flag chats parked on a human (`awaiting_input` = an approval or question is
@@ -271,6 +278,12 @@ export interface ScheduleRecord {
    * handles fires itself.
    */
   lastChatId?: string | null;
+  /**
+   * The params every chat this schedule fires starts with (see
+   * `ChatRecord.params`), validated against the agent's schema when the
+   * schedule was created.
+   */
+  params?: unknown;
   enabled: boolean;
   /** Single-fire lease (exactly-once claim), same shape as runs. */
   leaseOwner?: string | null;
@@ -291,6 +304,8 @@ export interface StorageAdapter<P> {
       kind?: string;
       /** Spawning agent of a sub-thread (see `ChatRecord.parentAgent`). */
       parentAgent?: string;
+      /** What the chat is about (see `ChatRecord.params`). JSON; store it as given. */
+      params?: unknown;
     },
   ): Promise<ChatRecord>;
   /** Scoped: returns null if the chat isn't the caller's. */
@@ -456,6 +471,8 @@ export interface StorageAdapter<P> {
       delivery?: unknown;
       /** Parked-predecessor policy (see `ScheduleRecord.onParked`); absent = `"skip"`. */
       onParked?: "skip" | "fire";
+      /** Params each fired chat starts with (see `ScheduleRecord.params`). JSON; store it as given. */
+      params?: unknown;
     },
   ): Promise<ScheduleRecord>;
   /** The caller's schedules, most-recently-created first. */

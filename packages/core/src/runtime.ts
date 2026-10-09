@@ -14,7 +14,7 @@ import {
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
 import { acceptUserMessage, InvalidMessageError, isHidden, lastQuestionResent, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
-import type { ContextDefinition, ToolContext } from "./context.js";
+import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
   AgentConfig,
   AgentFactory,
@@ -22,6 +22,7 @@ import type {
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
+import { ParamsFixedError, validateParams } from "./agent.js";
 import { currentDateLine } from "./current-date.js";
 import type { MemoryProvider } from "./memory.js";
 import {
@@ -153,9 +154,18 @@ export interface DynamicAgentStore<P> {
 
 export interface RuntimeConfig<P, RuntimeContext = unknown> {
   storage: StorageAdapter<P>;
-  context: ContextDefinition<P, RuntimeContext>;
+  /**
+   * What this customer's agents and tools can work with, built from who is
+   * asking at the start of every turn: `async ({ principal }) => ({ … })`.
+   * Optional; the `{ build }` object form from `defineContext` still works but
+   * is deprecated. See `ContextFunction`.
+   */
+  context?: ContextInput<P, RuntimeContext>;
   /** The agent registry: name → factory (file-based or DB-driven upstream). */
-  agents: Record<string, AgentFactory<P, RuntimeContext>>;
+  // `any` params: each agent declares its own, and a factory typed for one
+  // agent's params must still fit the registry.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  agents: Record<string, AgentFactory<P, RuntimeContext, any>>;
   durability?: DurabilityConfig;
   /** Optional cost calculation. Without it, recorded cost is 0. */
   pricing?: Pricing;
@@ -348,21 +358,31 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
 }
 
 export interface HandleChatInput<P> {
-  /** Which registered agent to run. */
-  agent: string;
+  /**
+   * Which agent to run. Required for a new chat; a continuing chat uses the
+   * agent it was started with when omitted.
+   */
+  agent?: string;
   /** Client-chosen chat id (create-or-continue). Omit to start a new chat. */
   chatId?: string;
   /** Resolved by the caller's ContextResolver (isolation flows from this). */
   principal: P;
   /** The incoming user message. */
   message: AppMessage;
-  /** Optional original request, passed to context.build. */
+  /**
+   * What the chat is about, for an agent that declares `params` (see
+   * `defineAgent`). Pass them with the chat's first message; they're validated,
+   * saved on the chat, and given to the agent on every later turn, so later
+   * messages don't send them again. Sending the same params again is fine;
+   * different ones are refused (`ParamsFixedError`, 409).
+   */
+  params?: unknown;
+  /** @deprecated The original request. Missing when an answer continues; read what you need in your route. */
   request?: Request;
   /**
-   * Per-turn request payload, passed to `context.build` and the agent factory.
-   * EPHEMERAL: never persisted with the run (only the principal is stored as
-   * `runs.identity`), so it is absent on resume/cron. Use it for request-scoped
-   * inputs (active document, UI selection, parsed body fields) — never identity.
+   * @deprecated Per-request data that isn't saved, so it is missing when an
+   * answer continues after an approval, a crash or on a schedule. Use `params`
+   * for what the chat is about.
    */
   turnContext?: unknown;
 }
@@ -399,6 +419,12 @@ export interface Runtime<P> {
      */
     files?: { url: string; mediaType: string; filename?: string }[];
     threadId?: string;
+    /**
+     * What the run is about, for an agent that declares `params`: validated and
+     * saved on the thread, so a resumed run gets them too. Continuing an
+     * existing `threadId` with different params is refused.
+     */
+    params?: unknown;
     blockGated?: boolean | "simulate-success";
     /**
      * Per-turn memory override. `false` = no recall and no memory tools this
@@ -582,6 +608,11 @@ export interface Runtime<P> {
      * on a human (see `ScheduleRecord.onParked`). Default `"skip"`.
      */
     onParked?: "skip" | "fire";
+    /**
+     * Params for the agent (see `defineAgent`): validated now, saved with the
+     * schedule, and given to the chat each fire starts.
+     */
+    params?: unknown;
   }): Promise<ScheduleRecord>;
   /** The caller's schedules. */
   listSchedules(input: { principal: P }): Promise<ScheduleRecord[]>;
@@ -751,6 +782,15 @@ function runSettingsOf(o: {
     ...(o.model ? { modelOverride: typeof o.model === "string" ? o.model : `${o.model.provider}:${o.model.modelId}` } : {}),
   };
   return Object.keys(settings).length ? settings : undefined;
+}
+
+/** JSON with object keys sorted, so two equal values compare equal however they were built. */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value ?? null, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, (v as Record<string, unknown>)[k]]))
+      : v,
+  );
 }
 
 /** Ids for assistant response messages — `msg_<random>`, matching storage ids. */
@@ -1498,6 +1538,7 @@ export function createRuntime<P, RC = unknown>(
   config: RuntimeConfig<P, RC>,
 ): Runtime<P> {
   const { storage } = config;
+  const contextDef = toContextDefinition(config.context);
   const reconstructPrincipal: ReconstructPrincipal<P> =
     config.reconstructPrincipal ?? ((identity) => identity as P);
   const dur = {
@@ -1519,6 +1560,21 @@ export function createRuntime<P, RC = unknown>(
     );
   }
 
+  /**
+   * Params arriving with a message: for a new chat, validated against the
+   * agent's schema and returned for saving; for an existing chat, they must
+   * equal what it was started with (`ParamsFixedError` otherwise), and nothing
+   * new is saved. An agent without a schema refuses params.
+   */
+  async function checkChatParams(agentName: string, chat: ChatRecord | null, incoming: unknown): Promise<unknown> {
+    const schema = config.agents[agentName]?.meta?.params;
+    if (!chat) return validateParams(agentName, schema, incoming);
+    if (incoming === undefined) return undefined;
+    const given = await validateParams(agentName, schema, incoming);
+    if (stableJson(given) !== stableJson(chat.params)) throw new ParamsFixedError(chat.id);
+    return undefined;
+  }
+
   /** Resolve an agent's per-request config + a display model id. */
   async function resolveAgentConfig(
     agentName: string,
@@ -1527,19 +1583,25 @@ export function createRuntime<P, RC = unknown>(
     turnContext?: unknown,
     /** Passed through to `dynamicAgents.resolve` (see DynamicAgentResolveContext). */
     resolveCtx?: DynamicAgentResolveContext,
-  ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC }> {
-    const runtimeCtx = await config.context.build({ principal, request, turnContext });
+    /** The chat's saved params (`ChatRecord.params`). */
+    chatParams?: unknown,
+  ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC; params: unknown }> {
+    const runtimeCtx = await contextDef.build({ principal, request, turnContext });
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
+    // Re-checked every turn, so the agent always gets its schema's output. An
+    // agent without a schema gets none, whatever the chat holds.
+    const schema = factory?.meta?.params;
+    const params = schema ? await validateParams(agentName, schema, chatParams) : undefined;
     const cfg = factory
-      ? await factory({ context: runtimeCtx, principal, turnContext })
+      ? await factory({ context: runtimeCtx, principal, params, turnContext })
       : await config.dynamicAgents?.resolve(agentName, principal, resolveCtx);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
       typeof cfg.model === "string"
         ? cfg.model
         : ((cfg.model as { modelId?: string }).modelId ?? "unknown");
-    return { cfg, modelId, runtimeCtx };
+    return { cfg, modelId, runtimeCtx, params };
   }
 
   /** `buildTurnStream` as an SSE `Response` — what every chat-facing path returns. */
@@ -1568,6 +1630,8 @@ export function createRuntime<P, RC = unknown>(
     lease: RunLease | undefined;
     uiMessages: AppMessage[];
     runtimeCtx: RC;
+    /** The chat's params, as the agent's schema returned them. */
+    params?: unknown;
     /** Subagent runs: waive approvals + drop OAuth `connect_` gates (no human). */
     autoApprove?: boolean;
     /**
@@ -2575,7 +2639,8 @@ export function createRuntime<P, RC = unknown>(
                 // as" names the same record the turn is using.
                 run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
                 writer,
-              } satisfies ToolContext<P, Record<string, unknown>>,
+                params: args.params,
+              } satisfies ToolContext<P, Record<string, unknown>, unknown>,
             ]),
           ),
           // generate-text step callback: accumulate usage across steps,
@@ -3039,10 +3104,11 @@ export function createRuntime<P, RC = unknown>(
   }
 
   async function handleChat({
-    agent: agentName,
+    agent: agentIn,
     chatId,
     principal,
     message,
+    params: paramsIn,
     request,
     turnContext,
   }: HandleChatInput<P>): Promise<Response> {
@@ -3058,6 +3124,11 @@ export function createRuntime<P, RC = unknown>(
 
     // chat: scoped create-or-continue (others' ids resolve to "not found")
     let chat = chatId ? await storage.getChat(principal, chatId) : null;
+    const agentName = agentIn ?? chat?.agent;
+    if (!agentName) throw new InvalidMessageError("a new chat needs an agent");
+    // A chat's params are set by its first message and fixed after that:
+    // checked before anything is created, so a refusal leaves nothing behind.
+    const newParams = await checkChatParams(agentName, chat, paramsIn);
     // Only a new user message gets in: a client can take part in the
     // conversation, not write it (see `acceptUserMessage`). Checked before a
     // chat is created, so a refused message leaves nothing behind.
@@ -3073,11 +3144,12 @@ export function createRuntime<P, RC = unknown>(
         agent: agentName,
         // Title from the first user message — for the chat list.
         title: firstText(userMessage)?.slice(0, 80),
+        ...(newParams !== undefined ? { params: newParams } : {}),
       });
     }
     const resolvedChatId = chat.id;
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
       agentName,
       principal,
       request,
@@ -3085,6 +3157,7 @@ export function createRuntime<P, RC = unknown>(
       // A host may continue a subagent thread through the chat surface; keep
       // resolving it the way its spawner would.
       { parentAgent: chat.parentAgent },
+      chat.params,
     );
 
     // The replaced answers are hidden by the same write that opens the new turn
@@ -3124,6 +3197,7 @@ export function createRuntime<P, RC = unknown>(
       // A retried message replaces its earlier copy rather than appearing twice.
       uiMessages: [...prior.filter((m) => m.id !== userMessage.id), userMessage],
       runtimeCtx,
+      params,
       admitted,
     });
   }
@@ -3307,11 +3381,11 @@ export function createRuntime<P, RC = unknown>(
     };
     // A store that records versions but can't resolve a pin falls back to the
     // agent as it is now — what recovery always did — rather than failing it.
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(pinnedAgent, principal, undefined, undefined, resolveCtx).catch(
+    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(pinnedAgent, principal, undefined, undefined, resolveCtx, chat?.params).catch(
       (e: unknown) => {
         if (pinnedAgent === run.agent) throw e;
         console.warn(`[resume] run ${run.id}: ${pinnedAgent} did not resolve; resuming on ${run.agent} as it is now`);
-        return resolveAgentConfig(run.agent, principal, undefined, undefined, resolveCtx);
+        return resolveAgentConfig(run.agent, principal, undefined, undefined, resolveCtx, chat?.params);
       },
     );
 
@@ -3337,6 +3411,7 @@ export function createRuntime<P, RC = unknown>(
       // here so a classifier change cannot reintroduce the prefill.
       uiMessages: trimTrailingAssistantPrefill(uiMessages, { unanchored: true }),
       runtimeCtx,
+      params,
       admitted,
       ...(settings.autoApprove !== undefined ? { autoApprove: settings.autoApprove } : {}),
       ...(settings.blockGated !== undefined ? { blockGated: settings.blockGated } : {}),
@@ -3465,12 +3540,13 @@ export function createRuntime<P, RC = unknown>(
 
     // Continue this chat from the decided history.
     const continueTurn = async () => {
-      const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+      const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
         chat.agent,
         principal,
         request,
         turnContext,
         { parentAgent: chat.parentAgent },
+        chat.params,
       );
       const admitted = await admitContinuation(principal, chat.agent, "decision");
       const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
@@ -3485,6 +3561,7 @@ export function createRuntime<P, RC = unknown>(
         // the tool result (a user turn), not an assistant prefill.
         uiMessages: trimTrailingAssistantPrefill(messages),
         runtimeCtx,
+        params,
         // A human just decided something, so a human is present — even if this
         // turn parks again on the NEXT gate (see TurnTrigger).
         trigger: "decision",
@@ -3630,12 +3707,13 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
       chat.agent,
       principal,
       request,
       turnContext,
       { parentAgent: chat.parentAgent },
+      chat.params,
     );
     const admitted = await admitContinuation(principal, chat.agent, "decision");
     // The result is persisted WITH the run (atomically where the adapter can):
@@ -3654,6 +3732,7 @@ export function createRuntime<P, RC = unknown>(
       // Resume: same prefill guard as applyApproval (see trimTrailingAssistantPrefill).
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
+      params,
       // A client-handled tool result is a human answering (see TurnTrigger).
       trigger: "decision",
       admitted,
@@ -3708,6 +3787,7 @@ export function createRuntime<P, RC = unknown>(
       request,
       turnContext,
       { parentAgent: chat.parentAgent },
+      chat.params,
     );
     // Tool definitions only affect how a recorded tool RESULT is rendered for the
     // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
@@ -3942,6 +4022,8 @@ export function createRuntime<P, RC = unknown>(
     agent: string;
     message: AppMessage;
     chatId?: string;
+    /** Params for the thread (see `HandleChatInput.params`): saved on a new one, checked against an existing one. */
+    params?: unknown;
     autoApprove: boolean;
     blockGated?: boolean | "simulate-success";
     /** Per-turn memory override (see buildTurn) — `false` disables recall. */
@@ -3976,11 +4058,13 @@ export function createRuntime<P, RC = unknown>(
     // created with id "" and the UI can never open it.
     const chatId = o.chatId?.trim() || generateSubchatId();
     let chat = await storage.getChat(o.principal, chatId);
+    const newParams = await checkChatParams(o.agent, chat, o.params);
     if (!chat) {
       chat = await storage.createChat(o.principal, {
         id: chatId,
         agent: o.agent,
         title: firstText(o.message)?.slice(0, 80),
+        ...(newParams !== undefined ? { params: newParams } : {}),
         // Runtime-created thread: stamp it internal so a host filtering its
         // chat list on kind never shows it (see ChatRecord.kind).
         kind: "internal",
@@ -4007,7 +4091,7 @@ export function createRuntime<P, RC = unknown>(
     // leaves nothing behind, same as handleChat. Same for a busy chat: open
     // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
-    const { cfg, modelId, runtimeCtx, run, lease } = await withReservation(admitted, async () => {
+    const { cfg, modelId, runtimeCtx, params, run, lease } = await withReservation(admitted, async () => {
       const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext, {
         // A continued thread keeps the parent it was created under (a mismatch
         // was refused above). Without a stored one — an adapter that doesn't
@@ -4015,7 +4099,7 @@ export function createRuntime<P, RC = unknown>(
         // that restricts a subagent by its parent must never see none.
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
-      });
+      }, chat.params);
       const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
@@ -4031,6 +4115,7 @@ export function createRuntime<P, RC = unknown>(
         lease,
         uiMessages: [...prior, o.message],
         runtimeCtx,
+        params,
         admitted,
         autoApprove: o.autoApprove,
         blockGated: o.blockGated,
@@ -4128,7 +4213,7 @@ export function createRuntime<P, RC = unknown>(
     // Another gated call in the same sub step still undecided → can't finish.
     if (hasPendingApproval(subMessages)) return { answer: "" };
 
-    const { cfg, modelId, runtimeCtx } = await resolveAgentConfig(
+    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
       subChat.agent,
       principal,
       undefined,
@@ -4136,6 +4221,7 @@ export function createRuntime<P, RC = unknown>(
       // Same shaping as the first sub-turn: the parent is read off the persisted
       // sub-thread, and this path is only ever reached by a human decision.
       { parentAgent: subChat.parentAgent, autoApprove: false },
+      subChat.params,
     );
     const admitted = await admitContinuation(principal, subChat.agent, "decision");
     const { run, lease } = await openRun(principal, subChatId, subChat.agent, cfg.configVersion);
@@ -4169,6 +4255,7 @@ export function createRuntime<P, RC = unknown>(
       // model as an assistant prefill.
       uiMessages: resumeFrom,
       runtimeCtx,
+      params,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
       // Keep the resumed turn nested under the original trace/session.
@@ -4194,6 +4281,7 @@ export function createRuntime<P, RC = unknown>(
     prompt,
     delivery,
     onParked,
+    params: paramsIn,
   }: {
     principal: P;
     agent: string;
@@ -4202,11 +4290,14 @@ export function createRuntime<P, RC = unknown>(
     prompt: string;
     delivery?: unknown;
     onParked?: "skip" | "fire";
+    params?: unknown;
   }): Promise<ScheduleRecord> {
     // Accept code-declared or dynamic (UI-created) agents.
     const known =
       !!config.agents[agent] || !!(await config.dynamicAgents?.resolve(agent, principal));
     if (!known) throw new Error(`Unknown agent: ${agent}`);
+    // Checked now, so a bad schedule is refused when it's made, not at 9:00.
+    const params = await validateParams(agent, config.agents[agent]?.meta?.params, paramsIn);
     const now = Date.now();
     let nextRunAt = now; // one-shot → fire on the next runDue
     if (cron) {
@@ -4226,6 +4317,7 @@ export function createRuntime<P, RC = unknown>(
       nextRunAt,
       delivery,
       onParked,
+      ...(params !== undefined ? { params } : {}),
     });
   }
 
@@ -4382,6 +4474,7 @@ export function createRuntime<P, RC = unknown>(
           const chat = await storage.createChat(principal, {
             agent: s.agent,
             title: s.prompt.slice(0, 80),
+            ...(s.params !== undefined ? { params: s.params } : {}),
           });
           // Remember where this fire ran so the NEXT occurrence can see a
           // parked predecessor. Stamped before the turn (a parked turn still
@@ -4431,6 +4524,7 @@ export function createRuntime<P, RC = unknown>(
       prompt,
       files,
       threadId,
+      params,
       blockGated = true,
       memory,
       model,
@@ -4445,6 +4539,7 @@ export function createRuntime<P, RC = unknown>(
         agent,
         message: userMessageOf(prompt, files),
         chatId: threadId,
+        params,
         depth: 1,
         // Autonomous: no human to authorize (blockGated stubs the gated tools).
         autoApprove: true,

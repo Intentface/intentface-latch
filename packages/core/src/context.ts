@@ -28,6 +28,29 @@ export type SecretResolver<P> = (
   key: string,
 ) => Promise<string | undefined>;
 
+/**
+ * Builds what this customer's agents and tools can work with, from who is
+ * asking: database clients limited to their organization, their plan, their
+ * permissions. Called at the start of every turn, including resumed runs,
+ * approvals and schedule fires, and never saved, so it can hold clients and
+ * functions and always reads current values. It gets only the principal,
+ * because that is all Latch still has when an answer continues.
+ *
+ * ```ts
+ * createRuntime({
+ *   context: async ({ principal }) => ({
+ *     db: dbFor(principal.orgId),
+ *     plan: await planOf(principal.orgId),
+ *   }),
+ * });
+ * ```
+ */
+export type ContextFunction<P, RuntimeContext> = (args: {
+  /** Who the turn is for. */
+  principal: P;
+}) => RuntimeContext | Promise<RuntimeContext>;
+
+/** @deprecated Pass a plain function to `createRuntime({ context })`; see {@link ContextFunction}. */
 export interface ContextDefinition<P, RuntimeContext> {
   /**
    * Build the shared runtime context for a request from its principal.
@@ -58,14 +81,14 @@ export interface ContextDefinition<P, RuntimeContext> {
  */
 // Latch sets these on every tool's context, after spreading what `build`
 // returned, so a built field with one of these names is overwritten.
-type LatchToolKeys = "principal" | "run" | "writer" | "runtime";
+type LatchToolKeys = "principal" | "run" | "writer" | "runtime" | "params";
 
 // `Omit` per union member: on a union as a whole it keeps only the shared
 // keys, so a context typed as `{ kind: "a"; a } | { kind: "b"; b }` would lose
 // `a` and `b`.
 type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-export type ToolContext<P, RuntimeContext = unknown> = OmitEach<RuntimeContext, LatchToolKeys> & {
+export type ToolContext<P, RuntimeContext = unknown, Params = unknown> = OmitEach<RuntimeContext, LatchToolKeys> & {
   /** Who the run is for: the principal your route passed, or the one restored for a resumed or scheduled run. */
   principal: P;
   /** The run this tool call belongs to. `agent` is the agent's name as the run resolved it. */
@@ -74,8 +97,29 @@ export type ToolContext<P, RuntimeContext = unknown> = OmitEach<RuntimeContext, 
   writer: TurnWriter;
   /** The runtime itself, for tools that schedule, list chats or start runs. */
   runtime: Runtime<P>;
+  /**
+   * What this chat is about (see `defineAgent`'s `params`), or `undefined` for
+   * an agent that declares none. Sent by the client: look ids up through
+   * something limited to `principal` before trusting them.
+   */
+  params: Params;
 };
 
+/** Either form `createRuntime({ context })` accepts. */
+export type ContextInput<P, RuntimeContext> =
+  | ContextFunction<P, RuntimeContext>
+  | ContextDefinition<P, RuntimeContext>;
+
+/** The deprecated `{ build }` form, or a plain function, as one `build`. */
+export function toContextDefinition<P, RuntimeContext>(
+  input: ContextInput<P, RuntimeContext> | undefined,
+): ContextDefinition<P, RuntimeContext> {
+  if (!input) return { build: () => ({}) as RuntimeContext };
+  if (typeof input === "function") return { build: ({ principal }) => input({ principal }) };
+  return input;
+}
+
+/** @deprecated Pass a plain function to `createRuntime({ context })`; see {@link ContextFunction}. */
 export function defineContext<P, RuntimeContext>(
   def: ContextDefinition<P, RuntimeContext>,
 ): ContextDefinition<P, RuntimeContext> {

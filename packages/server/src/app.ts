@@ -35,7 +35,8 @@ export interface LatchAppConfig<P, RC = unknown> {
    * can pick their model from `models.modelFor(...)` without loading the
    * catalog themselves.
    */
-  agents: Record<string, AgentFactory<P, RC>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, RC>>);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- each agent declares its own params
+  agents: Record<string, AgentFactory<P, RC, any>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, RC, any>>);
   /** Your auth: request → Principal (null → 401). */
   resolveContext: LatchHandlerConfig<P>["resolveContext"];
   /** Per-turn runtime context (default: `{}`). */

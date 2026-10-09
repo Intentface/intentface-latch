@@ -120,6 +120,26 @@ function checks<P>(): ConformanceCheck<P>[] {
       },
     },
 
+    // ── chats ─────────────────────────────────────────────────────────────
+    {
+      name: "a chat keeps the params it was created with",
+      async run({ store, principals: [me] }) {
+        const params = { ticketId: "T-9", tags: ["a", "b"], nested: { n: 1 } };
+        const chat = await store.createChat(me, { agent: "a", params });
+        const read = await store.getChat(me, chat.id);
+        // Key order may change on the way through (Postgres JSONB reorders), so compare sorted.
+        const sorted = (v: unknown) =>
+          JSON.stringify(v ?? null, (_k, x) =>
+            x && typeof x === "object" && !Array.isArray(x)
+              ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Record<string, unknown>)[k]]))
+              : x,
+          );
+        check(sorted(read?.params) === sorted(params), `params round-trip: ${JSON.stringify(read?.params)}`);
+        const plain = await store.createChat(me, { agent: "a" });
+        check((await store.getChat(me, plain.id))?.params === undefined, "a chat created without params has none");
+      },
+    },
+
     // ── tenancy ───────────────────────────────────────────────────────────
     {
       name: "another owner can't see a chat, its messages, or it in a list",

@@ -4,7 +4,7 @@ import type { Client } from "@libsql/client";
 const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_chats (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL,
-     title TEXT, kind TEXT NOT NULL DEFAULT 'user', parent_agent TEXT,
+     title TEXT, kind TEXT NOT NULL DEFAULT 'user', parent_agent TEXT, params TEXT,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   // NOTE: composite PK — message ids are only unique within a chat, and the
@@ -96,7 +96,7 @@ const DDL = [
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity TEXT,
      cron TEXT, timezone TEXT, prompt TEXT NOT NULL, delivery TEXT,
      next_run_at INTEGER NOT NULL, last_run_at INTEGER,
-     on_parked TEXT, last_chat_id TEXT,
+     on_parked TEXT, last_chat_id TEXT, params TEXT,
      enabled INTEGER NOT NULL, lease_owner TEXT, lease_expires_at INTEGER,
      created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_owner_idx ON latch_schedules (owner)`,
@@ -154,6 +154,8 @@ const ALTERS = [
   `ALTER TABLE latch_runs ADD COLUMN settings TEXT`,
   `ALTER TABLE latch_agent_versions ADD COLUMN changed_fields TEXT`,
   `ALTER TABLE latch_agent_versions ADD COLUMN change_message TEXT`,
+  `ALTER TABLE latch_chats ADD COLUMN params TEXT`,
+  `ALTER TABLE latch_schedules ADD COLUMN params TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];

@@ -23,6 +23,8 @@ export const chats = sqliteTable(
     kind: text("kind").notNull().default("user"),
     /** Spawning agent of a sub-thread (ChatRecord.parentAgent); null at top level. */
     parentAgent: text("parent_agent"),
+    /** What the chat is about, fixed when it starts (ChatRecord.params). */
+    params: text("params", { mode: "json" }),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
@@ -421,6 +423,8 @@ export const schedules = sqliteTable(
     onParked: text("on_parked"),
     /** Chat of the last default-path fire (see StorageAdapter.noteScheduleFire). */
     lastChatId: text("last_chat_id"),
+    /** Params each fired chat starts with (ScheduleRecord.params). */
+    params: text("params", { mode: "json" }),
     enabled: integer("enabled").notNull(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: integer("lease_expires_at"),
