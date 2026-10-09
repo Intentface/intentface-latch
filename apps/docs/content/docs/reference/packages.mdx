@@ -12,7 +12,7 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 | [`latch-server`](#latch-server) | an HTTP surface you don't have to write |
 | [`latch-mcp`](#latch-mcp) | tools from MCP servers |
 | [`latch-openapi`](#latch-openapi) | tools from an OpenAPI spec |
-| [`latch-memory`](#latch-memory) | agents that remember across sessions |
+| [`latch-memory`](#latch-memory) | agents that remember across sessions (**experimental**) |
 | [`latch-channels`](#latch-channels) | Slack, Telegram, WhatsApp |
 | [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
 | [`latch-langfuse`](#latch-langfuse) | tracing |
@@ -112,6 +112,8 @@ Key exports: `createMcpConnections` · `defineMcpConnection` · `createMcpHost` 
 Key exports: `bearer` · `apiKey` · `headers` · `isHostAllowed`. Uses `@apidevtools/swagger-parser` to resolve specs.
 
 ## latch-memory
+
+**Experimental.** The only production store today is a Loredex workspace, and the design may change.
 
 **Facts that survive the conversation.** Wire the `MemoryProvider` seam and each turn gets a compiled index appended to its instructions plus `memory_search` / `memory_save` tools; background jobs handle extraction and consolidation out of band.
 

@@ -3,6 +3,10 @@ title: Memory
 description: Facts an agent keeps across sessions — extracted from idle conversations, scoped per agent, user or org, injected next turn.
 ---
 
+<Callout type="warn" title="Experimental">
+Memory is experimental. The only production store today is a Loredex workspace, and the interface still carries Loredex conventions. Expect the design to change; don't build on it for anything you can't adjust later.
+</Callout>
+
 Memory lets an agent carry what it learned in one conversation into the next. It exists because an assistant that is no better on day thirty than on day one is not an assistant; and because building extraction, storage and injection per project is exactly the plumbing Latch is for.
 
 **What it makes possible.** An agent that remembers a user's preferences and context; an org-shared agent whose memory a whole team benefits from, next to personal memory that never leaks; a background sweep that needs only the cron you already run; per-principal prompt caching that stays correct when the prompt differs per user.

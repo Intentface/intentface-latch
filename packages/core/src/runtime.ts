@@ -268,6 +268,9 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * added to their instructions, and they get tools to search and save it.
    * Use `createMemoryProvider` from `@intentface/latch-memory`.
    *
+   * **Experimental.** The only production store today is a Loredex workspace,
+   * and the design may change.
+   *
    * Without it, an agent's `memory` setting is ignored.
    */
   memory?: MemoryProvider<P>;

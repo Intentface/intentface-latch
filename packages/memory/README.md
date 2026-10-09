@@ -1,5 +1,9 @@
 # @intentface/latch-memory
 
+> **Experimental.** The only production store today is Loredex (`createLoredexStore`), and the
+> interface still carries Loredex conventions (`__private_root` paths, a `connection` argument).
+> The design may change in any release.
+
 Pluggable, platform-managed memory for Latch agents. Declare `memory` on an
 agent and the platform does all upkeep:
 

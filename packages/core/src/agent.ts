@@ -161,6 +161,9 @@ export interface AgentConfig<P> {
    * Long-term memory across conversations: what the agent learns is added to
    * its instructions on later turns, and it gets tools to search and save
    * memories. Needs `memory` in the runtime config.
+   *
+   * **Experimental.** The only production store today is a Loredex workspace,
+   * and the design may change.
    */
   memory?: MemoryConfig;
   /**
