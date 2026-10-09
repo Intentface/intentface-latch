@@ -56,7 +56,11 @@ export interface ContextDefinition<P, RuntimeContext> {
  * },
  * ```
  */
-export type ToolContext<P, RuntimeContext = unknown> = RuntimeContext & {
+// Latch sets these on every tool's context, after spreading what `build`
+// returned, so a built field with one of these names is overwritten.
+type LatchToolKeys = "principal" | "run" | "writer" | "runtime";
+
+export type ToolContext<P, RuntimeContext = unknown> = Omit<RuntimeContext, LatchToolKeys> & {
   /** Who the run is for: the principal your route passed, or the one restored for a resumed or scheduled run. */
   principal: P;
   /** The run this tool call belongs to. `agent` is the agent's name as the run resolved it. */
