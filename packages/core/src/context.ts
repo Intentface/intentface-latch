@@ -60,7 +60,12 @@ export interface ContextDefinition<P, RuntimeContext> {
 // returned, so a built field with one of these names is overwritten.
 type LatchToolKeys = "principal" | "run" | "writer" | "runtime";
 
-export type ToolContext<P, RuntimeContext = unknown> = Omit<RuntimeContext, LatchToolKeys> & {
+// `Omit` per union member: on a union as a whole it keeps only the shared
+// keys, so a context typed as `{ kind: "a"; a } | { kind: "b"; b }` would lose
+// `a` and `b`.
+type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+export type ToolContext<P, RuntimeContext = unknown> = OmitEach<RuntimeContext, LatchToolKeys> & {
   /** Who the run is for: the principal your route passed, or the one restored for a resumed or scheduled run. */
   principal: P;
   /** The run this tool call belongs to. `agent` is the agent's name as the run resolved it. */
