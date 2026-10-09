@@ -31,6 +31,7 @@ import {
   toModelMessages,
 } from "./projections.js";
 import { summarizeForCompaction } from "./compaction.js";
+import { safeFileDownload } from "./file-download.js";
 import { computeCost, type Pricing } from "./pricing.js";
 import {
   defaultPromptCachingPlan,
@@ -334,6 +335,16 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * `step_end`: list an extension that persists before ones that observe.
    */
   extensions?: Extension[];
+  /**
+   * The most bytes of files a user message may carry inline (as `data:` URLs,
+   * which is how `useChat` sends attachments by default). Inline files travel
+   * in the chat request and are stored in the message, then reloaded on every
+   * turn; a message over the limit is refused (`InvalidMessageError`, HTTP
+   * 400). Send larger files by URL.
+   *
+   * @default 20 MB
+   */
+  maxInlineFileBytes?: number;
 }
 
 export interface HandleChatInput<P> {
@@ -2269,6 +2280,10 @@ export function createRuntime<P, RC = unknown>(
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
+      // File URLs the model can't fetch itself: capped, refused where
+      // addresses can't be checked, and stopped with the run (see
+      // `file-download.ts`). Not with the request: a run outlives its client.
+      experimental_download: safeFileDownload({ signal: abort.signal }),
       // Every agent gets a trailing "today's date" line — after the memory
       // block, so it stays the tail. Day-granularity by design — see
       // `currentDateLine` for the prompt-cache reasoning. With a caching plan,
@@ -3047,7 +3062,7 @@ export function createRuntime<P, RC = unknown>(
     // conversation, not write it (see `acceptUserMessage`). Checked before a
     // chat is created, so a refused message leaves nothing behind.
     const existing = chat ? await storage.loadMessages(principal, chat.id) : [];
-    const userMessage = acceptUserMessage(message, existing);
+    const userMessage = acceptUserMessage(message, existing, { maxInlineFileBytes: config.maxInlineFileBytes });
     // The last question regenerated (`useChat`'s `regenerate()`) or edited:
     // what it replaces is hidden from the user and the model, not deleted,
     // and the turn runs again from that question.

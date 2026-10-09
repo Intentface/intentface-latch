@@ -114,6 +114,28 @@ describe("parts a client sends", () => {
     ]);
   });
 
+  it("are refused when the files sent inline are over the limit", async () => {
+    const mem = memoryStorage();
+    const { model } = answering();
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: { a: defineAgent({ model }) },
+      maxInlineFileBytes: 4,
+    });
+    const send = async (url: string) =>
+      (await rt.handleChat({ agent: "a", chatId: "c", principal, message: { id: `u${url.length}`, role: "user", parts: [{ type: "file", mediaType: "image/png", url }] } })).text();
+    // 6 bytes inline: refused, nothing stored.
+    await expect(send("data:image/png;base64,AAAAAAAA")).rejects.toSatisfy(isInvalidMessageError);
+    // The scheme is case-insensitive: an uppercase one is counted too.
+    await expect(send("DATA:image/png;base64,AAAAAAAAAAAA")).rejects.toSatisfy(isInvalidMessageError);
+    expect(mem.chats.has("c")).toBe(false);
+    // 3 bytes inline, or any size by URL: accepted.
+    await send("data:image/png;base64,AAAA");
+    await send("https://example.com/huge.png");
+    expect(mem.messages.get("c")!.filter((m) => m.role === "user")).toHaveLength(2);
+  });
+
   it("are refused when a text or file part is missing what makes it one", async () => {
     const { send } = setup();
     await expect(send({ id: "u1", role: "user", parts: [{ type: "file", url: "x" }] } as unknown as AppMessage)).rejects.toSatisfy(isInvalidMessageError);

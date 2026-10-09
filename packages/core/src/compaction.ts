@@ -1,4 +1,5 @@
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
+import { safeFileDownload } from "./file-download.js";
 
 /**
  * Conversation compaction: replace a long history with a summary the model reads
@@ -89,6 +90,8 @@ export async function summarizeForCompaction(input: {
         ? { providerOptions: input.providerOptions as Record<string, never> }
         : {}),
       ...(input.signal ? { abortSignal: input.signal } : {}),
+      // The history can carry file URLs: download them the same checked way.
+      experimental_download: safeFileDownload({ signal: input.signal }),
       messages: [
         ...input.messages,
         {
