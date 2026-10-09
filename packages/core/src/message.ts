@@ -84,20 +84,50 @@ function userPart(part: unknown): AppMessage["parts"][number] | null {
 const sameParts = (a: readonly unknown[], b: readonly unknown[]) =>
   JSON.stringify(a.map(userPart)) === JSON.stringify(b.map(userPart));
 
+/** Hidden from the user and the model, but kept: what a regenerate or an edit replaced. */
+export const isHidden = (m: AppMessage): boolean => m.metadata?.sendToModel === false && m.metadata?.visibility === "internal";
+
+const hide = (m: AppMessage): AppMessage => ({ ...m, metadata: { ...m.metadata, visibility: "internal", sendToModel: false } });
+
 /**
- * The answers a regenerate replaces: when `message` resends the chat's last
- * user message unchanged (what `useChat`'s `regenerate()` does), every
- * assistant message after it, marked hidden from the user and the model. Empty
- * for anything that isn't a regenerate. The messages are kept, not deleted,
- * so history and usage stay intact.
+ * What resending the chat's last question replaces, when `message` does that:
+ *  - unchanged (`useChat`'s `regenerate()`): the answers after it;
+ *  - changed (`sendMessage({ messageId })`, an edit): the answers after it,
+ *    plus the question's earlier wording, kept under a new id. The edited
+ *    question keeps the client's id, so the client can edit it again.
+ *
+ * Each is returned hidden from the user and the model. Nothing is deleted, so
+ * history and usage stay intact. Null when `message` doesn't resend the last
+ * question with at least one answer after it. Messages hidden earlier don't
+ * count: only what the user can still see.
  */
-export function answersReplacedBy(message: AppMessage, prior: readonly AppMessage[]): AppMessage[] {
-  const at = prior.findIndex((m) => m.id === message.id);
-  if (at === -1 || prior[at]!.role !== "user") return [];
-  const after = prior.slice(at + 1);
-  if (after.length === 0 || after.some((m) => m.role !== "assistant")) return [];
-  if (!sameParts(prior[at]!.parts, message.parts)) return [];
-  return after.map((m) => ({ ...m, metadata: { ...m.metadata, visibility: "internal" as const, sendToModel: false } }));
+export function lastQuestionResent(message: AppMessage, prior: readonly AppMessage[]): AppMessage[] | null {
+  const visible = prior.filter((m) => !isHidden(m));
+  const at = visible.findIndex((m) => m.id === message.id);
+  if (at === -1 || visible[at]!.role !== "user") return null;
+  const answers = visible.slice(at + 1);
+  if (answers.length === 0 || answers.some((m) => m.role !== "assistant")) return null;
+  const replaced = answers.map(hide);
+  if (!sameParts(visible[at]!.parts, message.parts)) {
+    replaced.push(hide({ ...visible[at]!, id: `msg_${crypto.randomUUID().replace(/-/g, "")}` }));
+  }
+  return replaced;
+}
+
+/**
+ * A resend Latch doesn't do in place: regenerating or editing a question that
+ * later questions build on. In one chat that would hide messages after it,
+ * possibly what the agent did since, or a colleague's messages in a shared
+ * chat. Fork the chat at that question instead. The HTTP server answers 409.
+ */
+export class RewindNotSupportedError extends Error {
+  readonly code = "rewind_not_supported" as const;
+  constructor(readonly messageId: string) {
+    super(
+      `message "${messageId}" has later messages after it: only the last question can be regenerated or edited in place; fork the chat to change an earlier one`,
+    );
+    this.name = "RewindNotSupportedError";
+  }
 }
 
 /** The parts a person can send: what they typed and what they attached. */
@@ -120,9 +150,10 @@ const USER_PART_TYPES = new Set(["text", "file"]);
  *    `voice` are kept from the client;
  *  - an id already in the chat only as a resend of the latest exchange: a
  *    retry of the chat's last message when that is a user message (a client
- *    resending after a dropped response), or a regenerate (the last user
- *    message resent unchanged, see `answersReplacedBy`). Any other existing id
- *    is someone else's message, or one of the agent's.
+ *    resending after a dropped response), or the last question regenerated or
+ *    edited (see `lastQuestionResent`). An earlier question is refused with
+ *    `RewindNotSupportedError` (fork the chat instead); any other existing id
+ *    is one of the agent's messages, or one that was hidden.
  *
  * Decisions on approvals go through `applyApproval`, which takes ids only.
  * (`handleChat` also takes `useChat`'s own approval message, but reads only
@@ -146,10 +177,17 @@ export function acceptUserMessage(message: AppMessage, prior: readonly AppMessag
     parts.push(clean);
   }
   // An id already in the chat is only a resend of the chat's latest exchange:
-  // a retry of the last message, or a regenerate (`answersReplacedBy`).
-  const existing = prior.findIndex((m) => m.id === message.id);
-  const retry = existing === prior.length - 1 && prior[existing]?.role === "user";
-  if (existing !== -1 && !retry && answersReplacedBy({ ...message, parts }, prior).length === 0) {
+  // a retry of the last message, or the last question regenerated or edited
+  // (`lastQuestionResent`). An earlier question is a rewind, which belongs in
+  // a fork; any other id is one of the agent's messages.
+  const visible = prior.filter((m) => !isHidden(m));
+  const existing = visible.findIndex((m) => m.id === message.id);
+  const retry = existing === visible.length - 1 && visible[existing]?.role === "user";
+  if (existing !== -1 && !retry && !lastQuestionResent({ ...message, parts }, prior)) {
+    if (visible[existing]!.role === "user") throw new RewindNotSupportedError(message.id);
+    throw new InvalidMessageError(`message id "${message.id}" is already in this chat`);
+  }
+  if (existing === -1 && prior.some((m) => m.id === message.id)) {
     throw new InvalidMessageError(`message id "${message.id}" is already in this chat`);
   }
   const sent = message.metadata;

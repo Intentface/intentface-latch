@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, answersReplacedBy, InvalidMessageError, type AppMessage } from "./message.js";
+import { acceptUserMessage, InvalidMessageError, isHidden, lastQuestionResent, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import type { ContextDefinition } from "./context.js";
 import type {
@@ -3048,10 +3048,10 @@ export function createRuntime<P, RC = unknown>(
     // chat is created, so a refused message leaves nothing behind.
     const existing = chat ? await storage.loadMessages(principal, chat.id) : [];
     const userMessage = acceptUserMessage(message, existing);
-    // A regenerate (`useChat`'s `regenerate()` resends the last user message):
-    // the answers it replaces are hidden from the user and the model, not
-    // deleted, before the turn runs again from that message.
-    const replaced = answersReplacedBy(userMessage, existing);
+    // The last question regenerated (`useChat`'s `regenerate()`) or edited:
+    // what it replaces is hidden from the user and the model, not deleted,
+    // and the turn runs again from that question.
+    const replaced = lastQuestionResent(userMessage, existing) ?? [];
     if (!chat) {
       chat = await storage.createChat(principal, {
         id: chatId, // use the provided id (create-or-continue); generated if omitted
@@ -3075,7 +3075,8 @@ export function createRuntime<P, RC = unknown>(
     // The replaced answers are hidden by the same write that opens the new turn
     // (below), so a turn refused for a limit or a busy chat hides nothing.
     const hidden = new Set(replaced.map((m) => m.id));
-    const prior = (await storage.loadMessages(principal, resolvedChatId)).filter((m) => !hidden.has(m.id));
+    // Hidden messages, from this resend or earlier ones, take no part in the turn.
+    const prior = (await storage.loadMessages(principal, resolvedChatId)).filter((m) => !hidden.has(m.id) && !isHidden(m));
 
     // A new message while the last turn is parked on an approval is itself the
     // decision: the user declined to answer and wants to steer elsewhere. Close

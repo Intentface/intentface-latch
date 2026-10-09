@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createRuntime } from "./runtime.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
-import { isInvalidMessageError, type AppMessage } from "./message.js";
+import { isInvalidMessageError, RewindNotSupportedError, type AppMessage } from "./message.js";
 import { memoryStorage } from "./__tests__/memory-storage.js";
 
 /**
@@ -72,7 +72,7 @@ async function refused(p: Promise<unknown>): Promise<boolean> {
     await p;
     return false;
   } catch (e) {
-    return isInvalidMessageError(e);
+    return isInvalidMessageError(e) || e instanceof RewindNotSupportedError;
   }
 }
 

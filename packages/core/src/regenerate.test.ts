@@ -5,7 +5,7 @@ import { createRuntime, resumeShapeOf } from "./runtime.js";
 import { DAY_MS, LimitExceededError, usageKey, type LimitStore, type LimitUsage } from "./limits.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
-import { isInvalidMessageError, type AppMessage } from "./message.js";
+import { isInvalidMessageError, RewindNotSupportedError, type AppMessage } from "./message.js";
 import { memoryStorage } from "./__tests__/memory-storage.js";
 
 /**
@@ -130,16 +130,57 @@ describe("regenerate", () => {
     expect(texts(await rt.loadHistory({ chatId: "c", principal }))).toEqual(["user: hi", "assistant: answer 3"]);
   });
 
-  it("only works for the last question, resent unchanged", async () => {
+  it("is refused for an earlier question, which belongs in a fork", async () => {
     const { send, mem } = setup();
     await send(user("u1", "first"));
     await send(user("u2", "second"));
     const before = JSON.stringify(mem.messages.get("c"));
-    // An earlier question, unchanged: there is a later one after it.
-    await expect(send(user("u1", "first"))).rejects.toSatisfy(isInvalidMessageError);
-    // The last question, changed: that would rewrite what was asked.
-    await expect(send(user("u2", "something else"))).rejects.toSatisfy(isInvalidMessageError);
+    // `regenerate({ messageId })` on the first answer resends "u1" with later messages after it.
+    await expect(send(user("u1", "first"))).rejects.toBeInstanceOf(RewindNotSupportedError);
+    // …and so does editing it.
+    await expect(send(user("u1", "changed"))).rejects.toBeInstanceOf(RewindNotSupportedError);
     expect(JSON.stringify(mem.messages.get("c"))).toBe(before);
+  });
+});
+
+describe("editing the last question", () => {
+  it("answers the new wording and hides the old one with its answer", async () => {
+    const { send, rt, mem, prompts } = setup();
+    await send(user("u1", "first"));
+    await send(user("u2", "how tall is it?"));
+    // `sendMessage({ messageId: "u2", text })` edits the last question.
+    await send(user("u2", "how wide is it?"));
+    expect(texts(await rt.loadHistory({ chatId: "c", principal }))).toEqual([
+      "user: first",
+      "assistant: answer 1",
+      "user: how wide is it?",
+      "assistant: answer 3",
+    ]);
+    // The model saw the new wording only.
+    expect(prompts[2]).toContain("how wide is it?");
+    expect(prompts[2]).not.toContain("how tall is it?");
+    expect(prompts[2]).not.toContain("answer 2");
+    // The old wording is still stored, hidden, under a new id.
+    const old = mem.messages.get("c")!.find((m) => texts([m])[0] === "user: how tall is it?")!;
+    expect(old.id).not.toBe("u2");
+    expect(old.metadata).toMatchObject({ visibility: "internal", sendToModel: false });
+  });
+
+  it("can be edited again, and regenerated after", async () => {
+    const { send, rt } = setup();
+    await send(user("u1", "one"));
+    await send(user("u1", "two"));
+    await send(user("u1", "three"));
+    await send(user("u1", "three"));
+    expect(texts(await rt.loadHistory({ chatId: "c", principal }))).toEqual(["user: three", "assistant: answer 4"]);
+  });
+
+  it("can't reuse the id of a hidden message", async () => {
+    const { send, mem } = setup();
+    await send(user("u1", "one"));
+    await send(user("u1", "two"));
+    const hiddenId = mem.messages.get("c")!.find((m) => texts([m])[0] === "user: one")!.id;
+    await expect(send(user(hiddenId, "resurrected"))).rejects.toSatisfy(isInvalidMessageError);
   });
 });
 

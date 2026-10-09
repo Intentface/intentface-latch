@@ -365,3 +365,21 @@ describe("POST /agents/:agent/:id with useChat's default body ({ messages })", (
     expect(handleChat.mock.calls[0]![0].message).toMatchObject({ role: "user", parts: [{ type: "text", text: "hello" }] });
   });
 });
+
+describe("POST /agents/:agent/:id regenerating or editing an earlier question", () => {
+  it("answers 409 rewind_not_supported", async () => {
+    const { RewindNotSupportedError } = await import("@intentface/latch-core");
+    const handleChat = vi.fn(async () => {
+      throw new RewindNotSupportedError("m1");
+    });
+    const handler = createLatchHandler<P>({
+      runtime: { handleChat } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+    const res = (await handler(post("agents/assistant/chat_1", { message: { id: "m1", role: "user", parts: [{ type: "text", text: "x" }] } })))!;
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "rewind_not_supported" });
+  });
+});

@@ -124,14 +124,17 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
 
     async messagesAfter(chatId, afterSeq, maxChars) {
       const rows = await db
-        .select({ seq: s.messages.seq, role: s.messages.role, parts: s.messages.parts })
+        .select({ seq: s.messages.seq, role: s.messages.role, parts: s.messages.parts, metadata: s.messages.metadata })
         .from(s.messages)
         .where(and(eq(s.messages.chatId, chatId), sql`${s.messages.seq} > ${afterSeq}`))
         .orderBy(s.messages.seq)
         .limit(MESSAGES_AFTER_ROW_CAP);
       const out: Array<{ seq: number; role: string; text: string }> = [];
       let used = 0;
-      for (const r of rows as Array<{ seq: number; role: string; parts: unknown }>) {
+      for (const r of rows as Array<{ seq: number; role: string; parts: unknown; metadata: unknown }>) {
+        // Hidden from the model (an answer a regenerate replaced, a question's
+        // edited-away wording): not something the user said or accepted.
+        if ((r.metadata as { sendToModel?: unknown } | null)?.sendToModel === false) continue;
         const text = textOfParts(r.parts);
         if (!text) continue;
         const remaining = maxChars - used;

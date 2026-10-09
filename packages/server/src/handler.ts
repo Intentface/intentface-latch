@@ -241,6 +241,7 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   chat_conflict     409  the client-chosen chat id exists and isn't yours
  *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
  *   invalid_message   400  the message isn't a new user message (text and files)
+ *   rewind_not_supported 409  an earlier question was regenerated or edited: fork instead
  */
 function refusalResponse(e: unknown): Response | undefined {
   const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
@@ -265,6 +266,8 @@ function refusalResponse(e: unknown): Response | undefined {
       return withRetry({ error: message("limit exceeded"), code }, 429);
     case "invalid_message":
       return json({ error: message("invalid message"), code }, 400);
+    case "rewind_not_supported":
+      return json({ error: message("only the last question can be regenerated or edited"), code }, 409);
     default:
       return undefined;
   }
