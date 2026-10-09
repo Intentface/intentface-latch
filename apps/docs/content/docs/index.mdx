@@ -57,15 +57,20 @@ import type { Principal } from "./latch";
 // customer's orders.
 const ordersFor = (orgId: string) => ({
   get: (orderId: string) => db.orders.findOne({ orgId, orderId }),
-  refund: (orderId: string) => payments.refund({ orgId, orderId }),
+  refund: (orderId: string, requestedBy: string) =>
+    payments.refund({ orgId, orderId, requestedBy }),
 });
 
-type Ctx = { orders: ReturnType<typeof ordersFor> };
+type Orders = ReturnType<typeof ordersFor>;
 
 // Built at the start of every turn, from the principal your route passed.
-export const context = defineContext<Principal, Ctx>({
+export const context = defineContext<Principal, { orders: Orders }>({
   build: ({ principal }) => ({ orders: ordersFor(principal.orgId) }),
 });
+
+// What a tool receives: what `build` returned, plus the principal itself,
+// which Latch adds for you.
+type Ctx = { orders: Orders; principal: Principal };
 
 export const find_order = tool({
   description: "Look up an order",
@@ -77,8 +82,10 @@ export const find_order = tool({
 export const refund = tool({
   description: "Refund an order",
   inputSchema: z.object({ orderId: z.string() }),
-  execute: async ({ orderId }, { context }) =>
-    (context as Ctx).orders.refund(orderId),
+  execute: async ({ orderId }, { context }) => {
+    const { orders, principal } = context as Ctx;
+    return orders.refund(orderId, principal.userId);
+  },
 });
 ```
 
