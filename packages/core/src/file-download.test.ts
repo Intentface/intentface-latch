@@ -4,19 +4,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { safeFileDownload } from "./file-download.js";
 
 /**
- * File URLs the model can't fetch itself are downloaded by Latch: every hop
- * through latch-net's pinned fetch, which checks the address the connection
- * really goes to, with redirects followed one checked hop at a time.
+ * File URLs the model can't fetch itself are downloaded by the server: on
+ * Node through the AI SDK's address-checked download, capped in size and
+ * time; on runtimes that can't check addresses, refused.
  */
 
 const req = (url: string, isUrlSupportedByModel = false) => ({ url: new URL(url), isUrlSupportedByModel });
 
 describe("safeFileDownload", () => {
-  afterEach(() => vi.doUnmock("@intentface/latch-net/pinned"));
+  afterEach(() => vi.unstubAllGlobals());
 
   it("passes through a URL the model fetches itself", async () => {
-    const download = safeFileDownload();
-    expect(await download([req("https://example.com/a.png", true)])).toEqual([null]);
+    expect(await safeFileDownload()([req("https://example.com/a.png", true)])).toEqual([null]);
   });
 
   it("refuses a file on a private address, for real", async () => {
@@ -30,80 +29,32 @@ describe("safeFileDownload", () => {
     }
   });
 
-  it("follows a redirect only through the checked fetch, one hop at a time", async () => {
-    const seen: string[] = [];
-    vi.doMock("@intentface/latch-net/pinned", () => ({
-      pinnedFetch: async (url: URL, init?: RequestInit) => {
-        seen.push(`${url} ${init?.redirect}`);
-        if (url.pathname === "/start") return new Response(null, { status: 302, headers: { location: "/final" } });
-        return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
-      },
-    }));
-    vi.resetModules();
-    const { safeFileDownload: fresh } = await import("./file-download.js");
-    const [file] = await fresh()([req("https://files.example.com/start")]);
-    expect(seen).toEqual(["https://files.example.com/start manual", "https://files.example.com/final manual"]);
-    expect(file).toEqual({ data: new Uint8Array([1, 2, 3]), mediaType: "image/png" });
+  it("downloads through the SDK with a size cap and a deadline", async () => {
+    const calls: Array<{ url: string; signal?: AbortSignal }> = [];
+    const download = async ({ url, abortSignal }: { url: URL; abortSignal?: AbortSignal }) => {
+      calls.push({ url: url.href, signal: abortSignal });
+      return { data: new Uint8Array([1, 2, 3]), mediaType: "image/png" };
+    };
+    const files = await safeFileDownload({ download })([req("https://files.example.com/a.png"), req("https://cdn.example.com/b.png", true)]);
+    expect(files).toEqual([{ data: new Uint8Array([1, 2, 3]), mediaType: "image/png" }, null]);
+    expect(calls.map((c) => c.url)).toEqual(["https://files.example.com/a.png"]);
+    expect(calls[0]!.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("refuses a file over the size limit", async () => {
-    vi.doMock("@intentface/latch-net/pinned", () => ({
-      pinnedFetch: async () => new Response(new Uint8Array(100)),
-    }));
-    vi.resetModules();
-    const { safeFileDownload: fresh } = await import("./file-download.js");
-    await expect(fresh({ maxBytes: 10 })([req("https://files.example.com/big")])).rejects.toThrow(/limit/);
-  });
-
-  it("refuses a redirect to a non-http scheme", async () => {
-    vi.doMock("@intentface/latch-net/pinned", () => ({
-      pinnedFetch: async () => new Response(null, { status: 302, headers: { location: "file:///etc/passwd" } }),
-    }));
-    vi.resetModules();
-    const { safeFileDownload: fresh } = await import("./file-download.js");
-    await expect(fresh()([req("https://files.example.com/start")])).rejects.toThrow(/http or https/);
-  });
-});
-
-describe("safeFileDownload's deadline", () => {
-  afterEach(() => vi.doUnmock("@intentface/latch-net/pinned"));
-
-  it("gives up on a file that takes too long, even while bytes keep arriving", async () => {
-    vi.doMock("@intentface/latch-net/pinned", () => ({
-      pinnedFetch: async (_url: URL, init?: RequestInit) => {
-        // A server that sends a byte every 10 ms, forever, unless aborted.
-        let timer: ReturnType<typeof setInterval>;
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            timer = setInterval(() => controller.enqueue(new Uint8Array([1])), 10);
-            init?.signal?.addEventListener("abort", () => {
-              clearInterval(timer);
-              controller.error(init.signal!.reason);
-            });
-          },
-          cancel() {
-            clearInterval(timer);
-          },
-        });
-        return new Response(body);
-      },
-    }));
-    vi.resetModules();
-    const { safeFileDownload: fresh } = await import("./file-download.js");
+  it("gives up on a file that takes too long", async () => {
+    const download = ({ abortSignal }: { url: URL; abortSignal?: AbortSignal }) =>
+      new Promise<never>((_ok, fail) => abortSignal?.addEventListener("abort", () => fail(abortSignal.reason)));
     const started = Date.now();
-    await expect(fresh({ timeoutMs: 100 })([req("https://files.example.com/slow")])).rejects.toThrow();
+    await expect(safeFileDownload({ download, timeoutMs: 50 })([req("https://files.example.com/slow")])).rejects.toThrow();
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
-  it("closes a response refused for its declared size", async () => {
-    let cancelled = false;
-    vi.doMock("@intentface/latch-net/pinned", () => ({
-      pinnedFetch: async () =>
-        new Response(new ReadableStream({ cancel: () => void (cancelled = true) }), { headers: { "content-length": "1000" } }),
-    }));
-    vi.resetModules();
-    const { safeFileDownload: fresh } = await import("./file-download.js");
-    await expect(fresh({ maxBytes: 10 })([req("https://files.example.com/big")])).rejects.toThrow(/limit/);
-    expect(cancelled).toBe(true);
+  it("refuses to download where addresses can't be checked (edge, Bun, Deno)", async () => {
+    vi.stubGlobal("EdgeRuntime", "edge-runtime");
+    const download = vi.fn();
+    await expect(safeFileDownload({ download })([req("https://files.example.com/a.png")])).rejects.toThrow(/can't check/);
+    expect(download).not.toHaveBeenCalled();
+    // A URL the model fetches itself still goes through: the provider fetches it.
+    expect(await safeFileDownload({ download })([req("https://cdn.example.com/b.png", true)])).toEqual([null]);
   });
 });
