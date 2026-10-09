@@ -1,15 +1,101 @@
 ---
 title: Latch
-description: The backend for agent products — persistence, safety and operations for agents, as a library inside your own stack.
+description: The backend around your AI agent. Saved conversations, approvals, crash recovery, per-customer isolation, usage limits and chat apps, inside your own server and database.
 ---
 
-Latch is a backend for agent products, built on the Vercel AI SDK. It gives an agent the things every agent product needs and nobody wants to rebuild: conversations that persist, a human in the loop for risky actions, runs that survive a crash, per-tenant isolation, channels, and a bill you can attribute — behind your own auth, against your own database, with no resident process.
+The [Vercel AI SDK](https://ai-sdk.dev) gives you the model call and the tool loop. **Latch is the backend around it**: everything an agent needs once real customers use it. Conversations that are saved, risky actions that wait for a person, answers that survive a crashed server, customers who never see each other's data, usage limits, and the same agent in Slack.
+
+It's a library, not a service. It runs inside your own server, on the Postgres or SQLite you already have, behind your own login.
+
+## What it looks like
+
+An agent that helps customers with their orders, and asks before refunding:
+
+<Tabs items={["Server", "Chat route", "Chat UI"]}>
+<Tab value="Server">
+
+```ts title="lib/latch.ts"
+import { anthropic } from "@ai-sdk/anthropic";
+import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createPostgresAdapter } from "@intentface/latch-drizzle";
+
+export const runtime = createRuntime<Principal>({
+  // Every conversation belongs to one person in one organization.
+  storage: createPostgresAdapter(db, { owner: (p) => [p.orgId, p.userId] }),
+  // What tools receive: this customer's data, and nobody else's.
+  context: defineContext({
+    build: ({ principal }) => ({ orders: ordersFor(principal.orgId) }),
+  }),
+  agents: {
+    support: defineAgent({
+      model: anthropic("claude-sonnet-4-6"),
+      instructions: "You help customers with their orders.",
+      tools: { find_order, refund },
+      toolApproval: { refund: "user-approval" }, // a person clicks Approve first
+    }),
+  },
+  durability: { enabled: true }, // a crashed answer is finished by another server
+});
+```
+
+</Tab>
+<Tab value="Chat route">
+
+```ts title="app/api/chat/route.ts"
+import { runtime } from "@/lib/latch";
+
+export async function POST(req: Request) {
+  const user = await requireUser(req); // your login, not ours
+  const { id, message } = await req.json();
+  return runtime.handleChat({
+    agent: "support",
+    chatId: id,
+    principal: { orgId: user.orgId, userId: user.id },
+    message,
+  });
+}
+```
+
+</Tab>
+<Tab value="Chat UI">
+
+```tsx title="app/chat.tsx"
+// The AI SDK's own useChat, approvals included. Nothing Latch-specific.
+const { messages, sendMessage, addToolApprovalResponse } = useChat({
+  id: chatId,
+  transport: new DefaultChatTransport({
+    api: "/api/chat",
+    prepareSendMessagesRequest: ({ id, messages }) => ({ body: { id, message: messages.at(-1) } }),
+  }),
+  sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+});
+```
+
+</Tab>
+</Tabs>
+
+That's the whole integration. The conversation is saved, the refund waits for a click (today, tomorrow, from another device), and if a server dies mid-answer, another one finishes it.
+
+## What you get
+
+- [**Conversations that are saved**](/docs/hard-parts/history), safe from two tabs, retries and forged messages.
+- [**Approvals**](/docs/hard-parts/approvals) that work tomorrow, on another device, from Slack, and only once.
+- [**Answers that survive a crash**](/docs/hard-parts/durability), on one server or fifty.
+- [**Customers who never see each other's data**](/docs/hard-parts/access), including in runs nobody is logged in for.
+- [**Usage limits**](/docs/hard-parts/limits) per organization, user and agent, that simultaneous requests can't slip past.
+- [**Files and images**](/docs/hard-parts/attachments) handled without bloating your database or leaking requests.
+
+Plus schedules, connections to other services (MCP, OAuth), subagents, Slack, Telegram and WhatsApp, and cost per answer.
+
+## When not to use it
+
+If you're building a single-user prototype that doesn't need to remember anything, the AI SDK alone is the better tool. Latch earns its place when a second customer, a second server or a second channel shows up.
 
 <Cards>
-  <Card href="/docs/foundations" title="Foundations" description="What Latch is and the four ideas everything rests on." />
-  <Card href="/docs/getting-started" title="Getting Started" description="Everything in one call, or the pieces by hand." />
-  <Card href="/docs/cookbook" title="Cookbook" description="Task-shaped recipes that end in a runnable example." />
-  <Card href="/docs/reference/packages" title="Reference" description="Packages, the storage contract, seam interfaces, error codes." />
+  <Card href="/docs/getting-started/quickstart" title="Quickstart" description="A chat agent that remembers, in one file and five minutes." />
+  <Card href="/docs/concepts" title="How it fits together" description="The parts of Latch, what each one is for, and why it exists." />
+  <Card href="/docs/hard-parts" title="Harder than it looks" description="What the simple version of each feature misses." />
+  <Card href="/docs/reference/create-runtime" title="Reference" description="Every option and method, generated from the code." />
 </Cards>
 
 <Callout type="info" title="Reading this as an agent">
