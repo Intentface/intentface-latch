@@ -127,6 +127,8 @@ describe("parts a client sends", () => {
       (await rt.handleChat({ agent: "a", chatId: "c", principal, message: { id: `u${url.length}`, role: "user", parts: [{ type: "file", mediaType: "image/png", url }] } })).text();
     // 6 bytes inline: refused, nothing stored.
     await expect(send("data:image/png;base64,AAAAAAAA")).rejects.toSatisfy(isInvalidMessageError);
+    // The scheme is case-insensitive: an uppercase one is counted too.
+    await expect(send("DATA:image/png;base64,AAAAAAAAAAAA")).rejects.toSatisfy(isInvalidMessageError);
     expect(mem.chats.has("c")).toBe(false);
     // 3 bytes inline, or any size by URL: accepted.
     await send("data:image/png;base64,AAAA");

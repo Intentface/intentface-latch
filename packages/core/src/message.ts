@@ -198,7 +198,8 @@ export const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
 
 /** The decoded size of a `data:` URL, or 0 for any other URL. */
 function inlineBytes(url: string): number {
-  if (!url.startsWith("data:")) return 0;
+  // URL schemes are case-insensitive: "DATA:" is inline data too.
+  if (!/^data:/i.test(url)) return 0;
   const comma = url.indexOf(",");
   if (comma === -1) return 0;
   const body = url.slice(comma + 1);

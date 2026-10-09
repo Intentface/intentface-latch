@@ -15,6 +15,8 @@ import type { Experimental_DownloadFunction as DownloadFunction } from "ai";
 
 /** The most bytes one file may have. */
 export const MAX_FILE_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+/** The longest one file's download may take, redirects and body included. */
+export const FILE_DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_REDIRECTS = 4;
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -38,6 +40,7 @@ async function pinnedFetch(): Promise<FetchLike | null> {
 async function readCapped(res: Response, url: string, maxBytes: number): Promise<Uint8Array> {
   const declared = Number(res.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel();
     throw new Error(`file at ${url} is ${declared} bytes, over the ${maxBytes}-byte limit`);
   }
   if (!res.body) return new Uint8Array(await res.arrayBuffer());
@@ -63,7 +66,15 @@ async function readCapped(res: Response, url: string, maxBytes: number): Promise
   return out;
 }
 
-async function download(fetch: FetchLike, start: URL, maxBytes: number): Promise<{ data: Uint8Array; mediaType: string | undefined }> {
+async function download(
+  fetch: FetchLike,
+  start: URL,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<{ data: Uint8Array; mediaType: string | undefined }> {
+  // One deadline for the whole download: every hop and the body. A byte cap
+  // alone doesn't stop a server that keeps sending slowly.
+  const signal = AbortSignal.timeout(timeoutMs);
   let url = start;
   for (let hop = 0; ; hop++) {
     if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -71,7 +82,7 @@ async function download(fetch: FetchLike, start: URL, maxBytes: number): Promise
     }
     // Redirects are followed here, one hop at a time, so each target is
     // checked by the pinned fetch before anything connects to it.
-    const res = await fetch(url, { redirect: "manual" });
+    const res = await fetch(url, { redirect: "manual", signal });
     const location = res.headers.get("location");
     if (res.status >= 300 && res.status < 400 && location) {
       await res.body?.cancel();
@@ -88,8 +99,9 @@ async function download(fetch: FetchLike, start: URL, maxBytes: number): Promise
 }
 
 /** The download function every turn's agent uses (`experimental_download`). */
-export function safeFileDownload(opts: { maxBytes?: number } = {}): DownloadFunction {
+export function safeFileDownload(opts: { maxBytes?: number; timeoutMs?: number } = {}): DownloadFunction {
   const maxBytes = opts.maxBytes ?? MAX_FILE_DOWNLOAD_BYTES;
+  const timeoutMs = opts.timeoutMs ?? FILE_DOWNLOAD_TIMEOUT_MS;
   return async (requests) => {
     if (requests.every((r) => r.isUrlSupportedByModel)) return requests.map(() => null);
     const fetch = await pinnedFetch();
@@ -102,8 +114,10 @@ export function safeFileDownload(opts: { maxBytes?: number } = {}): DownloadFunc
       }
       const { createDownload } = await import("ai");
       const fallback = createDownload({ maxBytes });
-      return Promise.all(requests.map((r) => (r.isUrlSupportedByModel ? null : fallback({ url: r.url }))));
+      return Promise.all(
+        requests.map((r) => (r.isUrlSupportedByModel ? null : fallback({ url: r.url, abortSignal: AbortSignal.timeout(timeoutMs) }))),
+      );
     }
-    return Promise.all(requests.map((r) => (r.isUrlSupportedByModel ? null : download(fetch, r.url, maxBytes))));
+    return Promise.all(requests.map((r) => (r.isUrlSupportedByModel ? null : download(fetch, r.url, maxBytes, timeoutMs))));
   };
 }

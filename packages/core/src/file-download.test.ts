@@ -64,3 +64,46 @@ describe("safeFileDownload", () => {
     await expect(fresh()([req("https://files.example.com/start")])).rejects.toThrow(/http or https/);
   });
 });
+
+describe("safeFileDownload's deadline", () => {
+  afterEach(() => vi.doUnmock("@intentface/latch-net/pinned"));
+
+  it("gives up on a file that takes too long, even while bytes keep arriving", async () => {
+    vi.doMock("@intentface/latch-net/pinned", () => ({
+      pinnedFetch: async (_url: URL, init?: RequestInit) => {
+        // A server that sends a byte every 10 ms, forever, unless aborted.
+        let timer: ReturnType<typeof setInterval>;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            timer = setInterval(() => controller.enqueue(new Uint8Array([1])), 10);
+            init?.signal?.addEventListener("abort", () => {
+              clearInterval(timer);
+              controller.error(init.signal!.reason);
+            });
+          },
+          cancel() {
+            clearInterval(timer);
+          },
+        });
+        return new Response(body);
+      },
+    }));
+    vi.resetModules();
+    const { safeFileDownload: fresh } = await import("./file-download.js");
+    const started = Date.now();
+    await expect(fresh({ timeoutMs: 100 })([req("https://files.example.com/slow")])).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("closes a response refused for its declared size", async () => {
+    let cancelled = false;
+    vi.doMock("@intentface/latch-net/pinned", () => ({
+      pinnedFetch: async () =>
+        new Response(new ReadableStream({ cancel: () => void (cancelled = true) }), { headers: { "content-length": "1000" } }),
+    }));
+    vi.resetModules();
+    const { safeFileDownload: fresh } = await import("./file-download.js");
+    await expect(fresh({ maxBytes: 10 })([req("https://files.example.com/big")])).rejects.toThrow(/limit/);
+    expect(cancelled).toBe(true);
+  });
+});
