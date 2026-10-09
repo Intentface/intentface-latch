@@ -1,0 +1,40 @@
+---
+title: Agent versions
+description: Once agents live in a database, someone will edit one, break it, and need to know what was running last Tuesday.
+---
+
+Agents your users edit live in a database, not in code. Changing the prompt is a row update: no deploy, no review.
+
+**Saving overwrites.** The prompt that worked yesterday is gone the moment someone saves a worse one.
+
+**Rolling back isn't one field.** A prompt was written for a model and a set of tools. Restoring the old prompt next to today's model gives you a combination that never ran.
+
+**Two people edit at once.** Two admins tweak the same agent; the second save quietly erases the first.
+
+**Trying a change means shipping it.** There's no way to run the new prompt without every user getting it.
+
+**"What answered this?"** A customer complains about an answer from last week. Which configuration produced it?
+
+**A publish lands mid-answer.** A server crashed during an answer, and someone published a new version before another server picked it up. The answer would finish with a different model and different instructions than it started with.
+
+## What Latch does
+
+**Publishing appends a version.** The whole configuration is kept: prompt, model, tools, settings. A version is always a set of choices that actually ran together. Saving with no changes adds nothing.
+
+**Rolling back moves a pointer.** Making an old version live adds no new version, and a separate log records who made which version live, and when. The version list says what the agent looked like; the log says what it was running on Tuesday.
+
+**Changes are tried as candidates.** A candidate is a named, unpublished configuration that everyone editing the agent can see. It never affects the live agent, but you can run it by name (`support@c_…`) to test it. It remembers which version it started from, so publishing over someone else's newer version can be caught instead of silently reverting it.
+
+**Every run records its version,** when it starts, so even a failed run says what it ran. A recovered answer finishes on the version it started on.
+
+```ts
+await store.upsert(principal, record, { author: userId, message: "Tighter refund wording" });
+await store.listVersions(principal, "support", "org");
+await store.activateVersion(principal, "support", "org", 2); // roll back
+```
+
+<Callout title="What a version can't bring back">
+A version records the tools an agent chose, not the tools your app still provides. Rolling back to a version that used a connection you've since removed restores the reference, not the connection.
+</Callout>
+
+How to set it up: [Agents in a database](/docs/guides/agents-in-a-database).

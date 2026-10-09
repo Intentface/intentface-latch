@@ -3,24 +3,29 @@ title: Agents in a database
 description: Agents your users create and edit, resolved per caller, with every published version kept and rollback by pointer.
 ---
 
-Agents that live in a database rather than in code come from `dynamicAgents`, which looks one up by name for the caller:
+Agents that live in a database rather than in code come from `dynamicAgents`: `resolve` builds one by name for the caller, `list` shows the caller's agents in a picker. `@intentface/latch-drizzle` ships a store that does both, with the versions below:
 
 ```ts
+import { createPostgresAgentBuilderStore } from "@intentface/latch-drizzle";
+
+const store = createPostgresAgentBuilderStore<Principal>(db, {
+  // Who owns an agent: the organization, or one person in it.
+  owner: (p, scope) => (scope === "org" ? [p.orgId] : [p.orgId, p.userId]),
+  modelFor: (id) => gateway(id), // a stored model id → a model
+});
+
 createRuntime({
   storage,
   context,
   agents, // code-declared
   dynamicAgents: {
-    async get(principal, name) {
-      const row = await db.agents.find({ orgId: principal.orgId, name });
-      return row ? { config: toAgentConfig(row), meta: { title: row.title } } : null;
-    },
-    async list(principal) {
-      /* … */
-    },
+    resolve: (name, principal, ctx) => store.resolve(name, principal, ctx),
+    list: (principal) => store.list(principal),
   },
 });
 ```
+
+Your own table works too: implement `resolve(name, principal)` to return an agent config (or `undefined`) and `list(principal)` to return `{ name, title, description }` entries.
 
 `runtime.listAgents(principal)` returns both sets, so a picker shows code-declared and user-created agents together. This is what makes "agents are data" work: one deploy serves any number of agents per tenant, and changing a prompt is a row update rather than a release.
 
@@ -57,6 +62,20 @@ The version list answers *what did this agent look like*; the activation log ans
 await store.saveDraft(principal, "support", "org", record, baseVersion);
 const draft = await store.getDraft(principal, "support", "org");
 const others = await store.listDrafts(principal); // metadata only — a colleague's text isn't yours to read
+```
+
+**Candidates are shared changes you can test.** A candidate is a named, unpublished configuration that belongs to the agent, not to one person: everyone who can edit the agent sees it. It never affects the live agent, but it runs by reference, so you can try it before anyone else gets it. Closing one, discarded or published, keeps it, so results filed under it keep their name.
+
+```ts
+const c = await store.saveCandidate(principal, "support", "org", {
+  title: "Shorter answers",
+  record,
+  baseVersion: 3, // the publish guard, as with drafts
+});
+
+await runtime.runAgent({ principal, agent: `support@${c.id}`, prompt: "Where is my order?" });
+
+await store.closeCandidate(principal, "support", "org", c.id, { publishedAs: 4 });
 ```
 
 **Runs record the version behind them.** The resolved config carries `configVersion`, the runtime stamps it on the run as `agentVersion` — when the run *opens*, so a run that errors or crashes still says what it ran — and a tracer can tag the trace with it (`@intentface/latch-langfuse` emits `agent-version:<n>`). A past answer stays attributable to an exact configuration, and eval scores can be compared across versions.

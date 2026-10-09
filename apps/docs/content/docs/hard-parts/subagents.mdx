@@ -1,0 +1,38 @@
+---
+title: Subagents
+description: One agent handing work to another sounds like a function call. It's a second conversation that can pause, crash and cost money.
+---
+
+A support agent hands a research question to a researcher agent and uses the answer. It looks like a tool that calls another agent.
+
+**Whose context is it?** If the researcher's twenty tool calls land in the support conversation, the support agent's context fills with someone else's work.
+
+**The researcher needs approval.** It wants to run a tool behind approval. The person who can approve is talking to the *support* agent, and the researcher has no conversation of its own with them.
+
+**A server dies halfway.** The support answer is waiting on the researcher. Recovering one without the other leaves an answer that never finishes.
+
+**Agents calling agents calling agents.** Without a limit, a loop of delegation can run up a bill before anyone notices.
+
+**The cost goes somewhere.** A researcher's tokens count against someone's budget. Whose?
+
+## What Latch does
+
+**Each subagent gets its own thread.** It's saved like any conversation, marked internal so your chat list can leave it out (`listChats({ kind: "user" })`), and the parent can continue it later with full context. The parent only sees the answer.
+
+**Approvals come up to the person.** A tool waiting for approval inside the researcher pauses the support answer too, and shows up in the user's chat as an approval card. One click, and the researcher continues, then the support agent.
+
+**Recovery follows the tree.** A resumed subagent run is rebuilt exactly as the parent shaped it, and finishes inside the parent's answer.
+
+**Delegation has a limit.** Subagents can go four levels deep, then the tool to delegate isn't offered.
+
+**It's the same person's budget.** A subagent run is checked against the same [limits](/docs/hard-parts/limits) as the person who started it, and its cost is recorded.
+
+```ts
+defineAgent({
+  model,
+  instructions: "Hand research questions to the researcher.",
+  subagents: ["researcher"],
+});
+```
+
+The agent gets a `spawn_agent` tool, and progress from the researcher streams into the parent's answer as it works.

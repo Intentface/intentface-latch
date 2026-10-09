@@ -1,0 +1,32 @@
+---
+title: Streaming
+description: Words appearing as the model writes them. Then the user closes the tab, reloads, or sends another message.
+---
+
+The answer should appear as it's written. The AI SDK streams it to the browser, and on one happy path that's all there is to it.
+
+**The user closes the tab.** Should the answer stop? If the server stops with the connection, the user comes back to half an answer, and the tools it ran are left half done.
+
+**The user reloads.** The page loads the saved conversation. Where is the answer that's still being written?
+
+**The user sends another message.** The first answer is still running. Two answers at once write into the same conversation in an order nobody chose.
+
+**An approval comes back later.** After the click, the answer continues. Is that a new message, or the rest of the old one?
+
+**The server dies mid-sentence.** Another server finishes the answer, but the browser was connected to the one that died.
+
+## What Latch does
+
+**The answer doesn't depend on the browser.** Closing the tab ends the stream, not the run: the answer finishes on the server and is saved, ready when the user comes back.
+
+**One answer at a time per chat.** A message sent while an answer is running gets `409 chat_busy` with how long to wait, and nothing is saved, so the client can resend it.
+
+**With crash recovery on, every step is saved as it finishes.** A reload shows the answer up to its last finished step; the rest appears when it's done. A server that took over a crashed answer saves to the same place.
+
+**A continued answer is the same message.** After an approval, the stream continues the paused assistant message (same id) instead of starting a new one, so the UI fills in where it stopped.
+
+<Callout type="warn" title="What isn't there yet">
+A reloaded page doesn't re-attach to an answer that's still streaming; it shows finished steps, then the whole answer once saved. The `stop` button in `useChat` ends the stream in the browser, but the answer keeps running on the server and is saved. Someone else viewing a shared chat sees an answer once it's saved, not live.
+</Callout>
+
+In chat apps, streaming is real or not at all: Slack streams natively, other platforms get the finished answer. See [Chat apps](/docs/hard-parts/chat-apps).

@@ -1,0 +1,40 @@
+---
+title: Chat apps
+description: A Slack or Telegram bot is an afternoon's work. A bot your customers can rely on isn't.
+---
+
+The agent should answer in Slack and Telegram too. Receive a webhook, call the agent, post the reply: it works in an afternoon.
+
+**Platforms send things twice.** Telegram and WhatsApp resend until they get a quick `200`; Slack sometimes sends one message as two events. Answer slowly and you get the same question again, and answer it twice.
+
+**The bot answers itself.** Some of the bot's own posts come back as new messages. Get the check wrong and it talks to itself.
+
+**Who is this?** A Slack user has to be linked to an account in your app. The sign-in link opens in a browser that might be logged in as someone else.
+
+**People leave.** Someone removed from the company still has a linked Slack account, and a schedule still delivering to them.
+
+**Buttons are pressed by anyone.** An approval card in a shared channel can be clicked by whoever sees it, and twice by someone impatient.
+
+**"Streaming" by editing.** Editing a message every half second to look like streaming hits rate limits and sends a notification per edit.
+
+## What Latch does
+
+**Every delivery is claimed once,** through a small store you provide (a table with an expiry), so a resend or a duplicate event is dropped on any server. The reply happens after the quick `200`, so platforms stop resending.
+
+**The bot knows its own id,** and ignores its own messages by that, not by guessing from their shape.
+
+**Unknown users are asked to link, and nothing is lost.** Your `authorizeUser` decides who a platform user is, or returns a sign-in link. The message that triggered it is held and answered once they've linked.
+
+**Your check runs on every message,** so removing someone in your app stops the bot for them on their next message.
+
+**Buttons belong to someone.** In Slack, approval buttons are signed and carry the person allowed to press them. In every app, a second press is ignored.
+
+**Answers stream where the platform really streams** (Slack) and are posted once, when done, everywhere else, with a typing indicator meanwhile.
+
+<Callout title="The link page is yours">
+The page a sign-in link opens lives in your app. Show both accounts, the chat account and the one logged in to your app, and ask before joining them: the link may be opened in a browser logged in as someone else.
+</Callout>
+
+One conversation, wherever it happens: a chat in Slack is a chat in storage like any other, with history, limits, approvals and crash recovery.
+
+How it fits: [Channels](/docs/concepts/channels). In depth: [Chat apps in depth](/docs/guides/channels).
