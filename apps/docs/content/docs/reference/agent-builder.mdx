@@ -1,0 +1,10 @@
+---
+title: Agent store
+description: The methods of the agent store from @intentface/latch-agent-builder, for agents kept in a database, with versions and candidates.
+---
+
+The store behind [agents in a database](/docs/guides/agents-in-a-database). Create one with `createPostgresAgentBuilderStore` or `createSqliteAgentBuilderStore` from [`@intentface/latch-drizzle`](/docs/reference/drizzle), and pass its `resolve` and `list` to `createRuntime`'s `dynamicAgents`.
+
+Agents have a scope: `"org"` agents are shared by an organization, `"user"` agents belong to one person. A name can pin a version or candidate: `support@7` runs version 7, `support@c_…` a candidate.
+
+<auto-type-table path="../../../../../packages/agent-builder/src/store.ts" name="AgentBuilderStore" />

@@ -1,0 +1,32 @@
+---
+title: Channels
+description: Every option for the Telegram, Slack and WhatsApp channels in @intentface/latch-channels.
+---
+
+What channels are for: [Channels](/docs/concepts/channels). What they handle for you: [Chat apps](/docs/hard-parts/chat-apps).
+
+Each platform is a subpath, and each channel has one `handleRequest(request)` for its webhook route.
+
+## Telegram
+
+```ts
+import { telegramChannel } from "@intentface/latch-channels/telegram";
+```
+
+<auto-type-table path="../../../../../packages/latch-channels/src/telegram/telegramChannel.ts" name="TelegramChannelConfig" />
+
+## Slack
+
+```ts
+import { slackChannel } from "@intentface/latch-channels/slack";
+```
+
+<auto-type-table path="../../../../../packages/latch-channels/src/slack/slackChannel.ts" name="SlackChannelConfig" />
+
+## WhatsApp
+
+```ts
+import { whatsappChannel } from "@intentface/latch-channels/whatsapp";
+```
+
+<auto-type-table path="../../../../../packages/latch-channels/src/whatsapp/whatsappChannel.ts" name="WhatsappChannelConfig" />

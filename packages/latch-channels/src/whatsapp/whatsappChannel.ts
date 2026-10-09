@@ -43,38 +43,47 @@ export interface WhatsappUser {
 }
 
 export interface WhatsappChannelConfig<P> {
-  /** The agent this number serves. */
+  /** The agent this number answers as, by name. */
   agent: string;
-  /** Stable host-side bot id — used in chat ids (`whatsapp_<botRef>_<waId>`) and delivery keys. */
+  /** Your own id for this number. Chat ids are built from it (`whatsapp_<botRef>_<waId>`), so changing credentials keeps every conversation. */
   botRef: string;
-  /** Meta credentials, all lazily resolvable from the host's vault. */
+  /** Meta's access token for the WhatsApp Cloud API, or a function that reads it. */
   accessToken: LazyString;
+  /** The WhatsApp phone number id from Meta. */
   phoneNumberId: LazyString;
+  /** The Meta app secret; webhook requests not signed with it are refused. */
   appSecret: LazyString;
+  /** The verify token you entered when setting up the webhook in Meta. */
   verifyToken: LazyString;
+  /** Your runtime. */
   runtime: ChannelRunOps<P>;
-  /** Resolve the inbound WhatsApp user (`wa_id`) to a platform principal. */
+  /**
+   * Who this WhatsApp user is in your app. Return `{ allowed: true, principal }`,
+   * or `{ allowed: false, linkUrl }` to send them a link to connect their
+   * account. Runs on every message.
+   */
   authorizeUser: (user: WhatsappUser) => Promise<AuthResult<P>>;
-  /** Persistent dedupe on `<botRef>:<waId>:<wamid>` (Meta re-delivers webhooks). */
+  /** Returns `true` if this delivery was seen before, and records it if not. Meta resends webhooks; back this with a table with an expiry. */
   seen?: (deliveryKey: string) => Promise<boolean>;
-  /** Host-backed one-turn-per-chat lease (see the kernel). */
+  /** Only for a storage adapter that doesn't refuse a second answer per chat itself; the built-in ones do. */
   claimTurn?: (chatId: string) => Promise<string | null>;
   releaseTurn?: (chatId: string, token: string) => Promise<void>;
-  /** Stash the message that triggered a link prompt, to replay after linking. */
+  /** Keeps the message from a user who still has to connect their account, to answer after they do. */
   stashPending?: (
     input: WhatsappUser & { text: string; media?: InboundMedia<WaMediaRef>[] },
   ) => Promise<void>;
-  /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
+  /** The URL that starts signing in to a service when the agent asks the user to connect it. */
   authorizeUrl?: (
     connectionName: string,
     ctx: { chatId: string; waId: string; approvalId: string },
   ) => string;
-  /** Host storage for in-flight `askUser` questionnaires (see the kernel). */
+  /** Keeps the state of a question the agent asked with buttons, between taps. */
   askState?: AskStateStore;
-  /** Host storage for the thread epoch — what makes `/new` possible. */
+  /** Remembers the user's current conversation, so `/new` can start a fresh one. */
   thread?: ChannelThreadStore;
+  /** Keeps a serverless function running after the quick reply to Meta, for example Vercel's `waitUntil`. */
   waitUntil?: (p: Promise<unknown>) => void;
-  /** Test seam: base URL / fetch for the Graph API client. */
+  /** For tests: a different Graph API URL or `fetch`. */
   apiOptions?: WhatsappApiOptions;
 }
 

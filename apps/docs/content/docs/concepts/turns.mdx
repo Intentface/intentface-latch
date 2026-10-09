@@ -115,7 +115,7 @@ Stored history is untouched — compaction shrinks the *projection*, never the r
 
 ## What a turn actually does
 
-The order matters when you're debugging a seam.
+The order matters when you're debugging an option or an extension.
 
 1. **Context** — `context.build({ principal, request, turnContext })` produces `RuntimeContext`; every tool later receives it (plus `principal`, `run`, `writer`) as `options.context`.
 2. **Agent** — the factory runs, returning an `AgentConfig`. Dynamic agents resolve here.

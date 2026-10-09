@@ -1,9 +1,9 @@
 ---
-title: Seams
-description: The remaining optional interfaces — pricing, prompt caching, telemetry, sandbox, harness and provider tools — as a reference.
+title: Hooks
+description: The other options on createRuntime, for pricing, prompt caching, tracing, sandboxes and built-in tools.
 ---
 
-Every optional capability is a plain interface on `createRuntime`: supply it and the capability appears, omit it and it doesn't exist. The seams with a section of their own live there — [Connections](/docs/guides/connections) (connections registry, vault), [Memory](/docs/memory), [Limits](/docs/guides/plans-and-limits). The rest are catalogued here.
+Every optional capability is a plain option on `createRuntime`: pass it and the capability appears, leave it out and it doesn't exist. The ones with pages of their own: [Connections](/docs/guides/connections) (connections registry, vault), [Memory](/docs/memory), [Limits](/docs/guides/plans-and-limits). The rest are catalogued here.
 
 ## Pricing — per-run cost
 
@@ -79,11 +79,11 @@ createRuntime({
 });
 ```
 
-The seam supplies per-run AI SDK telemetry options, an optional trace wrapper around the model call, and a post-turn hook. `latch-langfuse` implements it over a standard OpenTelemetry provider: one trace per run, its id derived deterministically from the run id, tagged by owner and agent. Omit the seam and nothing is traced, at zero cost.
+The option supplies per-run AI SDK telemetry options, an optional trace wrapper around the model call, and a post-turn hook. `latch-langfuse` implements it over a standard OpenTelemetry provider: one trace per run, its id derived deterministically from the run id, tagged by owner and agent. Leave it out and nothing is traced, at zero cost.
 
 ## Telemetry hooks — usage, analytics, and "someone needs to be told"
 
-You don't need a tracer to use the seam. `LatchTelemetry` is also the place for plain callbacks: `onStep` after each generation step, `onRunFinished` after the turn is persisted. Every hook is guarded — a thrown or rejected hook is swallowed, so telemetry can never break a turn.
+You don't need a tracer to use it. `LatchTelemetry` is also the place for plain callbacks: `onStep` after each generation step, `onRunFinished` after the turn is persisted. Every hook is guarded — a thrown or rejected hook is swallowed, so telemetry can never break a turn.
 
 ```ts
 createRuntime({
@@ -165,7 +165,7 @@ Both exist so core carries no provider SDK. You don't have to write them: [`@int
 
 ## Extensions — moments and effects
 
-Every seam above adds one capability. `extensions` is the seam for adding a capability of your own: an extension attaches handlers to the **moments** of a turn and returns **effects**, and the runtime composes any number of them with one merge rule per moment. Attach them runtime-wide or per agent; with none attached, a turn is byte-identical to a runtime without the seam.
+Every option above adds one capability. `extensions` is how you add a capability of your own: an extension attaches handlers to the **moments** of a turn and returns **effects**, and the runtime composes any number of them with one merge rule per moment. Attach them runtime-wide or per agent; with none attached, a turn is exactly the same as without them.
 
 ```ts
 import { defineExtension } from "@intentface/latch-core";
@@ -216,4 +216,4 @@ declare module "@intentface/latch-core" {
 }
 ```
 
-Not yet on this seam: per-step re-evaluation of `instructions`/`context` (both apply to the turn's prompt), live `render` of the model's own text, and an extension contributing routes, tables or jobs. Runtime-wide extensions also render on `loadHistory`; an agent's own do not, since no agent is resolved there.
+Not available to extensions yet: per-step re-evaluation of `instructions`/`context` (both apply to the turn's prompt), live `render` of the model's own text, and an extension contributing routes, tables or jobs. Runtime-wide extensions also render on `loadHistory`; an agent's own do not, since no agent is resolved there.

@@ -6,11 +6,13 @@ import { makeStorageAdapter } from "./adapter.shared.js";
 
 export { isUniqueViolation } from "./adapter.shared.js";
 
+/** Options for `createSqliteAdapter` and `createPostgresAdapter`. */
 export interface SqliteAdapterOptions<P> {
   /**
-   * Derive the ownership key for a principal — the isolation boundary. Coarser
-   * (fewer segments) = more sharing; finer = more isolation. Must be
-   * server-derived from the authenticated principal, never client input.
+   * Whose conversation is whose. Every chat is stamped with this key when it's
+   * created, and every read checks it: `[p.orgId, p.userId]` gives each person
+   * their own chats, `[p.orgId]` shares them with the whole team. Build it only
+   * from the principal your login produced, never from what the client sends.
    */
   owner: (principal: P) => string[];
 }

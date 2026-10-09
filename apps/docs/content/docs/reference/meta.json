@@ -5,9 +5,16 @@
     "runtime",
     "define-agent",
     "define-context",
-    "packages",
+    "---Packages---",
+    "server",
+    "drizzle",
+    "mcp",
+    "channels",
+    "agent-builder",
+    "---Contracts---",
     "storage",
-    "seams",
-    "errors"
+    "hooks",
+    "errors",
+    "packages"
   ]
 }

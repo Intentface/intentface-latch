@@ -41,7 +41,7 @@ createRuntime({
 defineAgent({ …, connections: ["linear"] });
 ```
 
-A user who hasn't connected Linear yet sees the agent ask them to, and the conversation continues after they sign in. Their tokens are stored encrypted in the **vault** and used on their behalf; the model never sees them. Tools that change things (by the server's own description) need approval by default.
+A user who hasn't connected Linear yet sees the agent ask them to, and the conversation continues after they sign in. Their tokens are stored encrypted in the **vault** and used on their behalf; the model never sees them. Tools the server marks as destructive need approval by default; servers don't always mark them, so you can ask for approval on every tool instead.
 
 ## Secrets for your own tools
 

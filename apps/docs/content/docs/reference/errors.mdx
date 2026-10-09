@@ -19,5 +19,5 @@ Structural checks are exported from core: `isChatBusyError`, `isLimitExceededErr
 ## What is not an error
 
 - **A denied approval** is an answer: the turn resumes and the agent says what it will do instead.
-- **A parked unattended run** (`status: "awaiting_input"`, `trigger: "schedule"`) is a legitimate outcome — see [Operations](/docs/guides/schedules#when-a-fire-stops-for-a-human).
+- **A parked unattended run** (`status: "awaiting_input"`, `trigger: "schedule"`) is a legitimate outcome — see [Run agents on a schedule](/docs/guides/schedules#when-a-fire-stops-for-a-human).
 - **An empty `200` from a decision route** means the turn cannot resume yet because another gate in the same step is undecided.

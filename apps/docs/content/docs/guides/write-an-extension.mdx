@@ -3,7 +3,7 @@ title: Write an extension
 description: Add a capability of your own — a veto, a notice, a slash command, a context lens — without touching the runtime. Moments, effects, and the three rules that make them compose.
 ---
 
-Every seam on `createRuntime` adds one capability the runtime already knows about. An **extension** is how you add one it doesn't. It attaches handlers to the **moments** of a turn — before the model runs, before a tool executes, after a step ends — and each handler returns an **effect**. The runtime composes any number of extensions with one merge rule per moment, and with none attached a turn is byte-identical to a runtime without the seam.
+Every option on `createRuntime` adds one capability the runtime already knows about. An **extension** is how you add one it doesn't. It attaches handlers to the **moments** of a turn — before the model runs, before a tool executes, after a step ends — and each handler returns an **effect**. The runtime composes any number of extensions with one merge rule per moment, and with none attached a turn is exactly the same as without them.
 
 **What it makes possible.** A per-plan tool veto that the model is told about; a running cost line the customer sees and the model never does; a `/stats` command answered without a model call; a compaction that shrinks what the model reads while the customer keeps every message; a fail-closed audit log — each as one file, none as a change to core.
 
@@ -102,12 +102,12 @@ ext.context(async ({ run }) => `The customer is on the ${await planOf(run.princi
 
 An extension is a plain value, so its handlers can be called directly. For the whole turn, run it through `createRuntime` with a mock model from `ai/test` and an in-memory `StorageAdapter`, then read the three surfaces: the chunks the client received, what storage holds, and `model.doStreamCalls` for what the model was asked. Core's own `turn.test.ts` under `src/extensions/` is the template.
 
-## Not on the seam yet
+## Not available yet
 
 `instructions` and `context` apply to the turn's prompt, not per step. `render` does not touch the model's own streamed text live. An extension cannot yet contribute an HTTP route, a table or a scheduled job — the shape MCP with OAuth needs. Runtime-wide extensions render on `loadHistory`; an agent's own do not, since no agent is resolved there.
 
 ## Next
 
-- [Reference: seams — extensions](/docs/reference/seams#extensions--moments-and-effects) — the effect types in full
+- [Hooks: extensions](/docs/reference/hooks#extensions--moments-and-effects) — the effect types in full
 - [Turn inputs](/docs/concepts/turns) — the three views of a message that `tool_result` and `render` operate on
-- [createRuntime](/docs/reference/create-runtime) — where `extensions` sits among the other seams
+- [createRuntime](/docs/reference/create-runtime) — where `extensions` sits among the other options

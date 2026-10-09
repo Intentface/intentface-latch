@@ -74,7 +74,7 @@ The principal still carries `userId`; it's just not part of the key. Keep it, be
 
 ## Pattern 3 — Personal and shared, in one app
 
-Most real products want both: private assistants *and* team agents. The storage `owner` seam takes one function, so put the scope in the **principal** and let the key follow it:
+Most real products want both: private assistants *and* team agents. The storage `owner` option takes one function, so put the scope in the **principal** and let the key follow it:
 
 ```ts
 type Scope = "user" | "org";
@@ -104,7 +104,7 @@ The scope has to be **part of the principal**, not an extra argument, because it
 
 <Callout type="warn" title="Your own tables need the same rule — and won't get it for free">
 Latch's tables are safe here: you return segments and the adapter escapes and
-joins them. Your *own* owner-scoped tables have no such seam, so if you build a
+joins them. Your *own* owner-scoped tables have no such helper, so if you build a
 key by hand, do it in exactly one exported helper.
 
 Two copies that escape differently — one calling `encodeURIComponent`, one a bare

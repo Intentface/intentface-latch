@@ -1,0 +1,47 @@
+---
+title: Connections (MCP)
+description: createMcpConnections, a connection's options, and signing in with OAuth, from @intentface/latch-mcp.
+---
+
+`@intentface/latch-mcp` gives agents the tools of MCP servers, signed in as each user. What it's for: [Tools and connections](/docs/concepts/tools-connections). Setting it up: [Connect other services](/docs/guides/connections).
+
+```ts
+import { createVault } from "@intentface/latch-core";
+import { createPostgresSecretStore } from "@intentface/latch-drizzle";
+import { createMcpConnections, oauth, bearer } from "@intentface/latch-mcp";
+
+const vault = createVault<Principal>({
+  store: createPostgresSecretStore(db, { owner: (p) => [p.orgId, p.userId] }),
+  masterKey: process.env.LATCH_MASTER_KEY!, // base64 of 32 random bytes
+});
+
+createRuntime({
+  …,
+  connections: createMcpConnections({
+    vault,
+    secrets: vault.resolver,
+    allowedHosts: ["mcp.linear.app", "mcp.internal.example.com"],
+    callbackBaseUrl: "https://app.example.com/api/latch/connections",
+    connections: {
+      linear: { url: "https://mcp.linear.app/mcp", auth: oauth() },
+      crm: { url: "https://mcp.internal.example.com/crm", auth: bearer({ getToken: (p) => vault.resolver(p, "crm_token") }) },
+    },
+  }),
+});
+```
+
+## createMcpConnections
+
+<auto-type-table path="../../../../../packages/mcp/src/connections.ts" name="McpConnectionsConfig" />
+
+## A connection
+
+<auto-type-table path="../../../../../packages/mcp/src/connections.ts" name="McpConnectionDef" />
+
+## Signing in: oauth()
+
+`oauth()` with no options works for servers that let apps register themselves. For the rest, pass your own app's `clientId` and `clientSecret`.
+
+<auto-type-table path="../../../../../packages/mcp/src/connections.ts" name="OAuthAuthOptions" />
+
+`bearer({ getToken })` sends a token you supply, and `headers({ … })` sends fixed headers.
