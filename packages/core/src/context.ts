@@ -81,14 +81,14 @@ export interface ContextDefinition<P, RuntimeContext> {
  */
 // Latch sets these on every tool's context, after spreading what `build`
 // returned, so a built field with one of these names is overwritten.
-type LatchToolKeys = "principal" | "run" | "writer" | "runtime" | "params";
+type LatchToolKeys = "principal" | "run" | "writer" | "runtime" | "params" | "messageContext";
 
 // `Omit` per union member: on a union as a whole it keeps only the shared
 // keys, so a context typed as `{ kind: "a"; a } | { kind: "b"; b }` would lose
 // `a` and `b`.
 type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-export type ToolContext<P, RuntimeContext = unknown, Params = unknown> = OmitEach<RuntimeContext, LatchToolKeys> & {
+export type ToolContext<P, RuntimeContext = unknown, Params = unknown, MessageContext = unknown> = OmitEach<RuntimeContext, LatchToolKeys> & {
   /** Who the run is for: the principal your route passed, or the one restored for a resumed or scheduled run. */
   principal: P;
   /** The run this tool call belongs to. `agent` is the agent's name as the run resolved it. */
@@ -103,6 +103,12 @@ export type ToolContext<P, RuntimeContext = unknown, Params = unknown> = OmitEac
    * something limited to `principal` before trusting them.
    */
   params: Params;
+  /**
+   * What the user is looking at, from the `data-context` part of the message
+   * being answered; `undefined` when it has none. Sent by the client, like
+   * `params`: describes, never authorizes.
+   */
+  messageContext: MessageContext | undefined;
 };
 
 /** Either form `createRuntime({ context })` accepts. */

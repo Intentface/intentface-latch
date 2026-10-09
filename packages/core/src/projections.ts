@@ -2,6 +2,15 @@ import { convertToModelMessages, type ModelMessage } from "ai";
 import type { AppMessage } from "./message.js";
 
 /**
+ * The one data part a client may attach to its message: what the user is
+ * looking at while they write it (the open file, the selection, a model pick).
+ * The model reads it as text next to what they wrote; chat UIs don't render
+ * data parts, so the user doesn't see it. See `RuntimeConfig.messageContext`.
+ */
+export const CONTEXT_PART_TYPE = "data-context" as const;
+
+
+/**
  * The two message projections (see `message.ts`). `AppMessage` is the stored
  * source of truth; these derive what each *audience* sees, reading the two
  * metadata axes. Both default permissively: absent `visibility` → shown to the
@@ -133,12 +142,49 @@ export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
  */
 export async function toModelMessages(
   messages: AppMessage[],
-  opts?: { tools?: Record<string, unknown> },
+  opts?: {
+    tools?: Record<string, unknown>;
+    /**
+     * How a message's `data-context` part reads to the model. Return
+     * `undefined` to leave it out. Defaults to {@link defaultContextText}.
+     */
+    contextToText?: (data: unknown) => string | undefined;
+  },
 ): Promise<ModelMessage[]> {
   const forModel = closeDanglingToolCalls(
     replaceAudioFileParts(
       sliceAtCompaction(messages).filter((m) => m.metadata?.sendToModel !== false),
     ),
   );
-  return convertToModelMessages(forModel as never, (opts ?? {}) as never);
+  const toText = opts?.contextToText ?? defaultContextText;
+  return convertToModelMessages(forModel as never, {
+    ...(opts?.tools ? { tools: opts.tools } : {}),
+    // Only the client's context part becomes text, where the client put it in
+    // the message; every other data part (Latch's own, extensions') is left
+    // out, as it always was.
+    convertDataPart: (part: { type: string; data: unknown }) => {
+      if (part.type !== CONTEXT_PART_TYPE) return undefined;
+      const text = toText(part.data);
+      return text ? { type: "text" as const, text } : undefined;
+    },
+  } as never);
+}
+
+/**
+ * How a `data-context` part reads to the model when no `toModel` is set: a
+ * labelled block, one `key: value` line per field, nested values as JSON.
+ *
+ * ```
+ * [Context]
+ * activeFile: Q3 budget
+ * openTabs: ["Roadmap","Hiring plan"]
+ * ```
+ */
+export function defaultContextText(data: unknown): string | undefined {
+  if (data == null) return undefined;
+  if (typeof data !== "object" || Array.isArray(data)) return `[Context]\n${typeof data === "string" ? data : JSON.stringify(data)}`;
+  const lines = Object.entries(data as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
+  return lines.length ? `[Context]\n${lines.join("\n")}` : undefined;
 }

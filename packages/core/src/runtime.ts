@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, InvalidMessageError, isHidden, lastQuestionResent, type AppMessage } from "./message.js";
+import { acceptUserMessage, contextOf, InvalidMessageError, isHidden, lastQuestionResent, latestMessageContext, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
@@ -23,6 +23,7 @@ import type {
   ToolSource,
 } from "./agent.js";
 import { ParamsFixedError, validateParams } from "./agent.js";
+import { asSchema, type FlexibleSchema } from "ai";
 import { currentDateLine } from "./current-date.js";
 import type { MemoryProvider } from "./memory.js";
 import {
@@ -162,6 +163,24 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   context?: ContextInput<P, RuntimeContext>;
   /** The agent registry: name → factory (file-based or DB-driven upstream). */
+  /**
+   * What the client may attach to a user message as a `data-context` part:
+   * what the user is looking at (the open file, the selection, a model pick).
+   * The model reads it as text next to what they wrote; chat UIs don't show
+   * it; agent functions and tools get the latest one as `messageContext`.
+   * It's saved with its message, so a continuation of the answer sees the
+   * same values, and the instructions stay the same between messages, which
+   * keeps prompt caching working.
+   *
+   * Works without configuration. `schema` checks the part when a message
+   * arrives (a mismatch is refused, 400); `toModel` decides how it reads to
+   * the model (default: a `[Context]` block of `key: value` lines). An agent
+   * can override `toModel` in its own `defineAgent` meta.
+   */
+  messageContext?: {
+    schema?: FlexibleSchema;
+    toModel?: (context: any) => string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
+  };
   // `any` params: each agent declares its own, and a factory typed for one
   // agent's params must still fit the registry.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1575,6 +1594,29 @@ export function createRuntime<P, RC = unknown>(
     return undefined;
   }
 
+  /** How a `data-context` part reads to this agent's model: its own `toModel`, else the runtime's, else the default. */
+  function contextToTextFor(agentRef: string): ((data: unknown) => string | undefined) | undefined {
+    const name = agentRef.split("@")[0]!;
+    const own = config.agents[name]?.meta?.messageContext;
+    if (own && "toModel" in own) return own.toModel ?? (() => undefined);
+    return config.messageContext?.toModel;
+  }
+
+  /** A new message's `data-context`, checked against `messageContext.schema`; the message is refused on a mismatch. */
+  async function checkMessageContext(message: AppMessage): Promise<AppMessage> {
+    const schema = config.messageContext?.schema;
+    const data = contextOf(message);
+    if (!schema || data === undefined) return message;
+    const check = asSchema(schema).validate;
+    if (!check) return message;
+    const result = await check(data);
+    if (!result.success) throw new InvalidMessageError(`the data-context part doesn't match messageContext.schema: ${result.error.message}`);
+    return {
+      ...message,
+      parts: message.parts.map((p) => (p.type === "data-context" ? ({ type: "data-context", data: result.value } as typeof p) : p)),
+    };
+  }
+
   /** Resolve an agent's per-request config + a display model id. */
   async function resolveAgentConfig(
     agentName: string,
@@ -1585,7 +1627,9 @@ export function createRuntime<P, RC = unknown>(
     resolveCtx?: DynamicAgentResolveContext,
     /** The chat's saved params (`ChatRecord.params`). */
     chatParams?: unknown,
-  ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC; params: unknown }> {
+    /** The `data-context` of the message being answered. */
+    messageContext?: unknown,
+  ): Promise<{ cfg: AgentConfig<P>; modelId: string; runtimeCtx: RC; params: unknown; messageContext: unknown }> {
     const runtimeCtx = await contextDef.build({ principal, request, turnContext });
     // Code-declared agents first; otherwise a dynamic (e.g. DB-stored) agent.
     const factory = config.agents[agentName];
@@ -1594,14 +1638,14 @@ export function createRuntime<P, RC = unknown>(
     const schema = factory?.meta?.params;
     const params = schema ? await validateParams(agentName, schema, chatParams) : undefined;
     const cfg = factory
-      ? await factory({ context: runtimeCtx, principal, params, turnContext })
+      ? await factory({ context: runtimeCtx, principal, params, messageContext, turnContext })
       : await config.dynamicAgents?.resolve(agentName, principal, resolveCtx);
     if (!cfg) throw new Error(`Unknown agent: ${agentName}`);
     const modelId =
       typeof cfg.model === "string"
         ? cfg.model
         : ((cfg.model as { modelId?: string }).modelId ?? "unknown");
-    return { cfg, modelId, runtimeCtx, params };
+    return { cfg, modelId, runtimeCtx, params, messageContext };
   }
 
   /** `buildTurnStream` as an SSE `Response` — what every chat-facing path returns. */
@@ -1632,6 +1676,8 @@ export function createRuntime<P, RC = unknown>(
     runtimeCtx: RC;
     /** The chat's params, as the agent's schema returned them. */
     params?: unknown;
+    /** The `data-context` of the message being answered. */
+    messageContext?: unknown;
     /** Subagent runs: waive approvals + drop OAuth `connect_` gates (no human). */
     autoApprove?: boolean;
     /**
@@ -2587,7 +2633,7 @@ export function createRuntime<P, RC = unknown>(
         }
         // Model projection: drops `sendToModel:false` messages (and data-* parts).
         // `context` lets an extension reshape what the model reads this turn.
-        const projected = await toModelMessages(uiMessages, { tools });
+        const projected = await toModelMessages(uiMessages, { tools, contextToText: contextToTextFor(run.agent) });
         const modelMessages = hooks.has("context")
           ? await hooks.context(projected, xctx(0, uiMessages))
           : projected;
@@ -2640,7 +2686,8 @@ export function createRuntime<P, RC = unknown>(
                 run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
                 writer,
                 params: args.params,
-              } satisfies ToolContext<P, Record<string, unknown>, unknown>,
+                messageContext: args.messageContext,
+              } satisfies ToolContext<P, Record<string, unknown>, unknown, unknown>,
             ]),
           ),
           // generate-text step callback: accumulate usage across steps,
@@ -3133,7 +3180,7 @@ export function createRuntime<P, RC = unknown>(
     // conversation, not write it (see `acceptUserMessage`). Checked before a
     // chat is created, so a refused message leaves nothing behind.
     const existing = chat ? await storage.loadMessages(principal, chat.id) : [];
-    const userMessage = acceptUserMessage(message, existing, { maxInlineFileBytes: config.maxInlineFileBytes });
+    const userMessage = await checkMessageContext(acceptUserMessage(message, existing, { maxInlineFileBytes: config.maxInlineFileBytes }));
     // The last question regenerated (`useChat`'s `regenerate()`) or edited:
     // what it replaces is hidden from the user and the model, not deleted,
     // and the turn runs again from that question.
@@ -3149,7 +3196,7 @@ export function createRuntime<P, RC = unknown>(
     }
     const resolvedChatId = chat.id;
 
-    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
+    const { cfg, modelId, runtimeCtx, params, messageContext } = await resolveAgentConfig(
       agentName,
       principal,
       request,
@@ -3158,6 +3205,7 @@ export function createRuntime<P, RC = unknown>(
       // resolving it the way its spawner would.
       { parentAgent: chat.parentAgent },
       chat.params,
+      contextOf(userMessage),
     );
 
     // The replaced answers are hidden by the same write that opens the new turn
@@ -3198,6 +3246,7 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: [...prior.filter((m) => m.id !== userMessage.id), userMessage],
       runtimeCtx,
       params,
+      messageContext,
       admitted,
     });
   }
@@ -3381,11 +3430,11 @@ export function createRuntime<P, RC = unknown>(
     };
     // A store that records versions but can't resolve a pin falls back to the
     // agent as it is now — what recovery always did — rather than failing it.
-    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(pinnedAgent, principal, undefined, undefined, resolveCtx, chat?.params).catch(
+    const { cfg, modelId, runtimeCtx, params, messageContext } = await resolveAgentConfig(pinnedAgent, principal, undefined, undefined, resolveCtx, chat?.params, latestMessageContext(uiMessages)).catch(
       (e: unknown) => {
         if (pinnedAgent === run.agent) throw e;
         console.warn(`[resume] run ${run.id}: ${pinnedAgent} did not resolve; resuming on ${run.agent} as it is now`);
-        return resolveAgentConfig(run.agent, principal, undefined, undefined, resolveCtx, chat?.params);
+        return resolveAgentConfig(run.agent, principal, undefined, undefined, resolveCtx, chat?.params, latestMessageContext(uiMessages));
       },
     );
 
@@ -3412,6 +3461,7 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: trimTrailingAssistantPrefill(uiMessages, { unanchored: true }),
       runtimeCtx,
       params,
+      messageContext,
       admitted,
       ...(settings.autoApprove !== undefined ? { autoApprove: settings.autoApprove } : {}),
       ...(settings.blockGated !== undefined ? { blockGated: settings.blockGated } : {}),
@@ -3540,13 +3590,14 @@ export function createRuntime<P, RC = unknown>(
 
     // Continue this chat from the decided history.
     const continueTurn = async () => {
-      const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
+      const { cfg, modelId, runtimeCtx, params, messageContext } = await resolveAgentConfig(
         chat.agent,
         principal,
         request,
         turnContext,
         { parentAgent: chat.parentAgent },
         chat.params,
+        latestMessageContext(messages),
       );
       const admitted = await admitContinuation(principal, chat.agent, "decision");
       const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
@@ -3562,6 +3613,7 @@ export function createRuntime<P, RC = unknown>(
         uiMessages: trimTrailingAssistantPrefill(messages),
         runtimeCtx,
         params,
+        messageContext,
         // A human just decided something, so a human is present — even if this
         // turn parks again on the NEXT gate (see TurnTrigger).
         trigger: "decision",
@@ -3707,13 +3759,14 @@ export function createRuntime<P, RC = unknown>(
       return new Response(null, { status: 200 });
     }
 
-    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
+    const { cfg, modelId, runtimeCtx, params, messageContext } = await resolveAgentConfig(
       chat.agent,
       principal,
       request,
       turnContext,
       { parentAgent: chat.parentAgent },
       chat.params,
+      latestMessageContext(messages),
     );
     const admitted = await admitContinuation(principal, chat.agent, "decision");
     // The result is persisted WITH the run (atomically where the adapter can):
@@ -3733,6 +3786,7 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: trimTrailingAssistantPrefill(messages),
       runtimeCtx,
       params,
+      messageContext,
       // A client-handled tool result is a human answering (see TurnTrigger).
       trigger: "decision",
       admitted,
@@ -3788,6 +3842,7 @@ export function createRuntime<P, RC = unknown>(
       turnContext,
       { parentAgent: chat.parentAgent },
       chat.params,
+      latestMessageContext(stored),
     );
     // Tool definitions only affect how a recorded tool RESULT is rendered for the
     // model (`toModelOutput`); an unknown tool falls back to its raw JSON rather
@@ -3817,7 +3872,7 @@ export function createRuntime<P, RC = unknown>(
     try {
       const { text, truncated, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
-        messages: await toModelMessages(live, { tools }),
+        messages: await toModelMessages(live, { tools, contextToText: contextToTextFor(chat.agent) }),
         ...(focus ? { focus } : {}),
         ...(noThinking ? { providerOptions: noThinking } : {}),
         ...(signal ? { signal } : {}),
@@ -4091,7 +4146,7 @@ export function createRuntime<P, RC = unknown>(
     // leaves nothing behind, same as handleChat. Same for a busy chat: open
     // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
-    const { cfg, modelId, runtimeCtx, params, run, lease } = await withReservation(admitted, async () => {
+    const { cfg, modelId, runtimeCtx, params, messageContext, run, lease } = await withReservation(admitted, async () => {
       const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext, {
         // A continued thread keeps the parent it was created under (a mismatch
         // was refused above). Without a stored one — an adapter that doesn't
@@ -4099,7 +4154,7 @@ export function createRuntime<P, RC = unknown>(
         // that restricts a subagent by its parent must never see none.
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
-      }, chat.params);
+      }, chat.params, contextOf(o.message));
       const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
@@ -4116,6 +4171,7 @@ export function createRuntime<P, RC = unknown>(
         uiMessages: [...prior, o.message],
         runtimeCtx,
         params,
+        messageContext,
         admitted,
         autoApprove: o.autoApprove,
         blockGated: o.blockGated,
@@ -4213,7 +4269,7 @@ export function createRuntime<P, RC = unknown>(
     // Another gated call in the same sub step still undecided → can't finish.
     if (hasPendingApproval(subMessages)) return { answer: "" };
 
-    const { cfg, modelId, runtimeCtx, params } = await resolveAgentConfig(
+    const { cfg, modelId, runtimeCtx, params, messageContext } = await resolveAgentConfig(
       subChat.agent,
       principal,
       undefined,
@@ -4222,6 +4278,7 @@ export function createRuntime<P, RC = unknown>(
       // sub-thread, and this path is only ever reached by a human decision.
       { parentAgent: subChat.parentAgent, autoApprove: false },
       subChat.params,
+      latestMessageContext(subMessages),
     );
     const admitted = await admitContinuation(principal, subChat.agent, "decision");
     const { run, lease } = await openRun(principal, subChatId, subChat.agent, cfg.configVersion);
@@ -4256,6 +4313,7 @@ export function createRuntime<P, RC = unknown>(
       uiMessages: resumeFrom,
       runtimeCtx,
       params,
+      messageContext,
       autoApprove: false, // keep gating any further writes in the sub
       depth: 1,
       // Keep the resumed turn nested under the original trace/session.

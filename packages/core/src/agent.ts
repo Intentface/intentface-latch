@@ -203,10 +203,16 @@ export interface AgentMeta {
    * to the principal, in the agent function.
    */
   params?: FlexibleSchema;
+  /**
+   * How this agent reads the `data-context` part on user messages, in place of
+   * the runtime's `messageContext.toModel`. Return `undefined` to leave it out
+   * for this agent.
+   */
+  messageContext?: { toModel?: (context: any) => string | undefined }; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
 /** An agent's identity for selection UIs: its registry key + display metadata. */
-export interface AgentInfo extends Omit<AgentMeta, "params"> {
+export interface AgentInfo extends Omit<AgentMeta, "params" | "messageContext"> {
   name: string;
 }
 
@@ -229,6 +235,13 @@ export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
    */
   context: RuntimeContext;
   principal: P;
+  /**
+   * What the user is looking at, from the `data-context` part of the message
+   * being answered (checked against `messageContext.schema` when set). The
+   * same on a continuation of that answer; `undefined` when the message has
+   * none.
+   */
+  messageContext?: unknown;
   /**
    * @deprecated Per-request data that isn't saved, so it is missing when an
    * answer continues after an approval, a crash or on a schedule. Use `params`
