@@ -1,4 +1,5 @@
 import type { UIMessage, UITools, UIDataTypes } from "ai";
+import { COMPACTION_PART_TYPE } from "./projections.js";
 
 /**
  * The message model.
@@ -96,6 +97,9 @@ const hide = (m: AppMessage): AppMessage => ({ ...m, metadata: { ...m.metadata, 
  *    plus the question's earlier wording, kept under a new id. The edited
  *    question keeps the client's id, so the client can edit it again.
  *
+ * A compaction summary written after the question is replaced too: it
+ * summarizes the answers being replaced.
+ *
  * Each is returned hidden from the user and the model. Nothing is deleted, so
  * history and usage stay intact. Null when `message` doesn't resend the last
  * question with at least one answer after it. Messages hidden earlier don't
@@ -105,8 +109,13 @@ export function lastQuestionResent(message: AppMessage, prior: readonly AppMessa
   const visible = prior.filter((m) => !isHidden(m));
   const at = visible.findIndex((m) => m.id === message.id);
   if (at === -1 || visible[at]!.role !== "user") return null;
+  // After it: the answers, and possibly a compaction summary written since.
+  // The summary covers the answers being replaced, so it is hidden with them,
+  // and the model's context goes back to what it was before that compaction.
   const answers = visible.slice(at + 1);
-  if (answers.length === 0 || answers.some((m) => m.role !== "assistant")) return null;
+  const isSummary = (m: AppMessage) => m.parts.some((p) => p.type === COMPACTION_PART_TYPE);
+  if (!answers.some((m) => m.role === "assistant")) return null;
+  if (answers.some((m) => m.role !== "assistant" && !isSummary(m))) return null;
   const replaced = answers.map(hide);
   if (!sameParts(visible[at]!.parts, message.parts)) {
     replaced.push(hide({ ...visible[at]!, id: `msg_${crypto.randomUUID().replace(/-/g, "")}` }));

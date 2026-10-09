@@ -184,6 +184,37 @@ describe("editing the last question", () => {
   });
 });
 
+describe("after the chat was compacted", () => {
+  it("regenerating the last question also retires the summary that covered its answer", async () => {
+    const { send, rt, mem, prompts } = setup();
+    await send(user("u1", "first"));
+    await send(user("u2", "second"));
+    // compactChat's marker: an internal user message carrying the summary.
+    const summary: AppMessage = {
+      id: "summary_1",
+      role: "user",
+      parts: [{ type: "text", text: "SUMMARY of everything so far" }, { type: "data-compaction", data: { compacted: 4, at: 1 } }],
+      metadata: { visibility: "internal" },
+    } as AppMessage;
+    await mem.storage.appendMessages("c", [summary]);
+
+    await send(user("u2", "second"));
+
+    expect(texts(await rt.loadHistory({ chatId: "c", principal }))).toEqual([
+      "user: first",
+      "assistant: answer 1",
+      "user: second",
+      "assistant: answer 3",
+    ]);
+    // The summary mentioned the replaced answer: it is retired, and the model
+    // works from the full history again, as before it was written.
+    expect(mem.messages.get("c")!.find((m) => m.id === "summary_1")!.metadata).toMatchObject({ sendToModel: false });
+    expect(prompts[2]).not.toContain("SUMMARY");
+    expect(prompts[2]).toContain("first");
+    expect(prompts[2]).not.toContain("answer 2");
+  });
+});
+
 describe("a regenerate that can't run", () => {
   it("leaves the previous answer visible", async () => {
     const { send, rt } = setup({ maxTurns: 1 });
