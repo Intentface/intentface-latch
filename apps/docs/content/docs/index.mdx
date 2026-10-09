@@ -20,6 +20,8 @@ import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createPostgresAdapter } from "@intentface/latch-drizzle";
 import { context, find_order, refund } from "./tools";
 
+// Who is asking. Ids only: it's saved with every run and schedule.
+// Anything you look up (plan, names, clients) goes in the context.
 export type Principal = { orgId: string; userId: string };
 
 export const runtime = createRuntime<Principal>({

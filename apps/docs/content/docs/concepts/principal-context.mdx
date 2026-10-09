@@ -42,6 +42,36 @@ const find_order = tool({
 
 Because the context is rebuilt from ids, a scheduled or resumed run gets the same, current values, even with no request.
 
+## Why two things
+
+They live for different lengths of time.
+
+|  | Principal | Context |
+| --- | --- | --- |
+| What | Who is asking | What their tools work with |
+| Built by | Your route, from your login | `build`, from the principal |
+| Lifetime | Saved with every chat, run and schedule | One turn, never saved |
+| Holds | Plain ids | Anything: clients, plans, permissions, keys |
+| Changes | Never, for a given person | Every turn, reading current values |
+
+Put a plan in the principal, and it's frozen into every run and schedule: someone who upgrades keeps their old plan on last month's report. Use only the principal, and every tool looks things up itself and has to remember to filter by customer. Splitting them means looking up once, fresh, on every turn, and handing tools objects already bound to the right customer.
+
+The agent itself can be built from the context too, so each plan gets its own model and tools, decided again on every turn ([limits per plan](/docs/guides/plans-and-limits) work the same way):
+
+```ts
+const support = defineAgent<Principal, Ctx>(({ context }) => ({
+  model: context.plan === "pro"
+    ? anthropic("claude-sonnet-4-6")
+    : anthropic("claude-haiku-4-5"),
+  instructions: "You help customers with their orders.",
+  // Free plans can look orders up; only Pro can refund from chat.
+  tools: context.plan === "pro" ? { find_order, refund } : { find_order },
+  toolApproval: { refund: "user-approval" },
+}));
+```
+
+The rule of thumb: **ids in the principal, everything you look up in the context.**
+
 ## Go deeper
 
 - Private, shared and team conversations: [Who sees what](/docs/hard-parts/access)
