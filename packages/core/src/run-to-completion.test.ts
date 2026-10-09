@@ -3,7 +3,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream, tool } from "ai";
 import { z } from "zod";
 import { createRuntime } from "./runtime.js";
-import { defineContext } from "./context.js";
+import { defineContext, type ToolContext } from "./context.js";
 import { defineAgent } from "./agent.js";
 import type { AppMessage } from "./message.js";
 import { memoryStorage } from "./__tests__/memory-storage.js";
@@ -253,10 +253,13 @@ describe("options.context carries the runtime", () => {
       },
     });
     await rt.runAgent({ principal, agent: "probe", prompt: "x", blockGated: false });
-    const ctx = seen as { flag: number; principal: P; runtime: unknown; run: { agent: string } };
+    const ctx = seen as ToolContext<P, { flag: number }>;
     expect(ctx.flag).toBe(1);
     expect(ctx.principal).toEqual(principal);
     expect(ctx.run.agent).toBe("probe");
+    expect(typeof ctx.run.id).toBe("string");
+    expect(typeof ctx.run.chatId).toBe("string");
+    expect(typeof ctx.writer.write).toBe("function");
     expect(ctx.runtime).toBe(rt);
   });
 });

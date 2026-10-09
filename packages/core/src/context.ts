@@ -20,6 +20,8 @@
  * rebuilds the same context.
  */
 
+import type { Runtime, TurnWriter } from "./runtime.js";
+
 /** Reads a secret for a principal (the Vault read-side; isolation lives in the store). */
 export type SecretResolver<P> = (
   principal: P,
@@ -42,6 +44,28 @@ export interface ContextDefinition<P, RuntimeContext> {
     turnContext?: unknown;
   }) => RuntimeContext | Promise<RuntimeContext>;
 }
+
+/**
+ * What a tool receives as `options.context` during a run: whatever your
+ * `defineContext` `build` returned, plus what Latch adds for every tool.
+ *
+ * ```ts
+ * execute: async ({ orderId }, { context }) => {
+ *   const { orders, principal } = context as ToolContext<Principal, Ctx>;
+ *   return orders.refund(orderId, principal.userId);
+ * },
+ * ```
+ */
+export type ToolContext<P, RuntimeContext = unknown> = RuntimeContext & {
+  /** Who the run is for: the principal your route passed, or the one restored for a resumed or scheduled run. */
+  principal: P;
+  /** The run this tool call belongs to. `agent` is the agent's name as the run resolved it. */
+  run: { id: string; chatId: string; agent: string };
+  /** Streams extra parts (for example `data-*` progress) into the answer while the tool runs. */
+  writer: TurnWriter;
+  /** The runtime itself, for tools that schedule, list chats or start runs. */
+  runtime: Runtime<P>;
+};
 
 export function defineContext<P, RuntimeContext>(
   def: ContextDefinition<P, RuntimeContext>,
