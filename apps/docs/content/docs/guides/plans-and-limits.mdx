@@ -1,42 +1,73 @@
 ---
 title: Plans and limits
-description: Budgets on turns, tokens and cost — per team, member, agent or plan; refused at the cap, stopped mid-turn, settled on finish.
+description: Give each plan its own caps on requests, tokens and cost, per team, person and agent, and tell users which one they hit.
 ---
 
-Limits put a ceiling on what a tenant, a user or an agent may spend. They exist so an agent can sit in front of paying customers without an open-ended bill, and so one runaway agentic turn cannot consume a day's budget after being admitted at ninety-nine percent.
+The free plan gets 20 requests a day per person. The team plan gets a monthly token budget for the whole team. The expensive research agent gets its own cost cap. Here's how to set that up. For why it's harder than reading a counter, see [Usage limits](/docs/hard-parts/limits).
 
-**What it makes possible.** Per-plan quotas, per-team budgets, a per-agent cap on a scheduled digest, a fair per-minute rate limit per member, and a runaway turn stopped at its remaining tokens.
+## 1. Say which limits a run counts against
 
-## How it works
-
-The host names the counters a turn counts against and their caps; the runtime counts and enforces. Keys are plain strings derived from **your** principal — Latch has no notion of an org, team or plan; whatever your principal carries is what you key on. Three enforcement points: **admission** (before a turn opens it is *reserved*: one atomic increment of each turn counter that returns the new count, so N concurrent requests against a one-turn cap get counts 1…N and exactly one is admitted; the first budget now over its cap refuses with `LimitExceededError`, mapped by the HTTP handler to `429` + `Retry-After`, and the reservation is released), **mid-turn** (the tool loop stops once this turn's tokens reach the tightest remaining token budget), and **settlement** (tokens and cost are added when the turn finishes — resumes and subagent turns included).
+`limitsFor` runs before every run and returns the limits it counts against. Each has a key (any string: a team, a person, an agent, an API key), a window, and caps on `turns`, `tokens` and `cost`.
 
 ```ts
 import { DAY_MS, MINUTE_MS } from "@intentface/latch-core";
-import { createSqliteLimitStore } from "@intentface/latch-drizzle";
+import { createPostgresLimitStore } from "@intentface/latch-drizzle";
 
 createRuntime({
-  // …
+  …,
   limits: {
-    store: createSqliteLimitStore(db), // latch_limit_counters: one row per (key, window)
-    // Your principal, your keys: a team, a workspace, an API key, a plan tier…
-    limitsFor: ({ principal, agent }) => [
-      { key: `team:${principal.teamId}`, windowMs: DAY_MS, max: { tokens: 5_000_000 }, label: "your team's daily budget" },
-      // Only when a human is behind the turn — a shared/system principal has no member.
-      ...(principal.memberId ? [{ key: `member:${principal.memberId}`, windowMs: MINUTE_MS, max: { turns: 10 } }] : []),
-      { key: `agent:${principal.teamId}:${agent}`, windowMs: DAY_MS, max: { cost: 20 } },
-    ],
+    store: createPostgresLimitStore(db), // one counter row per key and window
+    limitsFor: async ({ principal, agent }) => {
+      const plan = await planOf(principal.orgId); // your table: keep it fast, it runs every time
+      return [
+        { key: `org:${principal.orgId}`, windowMs: 30 * DAY_MS, max: { tokens: plan.monthlyTokens }, label: "your team's monthly budget" },
+        { key: `user:${principal.orgId}:${principal.userId}`, windowMs: DAY_MS, max: { turns: plan.dailyRequests }, label: "your daily requests" },
+        { key: `user:${principal.orgId}:${principal.userId}`, windowMs: MINUTE_MS, max: { turns: 10 } },
+        ...(agent === "research" ? [{ key: `agent:${principal.orgId}:research`, windowMs: DAY_MS, max: { cost: 20 } }] : []),
+      ];
+    },
   },
 });
 ```
 
-Windows are fixed and epoch-aligned (what "per day" means to people, and one row per key per window). `limitsFor` runs per turn, so it may read a policy table — keep it cheap. `runtime.cron()` prunes counters whose window ended more than a day ago.
+Return an empty list and the run isn't limited at all.
 
-<Callout title="Where the policy lives">
-Latch has no opinion on tenants, plans or tiers: `limitsFor` is where a host turns "the Pro plan gets 2M tokens a day" into policies, and a single-tenant app can key everything on one constant. The platform's own default reads five `LATCH_LIMIT_*` env vars and keys them at three scopes: the org (`org:<orgId>` — tokens and cost per day), the acting member (`user:<orgId>:<userId>` — tokens per day, turns per minute) and the agent within the org (`agent:<orgId>:<agent>` — turns per hour, shared by everyone using that agent).
-</Callout>
+## 2. Treat background runs differently
 
-## Next
+`trigger` says how the run started: `"chat"`, `"schedule"`, `"programmatic"` (a `runAgent` call), `"decision"` (continuing after an approval) or `"resume"` (after a crash). A scheduled report probably shouldn't use up a person's daily requests:
 
-- [Reference: errors](/docs/reference/errors) — `limit_exceeded` as the client sees it
-- [Reference: packages — latch-drizzle](/docs/reference/packages#latch-drizzle) — the counter store
+```ts
+limitsFor: ({ principal, trigger }) =>
+  trigger === "schedule"
+    ? [{ key: `schedules:${principal.orgId}`, windowMs: DAY_MS, max: { cost: 5 } }]
+    : chatLimits(principal),
+```
+
+Subagents count against the limits of the run that started them, with the same trigger.
+
+## 3. Tell the user which limit they hit
+
+A refused run throws `LimitExceededError` before anything is saved. Its message names the limit by its `label` and says when it resets: "Limit reached: your daily requests. Try again in 3 hours." `createLatchHandler` turns it into `429` with `Retry-After`; in your own route, do the same:
+
+```ts
+import { isLimitExceededError } from "@intentface/latch-core";
+
+try {
+  return await runtime.handleChat({ … });
+} catch (e) {
+  if (isLimitExceededError(e)) {
+    return Response.json({ error: e.message }, {
+      status: 429,
+      headers: { "retry-after": String(Math.ceil(e.retryAfterMs / 1000)) },
+    });
+  }
+  throw e;
+}
+```
+
+## Good to know
+
+- **Windows are fixed and aligned to UTC.** A day runs from 00:00 to 00:00 UTC, not the user's midnight. A 30-day window is 30 days from a fixed point, not a calendar month.
+- **Request limits are exact, token and cost limits can overshoot** by what answers already running spend. See [what holds exactly](/docs/hard-parts/limits).
+- **A long answer stops at the budget,** keeping what it wrote.
+- **Old counters are cleaned up** by `runtime.cron()`.

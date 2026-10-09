@@ -31,7 +31,7 @@ createRuntime({ …, durability: { enabled: true } });
 await runtime.cron();
 ```
 
-With `createLatchApp` from `@intentface/latch-server`, both are on by default. On serverless, point your platform's cron at `POST /cron/run`.
+With `createLatchApp` from `@intentface/latch-server`, both are on by default. On serverless, point your platform's cron at a route that calls `runtime.cron()`; see [Deploy on Vercel](/docs/guides/deploy-on-vercel).
 
 <Callout title="Already on Temporal or Durable Objects?">
 If your platform already guarantees one instance per conversation, it covers this part. Latch's job there is the rest: conversations, approvals, limits, channels.

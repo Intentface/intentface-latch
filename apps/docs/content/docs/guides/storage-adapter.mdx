@@ -1,0 +1,59 @@
+---
+title: Write your own storage adapter
+description: Keep Latch's data in your own schema or another database, and prove it keeps the same guarantees.
+---
+
+The built-in adapters cover Postgres and SQLite. Write your own when you need Latch's data in a schema you already have, in another database, or behind a layer you control: an audit log, encryption, a cache.
+
+## First: do you need to wrap, or replace?
+
+Most needs are a **wrapper** around a built-in adapter: same tables, one method changed.
+
+```ts
+const base = createPostgresAdapter<Principal>(db, { owner });
+
+const storage: StorageAdapter<Principal> = {
+  ...base,
+  appendMessages: async (chatId, messages, fence) => {
+    await audit.record(chatId, messages);
+    return base.appendMessages(chatId, messages, fence); // pass every argument on
+  },
+};
+```
+
+<Callout type="warn" title="Pass every argument on">
+A wrapper that drops an argument quietly turns a guarantee off. Leave out `fence` above, and a server that lost its run can keep writing into the conversation after another server took over. The adapter returns `false` when it refuses a write: return that too.
+</Callout>
+
+Write one from scratch only for a different database or a different schema.
+
+## Start from the checks
+
+The guarantees an adapter must keep only show up under load: two servers claiming one run, a server waking up after its run was taken over. The conformance checks make them show up in a test, so write the test first and make it pass one check at a time.
+
+```ts title="my-adapter.test.ts"
+import { describe, it } from "vitest";
+import { registerStorageConformance } from "@intentface/latch-core/testing";
+
+registerStorageConformance({ describe, it }, "my adapter", async () => {
+  const db = await openTestDatabase();
+  return {
+    store: createMyAdapter<Principal>(db, { owner: (p) => [p.orgId] }),
+    principals: [{ orgId: "a" }, { orgId: "b" }], // two different owners
+    close: () => db.close(),
+  };
+});
+```
+
+It runs under Vitest, Jest or `node:test`. The built-in adapters pass the same checks.
+
+## The guarantees, in the order to build them
+
+1. **Every read is scoped to its owner.** A chat from another owner is not found, not forbidden.
+2. **Messages keep their order** and are replaced by id, never duplicated.
+3. **One running answer per chat.** Starting a second fails with the time left on the first.
+4. **Claims are atomic.** Of many servers claiming the same run, exactly one wins.
+5. **Leases come from the database's clock,** not each server's.
+6. **Stale servers are fenced out.** Writes carry the run's fencing number, and a write with an old number is refused.
+
+The [storage reference](/docs/reference/storage) has every method and each guarantee in detail, with what breaks when it's missing.

@@ -306,12 +306,11 @@ createLatchHandler({
 });
 ```
 
-Omit `cronSecret` and the route doesn't exist at all — it fails closed. Point your platform's scheduler at it:
+Omit `cronSecret` and the route doesn't exist at all — it fails closed. Point any scheduler that can send a `POST` with that header at it.
 
-```
-# vercel.json
-{ "crons": [{ "path": "/api/latch/cron/run", "schedule": "*/5 * * * *" }] }
-```
+<Callout title="Vercel Cron">
+Vercel Cron sends a `GET` with `Authorization: Bearer $CRON_SECRET`, which this route doesn't accept. Use a five-line route that calls `runtime.cron()` instead: see [Deploy on Vercel](/docs/guides/deploy-on-vercel#4-the-cron).
+</Callout>
 
 Schedules also need a cron evaluator, since core ships no cron library:
 
@@ -321,7 +320,7 @@ import { createCronerEvaluator } from "@intentface/latch-server";
 createRuntime({ /* … */ cron: createCronerEvaluator() });
 ```
 
-On a long-lived Node process you can skip the HTTP route entirely and use the in-process scheduler instead — see [Operations](/docs/guides/crash-recovery).
+On a long-lived Node process you can skip the HTTP route entirely and use the in-process scheduler instead — see [Turn on crash recovery](/docs/guides/crash-recovery).
 
 ## Multi-tenancy
 

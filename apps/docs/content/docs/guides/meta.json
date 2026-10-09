@@ -7,6 +7,7 @@
     "schedules",
     "scheduled-brief",
     "ownership-patterns",
+    "agent-for-your-customers",
     "plans-and-limits",
     "connections",
     "agents-in-a-database",
@@ -15,6 +16,8 @@
     "---Ship---",
     "mount-the-handler",
     "chat-ui",
-    "crash-recovery"
+    "crash-recovery",
+    "deploy-on-vercel",
+    "storage-adapter"
   ]
 }
