@@ -1,5 +1,5 @@
 ---
-title: Connections
+title: Connect other services
 description: Give an agent a SaaS service's tools by naming it — per tenant, OAuth once, secrets the model never sees.
 ---
 
@@ -50,13 +50,13 @@ createMcpConnections({ vault, secrets: vault.resolver /* … */ });
 
 ## OAuth, end to end
 
-1. A connection the user hasn't authorised exposes none of its tools yet — only a gated `connect_<name>` tool. When the agent calls it, the turn parks like an approval ([Operations](/docs/operations#human-in-the-loop)).
+1. A connection the user hasn't authorised exposes none of its tools yet — only a gated `connect_<name>` tool. When the agent calls it, the turn parks like an approval ([Approvals](/docs/hard-parts/approvals)).
 2. The client sends the user to `GET /connections/:name/authorize`. The **principal is pinned into the flow state here** — never re-resolved from the callback request, so the grant cannot land on whoever completes the redirect.
 3. The provider redirects to the callback; it finishes the exchange, stores the token in the vault under that principal, and redirects to `returnTo`.
-4. The client approves the parked `connect_<name>` and the turn continues with the tools available. [The client side](/docs/hosting/client#oauth-the-callback-redirects--resuming-is-yours) has the exact steps.
+4. The client approves the parked `connect_<name>` and the turn continues with the tools available. [The chat UI](/docs/guides/chat-ui#oauth-the-callback-redirects--resuming-is-yours) has the exact steps.
 
 ## Next
 
-- [Cookbook: gate a tool behind approval](/docs/cookbook/approvals) — the same pause the connect step uses
+- [Guide: gate a tool behind approval](/docs/guides/approvals) — the same pause the connect step uses
 - [Reference: packages — latch-mcp, latch-openapi](/docs/reference/packages#latch-mcp)
-- [Foundations: principals](/docs/foundations/principals#how-a-principal-reaches-a-tool) — how a principal reaches a tool and its credential
+- [Who owns a conversation](/docs/guides/ownership-patterns#how-a-principal-reaches-a-tool) — how a principal reaches a tool and its credential

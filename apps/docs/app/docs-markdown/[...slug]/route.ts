@@ -20,7 +20,7 @@ export async function GET(
   }
 
   const base = path.join(process.cwd(), "content", "docs");
-  // `/docs/runtime.md` → runtime.mdx; `/docs.md` (the index) → index.mdx.
+  // `/docs/concepts/runtime.md` → concepts/runtime.mdx; `/docs.md` (the index) → index.mdx.
   const candidates = [
     path.join(base, `${slug.join("/")}.mdx`),
     path.join(base, ...slug, "index.mdx"),

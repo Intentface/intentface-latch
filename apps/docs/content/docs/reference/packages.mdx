@@ -49,7 +49,7 @@ createRuntime({
 
 `providerDefaults` supplies `pricing`, `resolveProviderTools`, `resolveReasoningOptions` and `resolvePromptCaching`; list any of them after the spread to override it. The provider SDKs (`@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`) are *optional* peers, imported lazily per provider — a host with one API key never loads the other two, and the core root imports none of them.
 
-→ [Runtime](/docs/runtime) · [Seams](/docs/reference/seams)
+→ [Runtime](/docs/concepts/runtime) · [Seams](/docs/reference/seams)
 
 ## latch-drizzle
 
@@ -65,7 +65,7 @@ It takes the `db`, not a connection string — your app owns the connection and 
 
 Beyond the core adapter it also provides the **secret store** (envelope-encrypted rows behind `createVault`), the **memory job store**, and an **agent-builder store** so DB-defined agents work without you writing that table.
 
-The agent-builder store is versioned: `upsert` publishes (appending a snapshot unless the content is unchanged), `activateVersion` rolls back by moving a pointer, `listVersions` / `getVersion` / `listActivations` read the history, and `getDraft` / `saveDraft` / `discardDraft` / `listDrafts` hold one unpublished working copy **per editor**. See [Agents → Versions, drafts and rollback](/docs/agents#versions-drafts-and-rollback).
+The agent-builder store is versioned: `upsert` publishes (appending a snapshot unless the content is unchanged), `activateVersion` rolls back by moving a pointer, `listVersions` / `getVersion` / `listActivations` read the history, and `getDraft` / `saveDraft` / `discardDraft` / `listDrafts` hold one unpublished working copy **per editor**. See [Agents → Versions, drafts and rollback](/docs/guides/agents-in-a-database#versions-drafts-and-rollback).
 
 Key exports: `createSqliteAdapter` · `createPostgresAdapter` · `migrate` / `migratePostgres` · `createSqliteSecretStore` · `createPostgresSecretStore` · `createMemoryJobStore` · `createSqliteAgentBuilderStore` · `schema`.
 
@@ -89,7 +89,7 @@ import { createLatchHono, createLatchHonoApp } from "@intentface/latch-server/ho
 
 `hono` stays an optional peer because the adapter lives on a subpath. Also supplies `createCronerEvaluator()` for the `cron` seam, since core ships no cron library.
 
-→ [Hosting](/docs/hosting)
+→ [Hosting](/docs/guides/mount-the-handler)
 
 ## latch-mcp
 
@@ -148,7 +148,7 @@ You supply the persistence: which agent a bot serves, the identity links, held m
 Decide deliberately whether a turn runs as the *person messaging* or as the
 account that installed the bot. Getting this wrong keys every row to the wrong
 owner and silently disables per-user memory — see the worked example in
-[Principals](/docs/foundations/principals#make-sure-the-principal-is-the-person-you-think-it-is).
+[Principals](/docs/guides/ownership-patterns#make-sure-the-principal-is-the-person-you-think-it-is).
 </Callout>
 
 ## latch-agent-builder

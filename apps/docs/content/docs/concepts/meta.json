@@ -1,4 +1,17 @@
 {
   "title": "How it fits together",
-  "pages": ["index", "runtime", "agents", "principal-context", "storage", "tools-connections", "server", "channels", "extensions"]
+  "pages": [
+    "index",
+    "runtime",
+    "agents",
+    "principal-context",
+    "storage",
+    "tools-connections",
+    "server",
+    "channels",
+    "extensions",
+    "---In depth---",
+    "turns",
+    "run-log"
+  ]
 }

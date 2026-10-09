@@ -1,0 +1,72 @@
+---
+title: Run agents on a schedule
+description: Schedules are rows, not timers. Create one, make time pass, and decide what happens when a fire stops for a person.
+---
+
+Schedules are **rows**, not timers. Core stores the cron expression and the captured identity; what makes time pass is your infrastructure.
+
+```ts
+await runtime.schedule({
+  principal,
+  agent: "reporter",
+  cron: "0 9 * * 1", // null = one-shot, fired on the next runDue()
+  timezone: "Europe/Helsinki",
+  prompt: "Summarise last week's signups.",
+  delivery: { kind: "slack", channel: "C123" }, // opaque to core
+  onParked: "skip", // the default; see "When a fire stops for a human" below
+});
+```
+
+Core needs a cron evaluator — it deliberately ships no cron library:
+
+```ts
+import { Cron } from "croner";
+
+createRuntime({
+  // …
+  cron: (expr, afterMs, timezone) =>
+    new Cron(expr, { timezone }).nextRun(new Date(afterMs))?.getTime() ?? null,
+});
+```
+
+Then fire due schedules from the same route as `sweep`:
+
+```ts
+await runtime.runDue();
+// → { fired, errors, skipped, parked }  — all tenants, each claimed once
+```
+
+Each fire reconstructs the principal from the stored identity blob, runs the turn, and advances the schedule.
+
+## When a fire stops for a human
+
+An unattended turn can meet an approval gate, and then it **parks**: the tokens are spent, no answer is produced, and nobody is there to decide. Latch treats that as a legitimate outcome (a scheduled agent asking before it mutates something is the point of the gate) and makes it loud rather than impossible:
+
+- **`parked`** counts fires that ran and stopped waiting on a human. They are counted in `fired` too — the turn did run — and logged on the tick it happens, which is what a one-shot schedule needs: it has no later occurrence to reveal it. Core can account for this itself on the default fresh-chat path; a host that takes over delivery via `runSchedule` owns the chat its fire ran in, so it opts into the same accounting by returning `{ handled: true, chatId, parked }` instead of a bare `true`.
+- **`onParked`** decides what the *next* occurrence does while the previous fire is still waiting (against the chat the last fire reported — the default path's own, or the `chatId` a `runSchedule` host returned): `"skip"` (the default) consumes the occurrence without running, so a recurring schedule can't mint a new parked chat and a new bill every tick; `"fire"` always runs, for a digest whose every occurrence matters even while one waits. `skipped` counts those.
+- **Which conversations need a person** is a plain list read: `ChatRecord.lastRunStatus` is `"awaiting_input"` for a chat whose latest run is waiting, and self-heals when the conversation moves on.
+- **To push a notification** rather than wait for someone to look, use `telemetry.onRunFinished` and check `run.trigger` — see [Telemetry hooks](/docs/reference/seams#telemetry-hooks--usage-analytics-and-someone-needs-to-be-told). `status: "awaiting_input"` with `trigger: "schedule"` is precisely "a fire nobody can answer".
+
+## Delivering somewhere other than a fresh chat
+
+By default a fired schedule runs in a new chat. If the report should land in the conversation the person actually replies in — a Slack thread, a Telegram DM — supply `runSchedule`:
+
+```ts
+createRuntime({
+  // …
+  runSchedule: async ({ schedule, principal }) => {
+    const target = parseDelivery(schedule.delivery); // yours; core never reads this
+    if (!target) return false; // fall through to the default
+    const { chatId, parked } = await deliverIntoChannel({ schedule, principal, target });
+    // `true` is enough. The object form opts this fire into the same accounting
+    // the default path gets: `chatId` is what the next occurrence's `onParked`
+    // check reads, and `parked` joins runDue's `parked` count.
+    return { handled: true, chatId, parked };
+  },
+});
+```
+
+Return `true` (or `{ handled: true, … }`) only when you ran *and* delivered it. Anything else — `false`, `{ handled: false }`, `undefined`, or a throw — falls through to core's default, so a stale target (bot disabled, user unlinked) still gets the work done in a chat rather than losing the fire. Core keeps owning the claim, the lease and the advance either way.
+
+`runScheduleNow` makes a schedule due immediately and lets it fire through the ordinary `runDue` path — so "run now" can never drift from what the cron actually does.
+

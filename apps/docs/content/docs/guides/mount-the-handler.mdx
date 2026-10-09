@@ -1,5 +1,5 @@
 ---
-title: Hosting
+title: Mount in your framework
 description: One Web-standard handler, mounted in Hono, Express, Fastify, NestJS, or any framework that speaks Request and Response.
 ---
 
@@ -31,7 +31,7 @@ export const latch = createLatchHandler({
 ```
 
 <Callout title="The routes are a convenience, not the contract">
-The real contract is the [Runtime operations](/docs/runtime). This handler is a
+The real contract is the [Runtime methods](/docs/reference/runtime). This handler is a
 pre-wired HTTP surface over them — you can ignore it and call `handleChat`,
 `sweep` or `schedule` from your own routes, a queue consumer, or a CLI.
 </Callout>
@@ -321,7 +321,7 @@ import { createCronerEvaluator } from "@intentface/latch-server";
 createRuntime({ /* … */ cron: createCronerEvaluator() });
 ```
 
-On a long-lived Node process you can skip the HTTP route entirely and use the in-process scheduler instead — see [Operations](/docs/operations).
+On a long-lived Node process you can skip the HTTP route entirely and use the in-process scheduler instead — see [Operations](/docs/guides/crash-recovery).
 
 ## Multi-tenancy
 
@@ -344,4 +344,4 @@ createLatchHandler({
 });
 ```
 
-Which one you want, and how the owner key follows from your `Principal`, is [Principals](/docs/foundations/principals).
+Which one you want, and how the owner key follows from your `Principal`, is [Principals](/docs/guides/ownership-patterns).

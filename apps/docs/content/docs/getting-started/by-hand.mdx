@@ -27,7 +27,7 @@ const db = drizzle(client, { schema });
 // `migrate` executes DDL, so it takes the libSQL client — not the drizzle db.
 await migrate(client);
 
-// The owner key is your isolation boundary — see /docs/foundations/principals.
+// The owner key is your isolation boundary — see /docs/guides/ownership-patterns.
 const storage = createSqliteAdapter<Principal>(db, {
   owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
 });
@@ -89,7 +89,7 @@ export async function POST(request: Request) {
 }
 ```
 
-A run that dies mid-turn is now reaped on the next tick and resumed from its own log. On a long-lived process, `createIntervalScheduler` drives the same call in-process — see [Operations](/docs/operations#durability).
+A run that dies mid-turn is now reaped on the next tick and resumed from its own log. On a long-lived process, `createIntervalScheduler` drives the same call in-process — see [Operations](/docs/guides/crash-recovery).
 
 ## Tier 0 — stateless
 
@@ -97,9 +97,9 @@ The same code with `createClient({ url: ":memory:" })`: a fresh database per pro
 
 ## Mount it
 
-`createLatchHandler({ runtime, resolveContext })` gives you the Web-standard handler; [Hosting](/docs/hosting) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
+`createLatchHandler({ runtime, resolveContext })` gives you the Web-standard handler; [Hosting](/docs/guides/mount-the-handler) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
 
 ## Next
 
-- [Runtime](/docs/runtime) — every configuration field and operation
-- [Foundations: seams](/docs/foundations/seams) — why everything past tier 0 is a function you pass
+- [createRuntime](/docs/reference/create-runtime) and [Runtime methods](/docs/reference/runtime) — every option and operation
+- [Hooks](/docs/reference/seams) — why everything past tier 0 is a function you pass

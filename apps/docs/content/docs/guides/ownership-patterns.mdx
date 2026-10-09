@@ -1,6 +1,6 @@
 ---
-title: Principals
-description: How your users' identity becomes the isolation boundary — six tenancy patterns, and how a principal reaches a tool.
+title: Who owns a conversation
+description: Six patterns for whose conversations are whose. Private, shared, both, a database per customer, background runs, and support access.
 ---
 
 `Principal` is **your type**. Latch never inspects it, and there is no built-in notion of a user, an org, or a role. What Latch does with it is derive one string — the **owner key** — and scope every row by it.
@@ -281,6 +281,6 @@ will disagree too.
 
 ## See also
 
-- [Turn inputs](/docs/foundations/turns) — the principal, context and message projections in detail
+- [Turn inputs](/docs/concepts/turns) — the principal, context and message projections in detail
 - [Storage](/docs/reference/storage) — the guarantees the adapter must make for owner scoping to hold
-- [Connections](/docs/connections#vault--secrets-the-model-never-sees) — the vault contract
+- [Connections](/docs/guides/connections#vault--secrets-the-model-never-sees) — the vault contract

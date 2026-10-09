@@ -1,0 +1,20 @@
+{
+  "title": "Guides",
+  "pages": [
+    "index",
+    "---Build---",
+    "approvals",
+    "schedules",
+    "scheduled-brief",
+    "ownership-patterns",
+    "plans-and-limits",
+    "connections",
+    "agents-in-a-database",
+    "write-an-extension",
+    "channels",
+    "---Ship---",
+    "mount-the-handler",
+    "chat-ui",
+    "crash-recovery"
+  ]
+}

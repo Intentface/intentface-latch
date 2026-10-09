@@ -1,6 +1,6 @@
 ---
-title: Turn inputs
-description: Principal, context, and the three views of a message — what flows into a turn and what comes back out.
+title: Inside a turn
+description: What goes into a turn, the three views of a message, compaction, and the order a turn runs in.
 ---
 
 Three things decide what a turn sees: **who** is asking (principal), **what world** they're in (context), and **which messages** the model gets (projections).
@@ -33,7 +33,7 @@ If the value your owner key derives from can change mid-session — an "active o
 
 ## Context — the world the agent runs in
 
-`defineContext` declares the shape once and builds it per turn. Every tool receives it — plus `principal`, the current `run`, and the `writer` — as `options.context`, so anything a tool needs per tenant (endpoint, plan tier, feature flags) goes in here, and a secret is resolved by the tool from the principal (see [how a principal reaches a tool](/docs/foundations/principals#how-a-principal-reaches-a-tool)).
+`defineContext` declares the shape once and builds it per turn. Every tool receives it — plus `principal`, the current `run`, and the `writer` — as `options.context`, so anything a tool needs per tenant (endpoint, plan tier, feature flags) goes in here, and a secret is resolved by the tool from the principal (see [how a principal reaches a tool](/docs/guides/ownership-patterns#how-a-principal-reaches-a-tool)).
 
 ```ts
 import { defineContext } from "@intentface/latch-core";
@@ -112,3 +112,16 @@ const result = await runtime.compactChat({
 ```
 
 Stored history is untouched — compaction shrinks the *projection*, never the record. `null` means there was too little to compact. It throws `PendingApprovalError` if the last turn is paused awaiting a human.
+
+## What a turn actually does
+
+The order matters when you're debugging a seam.
+
+1. **Context** — `context.build({ principal, request, turnContext })` produces `RuntimeContext`; every tool later receives it (plus `principal`, `run`, `writer`) as `options.context`.
+2. **Agent** — the factory runs, returning an `AgentConfig`. Dynamic agents resolve here.
+3. **Tools** — static `tools`, plus each `ToolSource` opened for this turn (connections/MCP), plus harness, sandbox, render and memory tools per the agent's flags. Sources are closed when the turn ends.
+4. **Instructions** — the agent's `instructions`, plus the memory provider's compiled index block, plus the current date line.
+5. **Model** — one `ToolLoopAgent` stream. `smoothStream`, `maxSteps`, `enabledTools` and reasoning options all apply here.
+6. **Persist** — the user and assistant messages, the run row, and a usage row carrying the priced cost.
+
+A gated tool call ends step 5 early with an `approval-requested` part; the run goes `awaiting_input` and waits for `applyApproval`.
