@@ -1,0 +1,549 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadow-plugin";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  font-feature-settings:
+    "liga" 1,
+    "calt" 1;
+
+  /* ─── Seeds ─── */
+  --bg: #ffffff;
+  --fg: #18181b;
+  --acc: #0169cc;
+  --con: 0.3;
+
+  /* State deltas (OKLCH L offsets, scale with --con).
+     In light, signs are negative so hover/active/border sink toward
+     darker. Surfaces sit near white; a positive Δ would clamp at #fff.
+     The .dark block below flips signs so states lift toward white. */
+  --state-hover: calc(-0.08 * var(--con));
+  --state-active: calc(-0.14 * var(--con));
+  --state-border: calc(-0.2 * var(--con));
+
+  /* Surface lightness steps. Each tier offsets from --bg by step ×
+     --con. Positive lifts above bg; negative sinks below.
+
+       step   role
+       ────   ────────────────────────────────
+       0.05   subtle    near-bg, slight elevation
+       0.01   hairline  barely visible separation
+       -0.01  soft      input-strength fill
+       -0.1   frame     app frame and trays, sunk below bg */
+  --primary-lightness: calc(0.05 * var(--con));
+  --tertiary-lightness: calc(0.01 * var(--con));
+  --quaternary-lightness: calc(-0.01 * var(--con));
+  --base-lightness: calc(-0.1 * var(--con));
+
+  /* Surface families + state variants — defined once; in .dark the deltas
+     flip sign and the surfaces redefine, so these formulas pick up both.
+     secondary is passthrough = --bg (canvas). Border states derive from the
+     border token, not the surface, so the deltas stack — a hovered border
+     keeps its separation from the hovered background instead of collapsing
+     into it. */
+  --primary-bg: oklch(from var(--bg) calc(l + var(--primary-lightness)) c h);
+  --primary-bg-hover: oklch(from var(--primary-bg) calc(l + var(--state-hover)) c h);
+  --primary-bg-active: oklch(from var(--primary-bg) calc(l + var(--state-active)) c h);
+  --primary-border: oklch(from var(--primary-bg) calc(l + var(--state-border)) c h);
+  --primary-border-hover: oklch(from var(--primary-border) calc(l + var(--state-hover)) c h);
+  --primary-border-active: oklch(from var(--primary-border) calc(l + var(--state-active)) c h);
+
+  --secondary-bg: var(--bg);
+  --secondary-bg-hover: oklch(from var(--secondary-bg) calc(l + var(--state-hover)) c h);
+  --secondary-bg-active: oklch(from var(--secondary-bg) calc(l + var(--state-active)) c h);
+  --secondary-border: oklch(from var(--secondary-bg) calc(l + var(--state-border)) c h);
+  --secondary-border-hover: oklch(from var(--secondary-border) calc(l + var(--state-hover)) c h);
+  --secondary-border-active: oklch(from var(--secondary-border) calc(l + var(--state-active)) c h);
+
+  --tertiary-bg: oklch(from var(--bg) calc(l + var(--tertiary-lightness)) c h);
+  --tertiary-bg-hover: oklch(from var(--tertiary-bg) calc(l + var(--state-hover)) c h);
+  --tertiary-bg-active: oklch(from var(--tertiary-bg) calc(l + var(--state-active)) c h);
+  --tertiary-border: oklch(from var(--tertiary-bg) calc(l + var(--state-border)) c h);
+  --tertiary-border-hover: oklch(from var(--tertiary-border) calc(l + var(--state-hover)) c h);
+  --tertiary-border-active: oklch(from var(--tertiary-border) calc(l + var(--state-active)) c h);
+
+  --quaternary-bg: oklch(from var(--bg) calc(l + var(--quaternary-lightness)) c h);
+  --quaternary-bg-hover: oklch(from var(--quaternary-bg) calc(l + var(--state-hover)) c h);
+  --quaternary-bg-active: oklch(from var(--quaternary-bg) calc(l + var(--state-active)) c h);
+  --quaternary-border: oklch(from var(--quaternary-bg) calc(l + var(--state-border)) c h);
+  --quaternary-border-hover: oklch(from var(--quaternary-border) calc(l + var(--state-hover)) c h);
+  --quaternary-border-active: oklch(from var(--quaternary-border) calc(l + var(--state-active)) c h);
+
+  --base-bg: oklch(from var(--bg) calc(l + var(--base-lightness)) c h);
+  --base-bg-hover: oklch(from var(--base-bg) calc(l + var(--state-hover)) c h);
+  --base-bg-active: oklch(from var(--base-bg) calc(l + var(--state-active)) c h);
+  --base-border: oklch(from var(--base-bg) calc(l + var(--state-border)) c h);
+  --base-border-hover: oklch(from var(--base-border) calc(l + var(--state-hover)) c h);
+  --base-border-active: oklch(from var(--base-border) calc(l + var(--state-active)) c h);
+
+  /* Accent — tinted from --acc, no surface derivation. */
+  --accent-bg: var(--acc);
+  --accent-bg-hover: oklch(from var(--accent-bg) calc(l + var(--state-hover)) c h);
+  --accent-bg-active: oklch(from var(--accent-bg) calc(l + var(--state-active)) c h);
+  --accent-border: oklch(from var(--accent-bg) calc(l + var(--state-border)) c h);
+  --accent-border-hover: oklch(from var(--accent-border) calc(l + var(--state-hover)) c h);
+  --accent-border-active: oklch(from var(--accent-border) calc(l + var(--state-active)) c h);
+
+  /* Text. Independent of --con: contrast shouldn't soften when
+     surfaces flatten. Primary = --fg verbatim. Secondary/tertiary
+     shift toward bg's lightness in OKLCH so they stay opaque and
+     keep fg's hue. Sign positive in light (fg dark, lifts toward
+     white bg); negative in dark. */
+  --text-primary: var(--fg);
+  --text-body: oklch(from var(--fg) calc(l + 0.16) c h);
+  --text-secondary: oklch(from var(--fg) calc(l + 0.34) c h);
+  --text-tertiary: oklch(from var(--fg) calc(l + 0.5) c h);
+
+  /* Elevation. Raised controls are lit from above: a face a touch lighter
+     than the surface, a top highlight and a crisp ring. The .dark block
+     swaps in lighter rings and an inner edge. */
+  --raised-bg: var(--primary-bg);
+  --raised-bg-hover: oklch(from var(--raised-bg) calc(l + var(--raised-hover-shift)) c h);
+  --raised-selected-bg: var(--raised-bg);
+  --raised-spread: 0.004;
+  --raised-hover-shift: -0.012;
+  --elevation-raised:
+    inset 0 1px 0 rgb(255 255 255), 0 0 0 1px rgb(0 0 0 / 0.075), 0 1px 2px rgb(0 0 0 / 0.07), 0 2px
+    6px -2px rgb(0 0 0 / 0.05);
+  --elevation-card:
+    0 0 0 1px rgb(0 0 0 / 0.075), 0 1px 2px rgb(0 0 0 / 0.06), 0 4px 8px -2px rgb(0 0 0 / 0.05);
+  --elevation-composer:
+    0 0 0 1px rgb(0 0 0 / 0.08), 0 1px 2px -1px rgb(0 0 0 / 0.08), 0 6px 16px -6px rgb(0 0 0 / 0.1);
+  --elevation-overlay:
+    0 0 0 1px rgb(0 0 0 / 0.075), 0 1px 2px rgb(0 0 0 / 0.06), 0 12px 32px -8px rgb(0 0 0 / 0.16),
+    0 32px 64px -16px rgb(0 0 0 / 0.14);
+
+  /* Accent controls (send, logo tile) share one cobalt bevel. */
+  --elevation-logo:
+    inset 0 1px 0 rgb(255 255 255 / 0.28), inset 0 -2px 3px oklch(30% 0.12 258 / 0.35), 0 0 0 1px
+    oklch(from var(--acc) calc(l - 0.064) c h), 0 1px 2px oklch(from var(--acc) l c h / 0.35);
+  --elevation-logo-lg:
+    inset 0 1px 0 rgb(255 255 255 / 0.28), inset 0 -3px 5px oklch(30% 0.12 258 / 0.35), 0 0 0 1px
+    oklch(from var(--acc) calc(l - 0.064) c h), 0 1px 2px oklch(from var(--acc) l c h / 0.35), 0
+    4px 10px -2px oklch(from var(--acc) l c h / 0.3);
+  --elevation-accent:
+    inset 0 1px 0 rgb(255 255 255 / 0.28), 0 0 0 1px oklch(from var(--acc) calc(l - 0.064) c h), 0
+    1px 2px oklch(from var(--acc) l c h / 0.35);
+
+  /* The composer: white in light; a step above the tray in dark. */
+  --composer-bg: var(--primary-bg);
+
+  /* Reference tables are two-tone like code blocks: a tray (header, expanded
+     rows) around a lighter panel of rows. */
+  --table-tray: var(--base-bg);
+  --table-panel: var(--primary-bg);
+
+  /* Code blocks are dark in both modes: fixed zinc, not seed-derived. */
+  /* Code stays dark in light mode: the frame is the ink seed, the panel a step
+     lighter (scaled by contrast like the tables), so a theme's hue tints both. */
+  --code-bg: var(--fg);
+  --code-panel: oklch(from var(--fg) calc(l + 0.13 * var(--con)) c h);
+  --elevation-code:
+    inset 0 0 0 1px rgb(255 255 255 / 0.1), inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px
+    var(--code-bg), 0 1px 2px rgb(0 0 0 / 0.12), 0 4px 10px -2px rgb(0 0 0 / 0.12);
+
+  --radius: 8px;
+
+  --sidebar-width: 256px;
+  --thread-width: 672px;
+}
+
+.dark {
+  --bg: #18181b;
+  --fg: #f4f4f5;
+  --acc: #4c9bea;
+
+  /* State deltas flip positive in dark — surfaces sit far from
+     white, so states lift toward white instead of sinking. */
+  --state-hover: calc(0.16 * var(--con));
+  --state-active: calc(0.18 * var(--con));
+  --state-border: calc(0.2 * var(--con));
+
+  /* Lightness steps in dark. Most tiers lift (positive) to be
+     visible above the dark canvas; base sinks slightly. */
+  --primary-lightness: calc(0.1 * var(--con));
+  --tertiary-lightness: calc(0.2 * var(--con));
+  --quaternary-lightness: calc(0.3 * var(--con));
+  --base-lightness: calc(-0.075 * var(--con));
+
+  /* Absolute L floors. The natural lift compresses below 1 sRGB
+     unit at bg=#000; floors guarantee tiers stay distinct. At
+     typical dark bgs (#111 etc.) the natural lift wins. */
+  --primary-floor: calc(0.09 + 0.106 * var(--con));
+  --tertiary-floor: calc(0.142 + 0.075 * var(--con));
+  --quaternary-floor: calc(0.194 + 0.063 * var(--con));
+
+  --primary-bg: oklch(
+    from var(--bg) max(var(--primary-floor), calc(l + var(--primary-lightness))) c h
+  );
+  --secondary-bg: var(--bg);
+  --tertiary-bg: oklch(
+    from var(--bg) max(var(--tertiary-floor), calc(l + var(--tertiary-lightness))) c h
+  );
+  --quaternary-bg: oklch(
+    from var(--bg) max(var(--quaternary-floor), calc(l + var(--quaternary-lightness))) c h
+  );
+  --base-bg: oklch(from var(--bg) max(0, calc(l + var(--base-lightness))) c h);
+
+  --text-body: oklch(from var(--fg) calc(l - 0.1) c h);
+  --text-secondary: oklch(from var(--fg) calc(l - 0.26) c h);
+  --text-tertiary: oklch(from var(--fg) calc(l - 0.42) c h);
+
+  /* Dark rings stay light: a near-black ring reads as a cut-out. */
+  --raised-bg: oklch(from var(--bg) calc(l + 0.29 * var(--con)) c h);
+  /* Selected rows sit a step below raised buttons so they don't shout. */
+  --raised-selected-bg: oklch(from var(--bg) calc(l + 0.21 * var(--con)) c h);
+  --raised-spread: 0.014;
+  --raised-hover-shift: 0.02;
+  --elevation-raised:
+    inset 0 1px 0 rgb(255 255 255 / 0.1), inset 0 0 0 1px rgb(255 255 255 / 0.05), 0 0 0 1px
+    rgb(0 0 0 / 0.16), 0 1px 2px rgb(0 0 0 / 0.1);
+  --elevation-card:
+    inset 0 1px 0 rgb(255 255 255 / 0.05), inset 0 0 0 1px rgb(255 255 255 / 0.06), 0 0 0 1px
+    rgb(0 0 0 / 0.16), 0 1px 2px rgb(0 0 0 / 0.1);
+  --elevation-composer:
+    inset 0 1px 0 rgb(255 255 255 / 0.06), inset 0 0 0 1px rgb(255 255 255 / 0.07),
+    0 0 0 1px rgb(0 0 0 / 0.2), 0 1px 2px rgb(0 0 0 / 0.12), 0 6px 16px -6px rgb(0 0 0 / 0.22);
+  --elevation-overlay:
+    inset 0 1px 0 rgb(255 255 255 / 0.06), inset 0 0 0 1px rgb(255 255 255 / 0.07),
+    0 0 0 1px rgb(0 0 0 / 0.16), 0 12px 32px -8px rgb(0 0 0 / 0.4), 0 32px 64px -16px
+    rgb(0 0 0 / 0.36);
+
+  --composer-bg: oklch(from var(--bg) calc(l + 0.13 * var(--con)) c h);
+  --table-tray: var(--primary-bg);
+  --table-panel: oklch(from var(--bg) calc(l + 0.2 * var(--con)) c h);
+
+  --code-bg: oklch(from var(--bg) calc(l + 0.1 * var(--con)) c h);
+  --code-panel: oklch(from var(--bg) calc(l + 0.2 * var(--con)) c h);
+  --elevation-code:
+    inset 0 0 0 1px rgb(255 255 255 / 0.06), inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px
+    rgb(0 0 0 / 0.16), 0 1px 2px rgb(0 0 0 / 0.1);
+
+  --shadow-border-opacity: 0.06;
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-ioskeley-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --font-weight-normal: 450;
+
+  /* Borderless card edge: a 1px ring + soft drop, replacing border utilities
+     so the edge never affects layout. The ring uses the theme's primary
+     border token, so it tracks light/dark and the theme-configurator seeds;
+     the drop layers stay neutral black. */
+
+  /* 0px 0px 0px 1px oklch(from var(--primary-border) l c h / 1), */
+  --shadow-border: 0px 1px 2px -1px rgb(0 0 0 / 0.06), 0px 2px 4px 0px rgb(0 0 0 / 0.04);
+  --shadow-raised: var(--elevation-raised);
+  --shadow-card: var(--elevation-card);
+  --shadow-composer: var(--elevation-composer);
+  --shadow-overlay: var(--elevation-overlay);
+  --shadow-accent: var(--elevation-accent);
+  --shadow-logo: var(--elevation-logo);
+  --shadow-logo-lg: var(--elevation-logo-lg);
+  --shadow-code: var(--elevation-code);
+
+  /* Background */
+  --color-base-bg: var(--base-bg);
+  --color-base-bg-hover: var(--base-bg-hover);
+  --color-base-bg-active: var(--base-bg-active);
+  --color-base-border: var(--base-border);
+  --color-base-border-hover: var(--base-border-hover);
+  --color-base-border-active: var(--base-border-active);
+
+  /* Surface: secondary (panels, sidebar) */
+  --color-secondary-bg: var(--secondary-bg);
+  --color-secondary-bg-hover: var(--secondary-bg-hover);
+  --color-secondary-bg-active: var(--secondary-bg-active);
+  --color-secondary-border: var(--secondary-border);
+  --color-secondary-border-hover: var(--secondary-border-hover);
+  --color-secondary-border-active: var(--secondary-border-active);
+
+  /* Surface: primary (cards, inputs, composer) */
+  --color-primary-bg: var(--primary-bg);
+  --color-primary-bg-hover: var(--primary-bg-hover);
+  --color-primary-bg-active: var(--primary-bg-active);
+  --color-primary-border: var(--primary-border);
+  --color-primary-border-hover: var(--primary-border-hover);
+  --color-primary-border-active: var(--primary-border-active);
+
+  /* Surface: tertiary (filled controls) */
+  --color-tertiary-bg: var(--tertiary-bg);
+  --color-tertiary-bg-hover: var(--tertiary-bg-hover);
+  --color-tertiary-bg-active: var(--tertiary-bg-active);
+  --color-tertiary-border: var(--tertiary-border);
+  --color-tertiary-border-hover: var(--tertiary-border-hover);
+  --color-tertiary-border-active: var(--tertiary-border-active);
+
+  /* Surface: quaternary (filled controls) */
+  --color-quaternary-bg: var(--quaternary-bg);
+  --color-quaternary-bg-hover: var(--quaternary-bg-hover);
+  --color-quaternary-bg-active: var(--quaternary-bg-active);
+  --color-quaternary-border: var(--quaternary-border);
+  --color-quaternary-border-hover: var(--quaternary-border-hover);
+  --color-quaternary-border-active: var(--quaternary-border-active);
+
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-bg-hover: var(--accent-bg-hover);
+  --color-accent-bg-active: var(--accent-bg-active);
+  --color-accent-border: var(--accent-border);
+  --color-accent-border-hover: var(--accent-border-hover);
+  --color-accent-border-active: var(--accent-border-active);
+
+  /* Text */
+  --color-composer-bg: var(--composer-bg);
+  --color-table-tray: var(--table-tray);
+  --color-table-panel: var(--table-panel);
+  --color-code-bg: var(--code-bg);
+  --color-code-panel: var(--code-panel);
+
+  --color-ink-primary: var(--text-primary);
+  --color-ink-body: var(--text-body);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-tertiary: var(--text-tertiary);
+
+  --radius-xs: calc(var(--radius) - 4px);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 15px;
+  --text-xl: 16px;
+}
+
+/* Raised face: pair with shadow-raised (or shadow-accent for bg-accent-raised).
+   The gradient reads --raised-face on the element itself, so the hover and
+   selected utilities only swap that variable. */
+@utility bg-raised {
+  --raised-face: var(--raised-bg);
+  background-color: var(--raised-face);
+  background-image: linear-gradient(
+    180deg,
+    oklch(from var(--raised-face) calc(l + var(--raised-spread)) c h),
+    oklch(from var(--raised-face) calc(l - var(--raised-spread)) c h)
+  );
+}
+
+@utility bg-raised-hover {
+  --raised-face: var(--raised-bg-hover);
+}
+
+@utility bg-raised-selected {
+  --raised-face: var(--raised-selected-bg);
+  background-color: var(--raised-face);
+  background-image: linear-gradient(
+    180deg,
+    oklch(from var(--raised-face) calc(l + var(--raised-spread)) c h),
+    oklch(from var(--raised-face) calc(l - var(--raised-spread)) c h)
+  );
+}
+
+@utility bg-accent-raised {
+  --accent-face: var(--acc);
+  background-color: var(--accent-face);
+  background-image: linear-gradient(
+    180deg,
+    oklch(from var(--accent-face) calc(l + 0.043) c h),
+    var(--accent-face)
+  );
+}
+
+@utility bg-accent-raised-hover {
+  --accent-face: oklch(from var(--acc) calc(l + 0.03) c h);
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -200% 50%;
+  }
+}
+
+@layer base {
+  ::-webkit-scrollbar {
+    width: 5px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--primary-border);
+    border-radius: 5px;
+  }
+
+  * {
+    @apply border-primary-border ring-ink-primary;
+    scrollbar-width: thin;
+    scrollbar-color: var(--primary-border) transparent;
+  }
+
+  body {
+    @apply bg-base-bg font-sans font-normal text-ink-primary;
+    font-synthesis: none;
+  }
+
+  /* Ioskeley's web build carries ligatures; code shows what was typed. */
+  code,
+  kbd,
+  pre,
+  samp,
+  .font-mono {
+    font-variant-ligatures: none;
+    font-feature-settings:
+      "liga" 0,
+      "calt" 0;
+  }
+}
+
+/* Scroll masks fade the edges a scroller can still scroll past. Scroll-driven
+   animations size each fade, so an axis that can't scroll (or a browser without
+   scroll timelines) gets none. */
+@property --scroll-mask-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --scroll-mask-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --scroll-mask-left {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --scroll-mask-right {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes scroll-mask-top {
+  to {
+    --scroll-mask-top: 32px;
+  }
+}
+@keyframes scroll-mask-bottom {
+  from {
+    --scroll-mask-bottom: 32px;
+  }
+}
+@keyframes scroll-mask-left {
+  to {
+    --scroll-mask-left: 32px;
+  }
+}
+@keyframes scroll-mask-right {
+  from {
+    --scroll-mask-right: 32px;
+  }
+}
+
+@utility scroll-mask-y {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--scroll-mask-top),
+    #000 calc(100% - var(--scroll-mask-bottom)),
+    transparent
+  );
+  animation:
+    scroll-mask-top linear both,
+    scroll-mask-bottom linear both;
+  animation-timeline: scroll(self y), scroll(self y);
+  animation-range:
+    0 32px,
+    calc(100% - 32px) 100%;
+}
+
+@utility scroll-mask {
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent,
+      #000 var(--scroll-mask-top),
+      #000 calc(100% - var(--scroll-mask-bottom)),
+      transparent
+    ),
+    linear-gradient(
+      to right,
+      transparent,
+      #000 var(--scroll-mask-left),
+      #000 calc(100% - var(--scroll-mask-right)),
+      transparent
+    );
+  mask-composite: intersect;
+  animation:
+    scroll-mask-top linear both,
+    scroll-mask-bottom linear both,
+    scroll-mask-left linear both,
+    scroll-mask-right linear both;
+  animation-timeline: scroll(self y), scroll(self y), scroll(self x), scroll(self x);
+  animation-range:
+    0 32px,
+    calc(100% - 32px) 100%,
+    0 32px,
+    calc(100% - 32px) 100%;
+}
+
+/* Switching between the docs and the playground cross-dissolves the viewport (a
+   ViewTransition in SiteShell). The root swaps live rather than fading a frozen
+   snapshot, so the sidebar's own slide plays through. */
+/* biome-ignore lint/correctness/noUnknownTypeSelector: `root` is a view-transition name, not an element. */
+::view-transition-old(root) {
+  display: none;
+}
+/* biome-ignore lint/correctness/noUnknownTypeSelector: `root` is a view-transition name, not an element. */
+::view-transition-new(root) {
+  animation: none;
+}
+::view-transition-group(site-viewport) {
+  animation-duration: 220ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Docs code blocks: a line-number gutter on multi-line blocks. */
+[data-code-block] pre[data-line-numbers] code {
+  counter-reset: line;
+}
+
+[data-code-block] pre[data-line-numbers] .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 3rem;
+  padding-right: 1.25rem;
+  text-align: right;
+  color: #71717a;
+  user-select: none;
+}
+
+/* ─── Shiki dual-theme fallback ───
+   Highlighting that runs with { light, dark } themes and defaultColor:false
+   emits per-token CSS variables; activate light by default and swap under
+   .dark. Docs code blocks use one dark theme with inline colors instead. */
+.shiki,
+.shiki span {
+  color: var(--shiki-light);
+}
+
+.dark .shiki,
+.dark .shiki span {
+  color: var(--shiki-dark);
+}

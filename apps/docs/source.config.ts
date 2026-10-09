@@ -26,8 +26,44 @@ function override({ type, checker, location }: { type: any; checker: any; locati
   return text.includes("{") || text.length > SHORT ? undefined : text;
 }
 
+type MdNode = { type: string; meta?: string | null; data?: Record<string, unknown>; children?: MdNode[] };
+
+/**
+ * Keeps a fence's `title="…"` (```ts title="lib/latch.ts") as `data-title` on
+ * the code element, where the `pre` handler in mdx-components.tsx reads it for
+ * the code block's tab.
+ */
+function remarkCodeTitle() {
+  const walk = (node: MdNode) => {
+    if (node.type === "code" && node.meta) {
+      const title = /title="([^"]+)"/.exec(node.meta)?.[1];
+      if (title) {
+        const data = (node.data ??= {});
+        data.hProperties = { ...(data.hProperties as object | undefined), "data-title": title };
+      }
+    }
+    node.children?.forEach(walk);
+  };
+  return (tree: MdNode) => walk(tree);
+}
+
+/** Types render as plain text: the table's type chip styles them. */
+const renderType = async (type: string) => ({
+  type: "element" as const,
+  tagName: "span",
+  properties: {},
+  children: [{ type: "text" as const, value: type }],
+});
+
 export default defineConfig({
   mdxOptions: {
-    remarkPlugins: [[remarkAutoTypeTable, { generator, options: { typeSimplifier: { override } } }]],
+    remarkPlugins: [
+      remarkCodeTitle,
+      [remarkAutoTypeTable, { generator, renderType, options: { typeSimplifier: { override } } }],
+    ],
+    // Disable fumadocs' built-in shiki pass so fenced code reaches the `pre`
+    // handler as raw text. Highlighting is done in one place: the CodeBlock
+    // component (fumadocs-core `highlight`).
+    rehypeCodeOptions: false,
   },
 });
