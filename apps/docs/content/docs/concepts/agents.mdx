@@ -33,6 +33,7 @@ const assistant = defineAgent<Principal, Ctx>(({ context }) => ({
 
 ## What an agent can have
 
+- **Params:** what its chats are about, such as a ticket or a document, given once when a chat starts. See [Principal, context and params](/docs/concepts/inputs).
 - **Tools,** some of them [behind approval](/docs/hard-parts/approvals).
 - **Connections** to other services, by name (`connections: ["linear"]`).
 - **Subagents** it can hand work to (`subagents: ["researcher"]`).

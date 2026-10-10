@@ -4,7 +4,7 @@
     "index",
     "runtime",
     "agents",
-    "principal-context",
+    "inputs",
     "storage",
     "tools-connections",
     "server",

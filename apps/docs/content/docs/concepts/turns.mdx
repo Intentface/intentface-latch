@@ -3,53 +3,15 @@ title: Inside a turn
 description: What goes into a turn, the three views of a message, compaction, and the order a turn runs in.
 ---
 
-Three things decide what a turn sees: **who** is asking (principal), **what world** they're in (context), and **which messages** the model gets (projections).
+A turn is built from what it's given (**principal**, **context**, **params**, the message's **data-context**) and from the stored **messages**, projected differently for the model and the user. What each input is and when to use it: [Principal, context and params](/docs/concepts/inputs). In short:
 
-## Principal — identity, opaque by design
-
-`Principal` is your type. Latch never inspects it, and there is no built-in notion of a user, an org or a role.
-
-```ts
-interface Principal {
-  orgId: string;
-  userId?: string;
-}
-```
-
-You resolve it however you authenticate (`ContextResolver`), and the storage adapter derives an **owner key** from it — that key is what scopes every row.
-
-```ts
-const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
-```
-
-Two consequences worth internalising:
-
-- **Authorization is yours.** Latch enforces isolation by owner key at the storage layer; it does not decide whether this user may use that agent.
-- **Identity must be stable.** The principal is serialized onto the run as an opaque `identity` blob so a resumed or cron-fired turn can rebuild it via `reconstructPrincipal`.
+- **principal**: who is asking. Saved with the chat, run and schedule; the storage adapter derives the owner key that scopes every row from it; re-checked by `reconstructPrincipal` when a turn runs without a request.
+- **context**: built by your `context` function from the principal at the start of every turn. Never saved.
+- **params**: saved on the chat by its first message; every turn gets them.
+- **data-context**: a part on the user's message; the turn answering that message gets it, saved with the message.
 
 <Callout type="warn" title="Pin the tenant at session creation">
-If the value your owner key derives from can change mid-session — an "active org" the user can switch — then owner-keyed rows fragment silently: yesterday's chats belong to a key you no longer produce. Resolve it once when the session is created and keep it stable for the session's life.
-</Callout>
-
-## Context — the world the agent runs in
-
-`defineContext` declares the shape once and builds it per turn. Every tool receives it — plus `principal`, the current `run`, and the `writer` — as `options.context`, so anything a tool needs per tenant (endpoint, plan tier, feature flags) goes in here, and a secret is resolved by the tool from the principal (see [how a principal reaches a tool](/docs/guides/ownership-patterns#how-a-principal-reaches-a-tool)).
-
-```ts
-import { defineContext } from "@intentface/latch-core";
-
-const context = defineContext<Principal, Ctx>({
-  build: async ({ principal }) => ({
-    orgId: principal.orgId,
-    orgName: await lookupOrgName(principal.orgId),
-  }),
-});
-```
-
-The type then flows into `defineAgent`, tools and hooks with no `any`.
-
-<Callout type="warn" title="turnContext is ephemeral — derive from the principal">
-`build` also receives `turnContext`: the per-turn request payload (parsed body, active document, UI selection). It is **never persisted with the run**, so a resumed or scheduled turn rebuilds context *without it*. Anything durable must derive from the principal. Reading identity out of `turnContext` produces a turn that works interactively and breaks on resume — which is the worst kind of bug, because it only appears after a crash.
+If the value your owner key derives from can change mid-session (an "active org" the user can switch), owner-keyed rows fragment silently: yesterday's chats belong to a key you no longer produce. Resolve it once when the session is created and keep it stable for the session's life.
 </Callout>
 
 ## Messages — one record, three views
@@ -117,8 +79,8 @@ Stored history is untouched — compaction shrinks the *projection*, never the r
 
 The order matters when you're debugging an option or an extension.
 
-1. **Context** — `context.build({ principal, request, turnContext })` produces `RuntimeContext`; every tool later receives it (plus `principal`, `run`, `writer`) as `options.context`.
-2. **Agent** — the factory runs, returning an `AgentConfig`. Dynamic agents resolve here.
+1. **Context**: your `context({ principal })` function builds it; every tool later receives it, plus `principal`, `params`, `messageContext`, `run` and `writer`, as `options.context`.
+2. **Agent**: the agent function runs with `{ context, principal, params, messageContext }` and returns an `AgentConfig`; the chat's saved params are checked against the agent's schema first. Dynamic agents resolve here.
 3. **Tools** — static `tools`, plus each `ToolSource` opened for this turn (connections/MCP), plus harness, sandbox, render and memory tools per the agent's flags. Sources are closed when the turn ends.
 4. **Instructions** — the agent's `instructions`, plus the memory provider's compiled index block, plus the current date line.
 5. **Model** — one `ToolLoopAgent` stream. `smoothStream`, `maxSteps`, `enabledTools` and reasoning options all apply here.

@@ -13,6 +13,8 @@ const config = {
   async redirects() {
     const moved = {
       "/docs/foundations": "/docs/concepts",
+      "/docs/concepts/principal-context": "/docs/concepts/inputs",
+      "/docs/reference/define-context": "/docs/reference/context",
       "/docs/foundations/principals": "/docs/guides/ownership-patterns",
       "/docs/foundations/turns": "/docs/concepts/turns",
       "/docs/foundations/run-log": "/docs/concepts/run-log",

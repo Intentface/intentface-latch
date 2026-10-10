@@ -35,16 +35,15 @@ Each visitor sees only their own chats. Don't use `[p.tenantId]` here: every vis
 The context is built per turn from the tenant id: their name, their help articles, their own API key from the vault. The agent's instructions come from it.
 
 ```ts
-const context = defineContext<Principal, Ctx>({
-  build: async ({ principal }) => {
-    const tenant = await tenants.get(principal.tenantId);
-    return {
-      tenant,
-      articles: helpCenterFor(tenant.id), // search over this tenant's articles only
-      crmKey: await vault.resolver(principal, "crm_api_key"),
-    };
-  },
-});
+const context = async ({ principal }: { principal: Principal }) => {
+  const tenant = await tenants.get(principal.tenantId);
+  return {
+    tenant,
+    articles: helpCenterFor(tenant.id), // search over this tenant's articles only
+    crmKey: await vault.resolver(principal, "crm_api_key"),
+  };
+};
+type Ctx = Awaited<ReturnType<typeof context>>;
 
 const support = defineAgent<Principal, Ctx>(({ context }) => ({
   model: anthropic("claude-sonnet-4-6"),
@@ -52,6 +51,21 @@ const support = defineAgent<Principal, Ctx>(({ context }) => ({
   tools: { search_articles, open_ticket },
 }));
 ```
+
+## What the visitor is looking at
+
+The widget knows which page of the tenant's site the visitor is on. It attaches that to each message as a `data-context` part, so the agent can answer "how do I cancel this?" about the right product page, without the page going into the instructions:
+
+```ts
+sendMessage({
+  parts: [
+    { type: "text", text: "How do I cancel this?" },
+    { type: "data-context", data: { page: location.pathname, product: currentProductSlug } },
+  ],
+});
+```
+
+It's a hint, not a permission: the agent still looks the product up through the tenant's own data.
 
 ## What it may spend: the tenant's plan
 

@@ -1,0 +1,48 @@
+---
+title: Context and tools
+description: The context function, and everything a tool receives as options.context.
+---
+
+What these are for, and when to use which: [Principal, context and params](/docs/concepts/inputs).
+
+## The context function
+
+```ts
+export const context = async ({ principal }: { principal: Principal }) => ({
+  db: dbFor(principal.orgId),
+  plan: await planOf(principal.orgId),
+});
+export type Ctx = Awaited<ReturnType<typeof context>>;
+
+createRuntime({ storage, context, agents });
+```
+
+- **Called** at the start of every turn: new messages, the continuation after an approval, crash recovery, schedule fires, subagent runs.
+- **Gets** only the principal. That's all Latch has when an answer continues without a request.
+- **Never saved**, so it can return clients and functions, and always reads current values.
+- **Optional.** Without it, the context is `{}`.
+
+The `{ build }` object from `defineContext` still works but is deprecated: its `request` and `turnContext` are missing whenever an answer continues.
+
+## What a tool receives
+
+Every tool gets what the context function returned, plus what Latch adds, as `options.context`:
+
+```ts
+import type { ToolContext } from "@intentface/latch-core";
+
+execute: async ({ reason }, { context }) => {
+  const { db, principal, params, messageContext } = context as ToolContext<Principal, Ctx, TicketParams, View>;
+  return db.tickets.close(params.ticketId, { by: principal.userId, reason });
+},
+```
+
+`ToolContext<Principal, Ctx, Params, MessageContext>` is that shape. The cast is still needed: the AI SDK can only infer a tool's context type from a `contextSchema`.
+
+<auto-type-table path="../../../../../packages/core/src/context.ts" name="ToolContext" />
+
+A field your context function returns with one of these names is replaced by Latch's.
+
+## What the agent function receives
+
+<auto-type-table path="../../../../../packages/core/src/agent.ts" name="AgentFactoryInput" />

@@ -1,0 +1,210 @@
+---
+title: Principal, context and params
+description: What to pass where. Who is asking, what they can work with, what the chat is about, and what they're looking at right now.
+---
+
+An agent needs to know four things on every turn. Each has its own place in Latch, because each one lives for a different length of time.
+
+| Input | Answers | Example |
+| --- | --- | --- |
+| `principal` | Who is asking? | `{ orgId: "o_7", userId: "u_42" }` |
+| `context` | What can they work with? | a database client limited to their organization, their plan |
+| `params` | What is this chat about? | `{ ticketId: "T-9" }` |
+| `data-context` | What are they looking at right now? | `{ activeFile: "Q3 budget" }` |
+
+## Which one do I use?
+
+Ask these in order. The first yes is the answer.
+
+1. **Is it who the user is?** Use the **principal**. Ids only.
+2. **Can you work it out from who they are?** Use the **context**: their plan, their permissions, the organization's name, clients for their data.
+3. **Is it what this conversation is about, decided when it starts?** Use **params**: a ticket, a document, a model fixed for the chat.
+4. **Does it change while they chat?** Put it in a **`data-context` part** on their message: the open file, the selection, the page.
+
+Most agents need only the first two. Params are for agents that are *about* something; `data-context` is for agents that see the user's screen.
+
+## Why four places
+
+One answer doesn't always finish in the request that started it. It can stop for an approval that's clicked tomorrow in Slack, or be cut off by a crash and finished by another server. Those moments run with nothing of yours involved, except the `context` function, so whatever the agent needs then has to be saved, or rebuildable from something saved.
+
+<InputsTimeline />
+
+- The **principal** and **params** are saved once and restored, so they're the same throughout.
+- The **context** is never saved. It's rebuilt from the principal every time, so it's always current: a downgraded plan applies from the next turn on, even in the middle of an answer.
+- The **`data-context` part** is saved with its message. The rest of that answer sees the same values; the next message brings its own.
+
+## The principal: who is asking
+
+```ts
+type Principal = { orgId: string; userId: string };
+
+// in your route, on every message
+const user = await requireUser(req);
+runtime.handleChat({ chatId, principal: { orgId: user.orgId, userId: user.id }, message });
+```
+
+- **Passed by your route**, built from your login, on every call.
+- **Saved** with every chat, run and schedule. Storage scopes every read and write by it, so another customer's chat simply isn't found.
+- **Re-checked** when an answer continues without a request: your `reconstructPrincipal` can say the person has left.
+- **Ids only.** Names, plans and roles change; once saved here, they'd be stale in every schedule and resumed run.
+
+## The context: what they can work with
+
+```ts
+export const context = async ({ principal }: { principal: Principal }) => ({
+  db: dbFor(principal.orgId),            // queries limited to this organization
+  plan: await planOf(principal.orgId),   // read fresh on every turn
+  can: (action: string) => permissions.check(principal, action),
+});
+export type Ctx = Awaited<ReturnType<typeof context>>;
+
+createRuntime({ storage, context, agents });
+```
+
+- **Built by your function** at the start of every turn, from the principal only. That's all Latch has when an answer continues, so that's all it takes.
+- **Never saved**, so it can hold clients and functions, and always reads current values.
+- **Reaches the agent function** as `context`, and **every tool** as `options.context`, together with `principal`:
+
+```ts
+const find_ticket = tool({
+  description: "Look up a ticket",
+  inputSchema: z.object({ id: z.string() }),
+  execute: async ({ id }, { context }) => {
+    const { db } = context as ToolContext<Principal, Ctx>;
+    return db.tickets.get(id); // can't reach another organization's tickets
+  },
+});
+```
+
+## Params: what the chat is about
+
+```ts
+const Ticket = z.object({ ticketId: z.string() });
+
+const support = defineAgent<Principal, Ctx, z.infer<typeof Ticket>>(
+  async ({ context, params }) => {
+    const ticket = await context.db.tickets.get(params.ticketId); // a claim: load it through the user's own db
+    if (!ticket) throw new Error("Ticket not found");
+    return {
+      model: anthropic("claude-sonnet-4-6"),
+      instructions: `You help with ticket ${ticket.id}: "${ticket.subject}".`,
+      tools: { reply_to_ticket, close_ticket },
+    };
+  },
+  { params: Ticket },
+);
+```
+
+```ts
+// the chat's first message says what it's about
+runtime.handleChat({ agent: "support", chatId, principal, message, params: { ticketId: "T-9" } });
+
+// every later message: just the message
+runtime.handleChat({ chatId, principal, message });
+```
+
+- **Declared by the agent**, with a schema (Zod, Valibot, any Standard Schema). Without type arguments the params type comes from the schema; with them, give it as the third, as above.
+- **Passed once**, with the chat's first message, or to `runAgent` and `schedule`.
+- **Checked** against the schema (400 `invalid_params` if they don't match), then **saved on the chat**.
+- **Fixed** for the chat's life. Sending the same params again is fine; different ones are refused (409 `params_fixed`). A different ticket means a new chat.
+- **Reach** the agent function as `params` and every tool as `options.context.params`, on every turn.
+
+Good uses: the ticket or document a chat is about, a model chosen when the chat starts (reasoning from one provider can't be sent to another), what a schedule or a background job should work on.
+
+## data-context: what they're looking at
+
+The client attaches it to the message the user is sending:
+
+```ts
+sendMessage({
+  parts: [
+    { type: "text", text: "Summarize this" },
+    { type: "data-context", data: { activeFile: "Q3 budget", openTabs: ["Roadmap"] } },
+  ],
+});
+```
+
+What the model sees for that message:
+
+```text
+Summarize this
+[Context]
+activeFile: Q3 budget
+openTabs: ["Roadmap"]
+```
+
+- **The model** reads it as text in that message, after what the user wrote. Earlier messages keep their own, so the instructions never change between messages and **prompt caching keeps working**.
+- **The user** doesn't see it: chat UIs don't render data parts.
+- **The agent function and tools** get the latest one as `messageContext`, as data:
+
+```ts
+defineAgent(({ messageContext }) => {
+  const view = messageContext as { model?: string } | undefined;
+  return { model: view?.model === "fast" ? haiku : sonnet, … };
+});
+```
+
+- **Saved with its message**, so after an approval or a crash the rest of the answer sees the same values.
+- **Optional checks and wording:** `createRuntime({ messageContext: { schema, toModel } })`. An agent can word it its own way, or leave it out, with `defineAgent(fn, { messageContext: { toModel } })`.
+
+## All four together
+
+A help desk: each chat is about one ticket, and the side panel tells the agent which reply the agent is looking at.
+
+```ts title="lib/latch.ts"
+export const context = async ({ principal }: { principal: Principal }) => ({
+  db: dbFor(principal.orgId),
+  plan: await planOf(principal.orgId),
+});
+type Ctx = Awaited<ReturnType<typeof context>>;
+
+const Ticket = z.object({ ticketId: z.string() });
+
+const support = defineAgent<Principal, Ctx, z.infer<typeof Ticket>>(
+  async ({ context, params }) => {
+    const ticket = await context.db.tickets.get(params.ticketId);
+    if (!ticket) throw new Error("Ticket not found");
+    return {
+      model: context.plan === "pro" ? sonnet : haiku,                 // from the context
+      instructions: `You help with ticket ${ticket.id}: "${ticket.subject}".`, // from params
+      tools: { reply_to_ticket: replyTool(ticket) },                  // bound to this ticket
+    };
+  },
+  { params: Ticket },
+);
+
+export const runtime = createRuntime<Principal>({
+  storage,
+  context,
+  agents: { support },
+  messageContext: { toModel: (c: { replyId?: string }) => (c.replyId ? `[Looking at reply ${c.replyId}]` : undefined) },
+});
+```
+
+```ts title="app/api/chat/route.ts"
+const user = await requireUser(req);                         // who: from your login
+const { chatId, message, ticketId } = await req.json();
+return runtime.handleChat({
+  agent: "support",
+  chatId,
+  principal: { orgId: user.orgId, userId: user.id },
+  message,                                                   // carries its own data-context part
+  ...(ticketId ? { params: { ticketId } } : {}),             // only the first message sends it
+});
+```
+
+## Common mistakes
+
+| Mistake | What goes wrong | Instead |
+| --- | --- | --- |
+| A plan or role in the principal | Frozen into every saved run and schedule: a downgraded user keeps Pro on last month's report | The context |
+| What the user is looking at in the instructions | Every navigation changes the system prompt and breaks the prompt cache | A `data-context` part |
+| Reading the request inside `context` | There's no request when an answer continues, so it's missing halfway through | Read it in your route; pass `params` or a `data-context` part |
+| Trusting an id from params or `data-context` | Another customer's ticket, if someone edits the request | Load it through the user's own client in the agent function |
+| A secret in params or `data-context` | Saved in your database, and sent to the model | Fetch it inside the tool, from the vault |
+| A new ticket in the same chat | Refused: params are fixed | Start a new chat |
+
+## Go deeper
+
+- Private, shared and team conversations: [Who sees what](/docs/hard-parts/access)
+- Options: [createRuntime](/docs/reference/create-runtime) (`context`, `messageContext`), [defineAgent](/docs/reference/define-agent) (`params`), [Context and tools](/docs/reference/context)

@@ -4,6 +4,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { Callout } from "@/components/docs/callout";
 import { Card, Cards } from "@/components/docs/cards";
 import { CodeBlock } from "@/components/docs/code-block";
+import { InputsTimeline } from "@/components/docs/inputs-timeline";
 import { Tab, Tabs } from "@/components/docs/tabs";
 import { TypeTable } from "@/components/docs/type-table";
 import { cn } from "@/lib/utils";
@@ -126,6 +127,7 @@ const docsComponents: MDXComponents = {
   Callout,
   Card,
   Cards,
+  InputsTimeline,
   Tab,
   Tabs,
   TypeTable,

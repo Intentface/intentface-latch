@@ -28,10 +28,10 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 Dependency-light on purpose: `zod` is the only runtime dependency, `ai` (>= 7) is a peer, and there is no HTTP framework, no database driver and no provider SDK anywhere in it.
 
 ```ts
-import { createRuntime, defineAgent, defineContext, createVault } from "@intentface/latch-core";
+import { createRuntime, defineAgent, createVault, type ToolContext } from "@intentface/latch-core";
 ```
 
-Key exports: `createRuntime` · `defineAgent` · `defineContext` · `createVault` · `mergeConnections` · `mergeToolSources` · `toModelMessages` / `toClientMessages` · `staticPricing` / `computeCost` · `createIntervalScheduler`.
+Key exports: `createRuntime` · `defineAgent` · `ToolContext` · `createVault` · `mergeConnections` · `mergeToolSources` · `toModelMessages` / `toClientMessages` · `staticPricing` / `computeCost` · `createIntervalScheduler`.
 
 There is also `@intentface/latch-core/node` for the Node-only key derivation (`deriveMasterKey`), **`@intentface/latch-core/harness`** — the default harness tools (`bash`/`read_file`/`write_file`/`glob`/`grep` over the sandbox seam; `web_fetch` with clean markdown, media passthrough and SSRF gating; `askUser`; `list_schedules`/`cancel_schedule`), as `harnessTools: defaultHarnessTools()`; `web_fetch`'s `turndown` + `@intentface/latch-net` are optional peers loaded on first call — and **`@intentface/latch-core/models`** — the model side of a host, so you don't hand-write it: a models.dev-backed catalog (ids, labels, pricing, reasoning capability, max output — filtered to the providers whose SDK is installed and API key is set), provider inference from a model id, and the four `RuntimeConfig` hooks that depend on the provider.
 

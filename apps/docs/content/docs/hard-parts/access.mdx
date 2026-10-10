@@ -28,11 +28,12 @@ createPostgresAdapter(db, {
 });
 ```
 
-**Tools get the right customer, not a way to choose one.** What `defineContext` returns reaches every tool, built fresh from the principal on every turn. Hand tools clients that are already bound to this customer, and a tool can't reach anyone else's rows.
+**Tools get the right customer, not a way to choose one.** What your `context` function returns reaches every tool, built fresh from the principal on every turn. Hand tools clients that are already bound to this customer, and a tool can't reach anyone else's rows.
 
 ```ts
-defineContext<Principal, Ctx>({
-  build: async ({ principal }) => ({
+createRuntime({
+  …,
+  context: async ({ principal }) => ({
     orders: ordersFor(principal.orgId), // this customer's orders, nobody else's
     can: (action: string) => permissions.check(principal, action),
   }),
@@ -52,5 +53,5 @@ createRuntime({
 ```
 
 <Callout title="Ids in the principal, names in the context">
-The principal is saved with every run and schedule, so keep it to plain ids. Look up names, plans and permissions in `defineContext`, which runs again on every turn and always reads the current values.
+The principal is saved with every run and schedule, so keep it to plain ids. Look up names, plans and permissions in the `context` function, which runs again on every turn and always reads the current values. See [Principal, context and params](/docs/concepts/inputs).
 </Callout>

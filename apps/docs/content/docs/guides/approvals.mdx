@@ -58,7 +58,7 @@ If they type a new message instead of deciding, that message *is* the decision: 
 ## Full example
 
 ```ts
-import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
@@ -75,7 +75,7 @@ const storage = createSqliteAdapter<Principal>(drizzle(client, { schema }), {
 
 const runtime = createRuntime<Principal, { orgId: string }>({
   storage,
-  context: defineContext({ build: ({ principal }) => ({ orgId: principal.orgId }) }),
+  context: ({ principal }) => ({ orgId: principal.orgId }),
   agents: {
     support: defineAgent({
       model,

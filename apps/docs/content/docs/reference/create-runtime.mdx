@@ -6,19 +6,19 @@ description: Every option createRuntime takes, with what it does and what happen
 `createRuntime(config)` builds the runtime: the object your server calls to run chat turns, apply approvals, resume crashed runs and fire schedules. Create it once per process and reuse it.
 
 ```ts
-import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createPostgresAdapter } from "@intentface/latch-drizzle";
 
 export const runtime = createRuntime<Principal>({
   storage: createPostgresAdapter(db, { owner: (p) => [p.orgId, p.userId] }),
-  context: defineContext({ build: ({ principal }) => ({ orgId: principal.orgId }) }),
+  context: ({ principal }) => ({ orgId: principal.orgId }),
   agents: {
     support: defineAgent({ model: anthropic("claude-sonnet-4-6"), instructions: "…" }),
   },
 });
 ```
 
-Only `storage`, `context` and `agents` are required. Every other option switches a capability on; leave it out and that capability doesn't exist. Click a row to see its full type and description.
+Only `storage` and `agents` are required. Every other option switches a capability on; leave it out and that capability doesn't exist. Click a row to see its full type and description.
 
 ## Options
 

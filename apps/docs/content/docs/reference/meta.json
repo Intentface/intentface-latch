@@ -4,7 +4,7 @@
     "create-runtime",
     "runtime",
     "define-agent",
-    "define-context",
+    "context",
     "---Packages---",
     "server",
     "drizzle",

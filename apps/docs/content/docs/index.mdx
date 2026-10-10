@@ -49,7 +49,7 @@ export const runtime = createRuntime<Principal>({
 <Tab value="Tools">
 
 ```ts title="lib/tools.ts"
-import { defineContext } from "@intentface/latch-core";
+import type { ToolContext } from "@intentface/latch-core";
 import { tool } from "ai";
 import { z } from "zod";
 import type { Principal } from "./latch";
@@ -63,16 +63,14 @@ const ordersFor = (orgId: string) => ({
     payments.refund({ orgId, orderId, requestedBy }),
 });
 
-type Orders = ReturnType<typeof ordersFor>;
-
 // Built at the start of every turn, from the principal your route passed.
-export const context = defineContext<Principal, { orders: Orders }>({
-  build: ({ principal }) => ({ orders: ordersFor(principal.orgId) }),
+export const context = ({ principal }: { principal: Principal }) => ({
+  orders: ordersFor(principal.orgId),
 });
 
-// What a tool receives: what `build` returned, plus the principal itself,
-// which Latch adds for you.
-type Ctx = { orders: Orders; principal: Principal };
+// What a tool receives: what `context` returned, plus the principal
+// itself, which Latch adds for you.
+type Ctx = ToolContext<Principal, ReturnType<typeof context>>;
 
 export const find_order = tool({
   description: "Look up an order",
@@ -130,7 +128,7 @@ const { messages, sendMessage, addToolApprovalResponse } = useChat({
 
 That's the whole integration. The conversation is saved, the refund waits for a click (today, tomorrow, from another device), and if a server dies mid-answer, another one finishes it.
 
-The `principal` you pass once is what keeps customers apart. Storage scopes every read and write by it, every tool receives it through the context, your limits are keyed from it, connected accounts are stored under it, and it's saved with each run and schedule, so a resumed answer or a 9:00 report still acts as the right person. More in [Principal and context](/docs/concepts/principal-context).
+The `principal` you pass once is what keeps customers apart. Storage scopes every read and write by it, every tool receives it through the context, your limits are keyed from it, connected accounts are stored under it, and it's saved with each run and schedule, so a resumed answer or a 9:00 report still acts as the right person. More in [Principal, context and params](/docs/concepts/inputs).
 
 ## What you get
 

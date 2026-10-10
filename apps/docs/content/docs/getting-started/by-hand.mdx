@@ -10,7 +10,7 @@ description: createRuntime piece by piece — storage, context, agents — then 
 Storage is the one option you can't leave out. `latch-drizzle` ships adapters for SQLite and Postgres, plus the migrations.
 
 ```ts title="latch.ts"
-import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createClient } from "@libsql/client";
@@ -32,9 +32,8 @@ const storage = createSqliteAdapter<Principal>(db, {
   owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
 });
 
-const context = defineContext<Principal, { orgId: string }>({
-  build: async ({ principal }) => ({ orgId: principal.orgId }),
-});
+// What tools work with, built from who is asking on every turn.
+const context = async ({ principal }: { principal: Principal }) => ({ orgId: principal.orgId });
 
 const agents = {
   assistant: defineAgent<Principal>(() => ({

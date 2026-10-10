@@ -227,11 +227,9 @@ export type AgentFactory<P, RuntimeContext = unknown, Params = unknown> = ((ctx:
  * no params can still be called as `factory({ context, principal })`.
  */
 export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
-  /**
-   * The runtime CONTEXT built by `context.build` for this turn (org name, plan,
-   * feature flags — see `ContextDefinition`).
-   */
+  /** What your `context` function built for this turn, from the principal: clients, the plan, permissions. */
   context: RuntimeContext;
+  /** Who is asking. */
   principal: P;
   /**
    * What the user is looking at, from the `data-context` part of the message
@@ -254,14 +252,13 @@ export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
     }
   : unknown extends Params
   ? {
-      /** What this chat is about; `undefined` for an agent that declares no params. */
+      /**
+       * What this chat is about: the params its first message passed, checked
+       * against `meta.params`. `undefined` for an agent that declares none.
+       */
       params?: Params;
     }
   : {
-      /**
-       * What this chat is about, validated against `meta.params` (see
-       * {@link AgentMeta.params}).
-       */
       params: Params;
     });
 
