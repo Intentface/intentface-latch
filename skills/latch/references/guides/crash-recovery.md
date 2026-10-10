@@ -51,4 +51,4 @@ Ticks never overlap — a slow tick skips the next fire rather than stacking —
 
 > **Why this is safe on every node at once**
 >
-> With a storage adapter that keeps the [storage contract](https://intentface-latch-docs.vercel.app/docs/reference/storage) (atomic reaping and claiming, fenced writes), as the built-in ones do, firing `sweep()` on all nodes simultaneously is fine: only one node wins each run, and fencing tokens stop a revived stale worker from overwriting newer state. An adapter that ignores the fence lets a stale worker keep writing until its lease runs out.
+> With a storage adapter that keeps the [storage contract](https://intentface-latch-docs.vercel.app/docs/reference/storage) (atomic reaping and claiming, fenced writes), as the built-in ones do, firing `sweep()` on all nodes simultaneously is fine: only one node wins each run, and fencing tokens stop a revived stale worker from overwriting newer state. An adapter that ignores the fence accepts a stale worker's writes, over the new worker's, until the stale worker notices: it stops once its heartbeats have failed for a full lease.
