@@ -1,0 +1,23 @@
+{
+  "title": "Guides",
+  "pages": [
+    "index",
+    "---Build---",
+    "approvals",
+    "schedules",
+    "scheduled-brief",
+    "ownership-patterns",
+    "agent-for-your-customers",
+    "plans-and-limits",
+    "connections",
+    "agents-in-a-database",
+    "write-an-extension",
+    "channels",
+    "---Ship---",
+    "mount-the-handler",
+    "chat-ui",
+    "crash-recovery",
+    "deploy-on-vercel",
+    "storage-adapter"
+  ]
+}

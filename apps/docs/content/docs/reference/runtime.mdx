@@ -1,0 +1,97 @@
+---
+title: Runtime methods
+description: What each method of the runtime does, with every input and result.
+---
+
+`createRuntime` returns the runtime. Your server calls it from its routes: one call per chat message, approval decision or cron tick. Every method that takes a `principal` only ever sees that principal's data.
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="Runtime" />
+
+## handleChat
+
+Runs one chat turn and streams the answer back. Return its `Response` straight from your route to `useChat`.
+
+```ts
+export async function POST(req: Request) {
+  const principal = await requireUser(req);
+  const { id, message, agent } = await req.json();
+  return runtime.handleChat({ agent, chatId: id, principal, message, request: req });
+}
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="HandleChatInput" />
+
+## runAgent
+
+Runs an agent to completion with no client attached: a webhook, a background job, a test. Returns the final answer.
+
+```ts
+const { answer, error } = await runtime.runAgent({
+  principal,
+  agent: "triage",
+  prompt: `New ticket: ${ticket.title}`,
+  trigger: "programmatic",
+});
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RunAgentInput" />
+
+It returns:
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RunAgentResult" />
+
+## applyApproval
+
+Continues a run that paused on a tool needing approval. Decisions that are no longer pending (a double click, an old tab) are ignored, so it is safe to call more than once.
+
+```ts
+return runtime.applyApproval({
+  chatId,
+  principal,
+  decisions: [{ approvalId, approved: true }],
+});
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="ApplyApprovalInput" />
+
+Each decision:
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="ApprovalDecision" />
+
+## applyToolResult
+
+Continues a run that paused on a tool the client answers, such as `askUser`.
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="ApplyToolResultInput" />
+
+## schedule
+
+Runs an agent on a timer, as the caller. Recurring schedules need `cron` in the runtime config, and a timer calling `runtime.cron()`.
+
+```ts
+await runtime.schedule({
+  principal,
+  agent: "brief",
+  cron: "0 9 * * 1",
+  timezone: "Europe/Helsinki",
+  prompt: "Summarise last week's tickets.",
+});
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="ScheduleInput" />
+
+## cron
+
+The one function to call on a timer, every minute or so. It fires due schedules and, with `durability` on, resumes interrupted runs. Safe to call from every server at once.
+
+```ts
+// app/api/cron/route.ts — called by your platform's cron every minute
+export async function GET() {
+  const { due, resumed, errors } = await runtime.cron();
+  return Response.json({ fired: due.fired, resumed: resumed.length, errors });
+}
+```
+
+What `due` reports:
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RunDueResult" />

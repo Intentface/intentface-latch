@@ -1,0 +1,93 @@
+---
+title: An agent your customers offer their users
+description: You run a SaaS. Each customer puts your agent in front of their own users. Three layers of people, one runtime.
+---
+
+You sell a helpdesk. Each of your customers puts an agent on their website for their own visitors. That's three layers: you, your customer (the tenant), and their visitors, who never sign up with you.
+
+Every decision below comes down to one question: whose is this?
+
+## Who is asking: tenant and visitor
+
+Visitors don't have accounts in your app. The tenant's site vouches for them: it signs a short token with a key you issued, and your route checks it.
+
+```ts
+type Principal = { tenantId: string; visitorId: string };
+
+async function principalFrom(req: Request): Promise<Principal | null> {
+  const claims = await verifyVisitorToken(req.headers.get("authorization")); // signed by the tenant's site
+  return claims ? { tenantId: claims.tenant, visitorId: claims.sub } : null;
+}
+```
+
+Build the tenant id from the verified token, never from the request body. A visitor who can choose a tenant id can talk to another tenant's agent.
+
+## Whose conversation: one visitor's
+
+```ts
+createPostgresAdapter<Principal>(db, { owner: (p) => [p.tenantId, p.visitorId] });
+```
+
+Each visitor sees only their own chats. Don't use `[p.tenantId]` here: every visitor of a tenant would share one owner, and any of them could list the others' conversations.
+
+## What the agent knows: the tenant's setup
+
+The context is built per turn from the tenant id: their name, their help articles, their own API key from the vault. The agent's instructions come from it.
+
+```ts
+const context = async ({ principal }: { principal: Principal }) => {
+  const tenant = await tenants.get(principal.tenantId);
+  return {
+    tenant,
+    articles: helpCenterFor(tenant.id), // search over this tenant's articles only
+    crmKey: await vault.resolver(principal, "crm_api_key"),
+  };
+};
+type Ctx = Awaited<ReturnType<typeof context>>;
+
+const support = defineAgent<Principal, Ctx>(({ context }) => ({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: `You answer questions for visitors of ${context.tenant.name}. ${context.tenant.guidelines}`,
+  tools: { search_articles, open_ticket },
+}));
+```
+
+## What the visitor is looking at
+
+The widget knows which page of the tenant's site the visitor is on. It attaches that to each message as a `data-context` part, so the agent can answer "how do I cancel this?" about the right product page, without the page going into the instructions:
+
+```ts
+sendMessage({
+  parts: [
+    { type: "text", text: "How do I cancel this?" },
+    { type: "data-context", data: { page: location.pathname, product: currentProductSlug } },
+  ],
+});
+```
+
+It's a hint, not a permission: the agent still looks the product up through the tenant's own data.
+
+## What it may spend: the tenant's plan
+
+```ts
+limits: {
+  store: createPostgresLimitStore(db),
+  limitsFor: async ({ principal }) => {
+    const plan = await planOf(principal.tenantId);
+    return [
+      { key: `tenant:${principal.tenantId}`, windowMs: 30 * DAY_MS, max: { cost: plan.monthlyBudget }, label: "this site's monthly budget" },
+      { key: `visitor:${principal.tenantId}:${principal.visitorId}`, windowMs: MINUTE_MS, max: { turns: 5 } },
+    ];
+  },
+},
+```
+
+The tenant budget protects you; the visitor rate limit protects the tenant from one noisy visitor.
+
+## The tenant's inbox
+
+The tenant's support staff want to see every visitor's conversation. Latch's own lists are scoped to one owner, so keep a small index of your own (chat id, tenant, visitor, last activity), written when a run finishes, and open each chat with that visitor's principal and the staff member recorded as the actor. See [support access](/docs/guides/ownership-patterns#pattern-6--support-and-admin-access).
+
+## Agents each tenant configures
+
+If tenants edit their agent's instructions or tools in your dashboard, store them as [agents in a database](/docs/guides/agents-in-a-database), owned by the tenant. Every change is a version, and a tenant can roll back.

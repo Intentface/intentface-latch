@@ -1,8 +1,0 @@
-@import "tailwindcss";
-@import "fumadocs-ui/css/neutral.css";
-@import "fumadocs-ui/css/preset.css";
-
-/* Tailwind v4 needs the content sources declared; fumadocs ships classes in its
-   own dist, so scan that too or the theme renders unstyled. */
-@source "../node_modules/fumadocs-ui/dist/**/*.js";
-@source "../{app,components,content,lib}/**/*.{ts,tsx,mdx}";

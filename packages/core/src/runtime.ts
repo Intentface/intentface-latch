@@ -91,18 +91,45 @@ import {
  * T1: `handleChat` runs one turn with a `ToolLoopAgent` and persists via the
  * stock AI SDK stream helper — `onStepEnd` → runs/usage, `onFinish` → messages.
  */
+// T2 durability (opt-in). When enabled, each turn claims a single-writer lease,
+// heartbeats it while streaming, and aborts if the lease is lost. A reaper
+// (`runtime.cron()` → `sweep`, driven by cron) reclaims runs whose owner died.
 /**
- * T2 durability (opt-in). When enabled, each turn claims a single-writer lease,
- * heartbeats it while streaming, and aborts if the lease is lost. A reaper
- * (`runtime.cron()` → `sweep`, driven by cron) reclaims runs whose owner died.
+ * Crash recovery. With it on, a run that was cut off (the server crashed or
+ * was redeployed mid-answer) is picked up by another server and finished, and
+ * no two servers ever work on the same run at once.
  */
 export interface DurabilityConfig {
+  /**
+   * Turn crash recovery on. You also need to call `runtime.cron()` regularly
+   * (for example from a cron route every minute): that is what finds and
+   * resumes interrupted runs.
+   *
+   * @default false
+   */
   enabled?: boolean;
-  /** Lease lifetime in ms; a run is reapable once `now > leaseExpiresAt` (default 30s). */
+  /**
+   * How long a server's claim on a run lasts without being renewed, in ms.
+   * When a server dies, its runs are picked up once this has passed, so a
+   * crashed run is resumed after roughly this long plus your cron interval.
+   *
+   * @default 30_000
+   */
   leaseTtlMs?: number;
-  /** Heartbeat cadence in ms; must be comfortably < leaseTtlMs (default 10s). */
+  /**
+   * How often a server renews its claim while a run is going, in ms. Keep it
+   * well below `leaseTtlMs`, so a slow renewal never lets a live run expire.
+   *
+   * @default 10_000
+   */
   heartbeatMs?: number;
-  /** Stable owner id for this runtime instance (default: random per process). */
+  /**
+   * A name for this server, recorded on the runs it claims. Set it to
+   * something stable (a pod or instance name) to see in the database which
+   * server owns which run.
+   *
+   * @default a random id per process
+   */
   instanceId?: string;
 }
 
@@ -153,24 +180,36 @@ export interface DynamicAgentStore<P> {
   list(principal: P): AgentInfo[] | Promise<AgentInfo[]>;
 }
 
+/**
+ * Everything `createRuntime` takes. Only `storage`, `context` and `agents` are
+ * required; every other option switches a capability on, and leaving it out
+ * means that capability simply doesn't exist.
+ */
 export interface RuntimeConfig<P, RuntimeContext = unknown> {
+  /**
+   * Where conversations, runs, usage and schedules are stored. Use
+   * `createSqliteAdapter` or `createPostgresAdapter` from
+   * `@intentface/latch-drizzle`, or your own adapter (check it with
+   * `registerStorageConformance` from `@intentface/latch-core/testing`).
+   */
   storage: StorageAdapter<P>;
   /**
-   * What this customer's agents and tools can work with, built from who is
-   * asking at the start of every turn: `async ({ principal }) => ({ … })`.
-   * Optional; the `{ build }` object form from `defineContext` still works but
-   * is deprecated. See `ContextFunction`.
+   * What your agents and tools can work with, built from who is asking at the
+   * start of every turn, including resumed runs, approvals and schedule fires:
+   * `async ({ principal }) => ({ db: dbFor(principal.orgId), … })`. Never
+   * saved, so it can hold clients and functions and always reads current
+   * values. Optional. The `{ build }` object from `defineContext` still works
+   * but is deprecated.
    */
   context?: ContextInput<P, RuntimeContext>;
-  /** The agent registry: name → factory (file-based or DB-driven upstream). */
   /**
-   * What the client may attach to a user message as a `data-context` part:
-   * what the user is looking at (the open file, the selection, a model pick).
-   * The model reads it as text next to what they wrote; chat UIs don't show
-   * it; agent functions and tools get the latest one as `messageContext`.
-   * It's saved with its message, so a continuation of the answer sees the
-   * same values, and the instructions stay the same between messages, which
-   * keeps prompt caching working.
+   * What the user is looking at, sent as a `data-context` part on their
+   * message (the open file, the selection, a model pick). The model reads it
+   * as text in that message; chat UIs don't show it; agent functions and
+   * tools get the latest one as `messageContext`. It's saved with its
+   * message, so a continuation of the answer sees the same values, and the
+   * instructions stay the same between messages, which keeps prompt caching
+   * working.
    *
    * Works without configuration. `schema` checks the part when a message
    * arrives (a mismatch is refused, 400); `toModel` decides how it reads to
@@ -181,81 +220,104 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     schema?: FlexibleSchema;
     toModel?: (context: any) => string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
   };
+  /**
+   * Your agents, by name: `{ support: defineAgent({ … }) }`. The name is what
+   * clients send to pick an agent. Agents created by users at runtime come
+   * from `dynamicAgents` instead.
+   */
   // `any` context and params: with `createRuntime<Principal>(…)` the context
   // type is `unknown`, and each agent declares its own params, so a factory
   // typed for its own context and params must still fit the registry.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   agents: Record<string, AgentFactory<P, any, any>>;
+  /**
+   * Crash recovery: a run cut off by a crash or redeploy is finished by
+   * another server, and no two servers work on the same run at once.
+   *
+   * Without it, a crashed run stays unfinished until the user sends another
+   * message.
+   */
   durability?: DurabilityConfig;
-  /** Optional cost calculation. Without it, recorded cost is 0. */
+  /**
+   * Prices per model, so each run records what it cost. Needed for cost-based
+   * limits and usage reports. `providerDefaults` from
+   * `@intentface/latch-core/models` supplies it from a model catalog.
+   *
+   * Without it, every run's cost is recorded as 0.
+   */
   pricing?: Pricing;
   /**
-   * Connection registry used to resolve each agent's `connections: [...]` names
-   * into a per-turn tool source (MCP servers / integrations). Optional — without
-   * it, `connections` on an agent is ignored.
+   * Turns the names in an agent's `connections: [...]` into tools, typically
+   * MCP servers. Use `createMcpConnections` from `@intentface/latch-mcp`.
+   *
+   * Without it, an agent's `connections` are ignored.
    */
   connections?: ConnectionRegistry<P>;
   /**
-   * Resolve agents not in the static `agents` registry (e.g. DB/UI-created),
-   * per caller. Optional — without it, only code-declared agents exist.
+   * Agents that live in a database rather than in code, such as agents your
+   * users create in a UI. Looked up by name, per caller, when a name isn't in
+   * `agents`. The Agent Builder's store
+   * (`createPostgresAgentBuilderStore` or `createSqliteAgentBuilderStore` from
+   * `@intentface/latch-drizzle`) provides `resolve` and `list`.
+   *
+   * Without it, only the agents in `agents` exist.
    */
   dynamicAgents?: DynamicAgentStore<P>;
   /**
-   * Memory seam: gives agents that declare `memory` persistent cross-session
-   * memory (compiled index injected into instructions + scope-bound
-   * `memory_search`/`memory_save` tools). Optional — without it, an agent's
-   * `memory` declaration is ignored. See `MemoryProvider`.
+   * Long-term memory for agents that declare `memory`: what they learned is
+   * added to their instructions, and they get tools to search and save it.
+   * Use `createMemoryProvider` from `@intentface/latch-memory`.
+   *
+   * **Experimental.** The only production store today is a Loredex workspace,
+   * and the design may change.
+   *
+   * Without it, an agent's `memory` setting is ignored.
    */
   memory?: MemoryProvider<P>;
   /**
-   * Rebuild a `Principal` from the opaque identity blob a run stored, for
-   * resume/cron (no request). Default: passthrough (`identity as P`). Override to
-   * re-hydrate (e.g. re-fetch fresh identity) or validate on resume — return
-   * `null` to refuse an identity that is no longer valid (see
-   * `ReconstructPrincipal`). Runs before a cron occurrence is consumed, so keep
-   * it well under `durability.leaseTtlMs`.
+   * Rebuilds the caller's principal when nobody is there to send a request: a
+   * scheduled run firing, or a crashed run being resumed. Use it to re-check
+   * that the person still has access. Return `null` to refuse, which stops
+   * the schedule or ends the run.
+   *
+   * Without it, the principal stored when the run or schedule was created is
+   * used as it is, unchecked.
+   *
+   * @default (identity) => identity
    */
   reconstructPrincipal?: ReconstructPrincipal<P>;
   /**
-   * Next-fire evaluator for scheduled agents: given a cron expression, a lower
-   * bound (epoch ms), and an optional IANA timezone the expression is
-   * interpreted in, return the next fire time (epoch ms) or null if it never
-   * fires again. Keeps core cron-library-free — wire e.g. `croner`. Required to
-   * create recurring schedules.
+   * Works out the next time a cron expression fires, so recurring schedules
+   * can run. Wire a cron library, for example
+   * `(expr, after, tz) => new Cron(expr, { timezone: tz }).nextRun(new Date(after))?.getTime() ?? null`
+   * with `croner`.
+   *
+   * Without it, only one-off schedules can be created.
    */
   cron?: (expr: string, afterMs: number, timezone?: string) => number | null;
   /**
-   * Optional per-fire override for `runDue`, so a host can run a scheduled turn
-   * somewhere the default can't reach — typically a chat channel, where the
-   * report should land in the conversation the person actually replies in.
+   * Runs a scheduled fire yourself, for example to post the result into a
+   * Slack channel or a Telegram chat instead of a new web chat. Return `true`
+   * when you handled it; return `false` (or throw) to let Latch run it in a
+   * new chat as usual, so a fire is never lost.
    *
-   * Return true when the host ran (and delivered) this fire ITSELF; core then
-   * skips its own fresh-chat run. Anything else — false, absent, or a throw —
-   * falls through to the default, so a host whose delivery target has gone
-   * stale (bot disabled, user unlinked) still gets the work done in a chat
-   * rather than losing the fire.
+   * Return `{ handled: true, chatId, parked }` to tell Latch which chat the
+   * fire ran in and whether it is waiting on a person; schedules that skip a
+   * fire while the previous one waits need that.
    *
-   * A host that wants the SAME accounting the default path gets can return the
-   * object form instead of a bare boolean: `chatId` lets the next occurrence's
-   * `onParked` check see this fire's conversation, and `parked` joins `runDue`'s
-   * `parked` count. Core cannot derive either itself — the host owns the chat a
-   * channel fire runs in. Omit them and this fire simply isn't accounted (the
-   * bare-boolean behavior), which is correct for a host that reports its own.
-   *
-   * Core keeps owning the claim, the lease and the advance either way, and
-   * stays entirely channel-blind: `schedule.delivery` is opaque here and only
-   * ever interpreted by this hook.
+   * Without it, every scheduled fire runs in a new chat.
    */
   runSchedule?: (input: {
     schedule: ScheduleRecord;
     principal: P;
   }) => Promise<boolean | { handled: boolean; chatId?: string; parked?: boolean }>;
   /**
-   * Resolve a per-session sandbox for an agent that declares `sandbox: true`.
-   * Returns the AI SDK `Experimental_SandboxSession` passed to the model
-   * (`agent.stream({ experimental_sandbox })`) and read by sandbox tools. Keeps
-   * core free of any sandbox backend dep — the platform supplies the provider
-   * (e.g. just-bash / Daytona). The sandbox is per chat (`chatId`).
+   * Provides a sandbox (a workspace with files and a shell) for agents that
+   * set `sandbox: true`, one per chat. Return an AI SDK
+   * `Experimental_SandboxSession` from any provider: a simulated shell, a
+   * Daytona VM, and so on.
+   *
+   * Without it, `sandbox: true` on an agent has no effect.
    */
   sandbox?: (args: {
     principal: P;
@@ -264,19 +326,19 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     provider?: string;
   }) => Experimental_SandboxSession | Promise<Experimental_SandboxSession>;
   /**
-   * The default harness tools, supplied by the platform (kept out of core so we
-   * carry no sandbox/QuickJS deps). `sandbox` tools (bash/read_file/write_file/
-   * glob/grep) operate on the resolved `experimental_sandbox`; `app` tools
-   * (web_fetch, askUser, scheduling, …) run in the app process. Merged into an
-   * agent's toolset per its `sandbox`/`defaultTools` flags.
+   * Built-in tools to offer agents: shell and file tools that work in the
+   * sandbox, and app tools such as web fetch, asking the user a question and
+   * scheduling. `defaultHarnessTools()` from `@intentface/latch-core/harness`
+   * gives you the standard set. Each agent picks them up through its
+   * `sandbox` and `defaultTools` settings.
    */
   harnessTools?: {
+    /** Tools that work inside the agent's sandbox: `bash`, `read_file`, `write_file`, `glob`, `grep`. */
     sandbox?: Record<string, unknown>;
     /**
-     * App-process tools. A static record for principal-independent tools
-     * (web_fetch, …), or a per-turn factory when the tools must bind to the
-     * caller (e.g. workspace file/db tools scoped to the user's permissions
-     * and the current chat).
+     * Tools that run in your server: `web_fetch`, `askUser`, scheduling, and
+     * so on. Pass a function instead of an object when the tools must be
+     * built per turn, for example to limit them to what the caller may access.
      */
     app?:
       | Record<string, unknown>
@@ -285,85 +347,78 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
           chatId: string;
           agent: string;
         }) => Record<string, unknown> | Promise<Record<string, unknown>>);
-    /**
-     * Platform render tool(s) — attached only when an agent sets
-     * `renderTools: true`, never by `defaultTools`. Kept a separate capability
-     * (like `sandbox`) because it's platform-specific (needs a deployed render
-     * service) and should be opted into explicitly.
-     */
+    /** Tools that render a web page in a browser. Only agents that set `renderTools: true` get them. */
     render?: Record<string, unknown>;
     /**
-     * Default approval policy for harness tools, by tool name (e.g.
-     * `{ create_schedule: "user-approval" }`). Applied only to tools actually
-     * attached to the agent, and merged like a tool source's: the AGENT WINS
-     * for names it lists in its own `toolApproval`, so a host can ship a
-     * side-effecting harness tool gated by default without freezing that
-     * choice.
+     * Which built-in tools need a person's approval by default, by tool name,
+     * for example `{ create_schedule: "user-approval" }`. An agent's own
+     * `toolApproval` overrides this for the tools it names.
      */
     approval?: Record<string, unknown>;
   };
   /**
-   * Resolve the model provider's NATIVE web tools (server-side search/fetch) for
-   * a model id — kept out of core so it carries no provider SDK dep. Merged into
-   * an agent's toolset when it sets `providerWebTools`. Return `{}` for providers
-   * without native web tools.
+   * Returns the model provider's own web tools (its server-side search and
+   * fetch) for a model id, for agents that set `providerWebTools`. Return `{}`
+   * for a provider without them. `providerDefaults` supplies it.
    */
   resolveProviderTools?: (modelId: string) => Record<string, unknown>;
   /**
-   * Resolve an agent's `effort` to provider-specific reasoning options for a
-   * model id — kept out of core (no provider SDK dep). Returns the
-   * `providerOptions` (keyed by provider id) and an optional `maxOutputTokens`
-   * (token-budget providers need the budget to stay under the model's max).
-   * Return `undefined` to leave the provider default (e.g. non-reasoning model).
+   * Turns an agent's `effort` setting into the provider-specific reasoning
+   * options for a model. Return `undefined` to leave the provider's default,
+   * for example for a model that doesn't reason. `providerDefaults` supplies
+   * it.
+   *
+   * Without it, `effort` on an agent has no effect.
    */
   resolveReasoningOptions?: (
     modelId: string,
     effort: string,
   ) => { providerOptions?: Record<string, unknown>; maxOutputTokens?: number } | undefined;
   /**
-   * Resolve the prompt-caching plan for a model id. Supply it when you own a
-   * model catalog (you know the provider family better than the model object
-   * does) or need per-principal cache routing — typically
-   * `promptCachingPlanFor(providerOf(modelId), { agent, cacheKeySuffix })`.
-   * `memoryScoped` is true when the turn's system prompt is per-principal
-   * (memory-enabled agent) — use it to scope OpenAI's cache routing key.
+   * Controls prompt caching per model. Return `undefined` for a model to turn
+   * caching off for it. `memoryScoped` is true when the system prompt differs
+   * per person (an agent with memory), which matters for how OpenAI routes
+   * its cache.
    *
-   * ABSENT hook → caching defaults ON for first-party Anthropic/OpenAI models
-   * (see `defaultPromptCachingPlan`; measured ~6x unit cost on MCP-heavy
-   * agents). Opt out with `resolvePromptCaching: () => undefined`, or per turn
-   * with `promptCaching: false`. Returning `undefined` for a model disables
-   * caching for it.
+   * Without it, caching is on for Anthropic and OpenAI models, which can cut
+   * the cost of tool-heavy agents several times over. Turn it off everywhere
+   * with `resolvePromptCaching: () => undefined`, or for one run with
+   * `promptCaching: false`.
    */
   resolvePromptCaching?: (
     modelId: string,
     args: { agent: string; memoryScoped: boolean; principal: P },
   ) => PromptCachingPlan | undefined;
   /**
-   * The observation seam (kept out of core — no OTEL/vendor dep): per-run AI
-   * SDK telemetry options, an optional trace wrapper around the model call, a
-   * per-step hook and a post-turn hook. A full tracer
-   * (`@intentface/latch-langfuse`) or just the callbacks a host wants (usage
-   * rollups, per-tool analytics, "a scheduled fire parked — notify someone").
-   * Fires for subagent turns too — distinguish via `depth` and `trigger`.
-   * Optional — without it, nothing is observed and behavior is unchanged.
+   * Observes runs: tracing, per-step and per-run callbacks. Use
+   * `@intentface/latch-langfuse` for full tracing, or only the callbacks you
+   * need (usage dashboards, alerts when a scheduled run waits on a person).
+   * Subagent runs are reported too.
+   *
+   * Without it, nothing is observed.
    */
   telemetry?: LatchTelemetry<P>;
   /**
-   * Per org / user / agent budgets on turns, tokens and cost (see `limits.ts`).
-   * The host names the counters a turn counts against and their caps; the
-   * runtime refuses at admission (`LimitExceededError`, HTTP 429), stops the
-   * tool loop at the tightest remaining token budget, and settles usage on
-   * finish. Optional — without it, nothing is limited.
+   * Usage limits per organization, user and agent: requests, tokens and cost
+   * per time window. You decide which limits a run counts against; Latch
+   * refuses a run over a limit (HTTP 429 with a retry time), stops a long run
+   * when it uses up its token budget, and records usage when it finishes.
+   *
+   * Request limits hold even when many requests arrive at once. Token and
+   * cost limits are checked against usage already recorded, so runs that are
+   * still going can take them over by what those runs spend.
+   *
+   * Without it, nothing is limited.
    */
   limits?: LatchLimits<P>;
   /**
-   * Extensions attached to EVERY turn this runtime runs, before the agent's
-   * own (`AgentConfig.extensions`). An extension attaches handlers to the
-   * moments of a turn and returns effects — see `extensions/extension.ts`.
-   * Optional — with none attached every moment is a no-op and a turn is
-   * byte-identical to a runtime without the seam. Order matters for
-   * `step_end`: list an extension that persists before ones that observe.
+   * Extensions that apply to every run, before each agent's own. An
+   * extension can react to points in a run (before a turn, after each step,
+   * on finish) to add context, store data or stop the run.
    */
+  // Order matters for `step_end`: list an extension that persists before ones
+  // that observe. With none attached a turn is byte-identical to a runtime
+  // without the seam.
   extensions?: Extension[];
   /**
    * The most bytes of files a user message may carry inline (as `data:` URLs,
@@ -377,17 +432,41 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   maxInlineFileBytes?: number;
 }
 
+/** What `handleChat` takes: one user message for one agent in one chat. */
 export interface HandleChatInput<P> {
   /**
-   * Which agent to run. Required for a new chat; a continuing chat uses the
-   * agent it was started with when omitted.
+   * The agent to run, by name (a key of `agents`, or a dynamic agent's name).
+   * Required for a new chat; a continuing chat uses the agent it was started
+   * with when omitted.
    */
   agent?: string;
-  /** Client-chosen chat id (create-or-continue). Omit to start a new chat. */
+  /**
+   * The chat to continue. Pass the same id on every message of a conversation;
+   * a new id starts a new chat with that id. Omit it to start a new chat with
+   * a generated id.
+   */
   chatId?: string;
-  /** Resolved by the caller's ContextResolver (isolation flows from this). */
+  /**
+   * Who is asking, as your auth resolved it. Everything the run reads and
+   * writes is scoped to this principal, so build it on the server, never from
+   * client input.
+   */
   principal: P;
-  /** The incoming user message. */
+  /**
+   * The user's message, as `useChat` sends it. Accepted:
+   * - a new user message with text and files (files sent inline count
+   *   against `maxInlineFileBytes`);
+   * - the chat's last question resent unchanged (`regenerate()`) or edited
+   *   (`sendMessage({ messageId })`): the old answer is hidden, not deleted,
+   *   and the agent answers again;
+   * - the paused assistant message with approval answers on it
+   *   (`addToolApprovalResponse` with `sendAutomaticallyWhen`): only the
+   *   decisions are read, as `applyApproval` would.
+   *
+   * Anything else is refused: another role or part type (`InvalidMessageError`,
+   * 400), or an earlier question regenerated or edited
+   * (`RewindNotSupportedError`, 409; fork the chat instead).
+   */
   message: AppMessage;
   /**
    * What the chat is about, for an agent that declares `params` (see
@@ -402,293 +481,340 @@ export interface HandleChatInput<P> {
   /**
    * @deprecated Per-request data that isn't saved, so it is missing when an
    * answer continues after an approval, a crash or on a schedule. Use `params`
-   * for what the chat is about.
+   * for what the chat is about, and a `data-context` part on the message for
+   * what the user is looking at.
    */
   turnContext?: unknown;
 }
 
-/** What one `runDue` pass did — see `Runtime.runDue` for each counter. */
+/** What `runAgent` takes: one prompt, run to completion without a client. */
+export interface RunAgentInput<P> {
+  /** Who the run acts for. The run is scoped to this principal like a chat turn. */
+  principal: P;
+  /** The agent to run, by name. */
+  agent: string;
+  /** The task, as the user message. */
+  prompt: string;
+  /**
+   * Files sent with the prompt: `url` is a data URL or a URL the model
+   * provider can fetch. They come before the text in the user message.
+   */
+  files?: { url: string; mediaType: string; filename?: string }[];
+  /** Continue an earlier `runAgent` thread instead of starting a new one. */
+  threadId?: string;
+  /**
+   * What the run is about, for an agent that declares `params`: validated and
+   * saved on the thread, so a resumed run gets them too. Continuing an existing
+   * `threadId` with different params is refused.
+   */
+  params?: unknown;
+  /**
+   * What happens to tools that need a person's approval, since nobody is there
+   * to give it:
+   * - `true`: they don't run; the model is told they were blocked.
+   * - `"simulate-success"`: they don't run; the model is told they succeeded.
+   *   For testing what an agent would do next.
+   * - `false`: they run for real, without approval.
+   *
+   * @default true
+   */
+  blockGated?: boolean | "simulate-success";
+  /**
+   * Set `false` to run without the agent's long-term memory: nothing is
+   * recalled and nothing saved. Useful when running one agent over many test
+   * inputs, so earlier inputs can't influence later ones.
+   */
+  memory?: boolean;
+  /**
+   * Run on a different model than the agent's own, for this run only. For
+   * comparing models on the same task.
+   */
+  model?: LanguageModel;
+  /**
+   * @deprecated Per-request data that isn't saved, so it is missing when an
+   * answer continues. Use the agent's `params`, or a `data-context` part on the
+   * message.
+   */
+  turnContext?: unknown;
+  /**
+   * Set `false` to turn prompt caching off for this run, for example as the
+   * control in a cost comparison.
+   */
+  promptCaching?: boolean;
+  /**
+   * How telemetry labels this run. Pass `"chat"` when a person is waiting on
+   * the answer, for example a webhook that replies to them.
+   *
+   * @default "programmatic"
+   */
+  trigger?: TurnTrigger;
+}
+
+/** What `runAgent` returns. */
+export interface RunAgentResult {
+  /** The thread the run used. Pass it back as `threadId` to continue. */
+  threadId: string;
+  /** The agent's final answer. Empty when the run failed. */
+  answer: string;
+  /**
+   * Why the run failed, when it did: the model provider refused, a tool source
+   * wouldn't open, and so on.
+   */
+  error?: string;
+}
+
+/** What `applyApproval` takes: a person's decisions on tools waiting for approval. */
+export interface ApplyApprovalInput<P> {
+  /** The chat whose run is waiting. */
+  chatId: string;
+  /** Who is deciding. Must be allowed to see the chat. */
+  principal: P;
+  /**
+   * One decision per approval request. A decision for a request that is no
+   * longer waiting (already decided, or from an older message) is ignored.
+   */
+  decisions: ApprovalDecision[];
+  /** @deprecated The original request. Missing when an answer continues; read what you need in your route. */
+  request?: Request;
+  /**
+   * @deprecated Per-request data that isn't saved, so it is missing when an
+   * answer continues. Use the agent's `params`, or a `data-context` part on the
+   * message.
+   */
+  turnContext?: unknown;
+}
+
+/** What `applyToolResult` takes: the answer to a tool the client handles. */
+export interface ApplyToolResultInput<P> {
+  /** The chat whose run is waiting. */
+  chatId: string;
+  /** Who is answering. Must be allowed to see the chat. */
+  principal: P;
+  /** The tool call being answered, from the message part. */
+  toolCallId: string;
+  /** The tool's result, for example the user's answer to `askUser`. */
+  output: unknown;
+  /** @deprecated The original request. Missing when an answer continues; read what you need in your route. */
+  request?: Request;
+  /**
+   * @deprecated Per-request data that isn't saved, so it is missing when an
+   * answer continues. Use the agent's `params`, or a `data-context` part on the
+   * message.
+   */
+  turnContext?: unknown;
+}
+
+/** What `schedule` takes: an agent run on a timer. */
+export interface ScheduleInput<P> {
+  /**
+   * Who the schedule runs as. Every fire acts for this principal, re-checked
+   * with `reconstructPrincipal` when one is configured.
+   */
+  principal: P;
+  /** The agent to run, by name. */
+  agent: string;
+  /**
+   * When to run, as a cron expression (`"0 9 * * 1"` is Mondays at 9:00).
+   * `null` runs it once, on the next cron tick. Recurring schedules need
+   * `cron` in the runtime config.
+   */
+  cron: string | null;
+  /**
+   * The time zone the cron expression is read in, for example
+   * `"Europe/Helsinki"`.
+   *
+   * @default "UTC"
+   */
+  timezone?: string;
+  /** The message the agent receives on every fire. */
+  prompt: string;
+  /**
+   * Where the result should go, for your `runSchedule` hook to read (a Slack
+   * channel, a Telegram chat). Saved as it is; Latch never reads it.
+   */
+  delivery?: unknown;
+  /**
+   * What to do when it's time to fire but the previous fire is still waiting
+   * on a person (an approval nobody has given):
+   * - `"skip"`: skip this fire, so unanswered runs don't pile up.
+   * - `"fire"`: run anyway. For schedules where every fire matters, like a
+   *   daily digest.
+   *
+   * @default "skip"
+   */
+  onParked?: "skip" | "fire";
+  /**
+   * Params for the agent (see `defineAgent`): checked now, saved with the
+   * schedule, and given to the chat each fire starts.
+   */
+  params?: unknown;
+}
+
+/**
+ * What one `runDue` pass did. A fire that ran and then stopped to wait for a
+ * person counts in both `fired` and `parked`.
+ */
 export interface RunDueResult {
+  /** Fires that ran. */
   fired: number;
+  /** Fires that failed. */
   errors: number;
+  /** Fires skipped because the previous one is still waiting on a person (`onParked: "skip"`). */
   skipped: number;
+  /**
+   * Fires that ran and then stopped, waiting on an approval or a question
+   * nobody is there to answer. Tokens were spent and no answer was delivered,
+   * so a non-zero number is worth looking at.
+   */
   parked: number;
+  /**
+   * Fires refused because `reconstructPrincipal` returned `null` (the person
+   * no longer has access). Their schedules are disabled.
+   */
   rejected: number;
 }
 
+/** The runtime `createRuntime` returns. */
 export interface Runtime<P> {
-  /** The agents available to the caller (code-declared + dynamic) — for a picker. */
+  /** The agents this person can use (yours and their dynamic ones), for an agent picker. */
   listAgents(principal: P): Promise<AgentInfo[]>;
-  /** Run one turn; returns a streaming UIMessage `Response`. */
+  /**
+   * Runs one chat turn and streams the answer. Returns a streaming `Response`
+   * in the AI SDK's UI message format, ready to return from your route to
+   * `useChat`. The run keeps going and is saved even if the client
+   * disconnects.
+   */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
-   * Run one agent to completion once, autonomously, in an isolated throwaway
-   * thread (no streaming) — for programmatic use like the Agent Builder testing
-   * an agent it just created. `blockGated` (default true) stubs approval-gated
-   * (mutating) tools so a test run has no real side effects; pass false for a
-   * true end-to-end run. Returns the throwaway threadId + the final answer.
+   * Runs an agent to completion without a client and returns its answer: for
+   * webhooks, background jobs, tests and evaluations. Never throws for a run
+   * that fails once started; the failure comes back as `error`.
    */
-  runAgent(input: {
-    principal: P;
-    agent: string;
-    prompt: string;
-    /**
-     * Files sent with the prompt, as chat sends them: `url` is a data URL or
-     * a URL the model provider can fetch. They precede the text in the user
-     * message. Omit for a text-only turn — nothing changes.
-     */
-    files?: { url: string; mediaType: string; filename?: string }[];
-    threadId?: string;
-    /**
-     * What the run is about, for an agent that declares `params`: validated and
-     * saved on the thread, so a resumed run gets them too. Continuing an
-     * existing `threadId` with different params is refused.
-     */
-    params?: unknown;
-    blockGated?: boolean | "simulate-success";
-    /**
-     * Per-turn memory override. `false` = no recall and no memory tools this
-     * run, whatever the agent's `exec.memory` says.
-     *
-     * For measurement. A sweep runs one agent over many inputs under one
-     * principal, so agent-scoped memory written on row 1 is in context by row
-     * 20 — the rows stop being independent observations, the arm that ran
-     * first advantages or poisons the one after it, and a re-run gives
-     * different numbers. Turning it off costs a caveat (production has it on)
-     * and buys a comparison that means something.
-     */
-    memory?: boolean;
-    /**
-     * Per-turn model override.
-     *
-     * For measurement, and the cheapest ablation there is: same prompt, same
-     * tools, same inputs, one variable. It also unblocks a sweep when the
-     * agent's own provider is unavailable, without editing the agent.
-     */
-    model?: LanguageModel;
-    /**
-     * Per-turn request payload, passed to `context.build` and the agent
-     * factory (see `HandleChatInput.turnContext`). Ephemeral — never persisted,
-     * absent on resume.
-     */
-    turnContext?: unknown;
-    /**
-     * Per-turn prompt-caching override. `false` = set no caching provider
-     * options for this run (the control arm of an A/B comparison); default on
-     * when the runtime has a `resolvePromptCaching` hook.
-     */
-    promptCaching?: boolean;
-    /**
-     * How to classify this run on the telemetry run meta (see `TurnTrigger`).
-     * Defaults to `"programmatic"` — there is no client stream here, so the
-     * safe assumption is that nobody is watching, and a host that knows better
-     * (a webhook with a user waiting) says so by passing `"chat"`.
-     */
-    trigger?: TurnTrigger;
-  }): Promise<{
-    threadId: string;
-    answer: string;
-    /** Why the turn failed, when it did — the model provider's refusal, a tool source that would not open. The answer is then usually empty. */
-    error?: string;
-  }>;
+  runAgent(input: RunAgentInput<P>): Promise<RunAgentResult>;
   /**
-   * Summarize a conversation and append a compaction boundary, so later turns
-   * send the model the summary instead of the turns it replaces. Stored history
-   * is untouched — this shrinks the model projection, not the record. Null when
-   * there's too little to compact (or the chat isn't the caller's); throws
-   * `PendingApprovalError` when the last turn is paused awaiting a human.
+   * Summarizes a long conversation so later turns send the model the summary
+   * instead of the old messages. The stored history is kept in full. Returns
+   * `null` when there is too little to summarize or the chat isn't the
+   * caller's; throws `PendingApprovalError` while the chat waits on an
+   * approval.
    */
   compactChat(input: {
     chatId: string;
     principal: P;
-    /** Optional steer for the summary ("keep the training plan"). */
+    /** What the summary should keep, for example `"keep the training plan"`. */
     focus?: string;
     request?: Request;
     turnContext?: unknown;
   }): Promise<{ summary: string; compacted: number } | null>;
   /**
-   * Client-projected conversation history (`toClientMessages`): the stored
-   * messages with `internal`/`redacted` ones filtered out. For rendering past
-   * turns on load.
+   * A chat's messages for showing to the user, with internal messages left
+   * out. Use it to render a conversation when the page loads.
    */
   loadHistory(input: {
     chatId: string;
     principal: P;
   }): Promise<AppMessage[]>;
   /**
-   * The caller's chats, most-recent first (for a chat list / sidebar).
-   * `kind` filters to one chat kind (e.g. `'user'` to hide the runtime's
-   * internal `sub_…` threads); omitted → all kinds (back-compatible default).
+   * The caller's chats, newest first, for a sidebar. Pass `kind: "user"` to
+   * leave out the threads subagents use internally.
    */
   listChats(input: {
     principal: P;
     limit?: number;
     kind?: string;
   }): Promise<ChatRecord[]>;
-  /**
-   * One chat by id, scoped to the caller (null when it isn't theirs or doesn't
-   * exist). A direct lookup, not a capped scan — so "does this chat exist, and
-   * whose agent is it?" stays correct for a tenant with any number of chats.
-   */
+  /** One chat, or `null` when it doesn't exist or isn't the caller's. */
   getChat(input: { principal: P; id: string }): Promise<ChatRecord | null>;
-  /** The caller's runs, most-recent first (status, usage, cost — for an ops view). */
+  /** The caller's runs, newest first, with status, usage and cost: for an activity or usage view. */
   listRuns(input: {
     principal: P;
     limit?: number;
   }): Promise<RunRecord[]>;
-  /**
-   * One run by id, scoped to the caller: returns it only when the run's chat is
-   * owned by `principal` (else null). A direct lookup — no capped scan — so it's
-   * safe for ownership checks on arbitrarily old runs.
-   */
+  /** One run, or `null` when it doesn't exist or its chat isn't the caller's. */
   getRun(input: { principal: P; runId: string }): Promise<RunRecord | null>;
   /**
-   * Resume an interrupted run (requires durability). Re-claims it exactly-once,
-   * re-runs the turn from persisted history, and completes it server-side.
-   * Returns the run's final state, or null if it wasn't resumable (already
-   * completed, or claimed by another node).
+   * Resumes one interrupted run and finishes it. Needs `durability`. Returns
+   * `null` when the run can't be resumed: it already finished, or another
+   * server has it. You rarely call this yourself; `cron()` does it.
    */
   resume(runId: string): Promise<RunOutcome | null>;
   /**
-   * Reaper + auto-resume in one call — the durability half of `cron()`. Reaps
-   * lease-expired runs, then resumes each whose attempt count is still under
-   * `maxAttempts` (default 5; the cap stops poison runs from looping forever).
-   * Safe to fire on every node: reap and reclaim are atomic, so each run is
-   * handled exactly once. Requires durability.
+   * Finds runs whose server died and resumes them. Gives up on a run after
+   * `maxAttempts` tries (default 5), so one that crashes every time can't loop
+   * forever. Safe to call from every server at once. Needs `durability`;
+   * `cron()` calls it for you.
    */
   sweep(opts?: {
+    /** Pretend it is this time (epoch ms). For tests. */
     now?: number;
+    /** @default 5 */
     maxAttempts?: number;
     error?: string;
   }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }>;
   /**
-   * THE cron entry point — point a platform cron or the in-process scheduler at
-   * this and nothing else. Fires due schedules (`runDue`), then, when
-   * durability is on, reaps lease-expired runs and resumes them (`sweep`). One
-   * call per tick, so a deploy can't wire half of the operational surface. The
-   * two phases are isolated: a failure in one lands in `errors` and the other
-   * still runs. Safe to fire on every node concurrently (claims are atomic).
+   * The one function to call on a timer: fires due schedules, then (with
+   * `durability`) resumes interrupted runs. Call it every minute or so from a
+   * cron route, or with `createIntervalScheduler`. Safe to call from every
+   * server at once. Failures are returned in `errors`, never thrown.
    */
-  cron(opts?: { now?: number; maxAttempts?: number }): Promise<{
+  cron(opts?: {
+    /** Pretend it is this time (epoch ms). For tests. */
+    now?: number;
+    /** @default 5 */
+    maxAttempts?: number;
+  }): Promise<{
     due: RunDueResult;
     reaped: RunRecord[];
     resumed: RunOutcome[];
-    /** Phase failures (`"runDue: …"` / `"sweep: …"`) — reported, never thrown. */
+    /** What failed, as `"runDue: …"` or `"sweep: …"`. */
     errors: string[];
   }>;
   /**
-   * Apply HITL tool-approval decisions and continue the turn. Records each
-   * decision onto the persisted assistant message (approval-requested →
-   * approval-responded), then re-runs the agent from history: approved tools
-   * execute, denied ones are skipped. Returns the continuation's streaming
-   * Response. No suspension machinery — approvals round-trip as message state.
+   * Records a person's approve or deny decisions and continues the run:
+   * approved tools run, denied ones don't. Returns the continuation as a
+   * streaming `Response`. Works from any device or channel, any time later,
+   * because the waiting state is stored in the conversation. Repeated or
+   * stale decisions are ignored.
    */
-  applyApproval(input: {
-    chatId: string;
-    principal: P;
-    decisions: ApprovalDecision[];
-    request?: Request;
-    /** Per-turn request payload (see HandleChatInput.turnContext). */
-    turnContext?: unknown;
-  }): Promise<Response>;
+  applyApproval(input: ApplyApprovalInput<P>): Promise<Response>;
   /**
-   * Resume a turn paused on a client-handled tool (no `execute`, e.g.
-   * `askUser`): record the supplied output onto the matching tool call and
-   * re-run from history. Returns the continuation stream, or an empty 200 if
-   * other client tool calls in the step still need results.
+   * Answers a tool the client handles (one without `execute`, like `askUser`)
+   * and continues the run. Returns the continuation as a streaming `Response`,
+   * or an empty response while other client tools in the same step still need
+   * answers.
    */
-  applyToolResult(input: {
-    chatId: string;
-    principal: P;
-    toolCallId: string;
-    output: unknown;
-    request?: Request;
-    /** Per-turn request payload (see HandleChatInput.turnContext). */
-    turnContext?: unknown;
-  }): Promise<Response>;
-  /**
-   * Schedule an agent to run on a cron expression (or `cron: null` for one-shot,
-   * fired on the next `runDue`). Captures the caller's identity for fire-time.
-   * Requires `cron` in the runtime config for recurring schedules.
-   */
-  schedule(input: {
-    principal: P;
-    agent: string;
-    cron: string | null;
-    /** IANA timezone the cron is interpreted in (e.g. "Europe/Helsinki"). */
-    timezone?: string;
-    prompt: string;
-    /**
-     * Opaque, host-interpreted delivery target for each fire (see
-     * `RuntimeConfig.runSchedule`). Stored verbatim; core never reads it.
-     */
-    delivery?: unknown;
-    /**
-     * What a fire does while the previous fire's chat is still parked waiting
-     * on a human (see `ScheduleRecord.onParked`). Default `"skip"`.
-     */
-    onParked?: "skip" | "fire";
-    /**
-     * Params for the agent (see `defineAgent`): validated now, saved with the
-     * schedule, and given to the chat each fire starts.
-     */
-    params?: unknown;
-  }): Promise<ScheduleRecord>;
+  applyToolResult(input: ApplyToolResultInput<P>): Promise<Response>;
+  /** Schedules an agent to run on a timer, as the caller. */
+  schedule(input: ScheduleInput<P>): Promise<ScheduleRecord>;
   /** The caller's schedules. */
   listSchedules(input: { principal: P }): Promise<ScheduleRecord[]>;
-  /** Delete one of the caller's schedules. */
+  /** Deletes one of the caller's schedules. */
   unschedule(input: { principal: P; id: string }): Promise<void>;
   /**
-   * Make one of the caller's schedules due immediately. It then fires through
-   * the ordinary `runDue` path — same claim, same delivery, same advance — so
-   * "run now" can never drift from what the cron actually does.
-   *
-   * False when nothing was armed: unknown id, not the caller's, or already
-   * spent.
+   * Makes one of the caller's schedules fire on the next cron tick, exactly
+   * as a timed fire would. Returns `false` when there was nothing to run:
+   * the id is unknown, not the caller's, or a one-off that already ran.
    */
   runScheduleNow(input: { principal: P; id: string }): Promise<boolean>;
   /**
-   * Fire all due schedules across ALL tenants (system op — the cron entry point).
-   * Claims each, consumes the occurrence (advances `nextRunAt` BEFORE firing,
-   * so no concurrent claimer can fire it again), reconstructs its principal,
-   * and runs the turn in a fresh chat (or via `runSchedule`, when the host
-   * handles the fire). Point a platform cron (or the in-process scheduler) at
-   * this.
-   *
-   * Occurrences are at-most-once: a process that dies mid-fire does not retry
-   * the occurrence — the run row survives and `sweep()` resumes the turn
-   * instead, so recovery never means a second paid attempt.
-   *
-   * Awaits each fired turn to completion before returning. A driver that also
-   * gates on this promise (the in-process interval scheduler does) is stalled
-   * for the duration of the longest turn — fan out per tenant rather than
-   * looping serially if that matters to you.
-   *
-   * `skipped` counts occurrences consumed WITHOUT running because the previous
-   * fire's chat is still parked on a human (see `ScheduleRecord.onParked`) —
-   * distinct from `errors` so a quiet schedule is legible as "waiting on you",
-   * never mistaken for "ran fine" or "broken".
-   *
-   * `parked` counts fires that RAN and then stopped waiting on a human (an
-   * approval or question they cannot answer) — tokens spent, no answer
-   * delivered. They are counted in `fired` too: the turn did happen. A
-   * non-zero `parked` is the signal to go look — a cron whose every fire parks
-   * is paying for nothing, and for a one-shot schedule there is no later
-   * occurrence to notice. Chats awaiting a human are queryable via
-   * `ChatRecord.lastRunStatus`.
-   *
-   * `rejected` counts occurrences whose principal `reconstructPrincipal`
-   * refused (returned `null`): not run, and the schedule is DISABLED rather
-   * than left to refuse on every tick. Not counted in `errors` — nothing broke;
-   * the identity is simply no longer allowed to act.
+   * Fires every schedule that is due, for all customers. `cron()` calls it;
+   * call it directly only if you drive schedules separately from crash
+   * recovery. Waits for each fired run to finish.
    */
+  // Occurrences are at-most-once: `nextRunAt` advances BEFORE firing, so no
+  // concurrent claimer can fire it again, and a process that dies mid-fire
+  // does not retry the occurrence — the run row survives and `sweep()` resumes
+  // the turn instead, so recovery never means a second paid attempt.
   runDue(opts?: { now?: number }): Promise<RunDueResult>;
 }
 
-/** A user's decision on one pending tool-approval request. */
+/** A person's decision on one tool waiting for approval. */
 export interface ApprovalDecision {
+  /** The approval request's id, from the tool part's `approval.id`. */
   approvalId: string;
+  /** `true` lets the tool run; `false` stops it. */
   approved: boolean;
+  /** Why, shown to the model, for example why a request was denied. */
   reason?: string;
 }
 

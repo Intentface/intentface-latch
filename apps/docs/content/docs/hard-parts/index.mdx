@@ -1,0 +1,25 @@
+---
+title: Overview
+description: The parts of an agent product that seem like an afternoon's work, and what they turn into once real users arrive.
+---
+
+Most of what an agent product needs sounds simple. Save the conversation. Ask before sending an email. Keep going if the server restarts.
+
+Each one is simple in a demo. Then a user opens a second tab, a server restarts in the middle of an answer, a teammate approves from Slack while someone else approves in the browser, and the simple version starts doing things nobody intended. Often quietly: nothing errors, you just pay twice, or show the wrong answer.
+
+These pages walk through those parts one at a time: what the simple version misses, and what Latch does instead. Each ends with the few lines it takes.
+
+<Cards>
+  <Card href="/docs/hard-parts/history" title="Conversation history" description="Saving messages is easy. Two tabs, retries and forged messages are not." />
+  <Card href="/docs/hard-parts/approvals" title="Approvals" description="An Approve button, clicked tomorrow, twice, from Slack." />
+  <Card href="/docs/hard-parts/durability" title="Running on many servers" description="A crash mid-answer, five servers, and exactly one of them finishing it." />
+  <Card href="/docs/hard-parts/access" title="Who sees what" description="Customers, users, teams, and the runs nobody is logged in for." />
+  <Card href="/docs/hard-parts/limits" title="Usage limits" description="Caps that hold when five requests arrive in the same moment." />
+  <Card href="/docs/hard-parts/attachments" title="Files and images" description="Where files live, how they reach the model, and what never leaves your servers." />
+  <Card href="/docs/hard-parts/streaming" title="Streaming" description="Then the user closes the tab, reloads, or sends another message." />
+  <Card href="/docs/hard-parts/schedules" title="Schedules" description="A run with nobody there, on every server at once." />
+  <Card href="/docs/hard-parts/connections" title="Connecting accounts" description="Signing in mid-conversation, staying signed in, tokens the model never sees." />
+  <Card href="/docs/hard-parts/subagents" title="Subagents" description="A second conversation that can pause, crash and cost money." />
+  <Card href="/docs/hard-parts/chat-apps" title="Chat apps" description="Platforms that resend, bots that answer themselves, buttons anyone can press." />
+  <Card href="/docs/hard-parts/agent-versions" title="Agent versions" description="Someone will edit an agent, break it, and ask what ran last Tuesday." />
+</Cards>

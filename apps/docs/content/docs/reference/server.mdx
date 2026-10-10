@@ -1,0 +1,51 @@
+---
+title: Server
+description: createLatchApp and createLatchHandler from @intentface/latch-server, every option, and the routes they serve.
+---
+
+`@intentface/latch-server` serves the runtime over HTTP. What it's for: [Server](/docs/concepts/server). Mounting it in your framework: [Mount in your framework](/docs/guides/mount-the-handler).
+
+## createLatchApp
+
+Builds the runtime with sensible defaults (crash recovery, schedules, the model catalog, built-in tools) and the handler over it. Returns `{ runtime, handler, models, stop }`.
+
+```ts
+const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, resolveContext });
+```
+
+<auto-type-table path="../../../../../packages/server/src/app.ts" name="LatchAppConfig" />
+
+## createLatchHandler
+
+The handler on its own, over a runtime you built. Returns `(request) => Promise<Response | undefined>`: `undefined` means the path isn't one of its routes.
+
+```ts
+const handler = createLatchHandler<Principal>({ runtime, resolveContext, basePath: "/api/latch" });
+```
+
+<auto-type-table path="../../../../../packages/server/src/handler.ts" name="LatchHandlerConfig" />
+
+## Routes
+
+Paths are relative to `basePath`. Every route except the cron route calls `resolveContext` first.
+
+| Route | What it does |
+| --- | --- |
+| `GET agents` | The agents the caller can use, for a picker. |
+| `POST agents/:agent/:chatId` | Send a message; streams the answer. Body: `{ message }` or the AI SDK's `{ messages }`. |
+| `POST agents/:agent/:chatId/approvals` | Approve or deny paused tools; streams the rest of the answer. |
+| `POST agents/:agent/:chatId/tool-result` | Answer a tool the browser handles, such as a question for the user. |
+| `GET chats` | The caller's chats. |
+| `GET chats/:chatId` | One chat's messages. |
+| `GET runs` | The caller's runs, with usage and cost. |
+| `GET schedules`, `POST schedules` | List or create the caller's schedules. |
+| `GET schedules/:id`, `DELETE schedules/:id` | Read or delete one. |
+| `POST schedules/:id/run-now` | Fire it on the next cron tick. |
+| `GET connections` | The services the caller can connect, and which are connected. |
+| `GET connections/:name/authorize` | Start signing in; redirects to the provider. |
+| `GET connections/:name/callback` | Where the provider sends the user back. |
+| `POST connections/:name/disconnect` | Remove the caller's credentials. |
+| `POST connections/:name/test` | Check the connection works; returns its tool names. |
+| `POST cron/run` | `runtime.cron()` for everyone. Needs `cronSecret`. |
+
+Refusals come back as JSON with a `code`: see [Errors](/docs/reference/errors).

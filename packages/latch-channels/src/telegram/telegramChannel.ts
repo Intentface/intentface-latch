@@ -62,48 +62,54 @@ export interface TelegramUser {
 }
 
 export interface TelegramChannelConfig<P> {
-  /** The agent this bot serves. */
+  /** The agent this bot answers as, by name. */
   agent: string;
   /**
-   * Stable host-side bot id (the bot row's id). Used in chat ids
-   * (`telegram_<botRef>_<userId>`) and delivery keys — NOT the Telegram bot id,
-   * so rotating the actual bot token/account keeps conversations intact.
+   * Your own id for this bot, for example its row id in your database. Chat ids
+   * are built from it (`telegram_<botRef>_<userId>`), so changing the bot's
+   * token or account later keeps every conversation.
    */
   botRef: string;
-  /** Vault-backed in practice: `() => vault.get(principal, "telegram_bot_token:<id>")`. */
+  /** The bot's token from BotFather, or a function that reads it, for example from the vault. */
   botToken: TelegramToken;
-  /** The `secret_token` registered with setWebhook (lazy-resolvable like the token). */
+  /** The secret you registered with Telegram's `setWebhook`; requests without it are refused. */
   webhookSecret: string | (() => string | Promise<string>);
+  /** Your runtime. */
   runtime: ChannelRunOps<P>;
   /**
-   * Resolve the inbound Telegram user to a platform principal. Return
-   * `{ allowed: false, linkUrl }` to refuse and DM a signed setup link; the
-   * kernel stashes the message (see `stashPending`) to replay after linking.
+   * Who this Telegram user is in your app. Return `{ allowed: true, principal }`,
+   * or `{ allowed: false, linkUrl }` to send them a link to connect their
+   * account; their message is held (`stashPending`) and answered once they have.
+   * Runs on every message, so removing someone in your app stops the bot for them.
    */
   authorizeUser: (user: TelegramUser) => Promise<AuthResult<P>>;
-  /** Persistent dedupe on `<botRef>:<chatId>:<userId>:<messageId>` (and `<botRef>:cb:<id>` for taps). */
+  /**
+   * Returns `true` if this delivery was seen before, and records it if not.
+   * Telegram resends until it gets a quick reply; back this with a table with
+   * an expiry so a resend is ignored on any server.
+   */
   seen?: (deliveryKey: string) => Promise<boolean>;
-  /** Host-backed one-turn-per-chat lease (see the kernel). */
+  /** Only for a storage adapter that doesn't refuse a second answer per chat itself; the built-in ones do. */
   claimTurn?: (chatId: string) => Promise<string | null>;
   releaseTurn?: (chatId: string, token: string) => Promise<void>;
-  /** Stash the message that triggered a link prompt, to replay after linking. */
+  /** Keeps the message from a user who still has to connect their account, to answer after they do. */
   stashPending?: (
     input: TelegramUser & { text: string; media?: InboundMedia<TgFileRef>[] },
   ) => Promise<void>;
-  /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
+  /** The URL that starts signing in to a service when the agent asks the user to connect it. */
   authorizeUrl?: (
     connectionName: string,
     ctx: { chatId: string; telegramUserId: string; approvalId: string },
   ) => string;
-  /** Host speech-to-text for voice notes (see the kernel). */
+  /** Turns voice notes into text. Without it, the user is asked to type instead. */
   transcribe?: TranscribeAudio;
-  /** Host storage for in-flight `askUser` questionnaires (see the kernel). */
+  /** Keeps the state of a question the agent asked with buttons, between taps. */
   askState?: AskStateStore;
-  /** Host storage for the thread epoch — what makes `/new` possible. */
+  /** Remembers the user's current conversation, so `/new` can start a fresh one. */
   thread?: ChannelThreadStore;
-  /** Keep a serverless function alive after the fast ACK (Vercel: `waitUntil`). */
+  /** Keeps a serverless function running after the quick reply to Telegram, for example Vercel's `waitUntil`. */
   waitUntil?: (p: Promise<unknown>) => void;
-  /** Test seam: base URL / fetch for the Bot API client. */
+  /** For tests: a different Bot API URL or `fetch`. */
   apiOptions?: TelegramApiOptions;
 }
 

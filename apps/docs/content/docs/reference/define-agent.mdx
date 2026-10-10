@@ -1,0 +1,58 @@
+---
+title: defineAgent
+description: Every option an agent takes.
+---
+
+`defineAgent` declares an agent: its model, instructions and what it may do. Pass a config object, or a function that returns one when the agent depends on who is asking.
+
+```ts
+import { defineAgent } from "@intentface/latch-core";
+
+// The same for everyone:
+const support = defineAgent({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: "You answer support questions.",
+  tools: { search_docs, create_ticket },
+  toolApproval: { create_ticket: "user-approval" },
+});
+
+// Depends on the caller: built per turn from the context.
+const assistant = defineAgent(({ context }) => ({
+  model: context.plan === "pro" ? anthropic("claude-sonnet-4-6") : anthropic("claude-haiku-4-5"),
+  instructions: `You work for ${context.orgName}.`,
+}), { title: "Assistant", description: "Answers questions about your account." });
+```
+
+## Options
+
+<auto-type-table path="../../../../../packages/core/src/agent.ts" name="AgentConfig" />
+
+## Params
+
+An agent that's always *about* something declares it in the second argument, with a schema. The chat's first message passes the value; every turn after gets it. When to use params: [Principal, context and params](/docs/concepts/inputs#params-what-the-chat-is-about).
+
+```ts
+const Ticket = z.object({ ticketId: z.string() });
+
+const support = defineAgent<Principal, Ctx, z.infer<typeof Ticket>>(
+  async ({ context, params }) => {
+    const ticket = await context.db.tickets.get(params.ticketId);
+    return { model, instructions: `You help with ticket ${ticket.id}.`, tools: { reply_to_ticket } };
+  },
+  { title: "Support", params: Ticket },
+);
+
+runtime.handleChat({ agent: "support", chatId, principal, message, params: { ticketId: "T-9" } });
+```
+
+Refusals: params that don't match the schema, or sent to an agent without one, get 400 `invalid_params`; different params for an existing chat get 409 `params_fixed`.
+
+## What the function receives
+
+<auto-type-table path="../../../../../packages/core/src/agent.ts" name="AgentFactoryInput" />
+
+## Display, params and message context
+
+The second argument says how the agent appears in a picker, what its chats are about, and how it reads the message's `data-context`:
+
+<auto-type-table path="../../../../../packages/core/src/agent.ts" name="AgentMeta" />

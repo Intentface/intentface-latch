@@ -33,22 +33,42 @@ import type { TurnTrigger } from "./telemetry.js";
  * refusal says when the window turns over.
  */
 
-/** One counter a turn counts against, plus its caps in the window. */
+/** One limit: a counter, a time window and the caps within it. */
 export interface LimitPolicy {
-  /** Stable counter key — e.g. `org:o1`, `user:o1:u1`, `agent:o1:support`. Name the scope in it. */
+  /**
+   * The counter's name. Runs that return the same key share one counter, so
+   * name the level in it: `org:o1` for a whole organization, `user:o1:u1` for
+   * one person, `agent:o1:research` for one agent.
+   */
   key: string;
-  /** Fixed window length in ms (see `MINUTE_MS` … `DAY_MS`). */
+  /**
+   * How long one window lasts, in ms: `HOUR_MS`, `DAY_MS`, or your own.
+   * Windows are fixed, not rolling: a daily limit resets at midnight UTC.
+   */
   windowMs: number;
-  /** Caps within one window. An omitted cap is unlimited. */
+  /** The caps within one window. Leave a cap out for no limit on it. */
   max: {
-    /** Turns admitted (a resume doesn't count; a subagent turn does). */
+    /**
+     * Runs started. Safe under load: many requests at once can't all slip
+     * through. A resumed run doesn't count again; a subagent run does.
+     */
     turns?: number;
-    /** Input + output tokens. */
+    /**
+     * Input plus output tokens. A run that reaches the limit part-way stops
+     * there and keeps the answer so far. Runs already in progress can take
+     * the total over by what they spend.
+     */
     tokens?: number;
-    /** Cost in the pricing seam's currency (0 when no pricing is configured). */
+    /**
+     * Cost, in the currency of your `pricing`. Like `tokens`, runs already in
+     * progress can take it over. Always 0 without `pricing`.
+     */
     cost?: number;
   };
-  /** How a refusal names this budget to the user, e.g. "your organization's daily token budget". */
+  /**
+   * How the refusal names this limit to the user, for example
+   * `"your organization's daily token budget"`.
+   */
   label?: string;
 }
 
@@ -85,25 +105,44 @@ export interface LimitStore {
 }
 
 /** The limits seam as `createRuntime({ limits })` takes it. */
+/** What `limits` in the runtime config takes. */
 export interface LatchLimits<P> {
+  /**
+   * Where the counters are kept: `createPostgresLimitStore` or
+   * `createSqliteLimitStore` from `@intentface/latch-drizzle`.
+   */
   store: LimitStore;
   /**
-   * The counters this turn counts against. Empty → unlimited. Called per turn
-   * (admission), so it may read a policy table; keep it cheap.
+   * Returns the limits this run counts against. Called before every run, so
+   * keep it fast; reading the customer's plan from a cache is fine. Return
+   * `[]` for no limits.
+   *
+   * A typical setup returns one limit per level: the organization's monthly
+   * tokens, the user's daily requests, and a tighter budget for an expensive
+   * agent. `trigger` lets background runs (schedules, webhooks) count against
+   * different limits from people chatting.
    */
   limitsFor(input: {
+    /** Who the run is for. */
     principal: P;
-    /** The agent ref as resolved for the turn. */
+    /** The agent being run, by name. */
     agent: string;
+    /** How the run started: a chat message, a schedule, a resumed run, and so on. */
     trigger: TurnTrigger;
   }): LimitPolicy[] | Promise<LimitPolicy[]>;
-  /** A turn was refused. For metrics/alerts; must not throw. */
+  /**
+   * Called when a run is refused for being over a limit. For metrics and
+   * alerts; it must not throw.
+   */
   onRefused?(input: {
     principal: P;
     agent: string;
     trigger: TurnTrigger;
+    /** The limit that refused the run. */
     policy: LimitPolicy;
+    /** What had been used in the current window. */
     usage: LimitUsage;
+    /** How long until the window resets, in ms. */
     retryAfterMs: number;
   }): void | Promise<void>;
 }

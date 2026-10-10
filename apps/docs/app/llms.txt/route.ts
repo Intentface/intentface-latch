@@ -9,7 +9,7 @@ import { DOCS_BASE_URL, source } from "@/lib/source";
  */
 const SUMMARY = [
   "This is the documentation for `@intentface/latch-*` — Latch, a reusable backend for building, persisting and operating AI agents on the Vercel AI SDK.",
-  "It embeds into an existing backend (or runs standalone): the agent loop, an append-only run log, message projections, human-in-the-loop approvals, durability, schedules, memory, MCP/OpenAPI tools, and per-run cost accounting — all behind swappable seams.",
+  "It is a library that runs inside your own server and database: saved conversations, tool approvals, crash recovery across servers, per-customer isolation, usage limits, schedules, MCP/OpenAPI connections, Slack/Telegram/WhatsApp, and cost per run. Memory is experimental.",
   "Every page below is markdown: append `.md` to any docs URL to fetch the same content as plain text. `/llms-full.txt` is every page concatenated.",
 ].join("\n");
 

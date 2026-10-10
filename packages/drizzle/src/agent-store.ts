@@ -123,17 +123,16 @@ function recordFromJson(value: unknown): AgentRecord {
 
 export interface AgentStoreOptions<P> {
   /**
-   * Derive the ownership key segments for a principal at a scope — the
-   * isolation boundary (e.g. platform: org → [orgId], user → [orgId, userId];
-   * a workspace-per-DB host: org → ["workspace"], user → [userId]). Must be
-   * server-derived from the authenticated principal, never client input.
+   * Who owns an agent at each scope: `"org"` agents are shared by the
+   * organization, `"user"` agents belong to one person. For example
+   * `(p, scope) => scope === "org" ? [p.orgId] : [p.orgId, p.userId]`.
    */
   owner: (principal: P, scope: AgentScope) => string[];
-  /** Resolve a stored model id to the executable model (host catalog). */
+  /** Turns a model id saved with an agent into a model, for example `(id) => gateway(id)`. */
   modelFor: (id: string) => LanguageModel;
   /**
-   * Resolve the named authored tools into executable tools for a caller —
-   * supplied by hosts with a tool-authoring feature. When omitted, an agent's
+   * Loads tools your users wrote themselves, by name, if your app lets them.
+   * When omitted, an agent's
    * `authoredTools` are simply not attached.
    */
   loadAuthoredTools?: (
@@ -142,10 +141,8 @@ export interface AgentStoreOptions<P> {
     agentScope: AgentScope,
   ) => Promise<Record<string, unknown>>;
   /**
-   * Decorate the resolved `AgentConfig` with host policy, with the matched
-   * RECORD in hand (resolve alone hides it) — e.g. default a baseline
-   * toolset, or gate/waive tool approvals off `exec` flags. Runs last;
-   * return the (mutated or replaced) config.
+   * Adjusts each agent after it's built from its saved record: add tools every
+   * agent gets, change which tools need approval. Return the config to use.
    */
   decorateResolve?: (
     cfg: AgentConfig<P>,
@@ -153,13 +150,11 @@ export interface AgentStoreOptions<P> {
     principal: P,
   ) => AgentConfig<P>;
   /**
-   * Identify the EDITOR — a person — for per-user drafts and for attributing a
-   * publish. Distinct from `owner`, which is an isolation boundary a whole org
-   * shares: keying drafts by owner would let two admins of the same org
-   * overwrite each other's half-written prompt.
+   * Who is editing: one person, for their own drafts and for crediting a
+   * publish. Separate from `owner`, which a whole organization shares, so two
+   * admins never overwrite each other's draft.
    *
-   * Defaults to the user-scope owner key, which is already per-person on any
-   * host whose user scope includes a user id (the platform's is `orgId/userId`).
+   * @default the `"user"` scope's owner key
    */
   editorKey?: (principal: P) => string;
 }

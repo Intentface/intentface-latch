@@ -75,85 +75,80 @@ function connectionFailure(
 
 export interface LatchHandlerConfig<P> {
   /**
-   * The runtime, or a per-principal resolver. A resolver enables DB-per-tenant
-   * isolation (a separate runtime/DB per tenant, e.g. one SQLite file per
-   * workspace) — it's called after `resolveContext` yields the principal. A
-   * single `Runtime` value fits column-scoped (`owner`) tenancy. Note: `POST
-   * cron/run` (no principal) requires a static runtime OR a `cronRun` tick in
-   * this config (the resolver-based setup's system-wide sweep).
+   * The runtime the routes call. For a database per customer, pass a function
+   * instead: it gets the principal from `resolveContext` and returns that
+   * customer's runtime. In that case also set `cronRun`, because the cron
+   * route has no principal to pick a runtime with.
    */
   runtime: Runtime<P> | ((principal: P) => Runtime<P> | Promise<Runtime<P>>);
   /**
-   * Map a request to a Principal (your existing auth). Null → 401.
+   * Your login: turns a request into the principal, or `null` for a `401`.
    *
-   * NEVER consulted for identity on the OAuth callback: every flow this
-   * handler starts pins the resolved principal into the flow state, and the
-   * callback rebuilds identity from that pin via `reconstructPrincipal`, so a
-   * degraded session at redirect time can never change where credentials land.
-   * A callback whose state carries no pin is rejected as expired.
+   * Not used when a sign-in to a connection returns (the OAuth callback): the
+   * principal that started the sign-in is saved with it and restored with
+   * `reconstructPrincipal`, so whatever session the returning browser has
+   * can't change whose account the credentials are saved to.
    */
   resolveContext: (request: Request) => P | null | Promise<P | null>;
   /**
-   * Rebuild a Principal from the identity pinned into the OAuth flow state at
-   * `authorize` time (the mirror of the runtime's `reconstructPrincipal` for
-   * resume/cron). Called on the OAuth callback INSTEAD of `resolveContext` —
-   * the pinned identity is the source of truth; the live session is not
-   * consulted. Override to validate (e.g. re-check org membership) or
-   * re-hydrate; return null to reject the callback (401). Default: cast.
+   * Restores the principal that started a connection sign-in, when the sign-in
+   * returns. Check it's still valid here (for example, still a member);
+   * return `null` to refuse with a `401`. By default the saved principal is
+   * used as is.
    */
   reconstructPrincipal?: (
     identity: unknown,
     request: Request,
   ) => P | null | Promise<P | null>;
   /**
-   * Maximum age of an OAuth flow, from `authorize` to `callback`. A callback
-   * whose pinned flow state is older redirects with `?error=flow_expired`.
-   * Default: 30 minutes.
+   * How long a user has to finish signing in to a connection. A later return
+   * redirects with `?error=flow_expired`.
+   *
+   * @default 30 minutes
    */
   oauthFlowMaxAgeMs?: number;
   /**
-   * Connection registry (enables the connection routes), or a per-principal
-   * resolver — the latter lets a consumer build a tenant-scoped registry (e.g.
-   * a workspace's installed connectors) after the principal is known.
+   * The services users can connect, from `createMcpConnections`. Adds the
+   * routes to list, sign in to, test and disconnect them. Pass a function to
+   * give each customer their own set.
    */
   connections?:
     | McpConnections<P>
     | ((principal: P) => McpConnections<P> | Promise<McpConnections<P>>);
-  /**
-   * Called after a connection is successfully authorized (both the IdP callback
-   * and the already-authorized short-circuit in `authorize`). A consumer can use
-   * it to flip its own catalog/connector state to active.
-   */
+  /** Called after a user connects a service, including when they were already connected. */
   onConnected?: (principal: P, connectionName: string) => void | Promise<void>;
   /**
-   * Observe a failure the caller is deliberately not shown in full.
-   *
-   * A connection's OAuth errors quote the remote response, and the remote is an
-   * address the MCP server operator chose — so the routes return a stable code
-   * and at most an HTTP status, and hand the real error here. Without this the
-   * detail is simply lost; wire it to your logger.
+   * Receives errors the client is only told about briefly. A connection's
+   * errors can quote the other server's response, so the client gets a short
+   * code and the full error comes here. Wire it to your logger, or the detail
+   * is lost.
    */
   onError?: (error: unknown, info: { route: string; name?: string }) => void | Promise<void>;
   /**
-   * Query param appended to the post-callback redirect signalling which
-   * connection just connected (`?<connectedParam>=<name>`). Default "connected".
+   * The query parameter that tells your page which service was just connected,
+   * after a sign-in returns: `?connected=linear`.
+   *
+   * @default "connected"
    */
   connectedParam?: string;
-  /** Path prefix the handler is mounted under (e.g. "/api/latch"). Default "/". */
+  /**
+   * Where the handler is mounted, for example `"/api/latch"`.
+   *
+   * @default "/"
+   */
   basePath?: string;
   /**
-   * Shared secret guarding `POST /cron/run` (the system-wide schedule tick).
-   * When set, the request must send it as `x-latch-cron-secret`. That route is
-   * NOT user-authed — it fires all tenants' due schedules — so guard it at the
-   * host (cron secret / network). Omit to disable the route entirely.
+   * Turns on `POST /cron/run`, which calls `runtime.cron()` for every
+   * customer. Requests must send this secret in the `x-latch-cron-secret`
+   * header. Leave it out and the route doesn't exist. (Vercel Cron sends a
+   * `GET` with a bearer token instead: give it a route of your own.)
    */
   cronSecret?: string;
   /**
-   * The system-wide tick `POST /cron/run` fires. Required when `runtime` is a
-   * resolver (DB-per-tenant): no principal exists on this route, so the host
-   * must supply the tick that covers its tenants (each `runtime.cron()`). With
-   * a static runtime it defaults to `runtime.cron()` — due schedules fired,
-   * stalled runs reaped and resumed, in one call.
+   * What `POST /cron/run` does. Needed with a database per customer: call
+   * `cron()` on each customer's runtime.
+   *
+   * @default `runtime.cron()`
    */
   cronRun?: () => Promise<unknown>;
 }

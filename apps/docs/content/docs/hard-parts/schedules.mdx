@@ -1,0 +1,44 @@
+---
+title: Schedules
+description: Every Monday at 9 sounds like a cron job. It is a run with nobody there, on every server at once.
+---
+
+A user asks for a summary of last week's signups every Monday at 9:00, their time. It looks like a cron job that calls the agent.
+
+**Every server has the cron.** Five servers wake at 9:00 and all five see the schedule is due. The user gets five reports, and you pay for five.
+
+**A server dies mid-report.** Should the next tick run it again? Then a slow crash means two reports. Never again? Then the report is lost.
+
+**Nobody is logged in.** The run needs to act as the user, but there's no request and no session. And since March, the user may have changed teams or left.
+
+**The agent stops to ask.** The report reaches a tool behind approval. Nobody is there to click, and next Monday a second report stops at the same place, and the Monday after.
+
+**"9:00" is somewhere.** 9:00 in Helsinki moves against UTC twice a year.
+
+## What Latch does
+
+**Schedules are rows, not timers.** Every server's cron calls `runtime.cron()`, and each due occurrence is claimed by exactly one of them. The schedule moves to its next time *before* the run starts, so an occurrence fires at most once. If the server dies mid-run, the run itself is picked up by [crash recovery](/docs/hard-parts/durability), not fired a second time.
+
+**The user is checked again on every fire.** The schedule stores who created it. Each fire rebuilds that person through your `reconstructPrincipal`; return `null` and the schedule stops.
+
+**A run that stops for a person waits once.** By default, the next occurrence is skipped while the last one is still waiting, so one unanswered question doesn't become a pile of them. Chats waiting on someone are easy to list, and you can be told when one happens.
+
+**Times are in the user's time zone,** worked out by the cron library you pass in.
+
+```ts
+await runtime.schedule({
+  principal,
+  agent: "reporter",
+  cron: "0 9 * * 1",
+  timezone: "Europe/Helsinki",
+  prompt: "Summarise last week's signups.",
+});
+```
+
+The report can also land in the thread the user actually reads, in Slack or Telegram, instead of a new chat.
+
+<Callout title="Running it">
+Point your platform's cron at `runtime.cron()` every minute, or use `createIntervalScheduler` on a long-running server. The same call drives crash recovery.
+</Callout>
+
+How to set it up: [Run agents on a schedule](/docs/guides/schedules).

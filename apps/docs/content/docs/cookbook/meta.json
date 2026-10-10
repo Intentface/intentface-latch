@@ -1,9 +1,0 @@
-{
-  "title": "Cookbook",
-  "pages": [
-    "index",
-    "approvals",
-    "scheduled-brief"
-  ],
-  "root": true
-}

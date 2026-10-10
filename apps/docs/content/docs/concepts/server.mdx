@@ -1,0 +1,44 @@
+---
+title: Server
+description: Ready-made HTTP routes over the runtime, mounted in any framework, if you'd rather not write your own.
+---
+
+**`@intentface/latch-server` turns the runtime into HTTP routes.** It's optional: everything it does, your own routes can do by calling the runtime.
+
+## Why it exists
+
+A chat product needs more than one route: send a message, approve a tool, load a conversation, list chats, manage schedules, finish signing in to a service, and a cron endpoint. They're the same in every app, so they ship ready-made. Your login still decides who is asking.
+
+## The smallest version
+
+`createLatchApp` builds the runtime with sensible defaults (crash recovery, the cron, a model catalog) and gives you one handler for every route:
+
+```ts
+import { createLatchApp } from "@intentface/latch-server";
+
+export const { runtime, handler } = await createLatchApp<Principal>({
+  storage,
+  agents: { assistant },
+  // Your login. Return null and the request gets 401.
+  resolveContext: async (request) => {
+    const user = await getUser(request);
+    return user ? { orgId: user.orgId, userId: user.id } : null;
+  },
+});
+```
+
+The handler takes a `Request` and returns a `Response`, or `undefined` for a path that isn't one of its routes. So it mounts in anything that speaks web requests: Next.js, Hono, TanStack Start, Bun, Deno, and Express or Fastify with a small adapter.
+
+```ts title="app/api/latch/[...path]/route.ts"
+const route = async (req: Request) => (await handler(req)) ?? new Response(null, { status: 404 });
+export { route as GET, route as POST, route as DELETE };
+```
+
+## When to write your own routes instead
+
+When you need control over one step: a custom request body, extra checks before a message reaches the agent, a webhook that starts a run. Mix both freely: the handler for the routine routes, `runtime.handleChat` or `runtime.runAgent` in your own.
+
+## Go deeper
+
+- Mounting in each framework: [Hosting](/docs/guides/mount-the-handler)
+- Without the server package: [By hand](/docs/getting-started/by-hand)

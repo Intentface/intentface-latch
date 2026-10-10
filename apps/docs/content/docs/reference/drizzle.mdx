@@ -1,0 +1,37 @@
+---
+title: Postgres and SQLite
+description: The storage adapters, migrations, limit stores, secret stores and agent stores in @intentface/latch-drizzle.
+---
+
+`@intentface/latch-drizzle` keeps everything in your own Postgres or SQLite database (including libSQL and Turso), through a [Drizzle](https://orm.drizzle.team) instance you create and own.
+
+## Storage adapters
+
+```ts
+import { createPostgresAdapter, migratePostgres } from "@intentface/latch-drizzle";
+
+await migratePostgres(db); // once per deploy: creates and updates the latch_* tables
+const storage = createPostgresAdapter<Principal>(db, { owner: (p) => [p.orgId, p.userId] });
+```
+
+`createSqliteAdapter` and `migrate` do the same for SQLite. Both adapters take:
+
+<auto-type-table path="../../../../../packages/drizzle/src/adapter.ts" name="SqliteAdapterOptions" />
+
+Postgres needs a driver that supports transactions (`pg`, `postgres`, Neon's `neon-serverless`), not `neon-http`.
+
+## Everything else in the package
+
+| Export | What it is |
+| --- | --- |
+| `createPostgresLimitStore(db)`, `createSqliteLimitStore(db)` | Counters for [limits](/docs/guides/plans-and-limits). |
+| `createPostgresSecretStore(db, { owner })`, `createSqliteSecretStore(db, { owner })` | Where the vault keeps encrypted secrets. Its `owner` can differ from storage's: shared per team while chats are per person. |
+| `createPostgresAgentBuilderStore(db, options)`, `createSqliteAgentBuilderStore(db, options)` | [Agents in a database](/docs/guides/agents-in-a-database), with versions. Options below. |
+| `createPostgresMemoryJobStore`, `createMemoryJobStore` | For memory, which is experimental. |
+| `schema`, `pgSchema` | The Drizzle table definitions, for your own queries. |
+
+## Agent store options
+
+<auto-type-table path="../../../../../packages/drizzle/src/agent-store.ts" name="AgentStoreOptions" />
+
+The store's methods: [Agent store](/docs/reference/agent-builder).

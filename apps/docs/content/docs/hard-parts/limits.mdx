@@ -1,0 +1,45 @@
+---
+title: Usage limits
+description: Caps that hold when five requests arrive in the same moment.
+---
+
+A free plan gets 20 requests a day. A customer has a monthly token budget. One expensive research agent gets its own cap.
+
+The simple version reads how much was used, compares it with the cap, and lets the request through if it's under.
+
+**Five requests at once.** A user at 19 of 20 has five tabs open. All five requests read "19", all five pass, all five run. The busier the customer, the more often this happens.
+
+**One long answer.** A request admitted at 99% of the token budget can still spend the rest of the day's budget, because an agent keeps going for many steps after it was let in.
+
+**Background work.** A scheduled report and a person chatting probably shouldn't share one limit.
+
+## What Latch does
+
+**Requests are counted before they're checked.** Each request takes its number first, then sees whether it's over. Five requests against one free slot get the numbers 20 to 24, and exactly one runs.
+
+**A long answer stops at the budget.** Once an answer has used up the remaining token budget, it stops there and keeps what it has written, instead of carrying on.
+
+**You decide what counts against what.** For each run, you return the limits it counts against: per organization, per user, per agent, and different for background runs if you like.
+
+```ts
+import { DAY_MS } from "@intentface/latch-core";
+import { createPostgresLimitStore } from "@intentface/latch-drizzle";
+
+createRuntime({
+  …,
+  limits: {
+    store: createPostgresLimitStore(db),
+    limitsFor: ({ principal, agent }) => [
+      { key: `user:${principal.userId}`, windowMs: DAY_MS, max: { turns: 20 }, label: "your daily requests" },
+      { key: `org:${principal.orgId}`, windowMs: 30 * DAY_MS, max: { tokens: 5_000_000 }, label: "your team's monthly budget" },
+      ...(agent === "research" ? [{ key: `agent:${principal.orgId}:research`, windowMs: DAY_MS, max: { cost: 20 } }] : []),
+    ],
+  },
+});
+```
+
+A refused request gets `429` with how long until the limit resets, and the label tells the user which limit it was.
+
+<Callout title="What holds exactly, and what doesn't">
+Request limits (`turns`) hold exactly, however many requests arrive at once. Token and cost limits are checked against what's already been recorded, so answers that are still running can take them over by what those answers spend. Set those caps with that margin in mind.
+</Callout>

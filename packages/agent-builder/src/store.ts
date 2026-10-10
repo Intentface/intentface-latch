@@ -197,6 +197,7 @@ export interface AgentBuilderStore<P> extends DynamicAgentStore<P> {
     scope: AgentScope,
     opts?: { closed?: boolean },
   ) => Promise<AgentCandidate[]>;
+  /** One candidate by id, open or closed. */
   getCandidate: (p: P, name: string, scope: AgentScope, id: string) => Promise<AgentCandidate | undefined>;
   /**
    * Create (no `id`) or update one. Never touches the live record. Returns the
@@ -218,11 +219,9 @@ export interface AgentBuilderStore<P> extends DynamicAgentStore<P> {
     opts?: { publishedAs?: number },
   ) => Promise<void>;
   /**
-   * SYSTEM op (principal-free, cross-tenant): distinct names of records that
-   * look memory-enabled — a cheap prefilter for a background memory sweep. The
-   * sweep must re-check each candidate authoritatively (via `getRecord` under
-   * the chat's own principal); false positives here are harmless, and results
-   * must never feed anything but that per-principal check.
+   * For background jobs only, across every customer: the names of agents that
+   * may have memory switched on. A quick filter, not an answer: check each one
+   * again with `getRecord` as the chat's own principal before acting on it.
    */
   listMemoryEnabledNames: () => Promise<string[]>;
 }

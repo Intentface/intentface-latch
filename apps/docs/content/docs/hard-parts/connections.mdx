@@ -1,0 +1,43 @@
+---
+title: Connecting accounts
+description: The agent should use the user's Linear. Signing in, keeping them signed in, and keeping their tokens away from the model.
+---
+
+The user asks the agent to file a ticket in their Linear. The agent needs the Linear tools, signed in as *that* user. MCP makes the tools easy; the account is the hard part.
+
+**The user isn't signed in yet.** The agent is mid-answer. Failing is unhelpful, and sending the user to a settings page loses the conversation.
+
+**The sign-in comes back somewhere else.** The OAuth redirect lands in a browser tab, maybe a different one, maybe hours later. Something has to connect that sign-in to the right person and continue the right conversation.
+
+**Tokens expire.** Many access tokens last an hour. Some providers only hand out a refresh token if you ask the right way, and the connection quietly dies an hour later if you don't.
+
+**The model shouldn't see the token.** Anything in the prompt or a tool result can end up in an answer, a log, or a trace.
+
+**The address can lie.** A server URL that looks fine can resolve to an address inside your network when the request is made, carrying the user's credentials with it.
+
+## What Latch does
+
+**Asking to sign in is part of the conversation.** Until a user connects a service, the agent has one tool for it: `connect_linear`. Calling it pauses the answer like an approval, showing a sign-in button. After the redirect, the client approves it, and the answer continues with the Linear tools.
+
+**Tokens live in the vault,** encrypted per secret, stored for the person who signed in, refreshed when they expire, and attached to requests outside the model. The model sees tool results, never credentials.
+
+**Servers are checked where it counts.** Only the hosts you allow can be reached, and the check is on the address the request actually connects to, not just the URL text.
+
+**Tools that change things can ask first.** By default, tools the server marks as destructive, or as not read-only, need approval. Servers don't always mark their tools, so for a service that can do damage, set `approval: "all"` or choose per tool.
+
+```ts
+createMcpConnections({
+  vault,
+  allowedHosts: ["mcp.linear.app"],
+  callbackBaseUrl: "https://app.example.com/api/latch/connections",
+  connections: {
+    linear: { url: "https://mcp.linear.app/mcp", auth: oauth() },
+  },
+});
+```
+
+<Callout title="Registering with the provider">
+`oauth()` registers your app with the server on first use, which works for servers that allow it (Linear, most MCP servers). Google and most large providers need an app you registered yourself: pass `oauth({ clientId, clientSecret })`.
+</Callout>
+
+How to set it up: [Connect other services](/docs/guides/connections).

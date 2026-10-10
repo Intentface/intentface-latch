@@ -1,0 +1,37 @@
+---
+title: Conversation history
+description: Saving messages is easy. Two tabs, retries, regenerate and forged messages are what make it hard.
+---
+
+A chat needs to remember. The simple version saves each message to a table and loads them back on the next turn.
+
+That holds until the chat is used like a real one.
+
+**A second tab.** The user has the chat open twice and sends from both. Two answers are being written into one conversation at once, and the history ends up interleaved.
+
+**A retry.** The network drops just after a message arrives. The browser sends it again, and now it's in the history twice, with two answers.
+
+**A client that writes history.** A chat request carries a message from the browser, and the browser can send anything: a message claiming to be the assistant's, a tool result that never happened, a copy of an earlier message with new words. Stored as sent, it becomes "what was said", for the model and for everyone reading the chat afterwards.
+
+**Regenerate.** "Try again" looks like deleting the last answer. But the answer may have been summarized into a compacted context, learned into memory, or approved in another tab. Deleting it leaves those pointing at nothing.
+
+## What Latch does
+
+**One answer at a time per chat.** While an answer is being written, a second message to the same chat is turned away (`409`, with how long to wait) and nothing of it is saved. Two tabs can't interleave.
+
+**Messages come in as messages, not as history.** A chat request may add a user message with text and files, and nothing else. A message claiming another role, a tool result, or the id of an existing message is refused. The one exception is a resend of the chat's last question, explained next.
+
+**The last question can be regenerated or edited.** Resend it unchanged (`useChat`'s `regenerate()`) or changed (`sendMessage({ messageId })`): the old answer is hidden, not deleted, and the agent answers again. Hidden answers are kept for the record but never shown, never sent to the model, and never learned into memory. Changing an earlier question is refused, because everything after it builds on it; that's what forking a chat is for.
+
+**The client stays stock.** All of this works with the AI SDK's own `useChat`, as is.
+
+```ts
+// Your chat route: one call per message.
+return runtime.handleChat({ agent: "support", chatId, principal, message });
+
+// The sidebar, and a chat's history when the page loads:
+await runtime.listChats({ principal, kind: "user" });
+await runtime.loadHistory({ chatId, principal });
+```
+
+Very long conversations can be [compacted](/docs/concepts/turns#compaction): the model works from a summary while the user still sees everything.

@@ -1,0 +1,45 @@
+---
+title: Agents
+description: A model, its instructions, and what it may do, declared once and resolved for each person.
+---
+
+**An agent is a model, its instructions, and what it's allowed to do.** You declare it with `defineAgent` and give it a name; clients pick it by that name.
+
+## Why it exists
+
+The AI SDK's agent is an object you build per call. In a product, the same agent serves thousands of people, and what it may do often depends on who they are: a different model on the paid plan, a tool only admins get. `defineAgent` describes the agent once, and Latch builds it for each turn, for that person.
+
+## The smallest version
+
+```ts
+import { defineAgent } from "@intentface/latch-core";
+
+const support = defineAgent({
+  model: anthropic("claude-sonnet-4-6"),
+  instructions: "You help customers with their orders.",
+  tools: { find_order, refund },
+  toolApproval: { refund: "user-approval" },
+});
+```
+
+When it depends on the caller, pass a function instead:
+
+```ts
+const assistant = defineAgent<Principal, Ctx>(({ context }) => ({
+  model: context.plan === "pro" ? anthropic("claude-sonnet-4-6") : anthropic("claude-haiku-4-5"),
+  instructions: `You work for ${context.orgName}.`,
+}));
+```
+
+## What an agent can have
+
+- **Params:** what its chats are about, such as a ticket or a document, given once when a chat starts. See [Principal, context and params](/docs/concepts/inputs).
+- **Tools,** some of them [behind approval](/docs/hard-parts/approvals).
+- **Connections** to other services, by name (`connections: ["linear"]`).
+- **Subagents** it can hand work to (`subagents: ["researcher"]`).
+- **Built-in tools** you switch on: fetching web pages, asking the user a question, managing their schedules, a workspace with files and a shell.
+- **Agents stored in a database** instead of code, so users can create their own, with versions you can test before they go live.
+
+## Go deeper
+
+- Every option: [defineAgent reference](/docs/reference/define-agent)

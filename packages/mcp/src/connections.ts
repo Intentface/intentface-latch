@@ -41,20 +41,20 @@ export type McpConnectionAuth<P> =
 
 /** Options for an interactive (Authorization Code + PKCE) OAuth connection. */
 export interface OAuthAuthOptions {
-  /** Requested scope string components, joined with spaces. */
+  /** The permissions to ask for, for example `["read", "write"]`. */
   scopes?: string[];
   /**
-   * A pre-registered OAuth client. When set, Dynamic Client Registration (DCR)
-   * is SKIPPED and this client is used directly — required for auth servers that
-   * don't support DCR (Google, GitHub, Slack, …). Register our callback URL
-   * (`<callbackBaseUrl>/<name>/callback`) as an allowed redirect URI with the
-   * provider. Omit `clientSecret` for a public PKCE client.
+   * Your app's client id at the provider. Leave it out and Latch registers an
+   * app with the server automatically, which most MCP servers allow. Google,
+   * GitHub, Slack and most large providers don't: create an app there, add
+   * `<callbackBaseUrl>/<name>/callback` as a redirect URL, and pass its id.
    */
   clientId?: string;
+  /** Your app's client secret, with `clientId`. Leave out for a public client. */
   clientSecret?: string;
-  /** Client name advertised during dynamic client registration. */
+  /** The app name shown to users when Latch registers automatically. */
   clientName?: string;
-  /** Token-endpoint auth method (default `"none"` — public PKCE client). */
+  /** How the app proves itself when exchanging codes for tokens. @default "none" (a public client) */
   tokenEndpointAuthMethod?: string;
   /**
    * Normalize a provider's non-conformant discovery documents (e.g. a proxied
@@ -138,18 +138,18 @@ export function oauth<P = unknown>(
 
 /** A declarative MCP connection. The connection's *name* is the registry key. */
 export interface McpConnectionDef<P = unknown> {
-  /** MCP server URL (HTTP transport). */
+  /** The MCP server's URL (streamable HTTP). */
   url: string;
-  /** Human-readable purpose — surfaced to the user; helps the model choose it. */
+  /** What the service is for. Shown to the user, and helps the model pick it. */
   description?: string;
-  /** Auth strategy (default: none). */
+  /** How to sign in: `oauth()`, `bearer({ getToken })` or `headers({…})`. Leave out for a server without sign-in. */
   auth?: McpConnectionAuth<P>;
-  /** Restrict the exposed tools by their *server-local* name (pre-namespacing). */
+  /** Only offer some of the server's tools (`allow`), or hide some (`block`), by the server's own tool names. */
   tools?: { allow?: string[]; block?: string[] };
   /**
-   * Which of this connection's tools require human approval. Default
-   * `"destructive"` — respect the MCP server's own annotations (gate tools it
-   * marks destructive / not read-only). `"all"`, `"none"`, or a per-tool
+   * Which tools need a person's approval. `"destructive"` (the default) asks
+   * for tools the server marks as destructive or as not read-only; tools the
+   * server doesn't mark at all run without asking. `"all"`, `"none"`, or a per-tool
    * predicate `(tool) => boolean` — which may instead return a per-CALL
    * function `(input) => boolean | Promise<boolean>`, evaluated with the
    * model's arguments each call, for meta-tool servers whose one tool
@@ -159,30 +159,23 @@ export interface McpConnectionDef<P = unknown> {
    */
   approval?: McpApprovalPolicy;
   /**
-   * Per-principal approval resolver — awaited at open time to produce the
-   * approval policy for this caller (e.g. per-user permissions from a DB).
-   * Takes precedence over {@link approval} when set.
+   * Like `approval`, but decided per caller, for example from their
+   * permissions. Used instead of `approval` when set.
    */
   approvalFor?: (principal: P) => McpApprovalPolicy | Promise<McpApprovalPolicy>;
   /**
-   * Tool visibility filter — a tool for which it returns `false` is dropped
-   * entirely (no tool, no approval entry). A per-tool predicate
-   * `(tool) => boolean`, for a hard block an approval policy can't express. For
-   * visibility that varies by caller, use {@link visibleToolsFor} instead.
+   * Hides tools: one it returns `false` for isn't offered at all. For a rule
+   * that depends on the caller, use `visibleToolsFor`.
    */
   visibleTools?: (tool: McpToolInfo) => boolean;
-  /**
-   * Per-principal visibility resolver — awaited at open time to produce the
-   * visibility predicate for this caller. Takes precedence over
-   * {@link visibleTools} when set.
-   */
+  /** Like `visibleTools`, but decided per caller. Used instead of `visibleTools` when set. */
   visibleToolsFor?: (
     principal: P,
   ) => ((tool: McpToolInfo) => boolean) | Promise<(tool: McpToolInfo) => boolean>;
   /**
-   * Permit this connection to reach a private/internal address. Off by default
-   * (the host blocks private/loopback/link-local IPs and DNS rebinding); set
-   * `true` only for a trusted local/in-cluster MCP server.
+   * Lets this connection reach a private address (localhost, your internal
+   * network). Blocked by default, including names that resolve to one; turn it
+   * on only for a server you run yourself.
    */
   allowPrivateHost?: boolean;
 }
@@ -195,20 +188,26 @@ export function defineMcpConnection<P = unknown>(
 }
 
 export interface McpConnectionsConfig<P> {
+  /** Where each user's tokens are kept, encrypted. From `createVault`. */
   vault: Vault<P>;
-  /** Read-side for bearer secrets, if any bearer connection resolves from the Vault. */
+  /** Reads secrets for `bearer` connections, usually `vault.resolver`. */
   secrets?: SecretResolver<P>;
-  /** SSRF allowlist (see `createMcpHost`). */
+  /**
+   * The hosts connections may reach, for example `["mcp.linear.app"]`. A
+   * request anywhere else is refused, so a connection URL can't be pointed at
+   * an unexpected server. Pass a function to allow different hosts per caller.
+   */
   allowedHosts: string[] | ((principal: P) => string[] | Promise<string[]>);
-  /** Connection set, keyed by name. */
+  /** The services, by the name agents use in `connections: ["…"]`. */
   connections: Record<string, McpConnectionDef<P>>;
   /**
-   * Base URL the OAuth callback lands on, e.g.
-   * `https://app.example.com/api/latch/connections`. The registry appends
-   * `/<name>/callback` to build each connection's exact redirect URI.
+   * Where sign-ins return to, for example
+   * `https://app.example.com/api/latch/connections`. Each service's redirect
+   * URL is this plus `/<name>/callback`; register that URL with providers that
+   * ask for one.
    */
   callbackBaseUrl?: string;
-  /** Observe a connection that failed to open (skipped, not fatal). */
+  /** Called when a service can't be reached for a turn. The turn goes on without its tools. */
   onConnectionError?: (name: string, error: unknown) => void;
 }
 

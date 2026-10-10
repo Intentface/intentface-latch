@@ -1,16 +1,16 @@
 ---
 title: By hand
-description: createRuntime piece by piece — storage, context, agents — then durability and a cron, one seam at a time.
+description: createRuntime piece by piece — storage, context, agents — then durability and a cron, one option at a time.
 ---
 
 `createLatchApp` fills in every default. This page is the same backend assembled from its parts, so you can see what each default is and swap any of them.
 
 ## Tier 1 — a persisted runtime
 
-Storage is the one seam you can't omit. `latch-drizzle` ships adapters for SQLite and Postgres, plus the migrations.
+Storage is the one option you can't leave out. `latch-drizzle` ships adapters for SQLite and Postgres, plus the migrations.
 
 ```ts title="latch.ts"
-import { createRuntime, defineAgent, defineContext } from "@intentface/latch-core";
+import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createSqliteAdapter, migrate, schema } from "@intentface/latch-drizzle";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createClient } from "@libsql/client";
@@ -27,14 +27,13 @@ const db = drizzle(client, { schema });
 // `migrate` executes DDL, so it takes the libSQL client — not the drizzle db.
 await migrate(client);
 
-// The owner key is your isolation boundary — see /docs/foundations/principals.
+// The owner key is your isolation boundary — see /docs/guides/ownership-patterns.
 const storage = createSqliteAdapter<Principal>(db, {
   owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
 });
 
-const context = defineContext<Principal, { orgId: string }>({
-  build: async ({ principal }) => ({ orgId: principal.orgId }),
-});
+// What tools work with, built from who is asking on every turn.
+const context = async ({ principal }: { principal: Principal }) => ({ orgId: principal.orgId });
 
 const agents = {
   assistant: defineAgent<Principal>(() => ({
@@ -67,7 +66,7 @@ Tables are prefixed `latch_*`. Consume the package's migrations rather than hand
 
 ## Tier 2 — make it durable
 
-One seam and one route. The runtime gets `durability`, and something has to tick:
+One option and one route. The runtime gets `durability`, and something has to tick:
 
 ```ts
 import { Cron } from "croner";
@@ -89,7 +88,7 @@ export async function POST(request: Request) {
 }
 ```
 
-A run that dies mid-turn is now reaped on the next tick and resumed from its own log. On a long-lived process, `createIntervalScheduler` drives the same call in-process — see [Operations](/docs/operations#durability).
+A run that dies mid-turn is now reaped on the next tick and resumed from its own log. On a long-lived process, `createIntervalScheduler` drives the same call in-process — see [Turn on crash recovery](/docs/guides/crash-recovery).
 
 ## Tier 0 — stateless
 
@@ -97,9 +96,9 @@ The same code with `createClient({ url: ":memory:" })`: a fresh database per pro
 
 ## Mount it
 
-`createLatchHandler({ runtime, resolveContext })` gives you the Web-standard handler; [Hosting](/docs/hosting) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
+`createLatchHandler({ runtime, resolveContext })` gives you the Web-standard handler; [Hosting](/docs/guides/mount-the-handler) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
 
 ## Next
 
-- [Runtime](/docs/runtime) — every configuration field and operation
-- [Foundations: seams](/docs/foundations/seams) — why everything past tier 0 is a function you pass
+- [createRuntime](/docs/reference/create-runtime) and [Runtime methods](/docs/reference/runtime) — every option and operation
+- [Hooks](/docs/reference/hooks) — why everything past tier 0 is a function you pass

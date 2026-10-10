@@ -1,0 +1,36 @@
+---
+title: Runtime
+description: The one object your code calls. Build it once, call it from your routes, your cron and your tests.
+---
+
+**The runtime is the one object your code talks to.** You create it once with `createRuntime`, and every route, scheduled job and test calls it.
+
+## Why it exists
+
+An agent turn involves a lot of moving parts: load the conversation, check limits, claim the run so no other server runs it too, call the model, run tools, pause for approvals, save each step, record the cost. If your routes did that themselves, every route would need to get every step right, and the next route would get one wrong. The runtime does it the same way every time.
+
+## The smallest version
+
+```ts
+import { createRuntime } from "@intentface/latch-core";
+
+const runtime = createRuntime<Principal>({ storage, context, agents });
+```
+
+Three things are required: where to store things (`storage`), what tools receive (`context`), and your `agents`. Everything else switches on a capability (crash recovery, limits, schedules, connections) and does nothing until you add it.
+
+## What you call it for
+
+```ts
+runtime.handleChat({ agent, chatId, principal, message });   // a chat message, streamed back
+runtime.runAgent({ agent, principal, prompt });              // a job with no chat: webhooks, tests
+runtime.applyApproval({ chatId, principal, decisions });     // a person's decision on a paused tool
+runtime.loadHistory({ chatId, principal });                  // a conversation, for display
+runtime.cron();                                               // every minute: schedules and crash recovery
+```
+
+## Go deeper
+
+- Every option: [createRuntime reference](/docs/reference/create-runtime)
+- Every method: [Runtime methods](/docs/reference/runtime)
+- What it guarantees: [Harder than it looks](/docs/hard-parts)

@@ -48,146 +48,144 @@ export interface ToolSource<P> {
   open(principal: P): Promise<OpenToolSet>;
 }
 
+/**
+ * An agent: a model, its instructions and what it may do. Pass it to
+ * `defineAgent`, or return it from a factory when it depends on who is asking.
+ */
 export interface AgentConfig<P> {
   /**
-   * Which stored version of this agent's record produced this config, when it
-   * came from a store that versions them (`latch_agent_versions.version`).
-   * Absent for code-declared agents, which have no stored record.
-   *
-   * Recorded on the run and emitted as a trace tag, so a past answer can be
-   * traced back to the exact configuration that produced it — and so eval or
-   * judge scores can be compared across versions.
+   * Which saved version of a database agent this config came from. Set by
+   * agent stores that keep versions; leave it out for agents defined in code.
+   * Recorded on every run, so an answer can be traced to the exact
+   * configuration that produced it.
    */
   configVersion?: number;
+  /** The model the agent runs on, as an AI SDK model, for example `anthropic("claude-sonnet-4-6")`. */
   model: LanguageModel;
+  /** The system prompt. */
   instructions?: string;
-  /** Static tools, available every turn. */
+  /** Tools available on every turn, as AI SDK `tool()` definitions, by name. */
   tools?: Record<string, unknown>;
-  /** Dynamic tool sources opened per turn and closed after (e.g. MCP). */
+  /**
+   * Tools that are opened for each turn and closed after it, for example from
+   * an MCP server. Each source is opened with the caller's principal, so its
+   * tools can act as that person.
+   */
   toolSources?: ToolSource<P>[];
   /**
-   * Names of the connections (from the runtime's connection registry) this
-   * agent may use — its MCP servers / integrations. The runtime resolves these
-   * to a per-turn tool source: each authorized connection's tools, plus a gated
-   * `connect_<name>` tool for any that still need OAuth. Different agents can
-   * carry different connections. Names with no registry entry are ignored.
+   * The connections this agent may use, by name (MCP servers and other
+   * integrations from the runtime's `connections`). A connection the user
+   * hasn't authorized yet appears as a `connect_<name>` tool that starts its
+   * sign-in. Names the runtime doesn't know are ignored.
    */
   connections?: string[];
   /**
-   * HITL approval policy (the SDK's `toolApproval`): per-tool `'user-approval'`,
-   * an object with a reason, or a function. A gated call ends the turn with an
-   * `approval-requested` part instead of executing; the decision round-trips as
-   * message state via `runtime.applyApproval`. Kept loose (the SDK type is
-   * complex); cast at the agent boundary.
+   * Which tools need a person's approval before they run, by tool name:
+   * `{ send_email: "user-approval" }`. A gated call pauses the run and shows
+   * an approval request; `runtime.applyApproval` continues it. Same format as
+   * the AI SDK's `toolApproval`, including the function form.
    */
   toolApproval?: unknown;
   /**
-   * Smooth the visible token cadence (AI SDK `smoothStream`): even out bursty
-   * deltas before they stream to the client. `true` uses the SDK defaults
-   * (~10ms, word chunking); or tune `delayInMs`/`chunking`. Presentation only —
-   * it does not change what gets persisted.
+   * Evens out the speed of streamed text, so it appears word by word instead
+   * of in bursts. `true` uses the AI SDK defaults; pass `delayInMs` or
+   * `chunking` to tune it. Only affects display.
    */
   smoothStream?: boolean | { delayInMs?: number; chunking?: "word" | "line" };
   /**
-   * Max tool-loop steps before the turn stops (the SDK `stopWhen` ceiling).
-   * Omitted → SDK default (20). A number caps the loop; `"unlimited"` lets it
-   * run until the model stops on its own (no more tool calls) — use with care,
-   * it removes the runaway-loop backstop.
+   * The most model steps (a step is one model call and the tools it calls) a
+   * turn may take before it stops. `"unlimited"` lets the agent run until it
+   * stops calling tools; use with care, as nothing then stops a runaway loop.
+   *
+   * @default 20
    */
   maxSteps?: number | "unlimited";
   /**
-   * Restrict which tools the model may call (the SDK's `activeTools`) — the
-   * namespaced names (e.g. `clockify_getTimeEntries`). Omitted → all available
-   * tools are active. Tools a source marks `alwaysActive` (e.g. `connect_<name>`)
-   * stay callable regardless.
+   * Limits the agent to these tools, by name (connection tools are prefixed,
+   * like `github_create_issue`). Sign-in tools such as `connect_<name>` stay
+   * available.
+   *
+   * @default all tools
    */
   enabledTools?: string[];
   /**
-   * Per-tool description overrides (by namespaced tool name). The runtime
-   * replaces the resolved tool's `description` with this text before the model
-   * sees it — e.g. to tailor a connection tool's guidance for this agent.
+   * Replaces tool descriptions for this agent, by tool name: tailor how a
+   * connection's tool is described to the model without changing the tool.
    */
   toolDescriptions?: Record<string, string>;
   /**
-   * Agents this one may delegate to. The runtime adds a `spawn_agent` tool that
-   * runs one of these as a subagent (a normal agent, run autonomously — its
-   * tools are auto-approved) and returns its final answer. Each subagent run is
-   * its own persisted thread; pass the returned `threadId` back to continue the
-   * same subagent with full context.
+   * Agents this one can hand work to, by name. The agent gets a `spawn_agent`
+   * tool: the other agent runs on its own and its final answer comes back as
+   * the tool's result. Each handover is a saved thread the agent can continue
+   * with the returned `threadId`. A subagent's approval requests are shown in
+   * the parent chat.
    */
   subagents?: string[];
   /**
-   * Give the agent a per-session sandbox (a workspace) and the filesystem/shell
-   * tools that operate on it (`bash`, `read_file`, `write_file`, `glob`,
-   * `grep`). The runtime resolves the actual `Experimental_SandboxSession` via
-   * `RuntimeConfig.sandbox` and passes it to the model; the tools come from
-   * `RuntimeConfig.harnessTools.sandbox`. Optional `provider` picks the backend
-   * (e.g. `"just-bash"` | `"daytona"`); the resolver decides the default.
+   * Gives the agent a workspace with files and a shell, one per chat, plus
+   * the tools that use it: `bash`, `read_file`, `write_file`, `glob`, `grep`.
+   * Needs `sandbox` and `harnessTools` in the runtime config.
    */
   sandbox?: boolean;
-  /** Sandbox backend hint, passed through to `RuntimeConfig.sandbox`. */
+  /** Which sandbox provider to use, for example `"daytona"`. Passed to the runtime's `sandbox` function, which picks the default. */
   sandboxProvider?: string;
   /**
-   * Add the app-runtime default harness tools (`web_fetch`, `todo`,
-   * `ask_question`) from `RuntimeConfig.harnessTools.app`. `true` adds all;
-   * an array restricts to those names. These run in the app process, not the
-   * sandbox.
+   * Adds the built-in app tools: `web_fetch`, `askUser`, `list_schedules`,
+   * `cancel_schedule`. `true` adds all of them; a list adds only those. Needs
+   * `harnessTools` in the runtime config.
    */
   defaultTools?: boolean | string[];
   /**
-   * Give the agent the platform's render tool(s) from
-   * `RuntimeConfig.harnessTools.render` — a headless-browser fetch for
-   * JS-rendered pages. A separate capability flag (like `sandbox`) rather than
-   * a `defaultTools` member: the platform supplies it (needs a deployed render
-   * service) and it must be opted into explicitly, never swept in by
-   * `defaultTools: true`.
+   * Adds tools that open web pages in a real browser, for pages that need
+   * JavaScript to show their content. Needs `harnessTools.render`, which you
+   * supply with a deployed render service.
    */
   renderTools?: boolean;
-  /** Names of harness/default tools to drop for this agent (eve-style opt-out). */
+  /** Built-in tools to leave out for this agent, by name. */
   disableTools?: string[];
   /**
-   * Use the model provider's NATIVE web tools (server-side web search/fetch)
-   * when available, supplied by `RuntimeConfig.resolveProviderTools(modelId)`.
-   * Provider-specific: e.g. Anthropic exposes web_search + web_fetch, OpenAI
-   * web_search only. No-op on providers without native web tools.
+   * Uses the model provider's own web search and fetch, run on the provider's
+   * side. Anthropic offers search and fetch, OpenAI search only; other
+   * providers ignore it. Needs `resolveProviderTools` in the runtime config.
    */
   providerWebTools?: boolean;
   /**
-   * Reasoning/thinking effort for this agent. Mapped to provider-specific
-   * options by `RuntimeConfig.resolveReasoningOptions` (OpenAI effort enum vs
-   * Anthropic/Google thinking-token budget) and gated to reasoning-capable
-   * models. Omitted → the provider default.
+   * How hard a reasoning model thinks before answering. Higher is slower and
+   * costs more. Ignored by models that don't reason. Needs
+   * `resolveReasoningOptions` in the runtime config.
+   *
+   * @default the provider's default
    */
   effort?: "minimal" | "low" | "medium" | "high";
   /**
-   * Persistent cross-session memory for this agent. Requires the runtime to be
-   * composed with a `MemoryProvider` (`RuntimeConfig.memory`) — without one the
-   * declaration is ignored. When both are set, each turn gets the provider's
-   * compiled memory index appended to `instructions` and its memory tools
-   * (`memory_search`/`memory_save`) merged as capability tools; the provider's
-   * background jobs handle extraction and consolidation out of band.
+   * Long-term memory across conversations: what the agent learns is added to
+   * its instructions on later turns, and it gets tools to search and save
+   * memories. Needs `memory` in the runtime config.
+   *
+   * **Experimental.** The only production store today is a Loredex workspace,
+   * and the design may change.
    */
   memory?: MemoryConfig;
   /**
-   * Extensions attached to this agent's turns, after the runtime-wide ones
-   * (`RuntimeConfig.extensions`). See `extensions/extension.ts` for the
-   * moments and effects. Omitted → the agent's turns are unchanged.
+   * Extensions for this agent's runs, applied after the runtime-wide ones.
    */
   extensions?: Extension[];
 }
 
-/** Static, display-only metadata for an agent — surfaced by `runtime.listAgents()`. */
+/** How an agent is shown in a picker. Returned by `runtime.listAgents()`. */
 export interface AgentMeta {
-  /** Human-friendly name for a picker (defaults to the registry key). */
+  /**
+   * The name shown to users.
+   *
+   * @default the agent's key in `agents`
+   */
   title?: string;
-  /** Short description of what the agent does. */
+  /** One line on what the agent does. */
   description?: string;
   /**
-   * Internal agent: still resolvable/runnable by name, but flagged so
-   * user-facing pickers can drop it. `runtime.listAgents()` returns hidden
-   * agents WITH the flag (internal callers — e.g. a builder validating
-   * subagent names — need the full set); the HTTP `GET agents` route filters
-   * them out.
+   * Hides the agent from pickers. It still runs when called by name, for
+   * example as a subagent. `listAgents()` returns it with this flag set; the
+   * HTTP server's agent list leaves it out.
    */
   hidden?: boolean;
   /**
@@ -229,11 +227,9 @@ export type AgentFactory<P, RuntimeContext = unknown, Params = unknown> = ((ctx:
  * no params can still be called as `factory({ context, principal })`.
  */
 export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
-  /**
-   * The runtime CONTEXT built by `context.build` for this turn (org name, plan,
-   * feature flags — see `ContextDefinition`).
-   */
+  /** What your `context` function built for this turn, from the principal: clients, the plan, permissions. */
   context: RuntimeContext;
+  /** Who is asking. */
   principal: P;
   /**
    * What the user is looking at, from the `data-context` part of the message
@@ -256,14 +252,13 @@ export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
     }
   : unknown extends Params
   ? {
-      /** What this chat is about; `undefined` for an agent that declares no params. */
+      /**
+       * What this chat is about: the params its first message passed, checked
+       * against `meta.params`. `undefined` for an agent that declares none.
+       */
       params?: Params;
     }
   : {
-      /**
-       * What this chat is about, validated against `meta.params` (see
-       * {@link AgentMeta.params}).
-       */
       params: Params;
     });
 

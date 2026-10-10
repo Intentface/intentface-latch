@@ -1,9 +1,21 @@
 {
   "title": "Reference",
   "pages": [
-    "packages",
+    "create-runtime",
+    "runtime",
+    "define-agent",
+    "context",
+    "vault",
+    "---Packages---",
+    "server",
+    "drizzle",
+    "mcp",
+    "channels",
+    "agent-builder",
+    "---Contracts---",
     "storage",
-    "seams",
-    "errors"
+    "hooks",
+    "errors",
+    "packages"
   ]
 }

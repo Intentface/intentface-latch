@@ -64,56 +64,53 @@ export interface SlackThreadStore {
 }
 
 export interface SlackChannelConfig<P> {
-  /** The agent this app serves (own-app-per-agent). */
+  /** The agent this Slack app answers as, by name. Each agent has its own Slack app. */
   agent: string;
-  /** The Slack app id — the chat-id namespace. Required: no unscoped chats. */
+  /** The Slack app's id. Chat ids are built from it, so two apps never share a conversation. */
   appId: string;
 
-  /** The binding's owner — the principal a turn runs as unless `authorizeUser` says otherwise. */
+  /** Who the bot acts as, unless `authorizeUser` returns a principal for the person asking. */
   principal: P;
-  /** The workspace's bot token (vault-backed in practice). */
+  /** The workspace's bot token, or a function that reads it, for example from the vault. */
   botToken: SlackToken;
+  /** Your runtime. */
   runtime: ChannelRunOps<P>;
   /**
-   * The bot's own Slack user id — REQUIRED. The authoritative self-check;
-   * v2 has no `bot_id`/`subtype` identity fallback, a binding without it
-   * must be reinstalled.
+   * The bot's own Slack user id, from installing the app. The bot ignores its
+   * own messages by this id, so it never answers itself.
    */
   botUserId: string;
-  /** The installed workspace — `chat.startStream` needs it in channels. */
+  /** The workspace the app is installed in. Needed to stream answers in channels. */
   teamId: string;
 
+  /** The app's signing secret; requests not signed with it are refused. */
   signingSecret: string | (() => string | Promise<string>);
   /**
-   * Keep a serverless function alive for the deferred worker after the ACK.
-   * Without it the worker is awaited inline (fine off-serverless, but the ACK
-   * then waits on the whole turn).
+   * Keeps a serverless function running after the quick reply to Slack, for
+   * example Vercel's `waitUntil`. Without it the reply waits for the whole
+   * answer, which is fine on a long-running server but makes Slack retry on
+   * serverless.
    */
   waitUntil?: (p: Promise<unknown>) => void;
 
   /**
-   * Atomic TTL'd test-and-set: TRUE when THIS call claimed the key, false
-   * when someone already holds it. One primitive covers delivery retries
-   * (`evt:`), the same message arriving as two event shapes (`msg:`),
-   * interaction redeliveries (`act:`) and once-ever notices (`note:`).
+   * Claims a key for a while: returns `true` for the first call, `false` while
+   * it's held. Back it with a table with an expiry. It's how Slack's retries,
+   * one message arriving as two events, and repeated button presses are
+   * handled once, on any server.
    */
   claimOnce: (key: string, ttlMs: number) => Promise<boolean>;
-  /**
-   * Optional host-side one-turn-per-chat lease (`null` = busy). Core's storage
-   * adapter already refuses a second live run per chat (`ChatBusyError`, shown
-   * as the busy notice), so this is only for hosts on an adapter without that
-   * invariant.
-   */
+  /** Only for a storage adapter that doesn't refuse a second answer per chat itself; the built-in ones do. */
   claimTurn?: (chatId: string) => Promise<string | null>;
   releaseTurn?: (chatId: string, token: string) => Promise<void>;
-  /** Thread ownership + stop flag. */
+  /** Remembers who started each thread, and whether the bot was told to stop in it. */
   threads: SlackThreadStore;
 
   /**
-   * Gate inbound users (identity link, org membership, credential mode).
-   * `principal` (when returned with `allowed: true`) runs THIS turn as that
-   * principal — how per-user credentials work. `silent` suppresses the
-   * refusal notice (disabled bindings shouldn't reply at all).
+   * Decides whether this Slack user may use the bot, and as whom. Return
+   * `{ allowed: true, principal }` to answer as that person (with their own
+   * connected accounts), `{ allowed: false, linkUrl }` to ask them to connect
+   * their account, or add `silent: true` to refuse without replying.
    */
   authorizeUser?: (user: {
     teamId: string;
@@ -126,7 +123,7 @@ export interface SlackChannelConfig<P> {
     prompt: string;
   }) => Promise<AuthResult<P>>;
 
-  /** Build the platform authorize URL for a `connect_<name>` OAuth approval. */
+  /** The URL that starts signing in to a service when the agent asks the user to connect it. */
   authorizeUrl?: (
     connectionName: string,
     ctx: {
@@ -138,17 +135,16 @@ export interface SlackChannelConfig<P> {
     },
   ) => string;
 
-  /** `tokens_revoked` / `app_uninstalled` → the host disables the binding. */
+  /** Called when the app is uninstalled or its tokens are revoked, so you can turn the bot off. */
   onLifecycle?: (info: {
     type: "tokens_revoked" | "app_uninstalled";
     teamId: string;
   }) => Promise<void>;
 
   /**
-   * Streaming-engine telemetry: called when the engine is decided (`stream`,
-   * or `fallback` + Slack's refusal code) and again if a live stream dies
-   * mid-turn. Hosts persist the last value so the binding health row can say
-   * WHY a bot degraded to post-at-finish mode.
+   * Called when Latch decides whether to stream an answer or post it when done,
+   * with Slack's reason when streaming was refused. Save it to show why a bot
+   * stopped streaming.
    */
   onStreamMode?: (info: {
     chatId: string;
@@ -157,7 +153,7 @@ export interface SlackChannelConfig<P> {
     detail?: string;
   }) => Promise<void>;
 
-  /** Test seam for the Slack Web API client. */
+  /** For tests: a different Slack API URL or `fetch`. */
   apiOptions?: SlackApiOptions;
 }
 

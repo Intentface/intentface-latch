@@ -1,9 +1,8 @@
 import {
   createIntervalScheduler,
   createRuntime,
-  defineContext,
   type AgentFactory,
-  type ContextDefinition,
+  type ContextInput,
   type Runtime,
   type RuntimeConfig,
   type Scheduler,
@@ -28,32 +27,34 @@ import { createCronerEvaluator } from "./cron.js";
  * A hello-world is the storage adapter plus one agent; see `apps/example`.
  */
 export interface LatchAppConfig<P, RC = unknown> {
-  /** The storage adapter (e.g. `createSqliteAdapter(db, { owner })`). */
+  /** Where conversations, runs and usage are stored, for example `createPostgresAdapter(db, { owner })`. */
   storage: StorageAdapter<P>;
   /**
-   * The agent registry — or a function of the loaded model catalog, so agents
-   * can pick their model from `models.modelFor(...)` without loading the
-   * catalog themselves.
+   * Your agents, by name. Pass a function to get the model catalog, so an
+   * agent can pick its model by id: `(models) => ({ assistant: defineAgent({
+   * model: models.modelFor("claude-sonnet-4-6"), … }) })`.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- each agent declares its own params
   agents: Record<string, AgentFactory<P, any, any>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, any, any>>);
-  /** Your auth: request → Principal (null → 401). */
+  /** Your login: turns a request into the principal, or `null` for a `401`. */
   resolveContext: LatchHandlerConfig<P>["resolveContext"];
-  /** Per-turn runtime context (default: `{}`). */
-  context?: ContextDefinition<P, RC>;
-  /** A preloaded model catalog (default: `loadModelCatalog()`). */
+  /** What your agents and tools can work with, built from who is asking on every turn: `async ({ principal }) => ({ … })`. @default `{}` */
+  context?: ContextInput<P, RC>;
+  /** A model catalog you already loaded. @default `loadModelCatalog()` */
   models?: ModelCatalog;
-  /** Per-principal cache-key suffix for memory-scoped prompt caching (typically the owner key). */
+  /** A key per caller for prompt caching, so one person's cached prompt is never reused for another. Usually the same as the storage owner. */
   principalKey?: (principal: P) => string;
-  /** Anything else on the runtime — or overrides of the defaults (listed last wins). */
+  /** Any other `createRuntime` option (limits, connections, schedules…), or a different value for one of the defaults. */
   runtime?: Partial<Omit<RuntimeConfig<P, RC>, "storage" | "agents" | "context">>;
-  /** Handler options beyond `runtime` / `resolveContext` (basePath, connections, cronSecret, …). */
+  /** Any other `createLatchHandler` option, such as `basePath`, `connections` or `cronSecret`. */
   handler?: Partial<Omit<LatchHandlerConfig<P>, "runtime" | "resolveContext">>;
   /**
-   * In-process cron cadence (ms) driving `runtime.cron()`. Default 30s on a
-   * long-running process; `false` to disable. Auto-disabled on serverless
-   * (VERCEL / AWS_LAMBDA_FUNCTION_NAME set) — point a platform cron at
-   * `POST <basePath>/cron/run` there instead.
+   * How often to call `runtime.cron()` in this process, in ms, or `false` for
+   * never. Off on serverless (when `VERCEL` or `AWS_LAMBDA_FUNCTION_NAME` is
+   * set), where nothing runs between requests: call `runtime.cron()` from a
+   * cron route instead.
+   *
+   * @default 30000 on a long-running server
    */
   cronIntervalMs?: number | false;
 }
@@ -80,7 +81,8 @@ export async function createLatchApp<P, RC = unknown>(cfg: LatchAppConfig<P, RC>
 
   const runtime = createRuntime<P, RC>({
     storage: cfg.storage,
-    context: cfg.context ?? defineContext<P, RC>({ build: () => ({}) as RC }),
+    // Left out, the runtime builds an empty context.
+    context: cfg.context,
     agents,
     // Resume-after-crash on by default: it costs a lease heartbeat per turn
     // and is what makes `cron()`'s sweep half do anything.

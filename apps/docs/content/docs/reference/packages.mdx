@@ -12,7 +12,7 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 | [`latch-server`](#latch-server) | an HTTP surface you don't have to write |
 | [`latch-mcp`](#latch-mcp) | tools from MCP servers |
 | [`latch-openapi`](#latch-openapi) | tools from an OpenAPI spec |
-| [`latch-memory`](#latch-memory) | agents that remember across sessions |
+| [`latch-memory`](#latch-memory) | agents that remember across sessions (**experimental**) |
 | [`latch-channels`](#latch-channels) | Slack, Telegram, WhatsApp |
 | [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
 | [`latch-langfuse`](#latch-langfuse) | tracing |
@@ -28,10 +28,10 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 Dependency-light on purpose: `zod` is the only runtime dependency, `ai` (>= 7) is a peer, and there is no HTTP framework, no database driver and no provider SDK anywhere in it.
 
 ```ts
-import { createRuntime, defineAgent, defineContext, createVault } from "@intentface/latch-core";
+import { createRuntime, defineAgent, createVault, type ToolContext } from "@intentface/latch-core";
 ```
 
-Key exports: `createRuntime` · `defineAgent` · `defineContext` · `createVault` · `mergeConnections` · `mergeToolSources` · `toModelMessages` / `toClientMessages` · `staticPricing` / `computeCost` · `createIntervalScheduler`.
+Key exports: `createRuntime` · `defineAgent` · `ToolContext` · `createVault` · `mergeConnections` · `mergeToolSources` · `toModelMessages` / `toClientMessages` · `staticPricing` / `computeCost` · `createIntervalScheduler`.
 
 There is also `@intentface/latch-core/node` for the Node-only key derivation (`deriveMasterKey`), **`@intentface/latch-core/harness`** — the default harness tools (`bash`/`read_file`/`write_file`/`glob`/`grep` over the sandbox seam; `web_fetch` with clean markdown, media passthrough and SSRF gating; `askUser`; `list_schedules`/`cancel_schedule`), as `harnessTools: defaultHarnessTools()`; `web_fetch`'s `turndown` + `@intentface/latch-net` are optional peers loaded on first call — and **`@intentface/latch-core/models`** — the model side of a host, so you don't hand-write it: a models.dev-backed catalog (ids, labels, pricing, reasoning capability, max output — filtered to the providers whose SDK is installed and API key is set), provider inference from a model id, and the four `RuntimeConfig` hooks that depend on the provider.
 
@@ -49,7 +49,7 @@ createRuntime({
 
 `providerDefaults` supplies `pricing`, `resolveProviderTools`, `resolveReasoningOptions` and `resolvePromptCaching`; list any of them after the spread to override it. The provider SDKs (`@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`) are *optional* peers, imported lazily per provider — a host with one API key never loads the other two, and the core root imports none of them.
 
-→ [Runtime](/docs/runtime) · [Seams](/docs/reference/seams)
+→ [Runtime](/docs/concepts/runtime) · [Hooks](/docs/reference/hooks)
 
 ## latch-drizzle
 
@@ -65,7 +65,7 @@ It takes the `db`, not a connection string — your app owns the connection and 
 
 Beyond the core adapter it also provides the **secret store** (envelope-encrypted rows behind `createVault`), the **memory job store**, and an **agent-builder store** so DB-defined agents work without you writing that table.
 
-The agent-builder store is versioned: `upsert` publishes (appending a snapshot unless the content is unchanged), `activateVersion` rolls back by moving a pointer, `listVersions` / `getVersion` / `listActivations` read the history, and `getDraft` / `saveDraft` / `discardDraft` / `listDrafts` hold one unpublished working copy **per editor**. See [Agents → Versions, drafts and rollback](/docs/agents#versions-drafts-and-rollback).
+The agent-builder store is versioned: `upsert` publishes (appending a snapshot unless the content is unchanged), `activateVersion` rolls back by moving a pointer, `listVersions` / `getVersion` / `listActivations` read the history, and `getDraft` / `saveDraft` / `discardDraft` / `listDrafts` hold one unpublished working copy **per editor**. See [Agents → Versions, drafts and rollback](/docs/guides/agents-in-a-database#versions-drafts-and-rollback).
 
 Key exports: `createSqliteAdapter` · `createPostgresAdapter` · `migrate` / `migratePostgres` · `createSqliteSecretStore` · `createPostgresSecretStore` · `createMemoryJobStore` · `createSqliteAgentBuilderStore` · `schema`.
 
@@ -89,7 +89,7 @@ import { createLatchHono, createLatchHonoApp } from "@intentface/latch-server/ho
 
 `hono` stays an optional peer because the adapter lives on a subpath. Also supplies `createCronerEvaluator()` for the `cron` seam, since core ships no cron library.
 
-→ [Hosting](/docs/hosting)
+→ [Hosting](/docs/guides/mount-the-handler)
 
 ## latch-mcp
 
@@ -112,6 +112,8 @@ Key exports: `createMcpConnections` · `defineMcpConnection` · `createMcpHost` 
 Key exports: `bearer` · `apiKey` · `headers` · `isHostAllowed`. Uses `@apidevtools/swagger-parser` to resolve specs.
 
 ## latch-memory
+
+**Experimental.** The only production store today is a Loredex workspace, and the design may change.
 
 **Facts that survive the conversation.** Wire the `MemoryProvider` seam and each turn gets a compiled index appended to its instructions plus `memory_search` / `memory_save` tools; background jobs handle extraction and consolidation out of band.
 
@@ -146,7 +148,7 @@ You supply the persistence: which agent a bot serves, the identity links, held m
 Decide deliberately whether a turn runs as the *person messaging* or as the
 account that installed the bot. Getting this wrong keys every row to the wrong
 owner and silently disables per-user memory — see the worked example in
-[Principals](/docs/foundations/principals#make-sure-the-principal-is-the-person-you-think-it-is).
+[Principals](/docs/guides/ownership-patterns#make-sure-the-principal-is-the-person-you-think-it-is).
 </Callout>
 
 ## latch-agent-builder

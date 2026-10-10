@@ -1,0 +1,89 @@
+---
+title: Inside a turn
+description: What goes into a turn, the three views of a message, compaction, and the order a turn runs in.
+---
+
+A turn is built from what it's given (**principal**, **context**, **params**, the message's **data-context**) and from the stored **messages**, projected differently for the model and the user. What each input is and when to use it: [Principal, context and params](/docs/concepts/inputs). In short:
+
+- **principal**: who is asking. Saved with the chat, run and schedule; the storage adapter derives the owner key that scopes every row from it; re-checked by `reconstructPrincipal` when a turn runs without a request.
+- **context**: built by your `context` function from the principal at the start of every turn. Never saved.
+- **params**: saved on the chat by its first message; every turn gets them.
+- **data-context**: a part on the user's message; the turn answering that message gets it, saved with the message.
+
+<Callout type="warn" title="Pin the tenant at session creation">
+If the value your owner key derives from can change mid-session (an "active org" the user can switch), owner-keyed rows fragment silently: yesterday's chats belong to a key you no longer produce. Resolve it once when the session is created and keep it stable for the session's life.
+</Callout>
+
+## Messages — one record, three views
+
+`AppMessage` is just an AI SDK `UIMessage` typed with Latch's metadata. It is the source of truth; everything else is a projection.
+
+```ts
+type AppMessage = UIMessage<AppMetadata, UIDataTypes, TOOLS>;
+
+interface AppMetadata {
+  visibility?: "user" | "internal" | "redacted"; // client-projection axis
+  sendToModel?: boolean; // model-projection axis
+  model?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
+  cost?: number;
+  finishReason?: string;
+  createdAt?: number;
+  voice?: { durationMs: number };
+}
+```
+
+The **two axes** are the whole mechanism:
+
+| | `visibility` | `sendToModel` |
+| --- | --- | --- |
+| Governs | what the *user* sees | what the *model* sees |
+| Applied by | `toClientMessages` | `toModelMessages` |
+
+So a compaction summary or an injected instruction can reach the model without ever appearing in the conversation, and a redacted message can stay in the record while being invisible to both.
+
+```ts
+import { toClientMessages, toModelMessages } from "@intentface/latch-core";
+
+const forUser = toClientMessages(stored); // drops internal + redacted
+const forModel = await toModelMessages(stored, { tools }); // drops sendToModel: false
+```
+
+<Callout title="Pass the same tools to both">
+`toModelMessages` wraps the SDK's `convertToModelMessages`, which consults each tool's `toModelOutput` to decide what a tool result looks like to the model. Pass the same tool set you passed to the agent, or replayed history won't match what the model saw live.
+</Callout>
+
+`toModelMessages` also, in order: cuts to the live context window at the compaction boundary, drops `sendToModel: false`, neutralizes audio file parts, and closes any dangling tool calls (a tool call with no result makes conversion throw).
+
+## Compaction
+
+A chat that never ends — a DM, a months-old thread — would grow its prompt forever. `runtime.compactChat` summarises the history and appends a **boundary marker** (`data-compaction`); from then on the model projection starts at that boundary and reads the summary instead of the turns it replaced.
+
+```ts
+const result = await runtime.compactChat({
+  chatId,
+  principal,
+  focus: "keep the training plan",
+});
+// → { summary, compacted } | null
+```
+
+Stored history is untouched — compaction shrinks the *projection*, never the record. `null` means there was too little to compact. It throws `PendingApprovalError` if the last turn is paused awaiting a human.
+
+## What a turn actually does
+
+The order matters when you're debugging an option or an extension.
+
+1. **Context**: your `context({ principal })` function builds it; every tool later receives it, plus `principal`, `params`, `messageContext`, `run` and `writer`, as `options.context`.
+2. **Agent**: the agent function runs with `{ context, principal, params, messageContext }` and returns an `AgentConfig`; the chat's saved params are checked against the agent's schema first. Dynamic agents resolve here.
+3. **Tools** — static `tools`, plus each `ToolSource` opened for this turn (connections/MCP), plus harness, sandbox, render and memory tools per the agent's flags. Sources are closed when the turn ends.
+4. **Instructions** — the agent's `instructions`, plus the memory provider's compiled index block, plus the current date line.
+5. **Model** — one `ToolLoopAgent` stream. `smoothStream`, `maxSteps`, `enabledTools` and reasoning options all apply here.
+6. **Persist** — the user and assistant messages, the run row, and a usage row carrying the priced cost.
+
+A gated tool call ends step 5 early with an `approval-requested` part; the run goes `awaiting_input` and waits for `applyApproval`.

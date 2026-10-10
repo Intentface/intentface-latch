@@ -11,7 +11,7 @@ createRuntime({ storage, context, agents });
 
 ## What it stores
 
-Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every method that *takes a principal* scopes its read by it. A few internal methods take a bare id instead (`getRun`, `reclaimRun`, `reapExpiredRuns`); those are runtime machinery, not a caller-facing API, and they are **not** ownership-scoped. Reach for the [Runtime operations](/docs/runtime) rather than the adapter when you're serving a request.
+Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every method that *takes a principal* scopes its read by it. A few internal methods take a bare id instead (`getRun`, `reclaimRun`, `reapExpiredRuns`); those are runtime machinery, not a caller-facing API, and they are **not** ownership-scoped. Reach for the [Runtime operations](/docs/reference/runtime) rather than the adapter when you're serving a request.
 
 | Record | Holds |
 | --- | --- |

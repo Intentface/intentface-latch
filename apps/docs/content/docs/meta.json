@@ -2,17 +2,12 @@
   "title": "Latch",
   "pages": [
     "index",
-    "foundations",
     "getting-started",
-    "runtime",
-    "agents",
-    "operations",
-    "channels",
-    "connections",
-    "memory",
-    "extensions",
-    "hosting",
+    "concepts",
+    "hard-parts",
+    "guides",
     "reference",
-    "cookbook"
+    "---Experimental---",
+    "memory"
   ]
 }
