@@ -1,4 +1,4 @@
-import type { LanguageModel } from "ai";
+import { asSchema, type FlexibleSchema, type LanguageModel } from "ai";
 import type { MemoryConfig } from "./memory.js";
 import type { Extension } from "./extensions/extension.js";
 
@@ -190,10 +190,29 @@ export interface AgentMeta {
    * them out.
    */
   hidden?: boolean;
+  /**
+   * What a chat with this agent is about, as a schema (Zod, Valibot, any
+   * Standard Schema): a ticket, a document, a model fixed for the chat. Set on
+   * the chat's first message (`handleChat({ params })`, `runAgent`,
+   * `schedule`), validated, saved on the chat, and handed to the agent function
+   * and its tools on every turn. Most agents need none; an agent without a
+   * schema refuses params.
+   *
+   * Params come from the client. An id in them says which thing the chat is
+   * about, not whether the user may see it: load it through something limited
+   * to the principal, in the agent function.
+   */
+  params?: FlexibleSchema;
+  /**
+   * How this agent reads the `data-context` part on user messages, in place of
+   * the runtime's `messageContext.toModel`. Return `undefined` to leave it out
+   * for this agent.
+   */
+  messageContext?: { toModel?: (context: any) => string | undefined }; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
 /** An agent's identity for selection UIs: its registry key + display metadata. */
-export interface AgentInfo extends AgentMeta {
+export interface AgentInfo extends Omit<AgentMeta, "params" | "messageContext"> {
   name: string;
 }
 
@@ -202,7 +221,14 @@ export interface AgentInfo extends AgentMeta {
  * Carries optional static `meta` (read without invoking the factory) so the
  * runtime can list agents for a picker.
  */
-export type AgentFactory<P, RuntimeContext = unknown> = ((ctx: {
+export type AgentFactory<P, RuntimeContext = unknown, Params = unknown> = ((ctx: AgentFactoryInput<P, RuntimeContext, Params>) => AgentConfig<P> | Promise<AgentConfig<P>>) & { meta?: AgentMeta };
+
+/**
+ * What an agent function receives. `params` is required for an agent that
+ * declares a params type, and optional for one that doesn't, so a factory with
+ * no params can still be called as `factory({ context, principal })`.
+ */
+export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
   /**
    * The runtime CONTEXT built by `context.build` for this turn (org name, plan,
    * feature flags — see `ContextDefinition`).
@@ -210,20 +236,138 @@ export type AgentFactory<P, RuntimeContext = unknown> = ((ctx: {
   context: RuntimeContext;
   principal: P;
   /**
-   * The per-turn request payload (see `ContextDefinition.build`). Ephemeral —
-   * absent on resume/cron turns, so factories must not require it.
+   * What the user is looking at, from the `data-context` part of the message
+   * being answered (checked against `messageContext.schema` when set). The
+   * same on a continuation of that answer; `undefined` when the message has
+   * none.
+   */
+  messageContext?: unknown;
+  /**
+   * @deprecated Per-request data that isn't saved, so it is missing when an
+   * answer continues after an approval, a crash or on a schedule. Use `params`
+   * for what the chat is about.
    */
   turnContext?: unknown;
-}) => AgentConfig<P> | Promise<AgentConfig<P>>) & { meta?: AgentMeta };
+} & (0 extends 1 & Params
+  ? {
+      // `any` (the registry's view of every agent): required, so a factory
+      // that needs its params still fits.
+      params: Params;
+    }
+  : unknown extends Params
+  ? {
+      /** What this chat is about; `undefined` for an agent that declares no params. */
+      params?: Params;
+    }
+  : {
+      /**
+       * What this chat is about, validated against `meta.params` (see
+       * {@link AgentMeta.params}).
+       */
+      params: Params;
+    });
 
-export function defineAgent<P, RuntimeContext = unknown>(
-  def: AgentConfig<P> | AgentFactory<P, RuntimeContext>,
-  meta?: AgentMeta,
-): AgentFactory<P, RuntimeContext> {
-  const factory: AgentFactory<P, RuntimeContext> =
+/**
+ * Declares an agent: a config, or a function that builds one every turn from
+ * `{ context, principal, params }`. Pass `params` in `meta` to say what a chat
+ * with it is about; its type then flows into the function. With explicit type
+ * arguments, give the params type as the third:
+ * `defineAgent<Principal, Ctx, { ticketId: string }>(fn, { params: schema })`.
+ */
+export function defineAgent<P, RuntimeContext = unknown, Params = unknown>(
+  def: AgentConfig<P> | AgentFactory<P, RuntimeContext, Params>,
+  meta?: AgentMeta & { params?: FlexibleSchema<Params> },
+): AgentFactory<P, RuntimeContext, Params> {
+  const factory: AgentFactory<P, RuntimeContext, Params> =
     typeof def === "function"
-      ? (def as AgentFactory<P, RuntimeContext>)
+      ? (def as AgentFactory<P, RuntimeContext, Params>)
       : () => def;
   if (meta) factory.meta = meta;
   return factory;
+}
+
+/** Params larger than this (as JSON) are refused: they are saved with every chat. */
+export const MAX_PARAMS_BYTES = 16 * 1024;
+
+/**
+ * Params were refused: the agent declares none, they don't match its schema,
+ * they aren't JSON, or they are too large. The HTTP server answers 400.
+ */
+export class InvalidParamsError extends Error {
+  readonly code = "invalid_params" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidParamsError";
+  }
+}
+
+export function isInvalidParamsError(e: unknown): e is InvalidParamsError {
+  return e instanceof InvalidParamsError || (e as { code?: unknown } | null)?.code === "invalid_params";
+}
+
+/**
+ * A later message tried to change the chat's params. They are fixed for the
+ * chat's life; start a new chat for something else. The HTTP server answers 409.
+ */
+export class ParamsFixedError extends Error {
+  readonly code = "params_fixed" as const;
+  constructor(chatId: string) {
+    super(`chat ${chatId} is already about something else: start a new chat for different params`);
+    this.name = "ParamsFixedError";
+  }
+}
+
+export function isParamsFixedError(e: unknown): e is ParamsFixedError {
+  return e instanceof ParamsFixedError || (e as { code?: unknown } | null)?.code === "params_fixed";
+}
+
+/**
+ * Checks params against an agent's schema and returns what to SAVE: the input,
+ * as plain JSON, once the schema has accepted it. The input rather than the
+ * schema's output, because the output can be anything a transform makes (a
+ * `Date`), and because the saved value is checked again on every turn: a
+ * transform must run on the original, not on its own result. Refuses params for
+ * an agent without a schema, values that aren't JSON, and anything over
+ * {@link MAX_PARAMS_BYTES}. `undefined` stays `undefined` unless the schema
+ * rejects it.
+ */
+export async function paramsToSave(agent: string, schema: FlexibleSchema | undefined, value: unknown): Promise<unknown> {
+  const json = paramsJson(agent, schema, value);
+  await validateParams(agent, schema, json);
+  return json;
+}
+
+/** `value` as plain JSON, size-capped; refused for an agent without a schema. */
+function paramsJson(agent: string, schema: FlexibleSchema | undefined, value: unknown): unknown {
+  if (!schema) {
+    if (value !== undefined) throw new InvalidParamsError(`agent "${agent}" takes no params`);
+    return undefined;
+  }
+  if (value === undefined) return undefined;
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    // falls through to the refusal below
+  }
+  if (text === undefined) throw new InvalidParamsError(`params for "${agent}" must be JSON`);
+  if (new TextEncoder().encode(text).length > MAX_PARAMS_BYTES) {
+    throw new InvalidParamsError(`params for "${agent}" are over ${MAX_PARAMS_BYTES} bytes`);
+  }
+  return JSON.parse(text);
+}
+
+/**
+ * Checks params against an agent's schema and returns the schema's output
+ * (defaults applied, transforms run): what the agent function and tools get.
+ * Use {@link paramsToSave} for what to store.
+ */
+export async function validateParams(agent: string, schema: FlexibleSchema | undefined, value: unknown): Promise<unknown> {
+  const json = paramsJson(agent, schema, value);
+  if (!schema) return undefined;
+  const check = asSchema(schema).validate;
+  if (!check) return json;
+  const result = await check(json);
+  if (!result.success) throw new InvalidParamsError(`params for "${agent}" don't match its schema: ${result.error.message}`);
+  return result.value;
 }

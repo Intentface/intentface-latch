@@ -242,6 +242,8 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
  *   invalid_message   400  the message isn't a new user message (text and files)
  *   rewind_not_supported 409  an earlier question was regenerated or edited: fork instead
+ *   invalid_params    400  params the agent doesn't declare, or that don't match its schema
+ *   params_fixed      409  different params for a chat that was started with others
  */
 function refusalResponse(e: unknown): Response | undefined {
   const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
@@ -268,6 +270,10 @@ function refusalResponse(e: unknown): Response | undefined {
       return json({ error: message("invalid message"), code }, 400);
     case "rewind_not_supported":
       return json({ error: message("only the last question can be regenerated or edited"), code }, 409);
+    case "invalid_params":
+      return json({ error: message("invalid params"), code }, 400);
+    case "params_fixed":
+      return json({ error: message("this chat was started with different params"), code }, 409);
     default:
       return undefined;
   }
@@ -535,6 +541,9 @@ export function createLatchHandler<P>(
             chatId,
             principal,
             message: toUserMessage(body),
+            // What the chat is about, for an agent that declares params: sent
+            // with the first message, checked against the saved ones after.
+            ...(body.params !== undefined ? { params: body.params } : {}),
             request,
             // The POST body is parsed exactly once, here — pass it on as the
             // per-turn payload so `context.build` / agent factories can read
@@ -590,6 +599,7 @@ export function createLatchHandler<P>(
           prompt?: string;
           delivery?: unknown;
           onParked?: unknown;
+          params?: unknown;
         };
         if (!body.agent || !body.prompt) {
           return json({ error: "agent and prompt are required" }, 400);
@@ -615,6 +625,7 @@ export function createLatchHandler<P>(
             // seam unreachable through this handler.
             delivery: body.delivery,
             onParked: body.onParked as "skip" | "fire" | undefined,
+            ...(body.params !== undefined ? { params: body.params } : {}),
           });
           return json({ schedule: record });
         } catch (e) {

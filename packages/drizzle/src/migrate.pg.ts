@@ -4,7 +4,7 @@ import type { PgDatabase } from "drizzle-orm/pg-core";
 const DDL = [
   `CREATE TABLE IF NOT EXISTS latch_chats (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL,
-     title TEXT, kind TEXT NOT NULL DEFAULT 'user', parent_agent TEXT,
+     title TEXT, kind TEXT NOT NULL DEFAULT 'user', parent_agent TEXT, params JSONB,
      created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_chats_owner_idx ON latch_chats (owner)`,
   // NOTE: composite PK — message ids are only unique within a chat, and the
@@ -92,7 +92,7 @@ const DDL = [
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, agent TEXT NOT NULL, identity JSONB,
      cron TEXT, timezone TEXT, prompt TEXT NOT NULL, delivery JSONB,
      next_run_at BIGINT NOT NULL, last_run_at BIGINT,
-     on_parked TEXT, last_chat_id TEXT,
+     on_parked TEXT, last_chat_id TEXT, params JSONB,
      enabled INTEGER NOT NULL, lease_owner TEXT, lease_expires_at BIGINT,
      created_at BIGINT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS latch_schedules_owner_idx ON latch_schedules (owner)`,
@@ -149,6 +149,8 @@ const ALTERS = [
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS settings JSONB`,
   `ALTER TABLE latch_agent_versions ADD COLUMN IF NOT EXISTS changed_fields JSONB`,
   `ALTER TABLE latch_agent_versions ADD COLUMN IF NOT EXISTS change_message TEXT`,
+  `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS params JSONB`,
+  `ALTER TABLE latch_schedules ADD COLUMN IF NOT EXISTS params JSONB`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];

@@ -28,6 +28,7 @@ export function memoryStorage<P = { orgId: string }>() {
         title: input.title,
         kind: input.kind ?? "user",
         ...(input.parentAgent ? { parentAgent: input.parentAgent } : {}),
+        ...(input.params !== undefined ? { params: input.params } : {}),
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };

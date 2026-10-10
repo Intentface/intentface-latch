@@ -25,6 +25,8 @@ export const chats = pgTable(
     kind: text("kind").notNull().default("user"),
     /** Spawning agent of a sub-thread (ChatRecord.parentAgent); null at top level. */
     parentAgent: text("parent_agent"),
+    /** What the chat is about, fixed when it starts (ChatRecord.params). */
+    params: jsonb("params"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -385,6 +387,8 @@ export const schedules = pgTable(
     onParked: text("on_parked"),
     /** Chat of the last default-path fire (see StorageAdapter.noteScheduleFire). */
     lastChatId: text("last_chat_id"),
+    /** Params each fired chat starts with (ScheduleRecord.params). */
+    params: jsonb("params"),
     enabled: integer("enabled").notNull(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),

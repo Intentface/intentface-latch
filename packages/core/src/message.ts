@@ -1,5 +1,5 @@
 import type { UIMessage, UITools, UIDataTypes } from "ai";
-import { COMPACTION_PART_TYPE } from "./projections.js";
+import { COMPACTION_PART_TYPE, CONTEXT_PART_TYPE } from "./projections.js";
 
 /**
  * The message model.
@@ -65,6 +65,21 @@ export class InvalidMessageError extends Error {
 
 export function isInvalidMessageError(e: unknown): e is InvalidMessageError {
   return e instanceof InvalidMessageError || (e as { code?: unknown } | null)?.code === "invalid_message";
+}
+
+/** A context part's data as plain JSON, size-capped; refused otherwise. */
+export function contextData(data: unknown): unknown {
+  if (data === undefined) throw new InvalidMessageError("a data-context part needs data");
+  let text: string;
+  try {
+    text = JSON.stringify(data);
+  } catch {
+    throw new InvalidMessageError("a data-context part's data must be JSON");
+  }
+  if (new TextEncoder().encode(text).length > MAX_CONTEXT_BYTES) {
+    throw new InvalidMessageError(`a data-context part is over ${MAX_CONTEXT_BYTES} bytes`);
+  }
+  return JSON.parse(text);
 }
 
 /**
@@ -166,6 +181,28 @@ export class RewindNotSupportedError extends Error {
 /** The parts a person can send: what they typed and what they attached. */
 const USER_PART_TYPES = new Set(["text", "file"]);
 
+/** A message's context part is refused over this size (as JSON): it is saved with the message. */
+export const MAX_CONTEXT_BYTES = 32 * 1024;
+
+/** The data of a message's `data-context` part, or `undefined`. */
+export function contextOf(message: AppMessage | undefined): unknown {
+  const part = message?.parts.find((p) => p.type === CONTEXT_PART_TYPE) as { data?: unknown } | undefined;
+  return part?.data;
+}
+
+/**
+ * The context of the message being answered: the latest user message that
+ * hasn't been hidden. A continuation (an approval, a resumed run) answers the
+ * same message, so it sees the same context.
+ */
+export function latestMessageContext(messages: readonly AppMessage[]): unknown {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role === "user" && !isHidden(m)) return contextOf(m);
+  }
+  return undefined;
+}
+
 /**
  * The message a client sent, as Latch will store it — or a refusal.
  *
@@ -228,12 +265,20 @@ export function acceptUserMessage(
   const parts: AppMessage["parts"] = [];
   for (const part of message.parts) {
     const type = (part as { type?: unknown } | null)?.type;
+    if (type === CONTEXT_PART_TYPE) {
+      if (parts.some((p) => p.type === CONTEXT_PART_TYPE)) throw new InvalidMessageError("a message can have only one data-context part");
+      parts.push({ type: CONTEXT_PART_TYPE, data: contextData((part as { data?: unknown }).data) } as AppMessage["parts"][number]);
+      continue;
+    }
     if (typeof type !== "string" || !USER_PART_TYPES.has(type)) {
-      throw new InvalidMessageError(`a user message can only contain text and files, not "${String(type)}"`);
+      throw new InvalidMessageError(`a user message can only contain text, files and a data-context part, not "${String(type)}"`);
     }
     const clean = userPart(part);
     if (!clean) throw new InvalidMessageError(`a ${type} part is missing its ${type === "text" ? "text" : "mediaType or url"}`);
     parts.push(clean);
+  }
+  if (!parts.some((p) => p.type !== CONTEXT_PART_TYPE)) {
+    throw new InvalidMessageError("a message needs text or a file, not only a data-context part");
   }
   // Files sent inline travel in the request and are stored in the message
   // row, then reloaded on every turn: cap them. Larger files belong in
