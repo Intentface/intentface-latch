@@ -24,6 +24,9 @@ function answering() {
   const prompts: string[] = [];
   const model = new MockLanguageModelV4({
     modelId: "mock",
+    // Takes file URLs as they are, like a real provider does. Without it the AI
+    // SDK downloads every URL first, and a test sending one goes to the network.
+    supportedUrls: { "*/*": [/^https?:\/\//] },
     doStream: (async (opts: { prompt: unknown }) => {
       prompts.push(JSON.stringify(opts.prompt));
       n++;
