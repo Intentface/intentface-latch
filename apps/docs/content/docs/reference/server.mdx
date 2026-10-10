@@ -27,7 +27,7 @@ const handler = createLatchHandler<Principal>({ runtime, resolveContext, basePat
 
 ## Routes
 
-Paths are relative to `basePath`. Every route except the cron route calls `resolveContext` first.
+Paths are relative to `basePath`. Every route except the cron route and the connection sign-in callback calls `resolveContext` first. The callback restores the principal that started the sign-in instead (see `reconstructPrincipal` above).
 
 | Route | What it does |
 | --- | --- |

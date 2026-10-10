@@ -196,18 +196,23 @@ resolveContext: async (request) => {
   const session = await auth.getSession(request);
   if (!session) return null;
 
-  const actingAs = request.headers.get("x-acting-as-org");
+  // The customer being helped: "orgId/userId", or "orgId" for team chats.
+  const actingAs = request.headers.get("x-acting-as");
   if (actingAs) {
     if (!(await isSupportStaff(session.userId))) return null;
     await auditLog.record({ actor: session.userId, subject: actingAs });
-    return { orgId: actingAs, userId: session.userId };
+    const [orgId, userId] = actingAs.split("/");
+    // The customer's principal, so storage opens their chats. `actorId` isn't
+    // part of the owner key: it records who acted without changing whose
+    // chats these are.
+    return { orgId, userId, actorId: session.userId };
   }
 
   return { orgId: session.orgId, userId: session.userId };
 },
 ```
 
-Two properties worth keeping: the authorization check happens before the principal is built, and the *acting* user stays in the principal so tools and traces record who really did it.
+Two properties worth keeping: the authorization check happens before the principal is built, and the staff member rides along as `actorId` (add it to your `Principal` type, outside the owner key), so tools and traces record who really did it.
 
 ## How a principal reaches a tool
 

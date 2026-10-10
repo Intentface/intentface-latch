@@ -36,6 +36,8 @@ export const runtime = createRuntime<Principal>({
       toolApproval: { refund: "user-approval" },
     }),
   },
+  // Finishes answers a crashed server left, once something calls
+  // runtime.cron() regularly (see "Deploy on Vercel or many servers").
   durability: { enabled: true },
 });
 
@@ -198,10 +200,28 @@ store. Read [channels](references/concepts/channels.md) and
 
 ### Deploy on Vercel or many servers
 
-`durability: { enabled: true }`, `maxDuration` on the chat and cron routes, a
-GET cron route that checks `CRON_SECRET` and calls `runtime.cron()`, and
-`vercel.json` crons. Read [deploy on Vercel](references/guides/deploy-on-vercel.md)
-and [crash recovery](references/guides/crash-recovery.md).
+`durability: { enabled: true }`, `maxDuration` on the chat and cron routes,
+and a cron that calls `runtime.cron()`: it fires due schedules and finishes
+interrupted answers. Without it, neither happens.
+
+```ts
+// app/api/cron/route.ts; vercel.json: { "crons": [{ "path": "/api/cron", "schedule": "* * * * *" }] }
+export const maxDuration = 300;
+
+export async function GET(req: Request) {
+  const secret = process.env.CRON_SECRET;
+  // Unset, the comparison would accept "Bearer undefined".
+  if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  const result = await runtime.cron();
+  return Response.json({ fired: result.due.fired, resumed: result.resumed.length });
+}
+```
+
+On a long-running server, `createLatchApp` runs the cron for you.
+Read [deploy on Vercel](references/guides/deploy-on-vercel.md) and
+[crash recovery](references/guides/crash-recovery.md).
 
 ### More
 

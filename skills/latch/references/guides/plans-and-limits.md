@@ -50,7 +50,7 @@ Subagents count against the limits of the run that started them, with the same t
 
 ## 3. Tell the user which limit they hit
 
-A refused run throws `LimitExceededError` before anything is saved. Its message names the limit by its `label` and says when it resets: "Limit reached: your daily requests. Try again in 3 hours." `createLatchHandler` turns it into `429` with `Retry-After`; in your own route, do the same:
+A refused run throws `LimitExceededError` before the chat or the message is saved. (The refused attempt's place in the window is given back; if that fails, it counts once against the limit.) Its message names the limit by its `label` and says when it resets: "Limit reached: your daily requests. Try again in 3 hours." `createLatchHandler` turns it into `429` with `Retry-After`; in your own route, do the same:
 
 ```ts
 import { isLimitExceededError } from "@intentface/latch-core";

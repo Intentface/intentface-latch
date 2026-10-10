@@ -64,7 +64,9 @@ Vercel Cron calls a URL with `GET` and your `CRON_SECRET` as a bearer token. One
 export const maxDuration = 300;
 
 export async function GET(req: Request) {
-  if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
+  const secret = process.env.CRON_SECRET;
+  // Unset, the comparison would accept "Bearer undefined".
+  if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
     return new Response("Forbidden", { status: 403 });
   }
   const result = await runtime.cron();
