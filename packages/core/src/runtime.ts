@@ -4174,7 +4174,7 @@ export function createRuntime<P, RC = unknown>(
       });
       return { summary: text, compacted: live.length };
     } catch (e) {
-      await storage
+      await owned
         .updateRun(run.id, {
           status: "errored",
           error: e instanceof Error ? e.message : String(e),
@@ -4433,7 +4433,7 @@ export function createRuntime<P, RC = unknown>(
       // If settling fails too, say so: the run then stays active (holding the
       // chat until its lease lapses), and a caller told only the setup error
       // would retry into a busy chat without knowing why.
-      const unsettled = await storage
+      const unsettled = await ownedBy(run.ownerKey)
         .updateRun(run.id, { status: "errored", error, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null }, lease)
         .then(
           // `false`: the lease guard refused the write — another worker holds the run now.
