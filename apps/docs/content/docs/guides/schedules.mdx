@@ -68,5 +68,7 @@ createRuntime({
 
 Return `true` (or `{ handled: true, … }`) only when you ran *and* delivered it. Anything else — `false`, `{ handled: false }`, `undefined`, or a throw — falls through to core's default, so a stale target (bot disabled, user unlinked) still gets the work done in a chat rather than losing the fire. Core keeps owning the claim, the lease and the advance either way.
 
+So once your hook has delivered, return `{ handled: true, … }` even if a later step fails: a throw after delivery falls through and the work runs a second time, at a second turn's cost. Make any retry of the delivery itself safe to repeat.
+
 `runScheduleNow` makes a schedule due immediately and lets it fire through the ordinary `runDue` path — so "run now" can never drift from what the cron actually does.
 

@@ -120,6 +120,7 @@ Express, Fastify and NestJS predate `Request`/`Response`, so they need a bridge 
 
 ```ts title="node-bridge.ts"
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { LatchHandler } from "@intentface/latch-server";
 
@@ -150,7 +151,10 @@ async function writeNodeResponse(response: Response, res: ServerResponse): Promi
   res.statusCode = response.status;
   response.headers.forEach((value, key) => res.setHeader(key, value));
   if (!response.body) return void res.end();
-  Readable.fromWeb(response.body as never).pipe(res);
+  // pipeline, not pipe: on an error (or the client leaving) it closes both
+  // ends; a bare pipe leaves the error unhandled and can take the process down.
+  // The turn itself finishes and is saved server-side either way.
+  await pipeline(Readable.fromWeb(response.body as never), res).catch(() => {});
 }
 
 /** Returns false when Latch doesn't own the route, so the host can continue. */
@@ -232,8 +236,9 @@ await app.listen({ port: 3000 });
 </Tab>
 
 <Tab value="NestJS">
-NestJS runs on Express or Fastify, so the same bridge applies — reach for the
-underlying request and skip Nest's pipes on this route:
+The same bridge applies — reach for the underlying request and skip Nest's
+pipes on this route. This is NestJS on Express; on Fastify, `@Req()` and
+`@Res()` are Fastify's objects, so pass `req.raw` and `res.raw` to `handle`:
 
 ```ts title="latch.controller.ts"
 import { All, Controller, Next, Req, Res } from "@nestjs/common";

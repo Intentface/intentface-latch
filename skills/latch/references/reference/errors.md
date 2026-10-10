@@ -1,0 +1,26 @@
+<!-- Generated from apps/docs/content/docs/reference/errors.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Errors and refusals
+
+The typed refusals the runtime raises, their stable codes, and how the HTTP handler maps them.
+
+Online: https://intentface-latch-docs.vercel.app/docs/reference/errors
+
+The runtime refuses in a small number of typed ways. Each carries a stable `code` so a host can match it structurally, and `@intentface/latch-server` maps every one on every run-producing route (a message, an approval decision, a client-tool result).
+
+| Status | `code` | Class | Meaning | What the client does |
+| --- | --- | --- | --- | --- |
+| `400` | `invalid_message` | `InvalidMessageError` | The chat message isn't one a person can send: another role, a part other than text or a file, an id already in the chat, or inline files over `maxInlineFileBytes`. Nothing was persisted. | Send a new user message; send large files by URL. |
+| `409` | `rewind_not_supported` | `RewindNotSupportedError` | An earlier question was regenerated or edited. Only the last question can be changed in place, because later messages (and what the agent did since) build on it. | Fork the chat at that question, or regenerate the last one instead. |
+| `409` | `pending_approval` | `PendingApprovalError` | A decision is outstanding on this chat. | Render the approval; resolve it first. |
+| `409` | `chat_busy` | `ChatBusyError` | A turn is already running in this chat — two tabs, a retry racing a reply, a brief landing mid-conversation. Nothing was persisted. | Wait `Retry-After` (also `retryAfterMs` in the body), resend the same message. |
+| `409` | `chat_conflict` | `ChatConflictError` | The client-chosen chat id exists and isn't the caller's. | Pick another id. |
+| `429` | `limit_exceeded` | `LimitExceededError` | A turn, token or cost budget is spent. `retryAfterMs` is when the window turns over. | Wait `Retry-After`; tell the user which budget (`message`). |
+
+Structural checks are exported from core: `isChatBusyError`, `isLimitExceededError`, `isInvalidMessageError`; `@intentface/latch-channels` adds `isPendingApprovalError` and `isChatBusyError` for hosts that only see the runtime through its `ChannelRunOps` view.
+
+## What is not an error
+
+- **A denied approval** is an answer: the turn resumes and the agent says what it will do instead.
+- **A parked unattended run** (`status: "awaiting_input"`, `trigger: "schedule"`) is a legitimate outcome — see [Run agents on a schedule](../guides/schedules.md#when-a-fire-stops-for-a-human).
+- **An empty `200` from a decision route** means the turn cannot resume yet because another gate in the same step is undecided.

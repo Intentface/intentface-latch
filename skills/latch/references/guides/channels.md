@@ -1,0 +1,47 @@
+<!-- Generated from apps/docs/content/docs/guides/channels.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Chat apps in depth
+
+The same agent in Slack, Telegram and WhatsApp — one kernel for admission, identity and rendering; a platform is a parser plus a surface.
+
+Online: https://intentface-latch-docs.vercel.app/docs/guides/channels
+
+A channel puts an agent where people already talk. Users message a bot; the bot answers as the agent, with approvals, questionnaires and commands rendered natively. Identity, credentials and dedupe stay in your host, per Latch's isolation model; the package owns the protocol.
+
+**What it makes possible.** One agent reachable from the web app, Slack, Telegram and WhatsApp; account linking that survives a forwarded link; scheduled briefs delivered into the same conversation the user chats in; a fourth platform in a day, not a rewrite.
+
+## The kernel
+
+Telegram and WhatsApp are two `Surface`s over one **turn kernel** (`createTurnKernel` in `@intentface/latch-channels`). The kernel owns everything that used to be copied per platform: dedupe, the identity gate with stash and post-link replay, thread epochs (`/new`), the slash commands, questionnaires with fenced state, media folding (files inline, voice transcribed), posting the answer **once at finish** (split past the platform cap, with a typing hint meanwhile), approvals and button taps back into the run. A `Surface` is pure protocol — send text, a link, an approval, a question; edit or retire a card; download a file.
+
+```ts
+import { telegramChannel } from "@intentface/latch-channels/telegram";
+
+const channel = telegramChannel<Principal>({
+  agent, botRef, botToken, webhookSecret,
+  runtime: { handleChat, applyApproval, applyToolResult, compactChat, loadHistory },
+  authorizeUser, seen, stashPending, askState, thread, waitUntil,
+});
+return channel.handleRequest(request); // one webhook route per bot
+```
+
+Slack keeps its own adapter — its surface is threads, native streaming and task cards — and shares the primitives that fit: the auth result, dedupe claims, signed actor-bound approval buttons.
+
+## What you supply
+
+The persistence: which agent a bot serves, the identity links, held messages, delivery dedup — the platform's `channel-store.ts` is the reference, one set of tables for every kind. One turn per chat is **not** yours to guard: core's storage adapter refuses a second live run and the channels render that as "still working". On a custom adapter without that invariant, wire the optional `claimTurn` / `releaseTurn` lease.
+
+## Where this gets hard
+
+- **Platforms redeliver.** Telegram and Meta resend until they see a 2xx; Slack sends one message as two events. Every delivery, message and click is claimed once in a TTL'd table — an in-process set does not survive serverless. Everything happens *after* the 200, because Slack's three-second ACK deadline is what caused the retries.
+- **The bot answers itself.** Some bot posts carry no bot id. The bot's own user id is the loop guard, not a heuristic on message shape.
+- **Linking lands in the wrong browser.** The signed link identifies the platform user; the session identifies the Latch user; they can differ. A GET only renders a confirmation showing both, the POST is CSRF-bound to that pair, a link claimed by another account is refused, and tokens are domain-separated and length-prefixed so an id with a colon cannot forge another channel's token.
+- **A removed employee still has a linked account.** Membership is re-checked on every inbound turn and every scheduled delivery.
+- **Two users named their agent "support".** Bindings pin the agent's scope, so a personal agent never shadows an org one.
+- **Streaming that isn't.** Never edit a message to mimic streaming. Slack streams natively or posts once at finish; Telegram posts at finish with a typing hint and falls back to plain text when the model's markdown breaks the entity parser.
+- **Double taps.** Questionnaire state carries a revision fence, so a repeated tap cannot advance twice; a final tap refused because the chat is busy keeps its answers for the retry.
+
+## Next
+
+- [Guide: a scheduled brief delivered to a channel](https://intentface-latch-docs.vercel.app/docs/guides/scheduled-brief)
+- [Reference: packages — latch-channels](https://intentface-latch-docs.vercel.app/docs/reference/packages#latch-channels)

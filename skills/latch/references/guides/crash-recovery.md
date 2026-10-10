@@ -1,0 +1,54 @@
+<!-- Generated from apps/docs/content/docs/guides/crash-recovery.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Turn on crash recovery
+
+Leases, a heartbeat and a sweep, so an answer survives its server dying. What to configure and what happens.
+
+Online: https://intentface-latch-docs.vercel.app/docs/guides/crash-recovery
+
+A turn that outlives its invocation needs to survive the process dying. Latch does this with a lease, a heartbeat and a reaper — no workflow engine, no queue service, no worker that must stay alive.
+
+```ts
+createRuntime({
+  storage,
+  context,
+  agents,
+  durability: { enabled: true },
+});
+```
+
+What happens:
+
+1. **Claim** — the run is claimed with a lease (`owner`, `fencingToken`, expiry).
+2. **Heartbeat** — the holder extends the lease while it works.
+3. **Die** — the process is killed mid-turn. Nothing is lost: every step so far is already in the log.
+4. **Reap** — a later `sweep()` (or `cron()`) finds runs whose lease has expired, marks them `errored`, clears the owner and bumps the fencing token (invalidating any zombie holder).
+5. **Resume** — `resume(runId)` reclaims the run under a fresh lease, then reads the tail of persisted history to decide what it needs. A turn whose last step called no tool had already finished, so its row is reconciled (`completed`, or `awaiting_input` when a gate is pending) with no model call. Anything else re-runs from history and completes server-side.
+
+Point any cron at `cron()` — it fires due schedules, then reaps and resumes in one call:
+
+```ts title="The whole operational wiring"
+await runtime.cron({ maxAttempts: 5 });
+// → { due: {…}, reaped: RunRecord[], resumed: RunOutcome[], errors: string[] }
+```
+
+`maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `sweep()` is the reap-and-resume half on its own, and `resume(runId)` reclaims and re-runs one run — for when you want the pieces separately.
+
+On a long-lived Node process, use the in-process scheduler instead of an external cron:
+
+```ts
+import { createIntervalScheduler } from "@intentface/latch-core";
+
+const scheduler = createIntervalScheduler({
+  intervalMs: 30_000,
+  onTick: () => runtime.cron(),
+  onError: (error) => log.warn({ error }, "sweep failed"),
+});
+scheduler.start();
+```
+
+Ticks never overlap — a slow tick skips the next fire rather than stacking — and the timer is `unref`'d so it won't hold the process open on its own.
+
+> **Why this is safe on every node at once**
+>
+> With a storage adapter that keeps the [storage contract](https://intentface-latch-docs.vercel.app/docs/reference/storage) (atomic reaping and claiming, fenced writes), as the built-in ones do, firing `sweep()` on all nodes simultaneously is fine: only one node wins each run, and fencing tokens stop a revived stale worker from overwriting newer state. An adapter that ignores the fence accepts a stale worker's writes, over the new worker's, until the stale worker notices: it stops once its heartbeats have failed for a full lease.

@@ -1,0 +1,116 @@
+<!-- Generated from apps/docs/content/docs/guides/write-an-extension.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Write an extension
+
+Add a capability of your own — a veto, a notice, a slash command, a context lens — without touching the runtime. Moments, effects, and the three rules that make them compose.
+
+Online: https://intentface-latch-docs.vercel.app/docs/guides/write-an-extension
+
+Every option on `createRuntime` adds one capability the runtime already knows about. An **extension** is how you add one it doesn't. It attaches handlers to the **moments** of a turn — before the model runs, before a tool executes, after a step ends — and each handler returns an **effect**. The runtime composes any number of extensions with one merge rule per moment, and with none attached a turn is exactly the same as without them.
+
+**What it makes possible.** A per-plan tool veto that the model is told about; a running cost line the customer sees and the model never does; a `/stats` command answered without a model call; a compaction that shrinks what the model reads while the customer keeps every message; a fail-closed audit log — each as one file, none as a change to core.
+
+## Your first extension
+
+```ts
+import { defineExtension } from "@intentface/latch-core";
+
+export const guardrails = defineExtension("guardrails", (ext) => {
+  // Refuse a tool for this tenant. The reason reaches the model as the
+  // tool's result, so it can explain rather than retry blindly.
+  ext.on("tool_call", ({ toolName }, run) => {
+    if (toolName === "delete_record" && plan(run.principal) === "free")
+      return { block: true, reason: "Deleting records needs the Team plan." };
+  });
+
+  // A line the customer sees after every step. The model never does.
+  ext.notify((step) => `${step.usage.inputTokens ?? 0} tokens in · ${step.durationMs} ms`);
+
+  // A slash command, answered with no model call.
+  ext.registerCommand("stats", {
+    description: "Turns this month",
+    handler: async (_args, { messages }) => `${messages.length} messages so far.`,
+  });
+});
+```
+
+Attach it to every turn, or to one agent's:
+
+```ts
+createRuntime({ storage, context, agents, extensions: [guardrails] });
+
+defineAgent({ model, instructions, extensions: [guardrails] });
+```
+
+Runtime-wide extensions run first, then the agent's own. A handler that returns `undefined` has no effect. A handler that throws is reported and skipped, so one broken extension never breaks a turn — unless its extension is marked `critical`, in which case the throw fails the run (see the third rule below).
+
+## Moments and effects
+
+The effect type for each moment is the permission — you cannot do everything everywhere, which is what keeps two extensions from fighting.
+
+| Moment | Returns | What it touches |
+| --- | --- | --- |
+| `session_start` | `{ inject }` / `{ replace }` | the transcript, on a conversation's first turn |
+| `before_agent_start` | `{ inject }` / `{ replace }` | the transcript, every turn, before the model |
+| `input` | `{ transform }` / `{ handled, reply }` | the user's text — rewrite it, or answer without the model |
+| `register_tools` | a new toolset | what the model may call; additions are always active |
+| `tool_call` | `{ block, reason }` | a veto; the reason becomes the tool's result |
+| `tool_result` | `{ output, isError }` | the stored result **and** what the model reads |
+| `instructions` | `{ append }` / `{ replace }` | the system prompt this turn |
+| `context` | `{ messages }` | the model's view of history this turn |
+| `step_start` | `{ stop, model, activeTools }` | whether, and how, the next step runs |
+| `step_end` | `{ append }` | parts appended to the reply — stored, and streamed live |
+| `render` | `{ hide }` / `{ replace }` | what the customer sees; never storage |
+| `error`, `agent_end` | — | observe |
+
+Three moments touch the stored record: `before_agent_start` (inject or replace before the run), `step_end` (append-only, after each step) and `tool_result` (the override *is* the stored value). Everything else is a lens on one audience's view and vanishes after the step.
+
+## The three rules
+
+**Storage keeps the truth.** `tool_result` changes what is stored, so a secret masked there is gone for the model and the customer alike. `render` changes only what the customer sees — live for parts an extension added, and every part on load — for the rarer case where the model should keep the truth and the person should not see it. Only the start moments can rewrite what is already stored, and only deliberately, through `replace`: `step_end` is append-only, and `render` never touches storage.
+
+**Order matters at `step_end`.** Handlers run in extension order, and the next model call waits for all of them. List an extension that persists before the ones that merely observe, and a persisting extension has always written before the model is asked again.
+
+**Failure is open by default, closed by declaration.** A throwing handler is reported and skipped. That is wrong for anything the run's correctness depends on: a persistence handler whose database is down has not "produced no effect", it has lost the step. Mark those `critical`, and a throw fails the run instead:
+
+```ts
+defineExtension("audit", (ext) => { /* … */ }, { critical: true });
+```
+
+## Identity
+
+Every handler receives the run's principal as a trailing argument — `run.principal` in `tool_call`, `ctx.principal` in `step_start`, `info.principal` in `step_end`. The one exception is `render`, which also runs when history is loaded with no run: its `ctx.principal` may be missing, so check it before use. Declare its shape once and every handler is typed, with no generic on any signature:
+
+```ts
+declare module "@intentface/latch-core" {
+  interface Principal { orgId: string; userId: string }
+}
+```
+
+Identity comes from the runtime, never from a closure: a per-tenant toolset, a per-tenant veto and a per-tenant redaction all read the same principal, so two extensions cannot disagree about who a run is for.
+
+## Two intents, assembled for you
+
+Most extensions want one of two things, and `defineExtension` spells both out so you don't assemble the moments by hand.
+
+**Give the model information** — `ext.context(provider, options)`. The provider returns text; the extension places it. `scope: "run"` (default) resolves once per turn and is cached per run, `"step"` resolves before every model call, `"session"` resolves once per conversation and is stored as a hidden part so later turns reuse it. `position: "before-user"` (default) prepends to the newest user message; `"system"` appends to the instructions.
+
+```ts
+ext.context(async ({ run }) => `The customer is on the ${await planOf(run.principal)} plan.`);
+```
+
+**Tell the customer something** — `ext.notify(provider)`. Runs at `step_end`; the text becomes a `data-notice-<extension>` part, stored on the reply and streamed as it happens. The model never sees it.
+
+## Testing an extension
+
+An extension is a plain value, so its handlers can be called directly. For the whole turn, run it through `createRuntime` with a mock model from `ai/test` and an in-memory `StorageAdapter`, then read the three surfaces: the chunks the client received, what storage holds, and `model.doStreamCalls` for what the model was asked. Core's own `turn.test.ts` under `src/extensions/` is the template.
+
+## Not available yet
+
+`instructions` and `context` apply to the turn's prompt, not per step. `render` does not touch the model's own streamed text live. An extension cannot yet contribute an HTTP route, a table or a scheduled job — the shape MCP with OAuth needs. Runtime-wide extensions render on `loadHistory`; an agent's own do not, since no agent is resolved there.
+
+## Next
+
+- [Hooks: extensions](https://intentface-latch-docs.vercel.app/docs/reference/hooks#extensions--moments-and-effects) — the effect types in full
+- [Turn inputs](https://intentface-latch-docs.vercel.app/docs/concepts/turns) — the three views of a message that `tool_result` and `render` operate on
+- [createRuntime](../reference/create-runtime.md) — where `extensions` sits among the other options

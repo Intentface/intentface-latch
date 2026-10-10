@@ -73,10 +73,11 @@ that are easy to miss and produce confusing UIs when missed:
    parts.** Seed your stream reader with a clone of that message before
    feeding it the continuation, or the answer renders as a second, half-empty
    message.
-2. **Mirror the decision locally first.** The approval card's state only
-   changes server-side when the continuation finishes persisting — mirror it
-   in local state at click time, or the card sits on screen for the whole run.
-   Reconcile against server history (`GET /chats/:id`) when the stream ends.
+2. **Mirror the decision locally first.** The decision is saved before the
+   continuation starts, but the stream won't show the card's new state until
+   the tool's result arrives — mirror it in local state at click time, or the
+   card sits on screen for the whole run. Reconcile against server history
+   (`GET /chats/:id`) when the stream ends.
 
 ## OAuth: the callback redirects — resuming is yours
 

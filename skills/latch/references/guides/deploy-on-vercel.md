@@ -1,0 +1,94 @@
+<!-- Generated from apps/docs/content/docs/guides/deploy-on-vercel.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Deploy on Vercel
+
+A Next.js app with Postgres, crash recovery, schedules and limits, on Vercel functions.
+
+Online: https://intentface-latch-docs.vercel.app/docs/guides/deploy-on-vercel
+
+Serverless changes three things: a function can be stopped at any moment, nothing runs between requests, and every request may land on a fresh instance. Latch is built for that. This guide sets it up.
+
+## 1. A database with transactions
+
+Use Postgres (Neon, Supabase, or any other) through a driver that supports transactions: `pg`, `postgres`, or Neon's `neon-serverless` pool. Neon's HTTP driver (`neon-http`) can't run transactions, and the adapter needs them.
+
+Run the migrations once per deploy, from a script, not on every request:
+
+```ts title="scripts/migrate.ts"
+import { migratePostgres } from "@intentface/latch-drizzle";
+await migratePostgres(db); // creates and updates the latch_* tables
+```
+
+## 2. The runtime
+
+One module, imported by every route. Creating the runtime is cheap and needs no connection, so a fresh instance pays nothing for it.
+
+```ts title="lib/latch.ts"
+import { createRuntime } from "@intentface/latch-core";
+import { createPostgresAdapter, createPostgresLimitStore } from "@intentface/latch-drizzle";
+import { createCronerEvaluator } from "@intentface/latch-server";
+
+export const runtime = createRuntime<Principal>({
+  storage: createPostgresAdapter(db, { owner: (p) => [p.orgId, p.userId] }),
+  context,
+  agents,
+  durability: { enabled: true }, // answers survive a stopped function
+  cron: createCronerEvaluator(), // recurring schedules
+  limits: { store: createPostgresLimitStore(db), limitsFor },
+  reconstructPrincipal: async (identity) => {
+    const p = identity as Principal;
+    return (await isActiveMember(p)) ? p : null;
+  },
+});
+```
+
+## 3. The chat route
+
+```ts title="app/api/chat/route.ts"
+export const maxDuration = 300; // seconds: long enough for your longest answer
+
+export async function POST(req: Request) {
+  const user = await requireUser(req);
+  const { id, message } = await req.json();
+  return runtime.handleChat({ agent: "assistant", chatId: id, principal: { orgId: user.orgId, userId: user.id }, message });
+}
+```
+
+An answer that runs past `maxDuration` isn't lost: the function stops, its lease runs out, and the next cron tick finishes the answer on another instance.
+
+## 4. The cron
+
+Vercel Cron calls a URL with `GET` and your `CRON_SECRET` as a bearer token. One small route turns that into `runtime.cron()`, which fires due schedules and recovers interrupted answers:
+
+```ts title="app/api/cron/route.ts"
+export const maxDuration = 300;
+
+export async function GET(req: Request) {
+  const secret = process.env.CRON_SECRET;
+  // Unset, the comparison would accept "Bearer undefined".
+  if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  const result = await runtime.cron();
+  if (result.errors.length) console.error("[latch cron]", result.errors);
+  return Response.json({ fired: result.due.fired, resumed: result.resumed.length });
+}
+```
+
+```json title="vercel.json"
+{ "crons": [{ "path": "/api/cron", "schedule": "* * * * *" }] }
+```
+
+Set `CRON_SECRET` in the project's environment variables; Vercel sends it automatically.
+
+> **How often your plan runs crons**
+>
+> Every-minute crons need a plan that allows them. With a less frequent cron, schedules fire late and crashed answers take longer to recover, but nothing is lost or run twice.
+
+## Checklist
+
+- `DATABASE_URL` points at a driver with transactions.
+- Migrations run on deploy.
+- `maxDuration` is set on the chat and cron routes.
+- `CRON_SECRET` is set, and `vercel.json` has the cron.
+- Model provider keys are in the environment.

@@ -76,7 +76,7 @@ defineExtension("audit", (ext) => { /* … */ }, { critical: true });
 
 ## Identity
 
-Every handler receives the run's principal as a trailing argument — `run.principal` in `tool_call`, `ctx.principal` in `step_start`, `info.principal` in `step_end`. Declare its shape once and every handler is typed, with no generic on any signature:
+Every handler receives the run's principal as a trailing argument — `run.principal` in `tool_call`, `ctx.principal` in `step_start`, `info.principal` in `step_end`. The one exception is `render`, which also runs when history is loaded with no run: its `ctx.principal` may be missing, so check it before use. Declare its shape once and every handler is typed, with no generic on any signature:
 
 ```ts
 declare module "@intentface/latch-core" {

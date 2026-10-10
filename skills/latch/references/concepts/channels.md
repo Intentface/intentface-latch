@@ -1,0 +1,44 @@
+<!-- Generated from apps/docs/content/docs/concepts/channels.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Channels
+
+The same agent in Slack, Telegram and WhatsApp, with approvals and questions as native buttons.
+
+Online: https://intentface-latch-docs.vercel.app/docs/concepts/channels
+
+**A channel puts your agent where people already talk.** Users message a bot in Slack, Telegram or WhatsApp; the bot answers as the agent, with the same conversations, tools, approvals and limits as your web app.
+
+## Why it exists
+
+Connecting a bot to a model takes an afternoon. Keeping it right takes much longer: platforms send the same message twice, a bot can end up answering itself, a person has to be linked to their account in your app, approvals need to be buttons that only the right person can press, and someone who left the company shouldn't keep a working bot. `@intentface/latch-channels` handles that once, for every platform.
+
+## The smallest version
+
+One webhook route per bot. You supply who the platform user is in your app, and optionally where the channel keeps its small bits of state; the runtime does the rest.
+
+```ts
+import { telegramChannel } from "@intentface/latch-channels/telegram";
+
+const channel = telegramChannel<Principal>({
+  agent: "assistant",
+  botRef, botToken, webhookSecret,
+  runtime,
+  authorizeUser, // the platform user → your principal, or a sign-in link
+  seen, stashPending, askState, thread, // optional stores: dedupe, held messages, button state, threads
+  waitUntil,
+});
+
+export const POST = (request: Request) => channel.handleRequest(request);
+```
+
+## What carries over
+
+- **The conversation.** A chat in Slack is a chat in storage like any other, with history, limits and crash recovery.
+- **Approvals and questions** become buttons, pressable only by the person they're for.
+- **Schedules** can deliver into the same thread the user chats in.
+- **Answers are posted when they're done,** or streamed where the platform really streams (Slack). Never faked by editing a message over and over.
+
+## Go deeper
+
+- What makes chat apps hard: [Channels in depth](../guides/channels.md)
+- A scheduled brief delivered to a channel: [Guide](https://intentface-latch-docs.vercel.app/docs/guides/scheduled-brief)

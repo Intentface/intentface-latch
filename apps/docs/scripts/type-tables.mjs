@@ -13,7 +13,7 @@ const contentDir = path.join(root, "content", "docs");
 const out = path.join(root, "lib", "type-tables.generated.json");
 const TAG = /<auto-type-table\s+path="([^"]+)"\s+name="([^"]+)"\s*\/>/g;
 
-const generator = createGenerator({ tsconfigPath: path.resolve(root, "../../packages/core/tsconfig.json") });
+const generator = createGenerator({ tsconfigPath: path.join(root, "tsconfig.type-tables.json") });
 
 async function* mdxFiles(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

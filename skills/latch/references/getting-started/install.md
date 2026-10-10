@@ -1,0 +1,40 @@
+<!-- Generated from apps/docs/content/docs/getting-started/install.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Install
+
+Add the packages from npm, wire a database, and get a runtime answering turns.
+
+Online: https://intentface-latch-docs.vercel.app/docs/getting-started/install
+
+The `@intentface/latch-*` packages are on the public npm registry. Nothing to configure — install and go.
+
+## What to install
+
+Start with two packages. Everything else is additive, and nothing else is required.
+
+```bash
+pnpm add @intentface/latch-core @intentface/latch-drizzle ai @ai-sdk/anthropic
+```
+
+`ai` is a **peer dependency** (`>=7.0.0`) — core deliberately doesn't pin your AI SDK version. Its only runtime dependency is `zod`.
+
+Add the rest as you need the capability:
+
+| Package | Adds |
+| --- | --- |
+| `latch-server` | a mountable HTTP surface — see [Hosting](../guides/mount-the-handler.md) |
+| `latch-mcp` | MCP connections, with an SSRF allowlist and vault-brokered auth |
+| `latch-openapi` | connections from an OpenAPI spec |
+| `latch-memory` | persistent agent memory across sessions (**experimental**) |
+| `latch-channels` | Slack, Telegram and WhatsApp |
+| `latch-langfuse` | OpenTelemetry tracing, one trace per run |
+| `latch-agent-builder` | agents defined as data, created from your UI |
+| `latch-net` | SSRF blocklist and a rebinding-safe pinned `fetch` |
+
+`latch-renderer` is not in this list on purpose: it's a headless-browser service
+you deploy, not a package you install. See [Packages](https://intentface-latch-docs.vercel.app/docs/reference/packages#latch-renderer).
+
+## Next
+
+- [Quickstart](./quickstart.md) — the whole backend in one call
+- [By hand](./by-hand.md) — `createRuntime` piece by piece, tier by tier

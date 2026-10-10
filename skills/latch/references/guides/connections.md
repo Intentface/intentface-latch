@@ -1,0 +1,65 @@
+<!-- Generated from apps/docs/content/docs/guides/connections.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Connect other services
+
+Give an agent a SaaS service's tools by naming it — per tenant, OAuth once, secrets the model never sees.
+
+Online: https://intentface-latch-docs.vercel.app/docs/guides/connections
+
+A connection is a named external service whose tools an agent may use. Declare `connections: ["linear"]` on an agent and every turn gets that service's tools, namespaced, for the tenant the turn runs as — plus a gated `connect_linear` step for a user who has not authorised it yet. The point is what you don't write: no per-tool wiring, no token handling in agent code, no per-tenant plumbing.
+
+**What it makes possible.** An agent with Linear, Gmail and Airtable tools by listing three names; user-completed OAuth once, then tools that just work; mutating third-party tools that arrive approval-gated from their own annotations; a per-tenant SSRF allowlist; one org's grant that can never serve another's tool.
+
+## Connections — MCP and OpenAPI tools
+
+A connection registry turns an agent's `connections: ["linear", "airtable"]` into a per-turn tool source: each authorized connection's tools namespaced `<name>_<tool>`, plus a gated `connect_<name>` tool for any that still need OAuth.
+
+```ts
+createRuntime({
+  // …
+  connections: {
+    async open(principal, names) {
+      /* → OpenToolSet */
+    },
+  },
+});
+```
+
+`@intentface/latch-mcp` implements this over MCP servers and adds two guards core doesn't have: a **per-tenant SSRF allowlist** (an unlisted host throws before a socket opens) and **vault-brokered auth** (bearer tokens resolved per tenant, never in agent config). `@intentface/latch-openapi` does the same for OpenAPI specs.
+
+Helpers for composing sources by hand:
+
+```ts
+import { mergeToolSources, mergeConnections } from "@intentface/latch-core";
+```
+
+> **Approval policy travels with the tools**
+>
+> An MCP tool's own annotations (`destructiveHint`, `readOnlyHint`) drive whether it needs approval, so a mutating third-party tool arrives gated without you enumerating it. For servers that ship no annotations, `latch-mcp` offers a tool-name verb heuristic.
+
+## Vault: secrets the model never sees
+
+Connections keep each user's tokens in the vault, and your own `bearer` connections read keys from it:
+
+```ts
+import { createVault } from "@intentface/latch-core";
+
+const vault = createVault<Principal>({ store, masterKey });
+
+createMcpConnections({ vault, secrets: vault.resolver /* … */ });
+```
+
+Setting it up, whose secret is whose, putting keys in from your settings page, and using them in your own tools: [Secrets (the vault)](../concepts/secrets.md).
+
+## OAuth, end to end
+
+1. A connection the user hasn't authorised exposes none of its tools yet — only a gated `connect_<name>` tool. When the agent calls it, the turn parks like an approval ([Approvals](https://intentface-latch-docs.vercel.app/docs/hard-parts/approvals)).
+2. The client sends the user to `GET /connections/:name/authorize`. The **principal is pinned into the flow state here** — never re-resolved from the callback request, so the grant cannot land on whoever completes the redirect.
+3. The provider redirects to the callback; it finishes the exchange, stores the token in the vault under that principal, and redirects to `returnTo`.
+4. The client approves the parked `connect_<name>` and the turn continues with the tools available. [The chat UI](./chat-ui.md#oauth-the-callback-redirects--resuming-is-yours) has the exact steps.
+
+## Next
+
+- [Guide: gate a tool behind approval](./approvals.md) — the same pause the connect step uses
+- [Reference: packages — latch-mcp, latch-openapi](https://intentface-latch-docs.vercel.app/docs/reference/packages#latch-mcp)
+- [Who owns a conversation](./ownership-patterns.md#how-a-principal-reaches-a-tool) — how a principal reaches a tool and its credential
