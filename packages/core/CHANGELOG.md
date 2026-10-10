@@ -1,5 +1,38 @@
 # @intentface/latch-core
 
+## 0.17.0
+
+### Minor Changes
+
+- e16480d: **Params: what a chat is about.** An agent can declare `params` with a schema (Zod, Valibot, any Standard Schema): `defineAgent(fn, { params: z.object({ ticketId: z.string() }) })`. The chat's first message passes them (`handleChat({ …, params })`, also `runAgent` and `schedule`). They're validated, saved on the chat, and given to the agent function and to tools (`context.params`) on every turn: later messages, the continuation after an approval, crash recovery, and schedule fires. Later messages don't send them again; the same params again are fine, different ones are refused (`ParamsFixedError`, 409). An agent without a schema refuses params (`InvalidParamsError`, 400).
+  
+  **`context` is a plain function**: `createRuntime({ context: async ({ principal }) => ({ … }) })`, and it's optional. `defineContext({ build })` still works but is deprecated, as are `turnContext` and `request`, which are missing when an answer continues.
+  
+  **`agent` is optional for a continuing chat**: `handleChat` uses the agent the chat was started with.
+  
+  **Storage:** chats and schedules get a `params` column (`migrate` / `migratePostgres` add it). A custom adapter should store `params` on `createChat` and `createSchedule` and return it; the conformance kit now checks chats.
+- 39c2910: **`data-context`: what the user is looking at, on their message.** A client can attach one `{ type: "data-context", data: { … } }` part to a user message, for example the open file, the selection or a model pick:
+  
+  - **The model** reads it as text in that message, after what the user wrote. The default wording is a `[Context]` block of `key: value` lines; `createRuntime({ messageContext: { toModel } })` changes it, and an agent can override it in its `defineAgent` meta (return `undefined` to leave it out).
+  - **Agent functions and tools** get the latest one as data: `messageContext`.
+  - **Chat UIs** don't render data parts, so the user doesn't see it.
+  
+  It's saved with its message. A continuation of the answer (after an approval, or a crash) therefore sees the same values, and the instructions stay the same between messages, so prompt caching keeps working: no more per-message state in the system prompt.
+  
+  `messageContext.schema` checks it when a message arrives (a mismatch is refused, 400). Without a schema it's free-form JSON, at most 32 KB, one per message, and never the only part of a message. Like params, it describes; it never authorizes.
+- 744431b: New `ToolContext<Principal, Ctx>` type: what a tool receives as `options.context` during a run. That's whatever your `defineContext` `build` returned, plus `principal`, `run` (`id`, `chatId`, `agent`), `writer` and `runtime`, which Latch adds for every tool. Use it instead of declaring those fields by hand:
+  
+  ```ts
+  execute: async ({ orderId }, { context }) => {
+    const { orders, principal } = context as ToolContext<Principal, Ctx>;
+    return orders.refund(orderId, principal.userId);
+  },
+  ```
+
+### Patch Changes
+
+- @intentface/latch-net@0.17.0
+
 ## 0.16.0
 
 ### Minor Changes
