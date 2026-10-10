@@ -5,6 +5,7 @@
     "runtime",
     "define-agent",
     "context",
+    "vault",
     "---Packages---",
     "server",
     "drizzle",

@@ -46,11 +46,13 @@ A user who hasn't connected Linear yet sees the agent ask them to, and the conve
 
 ## Secrets for your own tools
 
-The same vault holds API keys your tools need, per customer:
+The same vault holds API keys your tools need, per customer. A tool reads one when it runs and returns only the result:
 
 ```ts
-const key = await vault.resolver(context.principal, "crm_api_key");
+const key = await vault.get({ orgId: principal.orgId }, "crm_api_key");
 ```
+
+Setup, team and personal keys, and what protects them: [Secrets (the vault)](/docs/concepts/secrets).
 
 ## Go deeper
 

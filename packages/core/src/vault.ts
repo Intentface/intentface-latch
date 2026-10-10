@@ -37,21 +37,34 @@ export interface SecretRecord {
  * scopes by it (the default derives an `owner` key). The framework never reads `P`.
  */
 export interface SecretStore<P> {
+  /** Saves an encrypted record for this owner, replacing one with the same key. */
   put(principal: P, record: SecretRecord): Promise<void>;
+  /** This owner's record for the key, or `null`. */
   get(principal: P, key: string): Promise<SecretRecord | null>;
+  /** Removes this owner's record for the key. */
   delete(principal: P, key: string): Promise<void>;
-  /** Keys only — never values — for the caller. */
+  /** This owner's keys, never values. */
   list(principal: P): Promise<string[]>;
 }
 
-/** The Vault operations. `get` returns decrypted plaintext; storage stays opaque. */
+/**
+ * Per-customer secrets, encrypted in your database: API keys, bot tokens, the
+ * OAuth tokens of a user's connections. Every call takes the principal the
+ * secret belongs to; the store's `owner` decides whether that's one person or
+ * the whole team. Values come back only to your server code.
+ */
 export interface Vault<P> {
+  /** Saves a secret, encrypted, replacing any value under that key. This is also how you rotate one. */
   set(principal: P, key: string, value: string): Promise<void>;
+  /** The secret's value, or `undefined` if there is none. Use it in your server code and tools; never return it to the model or the browser. */
   get(principal: P, key: string): Promise<string | undefined>;
+  /** Whether a secret is set, without decrypting it. For a settings page's "connected" state. */
   has(principal: P, key: string): Promise<boolean>;
+  /** Removes a secret. Nothing that used it can read it afterwards. */
   delete(principal: P, key: string): Promise<void>;
+  /** The keys set for this owner. Names only, never values. */
   list(principal: P): Promise<string[]>;
-  /** Read-side adapter for context/tools (a `SecretResolver`). */
+  /** `get` as a function, for what takes a resolver: `createMcpConnections({ secrets: vault.resolver })`. */
   readonly resolver: SecretResolver<P>;
 }
 
@@ -81,9 +94,11 @@ const dec = new TextDecoder();
 const bs = (u: Uint8Array): BufferSource => u as unknown as BufferSource;
 
 /**
- * Build a Vault over a `SecretStore`. `masterKey` is a base64-encoded 32-byte
- * (256-bit) key — generate with `crypto.getRandomValues(new Uint8Array(32))`
- * and keep it in env/KMS, never in the database.
+ * Builds a vault over a `SecretStore` (`createPostgresSecretStore` or
+ * `createSqliteSecretStore` from `@intentface/latch-drizzle`). `masterKey` is
+ * 32 random bytes, base64-encoded: keep it in an environment variable or a key
+ * manager, never in the database. Losing or changing it makes every stored
+ * secret unreadable.
  */
 export function createVault<P>(opts: {
   store: SecretStore<P>;

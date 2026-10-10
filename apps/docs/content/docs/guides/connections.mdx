@@ -34,7 +34,9 @@ import { mergeToolSources, mergeConnections } from "@intentface/latch-core";
 An MCP tool's own annotations (`destructiveHint`, `readOnlyHint`) drive whether it needs approval, so a mutating third-party tool arrives gated without you enumerating it. For servers that ship no annotations, `latch-mcp` offers a tool-name verb heuristic.
 </Callout>
 
-## Vault — secrets the model never sees
+## Vault: secrets the model never sees
+
+Connections keep each user's tokens in the vault, and your own `bearer` connections read keys from it:
 
 ```ts
 import { createVault } from "@intentface/latch-core";
@@ -44,9 +46,7 @@ const vault = createVault<Principal>({ store, masterKey });
 createMcpConnections({ vault, secrets: vault.resolver /* … */ });
 ```
 
-`Vault` is `set`/`get`/`has`/`delete`/`list` plus a `resolver` — the read-side `SecretResolver`. Hand it to `createMcpConnections` (connection auth is brokered through it) and call it from your own tools with the `principal` they receive in `options.context`, so a tool gets a resolved credential while the model receives nothing. `list` returns **keys only, never values**, by contract.
-
-`SecretStore` is the storage half (envelope-encrypted rows by default; swap for KMS/Vault/Doppler). `@intentface/latch-core/node` exports `deriveMasterKey` for the Node key derivation.
+Setting it up, whose secret is whose, putting keys in from your settings page, and using them in your own tools: [Secrets (the vault)](/docs/concepts/secrets).
 
 ## OAuth, end to end
 

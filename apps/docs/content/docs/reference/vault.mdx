@@ -1,0 +1,32 @@
+---
+title: Vault
+description: createVault, its methods, and the secret store it keeps encrypted records in.
+---
+
+What the vault is for and how to use it: [Secrets (the vault)](/docs/concepts/secrets).
+
+```ts
+import { createVault } from "@intentface/latch-core";
+import { createPostgresSecretStore } from "@intentface/latch-drizzle";
+
+const vault = createVault<Principal>({
+  store: createPostgresSecretStore(db, { owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]) }),
+  masterKey: process.env.LATCH_VAULT_KEY!, // base64 of 32 random bytes
+});
+```
+
+`createVault` throws if `masterKey` isn't 32 bytes. `deriveMasterKey(passphrase, { salt })` from `@intentface/latch-core/node` derives one from a passphrase (Node only; the salt must be stable for the deployment).
+
+## Methods
+
+<auto-type-table path="../../../../../packages/core/src/vault.ts" name="Vault" />
+
+## Secret store
+
+`createPostgresSecretStore(db, { owner })` and `createSqliteSecretStore(db, { owner })` keep the encrypted records in `latch_secrets`. `owner(principal, key?)` returns the owner's segments, and receives the secret's key so different kinds of secret can belong to different owners. `list` has no key to pass, so it lists the owner `owner(principal)` gives without one.
+
+A store of your own implements:
+
+<auto-type-table path="../../../../../packages/core/src/vault.ts" name="SecretStore" />
+
+It only ever handles encrypted records; values are encrypted and decrypted in `createVault`.
