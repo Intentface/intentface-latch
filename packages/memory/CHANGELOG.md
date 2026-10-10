@@ -1,5 +1,14 @@
 # @intentface/latch-memory
 
+## 0.17.1
+
+### Patch Changes
+
+- a132539: Memory is now marked **experimental**: the `memory` options on `createRuntime` and `defineAgent`, the `@intentface/latch-memory` package and its docs. The only production store today is a Loredex workspace, and the interface still carries Loredex conventions, so the design may change in any release. Nothing changes in behaviour.
+- Updated dependencies [a132539]
+- Updated dependencies [0bee5fd]
+  - @intentface/latch-core@0.17.1
+
 ## 0.17.0
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # @intentface/latch-agent-builder
 
+## 0.17.1
+
+### Patch Changes
+
+- f2a16e5: Doc comments rewritten for people using the options: `createLatchApp` and `createLatchHandler`, MCP connections and `oauth()`, the storage and agent store options, and the Telegram, Slack and WhatsApp channels. They show in your editor and in the generated reference on the docs site. No code changes.
+- Updated dependencies [a132539]
+- Updated dependencies [0bee5fd]
+  - @intentface/latch-core@0.17.1
+
 ## 0.17.0
 
 ### Patch Changes
