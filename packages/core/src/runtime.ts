@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, contextOf, InvalidMessageError, isHidden, lastQuestionResent, latestMessageContext, type AppMessage } from "./message.js";
+import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, lastQuestionResent, latestMessageContext, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
@@ -22,7 +22,7 @@ import type {
   OpenToolSet,
   ToolSource,
 } from "./agent.js";
-import { ParamsFixedError, validateParams } from "./agent.js";
+import { ParamsFixedError, paramsToSave, validateParams } from "./agent.js";
 import { asSchema, type FlexibleSchema } from "ai";
 import { currentDateLine } from "./current-date.js";
 import type { MemoryProvider } from "./memory.js";
@@ -181,10 +181,11 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     schema?: FlexibleSchema;
     toModel?: (context: any) => string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
   };
-  // `any` params: each agent declares its own, and a factory typed for one
-  // agent's params must still fit the registry.
+  // `any` context and params: with `createRuntime<Principal>(…)` the context
+  // type is `unknown`, and each agent declares its own params, so a factory
+  // typed for its own context and params must still fit the registry.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agents: Record<string, AgentFactory<P, RuntimeContext, any>>;
+  agents: Record<string, AgentFactory<P, any, any>>;
   durability?: DurabilityConfig;
   /** Optional cost calculation. Without it, recorded cost is 0. */
   pricing?: Pricing;
@@ -1587,9 +1588,9 @@ export function createRuntime<P, RC = unknown>(
    */
   async function checkChatParams(agentName: string, chat: ChatRecord | null, incoming: unknown): Promise<unknown> {
     const schema = config.agents[agentName]?.meta?.params;
-    if (!chat) return validateParams(agentName, schema, incoming);
+    if (!chat) return paramsToSave(agentName, schema, incoming);
     if (incoming === undefined) return undefined;
-    const given = await validateParams(agentName, schema, incoming);
+    const given = await paramsToSave(agentName, schema, incoming);
     if (stableJson(given) !== stableJson(chat.params)) throw new ParamsFixedError(chat.id);
     return undefined;
   }
@@ -1613,7 +1614,9 @@ export function createRuntime<P, RC = unknown>(
     if (!result.success) throw new InvalidMessageError(`the data-context part doesn't match messageContext.schema: ${result.error.message}`);
     return {
       ...message,
-      parts: message.parts.map((p) => (p.type === "data-context" ? ({ type: "data-context", data: result.value } as typeof p) : p)),
+      // The schema's output is what's saved, so it gets the same JSON and size
+      // check as what the client sent: a transform can produce anything.
+      parts: message.parts.map((p) => (p.type === "data-context" ? ({ type: "data-context", data: contextData(result.value) } as typeof p) : p)),
     };
   }
 
@@ -4355,7 +4358,7 @@ export function createRuntime<P, RC = unknown>(
       !!config.agents[agent] || !!(await config.dynamicAgents?.resolve(agent, principal));
     if (!known) throw new Error(`Unknown agent: ${agent}`);
     // Checked now, so a bad schedule is refused when it's made, not at 9:00.
-    const params = await validateParams(agent, config.agents[agent]?.meta?.params, paramsIn);
+    const params = await paramsToSave(agent, config.agents[agent]?.meta?.params, paramsIn);
     const now = Date.now();
     let nextRunAt = now; // one-shot → fire on the next runDue
     if (cron) {

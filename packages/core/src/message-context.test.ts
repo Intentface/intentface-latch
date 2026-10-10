@@ -153,6 +153,18 @@ describe("a data-context part", () => {
     expect(mem.chats.has("c1")).toBe(false);
   });
 
+  it("refuses a schema output that isn't JSON", async () => {
+    const mem = memoryStorage();
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      messageContext: { schema: z.object({ n: z.number() }).transform((c) => ({ n: BigInt(c.n) })) },
+      agents: { a: defineAgent({ model: says() }) },
+    });
+    const e = await refusal(rt.handleChat({ agent: "a", chatId: "c1", principal, message: withContext("u1", "hi", { n: 1 }) }));
+    expect(isInvalidMessageError(e)).toBe(true);
+    expect(mem.chats.has("c1")).toBe(false);
+  });
+
   it("reads the way toModel says, and an agent can word it its own way", async () => {
     const mem = memoryStorage();
     const plainModel = says();

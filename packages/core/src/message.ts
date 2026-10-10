@@ -68,7 +68,7 @@ export function isInvalidMessageError(e: unknown): e is InvalidMessageError {
 }
 
 /** A context part's data as plain JSON, size-capped; refused otherwise. */
-function contextData(data: unknown): unknown {
+export function contextData(data: unknown): unknown {
   if (data === undefined) throw new InvalidMessageError("a data-context part needs data");
   let text: string;
   try {

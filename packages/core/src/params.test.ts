@@ -169,6 +169,31 @@ describe("params", () => {
     expect(isInvalidParamsError(big)).toBe(true);
   });
 
+  it("are saved as sent, and reach the agent as the schema's output", async () => {
+    const mem = memoryStorage();
+    let got: unknown;
+    const When = z.object({ when: z.string().transform((s) => new Date(s)) });
+    const rt = createRuntime<P>({
+      storage: mem.storage,
+      agents: {
+        a: defineAgent(
+          ({ params }) => {
+            got = params.when;
+            return { model: says("ok") };
+          },
+          { params: When },
+        ),
+      },
+    });
+    await (await rt.handleChat({ agent: "a", chatId: "c1", principal, message: user("u1", "hi"), params: { when: "2026-10-10" } })).text();
+    // Saved: the JSON the client sent. Given to the agent: the transform's Date.
+    expect(mem.chats.get("c1")?.params).toEqual({ when: "2026-10-10" });
+    expect(got).toBeInstanceOf(Date);
+    // A later turn re-runs the transform on the saved input, not on its own output.
+    await (await rt.handleChat({ chatId: "c1", principal, message: user("u2", "again") })).text();
+    expect(got).toBeInstanceOf(Date);
+  });
+
   it("are saved on a background run's thread", async () => {
     const { mem, rt, seen } = setup();
     const r = await rt.runAgent({ principal, agent: "support", prompt: "summarize", params: { ticketId: "T-1" } });

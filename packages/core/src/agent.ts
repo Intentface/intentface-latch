@@ -248,7 +248,13 @@ export type AgentFactoryInput<P, RuntimeContext = unknown, Params = unknown> = {
    * for what the chat is about.
    */
   turnContext?: unknown;
-} & (unknown extends Params
+} & (0 extends 1 & Params
+  ? {
+      // `any` (the registry's view of every agent): required, so a factory
+      // that needs its params still fits.
+      params: Params;
+    }
+  : unknown extends Params
   ? {
       /** What this chat is about; `undefined` for an agent that declares no params. */
       params?: Params;
@@ -316,30 +322,49 @@ export function isParamsFixedError(e: unknown): e is ParamsFixedError {
 }
 
 /**
- * Checks params against an agent's schema and returns what to save: the
- * schema's output (defaults applied), as plain JSON. Refuses params for an agent
- * without a schema, values that aren't JSON, and anything over
+ * Checks params against an agent's schema and returns what to SAVE: the input,
+ * as plain JSON, once the schema has accepted it. The input rather than the
+ * schema's output, because the output can be anything a transform makes (a
+ * `Date`), and because the saved value is checked again on every turn: a
+ * transform must run on the original, not on its own result. Refuses params for
+ * an agent without a schema, values that aren't JSON, and anything over
  * {@link MAX_PARAMS_BYTES}. `undefined` stays `undefined` unless the schema
  * rejects it.
  */
-export async function validateParams(agent: string, schema: FlexibleSchema | undefined, value: unknown): Promise<unknown> {
+export async function paramsToSave(agent: string, schema: FlexibleSchema | undefined, value: unknown): Promise<unknown> {
+  const json = paramsJson(agent, schema, value);
+  await validateParams(agent, schema, json);
+  return json;
+}
+
+/** `value` as plain JSON, size-capped; refused for an agent without a schema. */
+function paramsJson(agent: string, schema: FlexibleSchema | undefined, value: unknown): unknown {
   if (!schema) {
     if (value !== undefined) throw new InvalidParamsError(`agent "${agent}" takes no params`);
     return undefined;
   }
-  let json: unknown = value;
-  if (value !== undefined) {
-    let text: string;
-    try {
-      text = JSON.stringify(value);
-    } catch {
-      throw new InvalidParamsError(`params for "${agent}" must be JSON`);
-    }
-    if (new TextEncoder().encode(text).length > MAX_PARAMS_BYTES) {
-      throw new InvalidParamsError(`params for "${agent}" are over ${MAX_PARAMS_BYTES} bytes`);
-    }
-    json = JSON.parse(text);
+  if (value === undefined) return undefined;
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    // falls through to the refusal below
   }
+  if (text === undefined) throw new InvalidParamsError(`params for "${agent}" must be JSON`);
+  if (new TextEncoder().encode(text).length > MAX_PARAMS_BYTES) {
+    throw new InvalidParamsError(`params for "${agent}" are over ${MAX_PARAMS_BYTES} bytes`);
+  }
+  return JSON.parse(text);
+}
+
+/**
+ * Checks params against an agent's schema and returns the schema's output
+ * (defaults applied, transforms run): what the agent function and tools get.
+ * Use {@link paramsToSave} for what to store.
+ */
+export async function validateParams(agent: string, schema: FlexibleSchema | undefined, value: unknown): Promise<unknown> {
+  const json = paramsJson(agent, schema, value);
+  if (!schema) return undefined;
   const check = asSchema(schema).validate;
   if (!check) return json;
   const result = await check(json);

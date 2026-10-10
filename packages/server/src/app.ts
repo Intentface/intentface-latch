@@ -36,7 +36,7 @@ export interface LatchAppConfig<P, RC = unknown> {
    * catalog themselves.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- each agent declares its own params
-  agents: Record<string, AgentFactory<P, RC, any>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, RC, any>>);
+  agents: Record<string, AgentFactory<P, any, any>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, any, any>>);
   /** Your auth: request → Principal (null → 401). */
   resolveContext: LatchHandlerConfig<P>["resolveContext"];
   /** Per-turn runtime context (default: `{}`). */
