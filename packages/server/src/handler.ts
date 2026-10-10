@@ -161,8 +161,9 @@ export type LatchHandler = (
 
 /** The secret a cron request carries: a bearer token, or our own header. */
 function cronSecretOf(request: Request): string | null {
-  const auth = request.headers.get("authorization");
-  if (auth?.startsWith("Bearer ")) return auth.slice("Bearer ".length);
+  // The scheme name is case-insensitive (RFC 9110); the token is not.
+  const bearer = request.headers.get("authorization")?.match(/^bearer\s+(.+)$/i);
+  if (bearer) return bearer[1]!;
   return request.headers.get("x-latch-cron-secret");
 }
 

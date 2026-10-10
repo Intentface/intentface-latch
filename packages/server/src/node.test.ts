@@ -20,16 +20,25 @@ afterEach(
 );
 
 /** Serves `latch` with a host 404 behind it; `before` plays a body parser. */
+const failures: unknown[] = [];
+
 async function serve(
   handler: (req: Request) => Promise<Response | undefined>,
-  before?: (req: IncomingMessage) => Promise<void>,
+  before?: (req: IncomingMessage) => Promise<unknown>,
 ): Promise<string> {
   const latch = toNodeHandler(handler);
+  failures.length = 0;
   server = createServer(async (req, res) => {
-    await before?.(req);
-    if (!(await latch(req, res))) {
-      res.statusCode = 404;
-      res.end("host 404");
+    // `before` plays a framework's body parser; what it returns is passed on
+    // the way Fastify's `request.body` would be.
+    const parsed = await before?.(req);
+    try {
+      if (!(await latch(req, res, parsed))) {
+        res.statusCode = 404;
+        res.end("host 404");
+      }
+    } catch (e) {
+      failures.push(e);
     }
   });
   await new Promise<void>((ready) => server!.listen(0, ready));
@@ -114,8 +123,72 @@ describe("toNodeHandler", () => {
     await reader.read();
     ac.abort();
     await new Promise((r) => setTimeout(r, 50));
-    // The process is still up and the source was closed, not left hanging.
+    // The process is still up, the source was closed, and leaving isn't a failure.
     expect(cancelled).toBe(true);
+    expect(failures).toHaveLength(0);
     expect((await fetch(`${url}/again`)).status).toBe(200);
+  });
+
+  it("sends a parsed form on as a form, not as JSON", async () => {
+    let seen: { type: string | null; body: string } | undefined;
+    const url = await serve(
+      async (req) => {
+        seen = { type: req.headers.get("content-type"), body: await req.text() };
+        return new Response(null, { status: 204 });
+      },
+      // What express.urlencoded() does.
+      async (req) => {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        (req as IncomingMessage & { body?: unknown }).body = Object.fromEntries(new URLSearchParams(raw));
+      },
+    );
+    await fetch(url, { method: "POST", body: "a=1&b=two", headers: { "content-type": "application/x-www-form-urlencoded" } });
+    expect(seen).toEqual({ type: "application/x-www-form-urlencoded", body: "a=1&b=two" });
+  });
+
+  it("takes a body the framework parsed, passed in (Fastify's request.body)", async () => {
+    let body: string | undefined;
+    const url = await serve(
+      async (req) => {
+        body = await req.text();
+        return new Response(null, { status: 204 });
+      },
+      async (req) => {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        return JSON.parse(raw); // not on req.body: Fastify keeps it on its own request
+      },
+    );
+    await fetch(url, { method: "POST", body: '{"text":"hi"}', headers: { "content-type": "application/json" } });
+    expect(body).toBe('{"text":"hi"}');
+  });
+
+  it("uses the first forwarded protocol", async () => {
+    let seenUrl: string | undefined;
+    const url = await serve(async (req) => {
+      seenUrl = req.url;
+      return new Response(null, { status: 204 });
+    });
+    await fetch(`${url}/x`, { headers: { "x-forwarded-proto": "https,http" } });
+    expect(seenUrl?.startsWith("https://")).toBe(true);
+  });
+
+  it("rejects when the answer's own stream fails partway", async () => {
+    const url = await serve(async () => {
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode("data: first\n\n"));
+          c.error(new Error("model stream broke"));
+        },
+      });
+      return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+    });
+    await fetch(url)
+      .then((r) => r.text())
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 50));
+    expect(failures).toHaveLength(1);
+    expect(String(failures[0])).toMatch(/model stream broke/);
   });
 });
