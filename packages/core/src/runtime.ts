@@ -298,8 +298,11 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   /**
    * Runs a scheduled fire yourself, for example to post the result into a
    * Slack channel or a Telegram chat instead of a new web chat. Return `true`
-   * when you handled it; return `false` (or throw) to let Latch run it in a
-   * new chat as usual, so a fire is never lost.
+   * when you handled it; return `false` to let Latch run it in a new chat as
+   * usual (a stale or missing target, say). A throw counts as an error for
+   * that occurrence and nothing else runs, since the hook may already have
+   * done the work: once you've delivered, return `true` even if a later step
+   * fails.
    *
    * Return `{ handled: true, chatId, parked }` to tell Latch which chat the
    * fire ran in and whether it is waiting on a person; schedules that skip a
@@ -4623,38 +4626,46 @@ export function createRuntime<P, RC = unknown>(
           }
         }
         // Give the host first refusal (e.g. run it in the user's channel thread
-        // and stream the answer there). A hook that throws is treated as "not
-        // handled": the fire still happens the default way, so a broken
-        // delivery target degrades to a normal chat run instead of losing the
-        // occurrence entirely. Hosts: only throw BEFORE doing paid work — a
-        // hook that already ran the agent and then throws (say, on delivery)
-        // makes the fallback a second full turn for the same occurrence.
+        // and stream the answer there). Only an explicit "not handled" falls
+        // through to the default run, so a stale delivery target still gets
+        // the work done in a chat. A hook that THROWS ends this occurrence as
+        // an error instead: there's no knowing how far it got, and if it had
+        // already run the agent (and failed on delivery, say), the default run
+        // would be a second paid turn for the same occurrence — the duplicate
+        // consuming-first exists to prevent.
         let handled = false;
         if (config.runSchedule) {
+          let outcome: Awaited<ReturnType<NonNullable<typeof config.runSchedule>>>;
           try {
-            const outcome = await config.runSchedule({ schedule: s, principal });
-            handled = typeof outcome === "boolean" ? outcome : outcome.handled;
-            // The host owns the chat a channel fire ran in, so it is the only
-            // one that can report it. Same accounting as the default path when
-            // it does: stamp the chat for the next `onParked` check, and count
-            // a park that nobody can answer.
-            if (handled && typeof outcome === "object") {
-              if (outcome.chatId) {
-                await storage.noteScheduleFire?.(s.id, {
-                  lastChatId: outcome.chatId,
-                  firedAt: now,
-                });
-              }
-              if (outcome.parked) {
-                parked++;
-                console.warn(
-                  `[schedule] ${s.id} (${s.agent}): host-delivered fire parked waiting on a ` +
-                    `human${outcome.chatId ? ` in chat ${outcome.chatId}` : ""} — no answer was delivered`,
-                );
-              }
-            }
+            outcome = await config.runSchedule({ schedule: s, principal });
           } catch (e) {
-            console.error(`[schedule] runSchedule hook failed for ${s.id}:`, e);
+            console.error(
+              `[schedule] runSchedule hook failed for ${s.id} (${s.agent}); not running it again ` +
+                `the default way, which could repeat work the hook already did:`,
+              e,
+            );
+            errors++;
+            continue;
+          }
+          handled = typeof outcome === "boolean" ? outcome : !!outcome?.handled;
+          // The host owns the chat a channel fire ran in, so it is the only
+          // one that can report it. Same accounting as the default path when
+          // it does: stamp the chat for the next `onParked` check, and count
+          // a park that nobody can answer.
+          if (handled && typeof outcome === "object") {
+            if (outcome.chatId) {
+              await storage.noteScheduleFire?.(s.id, {
+                lastChatId: outcome.chatId,
+                firedAt: now,
+              });
+            }
+            if (outcome.parked) {
+              parked++;
+              console.warn(
+                `[schedule] ${s.id} (${s.agent}): host-delivered fire parked waiting on a ` +
+                  `human${outcome.chatId ? ` in chat ${outcome.chatId}` : ""} — no answer was delivered`,
+              );
+            }
           }
         }
         if (!handled) {

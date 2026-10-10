@@ -405,10 +405,19 @@ async function runSlackDelivery(
   }
 
   const api = slackApi(token);
-  const anchor = await api.postMessage({
-    channel: target.channel,
-    text: `:alarm_clock: ${summarize(schedule.prompt)}`,
-  });
+  // Nothing has run yet, so a failed post can still fall back to a chat. A
+  // throw from here on would end the occurrence as an error instead (the turn
+  // may have started), so this is the last point to decline.
+  let anchor: Awaited<ReturnType<typeof api.postMessage>>;
+  try {
+    anchor = await api.postMessage({
+      channel: target.channel,
+      text: `:alarm_clock: ${summarize(schedule.prompt)}`,
+    });
+  } catch (e) {
+    console.warn(`[schedule] ${schedule.id}: couldn't post to Slack; running it in a chat instead:`, e);
+    return false;
+  }
 
   // The adapter expects a SLACK user id: it becomes the thread's initiator
   // (who may drive follow-ups) and the target of ephemeral connect cards. The
