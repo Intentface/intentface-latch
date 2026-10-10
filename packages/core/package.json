@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-core",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "description": "Latch core — runtime, types, and seams for building agents on the AI SDK. Subpaths: /models (models.dev catalog + provider hooks) and /harness (default sandbox/app tools); their extra deps are optional peers, loaded lazily.",
   "keywords": [
     "ai",

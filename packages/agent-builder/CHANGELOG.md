@@ -1,5 +1,13 @@
 # @intentface/latch-agent-builder
 
+## 0.18.0
+
+### Patch Changes
+
+- Updated dependencies [666085c]
+- Updated dependencies [7339995]
+  - @intentface/latch-core@0.18.0
+
 ## 0.17.1
 
 ### Patch Changes

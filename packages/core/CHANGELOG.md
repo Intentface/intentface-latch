@@ -1,5 +1,18 @@
 # @intentface/latch-core
 
+## 0.18.0
+
+### Minor Changes
+
+- 666085c: A storage `owner` that returns a missing or empty segment now throws, instead of filing the row under the string `"undefined"`. Before, `owner: (p) => [p.orgId, p.userId]` put every principal without a `userId` into one shared `orgId/undefined` bucket, so their chats, secrets or agents mixed without an error. If you see the new error, decide what those principals should see. Return `[p.orgId]` only when a principal without a `userId` is *meant* to share the organization's data (a team chat, an org-wide secret); for personal data, throw in `owner` (or refuse them in your login) instead. A missing `userId` is not a reason to grant org-level access.
+  
+  The checked encoder is exported as `encodeOwnerKey(segments)` from `@intentface/latch-core`, for your own adapters and owner-scoped tables.
+- 7339995: A `runSchedule` hook that throws, or returns something other than `true`, `false` or `{ handled }` (say `undefined`, from a hook that forgot to return), now ends that occurrence as an error (`runDue`'s `errors`) and nothing else runs. Before, a throw fell through to the default run in a new chat, so a hook that had already run the agent and then failed (on delivery, say) paid for the same occurrence twice. To decline, return `false` before doing any work, as before; once delivered, return `true` even if a later step fails.
+
+### Patch Changes
+
+- @intentface/latch-net@0.18.0
+
 ## 0.17.1
 
 ### Patch Changes

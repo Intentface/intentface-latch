@@ -1,5 +1,14 @@
 # @intentface/latch-langfuse
 
+## 0.18.0
+
+### Patch Changes
+
+- 726806b: The published packages no longer include compiled test files (4 in latch-server, 24 in latch-mcp, 4 in latch-langfuse). They build from a tsconfig that leaves tests out, as the other packages already did.
+- Updated dependencies [666085c]
+- Updated dependencies [7339995]
+  - @intentface/latch-core@0.18.0
+
 ## 0.17.1
 
 ### Patch Changes
