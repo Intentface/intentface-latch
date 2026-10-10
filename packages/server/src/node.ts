@@ -72,7 +72,7 @@ function toWebRequest(req: IncomingMessage, parsedBody: unknown): Request {
 function bodyOf(req: IncomingMessage, given: unknown): BodyInit | undefined {
   // Fastify's passthrough parser hands the stream itself back as the body.
   const passed = given instanceof Readable ? undefined : given;
-  if (passed === undefined && !req.readableEnded) return Readable.toWeb(req) as ReadableStream;
+  if (passed === undefined && !req.readableEnded) return lazyBodyOf(req);
   const fromParser = passed ?? (req as IncomingMessage & { body?: unknown }).body;
   if (fromParser === undefined) {
     throw new Error(
@@ -86,6 +86,28 @@ function bodyOf(req: IncomingMessage, given: unknown): BodyInit | undefined {
   throw new Error(
     `The request body was already parsed (${type}) and can't be sent on as it arrived: ` +
       "mount the Latch route before your body parser.",
+  );
+}
+
+/**
+ * The request's body as a Web stream that doesn't touch `req` until something
+ * reads it. A route Latch declines leaves the body unread, for the host's next
+ * handler. (`Readable.toWeb` starts reading as soon as it's called.)
+ */
+function lazyBodyOf(req: IncomingMessage): ReadableStream<Uint8Array> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        reader ??= (Readable.toWeb(req) as ReadableStream<Uint8Array>).getReader();
+        const { done, value } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      },
+      cancel: (reason) => reader?.cancel(reason),
+    },
+    // Pull only when read: the default high-water mark of 1 pulls at once.
+    { highWaterMark: 0 },
   );
 }
 

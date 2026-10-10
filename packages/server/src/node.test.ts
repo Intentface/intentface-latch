@@ -75,6 +75,21 @@ describe("toNodeHandler", () => {
     expect(await res.text()).toBe("host 404");
   });
 
+  it("leaves the body unread for the host when Latch declines a POST", async () => {
+    const latch = toNodeHandler(async () => undefined);
+    server = createServer(async (req, res) => {
+      if (await latch(req, res)) return;
+      // The host's own handler still gets the whole body.
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      res.end(`host got ${raw}`);
+    });
+    await new Promise<void>((ready) => server!.listen(0, ready));
+    const url = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`;
+    const res = await fetch(`${url}/elsewhere`, { method: "POST", body: "x".repeat(200_000) });
+    expect(await res.text()).toBe(`host got ${"x".repeat(200_000)}`);
+  });
+
   it("keeps several cookies apart", async () => {
     const url = await serve(async () => {
       const headers = new Headers();
@@ -159,6 +174,19 @@ describe("toNodeHandler", () => {
         for await (const chunk of req) raw += chunk;
         return JSON.parse(raw); // not on req.body: Fastify keeps it on its own request
       },
+    );
+    await fetch(url, { method: "POST", body: '{"text":"hi"}', headers: { "content-type": "application/json" } });
+    expect(body).toBe('{"text":"hi"}');
+  });
+
+  it("streams the body when Fastify's passthrough parser hands back the stream itself", async () => {
+    let body: string | undefined;
+    const url = await serve(
+      async (req) => {
+        body = await req.text();
+        return new Response(null, { status: 204 });
+      },
+      async (req) => req, // `done(null, payload)`: request.body is the unread request
     );
     await fetch(url, { method: "POST", body: '{"text":"hi"}', headers: { "content-type": "application/json" } });
     expect(body).toBe('{"text":"hi"}');
