@@ -4,7 +4,7 @@
 import { IconBrandGithub, IconBrandNpm } from "@tabler/icons-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { DocsNav, type DocsTree, toGroups, toSuggestions } from "@/components/docs/docs-nav";
+import { DocsNav, type DocsTree, toNavModel, toSuggestions } from "@/components/docs/docs-nav";
 import { DocsSearch } from "@/components/docs/docs-search";
 import { DocsThemeToggle } from "@/components/docs/docs-theme-toggle";
 import { LogoTile } from "@/components/icons/logo-tile";
@@ -29,7 +29,7 @@ export const SiteShell = ({
   version: string;
   children: ReactNode;
 }) => {
-  const groups = toGroups(tree.children);
+  const model = toNavModel(tree.children);
 
   return (
     <Sidebar.Provider>
@@ -41,9 +41,9 @@ export const SiteShell = ({
             <LogoTile />
             <span className="font-semibold text-md tracking-[-0.01em]">intentface/latch</span>
           </Link>
-          <DocsSearch suggestions={toSuggestions(groups)} />
+          <DocsSearch suggestions={toSuggestions(model)} />
         </Sidebar.Header>
-        <DocsNav groups={groups} />
+        <DocsNav model={model} />
         <Sidebar.Footer className="flex-row items-center justify-between border-ink-primary/8 border-t pt-2 pr-1 pl-0.5">
           <a
             href="https://www.npmjs.com/package/@intentface/latch-core?activeTab=versions"

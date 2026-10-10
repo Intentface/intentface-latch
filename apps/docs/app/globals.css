@@ -547,3 +547,71 @@
 .dark .shiki span {
   color: var(--shiki-dark);
 }
+
+/* ─── Docs sidebar (components/docs/docs-nav.tsx) ───
+   The Nav primitive's guides, after intentface-chat's rail recipe: folding
+   lists, an indented rail down each section, and an elbow into each sub-group.
+   The geometry assumes 30px rows and a 2px gap. */
+.docs-nav {
+  /* Opaque: the elbow and the rail overlap, and a translucent line would show the seam. */
+  --rail: #e4e4e7;
+}
+.dark .docs-nav {
+  --rail: #2b2b2e;
+}
+.docs-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    height 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 200ms ease-out;
+}
+.docs-nav [data-nav-list][data-starting-style],
+.docs-nav [data-nav-list][data-ending-style] {
+  height: 0;
+  opacity: 0;
+}
+.docs-nav [data-nav-list] > * {
+  flex-shrink: 0;
+}
+.docs-nav [data-nav-list][data-indent] {
+  --nav-row: 30px;
+  margin-top: 2px;
+  margin-left: 15px;
+  padding-left: 7px;
+}
+.docs-nav [data-nav-list][data-rail] > * {
+  position: relative;
+  overflow: visible;
+}
+.docs-nav [data-nav-list][data-rail] > *::before,
+.docs-nav [data-nav-list][data-rail] > *::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  border-color: var(--rail);
+  border-left-width: 1px;
+  pointer-events: none;
+}
+.docs-nav [data-nav-list][data-rail] > *::before {
+  top: -2px;
+  width: 6px;
+  height: calc(var(--nav-row) / 2 + 2px);
+}
+.docs-nav [data-nav-list][data-rail] > *::after {
+  top: calc(var(--nav-row) / 2 - 6px);
+  bottom: -2px;
+}
+.docs-nav [data-nav-list][data-rail] > *:last-child::after {
+  display: none;
+}
+.docs-nav [data-nav-list][data-branches] > [data-nav-group]::before {
+  border-bottom-width: 1px;
+  border-bottom-left-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .docs-nav [data-nav-group] > [data-nav-list] {
+    transition: none;
+  }
+}

@@ -1,72 +1,96 @@
 "use client";
 
-import { ChevronRight } from "@keyline-icons/react";
+import { Nav } from "@intentface/chat/nav";
+import {
+  Blocks,
+  BookOpen,
+  ChevronDown,
+  Code,
+  FlaskConical,
+  Home,
+  Lightbulb,
+  Rocket,
+} from "@keyline-icons/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useState } from "react";
-import { Collapsible } from "@/components/ui/collapsible";
 import { Sidebar } from "@/components/ui/sidebar";
 import type { SearchSuggestion } from "./docs-search";
 
 // Structural mirror of fumadocs' page-tree nodes. Folders may carry an index
-// page and separators of their own (a sub-heading inside the group).
+// page and separators of their own (a sub-heading inside the section).
 type TreeItem = { type: "page"; name: ReactNode; url: string };
 type TreeFolder = { type: "folder"; name: ReactNode; index?: TreeItem; children: TreeNode[] };
 type TreeSeparator = { type: "separator"; name?: ReactNode };
 type TreeNode = TreeItem | TreeFolder | TreeSeparator;
 
-type NavEntry = TreeItem | { type: "label"; name: ReactNode };
-
-export type NavGroup = { label?: ReactNode; items: NavEntry[] };
-
 export type DocsTree = { children: TreeNode[] };
+
+/** A sub-heading inside a section ("In depth", "Build"), holding its pages. */
+type NavSubgroup = { type: "subgroup"; key: string; label: ReactNode; items: TreeItem[] };
+type SectionEntry = TreeItem | NavSubgroup;
+/** A top-level section: a folder, or a separator with the folder after it. */
+export type NavSection = { key: string; label: ReactNode; entries: SectionEntry[] };
+export type NavModel = { top: TreeItem[]; sections: NavSection[] };
+
+const keyOf = (name: ReactNode, fallback: string) =>
+  (typeof name === "string" ? name : fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
 // The docs home is titled "Latch", which reads oddly under the Latch logo.
 const displayName = (item: TreeItem) => (item.url === "/docs" ? "Introduction" : item.name);
 
-// A folder's own entries: its index page, then its pages, with any separator
-// inside it kept as a sub-heading.
-const folderEntries = (folder: TreeFolder): NavEntry[] => {
-  // A section's own index page reads "Overview" under the section's label.
-  const named = (page: TreeItem): TreeItem =>
-    page.name === folder.name ? { ...page, name: "Overview" } : page;
-  const entries: NavEntry[] = folder.index ? [named(folder.index)] : [];
+// Section icons, by the folder's title.
+const ICONS: Record<string, ReactNode> = {
+  "getting-started": <Rocket />,
+  "how-it-fits-together": <Blocks />,
+  "harder-than-it-looks": <Lightbulb />,
+  guides: <BookOpen />,
+  reference: <Code />,
+  experimental: <FlaskConical />,
+};
+
+// A folder's own entries. Its index page reads "Overview" under the section's
+// label; a separator inside it opens a sub-group for the pages after it.
+const folderEntries = (folder: TreeFolder, sectionKey: string): SectionEntry[] => {
+  const named = (page: TreeItem): TreeItem => (page.name === folder.name ? { ...page, name: "Overview" } : page);
+  const entries: SectionEntry[] = folder.index ? [named(folder.index)] : [];
+  let sub: NavSubgroup | null = null;
   for (const child of folder.children) {
-    if (child.type === "page") entries.push(named(child));
-    else if (child.type === "separator" && child.name) entries.push({ type: "label", name: child.name });
-    else if (child.type === "folder") entries.push(...folderEntries(child));
+    if (child.type === "separator" && child.name) {
+      sub = { type: "subgroup", key: `${sectionKey}/${keyOf(child.name, String(entries.length))}`, label: child.name, items: [] };
+      entries.push(sub);
+    } else if (child.type === "page") {
+      if (sub) sub.items.push(named(child));
+      else entries.push(named(child));
+    } else if (child.type === "folder") {
+      for (const e of folderEntries(child, sectionKey)) {
+        if (e.type === "page" && sub) sub.items.push(e);
+        else entries.push(e);
+      }
+    }
   }
   return entries;
 };
 
-// A separator opens a labelled group for the root pages after it; a folder is
-// a group of its own, or fills the group its separator just opened.
-export const toGroups = (nodes: TreeNode[]): NavGroup[] => {
-  const groups: NavGroup[] = [];
-  let open: NavGroup | null = null;
-
+/**
+ * The page tree as the sidebar shows it: root pages at the top, then one
+ * section per folder. A root separator names the section of the folder after
+ * it ("Experimental" over the memory folder).
+ */
+export const toNavModel = (nodes: TreeNode[]): NavModel => {
+  const model: NavModel = { top: [], sections: [] };
+  let pendingLabel: ReactNode | undefined;
   for (const node of nodes) {
-    switch (node.type) {
-      case "separator":
-        open = { label: node.name, items: [] };
-        groups.push(open);
-        break;
-      case "folder":
-        if (open?.label && open.items.length === 0) open.items.push(...folderEntries(node));
-        else groups.push({ label: node.name, items: folderEntries(node) });
-        open = null;
-        break;
-      case "page":
-        if (!open) {
-          open = { items: [] };
-          groups.push(open);
-        }
-        open.items.push(node);
-        break;
+    if (node.type === "page") model.top.push(node);
+    else if (node.type === "separator") pendingLabel = node.name;
+    else {
+      const label = pendingLabel ?? node.name;
+      const key = keyOf(label, String(model.sections.length));
+      model.sections.push({ key, label, entries: folderEntries(node, key) });
+      pendingLabel = undefined;
     }
   }
-
-  return groups;
+  return model;
 };
 
 // The search palette opens on these before anything is typed.
@@ -78,112 +102,129 @@ const SUGGESTED = [
   "/docs/reference/create-runtime",
 ];
 
-export const toSuggestions = (groups: NavGroup[]): SearchSuggestion[] =>
-  groups
-    .flatMap((group) => group.items)
-    .filter((item): item is TreeItem => item.type === "page" && SUGGESTED.includes(item.url))
-    .map((item) => ({
-      url: item.url,
-      title: typeof item.name === "string" ? item.name : item.url,
-    }));
+export const toSuggestions = (model: NavModel): SearchSuggestion[] =>
+  [...model.top, ...model.sections.flatMap((s) => s.entries.flatMap((e) => (e.type === "page" ? [e] : e.items)))]
+    .filter((item) => SUGGESTED.includes(item.url))
+    .map((item) => ({ url: item.url, title: typeof item.name === "string" ? item.name : item.url }));
 
-const NavLink = ({ item }: { item: TreeItem }) => {
+/** Every sub-group: they start open, so a section opens straight onto its pages. */
+const subgroupKeys = (model: NavModel) =>
+  model.sections.flatMap((s) => s.entries.flatMap((e) => (e.type === "subgroup" ? [e.key] : [])));
+
+/** The section and sub-group keys that hold `url`: what to open to show it. */
+const openFor = (model: NavModel, url: string): string[] => {
+  for (const s of model.sections) {
+    for (const e of s.entries) {
+      if (e.type === "page" && e.url === url) return [s.key];
+      if (e.type === "subgroup" && e.items.some((i) => i.url === url)) return [s.key, e.key];
+    }
+  }
+  return [];
+};
+
+// One row style for pages and section headings alike. The explicit height is
+// load-bearing: the rail's geometry (globals.css, `.docs-nav`) assumes 30px rows.
+const rowClass = [
+  "group/row flex h-[30px] shrink-0 cursor-pointer select-none items-center gap-2 rounded-md px-2 font-medium text-sm/none",
+  "text-ink-body no-underline transition-colors",
+  "hover:bg-ink-primary/5 hover:text-ink-primary",
+  // Inset: the collapsing lists clip their overflow, so an outset ring would be cut.
+  "focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent-bg/60",
+  // The current page is raised off the sidebar.
+  "data-[active]:bg-raised-selected data-[active]:text-ink-primary data-[active]:shadow-raised",
+  "[&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-ink-secondary hover:[&_svg]:text-ink-primary data-[active]:[&_svg]:text-ink-primary",
+].join(" ");
+
+const listClass = "flex flex-col gap-0.5";
+
+const Chevron = () => (
+  <ChevronDown className="ml-auto size-3! text-ink-tertiary transition-transform group-data-closed/row:-rotate-90" />
+);
+
+const PageRow = ({ item, icon }: { item: TreeItem; icon?: ReactNode }) => {
   const pathname = usePathname();
-
   return (
-    <Sidebar.MenuItem>
-      <Sidebar.MenuButton
-        isActive={pathname === item.url}
-        render={
-          <Link href={item.url}>
-            <span className="min-w-0 flex-1 truncate">{displayName(item)}</span>
-          </Link>
-        }
-      />
-    </Sidebar.MenuItem>
+    // The primitive's rows are buttons; these are real links, and say so.
+    <Nav.Item
+      value={item.url}
+      active={pathname === item.url}
+      role="link"
+      className={rowClass}
+      render={<Link href={item.url} />}
+    >
+      {icon && <Nav.Icon>{icon}</Nav.Icon>}
+      {/* Long titles truncate under the deeper indent; the tooltip has the rest. */}
+      <Nav.Label className="min-w-0 truncate" title={typeof item.name === "string" ? item.name : undefined}>
+        {displayName(item)}
+      </Nav.Label>
+    </Nav.Item>
   );
 };
 
-const groupKey = (group: NavGroup, index: number) =>
-  typeof group.label === "string" ? group.label : String(index);
-
-const hasPage = (group: NavGroup, url: string) =>
-  group.items.some((item) => item.type === "page" && item.url === url);
-
-const GroupItems = ({ items }: { items: NavEntry[] }) => (
-  <Sidebar.Menu>
-    {items.map((item, i) =>
-      item.type === "page" ? (
-        <NavLink key={item.url} item={item} />
-      ) : (
-        <li
-          key={`label-${i}`}
-          className="mt-2.5 flex h-6 items-center px-2 font-medium text-2xs text-ink-tertiary"
-        >
-          {item.name}
-        </li>
-      ),
-    )}
-  </Sidebar.Menu>
-);
-
 /**
- * The sidebar's page tree. Labelled sections fold: the one holding the current
- * page starts open and the rest closed, and arriving at a page in a closed
- * section (from search or a link) opens it. The shell lives in the root
- * layout, so what you opened stays open as you move between pages.
+ * The sidebar's page tree, on `@intentface/chat`'s Nav: one tab stop with
+ * arrow keys and typeahead, sections that fold with a guide down their left
+ * edge. The section holding the current page is open, and its sub-groups are;
+ * opening a page in a closed section (from search or a link) opens it; what
+ * you open or close stays that way while you move around.
  */
-export const DocsNav = ({ groups }: { groups: NavGroup[] }) => {
+export const DocsNav = ({ model }: { model: NavModel }) => {
   const pathname = usePathname();
-  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<string[]>(() => [...subgroupKeys(model), ...openFor(model, pathname)]);
   const [lastPath, setLastPath] = useState(pathname);
-
-  const current = groups.findIndex((group) => hasPage(group, pathname));
-  const currentKey = current >= 0 ? groupKey(groups[current], current) : undefined;
-  // Arriving at a page opens its section; closing it afterwards sticks.
   if (lastPath !== pathname) {
     setLastPath(pathname);
-    if (currentKey && open[currentKey] === false) setOpen({ ...open, [currentKey]: true });
+    const needed = openFor(model, pathname).filter((k) => !expanded.includes(k));
+    if (needed.length) setExpanded([...expanded, ...needed]);
   }
 
   return (
-    // Closed sections sit close together; an open one keeps room below it,
-    // inside the panel, so it folds away with the section.
-    <Sidebar.Content className="gap-0.5">
-      {groups.map((group, index) => {
-        const key = groupKey(group, index);
-        if (!group.label) {
-          return (
-            <Sidebar.Group key={key} className="mb-2">
-              <GroupItems items={group.items} />
-            </Sidebar.Group>
-          );
-        }
-        return (
-          <Collapsible
-            key={key}
-            open={open[key] ?? key === currentKey}
-            onOpenChange={(next) => setOpen({ ...open, [key]: next })}
-            render={<Sidebar.Group />}
-          >
-            <Sidebar.GroupLabel
-              render={<Collapsible.Trigger />}
-              className="group/label w-full cursor-pointer justify-between transition-colors hover:text-ink-primary"
-            >
-              {group.label}
-              <ChevronRight
-                aria-hidden
-                className="size-3! text-ink-tertiary transition-transform duration-200 group-hover/label:text-ink-secondary group-data-[panel-open]/label:rotate-90"
-              />
-            </Sidebar.GroupLabel>
-            <Collapsible.Panel className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] data-[ending-style]:h-0 data-[starting-style]:h-0">
-              <div className="pb-3">
-                <GroupItems items={group.items} />
-              </div>
-            </Collapsible.Panel>
-          </Collapsible>
-        );
-      })}
+    <Sidebar.Content className="docs-nav">
+      <Nav.Root
+        aria-label="Documentation"
+        guide="indent"
+        expanded={expanded}
+        onExpandedChange={setExpanded}
+        render={<nav />}
+        className="flex flex-col gap-0.5"
+      >
+        <Nav.List guide="none" className={listClass}>
+          {model.top.map((item) => (
+            <PageRow key={item.url} item={item} icon={item.url === "/docs" ? <Home /> : undefined} />
+          ))}
+
+          {model.sections.map((section, i) => (
+            <Nav.Group key={section.key} value={section.key} className={i === 0 ? "mt-2" : undefined}>
+              <Nav.Trigger className={rowClass}>
+                {ICONS[section.key] && <Nav.Icon>{ICONS[section.key]}</Nav.Icon>}
+                <Nav.Label className="min-w-0 truncate">{section.label}</Nav.Label>
+                <Chevron />
+              </Nav.Trigger>
+
+              {/* A rail down the section, with an elbow at each sub-group. */}
+              <Nav.List guide="branches" className={listClass}>
+                {section.entries.map((entry) =>
+                  entry.type === "page" ? (
+                    <PageRow key={entry.url} item={entry} />
+                  ) : (
+                    <Nav.Group key={entry.key} value={entry.key}>
+                      <Nav.Trigger className={rowClass}>
+                        <Nav.Label className="min-w-0 truncate">{entry.label}</Nav.Label>
+                        <Chevron />
+                      </Nav.Trigger>
+                      <Nav.List className={listClass}>
+                        {entry.items.map((item) => (
+                          <PageRow key={item.url} item={item} />
+                        ))}
+                      </Nav.List>
+                    </Nav.Group>
+                  ),
+                )}
+              </Nav.List>
+            </Nav.Group>
+          ))}
+        </Nav.List>
+      </Nav.Root>
     </Sidebar.Content>
   );
 };
