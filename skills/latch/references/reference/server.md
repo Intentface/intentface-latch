@@ -47,7 +47,7 @@ const handler = createLatchHandler<Principal>({ runtime, resolveContext, basePat
 | `onError` (optional) | `((error: unknown, info: { route: string; name?: string; }) => void \| Promise<void>)` | Receives errors the client is only told about briefly. A connection's errors can quote the other server's response, so the client gets a short code and the full error comes here. Wire it to your logger, or the detail is lost. |
 | `connectedParam` (optional) | `string` | The query parameter that tells your page which service was just connected, after a sign-in returns: `?connected=linear`. Default: `"connected"`. |
 | `basePath` (optional) | `string` | Where the handler is mounted, for example `"/api/latch"`. Default: `"/"`. |
-| `cronSecret` (optional) | `string` | Turns on `POST /cron/run`, which calls `runtime.cron()` for every customer. Requests must send this secret in the `x-latch-cron-secret` header. Leave it out and the route doesn't exist. (Vercel Cron sends a `GET` with a bearer token instead: give it a route of your own.) |
+| `cronSecret` (optional) | `string` | Turns on `cron/run`, which calls `runtime.cron()` for every customer: fires due schedules and finishes interrupted answers. Requests must carry this secret, as `Authorization: Bearer <secret>` or in the `x-latch-cron-secret` header, with `GET` or `POST`. That means Vercel Cron can call it directly: set this to `process.env.CRON_SECRET` and point `vercel.json` at the route. Leave it out and the route doesn't exist. |
 | `cronRun` (optional) | `(() => Promise<unknown>)` | What `POST /cron/run` does. Needed with a database per customer: call `cron()` on each customer's runtime. Default: ``runtime.cron()``. |
 
 ## Routes
@@ -71,6 +71,6 @@ Paths are relative to `basePath`. Every route except the cron route and the conn
 | `GET connections/:name/callback` | Where the provider sends the user back. |
 | `POST connections/:name/disconnect` | Remove the caller's credentials. |
 | `POST connections/:name/test` | Check the connection works; returns its tool names. |
-| `POST cron/run` | `runtime.cron()` for everyone. Needs `cronSecret`. |
+| `GET` / `POST cron/run` | `runtime.cron()` for everyone. Needs `cronSecret`, as a bearer token or `x-latch-cron-secret`, so Vercel Cron can call it. |
 
 Refusals come back as JSON with a `code`: see [Errors](./errors.md).

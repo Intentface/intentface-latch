@@ -78,6 +78,8 @@ export async function GET(req: Request) {
 
 Set `CRON_SECRET` in the project's environment variables; Vercel sends it automatically.
 
+If you mount [the handler](/docs/guides/mount-the-handler) instead of writing your own routes, you don't need this one: its `cron/run` route accepts Vercel's request. Pass `cronSecret: process.env.CRON_SECRET` (`createLatchApp` reads it on its own) and point `vercel.json` at `/api/latch/cron/run`.
+
 <Callout title="How often your plan runs crons">
 Every-minute crons need a plan that allows them. With a less frequent cron, schedules fire late and crashed answers take longer to recover, but nothing is lost or run twice.
 </Callout>

@@ -115,63 +115,21 @@ Deno.serve(async (request) =>
 
 ## Node frameworks
 
-Express, Fastify and NestJS predate `Request`/`Response`, so they need a bridge between Node's `req`/`res` and the Web objects. **Write it once** — all three then use the same helper.
+Express, Fastify and NestJS predate `Request`/`Response`, so they go through `toNodeHandler` from `@intentface/latch-server/node`, which turns Node's `req`/`res` into the Web objects and back. Request bodies and answers stream through it; it resolves `false` for a path that isn't a Latch route, so your app can carry on.
 
-```ts title="node-bridge.ts"
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import type { IncomingMessage, ServerResponse } from "node:http";
-import type { LatchHandler } from "@intentface/latch-server";
+```ts title="latch-handler.ts"
+import { createLatchHandler } from "@intentface/latch-server";
+import { toNodeHandler } from "@intentface/latch-server/node";
 
-/** Node request → Web Request. */
-function toWebRequest(req: IncomingMessage): Request {
-  const host = req.headers.host ?? "localhost";
-  const proto = (req.headers["x-forwarded-proto"] as string) ?? "http";
-  const url = new URL(req.url ?? "/", `${proto}://${host}`);
-
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (Array.isArray(value)) value.forEach((v) => headers.append(key, v));
-    else if (value !== undefined) headers.set(key, value);
-  }
-
-  const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  return new Request(url, {
-    method: req.method,
-    headers,
-    // Stream the body rather than buffering it.
-    body: hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined,
-    duplex: "half",
-  } as RequestInit);
-}
-
-/** Web Response → Node response, streaming (never buffered). */
-async function writeNodeResponse(response: Response, res: ServerResponse): Promise<void> {
-  res.statusCode = response.status;
-  response.headers.forEach((value, key) => res.setHeader(key, value));
-  if (!response.body) return void res.end();
-  // pipeline, not pipe: on an error (or the client leaving) it closes both
-  // ends; a bare pipe leaves the error unhandled and can take the process down.
-  // The turn itself finishes and is saved server-side either way.
-  await pipeline(Readable.fromWeb(response.body as never), res).catch(() => {});
-}
-
-/** Returns false when Latch doesn't own the route, so the host can continue. */
-export function nodeAdapter(handler: LatchHandler) {
-  return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
-    const response = await handler(toWebRequest(req));
-    if (!response) return false;
-    await writeNodeResponse(response, res);
-    return true;
-  };
-}
+export const handle = toNodeHandler(createLatchHandler({ runtime, resolveContext, basePath: "/api/latch" }));
 ```
 
 > **Do not body-parse the Latch route**
 >
 > `express.json()`, Fastify's default parser and NestJS's global pipes all consume
-> the request stream. If one runs first, the bridge hands Latch an empty body and
-> every turn arrives blank. Mount the parser *after* the Latch route, or exclude
+> the request stream. If one runs first, `toNodeHandler` sends Latch what it left on
+> `req.body`, but uploads no longer stream, and a parser that keeps nothing leaves
+> every turn blank. Mount the parser *after* the Latch route, or exclude
 > the path.
 
 > **Do not buffer the response**
@@ -184,12 +142,9 @@ export function nodeAdapter(handler: LatchHandler) {
 
 ```ts
 import express from "express";
-import { nodeAdapter } from "./node-bridge";
-import { latch } from "./latch-handler";
+import { handle } from "./latch-handler";
 
 const app = express();
-const handle = nodeAdapter(latch);
-
 // Before any body parser. Express 5 requires a NAMED wildcard — a bare
 // "/api/latch/*" throws at registration. On Express 4 use "/api/latch/*".
 app.all("/api/latch/*splat", async (req, res, next) => {
@@ -212,13 +167,10 @@ raw Node objects:
 
 ```ts
 import Fastify from "fastify";
-import { nodeAdapter } from "./node-bridge";
-import { latch } from "./latch-handler";
+import { handle } from "./latch-handler";
 
 const app = Fastify();
-const handle = nodeAdapter(latch);
-
-// Leave the body alone — the bridge streams it.
+// Leave the body alone: toNodeHandler streams it.
 app.addContentTypeParser(/.*/, (_req, payload, done) => done(null, payload));
 
 app.all("/api/latch/*", async (request, reply) => {
@@ -234,17 +186,14 @@ await app.listen({ port: 3000 });
 
 **NestJS**
 
-The same bridge applies — reach for the underlying request and skip Nest's
+The same handler applies — reach for the underlying request and skip Nest's
 pipes on this route. This is NestJS on Express; on Fastify, `@Req()` and
 `@Res()` are Fastify's objects, so pass `req.raw` and `res.raw` to `handle`:
 
 ```ts title="latch.controller.ts"
 import { All, Controller, Next, Req, Res } from "@nestjs/common";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { nodeAdapter } from "./node-bridge";
-import { latch } from "./latch-handler";
-
-const handle = nodeAdapter(latch);
+import { handle } from "./latch-handler";
 
 @Controller("api/latch")
 export class LatchController {
@@ -281,7 +230,7 @@ All paths are relative to `basePath`.
 | `GET` | `connections` | connection status for the caller |
 | `GET` | `connections/:name/authorize` · `callback` | the OAuth dance |
 | `POST` | `connections/:name/disconnect` · `test` | revoke, or check liveness |
-| `POST` | `cron/run` | `runtime.cron()`: fire all tenants' due schedules, reap + resume stalled runs |
+| `GET` `POST` | `cron/run` | `runtime.cron()`: fire all tenants' due schedules, reap + resume stalled runs |
 
 The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messages }` array and takes the last one — so an AI SDK client works without a translation layer.
 
@@ -296,7 +245,7 @@ The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messag
 
 ## The cron route
 
-`POST cron/run` is the only route that isn't user-authenticated: it fires **every** tenant's due schedules, so there's no principal to check. Guard it with a shared secret, sent as `x-latch-cron-secret`:
+`cron/run` is the only route that isn't user-authenticated: it fires **every** tenant's due schedules and finishes interrupted answers, so there's no principal to check. Guard it with a shared secret, sent as `Authorization: Bearer <secret>` or in the `x-latch-cron-secret` header, with `GET` or `POST`:
 
 ```ts
 createLatchHandler({
@@ -306,11 +255,11 @@ createLatchHandler({
 });
 ```
 
-Omit `cronSecret` and the route doesn't exist at all — it fails closed. Point any scheduler that can send a `POST` with that header at it.
+Omit `cronSecret` and the route doesn't exist at all — it fails closed.
 
 > **Vercel Cron**
 >
-> Vercel Cron sends a `GET` with `Authorization: Bearer $CRON_SECRET`, which this route doesn't accept. Use a five-line route that calls `runtime.cron()` instead: see [Deploy on Vercel](./deploy-on-vercel.md#4-the-cron).
+> Vercel Cron calls a URL with `GET` and `Authorization: Bearer $CRON_SECRET`, which this route accepts. Set `cronSecret: process.env.CRON_SECRET` (`createLatchApp` reads `CRON_SECRET` on its own) and point a cron in `vercel.json` at it: `{ "crons": [{ "path": "/api/latch/cron/run", "schedule": "* * * * *" }] }`.
 
 Schedules also need a cron evaluator, since core ships no cron library:
 
