@@ -9,7 +9,7 @@ export const docs = defineDocs({ dir: "content/docs" });
  * reference can't drift from the code, and a better doc comment improves both
  * the site and editor hovers.
  */
-const generator = createGenerator({ tsconfigPath: "../../packages/core/tsconfig.json" });
+const generator = createGenerator({ tsconfigPath: "./tsconfig.type-tables.json" });
 
 /** Longest type text shown as-is in the collapsed row; longer ones fall back to the default simple form. */
 const SHORT = 64;

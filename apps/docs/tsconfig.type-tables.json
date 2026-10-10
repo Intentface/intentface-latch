@@ -1,0 +1,9 @@
+{
+  // The reference tables read the packages' types. Resolve workspace packages
+  // to their source (the `development` export condition), not dist/, which is
+  // stale or missing wherever the packages weren't just built (CI, Vercel).
+  "extends": "../../packages/core/tsconfig.json",
+  "compilerOptions": {
+    "customConditions": ["development"]
+  }
+}
