@@ -43,6 +43,58 @@ export class ChatConflictError extends Error {
 }
 
 /**
+ * Whose record an id-only call acts on: the owner key the adapter itself put
+ * on the record (`ChatRecord.owner`, `RunRecord.ownerKey`,
+ * `ScheduleRecord.owner`), handed back by the runtime. Calls such as
+ * `updateRun(id)` otherwise carry only an id.
+ *
+ * An adapter may use it two ways, or ignore it:
+ *  - **Check:** refuse a call whose key doesn't match the row's owner by
+ *    throwing `OwnerKeyMismatchError`, so a bug can't write into another
+ *    owner's run or chat.
+ *  - **Route:** an adapter that keeps each tenant apart (a schema or a
+ *    database each) reads the tenant from the key (`decodeOwnerKey`) and goes
+ *    straight to it, with no global index of ids.
+ *
+ * The runtime passes it on every id-only call whenever the record it acts on
+ * carries a key (and the principal instead where it holds no record yet). The two cross-owner sweeps (`reapExpiredRuns`,
+ * `claimDueSchedules`) have no owner to start from: a per-tenant adapter keeps
+ * a global table of active leases and due schedules for them, and returns the
+ * key on each record so the calls that follow carry it.
+ */
+export interface OwnerScope<P = unknown> {
+  ownerKey?: string;
+  /**
+   * The person the call is made for, on the one call the runtime makes with no
+   * record in hand yet: `runtime.getRun({ principal, runId })`. Derive the key
+   * from it the way your principal-scoped methods do.
+   */
+  principal?: P;
+}
+
+/**
+ * Thrown by an adapter when an id-only call's `OwnerScope.ownerKey` doesn't
+ * match the owner of the row it names. The runtime never retries it: a
+ * mismatch is a bug or tampering, not a transient failure. Recovery and
+ * schedule sweeps report it through `onOwnerKeyMismatch` and leave the row
+ * alone.
+ */
+export class OwnerKeyMismatchError extends Error {
+  readonly code = "owner_key_mismatch";
+  constructor(
+    /** What the call named: `run <id>`, `chat <id>`, `schedule <id>`. */
+    readonly target: string,
+  ) {
+    super(`${target} doesn't belong to the owner key the call carried`);
+    this.name = "OwnerKeyMismatchError";
+  }
+}
+
+export function isOwnerKeyMismatchError(e: unknown): e is OwnerKeyMismatchError {
+  return e instanceof OwnerKeyMismatchError || (e as { code?: unknown } | null)?.code === "owner_key_mismatch";
+}
+
+/**
  * Thrown by `createRun` / `claimRun` when the chat already has a LIVE active
  * run — one turn per conversation is a storage-level invariant (a partial
  * unique index in the shipped adapters), so two tabs, a webhook retry racing a
@@ -114,6 +166,14 @@ export interface RunRecord {
   chatId: string;
   agent: string;
   status: RunStatus;
+  /**
+   * The owner key of the run's chat, stamped when the run is created: a run
+   * inherits its chat's owner. Optional, but an adapter that returns it on
+   * every run record (reaped and reclaimed ones included) gives the runtime
+   * the key to pass back on id-only calls about this run, crash recovery
+   * included. See `OwnerScope`.
+   */
+  ownerKey?: string;
   /**
    * Opaque identity blob (the serialized `Principal`) captured when the run was
    * created, so resume/cron — which have no request — can rebuild the principal
@@ -336,7 +396,12 @@ export interface StorageAdapter<P> {
    * An adapter that ignores `fence` still works, but a zombie worker can then
    * write for up to one lease TTL after losing its run.
    */
-  appendMessages(chatId: string, messages: AppMessage[], fence?: RunFence): Promise<void | boolean>;
+  appendMessages(
+    chatId: string,
+    messages: AppMessage[],
+    fence?: RunFence,
+    scope?: OwnerScope<P>,
+  ): Promise<void | boolean>;
 
   // runs (per-turn execution record)
   /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */
@@ -403,6 +468,7 @@ export interface StorageAdapter<P> {
     owner: string,
     ttlMs: number,
     fencingToken: number,
+    scope?: OwnerScope<P>,
   ): Promise<boolean>;
   /**
    * Re-claim an interrupted run for a new owner (resume). Succeeds only if the
@@ -417,6 +483,7 @@ export interface StorageAdapter<P> {
     id: string,
     owner: string,
     ttlMs: number,
+    scope?: OwnerScope<P>,
   ): Promise<RunRecord | null>;
   // ↑ Also null when the chat has since started a NEWER active run (the crashed
   //   turn was superseded by a fresh message) — resuming it would interleave.
@@ -431,8 +498,9 @@ export interface StorageAdapter<P> {
     id: string,
     patch: Partial<RunRecord>,
     guard?: RunLease,
+    scope?: OwnerScope<P>,
   ): Promise<boolean>;
-  getRun(id: string): Promise<RunRecord | null>;
+  getRun(id: string, scope?: OwnerScope<P>): Promise<RunRecord | null>;
   /** Scoped list of the caller's runs (joined via chats), most-recent first. */
   listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
   /**
@@ -531,6 +599,7 @@ export interface StorageAdapter<P> {
     patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
     owner: string,
     claim?: { leaseExpiresAt: number },
+    scope?: OwnerScope<P>,
   ): Promise<boolean | void>;
   /**
    * OPTIONAL system op (no principal): remember which chat a fire ran in, so
@@ -552,6 +621,7 @@ export interface StorageAdapter<P> {
   noteScheduleFire?(
     id: string,
     patch: { lastChatId: string; firedAt: number },
+    scope?: OwnerScope<P>,
   ): Promise<void>;
 }
 
@@ -578,4 +648,14 @@ export function encodeOwnerKey(segments: readonly unknown[]): string {
     );
   }
   return (segments as string[]).map(encodeURIComponent).join("/");
+}
+
+/**
+ * The segments of an owner key made by `encodeOwnerKey`, unescaped:
+ * `decodeOwnerKey("t1/u%2F7")` is `["t1", "u/7"]`. For an adapter that routes
+ * by the first segment (the tenant) or checks a prefix.
+ */
+export function decodeOwnerKey(key: string): string[] {
+  if (typeof key !== "string" || key === "") throw new Error("decodeOwnerKey: empty key");
+  return key.split("/").map(decodeURIComponent);
 }
