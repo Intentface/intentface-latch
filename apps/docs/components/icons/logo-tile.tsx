@@ -12,9 +12,12 @@ export const LogoTile = ({ size = "sm", className }: LogoTileProps) => (
   <span
     aria-hidden="true"
     className={cn(
-      "flex shrink-0 items-center justify-center bg-white dark:bg-[#18181c]",
-      "shadow-[0_0_0_1px_rgb(0_0_0/0.08),0_1px_2px_rgb(0_0_0/0.08)]",
-      "dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.08),0_0_0_1px_rgb(255_255_255/0.08)]",
+      "flex shrink-0 items-center justify-center",
+      // Bevelled like the send button: a face lit from above, a highlight on
+      // its top edge and a soft shade along the bottom, inside a crisp ring.
+      "bg-linear-to-b from-white to-[#ececef] dark:from-[#2a2a30] dark:to-[#16161a]",
+      "shadow-[inset_0_1px_0_rgb(255_255_255),inset_0_-2px_3px_rgb(0_0_0/0.06),0_0_0_1px_rgb(0_0_0/0.09),0_1px_2px_rgb(0_0_0/0.1)]",
+      "dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.12),inset_0_-2px_3px_rgb(0_0_0/0.4),0_0_0_1px_rgb(0_0_0/0.6),0_1px_2px_rgb(0_0_0/0.4)]",
       size === "sm" ? "size-6 rounded-md" : "size-12 rounded-xl",
       className,
     )}
