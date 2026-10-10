@@ -1,5 +1,17 @@
 # @intentface/latch-server
 
+## 0.17.1
+
+### Patch Changes
+
+- fa7a201: `createLatchApp({ context })` accepts the plain-function form, `async ({ principal }) => ({ … })`, as `createRuntime` does since 0.17.0. The deprecated `{ build }` object still works.
+- f2a16e5: Doc comments rewritten for people using the options: `createLatchApp` and `createLatchHandler`, MCP connections and `oauth()`, the storage and agent store options, and the Telegram, Slack and WhatsApp channels. They show in your editor and in the generated reference on the docs site. No code changes.
+- Updated dependencies [a132539]
+- Updated dependencies [0bee5fd]
+- Updated dependencies [f2a16e5]
+  - @intentface/latch-core@0.17.1
+  - @intentface/latch-mcp@0.17.1
+
 ## 0.17.0
 
 ### Minor Changes

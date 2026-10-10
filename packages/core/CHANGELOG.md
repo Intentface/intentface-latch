@@ -1,5 +1,15 @@
 # @intentface/latch-core
 
+## 0.17.1
+
+### Patch Changes
+
+- a132539: Memory is now marked **experimental**: the `memory` options on `createRuntime` and `defineAgent`, the `@intentface/latch-memory` package and its docs. The only production store today is a Loredex workspace, and the interface still carries Loredex conventions, so the design may change in any release. Nothing changes in behaviour.
+- 0bee5fd: The doc comments on `createRuntime`'s options, the runtime's methods, `defineAgent`, `defineContext` and usage limits now explain each option for someone using it: what it does, what happens without it, and its default. They show in your editor and in the new generated reference on the docs site.
+  
+  The inputs of `runAgent`, `applyApproval`, `applyToolResult` and `schedule` are now exported as named types (`RunAgentInput`, `RunAgentResult`, `ApplyApprovalInput`, `ApplyToolResultInput`, `ScheduleInput`), for typing your own wrappers. Nothing else changes.
+- @intentface/latch-net@0.17.1
+
 ## 0.17.0
 
 ### Minor Changes
