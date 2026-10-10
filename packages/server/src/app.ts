@@ -3,7 +3,7 @@ import {
   createRuntime,
   defineContext,
   type AgentFactory,
-  type ContextDefinition,
+  type ContextInput,
   type Runtime,
   type RuntimeConfig,
   type Scheduler,
@@ -39,8 +39,8 @@ export interface LatchAppConfig<P, RC = unknown> {
   agents: Record<string, AgentFactory<P, any, any>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, any, any>>);
   /** Your login: turns a request into the principal, or `null` for a `401`. */
   resolveContext: LatchHandlerConfig<P>["resolveContext"];
-  /** What tools receive, built for each turn. See `defineContext`. @default `{}` */
-  context?: ContextDefinition<P, RC>;
+  /** What your agents and tools can work with, built from who is asking on every turn: `async ({ principal }) => ({ … })`. @default `{}` */
+  context?: ContextInput<P, RC>;
   /** A model catalog you already loaded. @default `loadModelCatalog()` */
   models?: ModelCatalog;
   /** A key per caller for prompt caching, so one person's cached prompt is never reused for another. Usually the same as the storage owner. */
