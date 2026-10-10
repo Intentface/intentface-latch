@@ -20,6 +20,8 @@
  * rebuilds the same context.
  */
 
+import type { Runtime, TurnWriter } from "./runtime.js";
+
 /** Reads a secret for a principal (the Vault read-side; isolation lives in the store). */
 export type SecretResolver<P> = (
   principal: P,
@@ -42,6 +44,37 @@ export interface ContextDefinition<P, RuntimeContext> {
     turnContext?: unknown;
   }) => RuntimeContext | Promise<RuntimeContext>;
 }
+
+/**
+ * What a tool receives as `options.context` during a run: whatever your
+ * `defineContext` `build` returned, plus what Latch adds for every tool.
+ *
+ * ```ts
+ * execute: async ({ orderId }, { context }) => {
+ *   const { orders, principal } = context as ToolContext<Principal, Ctx>;
+ *   return orders.refund(orderId, principal.userId);
+ * },
+ * ```
+ */
+// Latch sets these on every tool's context, after spreading what `build`
+// returned, so a built field with one of these names is overwritten.
+type LatchToolKeys = "principal" | "run" | "writer" | "runtime";
+
+// `Omit` per union member: on a union as a whole it keeps only the shared
+// keys, so a context typed as `{ kind: "a"; a } | { kind: "b"; b }` would lose
+// `a` and `b`.
+type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+export type ToolContext<P, RuntimeContext = unknown> = OmitEach<RuntimeContext, LatchToolKeys> & {
+  /** Who the run is for: the principal your route passed, or the one restored for a resumed or scheduled run. */
+  principal: P;
+  /** The run this tool call belongs to. `agent` is the agent's name as the run resolved it. */
+  run: { id: string; chatId: string; agent: string };
+  /** Streams extra parts (for example `data-*` progress) into the answer while the tool runs. */
+  writer: TurnWriter;
+  /** The runtime itself, for tools that schedule, list chats or start runs. */
+  runtime: Runtime<P>;
+};
 
 export function defineContext<P, RuntimeContext>(
   def: ContextDefinition<P, RuntimeContext>,

@@ -14,7 +14,7 @@ import {
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
 import { acceptUserMessage, InvalidMessageError, isHidden, lastQuestionResent, type AppMessage } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
-import type { ContextDefinition } from "./context.js";
+import type { ContextDefinition, ToolContext } from "./context.js";
 import type {
   AgentConfig,
   AgentFactory,
@@ -2575,7 +2575,7 @@ export function createRuntime<P, RC = unknown>(
                 // as" names the same record the turn is using.
                 run: { id: run.id, chatId: resolvedChatId, agent: run.agent },
                 writer,
-              },
+              } satisfies ToolContext<P, Record<string, unknown>>,
             ]),
           ),
           // generate-text step callback: accumulate usage across steps,
