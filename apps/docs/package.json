@@ -9,7 +9,8 @@
     "start": "next start --port 3100",
     "postinstall": "fumadocs-mdx",
     "typecheck": "tsc --noEmit",
-    "type-tables": "node scripts/type-tables.mjs"
+    "type-tables": "node scripts/type-tables.mjs",
+    "skill": "node scripts/type-tables.mjs && node scripts/build-skill.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

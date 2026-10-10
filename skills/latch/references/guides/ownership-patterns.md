@@ -1,0 +1,288 @@
+<!-- Generated from apps/docs/content/docs/guides/ownership-patterns.mdx by apps/docs/scripts/build-skill.mjs. Edit the page, not this file. -->
+
+# Who owns a conversation
+
+Six patterns for whose conversations are whose. Private, shared, both, a database per customer, background runs, and support access.
+
+Online: https://intentface-latch-docs.vercel.app/docs/guides/ownership-patterns
+
+`Principal` is **your type**. Latch never inspects it, and there is no built-in notion of a user, an org, or a role. What Latch does with it is derive one string — the **owner key** — and scope every row by it.
+
+That single indirection is the whole tenancy model:
+
+```ts
+interface Principal {
+  orgId: string;
+  userId?: string;
+}
+
+const storage = createSqliteAdapter<Principal>(db, {
+  owner: (p) => (p.userId ? [p.orgId, p.userId] : [p.orgId]),
+});
+```
+
+`owner` returns the key's **segments**, not a string — the adapter escapes each one and joins them (so a `/` or `%` inside an id can't forge a boundary). Change that one function and you change who can see what. Everything below is a variation on it.
+
+> **Two responsibilities, clearly split**
+>
+> Latch enforces **isolation** — a read scoped to an owner key cannot return
+> another owner's rows. Latch does not do **authorization** — whether this user
+> may use that agent, or spend that budget, is your `resolveContext`'s job. Isolation
+> is structural; authorization is policy.
+
+## Pattern 1 — Each end user owns their own sessions
+
+The SaaS default, and the one most apps want. Include the user in the key:
+
+```ts
+owner: (p) => {
+  // Don't assert with `p.userId!` — a principal that reached here without a
+  // userId would key as [orgId, undefined] and quietly land in a bucket
+  // nobody can read back. Make the requirement explicit instead.
+  if (!p.userId) throw new Error("per-user isolation requires a userId");
+  return [p.orgId, p.userId];
+},
+```
+
+If your `Principal` type makes `userId` required, the check is free and the
+throw is unreachable — which is the better shape when every entry point has a
+human behind it.
+
+Now every chat, run, usage row and schedule belongs to one person. `listChats` for user A can never return user B's conversation, even inside the same customer account — not because a `WHERE` clause was remembered, but because the adapter has no key that would reach it.
+
+```ts
+const latch = createLatchHandler({
+  runtime,
+  resolveContext: async (request) => {
+    const session = await auth.getSession(request);
+    if (!session) return null; // → 401
+    return { orgId: session.orgId, userId: session.userId };
+  },
+});
+```
+
+Two users hitting the same route get different data from the same code path. There is no per-request filter to forget.
+
+## Pattern 2 — The whole team shares one inbox
+
+Drop the user from the key and the org becomes the unit:
+
+```ts
+owner: (p) => [p.orgId]
+```
+
+Every member sees the same chats and can pick up any thread. This is what you want for a shared support desk, an ops channel, or an on-call assistant — the conversation belongs to the company, not to whoever typed first.
+
+The principal still carries `userId`; it's just not part of the key. Keep it, because tools and audit logs still need to know who is acting.
+
+## Pattern 3 — Personal and shared, in one app
+
+Most real products want both: private assistants *and* team agents. The storage `owner` option takes one function, so put the scope in the **principal** and let the key follow it:
+
+```ts
+type Scope = "user" | "org";
+
+interface Principal {
+  orgId: string;
+  userId?: string;
+  /** Which bucket this turn reads and writes. Resolved with the session. */
+  scope: Scope;
+}
+
+const storage = createSqliteAdapter<Principal>(db, {
+  owner: (p) => {
+    if (p.scope === "org") return [p.orgId];
+    // Same rule as Pattern 1, and `?? ""` breaks it just as `!` would: every
+    // principal missing a userId would collide into one shared [orgId, ""]
+    // bucket — a cross-user leak dressed as a default.
+    if (!p.userId) throw new Error("user scope requires a userId");
+    return [p.orgId, p.userId];
+  },
+});
+```
+
+A personal agent runs with `scope: "user"` and resolves under the caller's key; an org agent runs with `scope: "org"` and resolves under the org's. The same human produces both, so they hold private conversations and shared ones side by side.
+
+The scope has to be **part of the principal**, not an extra argument, because it must survive serialization: a resumed or cron-fired turn rebuilds the principal from the stored `identity` blob, and a scope passed alongside it would be lost — the turn would then read from the wrong bucket.
+
+> **Your own tables need the same rule — and won't get it for free**
+>
+> Latch's tables are safe here: you return segments and the adapter escapes and
+> joins them. Your *own* owner-scoped tables have no such helper, so if you build a
+> key by hand, do it in exactly one exported helper.
+>
+> Two copies that escape differently — one calling `encodeURIComponent`, one a bare
+> template string — produce **different keys for the same principal** as soon as an
+> id contains a `/` or `%`. The rows don't leak; they vanish. No error is raised,
+> and the data still exists under a key nothing now generates.
+
+## Pattern 4 — A database per tenant
+
+When a column isn't enough — a compliance commitment, a customer with their own region, a very large tenant — isolate at the database instead. `latch-server` takes a runtime *resolver*:
+
+```ts
+createLatchHandler({
+  runtime: (principal) => runtimeFor(principal.orgId),
+  resolveContext,
+  cronRun: async () => {
+    // Not a serial for-loop: `runDue` awaits each scheduled turn to
+    // completion, so one tenant's hour-long agent turn would stall every
+    // tenant after it — including the `sweep` that recovers their crashed
+    // runs. Fan out, and don't let one tenant's failure skip the rest —
+    // but do LOG the failures, or a tenant whose schedules silently stopped
+    // firing is undiagnosable.
+    const tenants = await listTenants();
+    const results = await Promise.allSettled(
+      tenants.map(async (tenant) => {
+        const rt = await runtimeFor(tenant);
+        await rt.cron();
+      }),
+    );
+    results.forEach((r, i) => {
+      if (r.status === "rejected") console.error(`cron tick failed for tenant ${tenants[i]}:`, r.reason);
+    });
+  },
+});
+```
+
+The resolver runs *after* `resolveContext`, so the principal picks the database. Note the `cronRun`: the system-wide tick has no principal, so with per-tenant databases you must supply it yourself. With a single runtime it defaults to `runtime.cron()`.
+
+Both models can coexist — column-scoped for self-serve customers, a dedicated database for enterprise ones — because the choice lives in a function rather than in the schema.
+
+## Pattern 5 — Nobody is there
+
+A scheduled agent and a webhook-triggered agent still need a principal, and inventing one at fire time is how tenancy breaks. Latch stores the principal on the run as an opaque `identity` blob and hands it back:
+
+```ts
+createRuntime({
+  // The run stored your Principal verbatim. Give it back as-is.
+  reconstructPrincipal: (identity) => identity as Principal,
+});
+```
+
+The rule: **the identity is captured when the schedule is created, not when it fires.** A report scheduled by user A three months ago still runs as user A, reads what user A can read, and lands in user A's rows — even though no one is logged in.
+
+Which is also the risk: if user A has since been removed from the org, the passthrough above keeps running their schedule, as them, forever. Re-validate on the way back out and return `null` to refuse:
+
+```ts
+createRuntime({
+  reconstructPrincipal: async (identity) => {
+    const p = identity as Principal;
+    // The same question your login answers — not a weaker one.
+    return (await isActiveMember(p.userId, p.orgId)) ? p : null;
+  },
+});
+```
+
+A refusal is permanent, and the runtime treats it that way: a refused cron fire is not run and its **schedule is disabled** (counted in `runDue`'s `rejected`), and a refused resume ends the run `errored` without anything running as that identity. Throw only for a transient failure — a lookup that couldn't be made — which counts as an error for that occurrence: it is still consumed, so a recurring schedule stays live for its next one and a one-shot is spent, while a thrown resume is retried once its lease lapses. Only `null` refuses; `undefined` does not. The hook runs inside the schedule's claim window, so keep it fast.
+
+> **Never derive identity from the request**
+>
+> Identity comes from your login, in the route, and travels as the principal. The
+> `context` function gets only the principal, on purpose: a resumed or scheduled
+> turn has no request, so anything read from one would be missing exactly when
+> nobody is watching. What a chat is about goes in `params`; what the user is
+> looking at goes in a `data-context` part. Both are saved, and neither is
+> identity. See [Principal, context and params](../concepts/inputs.md).
+
+## Pattern 6 — Support and admin access
+
+The mistake is to run the turn as the admin and "look at" the customer's data. That inverts the model: writes land under the admin's owner key, so the notes, runs and usage of a support session end up in a bucket the customer can't see and your billing can't attribute.
+
+Resolve the **subject's** principal deliberately instead:
+
+```ts
+resolveContext: async (request) => {
+  const session = await auth.getSession(request);
+  if (!session) return null;
+
+  const actingAs = request.headers.get("x-acting-as-org");
+  if (actingAs) {
+    if (!(await isSupportStaff(session.userId))) return null;
+    await auditLog.record({ actor: session.userId, subject: actingAs });
+    return { orgId: actingAs, userId: session.userId };
+  }
+
+  return { orgId: session.orgId, userId: session.userId };
+},
+```
+
+Two properties worth keeping: the authorization check happens before the principal is built, and the *acting* user stays in the principal so tools and traces record who really did it.
+
+## How a principal reaches a tool
+
+Isolating rows is half the job. The other half is making sure tenant A's tool call carries tenant A's credentials — and that the model never sees either.
+
+Every tool the runtime attaches receives one context object as its second argument (`options.context`): what your `context` function returned, plus `principal`, the chat's `params`, the message's `messageContext`, the current `run` (`{ id, chatId, agent }`) and the `writer`. So the context function makes the per-turn world, and a tool resolves what it needs from the principal it was handed, the credential included:
+
+```ts
+import { createVault, type ToolContext } from "@intentface/latch-core";
+
+const vault = createVault<Principal>({ store, masterKey });
+
+const context = async ({ principal }: { principal: Principal }) => ({
+  orgId: principal.orgId,
+  plan: await lookupPlan(principal.orgId),
+});
+```
+
+Then a tool reads the context, never an argument — and asks the vault for the secret, scoped by the principal:
+
+```ts
+type ToolCtx = ToolContext<Principal, Awaited<ReturnType<typeof context>>>;
+
+const lookupCustomer = tool({
+  description: "Look up a customer in the CRM.",
+  inputSchema: z.object({ email: z.string() }),
+  execute: async ({ email }, { context }) => {
+    const { principal, plan } = context as ToolCtx;
+    const apiKey = await vault.resolver(principal, "crm_api_key");
+    const baseUrl = plan === "enterprise" ? EU_ENDPOINT : US_ENDPOINT;
+    const res = await fetch(`${baseUrl}/customers?email=${encodeURIComponent(email)}`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+    return res.json();
+  },
+});
+```
+
+What this buys you, in order of importance:
+
+- **The model never holds a credential.** It chooses *which* tool to call; the key is attached below it, at egress. No prompt injection can exfiltrate a value the model was never given.
+- **The same tool is safe for every tenant.** One `lookupCustomer` definition serves all customers, because the credential is resolved from the principal at call time rather than baked into the agent.
+- **Rotation is a vault write.** Replace the secret and every agent and connection built on it picks up the new value; delete it and they all revoke.
+- **Tools can be tenant-aware without being tenant-specific.** Endpoint, plan tier, feature flags all come through `build`, so behaviour can differ per customer while the code stays single.
+
+The same resolver backs connections: hand it to `createMcpConnections({ secrets: vault.resolver })` and `latch-mcp` brokers MCP server auth through the vault, so an agent's config names a connection and never carries its token.
+
+## Two failure modes worth internalising
+
+### Pin the tenant when the session is created
+
+If the value your owner key derives from can change mid-session — an "active org" the user can switch in a menu — then owner-keyed rows fragment silently. Yesterday's chats belong to a key you no longer produce. They aren't deleted and no error is raised; they simply stop appearing.
+
+Resolve it once at session creation and keep it stable for the session's life. Switching orgs should mean a new session, not a mutated one.
+
+### Make sure the principal is the person you think it is
+
+A worked example, from a real integration. A chat-platform bot verified the sender's identity, checked their org membership, and then ran the turn as **the account that installed the app** rather than as the sender. Consequences, none of which raise an error:
+
+- Every chat, run and usage row was keyed to the installer, not the user.
+- Two colleagues using the same bot shared one owner key, so one person's context could surface for the other.
+- Per-user memory keys on `principal.userId`. On an org-scoped install there was no `userId`, so per-user memory was **silently skipped entirely** — not misrouted, absent.
+- The same agent reached from the web app *did* have the right principal, so it remembered things the bot could not, for no visible reason.
+
+The lesson generalizes past chat bots to any inbound integration — webhooks, email, API keys, embedded widgets. **Authorizing a request and identifying the actor are different steps.** If you check identity and then discard it, you get a system that is secure and wrong at the same time.
+
+> **A quick audit**
+>
+> For each entry point you have — web app, mobile, webhook, bot, cron, admin —
+> write down what `principal.userId` is at the moment `handleChat` is called. If
+> any two entry points for the same human disagree, memory, history and billing
+> will disagree too.
+
+## See also
+
+- [Turn inputs](https://intentface-latch-docs.vercel.app/docs/concepts/turns) — the principal, context and message projections in detail
+- [Storage](https://intentface-latch-docs.vercel.app/docs/reference/storage) — the guarantees the adapter must make for owner scoping to hold
+- [Secrets (the vault)](../concepts/secrets.md): setting it up, and team or personal keys
