@@ -2,7 +2,7 @@ import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import { desc, eq, inArray, and, like, sql } from "drizzle-orm";
 import type { LanguageModel } from "ai";
-import type { AgentConfig, AgentInfo } from "@intentface/latch-core";
+import { encodeOwnerKey, type AgentConfig, type AgentInfo } from "@intentface/latch-core";
 import { isCandidateId, parseAgentRef } from "@intentface/latch-agent-builder";
 import type {
   AgentActivation,
@@ -301,7 +301,7 @@ const maxStepsToCol = (m: AgentRecord["maxSteps"]): number | null =>
 const maxStepsFromCol = (v: number | null): AgentRecord["maxSteps"] =>
   v == null ? undefined : v === 0 ? "unlimited" : v;
 
-const ownerKeyOf = (segments: string[]): string => segments.map(encodeURIComponent).join("/");
+const ownerKeyOf = (segments: string[]): string => encodeOwnerKey(segments);
 
 function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): AgentBuilderStore<P> {
   const ownerKey = (p: P, scope: AgentScope) => ownerKeyOf(opts.owner(p, scope));

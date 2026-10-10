@@ -16,6 +16,7 @@ import {
 import {
   ChatBusyError,
   ChatConflictError,
+  encodeOwnerKey,
   type AppMessage,
   type ChatRecord,
   type RunFence,
@@ -118,9 +119,9 @@ function violates(error: unknown, sqliteCode: RegExp, pgCode: string, text: RegE
  */
 export const STALE_RUN_MS = 10 * 60_000;
 
-/** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
+/** Join an `owner` path into one composite key; refuses a missing or empty segment. */
 function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
-  return owner(principal).map(encodeURIComponent).join("/");
+  return encodeOwnerKey(owner(principal));
 }
 
 export function makeStorageAdapter<P>(

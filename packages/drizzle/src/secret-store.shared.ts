@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import type { SecretRecord, SecretStore } from "@intentface/latch-core";
+import { encodeOwnerKey, type SecretRecord, type SecretStore } from "@intentface/latch-core";
 
 /**
  * Dialect-shared `SecretStore` implementation — persists the Vault's opaque
@@ -26,13 +26,13 @@ export interface SharedSecretStoreOptions<P> {
   owner: (principal: P, key?: string) => string[];
 }
 
-/** Join an `owner` path into one composite key, segment-encoded so it's unambiguous. */
+/** Join an `owner` path into one composite key; refuses a missing or empty segment. */
 function ownerKeyOf<P>(
   owner: (p: P, key?: string) => string[],
   principal: P,
   key?: string,
 ): string {
-  return owner(principal, key).map(encodeURIComponent).join("/");
+  return encodeOwnerKey(owner(principal, key));
 }
 
 /** Stable composite id from the ownership key + secret key. */
