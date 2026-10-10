@@ -95,6 +95,12 @@ try {
 
     const problems = [];
 
+    // Compiled tests ship when a package's tsconfig doesn't exclude them.
+    const tests = files.filter((f) => /\.test\.(js|d\.ts|js\.map|d\.ts\.map)$/.test(f) || f.includes("__tests__/"));
+    if (tests.length) {
+      problems.push(`ships ${tests.length} test file(s), e.g. ${tests[0]} — exclude src/**/*.test.ts in the tsconfig the package's build script uses (tsconfig.build.json)`);
+    }
+
     if (JSON.stringify(shipped.exports ?? {}).includes('"development"')) {
       problems.push(
         "exports still carries a `development` condition — add or update publishConfig.exports",

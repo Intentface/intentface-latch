@@ -138,10 +138,12 @@ export interface LatchHandlerConfig<P> {
    */
   basePath?: string;
   /**
-   * Turns on `POST /cron/run`, which calls `runtime.cron()` for every
-   * customer. Requests must send this secret in the `x-latch-cron-secret`
-   * header. Leave it out and the route doesn't exist. (Vercel Cron sends a
-   * `GET` with a bearer token instead: give it a route of your own.)
+   * Turns on `cron/run`, which calls `runtime.cron()` for every customer:
+   * fires due schedules and finishes interrupted answers. Requests must carry
+   * this secret, as `Authorization: Bearer <secret>` or in the
+   * `x-latch-cron-secret` header, with `GET` or `POST`. That means Vercel Cron
+   * can call it directly: set this to `process.env.CRON_SECRET` and point
+   * `vercel.json` at the route. Leave it out and the route doesn't exist.
    */
   cronSecret?: string;
   /**
@@ -156,6 +158,24 @@ export interface LatchHandlerConfig<P> {
 export type LatchHandler = (
   request: Request,
 ) => Promise<Response | undefined>;
+
+/** The secret a cron request carries: a bearer token, or our own header. */
+function cronSecretOf(request: Request): string | null {
+  // The scheme name is case-insensitive (RFC 9110); the token is not.
+  const bearer = request.headers.get("authorization")?.match(/^bearer\s+(.+)$/i);
+  if (bearer) return bearer[1]!;
+  return request.headers.get("x-latch-cron-secret");
+}
+
+/** Compares in time that doesn't depend on where the strings first differ. */
+function sameSecret(given: string | null, expected: string): boolean {
+  if (given === null) return false;
+  const a = new TextEncoder().encode(given);
+  const b = new TextEncoder().encode(expected);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < b.length; i++) diff |= (a[i] ?? 0) ^ b[i]!;
+  return diff === 0;
+}
 
 const json = (data: unknown, status = 200): Response =>
   new Response(JSON.stringify(data), {
@@ -649,12 +669,13 @@ export function createLatchHandler<P>(
       }
     }
 
-    // POST cron/run — system-wide tick: fire ALL tenants' due schedules, then
+    // cron/run — system-wide tick: fire ALL tenants' due schedules, then
     // reap + resume stalled runs. Host-guarded by `cronSecret`, NOT user auth.
-    // Disabled if no secret set.
-    if (seg[0] === "cron" && seg[1] === "run" && method === "POST") {
+    // Disabled if no secret set. GET as well as POST, and a bearer token as
+    // well as our header, because that's how Vercel Cron calls a URL.
+    if (seg[0] === "cron" && seg[1] === "run" && (method === "POST" || method === "GET")) {
       if (!config.cronSecret) return json({ error: "cron route disabled" }, 404);
-      if (request.headers.get("x-latch-cron-secret") !== config.cronSecret) {
+      if (!sameSecret(cronSecretOf(request), config.cronSecret)) {
         return json({ error: "forbidden" }, 403);
       }
       // Host-supplied tick first — the only option for a resolver-based

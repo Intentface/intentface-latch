@@ -554,3 +554,28 @@ export interface StorageAdapter<P> {
     patch: { lastChatId: string; firedAt: number },
   ): Promise<void>;
 }
+
+/**
+ * Joins an owner path (what a storage adapter's `owner` option returns) into
+ * one key, each segment escaped so a `/` or `%` inside an id can't forge a
+ * boundary. Use it in your own adapter or store too.
+ *
+ * Throws on a missing or empty segment, and on an empty path. Unchecked,
+ * `[orgId, undefined]` becomes the key `orgId/undefined`: one bucket every
+ * principal missing a `userId` would share, so their chats or secrets would
+ * mix without an error.
+ */
+export function encodeOwnerKey(segments: readonly unknown[]): string {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    throw new Error("owner returned no segments: return at least one id, such as [orgId]");
+  }
+  const bad = segments.findIndex((s) => typeof s !== "string" || s === "");
+  if (bad !== -1) {
+    const shown = segments.map((s) => (typeof s === "string" ? JSON.stringify(s) : String(s))).join(", ");
+    throw new Error(
+      `owner returned an empty segment at position ${bad}: [${shown}]. Every principal missing that id ` +
+        "would share one key. Return a complete path, or throw for a principal that can't have one.",
+    );
+  }
+  return (segments as string[]).map(encodeURIComponent).join("/");
+}

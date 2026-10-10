@@ -397,3 +397,43 @@ describe("a runSchedule host can join the same accounting", () => {
     expect(created).toBe(1);
   });
 });
+
+describe("a runSchedule hook that throws", () => {
+  it("is an error for that occurrence, and the default run doesn't start", async () => {
+    // The hook may already have run the agent and failed on delivery: running
+    // the default path too would be a second paid turn for one occurrence.
+    const { storage, calls } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      createChat: async () => ({ id: "chat_new", owner: "org_a", agent: "digest", createdAt: 0, updatedAt: 0 }),
+    });
+    const rt = runtimeWith(storage, {
+      cron: () => 1_000_000,
+      runSchedule: async () => {
+        throw new Error("delivery failed after the agent ran");
+      },
+    });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(calls).not.toContain("createChat");
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
+  });
+});
+
+describe("a runSchedule hook that returns nothing", () => {
+  it("is an error, not a decline, so the default run doesn't start", async () => {
+    const { storage, calls } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      createChat: async () => ({ id: "chat_new", owner: "org_a", agent: "digest", createdAt: 0, updatedAt: 0 }),
+    });
+    // A JavaScript hook that ran the agent and forgot to return.
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: (async () => undefined) as never });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(calls).not.toContain("createChat");
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
+  });
+});

@@ -66,9 +66,9 @@ createRuntime({
 });
 ```
 
-Return `true` (or `{ handled: true, … }`) only when you ran *and* delivered it. Anything else — `false`, `{ handled: false }`, `undefined`, or a throw — falls through to core's default, so a stale target (bot disabled, user unlinked) still gets the work done in a chat rather than losing the fire. Core keeps owning the claim, the lease and the advance either way.
+Return `true` (or `{ handled: true, … }`) only when you ran *and* delivered it. Return `false` (or `{ handled: false }`) to decline, and core runs it the default way, so a stale target (bot disabled, user unlinked) still gets the work done in a chat rather than losing the fire. Core keeps owning the claim, the lease and the advance either way.
 
-So once your hook has delivered, return `{ handled: true, … }` even if a later step fails: a throw after delivery falls through and the work runs a second time, at a second turn's cost. Make any retry of the delivery itself safe to repeat.
+A hook that throws is different: the occurrence counts as an error in `runDue`'s `errors`, and nothing else runs. The hook may already have run the agent (and failed on delivery, say), and running it again in a chat would be a second turn at a second turn's cost. So decline with `false` *before* doing any work, and once you've delivered, return `{ handled: true, … }` even if a later step fails. A recurring schedule fires again at its next occurrence; a one-shot that throws is spent.
 
 `runScheduleNow` makes a schedule due immediately and lets it fire through the ordinary `runDue` path — so "run now" can never drift from what the cron actually does.
 

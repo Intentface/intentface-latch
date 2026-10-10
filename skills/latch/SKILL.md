@@ -70,7 +70,8 @@ peers are in [install](references/getting-started/install.md).
 ### Your own route and the chat UI
 
 Call `runtime.handleChat` from your route (above), or mount the handler with
-`createLatchHandler` in Next.js, Hono, TanStack Start or Bun. The client is the
+`createLatchHandler` in Next.js, Hono, TanStack Start or Bun. Express, Fastify
+and NestJS wrap it in `toNodeHandler` from `@intentface/latch-server/node`. The client is the
 AI SDK's `useChat`; send only the last message:
 
 ```tsx
@@ -148,7 +149,10 @@ await runtime.schedule({
 `createRuntime` needs a `cron` evaluator (`createCronerEvaluator()` from
 `@intentface/latch-server`), and something must call `runtime.cron()`
 regularly. `runtime.runAgent({ principal, agent, prompt })` runs one now,
-without a chat. Read [schedules](references/guides/schedules.md).
+without a chat. To deliver a fire somewhere else (a Slack thread), add a
+`runSchedule` hook: return `false` to decline *before* doing any work, and
+`true` once delivered; a throw counts as an error and nothing else runs, so a
+fire is never paid for twice. Read [schedules](references/guides/schedules.md).
 
 ### Connect MCP servers and other accounts
 
@@ -203,6 +207,10 @@ store. Read [channels](references/concepts/channels.md) and
 `durability: { enabled: true }`, `maxDuration` on the chat and cron routes,
 and a cron that calls `runtime.cron()`: it fires due schedules and finishes
 interrupted answers. Without it, neither happens.
+
+With the handler mounted, its `cron/run` route accepts Vercel Cron as is: set
+`cronSecret: process.env.CRON_SECRET` (`createLatchApp` reads it on its own) and
+point `vercel.json` at `/api/latch/cron/run`. With your own routes, add one:
 
 ```ts
 // app/api/cron/route.ts; vercel.json: { "crons": [{ "path": "/api/cron", "schedule": "* * * * *" }] }
@@ -275,7 +283,9 @@ Read [Principal, context and params](references/concepts/inputs.md).
 - **Keep the owner key stable.** `owner: (p) => [...]` is what scopes data. If
   a value in it can change mid-session (an "active org" the user switches),
   older chats belong to a key the user no longer has. Pin it when the session
-  is created.
+  is created. Every segment must be present: a missing or empty one throws.
+  Return `[orgId]` only for principals meant to share the organization's data
+  (team chats); for personal data, refuse a principal without a `userId`.
 - **Tools with side effects must be safe to run twice.** Crash recovery resumes
   from the last finished step; a tool that was mid-run may run again. Check
   whether the action already happened, or pass an idempotency key.

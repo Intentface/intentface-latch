@@ -46,6 +46,6 @@ Paths are relative to `basePath`. Every route except the cron route and the conn
 | `GET connections/:name/callback` | Where the provider sends the user back. |
 | `POST connections/:name/disconnect` | Remove the caller's credentials. |
 | `POST connections/:name/test` | Check the connection works; returns its tool names. |
-| `POST cron/run` | `runtime.cron()` for everyone. Needs `cronSecret`. |
+| `GET` / `POST cron/run` | Your `cronRun`, or by default `runtime.cron()` for everyone (with a runtime per customer and no `cronRun`, it answers `400`). Needs `cronSecret`, as a bearer token or `x-latch-cron-secret`, so Vercel Cron can call it. |
 
 Refusals come back as JSON with a `code`: see [Errors](/docs/reference/errors).

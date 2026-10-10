@@ -341,19 +341,33 @@ export async function runScheduledDelivery(input: {
  * the person is mid-conversation right now; the kernel tells them it's still
  * working and this occurrence is skipped (`runDue` advanced `nextRunAt` already).
  */
+/**
+ * A lookup before the turn starts: a failure declines (core runs the fire in a
+ * chat instead), since nothing has run yet. Failures once the turn is running
+ * are errors, so the occurrence isn't paid for twice.
+ */
+async function lookupOrDecline<T>(lookup: () => Promise<T | null | undefined>): Promise<T | null> {
+  try {
+    return (await lookup()) ?? null;
+  } catch (e) {
+    console.warn("[schedule] delivery lookup failed; running it in a chat instead:", e);
+    return null;
+  }
+}
+
 const DM_DELIVERY: Record<
   DmChannelKind,
   (botId: string, externalId: string, text: string, principal: Principal) => Promise<boolean>
 > = {
   telegram: async (botId, telegramUserId, text, principal) => {
-    const resolved = await getTelegramChannelForBot(botId);
+    const resolved = await lookupOrDecline(() => getTelegramChannelForBot(botId));
     if (!resolved) return false;
     // In a private chat Telegram's chat_id IS the user id.
     await resolved.channel.replayMessage({ telegramUserId, telegramChatId: telegramUserId, text, principal });
     return true;
   },
   whatsapp: async (botId, waId, text, principal) => {
-    const resolved = await getWhatsappChannelForBot(botId);
+    const resolved = await lookupOrDecline(() => getWhatsappChannelForBot(botId));
     if (!resolved) return false;
     await resolved.channel.replayMessage({ waId, text, principal });
     return true;
@@ -375,17 +389,11 @@ async function runDmDelivery(
 }
 
 /**
- * Slack: post an anchor message, then run the turn threaded under it. A Latch
- * chat is anchored to a thread root, so there is no standing conversation to
- * continue the way a DM is — every fire gets its own thread, which is also the
- * Slack-native shape for a recurring brief (and means no turn lease is needed:
- * two fires can never share a history).
+ * The Slack delivery up to the turn: look up the binding, its token and the
+ * owner's Slack identity, then post the anchor. `false` declines (nothing to
+ * deliver to). Nothing here runs the agent, so a throw is a decline too.
  */
-async function runSlackDelivery(
-  schedule: ScheduleRecord,
-  principal: Principal,
-  target: SlackTarget,
-): Promise<boolean> {
+async function prepareSlackDelivery(schedule: ScheduleRecord, principal: Principal, target: SlackTarget) {
   const { credentials, channelStore } = await getLatch();
   const resolved = await getSlackChannelForApp(target.appId);
   if (!resolved) return false;
@@ -404,12 +412,6 @@ async function runSlackDelivery(
     return false;
   }
 
-  const api = slackApi(token);
-  const anchor = await api.postMessage({
-    channel: target.channel,
-    text: `:alarm_clock: ${summarize(schedule.prompt)}`,
-  });
-
   // The adapter expects a SLACK user id: it becomes the thread's initiator
   // (who may drive follow-ups) and the target of ephemeral connect cards. The
   // schedule stores the LATCH owner — translate via their linked identity.
@@ -419,6 +421,39 @@ async function runSlackDelivery(
     (resolved.app.teamId
       ? (await channelStore.identityForUser("slack", resolved.app.teamId, target.ownerUserId))?.externalId
       : null) ?? target.ownerUserId;
+
+  const api = slackApi(token);
+  const anchor = await api.postMessage({
+    channel: target.channel,
+    text: `:alarm_clock: ${summarize(schedule.prompt)}`,
+  });
+  return { resolved, api, anchor, ownerSlackId };
+}
+
+/**
+ * Slack: post an anchor message, then run the turn threaded under it. A Latch
+ * chat is anchored to a thread root, so there is no standing conversation to
+ * continue the way a DM is — every fire gets its own thread, which is also the
+ * Slack-native shape for a recurring brief (and means no turn lease is needed:
+ * two fires can never share a history).
+ */
+async function runSlackDelivery(
+  schedule: ScheduleRecord,
+  principal: Principal,
+  target: SlackTarget,
+): Promise<boolean> {
+  // Everything before the turn starts can still decline (`false`), and core
+  // then runs the fire in a chat. Once the turn has started, a failure is an
+  // error for this occurrence: the agent may already have run.
+  let prepared: Awaited<ReturnType<typeof prepareSlackDelivery>>;
+  try {
+    prepared = await prepareSlackDelivery(schedule, principal, target);
+  } catch (e) {
+    console.warn(`[schedule] ${schedule.id}: couldn't prepare the Slack delivery; running it in a chat instead:`, e);
+    return false;
+  }
+  if (!prepared) return false;
+  const { resolved, api, anchor, ownerSlackId } = prepared;
 
   try {
     await resolved.channel.runMessage({

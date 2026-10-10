@@ -224,14 +224,16 @@ describe("runDue → runSchedule hook", () => {
     expect(chats[0]!.agent).toBe("briefer");
   });
 
-  it("falls back when the hook throws — a broken target must not lose the fire", async () => {
+  it("counts a throwing hook as an error and doesn't run it again in a chat", async () => {
+    // The hook may have run the agent before it threw (delivery failed, say):
+    // a fallback chat would be a second paid turn. Declining is `return false`.
     const runtime = build(async () => {
-      throw new Error("bot disabled");
+      throw new Error("delivery failed after the turn ran");
     });
     await runtime.schedule({ principal, agent: "briefer", cron: null, prompt: "brief me" });
 
-    expect(await runtime.runDue()).toEqual({ fired: 1, errors: 0, skipped: 0, parked: 0, rejected: 0 });
-    expect(await runtime.listChats({ principal })).toHaveLength(1);
+    expect(await runtime.runDue()).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
+    expect(await runtime.listChats({ principal })).toHaveLength(0);
   });
 
   it("advances nextRunAt on every path, so nothing hot-loops", async () => {

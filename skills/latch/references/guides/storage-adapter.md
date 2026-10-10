@@ -52,7 +52,7 @@ It runs under Vitest, Jest or `node:test`. The built-in adapters pass the same c
 
 ## The guarantees, in the order to build them
 
-1. **Every read is scoped to its owner.** A chat from another owner is not found, not forbidden.
+1. **Every read is scoped to its owner.** A chat from another owner is not found, not forbidden. Build the owner key with `encodeOwnerKey(owner(principal))` from `@intentface/latch-core`: it escapes each segment and refuses a missing one, so a principal without a `userId` can't land in a bucket shared with every other one.
 2. **Messages keep their order** and are replaced by id, never duplicated.
 3. **One running answer per chat.** Starting a second fails with the time left on the first.
 4. **Claims are atomic.** Of many servers claiming the same run, exactly one wins.

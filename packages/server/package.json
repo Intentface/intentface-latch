@@ -1,7 +1,7 @@
 {
   "name": "@intentface/latch-server",
   "version": "0.17.1",
-  "description": "The mountable Latch HTTP surface — one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath.",
+  "description": "The mountable Latch HTTP surface \u2014 one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath, Node (Express, Fastify, NestJS) in /node.",
   "keywords": [
     "ai",
     "ai-sdk",
@@ -9,7 +9,8 @@
     "llm",
     "http",
     "hono",
-    "webhooks"
+    "webhooks",
+    "express"
   ],
   "license": "MIT",
   "type": "module",
@@ -26,6 +27,11 @@
       "development": "./src/hono.ts",
       "types": "./dist/hono.d.ts",
       "import": "./dist/hono.js"
+    },
+    "./node": {
+      "development": "./src/node.ts",
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
     }
   },
   "files": [
@@ -43,11 +49,15 @@
       "./hono": {
         "types": "./dist/hono.d.ts",
         "import": "./dist/hono.js"
+      },
+      "./node": {
+        "types": "./dist/node.d.ts",
+        "import": "./dist/node.js"
       }
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
@@ -69,7 +79,8 @@
     "ai": "^7.0.106",
     "hono": "^4.6.0",
     "typescript": "^5.7.0",
-    "vitest": "^4"
+    "vitest": "^4",
+    "@types/node": "^22"
   },
   "repository": {
     "type": "git",
