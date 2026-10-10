@@ -1,7 +1,6 @@
 import {
   createIntervalScheduler,
   createRuntime,
-  defineContext,
   type AgentFactory,
   type ContextInput,
   type Runtime,
@@ -82,7 +81,8 @@ export async function createLatchApp<P, RC = unknown>(cfg: LatchAppConfig<P, RC>
 
   const runtime = createRuntime<P, RC>({
     storage: cfg.storage,
-    context: cfg.context ?? defineContext<P, RC>({ build: () => ({}) as RC }),
+    // Left out, the runtime builds an empty context.
+    context: cfg.context,
     agents,
     // Resume-after-crash on by default: it costs a lease heartbeat per turn
     // and is what makes `cron()`'s sweep half do anything.
