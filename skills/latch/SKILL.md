@@ -283,8 +283,9 @@ Read [Principal, context and params](references/concepts/inputs.md).
 - **Keep the owner key stable.** `owner: (p) => [...]` is what scopes data. If
   a value in it can change mid-session (an "active org" the user switches),
   older chats belong to a key the user no longer has. Pin it when the session
-  is created. Every segment must be present: a missing or empty one throws,
-  so return a shorter path (`[orgId]`) for a principal without a `userId`.
+  is created. Every segment must be present: a missing or empty one throws.
+  Return `[orgId]` only for principals meant to share the organization's data
+  (team chats); for personal data, refuse a principal without a `userId`.
 - **Tools with side effects must be safe to run twice.** Crash recovery resumes
   from the last finished step; a tool that was mid-run may run again. Check
   whether the action already happened, or pass an idempotency key.

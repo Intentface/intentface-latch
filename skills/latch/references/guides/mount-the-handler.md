@@ -163,7 +163,8 @@ with `app.use("/api/latch", …)` also works and is version-agnostic — but not
 **Fastify**
 
 Fastify parses bodies by default, so register a passthrough parser and use the
-raw Node objects:
+raw Node objects. (Without it, pass Fastify's parsed body as the third argument,
+`handle(request.raw, reply.raw, request.body)`, but uploads then don't stream.)
 
 ```ts
 import Fastify from "fastify";
@@ -230,7 +231,7 @@ All paths are relative to `basePath`.
 | `GET` | `connections` | connection status for the caller |
 | `GET` | `connections/:name/authorize` · `callback` | the OAuth dance |
 | `POST` | `connections/:name/disconnect` · `test` | revoke, or check liveness |
-| `GET` `POST` | `cron/run` | `runtime.cron()`: fire all tenants' due schedules, reap + resume stalled runs |
+| `GET` `POST` | `cron/run` | `runtime.cron()`, or your `cronRun`: fire all tenants' due schedules, reap + resume stalled runs |
 
 The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messages }` array and takes the last one — so an AI SDK client works without a translation layer.
 
