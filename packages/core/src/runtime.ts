@@ -299,10 +299,10 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * Runs a scheduled fire yourself, for example to post the result into a
    * Slack channel or a Telegram chat instead of a new web chat. Return `true`
    * when you handled it; return `false` to let Latch run it in a new chat as
-   * usual (a stale or missing target, say). A throw counts as an error for
-   * that occurrence and nothing else runs, since the hook may already have
-   * done the work: once you've delivered, return `true` even if a later step
-   * fails.
+   * usual (a stale or missing target, say). A throw, or a result that's
+   * neither, counts as an error for that occurrence and nothing else runs,
+   * since the hook may already have done the work: once you've delivered,
+   * return `true` even if a later step fails.
    *
    * Return `{ handled: true, chatId, parked }` to tell Latch which chat the
    * fire ran in and whether it is waiting on a person; schedules that skip a
@@ -4647,7 +4647,25 @@ export function createRuntime<P, RC = unknown>(
             errors++;
             continue;
           }
-          handled = typeof outcome === "boolean" ? outcome : !!outcome?.handled;
+          // Only an explicit decline (`false`, `{ handled: false }`) runs the
+          // default. A missing or malformed result is an error, not a decline:
+          // a hook that ran the agent and forgot to return would otherwise pay
+          // for the occurrence twice.
+          const declined =
+            outcome === false ||
+            (typeof outcome === "object" && outcome !== null && outcome.handled === false);
+          const accepted =
+            outcome === true ||
+            (typeof outcome === "object" && outcome !== null && outcome.handled === true);
+          if (!declined && !accepted) {
+            console.error(
+              `[schedule] runSchedule hook for ${s.id} (${s.agent}) returned ${String(outcome)}; ` +
+                `expected true, false or { handled }. Not running it the default way.`,
+            );
+            errors++;
+            continue;
+          }
+          handled = accepted;
           // The host owns the chat a channel fire ran in, so it is the only
           // one that can report it. Same accounting as the default path when
           // it does: stamp the chat for the next `onParked` check, and count

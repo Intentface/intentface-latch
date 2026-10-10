@@ -420,3 +420,20 @@ describe("a runSchedule hook that throws", () => {
     expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
   });
 });
+
+describe("a runSchedule hook that returns nothing", () => {
+  it("is an error, not a decline, so the default run doesn't start", async () => {
+    const { storage, calls } = stubStorage({
+      claimDueSchedules: async () => [SCHEDULE],
+      completeSchedule: async () => {},
+      createChat: async () => ({ id: "chat_new", owner: "org_a", agent: "digest", createdAt: 0, updatedAt: 0 }),
+    });
+    // A JavaScript hook that ran the agent and forgot to return.
+    const rt = runtimeWith(storage, { cron: () => 1_000_000, runSchedule: (async () => undefined) as never });
+
+    const res = await rt.runDue({ now: 100 });
+
+    expect(calls).not.toContain("createChat");
+    expect(res).toEqual({ fired: 0, errors: 1, skipped: 0, parked: 0, rejected: 0 });
+  });
+});

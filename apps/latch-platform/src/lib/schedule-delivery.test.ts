@@ -16,6 +16,14 @@ vi.mock("./auth", () => ({
   isOrgMember: async (userId: string, orgId: string) => members.has(`${userId}@${orgId}`),
 }));
 
+// The Telegram channel a delivery pushes into; each test decides what it does.
+const telegram = vi.hoisted(() => ({
+  lookup: async (_botId: string): Promise<unknown> => null,
+}));
+vi.mock("./telegram-channel", () => ({
+  getTelegramChannelForBot: (botId: string) => telegram.lookup(botId),
+}));
+
 let client: Client;
 let channelStore: ReturnType<typeof createChannelStore>;
 let slackStore: ReturnType<typeof createSlackStore>;
@@ -37,6 +45,7 @@ const {
   removeIfActorDeparted,
   resolveDelivery,
   resolveOfferedDelivery,
+  runScheduledDelivery,
 } = await import("./schedule-delivery");
 
 const owner: Principal = { orgId: "org1", userId: "u1" };
@@ -363,5 +372,40 @@ describe("removeIfActorDeparted", () => {
     );
     expect(handled).toBe(true); // …but the ACTOR left, so the schedule goes
     expect(unschedule).toHaveBeenCalled();
+  });
+});
+
+describe("runScheduledDelivery: declining vs failing", () => {
+  const schedule = {
+    id: "sch_1",
+    owner: "org1/u1",
+    agent: "todo",
+    identity: owner,
+    cron: null,
+    prompt: "brief me",
+    nextRunAt: 0,
+    enabled: true,
+    createdAt: 0,
+    delivery: { kind: "telegram", botId: "b1" },
+  };
+
+  it("declines when a lookup fails before the turn, so core runs it in a chat", async () => {
+    await linkedBot();
+    telegram.lookup = async () => {
+      throw new Error("db unavailable");
+    };
+    await expect(runScheduledDelivery({ schedule, principal: owner })).resolves.toBe(false);
+  });
+
+  it("fails when the turn itself fails, so the occurrence isn't run twice", async () => {
+    await linkedBot();
+    telegram.lookup = async () => ({
+      channel: {
+        replayMessage: async () => {
+          throw new Error("delivery failed after the agent ran");
+        },
+      },
+    });
+    await expect(runScheduledDelivery({ schedule, principal: owner })).rejects.toThrow(/after the agent ran/);
   });
 });
