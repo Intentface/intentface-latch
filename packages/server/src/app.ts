@@ -97,8 +97,10 @@ export async function createLatchApp<P, RC = unknown>(cfg: LatchAppConfig<P, RC>
     runtime,
     resolveContext: cfg.resolveContext,
     // The system-wide cron route is unauthenticated — enabled only when a
-    // secret is set (the handler 404s it otherwise).
-    cronSecret: env("LATCH_CRON_SECRET"),
+    // secret is set (the handler 404s it otherwise). CRON_SECRET is the one
+    // Vercel sends to its crons, so on Vercel a cron in vercel.json pointing
+    // at cron/run is all it takes.
+    cronSecret: env("LATCH_CRON_SECRET") ?? env("CRON_SECRET"),
     ...cfg.handler,
   });
 
