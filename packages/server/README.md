@@ -1,6 +1,6 @@
 # @intentface/latch-server
 
-The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web handler** you mount at a single route in any Web-standard host (TanStack Start, Next, Bun, Deno, serverless).
+The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web handler** you mount at a single route in any Web-standard host (TanStack Start, Next, Bun, Deno, serverless). Express, Fastify and NestJS mount it through `toNodeHandler` from `@intentface/latch-server/node`.
 
 ## What it does
 
@@ -10,7 +10,7 @@ The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web 
 - `POST /agents/:agent/:id/approvals` — submit HITL approval decisions (resumes the turn).
 - `POST /agents/:agent/:id/tool-result` — return a client-handled tool result (e.g. `ask_question`).
 - `GET /agents/:agent/:id/history`, `GET /chats`, `GET /runs` — projections for the UI.
-- `GET/POST/DELETE /schedules`, `GET /schedules/:id`, `POST /schedules/:id/run-now` — manage scheduled agents; `POST /cron/run` — the host-guarded tick.
+- `GET/POST/DELETE /schedules`, `GET /schedules/:id`, `POST /schedules/:id/run-now` — manage scheduled agents; `GET`/`POST /cron/run` — the host-guarded tick (a bearer token or `x-latch-cron-secret`, so Vercel Cron can call it).
 - `GET /connections`, `…/:name/authorize`, `…/:name/callback`, `…/:name/disconnect`, `…/test` — generic MCP connection OAuth + status.
 
 `resolveContext(request)` turns a request into your `Principal` (bring-your-own auth). A Hono adapter is exported from the `/hono` subpath.
