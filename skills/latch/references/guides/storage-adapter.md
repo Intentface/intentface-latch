@@ -17,16 +17,16 @@ const base = createPostgresAdapter<Principal>(db, { owner });
 
 const storage: StorageAdapter<Principal> = {
   ...base,
-  appendMessages: async (chatId, messages, fence) => {
+  appendMessages: async (chatId, messages, ...rest) => {
     await audit.record(chatId, messages);
-    return base.appendMessages(chatId, messages, fence); // pass every argument on
+    return base.appendMessages(chatId, messages, ...rest); // pass every argument on
   },
 };
 ```
 
 > **Pass every argument on**
 >
-> A wrapper that drops an argument quietly turns a guarantee off. Leave out `fence` above, and a server that lost its run can keep writing into the conversation after another server took over. The adapter returns `false` when it refuses a write: return that too.
+> A wrapper that drops an argument quietly turns a guarantee off. Leave out the fence, and a server that lost its run can keep writing into the conversation after another server took over; leave out the owner key, and the adapter can no longer check whose chat it's writing to. Forward the rest of the arguments as they are (`...rest` above). The adapter returns `false` when it refuses a write: return that too.
 
 Write one from scratch only for a different database or a different schema.
 
@@ -60,3 +60,21 @@ It runs under Vitest, Jest or `node:test`. The built-in adapters pass the same c
 6. **Stale servers are fenced out.** Writes carry the run's fencing number, and a write with an old number is refused.
 
 The [storage reference](https://intentface-latch-docs.vercel.app/docs/reference/storage) has every method and each guarantee in detail, with what breaks when it's missing.
+
+## One schema or database per tenant
+
+If each tenant's data lives in its own schema or database, calls by id are the hard part: `updateRun("run_8f3k")` doesn't say which tenant's schema the run is in. The runtime solves that by handing back the owner key on every such call, so:
+
+1. **Make the tenant the first segment of your owner key**, e.g. `encodeOwnerKey([tenantId, userId])`.
+2. **Return the key on every record**: `ChatRecord.owner` and `ScheduleRecord.owner` as usual, and `RunRecord.ownerKey` on every run, reaped and reclaimed ones included.
+3. **Route each call by it**: `decodeOwnerKey(scope.ownerKey)[0]` is the tenant. `Runtime.getRun` is the one call that passes `{ principal }` instead; derive the key from it as your other methods do.
+4. **Keep a global table for the two sweeps**, `reapExpiredRuns` and `claimDueSchedules`: active leases and due schedules across tenants, each with its owner key.
+5. **Run the checks with `checksOwnerKey: true`.**
+
+```ts
+registerStorageConformance({ describe, it }, "per-tenant adapter", async () => ({
+  store: createTenantAdapter<Principal>(cluster, { owner: (p) => [p.tenantId, p.userId] }),
+  principals: [{ tenantId: "t1", userId: "u1" }, { tenantId: "t2", userId: "u2" }],
+  checksOwnerKey: true,
+}));
+```
