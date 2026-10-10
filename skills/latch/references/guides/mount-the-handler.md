@@ -162,24 +162,29 @@ with `app.use("/api/latch", …)` also works and is version-agnostic — but not
 
 **Fastify**
 
-Fastify parses bodies by default, so register a passthrough parser and use the
-raw Node objects. (Without it, pass Fastify's parsed body as the third argument,
-`handle(request.raw, reply.raw, request.body)`, but uploads then don't stream.)
+Fastify parses JSON before your route runs, and a catch-all content-type
+parser can't override its built-in one. So give the Latch routes a plugin of
+their own without Fastify's parsers: the body then streams. Pass the raw Node
+objects, and `request.body` too, which covers a body Fastify did parse.
 
 ```ts
 import Fastify from "fastify";
 import { handle } from "./latch-handler";
 
 const app = Fastify();
-// Leave the body alone: toNodeHandler streams it.
-app.addContentTypeParser(/.*/, (_req, payload, done) => done(null, payload));
 
-app.all("/api/latch/*", async (request, reply) => {
-  reply.hijack(); // we own the raw socket from here
-  if (!(await handle(request.raw, reply.raw))) {
-    reply.raw.statusCode = 404;
-    reply.raw.end();
-  }
+app.register(async (latch) => {
+  // Only inside this plugin: let every body through unread, JSON included.
+  latch.removeAllContentTypeParsers();
+  latch.addContentTypeParser("*", (_req, payload, done) => done(null, payload));
+
+  latch.all("/api/latch/*", async (request, reply) => {
+    reply.hijack(); // we own the raw socket from here
+    if (!(await handle(request.raw, reply.raw, request.body))) {
+      reply.raw.statusCode = 404;
+      reply.raw.end();
+    }
+  });
 });
 
 await app.listen({ port: 3000 });
