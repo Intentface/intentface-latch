@@ -44,3 +44,30 @@ jobs:
       # tarball. Publish-shape bugs are invisible in a workspace, where the
       # `development` condition points at src that is not in the tarball.
       - run: pnpm verify:publish
+
+  # The latch skill carries docs pages as markdown (skills/latch/references),
+  # generated from apps/docs. A docs change that isn't regenerated fails here,
+  # so the skill never ships pages older than the release it's in.
+  skill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The docs app (the generator and fumadocs-typescript), plus the packages
+      # whose types the reference tables are read from.
+      - run: pnpm install --frozen-lockfile --filter @intentface/latch-docs --filter "./packages/**" --filter "."
+      - run: pnpm --filter @intentface/latch-docs skill
+      - name: References match the docs
+        run: |
+          if [ -n "$(git status --porcelain skills/latch)" ]; then
+            git status --short skills/latch
+            echo "::error::skills/latch/references is out of date. Run: pnpm --filter @intentface/latch-docs skill"
+            exit 1
+          fi
