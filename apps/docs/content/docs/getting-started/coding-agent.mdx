@@ -1,0 +1,35 @@
+---
+title: Use Latch with your coding agent
+description: Install the Latch skill so Claude Code, Cursor, Codex and other agents build with Latch the way it's meant to be used.
+---
+
+Coding agents know the AI SDK well and Latch not at all, so left alone they guess, and the guesses that go wrong are the quiet ones: the user's plan saved in the principal, editor state written into the system prompt, a tool that charges a card twice after a crash. The Latch skill gives your agent the rules, a recipe for each common task, and this documentation for your version.
+
+## Install
+
+```bash
+npx skills add Intentface/intentface-latch --skill latch
+```
+
+The [skills CLI](https://skills.sh) asks which of your agents to install it for (Claude Code, Cursor, Codex and many more) and puts it in your project; add `-g` to install it for every project instead, or `-a claude-code -y` to skip the questions. Your agent then reaches for it on its own whenever it works on code that uses `@intentface/latch-*`.
+
+## What's in it
+
+- **Recipes** for the common tasks: a chat agent that remembers, your route and the chat UI, tools that only reach the user's data, approvals, schedules, MCP connections, limits per plan, Slack and Telegram, deploying on Vercel, deleting someone's data.
+- **What to pass where:** the principal, the context, params and `data-context`, and the mistakes that break quietly after an approval or a crash.
+- **The rules that fail silently,** such as a stable owner key and tools that are safe to run twice.
+- **Thirty pages of these docs** as markdown, read only when the task needs them, and readable offline.
+
+## Match it to your version
+
+The command above installs the skill as it is on `main`, which follows the latest release. If you're on an older version, install the skill from that release's tag instead, so the docs it carries describe the API you have:
+
+```bash
+npx skills add https://github.com/Intentface/intentface-latch/tree/v0.20.0/skills/latch
+```
+
+Every release from 0.20.0 has a `v<version>` tag. To update, run the install again.
+
+## Without the skill
+
+Agents that read the web can use the docs directly: `/llms.txt` lists every page with a one-line description, `/llms-full.txt` is the whole documentation as one file, and adding `.md` to any page's URL gives its markdown.

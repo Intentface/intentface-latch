@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "quickstart",
+    "coding-agent",
     "by-hand",
     "install"
   ]
