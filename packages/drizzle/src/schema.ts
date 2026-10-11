@@ -67,6 +67,8 @@ export const runs = sqliteTable(
     chatId: text("chat_id").notNull(),
     agent: text("agent").notNull(),
     status: text("status").notNull(),
+    /** The chat's owner key, stamped at open (RunRecord.ownerKey). NULL on runs from before it existed. */
+    ownerKey: text("owner_key"),
     /** Serialized Principal blob — rebuilt on resume/cron (no request). */
     identity: text("identity", { mode: "json" }),
     leaseOwner: text("lease_owner"),

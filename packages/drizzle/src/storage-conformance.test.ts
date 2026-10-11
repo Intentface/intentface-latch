@@ -18,12 +18,12 @@ const principals: [P, P] = [{ org: "org_a" }, { org: "org_b" }];
 registerStorageConformance<P>({ describe, it }, "SQLite (libsql)", async () => {
   const client = createClient({ url: ":memory:" });
   await migrate(client);
-  return { store: createSqliteAdapter<P>(drizzle(client, { schema }), { owner }), principals, close: () => client.close() };
+  return { store: createSqliteAdapter<P>(drizzle(client, { schema }), { owner }), principals, close: () => client.close(), checksOwnerKey: true };
 });
 
 registerStorageConformance<P>({ describe, it }, "Postgres (PGlite)", async () => {
   const pg = new PGlite();
   const db = drizzlePg(pg, { schema: schemaPg });
   await migratePostgres(db);
-  return { store: createPostgresAdapter<P>(db, { owner }), principals, close: () => pg.close() };
+  return { store: createPostgresAdapter<P>(db, { owner }), principals, close: () => pg.close(), checksOwnerKey: true };
 });

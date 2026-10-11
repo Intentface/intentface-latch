@@ -53,15 +53,17 @@ import {
   type LimitUsage,
   type LimitWindowRef,
 } from "./limits.js";
-import type {
-  ChatRecord,
-  RunLease,
-  RunFence,
-  RunRecord,
-  RunSettings,
-  RunStatus,
-  ScheduleRecord,
-  StorageAdapter,
+import {
+  isOwnerKeyMismatchError,
+  type ChatRecord,
+  type OwnerKeyMismatchError,
+  type RunLease,
+  type RunFence,
+  type RunRecord,
+  type RunSettings,
+  type RunStatus,
+  type ScheduleRecord,
+  type StorageAdapter,
 } from "./storage.js";
 import {
   compose,
@@ -402,6 +404,22 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   telemetry?: LatchTelemetry<P>;
   /**
+   * Called when the storage adapter refuses a call because its owner key
+   * doesn't match the row (`OwnerKeyMismatchError`). Latch never retries it;
+   * crash recovery and schedule firing leave that run or schedule alone, so an
+   * interrupted answer stays unfinished until someone looks. Send it to your
+   * alerting. It also appears in `cron()`'s `errors`.
+   *
+   * Without it, the mismatch is logged and nothing else happens.
+   */
+  onOwnerKeyMismatch?: (event: {
+    error: OwnerKeyMismatchError;
+    /** Where it happened: resuming a run, firing a schedule, or a turn. */
+    during: "resume" | "schedule" | "turn";
+    runId?: string;
+    scheduleId?: string;
+  }) => void | Promise<void>;
+  /**
    * Usage limits per organization, user and agent: requests, tokens and cost
    * per time window. You decide which limits a run counts against; Latch
    * refuses a run over a limit (HTTP 429 with a retry time), stops a long run
@@ -739,8 +757,11 @@ export interface Runtime<P> {
    * Resumes one interrupted run and finishes it. Needs `durability`. Returns
    * `null` when the run can't be resumed: it already finished, or another
    * server has it. You rarely call this yourself; `cron()` does it.
+   *
+   * Pass the run record (from `reapExpiredRuns`, say) rather than its id when
+   * your storage adapter checks or routes by owner key: the record carries it.
    */
-  resume(runId: string): Promise<RunOutcome | null>;
+  resume(run: string | Pick<RunRecord, "id" | "ownerKey">): Promise<RunOutcome | null>;
   /**
    * Finds runs whose server died and resumes them. Gives up on a run after
    * `maxAttempts` tries (default 5), so one that crashes every time can't loop
@@ -753,7 +774,12 @@ export interface Runtime<P> {
     /** @default 5 */
     maxAttempts?: number;
     error?: string;
-  }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }>;
+  }): Promise<{
+    reaped: RunRecord[];
+    resumed: RunOutcome[];
+    /** Runs whose recovery failed, one line each; the sweep carried on with the rest. */
+    errors: string[];
+  }>;
   /**
    * The one function to call on a timer: fires due schedules, then (with
    * `durability`) resumes interrupted runs. Call it every minute or so from a
@@ -1852,6 +1878,8 @@ export function createRuntime<P, RC = unknown>(
     admitted?: Admitted;
   }): Promise<ReadableStream<unknown>> {
     const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
+    // Every id-only write of this turn carries the run's owner key.
+    const owned = ownedBy(run.ownerKey);
     // A per-turn model override replaces the agent's own, and the telemetry id
     // with it — a run row that says the agent's model while a different one
     // answered makes every later comparison a lie.
@@ -1954,7 +1982,7 @@ export function createRuntime<P, RC = unknown>(
           return;
         }
         beatInFlight = true;
-        void storage
+        void owned
           .heartbeatRun(run.id, lease.owner, dur.leaseTtlMs, lease.fencingToken)
           .then((held) => {
             missedBeats = 0;
@@ -1963,7 +1991,14 @@ export function createRuntime<P, RC = unknown>(
               abort.abort(new Error("lease lost"));
             }
           })
-          .catch((e) => missBeat("write failed", e))
+          .catch((e) => {
+            // A key mismatch won't fix itself on the next beat: stop now, loudly.
+            if (isOwnerKeyMismatchError(e)) {
+              stopHeartbeat();
+              abort.abort(e);
+              void reportMismatch(e, { during: "turn", runId: run.id });
+            } else missBeat("write failed", e);
+          })
           .finally(() => {
             beatInFlight = false;
           });
@@ -2609,12 +2644,17 @@ export function createRuntime<P, RC = unknown>(
           // Re-checked at write time: the lease may have gone while this
           // checkpoint waited behind the previous one.
           if (abort.signal.aborted) return;
-          const landed = await storage.appendMessages(resolvedChatId, [message], fence);
+          const landed = await owned.appendMessages(resolvedChatId, [message], fence);
           // Refused by the fence: another worker owns the run now. Stop like
           // a lost heartbeat does, before this turn spends another step.
           if (landed === false) abort.abort(new Error("lease lost"));
         })
-        .catch((e) => console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e));
+        .catch((e) => {
+          if (isOwnerKeyMismatchError(e)) {
+            abort.abort(e);
+            void reportMismatch(e, { during: "turn", runId: run.id });
+          } else console.warn(`[durability] step checkpoint failed for run ${run.id}:`, e);
+        });
     };
     if (stepHooks) {
       const needUi = hooks.has("step_end");
@@ -2999,7 +3039,7 @@ export function createRuntime<P, RC = unknown>(
         // by another node whose writes must win. The guarded update no-ops if
         // the run was reassigned. Exactly one terminal report either way.
         if (failed !== undefined || isAborted) {
-          const settled = await storage.updateRun(
+          const settled = await owned.updateRun(
             run.id,
             { status: "errored", error: failed ?? "aborted", endedAt: Date.now() },
             lease,
@@ -3030,7 +3070,7 @@ export function createRuntime<P, RC = unknown>(
         // apply (our lease was reaped + the run re-claimed elsewhere), we're
         // a stale writer — skip the final message/usage persistence so we
         // don't overwrite the new owner's state.
-        const applied = await storage.updateRun(
+        const applied = await owned.updateRun(
           run.id,
           {
             status: paused ? "awaiting_input" : "completed",
@@ -3047,7 +3087,7 @@ export function createRuntime<P, RC = unknown>(
         if (applied) {
           // Fenced too: the run row and the message are separate writes, and
           // the lease can be lost between them.
-          await storage.appendMessages(resolvedChatId, messages, fence);
+          await owned.appendMessages(resolvedChatId, messages, fence);
           await storage.recordUsage(principal, {
             runId: run.id,
             model: modelId,
@@ -3178,8 +3218,8 @@ export function createRuntime<P, RC = unknown>(
    * user retrying into a busy chat would exhaust their own turn cap.
    */
   /** A run's stored error, when it ended `errored` — the fallback when its stream said nothing. */
-  async function terminalError(runId: string): Promise<string | undefined> {
-    const row = await storage.getRun(runId).catch(() => null);
+  async function terminalError(run: RunRecord): Promise<string | undefined> {
+    const row = await ownedBy(run.ownerKey).getRun(run.id).catch(() => null);
     return row?.status === "errored" && row.error ? row.error : undefined;
   }
 
@@ -3217,6 +3257,50 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /**
+   * The id-only storage calls, each carrying the owner key of the record it
+   * acts on (see `OwnerScope`), so an adapter can check or route by it. Every
+   * id-only call goes through here: a call without a key is a bug, and a test
+   * fails on one.
+   */
+  const ownedBy = (ownerKey: string | undefined) => {
+    const scope = ownerKey ? { ownerKey } : undefined;
+    return {
+      appendMessages: (chatId: string, messages: AppMessage[], fence?: RunFence) =>
+        storage.appendMessages(chatId, messages, fence, scope),
+      updateRun: (id: string, patch: Partial<RunRecord>, guard?: RunLease) => storage.updateRun(id, patch, guard, scope),
+      getRun: (id: string) => storage.getRun(id, scope),
+      heartbeatRun: (id: string, owner: string, ttlMs: number, fencingToken: number) =>
+        storage.heartbeatRun(id, owner, ttlMs, fencingToken, scope),
+      reclaimRun: (id: string, owner: string, ttlMs: number) => storage.reclaimRun(id, owner, ttlMs, scope),
+      completeSchedule: (
+        id: string,
+        patch: { nextRunAt: number; lastRunAt: number; enabled: boolean },
+        owner: string,
+        claim?: { leaseExpiresAt: number },
+      ) => storage.completeSchedule(id, patch, owner, claim, scope),
+      noteScheduleFire: (id: string, patch: { lastChatId: string; firedAt: number }) =>
+        storage.noteScheduleFire?.(id, patch, scope),
+    };
+  };
+
+  /** A run as the runtime holds it: carrying its chat's owner key even when the adapter left it off. */
+  const withOwnerKey = (run: RunRecord, chat: Pick<ChatRecord, "owner">): RunRecord =>
+    run.ownerKey ? run : { ...run, ownerKey: chat.owner };
+
+  /** Report an owner-key mismatch through the host's hook (never throws). */
+  async function reportMismatch(
+    error: OwnerKeyMismatchError,
+    at: { during: "resume" | "schedule" | "turn"; runId?: string; scheduleId?: string },
+  ): Promise<void> {
+    console.error(`[latch] owner key mismatch (${at.during}): ${error.message}`);
+    try {
+      await config.onOwnerKeyMismatch?.({ error, ...at });
+    } catch (e) {
+      console.error("[latch] onOwnerKeyMismatch failed:", e);
+    }
+  }
+
+  /**
    * Open a turn: the run (one active per chat — `ChatBusyError` if not ours to
    * run) and the user message that starts it. Atomic when the adapter offers
    * `openTurn`; otherwise the run first, then the message, so a refusal still
@@ -3225,41 +3309,43 @@ export function createRuntime<P, RC = unknown>(
    */
   async function openTurn(
     principal: P,
-    chatId: string,
+    chat: Pick<ChatRecord, "id" | "owner">,
     agentName: string,
     messages: AppMessage[],
     agentVersion?: number,
     /** Recorded on the run so recovery resumes it the same way (`RunRecord.settings`). */
     settings?: RunSettings,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
+    const chatId = chat.id;
     if (storage.openTurn) {
-      const run = await storage.openTurn(principal, {
+      const run = withOwnerKey(await storage.openTurn(principal, {
         chatId,
         agent: agentName,
         messages,
         agentVersion: agentVersion ?? null,
         ...(settings ? { settings } : {}),
         ...(dur.enabled ? { lease: { owner: dur.instanceId, ttlMs: dur.leaseTtlMs } } : {}),
-      });
+      }), chat);
       return {
         run,
         lease: dur.enabled ? { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } : undefined,
       };
     }
-    const opened = await openRun(principal, chatId, agentName, agentVersion, settings);
-    if (messages.length > 0) await storage.appendMessages(chatId, messages);
+    const opened = await openRun(principal, chat, agentName, agentVersion, settings);
+    if (messages.length > 0) await ownedBy(chat.owner).appendMessages(chatId, messages);
     return opened;
   }
 
   async function openRun(
     principal: P,
-    chatId: string,
+    chat: Pick<ChatRecord, "id" | "owner">,
     agentName: string,
     agentVersion?: number,
     settings?: RunSettings,
   ): Promise<{ run: RunRecord; lease: RunLease | undefined }> {
+    const chatId = chat.id;
     if (dur.enabled) {
-      const run = await storage.claimRun({
+      const run = withOwnerKey(await storage.claimRun({
         principal,
         chatId,
         agent: agentName,
@@ -3267,17 +3353,20 @@ export function createRuntime<P, RC = unknown>(
         ttlMs: dur.leaseTtlMs,
         agentVersion: agentVersion ?? null,
         ...(settings ? { settings } : {}),
-      });
+      }), chat);
       return { run, lease: { owner: dur.instanceId, fencingToken: run.fencingToken ?? 1 } };
     }
     return {
-      run: await storage.createRun(principal, {
-        chatId,
-        agent: agentName,
-        kind: "turn",
-        agentVersion: agentVersion ?? null,
-        ...(settings ? { settings } : {}),
-      }),
+      run: withOwnerKey(
+        await storage.createRun(principal, {
+          chatId,
+          agent: agentName,
+          kind: "turn",
+          agentVersion: agentVersion ?? null,
+          ...(settings ? { settings } : {}),
+        }),
+        chat,
+      ),
       lease: undefined,
     };
   }
@@ -3354,7 +3443,7 @@ export function createRuntime<P, RC = unknown>(
     // wedged chats whose gate could not be satisfied at all.
     if (hasPendingApproval(prior)) {
       const declined = declinePendingApprovals(prior);
-      if (declined.length > 0) await storage.appendMessages(resolvedChatId, declined);
+      if (declined.length > 0) await ownedBy(chat.owner).appendMessages(resolvedChatId, declined);
     }
 
     // Limits gate BEFORE anything is persisted: a refused turn leaves no
@@ -3364,7 +3453,7 @@ export function createRuntime<P, RC = unknown>(
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
     // lands in history — the client retries it (with its turn reservation released).
     const { run, lease } = await withReservation(admitted, () =>
-      openTurn(principal, resolvedChatId, agentName, [...replaced, userMessage], cfg.configVersion),
+      openTurn(principal, chat, agentName, [...replaced, userMessage], cfg.configVersion),
     );
 
     return buildTurn({
@@ -3383,13 +3472,17 @@ export function createRuntime<P, RC = unknown>(
     });
   }
 
-  async function resumeRun(runId: string): Promise<RunOutcome | null> {
+  async function resumeRun(reaped: Pick<RunRecord, "id" | "ownerKey">): Promise<RunOutcome | null> {
     if (!dur.enabled) throw new Error("resume requires durability.enabled");
+    const runId = reaped.id;
 
     // Exactly-once re-claim: only one node wins; a concurrent resumer / an
-    // already-completed run yields null.
-    const run = await storage.reclaimRun(runId, dur.instanceId, dur.leaseTtlMs);
-    if (!run) return null;
+    // already-completed run yields null. The reaped record carries the run's
+    // owner key, so even the first call of a recovery says whose run it is.
+    const reclaimed = await ownedBy(reaped.ownerKey).reclaimRun(runId, dur.instanceId, dur.leaseTtlMs);
+    if (!reclaimed) return null;
+    const run: RunRecord = reclaimed.ownerKey || !reaped.ownerKey ? reclaimed : { ...reclaimed, ownerKey: reaped.ownerKey };
+    const owned = ownedBy(run.ownerKey);
 
     // System op (no request): rebuild the principal from the run's identity blob.
     const principal = await reconstructPrincipal(run.identity);
@@ -3402,7 +3495,7 @@ export function createRuntime<P, RC = unknown>(
     // until `maxAttempts`, and a throw would abort the rest of `sweep`'s loop.
     // No `onRunFinished`: nothing ran.
     const refuse = async (error: string): Promise<RunOutcome> => {
-      await storage.updateRun(
+      await owned.updateRun(
         run.id,
         {
           status: "errored",
@@ -3418,7 +3511,7 @@ export function createRuntime<P, RC = unknown>(
         lease,
       );
       console.warn(`[resume] run ${run.id} (${run.agent}): ${error}`);
-      const settled = await storage.getRun(runId);
+      const settled = await owned.getRun(runId);
       return {
         runId,
         status: settled?.status ?? "errored",
@@ -3454,7 +3547,7 @@ export function createRuntime<P, RC = unknown>(
       const error = shape === "superseded" ? "superseded: a later turn moved the conversation on" : null;
       // Fenced like every other terminal write: if our lease was reaped again
       // mid-flight, the new owner decides this run's end state, not us.
-      const applied = await storage.updateRun(
+      const applied = await owned.updateRun(
         run.id,
         {
           status,
@@ -3519,7 +3612,7 @@ export function createRuntime<P, RC = unknown>(
           console.warn("latch telemetry flush failed:", e);
         }
       }
-      const settled = await storage.getRun(runId);
+      const settled = await owned.getRun(runId);
       return {
         runId,
         status: settled?.status ?? status,
@@ -3604,7 +3697,7 @@ export function createRuntime<P, RC = unknown>(
     });
     await res.text();
 
-    const final = await storage.getRun(runId);
+    const final = await owned.getRun(runId);
     return {
       runId,
       status: final?.status ?? "errored",
@@ -3616,11 +3709,12 @@ export function createRuntime<P, RC = unknown>(
     now?: number;
     maxAttempts?: number;
     error?: string;
-  }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[] }> {
+  }): Promise<{ reaped: RunRecord[]; resumed: RunOutcome[]; errors: string[] }> {
     if (!dur.enabled) throw new Error("sweep requires durability.enabled");
     const maxAttempts = opts?.maxAttempts ?? 5;
     const { reaped } = await reapTick({ now: opts?.now, error: opts?.error });
     const resumed: RunOutcome[] = [];
+    const errors: string[] = [];
     for (const run of reaped) {
       // Give up on poison runs that keep dying — don't loop forever.
       if ((run.attempt ?? 1) >= maxAttempts) continue;
@@ -3635,13 +3729,17 @@ export function createRuntime<P, RC = unknown>(
       // the reaper left it — `errored`, not auto-retried — which is today's
       // outcome for that run too; only its neighbours are new to recovery.
       try {
-        const outcome = await resumeRun(run.id);
+        const outcome = await resumeRun(run);
         if (outcome) resumed.push(outcome);
       } catch (e) {
-        console.error(`[resume] run ${run.id} (${run.agent}) failed; continuing the sweep:`, e);
+        // A mismatched owner key is never retried: the run stays as the reaper
+        // left it, and the host hears about it.
+        if (isOwnerKeyMismatchError(e)) await reportMismatch(e, { during: "resume", runId: run.id });
+        else console.error(`[resume] run ${run.id} (${run.agent}) failed; continuing the sweep:`, e);
+        errors.push(`resume ${run.id}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    return { reaped, resumed };
+    return { reaped, resumed, errors };
   }
 
   async function cron(opts?: { now?: number; maxAttempts?: number }): Promise<{
@@ -3663,7 +3761,9 @@ export function createRuntime<P, RC = unknown>(
     // Without durability there are no leases to reap — nothing to sweep.
     if (dur.enabled) {
       try {
-        ({ reaped, resumed } = await sweep({ now: opts?.now, maxAttempts: opts?.maxAttempts }));
+        let swept: string[];
+        ({ reaped, resumed, errors: swept } = await sweep({ now: opts?.now, maxAttempts: opts?.maxAttempts }));
+        errors.push(...swept);
       } catch (e) {
         errors.push(`sweep: ${describe(e)}`);
       }
@@ -3718,7 +3818,7 @@ export function createRuntime<P, RC = unknown>(
     if (live.length === 0) return new Response(null, { status: 200 });
     decisions = live;
     const changed = applyDecisions(messages, decisions);
-    if (changed.length > 0) await storage.appendMessages(chatId, changed);
+    if (changed.length > 0) await ownedBy(chat.owner).appendMessages(chatId, changed);
 
     // Continue this chat from the decided history.
     const continueTurn = async () => {
@@ -3732,7 +3832,7 @@ export function createRuntime<P, RC = unknown>(
         latestMessageContext(messages),
       );
       const admitted = await admitContinuation(principal, chat.agent, "decision");
-      const { run, lease } = await openRun(principal, chatId, chat.agent, cfg.configVersion);
+      const { run, lease } = await openRun(principal, chat, chat.agent, cfg.configVersion);
       return buildTurnStream({
         resolvedChatId: chatId,
         principal,
@@ -3817,7 +3917,7 @@ export function createRuntime<P, RC = unknown>(
           }
           // Persist the folded spawn_agent result (or re-bubbled approval part)
           // + resolved markers.
-          await storage.appendMessages(chatId, messages);
+          await ownedBy(chat.owner).appendMessages(chatId, messages);
           if (hasPendingApproval(messages)) {
             writer.write({ type: "finish" });
             return;
@@ -3887,7 +3987,7 @@ export function createRuntime<P, RC = unknown>(
     // abandoned turns ago is still `input-available` in stored history, and
     // counting it would park every future resume in this chat forever.
     if (hasPendingToolResult(changed)) {
-      await storage.appendMessages(chatId, changed);
+      await ownedBy(chat.owner).appendMessages(chatId, changed);
       return new Response(null, { status: 200 });
     }
 
@@ -3905,7 +4005,7 @@ export function createRuntime<P, RC = unknown>(
     // a busy chat refuses before anything is recorded, so the retry finds the
     // call still unanswered and resumes it — persisting first would make the
     // retry a "duplicate submit" no-op and lose the answer.
-    const { run, lease } = await openTurn(principal, chatId, chat.agent, changed, cfg.configVersion);
+    const { run, lease } = await openTurn(principal, chat, chat.agent, changed, cfg.configVersion);
 
     return buildTurn({
       resolvedChatId: chatId,
@@ -3994,13 +4094,17 @@ export function createRuntime<P, RC = unknown>(
     // provider mapping turns into "thinking off", so reuse the host's hook rather
     // than hardcoding provider shapes here.
     const noThinking = config.resolveReasoningOptions?.(modelId, "minimal")?.providerOptions;
-    const run = await storage.createRun(principal, {
-      chatId,
-      agent: chat.agent,
-      // Not a conversational turn — stats/rollups filter on kind so a
-      // compaction's cache-less usage never depresses an agent's hit rate.
-      kind: "compaction",
-    });
+    const run = withOwnerKey(
+      await storage.createRun(principal, {
+        chatId,
+        agent: chat.agent,
+        // Not a conversational turn — stats/rollups filter on kind so a
+        // compaction's cache-less usage never depresses an agent's hit rate.
+        kind: "compaction",
+      }),
+      chat,
+    );
+    const owned = ownedBy(run.ownerKey);
     try {
       const { text, truncated, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
@@ -4025,7 +4129,7 @@ export function createRuntime<P, RC = unknown>(
       // didn't write; `sendToModel` stays default-true so the model DOES see it.
       // Role `user` because after slicing this is the conversation's first
       // message, and a model prompt may not open with an assistant turn.
-      await storage.appendMessages(chatId, [
+      await owned.appendMessages(chatId, [
         {
           id: generateMessageId(),
           role: "user",
@@ -4050,7 +4154,7 @@ export function createRuntime<P, RC = unknown>(
           },
         } as AppMessage,
       ]);
-      await storage.updateRun(run.id, {
+      await owned.updateRun(run.id, {
         status: "completed",
         usageInputTokens: usage.inputTokens,
         usageOutputTokens: usage.outputTokens,
@@ -4070,7 +4174,7 @@ export function createRuntime<P, RC = unknown>(
       });
       return { summary: text, compacted: live.length };
     } catch (e) {
-      await storage
+      await owned
         .updateRun(run.id, {
           status: "errored",
           error: e instanceof Error ? e.message : String(e),
@@ -4137,7 +4241,8 @@ export function createRuntime<P, RC = unknown>(
     principal: P;
     runId: string;
   }): Promise<RunRecord | null> {
-    const run = await storage.getRun(runId);
+    // No record in hand yet: the principal stands in for the owner key.
+    const run = await storage.getRun(runId, { principal });
     if (!run) return null;
     // Ownership: the run is the caller's only if its chat is (getChat is
     // principal-scoped). Guards cross-tenant reads/writes keyed by runId.
@@ -4272,7 +4377,7 @@ export function createRuntime<P, RC = unknown>(
     // and this turn's verdict below would re-report that stale approval.
     if (hasPendingApproval(prior)) {
       const declined = declinePendingApprovals(prior);
-      if (declined.length > 0) await storage.appendMessages(chatId, declined);
+      if (declined.length > 0) await ownedBy(chat.owner).appendMessages(chatId, declined);
     }
     // Gate before the message persists — a refused schedule/subagent turn
     // leaves nothing behind, same as handleChat. Same for a busy chat: open
@@ -4287,7 +4392,7 @@ export function createRuntime<P, RC = unknown>(
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
       }, chat.params, contextOf(o.message));
-      const opened = await openTurn(o.principal, chatId, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
+      const opened = await openTurn(o.principal, chat, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
     const onProgress = o.onProgress;
@@ -4328,7 +4433,7 @@ export function createRuntime<P, RC = unknown>(
       // If settling fails too, say so: the run then stays active (holding the
       // chat until its lease lapses), and a caller told only the setup error
       // would retry into a busy chat without knowing why.
-      const unsettled = await storage
+      const unsettled = await ownedBy(run.ownerKey)
         .updateRun(run.id, { status: "errored", error, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null }, lease)
         .then(
           // `false`: the lease guard refused the write — another worker holds the run now.
@@ -4349,7 +4454,7 @@ export function createRuntime<P, RC = unknown>(
     // A failure that ends the run without an error chunk (a final-step
     // `step_end` handler, caught in onFinish) is only on the run row: read it
     // back so a failed turn never looks like a silent one.
-    const error = lastStreamError(await res.text()) ?? (await terminalError(run.id));
+    const error = lastStreamError(await res.text()) ?? (await terminalError(run));
 
     const after = await storage.loadMessages(o.principal, chatId);
     // The verdict is about THIS turn, so read the FINAL message only (the same
@@ -4397,7 +4502,7 @@ export function createRuntime<P, RC = unknown>(
     if (!subChat) return { answer: "" };
     const subMessages = await storage.loadMessages(principal, subChatId);
     const changed = applyDecisions(subMessages, decisions);
-    if (changed.length > 0) await storage.appendMessages(subChatId, changed);
+    if (changed.length > 0) await ownedBy(subChat.owner).appendMessages(subChatId, changed);
     // Another gated call in the same sub step still undecided → can't finish.
     if (hasPendingApproval(subMessages)) return { answer: "" };
 
@@ -4413,7 +4518,7 @@ export function createRuntime<P, RC = unknown>(
       latestMessageContext(subMessages),
     );
     const admitted = await admitContinuation(principal, subChat.agent, "decision");
-    const { run, lease } = await openRun(principal, subChatId, subChat.agent, cfg.configVersion);
+    const { run, lease } = await openRun(principal, subChat, subChat.agent, cfg.configVersion);
     const resumeFrom = trimTrailingAssistantPrefill(subMessages);
     let observeStream: ((observed: ReadableStream<unknown>) => void) | undefined;
     if (live) {
@@ -4555,7 +4660,7 @@ export function createRuntime<P, RC = unknown>(
       // survives and `sweep()` resumes it. For work that is billed per
       // attempt, "ran twice" is strictly worse than "ran once, resumed".
       try {
-        const applied = await storage.completeSchedule(
+        const applied = await ownedBy(s.owner).completeSchedule(
           s.id,
           { nextRunAt: next ?? now, lastRunAt: now, enabled: next != null && !refused },
           dur.instanceId,
@@ -4579,7 +4684,8 @@ export function createRuntime<P, RC = unknown>(
         // Cannot consume the occurrence → do NOT fire. Firing anyway would
         // leave the row due, and every subsequent tick would fire it again —
         // the swallowed version of this write was itself a repeat-fire bug.
-        console.error(`[schedule] failed to advance ${s.id}; skipping this fire:`, e);
+        if (isOwnerKeyMismatchError(e)) await reportMismatch(e, { during: "schedule", scheduleId: s.id });
+        else console.error(`[schedule] failed to advance ${s.id}; skipping this fire:`, e);
         errors++;
         continue;
       }
@@ -4672,7 +4778,7 @@ export function createRuntime<P, RC = unknown>(
           // a park that nobody can answer.
           if (handled && typeof outcome === "object") {
             if (outcome.chatId) {
-              await storage.noteScheduleFire?.(s.id, {
+              await ownedBy(s.owner).noteScheduleFire(s.id, {
                 lastChatId: outcome.chatId,
                 firedAt: now,
               });
@@ -4697,7 +4803,7 @@ export function createRuntime<P, RC = unknown>(
           // "completes" the await); optional — see StorageAdapter. `firedAt`
           // is the lastRunAt this fire's completeSchedule wrote above, so a
           // delayed stamp can't clobber a newer occurrence's.
-          await storage.noteScheduleFire?.(s.id, { lastChatId: chat.id, firedAt: now });
+          await ownedBy(s.owner).noteScheduleFire(s.id, { lastChatId: chat.id, firedAt: now });
           const outcome = await runToCompletion({
             principal,
             agent: s.agent,
@@ -4774,7 +4880,7 @@ export function createRuntime<P, RC = unknown>(
     getChat: getChatById,
     listRuns,
     getRun,
-    resume: resumeRun,
+    resume: (run) => resumeRun(typeof run === "string" ? { id: run } : run),
     sweep,
     cron,
     applyApproval,

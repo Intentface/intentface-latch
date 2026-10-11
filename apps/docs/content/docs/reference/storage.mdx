@@ -11,12 +11,12 @@ createRuntime({ storage, context, agents });
 
 ## What it stores
 
-Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every method that *takes a principal* scopes its read by it. A few internal methods take a bare id instead (`getRun`, `reclaimRun`, `reapExpiredRuns`); those are runtime machinery, not a caller-facing API, and they are **not** ownership-scoped. Reach for the [Runtime operations](/docs/reference/runtime) rather than the adapter when you're serving a request.
+Five record types. The adapter owns the **owner key** — an opaque string it derives from the principal — and every method that *takes a principal* scopes its read by it. The runtime's own machinery also calls a few methods by id (`appendMessages`, `updateRun`, `getRun`, `heartbeatRun`, `reclaimRun`, `completeSchedule`, `noteScheduleFire`). Those carry the owner key as an optional last argument, so the adapter can check it or route by it: see [Owner keys on id-only calls](#owner-keys-on-id-only-calls). Reach for the [Runtime operations](/docs/reference/runtime) rather than the adapter when you're serving a request.
 
 | Record | Holds |
 | --- | --- |
 | `ChatRecord` | id, owner, agent, title, `kind`, timestamps |
-| `RunRecord` | status, identity blob, lease fields, attempt count, token usage, cost, error, the agent version it ran |
+| `RunRecord` | status, `ownerKey` (its chat's), identity blob, lease fields, attempt count, token usage, cost, error, the agent version it ran |
 | `RunLease` | `{ owner, fencingToken }` — proof of single-writer ownership |
 | `UsageRecord` | per-run token/cost row for billing rollups |
 | `ScheduleRecord` | cron, timezone, prompt, opaque `delivery`, `nextRunAt`, lease fields |
@@ -82,7 +82,30 @@ Returning `void` is still accepted and treated as applied, so older adapters kee
 
 Every read that **takes a principal** must filter by the derived owner key — `listChats`, `loadMessages`, `listRuns`, `listSchedules`. Filter in the query, not after it: a capped scan that slices in application code silently stops being correct once a tenant has more rows than the cap.
 
-`getRun(id)` takes no principal and is deliberately unscoped — the reaper and resume path look runs up by id alone. Never serve it straight to a caller; go through `Runtime.getRun`, which scopes the lookup for you.
+`getRun(id)` takes no principal: the reaper and resume path look runs up by id. Never serve it straight to a caller; go through `Runtime.getRun`, which scopes the lookup for you.
+
+### Owner keys on id-only calls
+
+Every call the runtime makes by id carries an `OwnerScope` as its last argument: `{ ownerKey }`, the key **your adapter** put on the record it's acting on (`ChatRecord.owner`, `RunRecord.ownerKey`, `ScheduleRecord.owner`), handed back. The runtime never works out a key itself; it only passes yours on. The one exception is `Runtime.getRun`, which has no record yet and passes `{ principal }` instead.
+
+```ts
+appendMessages(chatId, messages, fence?, scope?)
+updateRun(id, patch, guard?, scope?)
+getRun(id, scope?)
+heartbeatRun(id, owner, ttlMs, fencingToken, scope?)
+reclaimRun(id, owner, ttlMs, scope?)
+completeSchedule(id, patch, owner, claim?, scope?)
+noteScheduleFire(id, patch, scope?)
+```
+
+It's optional, and an adapter may ignore it. Two reasons not to:
+
+- **Check it.** Throw `OwnerKeyMismatchError` when the key isn't the row's owner, so a bug can't write into another owner's run or chat. The runtime never retries a mismatch; recovery and schedules report it through `createRuntime({ onOwnerKeyMismatch })` and leave the row alone. The shipped adapters check it.
+- **Route by it.** An adapter that keeps each tenant in its own schema or database reads the tenant from the key (`decodeOwnerKey(key)[0]`) and goes straight there, with no global index of ids.
+
+For either, return `ownerKey` on **every** run record, reaped and reclaimed ones included: crash recovery starts from `reapExpiredRuns` with nothing else in hand. Stamp it when the run opens, from its chat's owner.
+
+`reapExpiredRuns` and `claimDueSchedules` are the two calls across all owners. An adapter with one schema per tenant keeps a small global table of active leases and due schedules for them, each row with its owner key.
 
 ### Chat id collisions surface as a conflict
 
@@ -125,7 +148,7 @@ The adapter takes the db, not a connection string — your app owns the connecti
 
 ## Testing your own adapter
 
-The failure modes above are invisible in normal use: an adapter that skips a fence or races a claim works until two nodes meet the same run. `@intentface/latch-core/testing` packages the guarantees as runnable checks: tenant scoping, message ordering, one active run per chat, racing claims and reclaims, heartbeats, the reaper, and fenced message writes. It runs under Vitest, Jest or `node:test`:
+The failure modes above are invisible in normal use: an adapter that skips a fence or races a claim works until two nodes meet the same run. `@intentface/latch-core/testing` packages the guarantees as runnable checks: tenant scoping, message ordering, one active run per chat, racing claims and reclaims, heartbeats, the reaper, fenced message writes, chat id conflicts, and schedules (racing claims, stale completions, bumps, one-shots, deleting mid-fire). Set `checksOwnerKey: true` when your adapter stamps and checks owner keys, to add those checks. It runs under Vitest, Jest or `node:test`:
 
 ```ts
 import { describe, it } from "vitest";

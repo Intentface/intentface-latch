@@ -156,6 +156,7 @@ const ALTERS = [
   `ALTER TABLE latch_agent_versions ADD COLUMN change_message TEXT`,
   `ALTER TABLE latch_chats ADD COLUMN params TEXT`,
   `ALTER TABLE latch_schedules ADD COLUMN params TEXT`,
+  `ALTER TABLE latch_runs ADD COLUMN owner_key TEXT`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];
@@ -182,6 +183,11 @@ function isColumnExists(error: unknown): boolean {
  * and written to be idempotent, so every `migrate()` can re-run them safely.
  */
 const BACKFILL = [
+  // Runs gained their chat's owner key (RunRecord.ownerKey). Only ACTIVE runs
+  // need it filled: crash recovery starts from them. Finished runs fall back to
+  // their chat's owner when read. The reaper index keeps this cheap on boot.
+  `UPDATE latch_runs SET owner_key = (SELECT c.owner FROM latch_chats c WHERE c.id = latch_runs.chat_id)
+   WHERE status = 'active' AND owner_key IS NULL`,
   // Every pre-existing agent becomes v1, so the prompt that was already live is
   // a rollback target. Without this the FIRST publish would create v1 from the
   // NEW content and the running prompt would be lost for good — the exact

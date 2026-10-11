@@ -67,6 +67,8 @@ export const runs = pgTable(
     chatId: text("chat_id").notNull(),
     agent: text("agent").notNull(),
     status: text("status").notNull(),
+    /** The chat's owner key, stamped at open (RunRecord.ownerKey). NULL on runs from before it existed. */
+    ownerKey: text("owner_key"),
     identity: jsonb("identity"),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),

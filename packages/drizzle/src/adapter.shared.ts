@@ -17,7 +17,9 @@ import {
   ChatBusyError,
   ChatConflictError,
   encodeOwnerKey,
+  OwnerKeyMismatchError,
   type AppMessage,
+  type OwnerScope,
   type ChatRecord,
   type RunFence,
   type RunRecord,
@@ -149,6 +151,7 @@ export function makeStorageAdapter<P>(
     chatId: r.chatId,
     agent: r.agent,
     status: r.status as RunStatus,
+    ...(r.ownerKey ? { ownerKey: r.ownerKey } : {}),
     identity: r.identity ?? undefined,
     leaseOwner: r.leaseOwner,
     leaseExpiresAt: r.leaseExpiresAt,
@@ -188,6 +191,31 @@ export function makeStorageAdapter<P>(
     leaseExpiresAt: r.leaseExpiresAt,
     createdAt: r.createdAt,
   });
+
+  /** A run's owner key: its own, or its chat's for runs stamped before the column existed. */
+  const runOwner = sql<string | null>`coalesce(${s.runs.ownerKey}, (select ${s.chats.owner} from ${s.chats} where ${s.chats.id} = ${s.runs.chatId}))`;
+
+  /** The owner key a row was stored under, or `undefined` when there's no such row. */
+  async function storedOwner(kind: "chat" | "run" | "schedule", id: string): Promise<string | undefined> {
+    const rows: any[] =
+      kind === "run"
+        ? await db.select({ owner: runOwner }).from(s.runs).where(eq(s.runs.id, id))
+        : kind === "chat"
+          ? await db.select({ owner: s.chats.owner }).from(s.chats).where(eq(s.chats.id, id))
+          : await db.select({ owner: s.schedules.owner }).from(s.schedules).where(eq(s.schedules.id, id));
+    return rows[0]?.owner ?? undefined;
+  }
+
+  /**
+   * Refuse an id-only call whose owner key isn't the row's (OwnerScope). An
+   * owner never changes once written, so checking before the write can't race
+   * it; a row that doesn't exist is left to the write itself to miss.
+   */
+  async function checkOwner(kind: "chat" | "run" | "schedule", id: string, scope: OwnerScope<P> | undefined): Promise<void> {
+    if (!scope?.ownerKey) return;
+    const owner = await storedOwner(kind, id);
+    if (owner !== undefined && owner !== scope.ownerKey) throw new OwnerKeyMismatchError(`${kind} ${id}`);
+  }
 
   async function getChat(principal: P, id: string): Promise<ChatRecord | null> {
     const rows = await db
@@ -311,6 +339,9 @@ export function makeStorageAdapter<P>(
     chatId: input.chatId,
     agent: input.agent,
     status: "active" as RunStatus,
+    // The run inherits its chat's owner: the same key, derived from the same
+    // principal the turn's chat was opened for.
+    ownerKey: ownerKey(principal),
     identity: principal,
     kind: input.kind,
     // Stamped at OPEN, so a run that errors or crashes still says which agent
@@ -452,7 +483,8 @@ export function makeStorageAdapter<P>(
       );
     },
 
-    async appendMessages(chatId, msgs, fence) {
+    async appendMessages(chatId, msgs, fence, scope) {
+      await checkOwner("chat", chatId, scope);
       if (fence) return msgs.length === 0 || appendFenced(chatId, msgs, fence);
       if (msgs.length === 0) return;
       // The next seq is computed INSIDE each INSERT (a single statement), so
@@ -533,7 +565,8 @@ export function makeStorageAdapter<P>(
       return rowToRun(await openRunRow(row, input.chatId, now));
     },
 
-    async heartbeatRun(id, owner, ttlMs, fencingToken) {
+    async heartbeatRun(id, owner, ttlMs, fencingToken, scope) {
+      await checkOwner("run", id, scope);
       const updated = await db
         .update(s.runs)
         .set({ leaseExpiresAt: sql`${nowMs} + ${ttlMs}`, heartbeatAt: nowMs })
@@ -551,7 +584,8 @@ export function makeStorageAdapter<P>(
       return updated.length > 0;
     },
 
-    async reclaimRun(id, owner, ttlMs) {
+    async reclaimRun(id, owner, ttlMs, scope) {
+      await checkOwner("run", id, scope);
       let updated: any[];
       try {
         updated = await db
@@ -589,9 +623,11 @@ export function makeStorageAdapter<P>(
       return updated[0] ? rowToRun(updated[0]) : null;
     },
 
-    async updateRun(id, patch, guard) {
+    async updateRun(id, patch, guard, scope) {
+      await checkOwner("run", id, scope);
       const set = Object.fromEntries(
-        Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "id"),
+        // `ownerKey` is stamped at open and never changes.
+        Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "id" && k !== "ownerKey"),
       );
       if (Object.keys(set).length === 0) return true;
       const where = guard
@@ -631,12 +667,16 @@ export function makeStorageAdapter<P>(
       return reaped.map(rowToRun);
     },
 
-    async getRun(id) {
+    async getRun(id, scope) {
+      await checkOwner("run", id, scope);
       const rows = await db
-        .select()
+        .select({ run: s.runs, owner: runOwner })
         .from(s.runs)
         .where(eq(s.runs.id, id));
-      return rows[0] ? rowToRun(rows[0]) : null;
+      if (!rows[0]) return null;
+      // Asked for a person rather than by key: someone else's run is simply not found.
+      if (scope?.principal !== undefined && rows[0].owner !== ownerKey(scope.principal)) return null;
+      return rowToRun(rows[0].run);
     },
 
     async listRuns(principal, opts) {
@@ -651,9 +691,12 @@ export function makeStorageAdapter<P>(
     },
 
     async recordUsage(principal, input) {
+      // Usage inherits its run's owner (derive once, inherit). The principal
+      // is only the fallback for a run this database doesn't hold.
+      const owner = (await storedOwner("run", input.runId)) ?? ownerKey(principal);
       await db.insert(s.usage).values({
         id: newId("use"),
-        owner: ownerKey(principal),
+        owner,
         runId: input.runId,
         model: input.model,
         inputTokens: input.inputTokens,
@@ -746,7 +789,8 @@ export function makeStorageAdapter<P>(
       return claimed.map(rowToSchedule);
     },
 
-    async completeSchedule(id, patch, owner, claim) {
+    async completeSchedule(id, patch, owner, claim, scope) {
+      await checkOwner("schedule", id, scope);
       const applied = await db
         .update(s.schedules)
         .set({
@@ -773,7 +817,8 @@ export function makeStorageAdapter<P>(
       return applied.length > 0;
     },
 
-    async noteScheduleFire(id, patch) {
+    async noteScheduleFire(id, patch, scope) {
+      await checkOwner("schedule", id, scope);
       // Fenced by the OCCURRENCE (see StorageAdapter): the stamp only lands
       // while last_run_at still holds the value this fire's completeSchedule
       // wrote — a delayed stamp from an older fire no-ops once a newer

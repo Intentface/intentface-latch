@@ -1,5 +1,13 @@
 import type { AppMessage } from "../message.js";
-import { isChatBusyError, type RunFence, type RunRecord, type StorageAdapter } from "../storage.js";
+import {
+  isChatBusyError,
+  isOwnerKeyMismatchError,
+  ChatConflictError,
+  type RunFence,
+  type RunRecord,
+  type ScheduleRecord,
+  type StorageAdapter,
+} from "../storage.js";
 
 /**
  * The `StorageAdapter` guarantees the runtime relies on, as runnable checks:
@@ -38,6 +46,12 @@ export interface ConformanceTarget<P> {
   /** Two principals the adapter maps to DIFFERENT owners. */
   principals: [P, P];
   close?: () => Promise<void> | void;
+  /**
+   * The adapter returns `ownerKey` on every run record and refuses an id-only
+   * call carrying another owner's key (`OwnerScope`). Turns on the owner-key
+   * checks; leave it off for an adapter that ignores owner keys.
+   */
+  checksOwnerKey?: boolean;
 }
 
 export interface ConformanceCheck<P> {
@@ -66,6 +80,17 @@ const msg = (id: string, text = id, role: AppMessage["role"] = "user"): AppMessa
 const textOf = (m: AppMessage | undefined) =>
   (m?.parts[0] as { text?: string } | undefined)?.text;
 
+/** Whether `fn` was refused with OwnerKeyMismatchError. */
+async function mismatched(fn: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await fn();
+    return false;
+  } catch (e) {
+    if (isOwnerKeyMismatchError(e)) return true;
+    throw e;
+  }
+}
+
 async function busy(fn: () => Promise<unknown>): Promise<number | null> {
   try {
     await fn();
@@ -75,6 +100,16 @@ async function busy(fn: () => Promise<unknown>): Promise<number | null> {
     throw e;
   }
 }
+
+/** A schedule due now, owned by `p`. */
+const dueSchedule = <P>(store: StorageAdapter<P>, p: P, cron: string | null = "0 9 * * *") =>
+  store.createSchedule(p, { agent: "a", cron, prompt: "brief", nextRunAt: 0 });
+
+/** Which of `claimed` is schedule `id`. */
+const claimedOne = (claimed: ScheduleRecord[], id: string) => claimed.filter((s) => s.id === id);
+
+/** A far-future time: "not due again". */
+const LATER = Date.now() + 365 * 24 * 3_600_000;
 
 const fenceOf = (run: RunRecord, owner: string): RunFence => ({
   runId: run.id,
@@ -342,6 +377,226 @@ function checks<P>(): ConformanceCheck<P>[] {
         const fence = fenceOf(run, "n1");
         check(await store.updateRun(run.id, { status: "completed", endedAt: Date.now() }, fence), "the holder settles");
         check((await store.appendMessages(chat.id, [msg("final", "answer", "assistant")], fence)) === true, "the final message lands");
+      },
+    },
+
+    // ── chats ─────────────────────────────────────────────────────────────
+    {
+      name: "a chat id that's taken is refused with ChatConflictError, for any owner",
+      async run({ store, principals: [me, other] }) {
+        await store.createChat(me, { id: "chat_fixed", agent: "a" });
+        for (const p of [other, me]) {
+          let err: unknown;
+          try {
+            await store.createChat(p, { id: "chat_fixed", agent: "a" });
+          } catch (e) {
+            err = e;
+          }
+          check(err instanceof ChatConflictError || (err as { code?: string })?.code === "chat_conflict", `a duplicate id is a ChatConflictError (${String(err)})`);
+        }
+        check((await store.getChat(other, "chat_fixed")) === null, "the other owner still can't see it");
+      },
+    },
+    {
+      name: "listChats filters by kind, and lists every kind without one",
+      async run({ store, principals: [me] }) {
+        const user = await store.createChat(me, { agent: "a" });
+        const sub = await store.createChat(me, { agent: "a", kind: "sub" });
+        const userOnly = (await store.listChats(me, { kind: "user" })).map((c) => c.id);
+        check(userOnly.includes(user.id) && !userOnly.includes(sub.id), "kind 'user' leaves the sub-thread out");
+        const all = (await store.listChats(me)).map((c) => c.id);
+        check(all.includes(user.id) && all.includes(sub.id), "no kind lists both");
+      },
+    },
+    {
+      name: "listRuns shows only the caller's runs",
+      async run({ store, principals: [me, other] }) {
+        const mine = await store.createChat(me, { agent: "a" });
+        const run = await store.createRun(me, { chatId: mine.id, agent: "a" });
+        check((await store.listRuns(me)).some((r) => r.id === run.id), "the owner sees the run");
+        check(!(await store.listRuns(other)).some((r) => r.id === run.id), "another owner doesn't");
+      },
+    },
+
+    // ── schedules ─────────────────────────────────────────────────────────
+    {
+      name: "racing claims take each due occurrence exactly once",
+      async run({ store, principals: [me] }) {
+        const s = await dueSchedule(store, me);
+        const race = await Promise.all(["n1", "n2", "n3", "n4"].map((owner) => store.claimDueSchedules(Date.now(), 60_000, owner)));
+        const winners = race.filter((claimed) => claimedOne(claimed, s.id).length === 1).length;
+        check(winners === 1, `exactly one claimer gets it (${winners})`);
+        const won = race.flatMap((c) => claimedOne(c, s.id))[0]!;
+        check(won.owner === s.owner, "the claim carries the schedule's owner");
+        check(JSON.stringify(won.identity) === JSON.stringify(s.identity), "and its stored identity");
+      },
+    },
+    {
+      name: "a live claim isn't claimed again; a lapsed one is",
+      async run({ store, principals: [me] }) {
+        const s = await dueSchedule(store, me);
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 1, "n1"), s.id).length === 1, "n1 claims it");
+        await sleep(EXPIRE);
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n2"), s.id).length === 1, "after the lease lapses, n2 claims it");
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n3"), s.id).length === 0, "while n2's lease is live, n3 doesn't");
+      },
+    },
+    {
+      name: "completing a stale claim is refused, by holder and by claim",
+      async run({ store, principals: [me] }) {
+        const s = await dueSchedule(store, me);
+        const first = claimedOne(await store.claimDueSchedules(Date.now(), 1, "n1"), s.id)[0]!;
+        await sleep(EXPIRE);
+        const second = claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n2"), s.id)[0]!;
+        const patch = { nextRunAt: LATER, lastRunAt: Date.now(), enabled: true };
+        check((await store.completeSchedule(s.id, patch, "n1", { leaseExpiresAt: first.leaseExpiresAt! })) === false, "the old holder's completion returns false");
+        check((await store.completeSchedule(s.id, patch, "n2", { leaseExpiresAt: second.leaseExpiresAt! })) !== false, "the current holder's applies");
+
+        // The same holder twice (two passes sharing an instance id): the claim fence tells them apart.
+        const t = await dueSchedule(store, me);
+        const early = claimedOne(await store.claimDueSchedules(Date.now(), 1, "n1"), t.id)[0]!;
+        await sleep(EXPIRE);
+        const late = claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n1"), t.id)[0]!;
+        check((await store.completeSchedule(t.id, patch, "n1", { leaseExpiresAt: early.leaseExpiresAt! })) === false, "the earlier claim by the same holder is refused");
+        check((await store.completeSchedule(t.id, patch, "n1", { leaseExpiresAt: late.leaseExpiresAt! })) !== false, "the later claim applies");
+      },
+    },
+    {
+      name: "a completed occurrence isn't due again, and a fired one-shot stays off",
+      async run({ store, principals: [me] }) {
+        const cron = await dueSchedule(store, me);
+        const oneShot = await dueSchedule(store, me, null);
+        const claimed = await store.claimDueSchedules(Date.now(), 60_000, "n1");
+        const now = Date.now();
+        for (const c of claimed.filter((x) => x.id === cron.id || x.id === oneShot.id)) {
+          await store.completeSchedule(c.id, { nextRunAt: c.id === cron.id ? LATER : now, lastRunAt: now, enabled: c.id === cron.id }, "n1", { leaseExpiresAt: c.leaseExpiresAt! });
+        }
+        const again = await store.claimDueSchedules(Date.now(), 60_000, "n2");
+        check(claimedOne(again, cron.id).length === 0, "the cron schedule isn't due until its next run");
+        check(claimedOne(again, oneShot.id).length === 0, "the one-shot isn't claimed again");
+        check((await store.bumpSchedule(me, oneShot.id)) === false, "bumping a fired one-shot does nothing (returns false)");
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n3"), oneShot.id).length === 0, "and it still isn't claimed");
+      },
+    },
+    {
+      name: "bump arms only the caller's enabled schedules",
+      async run({ store, principals: [me, other] }) {
+        const s = await store.createSchedule(me, { agent: "a", cron: "0 9 * * *", prompt: "brief", nextRunAt: LATER });
+        check((await store.bumpSchedule(other, s.id)) === false, "another owner can't bump it");
+        check((await store.bumpSchedule(me, "sch_missing")) === false, "an unknown id returns false");
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n1"), s.id).length === 0, "not due before the bump");
+        check((await store.bumpSchedule(me, s.id)) === true, "the owner's bump returns true");
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n1"), s.id).length === 1, "and makes it due now");
+      },
+    },
+    {
+      name: "bumping a claimed schedule doesn't let a second node fire it",
+      async run({ store, principals: [me] }) {
+        const s = await dueSchedule(store, me);
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n1"), s.id).length === 1, "n1 holds the claim");
+        await store.bumpSchedule(me, s.id);
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n2"), s.id).length === 0, "n2 can't claim it while n1's claim is live");
+      },
+    },
+    {
+      name: "a schedule deleted mid-fire isn't brought back by the fire's completion",
+      async run({ store, principals: [me] }) {
+        const s = await dueSchedule(store, me);
+        const c = claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n1"), s.id)[0]!;
+        await store.deleteSchedule(me, s.id);
+        await store.completeSchedule(s.id, { nextRunAt: LATER, lastRunAt: Date.now(), enabled: true }, "n1", { leaseExpiresAt: c.leaseExpiresAt! });
+        check(!(await store.listSchedules(me)).some((x) => x.id === s.id), "it stays deleted");
+        check(claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n2"), s.id).length === 0, "and is never claimed");
+      },
+    },
+    {
+      name: "schedules are scoped to their owner",
+      async run({ store, principals: [me, other] }) {
+        const s = await store.createSchedule(me, { agent: "a", cron: "0 9 * * *", prompt: "brief", nextRunAt: LATER });
+        check(!(await store.listSchedules(other)).some((x) => x.id === s.id), "another owner doesn't list it");
+        await store.deleteSchedule(other, s.id);
+        check((await store.listSchedules(me)).some((x) => x.id === s.id), "another owner can't delete it");
+      },
+    },
+    {
+      name: "a stamp from an older fire doesn't overwrite a newer fire's chat",
+      async run({ store, principals: [me] }) {
+        if (!store.noteScheduleFire) return;
+        const s = await dueSchedule(store, me);
+        const fire = async (owner: string, at: number) => {
+          const c = claimedOne(await store.claimDueSchedules(Date.now(), 60_000, owner), s.id)[0]!;
+          await store.completeSchedule(s.id, { nextRunAt: LATER, lastRunAt: at, enabled: true }, owner, { leaseExpiresAt: c.leaseExpiresAt! });
+        };
+        await fire("n1", 1_000);
+        await store.noteScheduleFire(s.id, { lastChatId: "chat_first", firedAt: 1_000 });
+        await store.bumpSchedule(me, s.id);
+        await fire("n2", 2_000);
+        // The first fire's stamp, delayed until after the second consumed.
+        await store.noteScheduleFire(s.id, { lastChatId: "chat_late", firedAt: 1_000 });
+        const row = (await store.listSchedules(me)).find((x) => x.id === s.id);
+        check(row?.lastChatId === "chat_first", `the delayed stamp is a no-op (${row?.lastChatId})`);
+        await store.noteScheduleFire(s.id, { lastChatId: "chat_second", firedAt: 2_000 });
+        check((await store.listSchedules(me)).find((x) => x.id === s.id)?.lastChatId === "chat_second", "the current fire's stamp lands");
+      },
+    },
+
+    // ── owner keys on id-only calls (checksOwnerKey) ─────────────────────
+    {
+      name: "runs carry their chat's owner key, through reaping and reclaiming",
+      async run({ store, principals: [me], checksOwnerKey }) {
+        if (!checksOwnerKey) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const plain = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        check(plain.ownerKey === chat.owner, `createRun stamps the chat's key (${plain.ownerKey})`);
+        await store.updateRun(plain.id, { status: "completed" });
+        const leased = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 1 });
+        check(leased.ownerKey === chat.owner, "claimRun stamps it");
+        await sleep(EXPIRE);
+        const reaped = (await store.reapExpiredRuns()).find((r) => r.id === leased.id);
+        check(reaped?.ownerKey === chat.owner, "a reaped run still carries it");
+        const back = await store.reclaimRun(leased.id, "n2", 60_000, { ownerKey: chat.owner });
+        check(back?.ownerKey === chat.owner, "and so does the reclaimed one");
+        check((await store.getRun(leased.id, { ownerKey: chat.owner }))?.ownerKey === chat.owner, "getRun returns it");
+        if (store.openTurn) {
+          const other = await store.createChat(me, { agent: "a" });
+          const opened = await store.openTurn(me, { chatId: other.id, agent: "a", messages: [msg("u1")] });
+          check(opened.ownerKey === other.owner, "openTurn stamps it");
+        }
+      },
+    },
+    {
+      name: "an id-only call carrying another owner's key is refused and changes nothing",
+      async run({ store, principals: [me, other], checksOwnerKey }) {
+        if (!checksOwnerKey) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const theirs = (await store.createChat(other, { agent: "a" })).owner;
+        const wrong = { ownerKey: theirs };
+        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 60_000 });
+        const token = run.fencingToken ?? 1;
+
+        check(await mismatched(() => store.appendMessages(chat.id, [msg("x")], undefined, wrong)), "appendMessages is refused");
+        check((await store.loadMessages(me, chat.id)).length === 0, "and wrote nothing");
+        check(await mismatched(() => store.updateRun(run.id, { status: "completed" }, undefined, wrong)), "updateRun is refused");
+        check((await store.getRun(run.id))?.status === "active", "and changed nothing");
+        check(await mismatched(() => store.heartbeatRun(run.id, "n1", 60_000, token, wrong)), "heartbeatRun is refused");
+        check(await mismatched(() => store.getRun(run.id, wrong)), "getRun by key is refused");
+        check((await store.getRun(run.id, { principal: other })) === null, "getRun for another person finds nothing");
+        check((await store.getRun(run.id, { principal: me }))?.id === run.id, "getRun for its owner finds it");
+
+        const dead = await store.claimRun({ principal: me, chatId: (await store.createChat(me, { agent: "a" })).id, agent: "a", owner: "n1", ttlMs: 1 });
+        await sleep(EXPIRE);
+        await store.reapExpiredRuns();
+        check(await mismatched(() => store.reclaimRun(dead.id, "n2", 60_000, wrong)), "reclaimRun is refused");
+        check((await store.getRun(dead.id))?.status === "errored", "and the run stays as the reaper left it");
+
+        const s = await dueSchedule(store, me);
+        const c = claimedOne(await store.claimDueSchedules(Date.now(), 60_000, "n1"), s.id)[0]!;
+        const patch = { nextRunAt: LATER, lastRunAt: Date.now(), enabled: true };
+        check(await mismatched(() => store.completeSchedule(s.id, patch, "n1", { leaseExpiresAt: c.leaseExpiresAt! }, wrong)), "completeSchedule is refused");
+        if (store.noteScheduleFire) {
+          check(await mismatched(() => store.noteScheduleFire!(s.id, { lastChatId: "x", firedAt: 1 }, wrong)), "noteScheduleFire is refused");
+        }
+        check((await store.completeSchedule(s.id, patch, "n1", { leaseExpiresAt: c.leaseExpiresAt! }, { ownerKey: s.owner })) !== false, "the right key applies");
       },
     },
   ];
