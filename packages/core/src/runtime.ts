@@ -54,8 +54,11 @@ import {
   type LimitWindowRef,
 } from "./limits.js";
 import {
+  encodeOwnerKey,
   isOwnerKeyMismatchError,
+  UnsupportedOperationError,
   type ChatRecord,
+  type PurgeResult,
   type OwnerKeyMismatchError,
   type RunLease,
   type RunFence,
@@ -675,6 +678,16 @@ export interface ScheduleInput<P> {
  * What one `runDue` pass did. A fire that ran and then stopped to wait for a
  * person counts in both `fired` and `parked`.
  */
+/**
+ * A store `runtime.purgeOwner` can empty for an owner path: the secret store,
+ * the agent store, the memory job store, or one of your own. One pass, as
+ * `StorageAdapter.purgeOwner`, called until `done`. A store passed without it
+ * makes the purge refuse.
+ */
+export interface OwnerPurgeable {
+  purgeOwner?(segments: string[], opts?: { batchSize?: number }): Promise<PurgeResult>;
+}
+
 export interface RunDueResult {
   /** Fires that ran. */
   fired: number;
@@ -753,6 +766,30 @@ export interface Runtime<P> {
   }): Promise<RunRecord[]>;
   /** One run, or `null` when it doesn't exist or its chat isn't the caller's. */
   getRun(input: { principal: P; runId: string }): Promise<RunRecord | null>;
+  /**
+   * Deletes one of the caller's chats with its messages, runs and usage, and
+   * the subagent threads it spawned. Returns the ids deleted: empty when the
+   * chat isn't the caller's. Refuses a chat with an answer still running
+   * (`ChatBusyError`), and `UnsupportedOperationError` when the storage
+   * adapter can't delete.
+   */
+  deleteChat(input: { principal: P; chatId: string }): Promise<{ deleted: string[] }>;
+  /**
+   * Deletes everything stored for an owner path, in every store you pass:
+   * `["t1"]` removes a whole tenant (keys `t1` and `t1/…`), `["t1", "u7"]` one
+   * person. Runs each store's purge until it's done and returns what each
+   * removed. Checks first that every store can purge, and refuses
+   * (`UnsupportedOperationError`) before deleting anything if one can't.
+   *
+   * Chats, messages, runs, usage and schedules are covered by the storage
+   * adapter. Pass your other stores by name in `also`: the secret store,
+   * stored agents, the memory job store, your own channel store. The result
+   * reports each under the same name (the storage adapter as `storage`).
+   */
+  purgeOwner(
+    segments: string[],
+    opts?: { also?: Record<string, OwnerPurgeable>; batchSize?: number },
+  ): Promise<{ removed: Record<string, Record<string, number>> }>;
   /**
    * Resumes one interrupted run and finishes it. Needs `durability`. Returns
    * `null` when the run can't be resumed: it already finished, or another
@@ -4234,6 +4271,66 @@ export function createRuntime<P, RC = unknown>(
     return storage.getChat(principal, id);
   }
 
+  /** Sub-thread ids a chat's messages point to: spawn_agent results, progress and bubbled approvals. */
+  function subThreadsOf(messages: AppMessage[]): string[] {
+    const ids = new Set<string>();
+    for (const m of messages) {
+      for (const p of (m.parts ?? []) as { type?: string; output?: { threadId?: unknown }; data?: { threadId?: unknown; subChatId?: unknown } }[]) {
+        for (const id of [p.type === "tool-spawn_agent" ? p.output?.threadId : undefined, p.data?.threadId, p.data?.subChatId]) {
+          if (typeof id === "string" && id) ids.add(id);
+        }
+      }
+    }
+    return [...ids];
+  }
+
+  async function deleteChat({ principal, chatId }: { principal: P; chatId: string }): Promise<{ deleted: string[] }> {
+    if (!storage.deleteChat) throw new UnsupportedOperationError("deleteChat");
+    // The threads it spawned go with it: the caller's own internal threads,
+    // found through the links in its messages, all the way down.
+    const order: string[] = [];
+    const seen = new Set<string>();
+    const visit = async (id: string, root: boolean): Promise<void> => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const chat = await storage.getChat(principal, id);
+      if (!chat || (!root && chat.kind !== "internal")) return;
+      order.push(id);
+      for (const sub of subThreadsOf(await storage.loadMessages(principal, id))) await visit(sub, false);
+    };
+    await visit(chatId, true);
+    const deleted: string[] = [];
+    // The chat itself first: its own busy check refuses while an answer (and
+    // so any subagent it's waiting on) is running, before anything is gone.
+    for (const id of order) {
+      if (await storage.deleteChat(principal, id)) deleted.push(id);
+    }
+    return { deleted };
+  }
+
+  async function purgeOwner(
+    segments: string[],
+    opts?: { also?: Record<string, OwnerPurgeable>; batchSize?: number },
+  ): Promise<{ removed: Record<string, Record<string, number>> }> {
+    encodeOwnerKey(segments); // refuses an empty path before anything else
+    const stores: [string, OwnerPurgeable][] = [["storage", storage], ...Object.entries(opts?.also ?? {})];
+    // All or nothing at the start: a store that can't purge would leave the
+    // owner half deleted, which is worse than refusing.
+    const missing = stores.filter(([, store]) => typeof store.purgeOwner !== "function").map(([name]) => name);
+    if (missing.length) throw new UnsupportedOperationError(`purgeOwner (${missing.join(", ")})`);
+    const removed: Record<string, Record<string, number>> = {};
+    for (const [name, store] of stores) {
+      const total: Record<string, number> = {};
+      for (;;) {
+        const pass = await store.purgeOwner!(segments, { batchSize: opts?.batchSize });
+        for (const [table, n] of Object.entries(pass.removed)) total[table] = (total[table] ?? 0) + n;
+        if (pass.done) break;
+      }
+      removed[name] = total;
+    }
+    return { removed };
+  }
+
   async function getRun({
     principal,
     runId,
@@ -4880,6 +4977,8 @@ export function createRuntime<P, RC = unknown>(
     getChat: getChatById,
     listRuns,
     getRun,
+    deleteChat,
+    purgeOwner,
     resume: (run) => resumeRun(typeof run === "string" ? { id: run } : run),
     sweep,
     cron,

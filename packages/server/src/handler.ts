@@ -19,6 +19,7 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *   POST agents/:agent/:id/approvals    submit tool-approval decisions, continue
  *   GET  chats                          list the tenant's chats
  *   GET  chats/:id                      client-projected history for one chat
+ *   DELETE chats/:id                    delete one chat and the subagent threads it spawned
  *   GET  runs                           list the tenant's runs (usage/cost)
  *   GET  agents                         the registered agents (for a picker)
  *   GET  schedules                      list the tenant's scheduled agents
@@ -27,7 +28,7 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  *                                       timezone?, delivery?, onParked?})
  *   POST schedules/:id/run-now          make it due on the next tick
  *   DELETE schedules/:id                delete one
- *   POST cron/run                       fire ALL due schedules (host-guarded, no user auth)
+ *   GET|POST cron/run                   fire ALL due schedules (host-guarded, no user auth)
  *   GET  connections                    per-connection status for the tenant
  *   GET  connections/:name/authorize    begin OAuth → 302 to the IdP
  *   GET  connections/:name/callback     finish OAuth → 302 back (see below)
@@ -259,6 +260,7 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   rewind_not_supported 409  an earlier question was regenerated or edited: fork instead
  *   invalid_params    400  params the agent doesn't declare, or that don't match its schema
  *   params_fixed      409  different params for a chat that was started with others
+ *   unsupported       501  the storage adapter can't do this (e.g. delete a chat)
  */
 function refusalResponse(e: unknown): Response | undefined {
   const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
@@ -289,6 +291,8 @@ function refusalResponse(e: unknown): Response | undefined {
       return json({ error: message("invalid params"), code }, 400);
     case "params_fixed":
       return json({ error: message("this chat was started with different params"), code }, 409);
+    case "unsupported":
+      return json({ error: message("not supported by the configured storage"), code }, 501);
     default:
       return undefined;
   }
@@ -582,6 +586,22 @@ export function createLatchHandler<P>(
         return json({ messages: await rt.loadHistory({ chatId: id, principal }) });
       }
       return json({ chats: await rt.listChats({ principal }) });
+    }
+
+    // DELETE chats/:id — the chat, its messages, runs and usage, and the
+    // subagent threads it spawned. 404 when it isn't the caller's.
+    if (seg[0] === "chats" && seg[1] && !seg[2] && method === "DELETE") {
+      const principal = await resolveContext(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
+      try {
+        const { deleted } = await rt.deleteChat({ principal, chatId: seg[1] });
+        return deleted.length ? json({ deleted }) : json({ error: "not found" }, 404);
+      } catch (e) {
+        const refused = refusalResponse(e);
+        if (refused) return refused;
+        throw e;
+      }
     }
 
     if (seg[0] === "runs" && method === "GET") {

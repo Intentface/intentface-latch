@@ -623,6 +623,67 @@ export interface StorageAdapter<P> {
     patch: { lastChatId: string; firedAt: number },
     scope?: OwnerScope<P>,
   ): Promise<void>;
+
+  // deletion
+  /**
+   * OPTIONAL. Delete one of the caller's chats with everything stored under
+   * it: its messages, its runs and their usage. Scoped like `getChat`: a chat
+   * that isn't the caller's (or doesn't exist) returns `false` and changes
+   * nothing. A chat with a live run (an answer in progress) is refused with
+   * `ChatBusyError`. Without it, `runtime.deleteChat` refuses.
+   */
+  deleteChat?(principal: P, id: string): Promise<boolean>;
+  /**
+   * OPTIONAL system op (no principal): delete everything stored for an owner
+   * path. That's every row whose owner key is `encodeOwnerKey(segments)` or
+   * starts with it plus `/` (see `isUnderOwner`): `["t1"]` covers `t1` and
+   * `t1/u7`, never `t10`. Chats with their messages, runs and usage, and
+   * schedules. Live runs are settled first with their fencing token bumped,
+   * so a server still running one can't write into what's being deleted.
+   *
+   * Works in passes of at most `batchSize` rows per table (default 500), so a
+   * large tenant can't time out: call until `done`. Idempotent: another call
+   * after `done` removes only stragglers (a turn that was in flight). Compare
+   * prefixes as plain strings, never with SQL `LIKE`: encoded keys contain
+   * `%` and `_`. Without it, `runtime.purgeOwner` refuses.
+   */
+  purgeOwner?(segments: string[], opts?: { batchSize?: number }): Promise<PurgeResult>;
+}
+
+/** One pass of a purge: rows removed, by table, and whether anything is left. */
+export interface PurgeResult {
+  /** Rows removed in this pass, by what they were: `chats`, `messages`, `runs`, `usage`, `schedules`, … */
+  removed: Record<string, number>;
+  /** `false` when the pass stopped at its batch size: call again to continue. */
+  done: boolean;
+}
+
+/**
+ * Whether an owner key falls under an owner path: it IS the path's key, or
+ * starts with it plus `/`. `isUnderOwner("t1/u7", ["t1"])` is true;
+ * `isUnderOwner("t10", ["t1"])` is false. Segments are escaped by
+ * `encodeOwnerKey`, so a `/` inside an id can't fake a boundary.
+ */
+export function isUnderOwner(ownerKey: string, segments: readonly string[]): boolean {
+  const key = encodeOwnerKey(segments);
+  return ownerKey === key || ownerKey.startsWith(`${key}/`);
+}
+
+/**
+ * Thrown when the runtime is asked for something the storage adapter (or
+ * another store) doesn't implement, such as `deleteChat` or `purgeOwner`.
+ * Nothing was changed. The server answers `501`.
+ */
+export class UnsupportedOperationError extends Error {
+  readonly code = "unsupported";
+  constructor(readonly operation: string) {
+    super(`${operation} isn't supported by the configured storage`);
+    this.name = "UnsupportedOperationError";
+  }
+}
+
+export function isUnsupportedOperationError(e: unknown): e is UnsupportedOperationError {
+  return e instanceof UnsupportedOperationError || (e as { code?: unknown } | null)?.code === "unsupported";
 }
 
 /**

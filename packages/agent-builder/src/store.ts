@@ -1,4 +1,4 @@
-import type { DynamicAgentStore } from "@intentface/latch-core";
+import type { DynamicAgentStore, PurgeResult } from "@intentface/latch-core";
 import type { AgentRecord, AgentScope } from "./record.js";
 
 /**
@@ -224,4 +224,10 @@ export interface AgentBuilderStore<P> extends DynamicAgentStore<P> {
    * again with `getRecord` as the chat's own principal before acting on it.
    */
   listMemoryEnabledNames: () => Promise<string[]>;
+  /**
+   * OPTIONAL. Delete everything this store keeps (agents, versions, activations, candidates, and the drafts a person is writing) for an owner path, in passes
+   * (see `StorageAdapter.purgeOwner`): call until `done`. Without it,
+   * `runtime.purgeOwner` refuses when this store is passed to it.
+   */
+  purgeOwner?(segments: string[], opts?: { batchSize?: number }): Promise<PurgeResult>;
 }

@@ -4,6 +4,7 @@ import {
   eq,
   getTableColumns,
   getTableName,
+  inArray,
   isNotNull,
   isNull,
   lt,
@@ -19,6 +20,7 @@ import {
   encodeOwnerKey,
   OwnerKeyMismatchError,
   type AppMessage,
+  type PurgeResult,
   type OwnerScope,
   type ChatRecord,
   type RunFence,
@@ -28,6 +30,7 @@ import {
   type ScheduleRecord,
   type StorageAdapter,
 } from "@intentface/latch-core";
+import { deleteBatch, underOwnerPath } from "./owner-path.js";
 
 /**
  * Dialect-shared `StorageAdapter` implementation. The SQLite and Postgres entry
@@ -402,6 +405,31 @@ export function makeStorageAdapter<P>(
       if (isNotNullViolation(error)) return false;
       throw error;
     }
+  }
+
+  /**
+   * Remove chats with everything under them. Live runs are settled first with
+   * their fencing token bumped, so a worker still running one has its writes
+   * refused; then usage, messages, runs and the chats themselves. Each step is
+   * safe to repeat, so a pass cut short is finished by the next.
+   */
+  async function removeChats(chatIds: string[]): Promise<Record<string, number>> {
+    await db
+      .update(s.runs)
+      .set({
+        status: "errored" as RunStatus,
+        error: "deleted",
+        endedAt: nowMs,
+        leaseOwner: null,
+        fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
+      })
+      .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
+    const runIds = (await db.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, chatIds))).map((r: any) => r.id as string);
+    const usage = runIds.length ? await db.delete(s.usage).where(inArray(s.usage.runId, runIds)).returning({ id: s.usage.id }) : [];
+    const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
+    const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
+    const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
+    return { chats: chats.length, messages: messages.length, runs: runs.length, usage: usage.length };
   }
 
   return {
@@ -829,6 +857,35 @@ export function makeStorageAdapter<P>(
         .where(
           and(eq(s.schedules.id, id), eq(s.schedules.lastRunAt, patch.firedAt)),
         );
+    },
+
+    async deleteChat(principal, id) {
+      if (!(await getChat(principal, id))) return false;
+      // An answer still running keeps its chat: refuse with the time it has left.
+      const live: any[] = await db
+        .select({ left: sql`${liveUntil} - ${nowMs}` })
+        .from(s.runs)
+        .where(and(eq(s.runs.chatId, id), eq(s.runs.status, "active"), sql`${liveUntil} > ${nowMs}`))
+        .limit(1);
+      if (live[0]) throw new ChatBusyError(id, Math.max(1, Number(live[0].left)));
+      await removeChats([id]);
+      return true;
+    },
+
+    async purgeOwner(segments, opts) {
+      const under = (col: any) => underOwnerPath(col, segments);
+      const limit = opts?.batchSize ?? 500;
+      const removed: Record<string, number> = { chats: 0, messages: 0, runs: 0, usage: 0, schedules: 0 };
+
+      const chats: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(under(s.chats.owner)).limit(limit);
+      const chatIds = chats.map((c) => c.id as string);
+      if (chatIds.length) Object.assign(removed, await removeChats(chatIds));
+      // Usage whose run is already gone, and schedules.
+      const usage = await deleteBatch(db, s.usage, s.usage.id, under(s.usage.owner), limit);
+      removed.usage += usage;
+      removed.schedules = await deleteBatch(db, s.schedules, s.schedules.id, under(s.schedules.owner), limit);
+      const done = chatIds.length < limit && usage < limit && removed.schedules < limit;
+      return { removed, done } satisfies PurgeResult;
     },
   };
 }

@@ -1,3 +1,5 @@
+import type { PurgeResult } from "@intentface/latch-core";
+
 /**
  * The job-state seam for the background sweep. Implemented by
  * `@intentface/latch-drizzle` (`createMemoryJobStore`) over three tables that
@@ -150,4 +152,10 @@ export interface MemoryJobStore {
   // ---- retention ----
   recordUsage(scopeKey: string, memoryIds: string[], at: number): Promise<void>;
   usageFor(scopeKey: string): Promise<MemoryUsageRow[]>;
+  /**
+   * OPTIONAL. Delete everything this store keeps for an owner path, in passes
+   * (see `StorageAdapter.purgeOwner`): call until `done`. Without it,
+   * `runtime.purgeOwner` refuses when this store is passed to it.
+   */
+  purgeOwner?(segments: string[], opts?: { batchSize?: number }): Promise<PurgeResult>;
 }

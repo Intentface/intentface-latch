@@ -422,3 +422,30 @@ describe("POST /agents/:agent/:id with params", () => {
     expect(await changed.json()).toMatchObject({ code: "params_fixed" });
   });
 });
+
+describe("DELETE chats/:id", () => {
+  const del = (id: string) => new Request(`https://app.example/api/latch/chats/${id}`, { method: "DELETE" });
+  const handlerWith = (deleteChat: (input: { principal: P; chatId: string }) => Promise<{ deleted: string[] }>) =>
+    createLatchHandler<P>({
+      runtime: { deleteChat } as never,
+      basePath: "/api/latch",
+      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+
+  it("deletes the caller's chat and lists what went", async () => {
+    const res = await handlerWith(async ({ chatId }) => ({ deleted: [chatId, "sub_1"] }))(del("c1"));
+    expect(res?.status).toBe(200);
+    expect(await res!.json()).toEqual({ deleted: ["c1", "sub_1"] });
+  });
+
+  it("is 404 for a chat that isn't the caller's", async () => {
+    expect((await handlerWith(async () => ({ deleted: [] }))(del("c1")))?.status).toBe(404);
+  });
+
+  it("is 409 while an answer runs, and 501 when storage can't delete", async () => {
+    const busy = Object.assign(new Error("busy"), { code: "chat_busy", retryAfterMs: 2_000 });
+    expect((await handlerWith(async () => Promise.reject(busy))(del("c1")))?.status).toBe(409);
+    const unsupported = Object.assign(new Error("no"), { code: "unsupported" });
+    expect((await handlerWith(async () => Promise.reject(unsupported))(del("c1")))?.status).toBe(501);
+  });
+});
