@@ -603,9 +603,9 @@ function checks<P>(): ConformanceCheck<P>[] {
 
     // ── deletion (deleteChat / purgeOwner, when the adapter has them) ─────
     {
-      name: "deleteChat removes the caller's chat with everything under it, and only that",
+      name: "deleteChats removes the caller's chats with everything under them, and only those",
       async run({ store, principals: [me, other] }) {
-        if (!store.deleteChat) return;
+        if (!store.deleteChats) return;
         const chat = await store.createChat(me, { agent: "a" });
         await store.appendMessages(chat.id, [msg("m1"), msg("m2", "answer", "assistant")]);
         const run = await store.createRun(me, { chatId: chat.id, agent: "a" });
@@ -614,29 +614,56 @@ function checks<P>(): ConformanceCheck<P>[] {
         await store.appendMessages(keep.id, [msg("k1")]);
         const theirs = await store.createChat(other, { agent: "a" });
 
-        check((await store.deleteChat(other, chat.id)) === false, "another owner can't delete it (returns false)");
+        check((await store.deleteChats(other, [chat.id])).length === 0, "another owner can't delete it");
         check((await store.getChat(me, chat.id)) !== null, "and it's still there");
-        check((await store.deleteChat(me, chat.id)) === true, "its owner deletes it (returns true)");
+        const deleted = await store.deleteChats(me, [chat.id, theirs.id]);
+        check(deleted.join() === chat.id, `only the caller's id is deleted (${deleted.join()})`);
         check((await store.getChat(me, chat.id)) === null, "it's gone by id");
         check(!(await store.listChats(me)).some((c) => c.id === chat.id), "and from the list");
         check((await store.loadMessages(me, chat.id)).length === 0, "its messages are gone");
         check((await store.getRun(run.id)) === null, "its runs are gone");
         check((await store.loadMessages(me, keep.id)).length === 1, "the owner's other chat is untouched");
         check((await store.getChat(other, theirs.id)) !== null, "another owner's chat is untouched");
-        check((await store.deleteChat(me, chat.id)) === false, "deleting again returns false");
+        check((await store.deleteChats(me, [chat.id])).length === 0, "deleting again deletes nothing");
       },
     },
     {
-      name: "deleteChat refuses while an answer is running",
+      name: "deleteChats is all or nothing: one chat with an answer running keeps them all",
       async run({ store, principals: [me] }) {
-        if (!store.deleteChat) return;
-        const chat = await store.createChat(me, { agent: "a" });
-        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 60_000 });
-        const retry = await busy(() => store.deleteChat!(me, chat.id));
+        if (!store.deleteChats) return;
+        const idle = await store.createChat(me, { agent: "a" });
+        await store.appendMessages(idle.id, [msg("i1")]);
+        const live = await store.createChat(me, { agent: "a" });
+        const run = await store.claimRun({ principal: me, chatId: live.id, agent: "a", owner: "n1", ttlMs: 60_000 });
+        const retry = await busy(() => store.deleteChats!(me, [idle.id, live.id]));
         check(retry !== null && retry > 0, `refused with ChatBusyError (${retry})`);
-        check((await store.getChat(me, chat.id)) !== null, "the chat is still there");
+        check((await store.getChat(me, idle.id)) !== null && (await store.loadMessages(me, idle.id)).length === 1, "the idle chat wasn't touched either");
+        check((await store.getChat(me, live.id)) !== null, "nor the live one");
         await store.updateRun(run.id, { status: "completed" });
-        check((await store.deleteChat(me, chat.id)) === true, "once the answer is done, it deletes");
+        check((await store.deleteChats(me, [idle.id, live.id])).length === 2, "once the answer is done, both go");
+      },
+    },
+    {
+      name: "a deleted chat can't be written to: no run, no message lands for it",
+      async run({ store, principals: [me] }) {
+        if (!store.deleteChats) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        await store.deleteChats(me, [chat.id]);
+        let runErr: unknown;
+        try {
+          await store.createRun(me, { chatId: chat.id, agent: "a" });
+        } catch (e) {
+          runErr = e;
+        }
+        check(runErr !== undefined, "opening a run in it fails");
+        let wrote: unknown = "threw";
+        try {
+          wrote = await store.appendMessages(chat.id, [msg("late")]);
+        } catch {
+          // a refusal by throwing is fine too
+        }
+        check(wrote !== undefined && wrote !== true, `a message for it doesn't land (${String(wrote)})`);
+        check((await store.loadMessages(me, chat.id)).length === 0, "and nothing is stored under its id");
       },
     },
     {

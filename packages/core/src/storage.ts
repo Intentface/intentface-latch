@@ -626,13 +626,14 @@ export interface StorageAdapter<P> {
 
   // deletion
   /**
-   * OPTIONAL. Delete one of the caller's chats with everything stored under
-   * it: its messages, its runs and their usage. Scoped like `getChat`: a chat
-   * that isn't the caller's (or doesn't exist) returns `false` and changes
-   * nothing. A chat with a live run (an answer in progress) is refused with
-   * `ChatBusyError`. Without it, `runtime.deleteChat` refuses.
+   * OPTIONAL. Delete some of the caller's chats with everything stored under
+   * them: messages, runs and their usage. All or nothing: if any of them has
+   * a live run (an answer in progress), none is deleted and it throws
+   * `ChatBusyError`. Ids that aren't the caller's are skipped. Returns the ids
+   * deleted. A run or message written for a chat after it's gone must fail,
+   * not land as an orphan. Without it, `runtime.deleteChat` refuses.
    */
-  deleteChat?(principal: P, id: string): Promise<boolean>;
+  deleteChats?(principal: P, ids: string[]): Promise<string[]>;
   /**
    * OPTIONAL system op (no principal): delete everything stored for an owner
    * path. That's every row whose owner key is `encodeOwnerKey(segments)` or

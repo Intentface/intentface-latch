@@ -166,4 +166,11 @@ describe("runtime.purgeOwner", () => {
     expect(removed.channels).toEqual({ bindings: 2 });
     expect(purged).toEqual([["t1"]]);
   });
+
+  it("stops with an error when a store says it's not done but removes nothing", async () => {
+    const store = await adapters[0]![1]();
+    const rt = createRuntime<P>({ storage: store, agents: {} });
+    const stuck = { purgeOwner: async () => ({ removed: { rows: 0 }, done: false }) };
+    await expect(rt.purgeOwner(["t1"], { also: { stuck } })).rejects.toThrow(/stuck store reported more to do but removed nothing/);
+  });
 });

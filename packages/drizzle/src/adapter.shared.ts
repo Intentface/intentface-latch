@@ -258,6 +258,19 @@ export function makeStorageAdapter<P>(
     sql`exists (select 1 from ${s.runs} where ${s.runs.id} = ${fence.runId} and ${s.runs.leaseOwner} = ${fence.owner} and ${s.runs.fencingToken} = ${fence.fencingToken}${opts.lockFencedRun ? sql` for share` : sql``})`;
 
   /**
+   * A chat's id, looked up rather than taken on trust: NULL when the chat is
+   * gone, which the NOT NULL `chat_id` columns turn into a failed write. So a
+   * run or message for a deleted chat can't land as an orphan. On Postgres it
+   * also waits (FOR SHARE) for a deletion of that chat to commit, which is what
+   * serializes `deleteChats` with a run starting in the same chat.
+   */
+  const chatRef = (chatId: string) =>
+    sql`(select ${s.chats.id} from ${s.chats} where ${s.chats.id} = ${chatId}${opts.lockFencedRun ? sql` for share` : sql``})`;
+
+  /** The error for a write into a chat that doesn't exist (any more). */
+  const chatGone = (chatId: string) => new Error(`Unknown chat: ${chatId}`);
+
+  /**
    * One message upsert (seq computed in-statement) as a query, for batching.
    *
    * With `fence`, the lease check is part of the same statement, so nothing can
@@ -271,7 +284,7 @@ export function makeStorageAdapter<P>(
       .insert(s.messages)
       .values({
         id: m.id,
-        chatId,
+        chatId: chatRef(chatId) as unknown as string,
         runId: null,
         seq: (fence ? sql`case when ${fenceHolds(fence)} then ${nextSeq} end` : nextSeq) as unknown as number,
         role: m.role,
@@ -295,13 +308,14 @@ export function makeStorageAdapter<P>(
    * in the lease's remaining time OUTSIDE the transaction, because on Postgres
    * a failed statement aborts the transaction and nothing can be read in it.
    */
-  async function insertRun(exec: any, row: Record<string, unknown>): Promise<any> {
+  async function insertRun(exec: any, row: Record<string, unknown>, chatId: string): Promise<any> {
     try {
       const got = await exec.insert(s.runs).values(row).returning();
       return got[0]!;
     } catch (error) {
+      if (isNotNullViolation(error)) throw chatGone(chatId);
       if (!isUniqueViolation(error)) throw error;
-      throw new ChatBusyError(String(row.chatId), 0);
+      throw new ChatBusyError(chatId, 0);
     }
   }
 
@@ -319,7 +333,7 @@ export function makeStorageAdapter<P>(
   async function openRunRow(row: Record<string, unknown>, chatId: string, now: number): Promise<any> {
     await supersedeStale(db, chatId, now);
     try {
-      return await insertRun(db, row);
+      return await insertRun(db, row, chatId);
     } catch (error) {
       if (error instanceof ChatBusyError) throw await busyError(chatId);
       throw error;
@@ -339,7 +353,7 @@ export function makeStorageAdapter<P>(
     now: number,
   ): Record<string, unknown> => ({
     id: newId("run"),
-    chatId: input.chatId,
+    chatId: chatRef(input.chatId),
     agent: input.agent,
     status: "active" as RunStatus,
     // The run inherits its chat's owner: the same key, derived from the same
@@ -521,7 +535,12 @@ export function makeStorageAdapter<P>(
       // (chat_id, seq) index backstops it. `withTx` is the dialect's batch
       // boundary: a real transaction where the driver is async (Postgres,
       // libsql), sequential statements on synchronous better-sqlite3.
-      await opts.withTx((tx) => appendMessagesWith(tx, chatId, msgs));
+      try {
+        await opts.withTx((tx) => appendMessagesWith(tx, chatId, msgs));
+      } catch (error) {
+        if (isNotNullViolation(error)) throw chatGone(chatId);
+        throw error;
+      }
     },
 
     /**
@@ -559,7 +578,7 @@ export function makeStorageAdapter<P>(
         // sync-capable falls through to `withTx`, whose atomicity is its own.
         const inserted = await opts.withTx(async (tx) => {
           await supersedeStale(tx, input.chatId, now);
-          const got = await insertRun(tx, row);
+          const got = await insertRun(tx, row, input.chatId);
           await appendMessagesWith(tx, input.chatId, input.messages);
           return got;
         });
@@ -568,6 +587,7 @@ export function makeStorageAdapter<P>(
         if (error instanceof ChatBusyError || isUniqueViolation(error)) {
           throw await busyError(input.chatId);
         }
+        if (isNotNullViolation(error)) throw chatGone(input.chatId);
         throw error;
       }
     },
@@ -859,17 +879,46 @@ export function makeStorageAdapter<P>(
         );
     },
 
-    async deleteChat(principal, id) {
-      if (!(await getChat(principal, id))) return false;
-      // An answer still running keeps its chat: refuse with the time it has left.
-      const live: any[] = await db
-        .select({ left: sql`${liveUntil} - ${nowMs}` })
-        .from(s.runs)
-        .where(and(eq(s.runs.chatId, id), eq(s.runs.status, "active"), sql`${liveUntil} > ${nowMs}`))
-        .limit(1);
-      if (live[0]) throw new ChatBusyError(id, Math.max(1, Number(live[0].left)));
-      await removeChats([id]);
-      return true;
+    async deleteChats(principal, ids) {
+      if (ids.length === 0) return [];
+      const owned: string[] = (
+        await db
+          .select({ id: s.chats.id })
+          .from(s.chats)
+          .where(and(inArray(s.chats.id, ids), eq(s.chats.owner, ownerKey(principal))))
+      ).map((r: any) => r.id);
+      if (owned.length === 0) return [];
+      // Every statement deletes only while none of the chats has a live run,
+      // and they run as one transaction: all of the chats go, or none does.
+      const live = sql`exists (select 1 from ${s.runs} where ${inArray(s.runs.chatId, owned)} and ${s.runs.status} = 'active' and ${liveUntil} > ${nowMs})`;
+      const idle = (where: SQL) => and(where, sql`not ${live}`);
+      const statements = (exec: any) => [
+        exec.delete(s.usage).where(idle(inArray(s.usage.runId, exec.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned))))),
+        exec.delete(s.messages).where(idle(inArray(s.messages.chatId, owned))),
+        exec.delete(s.runs).where(idle(inArray(s.runs.chatId, owned))),
+        exec.delete(s.chats).where(idle(inArray(s.chats.id, owned))),
+      ];
+      if (opts.batch) await opts.batch(statements(db));
+      else if (opts.syncTx) opts.syncTx((tx) => statements(tx).forEach((q: any) => q.run()));
+      else {
+        await opts.withTx(async (tx) => {
+          // Lock the chats first: a run starting in one of them waits for this
+          // to commit (see chatRef), so none can start between check and delete.
+          await tx.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).for("update");
+          for (const q of statements(tx)) await q;
+        });
+      }
+      const kept: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).limit(1);
+      if (kept.length) {
+        // Refused: an answer is running in one of them. Say which, and for how long.
+        const busy: any[] = await db
+          .select({ chatId: s.runs.chatId, left: sql`${liveUntil} - ${nowMs}` })
+          .from(s.runs)
+          .where(and(inArray(s.runs.chatId, owned), eq(s.runs.status, "active")))
+          .limit(1);
+        throw new ChatBusyError(busy[0]?.chatId ?? kept[0].id, Math.max(1, Number(busy[0]?.left ?? 1)));
+      }
+      return owned;
     },
 
     async purgeOwner(segments, opts) {

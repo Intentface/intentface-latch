@@ -4285,7 +4285,7 @@ export function createRuntime<P, RC = unknown>(
   }
 
   async function deleteChat({ principal, chatId }: { principal: P; chatId: string }): Promise<{ deleted: string[] }> {
-    if (!storage.deleteChat) throw new UnsupportedOperationError("deleteChat");
+    if (!storage.deleteChats) throw new UnsupportedOperationError("deleteChat");
     // The threads it spawned go with it: the caller's own internal threads,
     // found through the links in its messages, all the way down.
     const order: string[] = [];
@@ -4299,13 +4299,9 @@ export function createRuntime<P, RC = unknown>(
       for (const sub of subThreadsOf(await storage.loadMessages(principal, id))) await visit(sub, false);
     };
     await visit(chatId, true);
-    const deleted: string[] = [];
-    // The chat itself first: its own busy check refuses while an answer (and
-    // so any subagent it's waiting on) is running, before anything is gone.
-    for (const id of order) {
-      if (await storage.deleteChat(principal, id)) deleted.push(id);
-    }
-    return { deleted };
+    if (order.length === 0) return { deleted: [] };
+    // One all-or-nothing call: if any of them has an answer running, none goes.
+    return { deleted: await storage.deleteChats(principal, order) };
   }
 
   async function purgeOwner(
@@ -4323,8 +4319,14 @@ export function createRuntime<P, RC = unknown>(
       const total: Record<string, number> = {};
       for (;;) {
         const pass = await store.purgeOwner!(segments, { batchSize: opts?.batchSize });
-        for (const [table, n] of Object.entries(pass.removed)) total[table] = (total[table] ?? 0) + n;
+        let progress = 0;
+        for (const [table, n] of Object.entries(pass.removed)) {
+          total[table] = (total[table] ?? 0) + n;
+          progress += n;
+        }
         if (pass.done) break;
+        // A store that says "not done" yet removed nothing would loop forever.
+        if (progress === 0) throw new Error(`purgeOwner: the ${name} store reported more to do but removed nothing`);
       }
       removed[name] = total;
     }
