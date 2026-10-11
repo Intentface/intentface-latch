@@ -888,24 +888,34 @@ export function makeStorageAdapter<P>(
           .where(and(inArray(s.chats.id, ids), eq(s.chats.owner, ownerKey(principal))))
       ).map((r: any) => r.id);
       if (owned.length === 0) return [];
-      // Every statement deletes only while none of the chats has a live run,
-      // and they run as one transaction: all of the chats go, or none does.
-      const live = sql`exists (select 1 from ${s.runs} where ${inArray(s.runs.chatId, owned)} and ${s.runs.status} = 'active' and ${liveUntil} > ${nowMs})`;
-      const idle = (where: SQL) => and(where, sql`not ${live}`);
-      const statements = (exec: any) => [
-        exec.delete(s.usage).where(idle(inArray(s.usage.runId, exec.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned))))),
-        exec.delete(s.messages).where(idle(inArray(s.messages.chatId, owned))),
-        exec.delete(s.runs).where(idle(inArray(s.runs.chatId, owned))),
-        exec.delete(s.chats).where(idle(inArray(s.chats.id, owned))),
+      // The decision is made against ONE instant of the database's clock, read
+      // once: a lease that expires part-way through can't make one statement
+      // keep a chat's rows and the next delete the chat.
+      const at = Number((await db.select({ now: nowMs }).from(s.chats).limit(1))[0]?.now ?? Date.now());
+      const liveAt = sql`coalesce(${s.runs.leaseExpiresAt}, ${s.runs.startedAt} + ${STALE_RUN_MS}) > ${at}`;
+      const live = sql`exists (select 1 from ${s.runs} where ${inArray(s.runs.chatId, owned)} and ${s.runs.status} = 'active' and ${liveAt})`;
+      const deletes = (exec: any, where: (w: SQL) => SQL | undefined = (w) => w) => [
+        exec.delete(s.usage).where(where(inArray(s.usage.runId, exec.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned))))),
+        exec.delete(s.messages).where(where(inArray(s.messages.chatId, owned))),
+        exec.delete(s.runs).where(where(inArray(s.runs.chatId, owned))),
+        exec.delete(s.chats).where(where(inArray(s.chats.id, owned))),
       ];
-      if (opts.batch) await opts.batch(statements(db));
-      else if (opts.syncTx) opts.syncTx((tx) => statements(tx).forEach((q: any) => q.run()));
-      else {
+      if (opts.batch) {
+        // One transaction without branching: every statement carries the same
+        // condition, so all of them apply or none does.
+        await opts.batch(deletes(db, (w) => and(w, sql`not ${live}`)));
+      } else if (opts.syncTx) {
+        opts.syncTx((tx) => {
+          if ((tx.select({ one: sql`1` }).from(s.chats).where(live).limit(1).all() as unknown[]).length) return;
+          for (const q of deletes(tx)) q.run();
+        });
+      } else {
         await opts.withTx(async (tx) => {
           // Lock the chats first: a run starting in one of them waits for this
           // to commit (see chatRef), so none can start between check and delete.
           await tx.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).for("update");
-          for (const q of statements(tx)) await q;
+          if ((await tx.select({ one: sql`1` }).from(s.chats).where(live).limit(1)).length) return;
+          for (const q of deletes(tx)) await q;
         });
       }
       const kept: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).limit(1);
