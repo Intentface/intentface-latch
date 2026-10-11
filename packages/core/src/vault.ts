@@ -1,4 +1,5 @@
 import type { SecretResolver } from "./context.js";
+import type { PurgeResult } from "./storage.js";
 
 /**
  * The Vault — server-side, envelope-encrypted secret storage.
@@ -45,6 +46,12 @@ export interface SecretStore<P> {
   delete(principal: P, key: string): Promise<void>;
   /** This owner's keys, never values. */
   list(principal: P): Promise<string[]>;
+  /**
+   * OPTIONAL. Delete everything this store keeps (every secret under it) for an owner path, in passes
+   * (see `StorageAdapter.purgeOwner`): call until `done`. Without it,
+   * `runtime.purgeOwner` refuses when this store is passed to it.
+   */
+  purgeOwner?(segments: string[], opts?: { batchSize?: number }): Promise<PurgeResult>;
 }
 
 /**

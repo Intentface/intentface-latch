@@ -43,5 +43,6 @@ A store of your own implements:
 | `get` | `(principal: P, key: string) => Promise<SecretRecord \| null>` | This owner's record for the key, or `null`. |
 | `delete` | `(principal: P, key: string) => Promise<void>` | Removes this owner's record for the key. |
 | `list` | `(principal: P) => Promise<string[]>` | This owner's keys, never values. |
+| `purgeOwner` (optional) | `((segments: string[], opts?: { batchSize?: number; }) => Promise<PurgeResult>)` | OPTIONAL. Delete everything this store keeps (every secret under it) for an owner path, in passes (see `StorageAdapter.purgeOwner`): call until `done`. Without it, `runtime.purgeOwner` refuses when this store is passed to it. |
 
 It only ever handles encrypted records; values are encrypted and decrypted in `createVault`.

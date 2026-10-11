@@ -5,6 +5,7 @@ import type {
   MemoryUsageRow,
   ScopeStateRow,
 } from "@intentface/latch-memory";
+import { deleteBatch, underOwnerPath } from "./owner-path.js";
 
 /**
  * Dialect-shared MemoryJobStore implementation. The sqlite and pg entry points
@@ -379,6 +380,20 @@ export function makeMemoryJobStore(db: any, s: MemoryJobSchema): MemoryJobStore 
           createdAt: r.createdAt,
         }),
       );
+    },
+
+    async purgeOwner(segments, opts) {
+      const limit = opts?.batchSize ?? 500;
+      const chats = await deleteBatch(db, cs, cs.chatId, underOwnerPath(cs.owner, segments), limit);
+      // A scope's usage rows have no owner of their own: they go with their scope.
+      const scopes: any[] = await db.select({ key: ss.scopeKey }).from(ss).where(underOwnerPath(ss.owner, segments)).limit(limit);
+      const keys = scopes.map((r) => r.key as string);
+      let usage = 0;
+      if (keys.length) {
+        usage = (await db.delete(mu).where(inArray(mu.scopeKey, keys)).returning({ key: mu.scopeKey })).length;
+        await db.delete(ss).where(inArray(ss.scopeKey, keys));
+      }
+      return { removed: { chatState: chats, scopes: keys.length, usage }, done: chats < limit && keys.length < limit };
     },
   };
 }

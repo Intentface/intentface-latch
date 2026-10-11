@@ -1,5 +1,6 @@
 import type { AppMessage } from "../message.js";
 import {
+  decodeOwnerKey,
   isChatBusyError,
   isOwnerKeyMismatchError,
   ChatConflictError,
@@ -597,6 +598,130 @@ function checks<P>(): ConformanceCheck<P>[] {
           check(await mismatched(() => store.noteScheduleFire!(s.id, { lastChatId: "x", firedAt: 1 }, wrong)), "noteScheduleFire is refused");
         }
         check((await store.completeSchedule(s.id, patch, "n1", { leaseExpiresAt: c.leaseExpiresAt! }, { ownerKey: s.owner })) !== false, "the right key applies");
+      },
+    },
+
+    // ── deletion (deleteChat / purgeOwner, when the adapter has them) ─────
+    {
+      name: "deleteChats removes the caller's chats with everything under them, and only those",
+      async run({ store, principals: [me, other] }) {
+        if (!store.deleteChats) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        await store.appendMessages(chat.id, [msg("m1"), msg("m2", "answer", "assistant")]);
+        const run = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        await store.updateRun(run.id, { status: "completed" });
+        const keep = await store.createChat(me, { agent: "a" });
+        await store.appendMessages(keep.id, [msg("k1")]);
+        const theirs = await store.createChat(other, { agent: "a" });
+
+        check((await store.deleteChats(other, [chat.id])).length === 0, "another owner can't delete it");
+        check((await store.getChat(me, chat.id)) !== null, "and it's still there");
+        const deleted = await store.deleteChats(me, [chat.id, theirs.id]);
+        check(deleted.join() === chat.id, `only the caller's id is deleted (${deleted.join()})`);
+        check((await store.getChat(me, chat.id)) === null, "it's gone by id");
+        check(!(await store.listChats(me)).some((c) => c.id === chat.id), "and from the list");
+        check((await store.loadMessages(me, chat.id)).length === 0, "its messages are gone");
+        check((await store.getRun(run.id)) === null, "its runs are gone");
+        check((await store.loadMessages(me, keep.id)).length === 1, "the owner's other chat is untouched");
+        check((await store.getChat(other, theirs.id)) !== null, "another owner's chat is untouched");
+        check((await store.deleteChats(me, [chat.id])).length === 0, "deleting again deletes nothing");
+      },
+    },
+    {
+      name: "deleteChats is all or nothing: one chat with an answer running keeps them all",
+      async run({ store, principals: [me] }) {
+        if (!store.deleteChats) return;
+        const idle = await store.createChat(me, { agent: "a" });
+        await store.appendMessages(idle.id, [msg("i1")]);
+        const live = await store.createChat(me, { agent: "a" });
+        const run = await store.claimRun({ principal: me, chatId: live.id, agent: "a", owner: "n1", ttlMs: 60_000 });
+        const retry = await busy(() => store.deleteChats!(me, [idle.id, live.id]));
+        check(retry !== null && retry > 0, `refused with ChatBusyError (${retry})`);
+        check((await store.getChat(me, idle.id)) !== null && (await store.loadMessages(me, idle.id)).length === 1, "the idle chat wasn't touched either");
+        check((await store.getChat(me, live.id)) !== null, "nor the live one");
+        await store.updateRun(run.id, { status: "completed" });
+        check((await store.deleteChats(me, [idle.id, live.id])).length === 2, "once the answer is done, both go");
+      },
+    },
+    {
+      name: "a deleted chat can't be written to: no run, message or usage lands for it",
+      async run({ store, principals: [me] }) {
+        if (!store.deleteChats) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const done = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        await store.updateRun(done.id, { status: "completed" });
+        await store.deleteChats(me, [chat.id]);
+        let usageErr: unknown;
+        try {
+          await store.recordUsage(me, { runId: done.id, model: "m", inputTokens: 1, outputTokens: 1, cost: 0 });
+        } catch (e) {
+          usageErr = e;
+        }
+        check(usageErr !== undefined, "recording usage for its deleted run fails");
+        let runErr: unknown;
+        try {
+          await store.createRun(me, { chatId: chat.id, agent: "a" });
+        } catch (e) {
+          runErr = e;
+        }
+        check(runErr !== undefined, "opening a run in it fails");
+        let wrote: unknown = "threw";
+        try {
+          wrote = await store.appendMessages(chat.id, [msg("late")]);
+        } catch {
+          // a refusal by throwing is fine too
+        }
+        check(wrote !== undefined && wrote !== true, `a message for it doesn't land (${String(wrote)})`);
+        check((await store.loadMessages(me, chat.id)).length === 0, "and nothing is stored under its id");
+      },
+    },
+    {
+      name: "purgeOwner removes everything for an owner, in passes, and nothing else",
+      async run({ store, principals: [me, other] }) {
+        if (!store.purgeOwner) return;
+        const mine = [];
+        for (let i = 0; i < 3; i++) {
+          const c = await store.createChat(me, { agent: "a" });
+          await store.appendMessages(c.id, [msg(`m${i}`)]);
+          const r = await store.createRun(me, { chatId: c.id, agent: "a" });
+          await store.updateRun(r.id, { status: "completed" });
+          mine.push(c);
+        }
+        await store.createSchedule(me, { agent: "a", cron: "0 9 * * *", prompt: "brief", nextRunAt: LATER });
+        const theirs = await store.createChat(other, { agent: "a" });
+        await store.appendMessages(theirs.id, [msg("t1")]);
+        const theirSchedule = await store.createSchedule(other, { agent: "a", cron: "0 9 * * *", prompt: "brief", nextRunAt: LATER });
+
+        const segments = decodeOwnerKey(mine[0]!.owner);
+        const first = await store.purgeOwner(segments, { batchSize: 2, usage: "delete" });
+        check(first.done === false, "a pass stops at its batch size and says so");
+        let chats = first.removed.chats ?? 0;
+        for (let pass = 0; pass < 10; pass++) {
+          const next = await store.purgeOwner(segments, { batchSize: 2, usage: "delete" });
+          chats += next.removed.chats ?? 0;
+          if (next.done) break;
+        }
+        check(chats === 3, `every chat removed once across passes (${chats})`);
+        check((await store.listChats(me)).length === 0, "the owner has no chats left");
+        check((await store.listSchedules(me)).length === 0, "or schedules");
+        for (const c of mine) check((await store.loadMessages(me, c.id)).length === 0, "or messages");
+        check((await store.loadMessages(other, theirs.id)).length === 1, "another owner's chat is untouched");
+        check((await store.listSchedules(other)).some((x) => x.id === theirSchedule.id), "and their schedule");
+        const again = await store.purgeOwner(segments, { usage: "delete" });
+        check(again.done && Object.values(again.removed).every((n) => n === 0), "running it again removes nothing");
+      },
+    },
+    {
+      name: "a purge fences out a run that's still going",
+      async run({ store, principals: [me] }) {
+        if (!store.purgeOwner) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 60_000 });
+        const fence = fenceOf(run, "n1");
+        for (let pass = 0; pass < 10; pass++) if ((await store.purgeOwner(decodeOwnerKey(chat.owner), { usage: "delete" })).done) break;
+        check((await store.appendMessages(chat.id, [msg("late", "late", "assistant")], fence)) === false, "the worker's next write is refused");
+        check(!(await store.heartbeatRun(run.id, "n1", 60_000, fence.fencingToken)), "and so is its heartbeat");
+        check((await store.loadMessages(me, chat.id)).length === 0, "nothing came back");
       },
     },
   ];

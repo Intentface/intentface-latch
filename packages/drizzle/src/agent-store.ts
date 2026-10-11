@@ -1,8 +1,8 @@
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { PgDatabase } from "drizzle-orm/pg-core";
-import { desc, eq, inArray, and, like, sql } from "drizzle-orm";
+import { desc, eq, inArray, and, like, or, sql } from "drizzle-orm";
 import type { LanguageModel } from "ai";
-import { encodeOwnerKey, type AgentConfig, type AgentInfo } from "@intentface/latch-core";
+import { encodeOwnerKey, type AgentConfig, type AgentInfo, type PurgeResult } from "@intentface/latch-core";
 import { isCandidateId, parseAgentRef } from "@intentface/latch-agent-builder";
 import type {
   AgentActivation,
@@ -16,6 +16,7 @@ import type {
   AgentVersionMeta,
 } from "@intentface/latch-agent-builder";
 import { isUniqueViolation } from "./adapter.shared.js";
+import { deleteBatch, underOwnerPath } from "./owner-path.js";
 import * as sqliteSchema from "./schema.js";
 import * as pgSchema from "./schema.pg.js";
 
@@ -220,6 +221,8 @@ interface AgentCandidateRow {
 
 /** The dialect seam: a few queries + one upsert. */
 interface AgentQueries {
+  /** One pass of `purgeOwner` (see `purgeAgentTables`). */
+  purge(segments: string[], limit: number): Promise<PurgeResult>;
   /** Rows for these owners, optionally one name only (filtered at the query, not in memory). */
   byOwners(owners: string[], name?: string): Promise<AgentRow[]>;
   /** Distinct names whose `exec` JSON mentions memory — cross-tenant prefilter. */
@@ -382,6 +385,8 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
   }
 
   return {
+    purgeOwner: (segments, opts) => queries.purge(segments, opts?.batchSize ?? 500),
+
     async resolve(name, principal): Promise<AgentConfig<P> | undefined> {
       // Channel bindings pin resolution to one scope with an `org:`/`user:`
       // prefix (stored names never contain `:` — normalizeAgentName strips
@@ -843,6 +848,33 @@ function versionValues(row: {
   };
 }
 
+/**
+ * Delete an owner path's agents with their versions, activations and
+ * candidates, and the drafts its people are writing (a draft's `editor` is a
+ * person even inside an organization's agent). The tables are shape-identical
+ * in both dialects. Drafts and candidates have composite keys and few rows per
+ * owner, so they go in one statement each.
+ */
+async function purgeAgentTables(
+  db: any,
+  tables: { t: any; v: any; a: any; d: any; c: any },
+  segments: string[],
+  limit: number,
+): Promise<PurgeResult> {
+  const { t, v, a, d, c } = tables;
+  const agents = await deleteBatch(db, t, t.id, underOwnerPath(t.owner, segments), limit);
+  const versions = await deleteBatch(db, v, v.id, underOwnerPath(v.owner, segments), limit);
+  const activations = await deleteBatch(db, a, a.id, underOwnerPath(a.owner, segments), limit);
+  const drafts = (
+    await db.delete(d).where(or(underOwnerPath(d.owner, segments), underOwnerPath(d.editor, segments))).returning({ name: d.name })
+  ).length;
+  const candidates = (await db.delete(c).where(underOwnerPath(c.owner, segments)).returning({ name: c.name })).length;
+  return {
+    removed: { agents, versions, activations, drafts, candidates },
+    done: agents < limit && versions < limit && activations < limit,
+  };
+}
+
 /** `AgentBuilderStore` on a Drizzle SQLite database (libsql / better-sqlite3 / Turso). */
 export function createSqliteAgentBuilderStore<P>(
   db: BaseSQLiteDatabase<"sync" | "async", any, any>,
@@ -855,6 +887,7 @@ export function createSqliteAgentBuilderStore<P>(
   const c = sqliteSchema.agentCandidates;
   return createStore<P>(
     {
+      purge: (segments, limit) => purgeAgentTables(db, { t, v, a, d, c }, segments, limit),
       async byOwners(owners, name) {
         const where = name ? and(inArray(t.owner, owners), eq(t.name, name)) : inArray(t.owner, owners);
         return (await db.select().from(t).where(where).orderBy(desc(t.createdAt))) as AgentRow[];
@@ -1005,6 +1038,7 @@ export function createPostgresAgentBuilderStore<P>(
   const c = pgSchema.agentCandidates;
   return createStore<P>(
     {
+      purge: (segments, limit) => purgeAgentTables(db, { t, v, a, d, c }, segments, limit),
       async byOwners(owners, name) {
         const where = name ? and(inArray(t.owner, owners), eq(t.name, name)) : inArray(t.owner, owners);
         return (await db.select().from(t).where(where).orderBy(desc(t.createdAt))) as AgentRow[];

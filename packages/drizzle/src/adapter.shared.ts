@@ -4,6 +4,7 @@ import {
   eq,
   getTableColumns,
   getTableName,
+  inArray,
   isNotNull,
   isNull,
   lt,
@@ -18,7 +19,9 @@ import {
   ChatConflictError,
   encodeOwnerKey,
   OwnerKeyMismatchError,
+  refileTarget,
   type AppMessage,
+  type PurgeResult,
   type OwnerScope,
   type ChatRecord,
   type RunFence,
@@ -28,6 +31,7 @@ import {
   type ScheduleRecord,
   type StorageAdapter,
 } from "@intentface/latch-core";
+import { deleteBatch, underOwnerPath } from "./owner-path.js";
 
 /**
  * Dialect-shared `StorageAdapter` implementation. The SQLite and Postgres entry
@@ -120,6 +124,9 @@ function violates(error: unknown, sqliteCode: RegExp, pgCode: string, text: RegE
  * turn would block its chat forever. Durable runs use their lease instead.
  */
 export const STALE_RUN_MS = 10 * 60_000;
+
+/** What a re-filed usage row's `run_id` becomes: a link back to nothing. */
+const ERASED_RUN = "erased";
 
 /** Join an `owner` path into one composite key; refuses a missing or empty segment. */
 function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
@@ -255,6 +262,19 @@ export function makeStorageAdapter<P>(
     sql`exists (select 1 from ${s.runs} where ${s.runs.id} = ${fence.runId} and ${s.runs.leaseOwner} = ${fence.owner} and ${s.runs.fencingToken} = ${fence.fencingToken}${opts.lockFencedRun ? sql` for share` : sql``})`;
 
   /**
+   * A chat's id, looked up rather than taken on trust: NULL when the chat is
+   * gone, which the NOT NULL `chat_id` columns turn into a failed write. So a
+   * run or message for a deleted chat can't land as an orphan. On Postgres it
+   * also waits (FOR SHARE) for a deletion of that chat to commit, which is what
+   * serializes `deleteChats` with a run starting in the same chat.
+   */
+  const chatRef = (chatId: string) =>
+    sql`(select ${s.chats.id} from ${s.chats} where ${s.chats.id} = ${chatId}${opts.lockFencedRun ? sql` for share` : sql``})`;
+
+  /** The error for a write into a chat that doesn't exist (any more). */
+  const chatGone = (chatId: string) => new Error(`Unknown chat: ${chatId}`);
+
+  /**
    * One message upsert (seq computed in-statement) as a query, for batching.
    *
    * With `fence`, the lease check is part of the same statement, so nothing can
@@ -268,7 +288,7 @@ export function makeStorageAdapter<P>(
       .insert(s.messages)
       .values({
         id: m.id,
-        chatId,
+        chatId: chatRef(chatId) as unknown as string,
         runId: null,
         seq: (fence ? sql`case when ${fenceHolds(fence)} then ${nextSeq} end` : nextSeq) as unknown as number,
         role: m.role,
@@ -292,13 +312,14 @@ export function makeStorageAdapter<P>(
    * in the lease's remaining time OUTSIDE the transaction, because on Postgres
    * a failed statement aborts the transaction and nothing can be read in it.
    */
-  async function insertRun(exec: any, row: Record<string, unknown>): Promise<any> {
+  async function insertRun(exec: any, row: Record<string, unknown>, chatId: string): Promise<any> {
     try {
       const got = await exec.insert(s.runs).values(row).returning();
       return got[0]!;
     } catch (error) {
+      if (isNotNullViolation(error)) throw chatGone(chatId);
       if (!isUniqueViolation(error)) throw error;
-      throw new ChatBusyError(String(row.chatId), 0);
+      throw new ChatBusyError(chatId, 0);
     }
   }
 
@@ -316,7 +337,7 @@ export function makeStorageAdapter<P>(
   async function openRunRow(row: Record<string, unknown>, chatId: string, now: number): Promise<any> {
     await supersedeStale(db, chatId, now);
     try {
-      return await insertRun(db, row);
+      return await insertRun(db, row, chatId);
     } catch (error) {
       if (error instanceof ChatBusyError) throw await busyError(chatId);
       throw error;
@@ -336,7 +357,7 @@ export function makeStorageAdapter<P>(
     now: number,
   ): Record<string, unknown> => ({
     id: newId("run"),
-    chatId: input.chatId,
+    chatId: chatRef(input.chatId),
     agent: input.agent,
     status: "active" as RunStatus,
     // The run inherits its chat's owner: the same key, derived from the same
@@ -402,6 +423,49 @@ export function makeStorageAdapter<P>(
       if (isNotNullViolation(error)) return false;
       throw error;
     }
+  }
+
+  /** One usage row; `owner` may be a lookup (see `recordUsage`). */
+  async function insertUsage(
+    owner: string,
+    input: { runId: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; cost: number },
+  ): Promise<void> {
+    await db.insert(s.usage).values({
+      id: newId("use"),
+      owner,
+      runId: input.runId,
+      model: input.model,
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      cacheReadTokens: input.cacheReadTokens,
+      cacheWriteTokens: input.cacheWriteTokens,
+      cost: input.cost,
+      createdAt: Date.now(),
+    });
+  }
+
+  /**
+   * Remove chats with everything under them but their usage (the purge
+   * decides that). Live runs are settled first with their fencing token
+   * bumped, so a worker still running one has its writes refused; then
+   * messages, runs and the chats themselves. Each step is
+   * safe to repeat, so a pass cut short is finished by the next.
+   */
+  async function removeChats(chatIds: string[]): Promise<Record<string, number>> {
+    await db
+      .update(s.runs)
+      .set({
+        status: "errored" as RunStatus,
+        error: "deleted",
+        endedAt: nowMs,
+        leaseOwner: null,
+        fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
+      })
+      .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
+    const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
+    const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
+    const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
+    return { chats: chats.length, messages: messages.length, runs: runs.length };
   }
 
   return {
@@ -493,7 +557,12 @@ export function makeStorageAdapter<P>(
       // (chat_id, seq) index backstops it. `withTx` is the dialect's batch
       // boundary: a real transaction where the driver is async (Postgres,
       // libsql), sequential statements on synchronous better-sqlite3.
-      await opts.withTx((tx) => appendMessagesWith(tx, chatId, msgs));
+      try {
+        await opts.withTx((tx) => appendMessagesWith(tx, chatId, msgs));
+      } catch (error) {
+        if (isNotNullViolation(error)) throw chatGone(chatId);
+        throw error;
+      }
     },
 
     /**
@@ -531,7 +600,7 @@ export function makeStorageAdapter<P>(
         // sync-capable falls through to `withTx`, whose atomicity is its own.
         const inserted = await opts.withTx(async (tx) => {
           await supersedeStale(tx, input.chatId, now);
-          const got = await insertRun(tx, row);
+          const got = await insertRun(tx, row, input.chatId);
           await appendMessagesWith(tx, input.chatId, input.messages);
           return got;
         });
@@ -540,6 +609,7 @@ export function makeStorageAdapter<P>(
         if (error instanceof ChatBusyError || isUniqueViolation(error)) {
           throw await busyError(input.chatId);
         }
+        if (isNotNullViolation(error)) throw chatGone(input.chatId);
         throw error;
       }
     },
@@ -690,22 +760,19 @@ export function makeStorageAdapter<P>(
       return rows.map((r: any) => rowToRun(r.run));
     },
 
-    async recordUsage(principal, input) {
-      // Usage inherits its run's owner (derive once, inherit). The principal
-      // is only the fallback for a run this database doesn't hold.
-      const owner = (await storedOwner("run", input.runId)) ?? ownerKey(principal);
-      await db.insert(s.usage).values({
-        id: newId("use"),
-        owner,
-        runId: input.runId,
-        model: input.model,
-        inputTokens: input.inputTokens,
-        outputTokens: input.outputTokens,
-        cacheReadTokens: input.cacheReadTokens,
-        cacheWriteTokens: input.cacheWriteTokens,
-        cost: input.cost,
-        createdAt: Date.now(),
-      });
+    async recordUsage(_principal, input) {
+      // Usage inherits its run's owner (derive once, inherit), looked up in the
+      // same statement: a run that's gone (deleted) gives NULL, which the NOT
+      // NULL `owner` turns into a refusal instead of an orphan row. On Postgres
+      // the lookup holds a share lock on the run, so a deletion of its chat
+      // waits for this insert and then removes it too.
+      const owner = sql`(select ${runOwner} from ${s.runs} where ${s.runs.id} = ${input.runId}${opts.lockFencedRun ? sql` for share` : sql``})`;
+      try {
+        await insertUsage(owner as unknown as string, input);
+      } catch (error) {
+        if (isNotNullViolation(error)) throw new Error(`Unknown run: ${input.runId}`);
+        throw error;
+      }
     },
 
     async createSchedule(principal, input) {
@@ -829,6 +896,90 @@ export function makeStorageAdapter<P>(
         .where(
           and(eq(s.schedules.id, id), eq(s.schedules.lastRunAt, patch.firedAt)),
         );
+    },
+
+    async deleteChats(principal, ids) {
+      if (ids.length === 0) return [];
+      const owned: string[] = (
+        await db
+          .select({ id: s.chats.id })
+          .from(s.chats)
+          .where(and(inArray(s.chats.id, ids), eq(s.chats.owner, ownerKey(principal))))
+      ).map((r: any) => r.id);
+      if (owned.length === 0) return [];
+      // The decision is made against ONE instant of the database's clock, read
+      // once: a lease that expires part-way through can't make one statement
+      // keep a chat's rows and the next delete the chat.
+      const at = Number((await db.select({ now: nowMs }).from(s.chats).limit(1))[0]?.now ?? Date.now());
+      const liveAt = sql`coalesce(${s.runs.leaseExpiresAt}, ${s.runs.startedAt} + ${STALE_RUN_MS}) > ${at}`;
+      const live = sql`exists (select 1 from ${s.runs} where ${inArray(s.runs.chatId, owned)} and ${s.runs.status} = 'active' and ${liveAt})`;
+      // Usage stays: the ledger records what was spent (see deleteChats).
+      const deletes = (exec: any, where: (w: SQL) => SQL | undefined = (w) => w) => [
+        exec.delete(s.messages).where(where(inArray(s.messages.chatId, owned))),
+        exec.delete(s.runs).where(where(inArray(s.runs.chatId, owned))),
+        exec.delete(s.chats).where(where(inArray(s.chats.id, owned))),
+      ];
+      if (opts.batch) {
+        // One transaction without branching: every statement carries the same
+        // condition, so all of them apply or none does.
+        await opts.batch(deletes(db, (w) => and(w, sql`not ${live}`)));
+      } else if (opts.syncTx) {
+        opts.syncTx((tx) => {
+          if ((tx.select({ one: sql`1` }).from(s.chats).where(live).limit(1).all() as unknown[]).length) return;
+          for (const q of deletes(tx)) q.run();
+        });
+      } else {
+        await opts.withTx(async (tx) => {
+          // Lock the chats first: a run starting in one of them waits for this
+          // to commit (see chatRef), so none can start between check and delete.
+          await tx.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).for("update");
+          // ...and their runs: a usage insert holding a share lock on one (see
+          // recordUsage) commits first, against a run that still exists.
+          await tx.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned)).for("update");
+          if ((await tx.select({ one: sql`1` }).from(s.chats).where(live).limit(1)).length) return;
+          for (const q of deletes(tx)) await q;
+        });
+      }
+      const kept: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).limit(1);
+      if (kept.length) {
+        // Refused: an answer is running in one of them. Say which, and for how long.
+        const busy: any[] = await db
+          .select({ chatId: s.runs.chatId, left: sql`${liveUntil} - ${nowMs}` })
+          .from(s.runs)
+          .where(and(inArray(s.runs.chatId, owned), eq(s.runs.status, "active")))
+          .limit(1);
+        throw new ChatBusyError(busy[0]?.chatId ?? kept[0].id, Math.max(1, Number(busy[0]?.left ?? 1)));
+      }
+      return owned;
+    },
+
+    async purgeOwner(segments, opts) {
+      const under = (col: any) => underOwnerPath(col, segments);
+      const limit = opts?.batchSize ?? 500;
+      const removed: Record<string, number> = { chats: 0, messages: 0, runs: 0, usage: 0, usageRefiled: 0, schedules: 0 };
+      const refileTo = refileTarget(segments, opts);
+
+      const chats: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(under(s.chats.owner)).limit(limit);
+      const chatIds = chats.map((c) => c.id as string);
+      if (chatIds.length) Object.assign(removed, await removeChats(chatIds));
+      // The usage ledger, as the host chose: re-filed one level up with the
+      // run id cleared (a handle back to data that's gone), kept, or deleted.
+      let usage = 0;
+      if (refileTo) {
+        const rows: any[] = await db.select({ id: s.usage.id }).from(s.usage).where(under(s.usage.owner)).limit(limit);
+        if (rows.length) {
+          await db
+            .update(s.usage)
+            .set({ owner: encodeOwnerKey(refileTo), runId: ERASED_RUN })
+            .where(inArray(s.usage.id, rows.map((r) => r.id)));
+        }
+        usage = removed.usageRefiled = rows.length;
+      } else if (opts?.usage === "delete") {
+        usage = removed.usage = await deleteBatch(db, s.usage, s.usage.id, under(s.usage.owner), limit);
+      }
+      removed.schedules = await deleteBatch(db, s.schedules, s.schedules.id, under(s.schedules.owner), limit);
+      const done = chatIds.length < limit && usage < limit && removed.schedules < limit;
+      return { removed, done } satisfies PurgeResult;
     },
   };
 }

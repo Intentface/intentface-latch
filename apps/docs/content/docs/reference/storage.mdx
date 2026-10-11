@@ -44,6 +44,8 @@ interface StorageAdapter<P> {
   // Schedules
   createSchedule, listSchedules, deleteSchedule, bumpSchedule,
   claimDueSchedules, completeSchedule
+  // Deletion (optional)
+  deleteChats, purgeOwner
 }
 ```
 
@@ -127,6 +129,15 @@ try {
 `appendMessages` is the write path. Approval decisions, tool results and compaction boundaries are all recorded as appended message state — the log is the source of truth, and history is not rewritten in place.
 
 **One active run per chat.** `createRun` and `claimRun` throw `ChatBusyError` (code `chat_busy`) when the chat already has a live active run — a lease that hasn't expired, or for non-durable runs an active row younger than the adapter's stale timeout. An expired one is superseded first (marked errored, fencing token bumped), so a crashed turn never blocks its chat. The shipped adapters enforce this with a partial unique index on `(chat_id) WHERE status = 'active'`, so it holds under concurrency, not just in the happy path. `reclaimRun` returns null for a run whose chat has since started a newer active run. `openTurn` (implemented by the shipped adapters) opens the run and appends the user message in one transaction, so a refused turn persists nothing and a crash can't leave a run without its message. It is optional in the type for compatibility, but **a durable adapter must implement it**: without it a turn opens as two writes, and a process that dies between them leaves a run whose own message never landed — crash recovery then reads the previous turn's tail as that run's history. The runtime warns at startup when durability is on and `openTurn` is missing. This is what keeps two tabs, a webhook retry racing a reply, or a schedule firing mid-conversation from interleaving one history.
+
+### Deletion removes everything under a chat or an owner
+
+Both are optional; without them `runtime.deleteChat` and `runtime.purgeOwner` refuse with `UnsupportedOperationError` (`501` over HTTP).
+
+- **`deleteChats(principal, ids)`** removes the chats with their messages and runs, all or nothing: if any of them has a live run, none goes and it throws `ChatBusyError`. Ids that aren't the caller's are skipped; it returns the ids deleted. The runtime passes a chat together with the subagent threads it spawned, so a busy thread keeps the whole set.
+- **Nothing lands for a deleted chat.** A run, message or usage row written for a chat (or its run) that's gone must fail rather than become an orphan row nobody can see or delete. The shipped adapters look the chat up inside each such insert (on Postgres with `FOR SHARE`, which also makes a run starting in a chat wait for that chat's deletion to commit).
+- **Usage stays.** Neither operation rewrites the usage ledger on its own: `deleteChats` leaves a chat's usage rows, and `purgeOwner` does what `PurgeOptions.usage` says (default `"refile"`: move the rows to `refileTo`, by default the path one level up, and set their `run_id` to `"erased"`; or `"keep"`, or `"delete"`). Report re-filed rows as `usageRefiled`, deleted ones as `usage`.
+- **`purgeOwner(segments, { batchSize, usage, refileTo })`** removes every chat (with messages and runs) and every schedule whose owner key falls under the path: the key itself or anything starting with it plus `/` (`isUnderOwner`). Compare prefixes as plain strings (`substr`), never with `LIKE`: encoded keys contain `%` and `_`. Settle live runs first with their fencing token bumped, so a worker still running one has its writes refused. Stop each pass at `batchSize` rows per table and return `done: false`; the runtime calls again until `done`, and stops with an error if a pass reports `done: false` but removed nothing.
 
 ## Using the shipped adapter
 

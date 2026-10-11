@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { encodeOwnerKey, type SecretRecord, type SecretStore } from "@intentface/latch-core";
+import { deleteBatch, underOwnerPath } from "./owner-path.js";
 
 /**
  * Dialect-shared `SecretStore` implementation — persists the Vault's opaque
@@ -103,6 +104,12 @@ export function makeSecretStore<P>(
         .from(s.secrets)
         .where(eq(s.secrets.owner, ownerKey(principal)));
       return rows.map((r: any) => r.key);
+    },
+
+    async purgeOwner(segments, opts) {
+      const limit = opts?.batchSize ?? 500;
+      const secrets = await deleteBatch(db, s.secrets, s.secrets.id, underOwnerPath(s.secrets.owner, segments), limit);
+      return { removed: { secrets }, done: secrets < limit };
     },
   };
 }
