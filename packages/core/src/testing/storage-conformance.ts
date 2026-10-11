@@ -644,11 +644,20 @@ function checks<P>(): ConformanceCheck<P>[] {
       },
     },
     {
-      name: "a deleted chat can't be written to: no run, no message lands for it",
+      name: "a deleted chat can't be written to: no run, message or usage lands for it",
       async run({ store, principals: [me] }) {
         if (!store.deleteChats) return;
         const chat = await store.createChat(me, { agent: "a" });
+        const done = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        await store.updateRun(done.id, { status: "completed" });
         await store.deleteChats(me, [chat.id]);
+        let usageErr: unknown;
+        try {
+          await store.recordUsage(me, { runId: done.id, model: "m", inputTokens: 1, outputTokens: 1, cost: 0 });
+        } catch (e) {
+          usageErr = e;
+        }
+        check(usageErr !== undefined, "recording usage for its deleted run fails");
         let runErr: unknown;
         try {
           await store.createRun(me, { chatId: chat.id, agent: "a" });

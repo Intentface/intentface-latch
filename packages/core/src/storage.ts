@@ -630,8 +630,9 @@ export interface StorageAdapter<P> {
    * them: messages, runs and their usage. All or nothing: if any of them has
    * a live run (an answer in progress), none is deleted and it throws
    * `ChatBusyError`. Ids that aren't the caller's are skipped. Returns the ids
-   * deleted. A run or message written for a chat after it's gone must fail,
-   * not land as an orphan. Without it, `runtime.deleteChat` refuses.
+   * deleted. A run, message or usage row written for a chat (or its run)
+   * after it's gone must fail, not land as an orphan. Without it,
+   * `runtime.deleteChat` refuses.
    */
   deleteChats?(principal: P, ids: string[]): Promise<string[]>;
   /**

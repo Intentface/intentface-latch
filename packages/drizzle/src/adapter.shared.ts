@@ -421,6 +421,25 @@ export function makeStorageAdapter<P>(
     }
   }
 
+  /** One usage row; `owner` may be a lookup (see `recordUsage`). */
+  async function insertUsage(
+    owner: string,
+    input: { runId: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; cost: number },
+  ): Promise<void> {
+    await db.insert(s.usage).values({
+      id: newId("use"),
+      owner,
+      runId: input.runId,
+      model: input.model,
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      cacheReadTokens: input.cacheReadTokens,
+      cacheWriteTokens: input.cacheWriteTokens,
+      cost: input.cost,
+      createdAt: Date.now(),
+    });
+  }
+
   /**
    * Remove chats with everything under them. Live runs are settled first with
    * their fencing token bumped, so a worker still running one has its writes
@@ -738,22 +757,19 @@ export function makeStorageAdapter<P>(
       return rows.map((r: any) => rowToRun(r.run));
     },
 
-    async recordUsage(principal, input) {
-      // Usage inherits its run's owner (derive once, inherit). The principal
-      // is only the fallback for a run this database doesn't hold.
-      const owner = (await storedOwner("run", input.runId)) ?? ownerKey(principal);
-      await db.insert(s.usage).values({
-        id: newId("use"),
-        owner,
-        runId: input.runId,
-        model: input.model,
-        inputTokens: input.inputTokens,
-        outputTokens: input.outputTokens,
-        cacheReadTokens: input.cacheReadTokens,
-        cacheWriteTokens: input.cacheWriteTokens,
-        cost: input.cost,
-        createdAt: Date.now(),
-      });
+    async recordUsage(_principal, input) {
+      // Usage inherits its run's owner (derive once, inherit), looked up in the
+      // same statement: a run that's gone (deleted) gives NULL, which the NOT
+      // NULL `owner` turns into a refusal instead of an orphan row. On Postgres
+      // the lookup holds a share lock on the run, so a deletion of its chat
+      // waits for this insert and then removes it too.
+      const owner = sql`(select ${runOwner} from ${s.runs} where ${s.runs.id} = ${input.runId}${opts.lockFencedRun ? sql` for share` : sql``})`;
+      try {
+        await insertUsage(owner as unknown as string, input);
+      } catch (error) {
+        if (isNotNullViolation(error)) throw new Error(`Unknown run: ${input.runId}`);
+        throw error;
+      }
     },
 
     async createSchedule(principal, input) {
@@ -914,6 +930,9 @@ export function makeStorageAdapter<P>(
           // Lock the chats first: a run starting in one of them waits for this
           // to commit (see chatRef), so none can start between check and delete.
           await tx.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).for("update");
+          // ...and their runs: a usage insert holding a share lock on one (see
+          // recordUsage) commits first, so its row is seen and deleted below.
+          await tx.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned)).for("update");
           if ((await tx.select({ one: sql`1` }).from(s.chats).where(live).limit(1)).length) return;
           for (const q of deletes(tx)) await q;
         });
