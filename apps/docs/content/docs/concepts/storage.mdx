@@ -33,6 +33,24 @@ registerStorageConformance({ describe, it }, "my adapter", async () => ({
 }));
 ```
 
+## Deleting someone's data
+
+When a person asks for their data to be deleted, or a customer leaves, delete it through Latch rather than with SQL behind its back:
+
+```ts
+// One conversation, with the subagent threads it spawned.
+await runtime.deleteChat({ principal, chatId });
+
+// Everything stored for a person, or for a whole organization, in every store.
+const also = { secrets: secretStore, agents: agentStore, memory: memoryJobStore, channels: myChannelStore };
+await runtime.purgeOwner([orgId, userId], { also });
+await runtime.purgeOwner([orgId], { also });
+```
+
+`purgeOwner` works by owner path: `[orgId]` covers the organization's shared chats and every person in it, `[orgId, userId]` just that person. The storage adapter removes chats, messages, runs, usage and schedules; the stores in `also` remove what they keep (the shipped secret, agent and memory job stores all can, including the drafts a person is writing in the organization's agents). It works in batches, so a large organization can't time out, and anything an answer is still writing is stopped first, so nothing comes back. If any store can't purge, it refuses before deleting anything, rather than leaving the owner half deleted.
+
+Two things stay yours: memories themselves live in your memory store, and usage-limit counters are keyed by the names you chose (they expire on their own). The handler also exposes `DELETE chats/:id` for the chat list's delete button.
+
 ## Go deeper
 
 - What an adapter must guarantee: [Storage reference](/docs/reference/storage)

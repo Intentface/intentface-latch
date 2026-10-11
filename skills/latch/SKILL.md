@@ -231,6 +231,16 @@ On a long-running server, `createLatchApp` runs the cron for you.
 Read [deploy on Vercel](references/guides/deploy-on-vercel.md) and
 [crash recovery](references/guides/crash-recovery.md).
 
+### Delete someone's data
+
+`runtime.deleteChat({ principal, chatId })` deletes one chat with the subagent
+threads it spawned (the handler serves `DELETE chats/:id`).
+`runtime.purgeOwner([orgId, userId], { also: { secrets, agents, memory } })`
+deletes everything for a person, `[orgId]` for a whole organization, across
+every store you pass; it refuses before deleting anything if a store can't
+purge. Use these rather than SQL behind Latch's back.
+Read [storage](references/concepts/storage.md).
+
 ### More
 
 - Agents stored in a database, editable by users: [agents in a database](references/guides/agents-in-a-database.md)
