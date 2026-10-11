@@ -10,6 +10,7 @@ import {
   Home,
   Lightbulb,
   Rocket,
+  Sparkles,
 } from "@keyline-icons/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -38,6 +39,12 @@ const keyOf = (name: ReactNode, fallback: string) =>
 
 // The docs home is titled "Latch", which reads oddly under the Latch logo.
 const displayName = (item: TreeItem) => (item.url === "/docs" ? "Introduction" : item.name);
+
+// Icons for the root pages above the sections, by URL.
+const TOP_ICONS: Record<string, ReactNode> = {
+  "/docs": <Home />,
+  "/docs/build-with-ai": <Sparkles />,
+};
 
 // Section icons, by the folder's title.
 const ICONS: Record<string, ReactNode> = {
@@ -190,7 +197,7 @@ export const DocsNav = ({ model }: { model: NavModel }) => {
       >
         <Nav.List guide="none" className={listClass}>
           {model.top.map((item) => (
-            <PageRow key={item.url} item={item} icon={item.url === "/docs" ? <Home /> : undefined} />
+            <PageRow key={item.url} item={item} icon={TOP_ICONS[item.url]} />
           ))}
 
           {model.sections.map((section, i) => (

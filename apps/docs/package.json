@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/type-tables.mjs && next dev --port 3100",
-    "build": "node scripts/type-tables.mjs && next build",
+    "dev": "node scripts/type-tables.mjs && node scripts/skill-wellknown.mjs && next dev --port 3100",
+    "build": "node scripts/type-tables.mjs && node scripts/skill-wellknown.mjs && next build",
     "start": "next start --port 3100",
     "postinstall": "fumadocs-mdx",
     "typecheck": "tsc --noEmit",

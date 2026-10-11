@@ -141,6 +141,16 @@ The `principal` you pass once is what keeps customers apart. Storage scopes ever
 
 Plus schedules, connections to other services (MCP, OAuth), subagents, Slack, Telegram and WhatsApp, and cost per answer.
 
+## Build with your coding agent
+
+Install the Latch skill and your agent (Claude Code, Cursor, Codex and more) gets the recipes, the rules that break quietly, and these docs:
+
+```bash
+npx skills add https://intentface-latch-docs.vercel.app
+```
+
+More, including `llms.txt` for agents that read the web, in [Build with AI](/docs/build-with-ai).
+
 ## When not to use it
 
 If you're building a single-user prototype that doesn't need to remember anything, the AI SDK alone is the better tool. Latch earns its place when a second customer, a second server or a second channel shows up.
@@ -153,5 +163,5 @@ If you're building a single-user prototype that doesn't need to remember anythin
 </Cards>
 
 <Callout type="info" title="Reading this as an agent">
-`/llms.txt` is an index of every page with a one-line description; `/llms-full.txt` is the whole documentation as one markdown file. Append `.md` to any page URL for its source.
+`/llms.txt` is an index of every page with a one-line description; `/llms-full.txt` is the whole documentation as one markdown file. Append `.md` to any page URL for its source. The Latch skill installs with `npx skills add https://intentface-latch-docs.vercel.app`.
 </Callout>

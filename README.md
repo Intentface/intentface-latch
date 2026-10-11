@@ -89,10 +89,10 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 Install the Latch skill so Claude Code, Cursor, Codex and other agents build with Latch the way it's meant to be used: recipes for the common tasks, the rules that break quietly, and the docs for your version.
 
 ```bash
-npx skills add Intentface/intentface-latch --skill latch
+npx skills add https://intentface-latch-docs.vercel.app
 ```
 
-To match an older release, install from its tag: `npx skills add https://github.com/Intentface/intentface-latch/tree/v0.20.0/skills/latch`. More in [Use Latch with your coding agent](https://intentface-latch-docs.vercel.app/docs/getting-started/coding-agent).
+More in [Build with AI](https://intentface-latch-docs.vercel.app/docs/build-with-ai), including `llms.txt` and how to pin the skill to an older release.
 
 ## Core concepts
 
