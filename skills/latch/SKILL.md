@@ -238,7 +238,10 @@ threads it spawned (the handler serves `DELETE chats/:id`).
 `runtime.purgeOwner([orgId, userId], { also: { secrets, agents, memory } })`
 deletes everything for a person, `[orgId]` for a whole organization, across
 every store you pass; it refuses before deleting anything if a store can't
-purge. Use these rather than SQL behind Latch's back.
+purge. Usage records (the billing ledger) are kept: `deleteChat` leaves them,
+and a person's purge re-files them under `[orgId]`; a whole organization needs
+`usage: "delete"` or `"keep"`. Deleting never resets usage limits (a
+separate store). Use these rather than SQL behind Latch's back.
 Read [storage](references/concepts/storage.md).
 
 ### More

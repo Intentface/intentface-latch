@@ -19,6 +19,7 @@ import {
   ChatConflictError,
   encodeOwnerKey,
   OwnerKeyMismatchError,
+  refileTarget,
   type AppMessage,
   type PurgeResult,
   type OwnerScope,
@@ -123,6 +124,9 @@ function violates(error: unknown, sqliteCode: RegExp, pgCode: string, text: RegE
  * turn would block its chat forever. Durable runs use their lease instead.
  */
 export const STALE_RUN_MS = 10 * 60_000;
+
+/** What a re-filed usage row's `run_id` becomes: a link back to nothing. */
+const ERASED_RUN = "erased";
 
 /** Join an `owner` path into one composite key; refuses a missing or empty segment. */
 function ownerKeyOf<P>(owner: (p: P) => string[], principal: P): string {
@@ -441,9 +445,10 @@ export function makeStorageAdapter<P>(
   }
 
   /**
-   * Remove chats with everything under them. Live runs are settled first with
-   * their fencing token bumped, so a worker still running one has its writes
-   * refused; then usage, messages, runs and the chats themselves. Each step is
+   * Remove chats with everything under them but their usage (the purge
+   * decides that). Live runs are settled first with their fencing token
+   * bumped, so a worker still running one has its writes refused; then
+   * messages, runs and the chats themselves. Each step is
    * safe to repeat, so a pass cut short is finished by the next.
    */
   async function removeChats(chatIds: string[]): Promise<Record<string, number>> {
@@ -457,12 +462,10 @@ export function makeStorageAdapter<P>(
         fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
       })
       .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
-    const runIds = (await db.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, chatIds))).map((r: any) => r.id as string);
-    const usage = runIds.length ? await db.delete(s.usage).where(inArray(s.usage.runId, runIds)).returning({ id: s.usage.id }) : [];
     const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
     const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
     const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
-    return { chats: chats.length, messages: messages.length, runs: runs.length, usage: usage.length };
+    return { chats: chats.length, messages: messages.length, runs: runs.length };
   }
 
   return {
@@ -910,8 +913,8 @@ export function makeStorageAdapter<P>(
       const at = Number((await db.select({ now: nowMs }).from(s.chats).limit(1))[0]?.now ?? Date.now());
       const liveAt = sql`coalesce(${s.runs.leaseExpiresAt}, ${s.runs.startedAt} + ${STALE_RUN_MS}) > ${at}`;
       const live = sql`exists (select 1 from ${s.runs} where ${inArray(s.runs.chatId, owned)} and ${s.runs.status} = 'active' and ${liveAt})`;
+      // Usage stays: the ledger records what was spent (see deleteChats).
       const deletes = (exec: any, where: (w: SQL) => SQL | undefined = (w) => w) => [
-        exec.delete(s.usage).where(where(inArray(s.usage.runId, exec.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned))))),
         exec.delete(s.messages).where(where(inArray(s.messages.chatId, owned))),
         exec.delete(s.runs).where(where(inArray(s.runs.chatId, owned))),
         exec.delete(s.chats).where(where(inArray(s.chats.id, owned))),
@@ -931,7 +934,7 @@ export function makeStorageAdapter<P>(
           // to commit (see chatRef), so none can start between check and delete.
           await tx.select({ id: s.chats.id }).from(s.chats).where(inArray(s.chats.id, owned)).for("update");
           // ...and their runs: a usage insert holding a share lock on one (see
-          // recordUsage) commits first, so its row is seen and deleted below.
+          // recordUsage) commits first, against a run that still exists.
           await tx.select({ id: s.runs.id }).from(s.runs).where(inArray(s.runs.chatId, owned)).for("update");
           if ((await tx.select({ one: sql`1` }).from(s.chats).where(live).limit(1)).length) return;
           for (const q of deletes(tx)) await q;
@@ -953,14 +956,27 @@ export function makeStorageAdapter<P>(
     async purgeOwner(segments, opts) {
       const under = (col: any) => underOwnerPath(col, segments);
       const limit = opts?.batchSize ?? 500;
-      const removed: Record<string, number> = { chats: 0, messages: 0, runs: 0, usage: 0, schedules: 0 };
+      const removed: Record<string, number> = { chats: 0, messages: 0, runs: 0, usage: 0, usageRefiled: 0, schedules: 0 };
+      const refileTo = refileTarget(segments, opts);
 
       const chats: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(under(s.chats.owner)).limit(limit);
       const chatIds = chats.map((c) => c.id as string);
       if (chatIds.length) Object.assign(removed, await removeChats(chatIds));
-      // Usage whose run is already gone, and schedules.
-      const usage = await deleteBatch(db, s.usage, s.usage.id, under(s.usage.owner), limit);
-      removed.usage += usage;
+      // The usage ledger, as the host chose: re-filed one level up with the
+      // run id cleared (a handle back to data that's gone), kept, or deleted.
+      let usage = 0;
+      if (refileTo) {
+        const rows: any[] = await db.select({ id: s.usage.id }).from(s.usage).where(under(s.usage.owner)).limit(limit);
+        if (rows.length) {
+          await db
+            .update(s.usage)
+            .set({ owner: encodeOwnerKey(refileTo), runId: ERASED_RUN })
+            .where(inArray(s.usage.id, rows.map((r) => r.id)));
+        }
+        usage = removed.usageRefiled = rows.length;
+      } else if (opts?.usage === "delete") {
+        usage = removed.usage = await deleteBatch(db, s.usage, s.usage.id, under(s.usage.owner), limit);
+      }
       removed.schedules = await deleteBatch(db, s.schedules, s.schedules.id, under(s.schedules.owner), limit);
       const done = chatIds.length < limit && usage < limit && removed.schedules < limit;
       return { removed, done } satisfies PurgeResult;

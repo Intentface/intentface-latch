@@ -44,15 +44,23 @@ When a person asks for their data to be deleted, or a customer leaves, delete it
 // One conversation, with the subagent threads it spawned.
 await runtime.deleteChat({ principal, chatId });
 
-// Everything stored for a person, or for a whole organization, in every store.
+// Everything stored for a person, in every store you pass.
 const also = { secrets: secretStore, agents: agentStore, memory: memoryJobStore, channels: myChannelStore };
 await runtime.purgeOwner([orgId, userId], { also });
-await runtime.purgeOwner([orgId], { also });
+
+// A customer who has left: say what happens to their usage records.
+await runtime.purgeOwner([orgId], { also, usage: "delete" });
 ```
 
-`purgeOwner` works by owner path: `[orgId]` covers the organization's shared chats and every person in it, `[orgId, userId]` just that person. The storage adapter removes chats, messages, runs, usage and schedules; the stores in `also` remove what they keep (the shipped secret, agent and memory job stores all can, including the drafts a person is writing in the organization's agents). It works in batches, so a large organization can't time out, and anything an answer is still writing is stopped first, so nothing comes back. If any store can't purge, it refuses before deleting anything, rather than leaving the owner half deleted.
+`purgeOwner` works by owner path: `[orgId]` covers the organization's shared chats and every person in it, `[orgId, userId]` just that person. The storage adapter removes chats, messages, runs and schedules; the stores in `also` remove what they keep (the shipped secret, agent and memory job stores all can, including the drafts a person is writing in the organization's agents). It works in batches, so a large organization can't time out, and anything an answer is still writing is stopped first, so nothing comes back. If any store can't purge, it refuses before deleting anything, rather than leaving the owner half deleted.
 
-Two things stay yours: memories themselves live in your memory store, and usage-limit counters are keyed by the names you chose (they expire on their own). The handler also exposes `DELETE chats/:id` for the chat list's delete button.
+**Usage records stay, unless you say otherwise.** The usage ledger (model, tokens and cost per answer, no content) is what you bill from, so deleting doesn't rewrite it:
+
+- `deleteChat` keeps the chat's usage. Deleting a conversation doesn't make it cost less, and it doesn't give anyone more of their limits either: those count in a separate store.
+- `purgeOwner([orgId, userId])` re-files the person's usage under `[orgId]` and clears its link to their runs, so the organization's totals stay right while nothing points at the person. That's pseudonymous rather than anonymous (a one-person organization can still be told apart), which is what keeping billing records usually means. Pass `usage: "keep"` to leave it as it is, `"delete"` to remove it, or `refileTo` to move it somewhere else.
+- `purgeOwner([orgId])` has nothing above it to re-file to, so it asks you to choose: `usage: "delete"` or `"keep"`.
+
+Two things stay yours: memories themselves live in your memory store, and usage-limit counters are keyed by the names you chose (they may contain the person's id, like `user:org1:u7`; clear those for a complete erasure). The handler also exposes `DELETE chats/:id` for the chat list's delete button.
 
 ## Go deeper
 

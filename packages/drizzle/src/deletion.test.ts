@@ -50,7 +50,7 @@ const adapters: [string, () => Promise<StorageAdapter<P>>][] = [
 const msg = (id: string): AppMessage => ({ id, role: "user", parts: [{ type: "text", text: id }] });
 
 async function purgeAll(store: StorageAdapter<P>, segments: string[]) {
-  for (let i = 0; i < 20; i++) if ((await store.purgeOwner!(segments)).done) return;
+  for (let i = 0; i < 20; i++) if ((await store.purgeOwner!(segments, { usage: "delete" })).done) return;
   throw new Error("purge never finished");
 }
 
@@ -141,7 +141,7 @@ describe("runtime.purgeOwner", () => {
     const rt = createRuntime<P>({ storage: store, agents: {} });
     const chat = await store.createChat({ tenantId: "t1" }, { agent: "a" });
 
-    const refused = await rt.purgeOwner(["t1"], { also: { channels: {} } }).catch((e: unknown) => e);
+    const refused = await rt.purgeOwner(["t1"], { also: { channels: {} }, usage: "delete" }).catch((e: unknown) => e);
 
     expect(isUnsupportedOperationError(refused)).toBe(true);
     expect(String((refused as Error).message)).toContain("channels");
@@ -160,7 +160,7 @@ describe("runtime.purgeOwner", () => {
       },
     };
 
-    const { removed } = await rt.purgeOwner(["t1"], { also: { channels }, batchSize: 2 });
+    const { removed } = await rt.purgeOwner(["t1"], { also: { channels }, batchSize: 2, usage: "delete" });
 
     expect(removed.storage!.chats).toBe(5);
     expect(removed.channels).toEqual({ bindings: 2 });
@@ -171,6 +171,6 @@ describe("runtime.purgeOwner", () => {
     const store = await adapters[0]![1]();
     const rt = createRuntime<P>({ storage: store, agents: {} });
     const stuck = { purgeOwner: async () => ({ removed: { rows: 0 }, done: false }) };
-    await expect(rt.purgeOwner(["t1"], { also: { stuck } })).rejects.toThrow(/stuck store reported more to do but removed nothing/);
+    await expect(rt.purgeOwner(["t1"], { also: { stuck }, usage: "delete" })).rejects.toThrow(/stuck store reported more to do but removed nothing/);
   });
 });

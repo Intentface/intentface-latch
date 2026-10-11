@@ -67,7 +67,7 @@ describe("runtime.purgeOwner across the shipped stores", () => {
     expect(await owners(client, "latch_secrets")).toEqual(["t1", "t10"]);
     expect(await owners(client, "latch_agent_drafts", "editor")).toEqual(["t10/u1"]);
 
-    await rt.purgeOwner(["t1"], { also });
+    await rt.purgeOwner(["t1"], { also, usage: "delete" });
     for (const table of ["latch_secrets", "latch_agents", "latch_agent_versions", "latch_agent_activations", "latch_agent_candidates", "latch_memory_chat_state", "latch_memory_scope_state"]) {
       expect(await owners(client, table), table).toEqual(["t10"]);
     }

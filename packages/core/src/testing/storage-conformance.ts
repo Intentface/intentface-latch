@@ -693,11 +693,11 @@ function checks<P>(): ConformanceCheck<P>[] {
         const theirSchedule = await store.createSchedule(other, { agent: "a", cron: "0 9 * * *", prompt: "brief", nextRunAt: LATER });
 
         const segments = decodeOwnerKey(mine[0]!.owner);
-        const first = await store.purgeOwner(segments, { batchSize: 2 });
+        const first = await store.purgeOwner(segments, { batchSize: 2, usage: "delete" });
         check(first.done === false, "a pass stops at its batch size and says so");
         let chats = first.removed.chats ?? 0;
         for (let pass = 0; pass < 10; pass++) {
-          const next = await store.purgeOwner(segments, { batchSize: 2 });
+          const next = await store.purgeOwner(segments, { batchSize: 2, usage: "delete" });
           chats += next.removed.chats ?? 0;
           if (next.done) break;
         }
@@ -707,7 +707,7 @@ function checks<P>(): ConformanceCheck<P>[] {
         for (const c of mine) check((await store.loadMessages(me, c.id)).length === 0, "or messages");
         check((await store.loadMessages(other, theirs.id)).length === 1, "another owner's chat is untouched");
         check((await store.listSchedules(other)).some((x) => x.id === theirSchedule.id), "and their schedule");
-        const again = await store.purgeOwner(segments);
+        const again = await store.purgeOwner(segments, { usage: "delete" });
         check(again.done && Object.values(again.removed).every((n) => n === 0), "running it again removes nothing");
       },
     },
@@ -718,7 +718,7 @@ function checks<P>(): ConformanceCheck<P>[] {
         const chat = await store.createChat(me, { agent: "a" });
         const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 60_000 });
         const fence = fenceOf(run, "n1");
-        for (let pass = 0; pass < 10; pass++) if ((await store.purgeOwner(decodeOwnerKey(chat.owner))).done) break;
+        for (let pass = 0; pass < 10; pass++) if ((await store.purgeOwner(decodeOwnerKey(chat.owner), { usage: "delete" })).done) break;
         check((await store.appendMessages(chat.id, [msg("late", "late", "assistant")], fence)) === false, "the worker's next write is refused");
         check(!(await store.heartbeatRun(run.id, "n1", 60_000, fence.fencingToken)), "and so is its heartbeat");
         check((await store.loadMessages(me, chat.id)).length === 0, "nothing came back");

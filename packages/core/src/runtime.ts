@@ -56,8 +56,10 @@ import {
 import {
   encodeOwnerKey,
   isOwnerKeyMismatchError,
+  refileTarget,
   UnsupportedOperationError,
   type ChatRecord,
+  type PurgeOptions,
   type PurgeResult,
   type OwnerKeyMismatchError,
   type RunLease,
@@ -685,7 +687,7 @@ export interface ScheduleInput<P> {
  * makes the purge refuse.
  */
 export interface OwnerPurgeable {
-  purgeOwner?(segments: string[], opts?: { batchSize?: number }): Promise<PurgeResult>;
+  purgeOwner?(segments: string[], opts?: PurgeOptions): Promise<PurgeResult>;
 }
 
 export interface RunDueResult {
@@ -781,14 +783,20 @@ export interface Runtime<P> {
    * removed. Checks first that every store can purge, and refuses
    * (`UnsupportedOperationError`) before deleting anything if one can't.
    *
-   * Chats, messages, runs, usage and schedules are covered by the storage
-   * adapter. Pass your other stores by name in `also`: the secret store,
-   * stored agents, the memory job store, your own channel store. The result
-   * reports each under the same name (the storage adapter as `storage`).
+   * Chats, messages, runs and schedules are covered by the storage adapter.
+   * The usage ledger is kept and re-filed one level up by default, since
+   * billing records usually must outlive the person (see `PurgeOptions`):
+   * pass `usage: "delete"` to remove a whole tenant. Pass your other stores by
+   * name in `also`: the secret store, stored agents, the memory job store,
+   * your own channel store. The result reports each under the same name (the
+   * storage adapter as `storage`).
+   *
+   * Usage-limit counters are keyed by names you chose, and may contain the
+   * person's id (`user:org1:u7`): clear those yourself for a complete erasure.
    */
   purgeOwner(
     segments: string[],
-    opts?: { also?: Record<string, OwnerPurgeable>; batchSize?: number },
+    opts?: PurgeOptions & { also?: Record<string, OwnerPurgeable> },
   ): Promise<{ removed: Record<string, Record<string, number>> }>;
   /**
    * Resumes one interrupted run and finishes it. Needs `durability`. Returns
@@ -3078,7 +3086,17 @@ export function createRuntime<P, RC = unknown>(
         if (failed !== undefined || isAborted) {
           const settled = await owned.updateRun(
             run.id,
-            { status: "errored", error: failed ?? "aborted", endedAt: Date.now() },
+            {
+              status: "errored",
+              error: failed ?? "aborted",
+              endedAt: Date.now(),
+              // Its spend, as a completed run records it.
+              usageInputTokens: inputTokens,
+              usageOutputTokens: outputTokens,
+              usageCacheReadTokens: cacheReadTokens || undefined,
+              usageCacheWriteTokens: cacheWriteTokens || undefined,
+              costTotal: cost,
+            },
             lease,
           );
           // Only the winning writer reports (same rule as the completion
@@ -3087,6 +3105,22 @@ export function createRuntime<P, RC = unknown>(
           // failing turn settles against its budgets like any other, or a
           // token-only cap would never bound a run that keeps erroring.
           if (settled) {
+            // What a failed answer spent is still spent: it goes in the usage
+            // ledger like any other run's, or a bill from the ledger would
+            // leave failures out.
+            if (inputTokens + outputTokens > 0 || cost > 0) {
+              await storage
+                .recordUsage(principal, {
+                  runId: run.id,
+                  model: modelId,
+                  inputTokens,
+                  outputTokens,
+                  ...(cacheReadTokens ? { cacheReadTokens } : {}),
+                  ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+                  cost,
+                })
+                .catch((e) => console.error(`[usage] couldn't record usage for errored run ${run.id}:`, e));
+            }
             await settleLimits(admitted, { tokens: inputTokens + outputTokens, cost });
             await reportRunFinished("errored", messages, failed ?? "aborted");
             await agentEnd(failed ?? "aborted");
@@ -4306,9 +4340,10 @@ export function createRuntime<P, RC = unknown>(
 
   async function purgeOwner(
     segments: string[],
-    opts?: { also?: Record<string, OwnerPurgeable>; batchSize?: number },
+    opts?: PurgeOptions & { also?: Record<string, OwnerPurgeable> },
   ): Promise<{ removed: Record<string, Record<string, number>> }> {
     encodeOwnerKey(segments); // refuses an empty path before anything else
+    refileTarget(segments, opts); // and a usage choice that can't be carried out
     const stores: [string, OwnerPurgeable][] = [["storage", storage], ...Object.entries(opts?.also ?? {})];
     // All or nothing at the start: a store that can't purge would leave the
     // owner half deleted, which is worse than refusing.
@@ -4318,7 +4353,7 @@ export function createRuntime<P, RC = unknown>(
     for (const [name, store] of stores) {
       const total: Record<string, number> = {};
       for (;;) {
-        const pass = await store.purgeOwner!(segments, { batchSize: opts?.batchSize });
+        const pass = await store.purgeOwner!(segments, { batchSize: opts?.batchSize, usage: opts?.usage, refileTo: opts?.refileTo });
         let progress = 0;
         for (const [table, n] of Object.entries(pass.removed)) {
           total[table] = (total[table] ?? 0) + n;
