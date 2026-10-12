@@ -84,6 +84,16 @@ A runnable, durable server with the reaper + MCP-OAuth routes lives in [`apps/ex
 
 ---
 
+## Use with your coding agent
+
+Install the Latch skill so Claude Code, Cursor, Codex and other agents build with Latch the way it's meant to be used: recipes for the common tasks, the rules that break quietly, and the docs for your version.
+
+```bash
+npx skills add https://intentface-latch-docs.vercel.app
+```
+
+More in [Build with AI](https://intentface-latch-docs.vercel.app/docs/build-with-ai), including `llms.txt` and how to pin the skill to an older release.
+
 ## Core concepts
 
 - **Runtime** — the composition root + operations facade. Wire your seams once (`createRuntime`); everything (routes, cron, tests) calls the runtime, never the seams directly. Stateless and serverless-safe — all per-run state lives in the DB. Operations: `handleChat`, `loadHistory`, `resume`, `sweep`, `tick`, `applyApproval`.

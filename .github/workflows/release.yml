@@ -76,6 +76,7 @@ jobs:
       # shared output file instead. It also pushes through the GitHub API and
       # wants the token as an input, not the environment.
       - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        id: changesets
         with:
           version-script: pnpm version-packages
           publish-script: pnpm release
@@ -103,3 +104,19 @@ jobs:
         # NOT set: NPM_CONFIG_PROVENANCE. npm rejects provenance from private
         # source repositories — the publish fails rather than degrading. If
         # this repository goes public it is one line here.
+
+      # One plain `v<version>` tag per release, next to the per-package tags.
+      # It's what pins the coding-agent skill to a release:
+      #   npx skills add https://github.com/Intentface/intentface-latch/tree/v0.20.0/skills/latch
+      # The per-package tags (`@intentface/latch-core@0.20.0`) contain a `/`,
+      # which a tree URL can't hold. Versions are fixed across the packages,
+      # so latch-core's is the release's.
+      - if: steps.changesets.outputs.published == 'true'
+        env:
+          PUBLISHED: ${{ steps.changesets.outputs.publishedPackages }}
+        run: |
+          version=$(node -e 'const p = JSON.parse(process.env.PUBLISHED).find((p) => p.name === "@intentface/latch-core"); if (p) console.log(p.version)')
+          if [ -n "$version" ] && ! git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            git tag "v$version"
+            git push origin "refs/tags/v$version"
+          fi

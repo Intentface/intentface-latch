@@ -1,0 +1,50 @@
+---
+title: Build with AI
+description: Give Claude Code, Cursor, Codex and other coding agents the Latch skill and these docs, so they build with Latch the way it's meant to be used.
+---
+
+Coding agents know the AI SDK well and Latch not at all, so left alone they guess, and the guesses that go wrong are the quiet ones: the user's plan saved in the principal, editor state written into the system prompt, a tool that charges a card twice after a crash. Give your agent the Latch skill, and these docs.
+
+## Install the skill
+
+```bash
+npx skills add https://intentface-latch-docs.vercel.app
+```
+
+The [skills CLI](https://skills.sh) asks which of your agents to install it for (Claude Code, Cursor, Codex and many more) and puts it in your project. Add `-g` to install it for every project instead, or `-a claude-code -y` to skip the questions. Your agent then reaches for it on its own whenever it works on code that uses `@intentface/latch-*`. To update, run it again.
+
+The skill holds:
+
+- **Recipes** for the common tasks: a chat agent that remembers, your route and the chat UI, tools that only reach the user's data, approvals, schedules, MCP connections, limits per plan, Slack and Telegram, deploying on Vercel, deleting someone's data.
+- **What to pass where:** the principal, the context, params and `data-context`, and the mistakes that break quietly after an approval or a crash.
+- **The rules that fail silently,** such as a stable owner key and tools that are safe to run twice.
+- **Thirty pages of these docs** as markdown, read only when the task needs them, and readable offline.
+
+It's the current version, matching these docs. On an older Latch release, install the skill from that release instead (see below).
+
+## Give your agent the docs
+
+Agents that can read the web can use the docs directly:
+
+| | |
+| --- | --- |
+| [`/llms.txt`](/llms.txt) | Every page with a one-line description: where to start. |
+| [`/llms-full.txt`](/llms-full.txt) | The whole documentation as one file, for an agent with a large context window. |
+| Any page + `.md` | That page as markdown, e.g. [`/docs/concepts/inputs.md`](/docs/concepts/inputs.md). |
+
+Or start a conversation with:
+
+```text
+Here are the Latch docs: https://intentface-latch-docs.vercel.app/llms.txt
+Read the pages you need before writing code, and follow what they say over what you assume from the AI SDK.
+```
+
+Every page's **Copy page** button copies it as markdown, to paste into a chat.
+
+## Match an older release
+
+The skill on this site follows the latest release. From GitHub you can install it as it was in any release from 0.20.0 on, by its tag:
+
+```bash
+npx skills add https://github.com/Intentface/intentface-latch/tree/v0.20.0/skills/latch
+```

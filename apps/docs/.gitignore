@@ -4,3 +4,6 @@ next-env.d.ts
 
 # rendered by scripts/type-tables.mjs
 lib/type-tables.generated.json
+
+# packed by scripts/skill-wellknown.mjs from skills/latch
+public/.well-known/agent-skills/
