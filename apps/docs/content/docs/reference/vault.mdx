@@ -15,7 +15,25 @@ const vault = createVault<Principal>({
 });
 ```
 
-`createVault` throws if `masterKey` isn't 32 bytes. `deriveMasterKey(passphrase, { salt })` from `@intentface/latch-core/node` derives one from a passphrase (Node only; the salt must be stable for the deployment).
+`createVault` throws if a key isn't 32 bytes, or a key id isn't letters, digits, `_` and `-` (up to 32), or two keys share an id.
+
+| Option | |
+| --- | --- |
+| `store` | Where the encrypted records live (below). |
+| `masterKey` | The key new secrets are saved under: base64 of 32 random bytes, `{ id, key }`, or a `VaultKeyProvider` that calls your key service. A plain string has the id `default`. |
+| `previousKeys` | Keys, in either form, that still read secrets but never save new ones. Keep the old key here while rotating. |
+
+Each saved secret records the id of the key it was saved under, in `wrappedDek`. A secret is read with that key when it's configured, and otherwise with whichever configured key opens it. Rotating is described in [Secrets](/docs/concepts/secrets#rotating-the-master-key).
+
+A key in a key service (example in [Secrets](/docs/concepts/secrets#a-master-key-in-a-key-service)):
+
+<auto-type-table path="../../../../../packages/core/src/vault.ts" name="VaultKeyProvider" />
+
+<auto-type-table path="../../../../../packages/core/src/vault.ts" name="VaultKeyBinding" />
+
+A record whose key id isn't configured is tried against the keys held here, never against a key service.
+
+`deriveMasterKey(passphrase, { salt, cost? })` from `@intentface/latch-core/node` derives a key from a passphrase (Node only). `salt` must be stable for the deployment. `cost` is scrypt's N, a power of two from `2 ** 14` (the default, kept so existing keys don't change) to `2 ** 20`; use `2 ** 17` for a new deployment. A different cost gives a different key.
 
 ## Methods
 
@@ -25,8 +43,8 @@ const vault = createVault<Principal>({
 
 `createPostgresSecretStore(db, { owner })` and `createSqliteSecretStore(db, { owner })` keep the encrypted records in `latch_secrets`. `owner(principal, key?)` returns the owner's segments, and receives the secret's key so different kinds of secret can belong to different owners. `list` has no key to pass, so it lists the owner `owner(principal)` gives without one.
 
-A store of your own implements:
+They also implement `ownerKeyOf`, `scan` and `replaceWrap`, so secrets are tied to their owner and `vault.rotate()` works. A store of your own implements:
 
 <auto-type-table path="../../../../../packages/core/src/vault.ts" name="SecretStore" />
 
-It only ever handles encrypted records; values are encrypted and decrypted in `createVault`.
+It only ever handles encrypted records; values are encrypted and decrypted in `createVault`. Without `ownerKeyOf`, secrets are tied to their name only, so a record copied into another owner's row would still open there. Without `scan` and `replaceWrap`, `rotate()` throws `UnsupportedOperationError`.

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import { encodeOwnerKey, type SecretRecord, type SecretStore } from "@intentface/latch-core";
 import { deleteBatch, underOwnerPath } from "./owner-path.js";
 
@@ -104,6 +104,28 @@ export function makeSecretStore<P>(
         .from(s.secrets)
         .where(eq(s.secrets.owner, ownerKey(principal)));
       return rows.map((r: any) => r.key);
+    },
+
+    ownerKeyOf: (principal, key) => ownerKey(principal, key),
+
+    async scan({ after, limit }) {
+      const rows = await db
+        .select()
+        .from(s.secrets)
+        .where(after === undefined ? undefined : gt(s.secrets.id, after))
+        .orderBy(asc(s.secrets.id))
+        .limit(limit);
+      const records = rows.map((r: any) => ({ ...rowToRecord(r), owner: r.owner as string }));
+      return { records, next: rows.length === limit ? rows[rows.length - 1].id : undefined };
+    },
+
+    async replaceWrap(owner, key, wrap, expectedWrappedDek) {
+      const updated = await db
+        .update(s.secrets)
+        .set({ wrappedDek: wrap.wrappedDek, dekIv: wrap.dekIv })
+        .where(and(eq(s.secrets.id, secretId(owner, key)), eq(s.secrets.wrappedDek, expectedWrappedDek)))
+        .returning({ id: s.secrets.id });
+      return updated.length > 0;
     },
 
     async purgeOwner(segments, opts) {
