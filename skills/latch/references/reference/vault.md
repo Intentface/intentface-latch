@@ -49,13 +49,15 @@ A record whose key id isn't configured is tried against the keys held here, neve
 
 | Option | Type | Description |
 | --- | --- | --- |
+| `rotate` | `(opts?: { batchSize?: number; }) => Promise<{ checked: number; rewrapped: number; remaining: number; errors: { owner: string; key: string; error: unknown; }[]; }>` | Re-wraps every secret not yet under the current master key (and binding) onto it. Values aren't re-encrypted, so it's quick. Run it after adding a new `masterKey` with the old one in `previousKeys`; when it reports `remaining: 0`, nothing needs the old keys any more and you can remove them. Safe to run again or stop part-way. Needs a store with `scan` and `replaceWrap` (the shipped ones have them); throws `UnsupportedOperationError` otherwise. |
 | `set` | `(principal: P, key: string, value: string) => Promise<void>` | Saves a secret, encrypted, replacing any value under that key. This is also how you rotate one. |
 | `get` | `(principal: P, key: string) => Promise<string \| undefined>` | The secret's value, or `undefined` if there is none. Use it in your server code and tools; never return it to the model or the browser. |
 | `has` | `(principal: P, key: string) => Promise<boolean>` | Whether a secret is set, without decrypting it. For a settings page's "connected" state. |
 | `delete` | `(principal: P, key: string) => Promise<void>` | Removes a secret. Nothing that used it can read it afterwards. |
 | `list` | `(principal: P) => Promise<string[]>` | The keys set for this owner. Names only, never values. |
 | `resolver` | `SecretResolver<P>` | `get` as a function, for what takes a resolver: `createMcpConnections({ secrets: vault.resolver })`. |
-| `rotate` | `(opts?: { batchSize?: number; }) => Promise<{ checked: number; rewrapped: number; remaining: number; errors: { owner: string; key: string; error: unknown; }[]; }>` | Re-wraps every secret not yet under the current master key (and binding) onto it. Values aren't re-encrypted, so it's quick. Run it after adding a new `masterKey` with the old one in `previousKeys`; when it reports `remaining: 0`, nothing needs the old keys any more and you can remove them. Safe to run again or stop part-way. Needs a store with `scan` and `replaceWrap` (the shipped ones have them); throws `UnsupportedOperationError` otherwise. |
+
+`createVault` returns a `RotatableVault`. Tools and connections take a `Vault`, the same without `rotate`, so a wrapper of your own around a vault doesn't need to implement it.
 
 ## Secret store
 

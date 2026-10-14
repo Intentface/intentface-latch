@@ -37,7 +37,9 @@ A record whose key id isn't configured is tried against the keys held here, neve
 
 ## Methods
 
-<auto-type-table path="../../../../../packages/core/src/vault.ts" name="Vault" />
+<auto-type-table path="../../../../../packages/core/src/vault.ts" name="RotatableVault" />
+
+`createVault` returns a `RotatableVault`. Tools and connections take a `Vault`, the same without `rotate`, so a wrapper of your own around a vault doesn't need to implement it.
 
 ## Secret store
 

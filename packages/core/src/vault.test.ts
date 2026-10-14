@@ -164,6 +164,19 @@ describe("vault.rotate", () => {
     expect(result.errors).toEqual([expect.objectContaining({ owner: "u:alice", key: "a" })]);
   });
 
+  it("reports a record with a malformed wrap, and rotates the rest", async () => {
+    const { store, rows } = memoryStore();
+    const v1 = createVault({ store, masterKey: { id: "k1", key: K1 } });
+    await v1.set(alice, "a", "x");
+    await v1.set(bob, "b", "y");
+    rows.get("u:alice:a")!.wrappedDek = "v2:k1:z:AAAA"; // not a binding the vault writes
+
+    const result = await createVault({ store, masterKey: { id: "k2", key: K2 }, previousKeys: [{ id: "k1", key: K1 }] }).rotate();
+
+    expect(result).toMatchObject({ checked: 2, rewrapped: 1, remaining: 1 });
+    expect(result.errors).toEqual([expect.objectContaining({ owner: "u:alice", key: "a" })]);
+  });
+
   it("refuses with a store that can't list and replace records", async () => {
     const { store } = memoryStore({ full: false });
     const error = await createVault({ store, masterKey: K1 }).rotate().catch((e: unknown) => e);

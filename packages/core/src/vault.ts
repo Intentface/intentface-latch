@@ -145,6 +145,14 @@ export interface Vault<P> {
   list(principal: P): Promise<string[]>;
   /** `get` as a function, for what takes a resolver: `createMcpConnections({ secrets: vault.resolver })`. */
   readonly resolver: SecretResolver<P>;
+}
+
+/**
+ * What `createVault` returns: a `Vault`, and `rotate`, which only your own
+ * admin code needs. Tools and connections take a plain `Vault`, so a wrapper
+ * of your own around one doesn't have to implement it.
+ */
+export interface RotatableVault<P> extends Vault<P> {
   /**
    * Re-wraps every secret not yet under the current master key (and binding)
    * onto it. Values aren't re-encrypted, so it's quick. Run it after adding a
@@ -234,7 +242,7 @@ export function createVault<P>(opts: {
   masterKey: string | VaultKey;
   /** Keys that can still read secrets, but never wrap new ones: the ones you're rotating away from. */
   previousKeys?: VaultKey[];
-}): Vault<P> {
+}): RotatableVault<P> {
   const { store } = opts;
   const current: VaultKey = typeof opts.masterKey === "string" ? { id: "default", key: opts.masterKey } : opts.masterKey;
   const keks = new Map<string, Kek>();
@@ -360,8 +368,8 @@ export function createVault<P>(opts: {
         const page = await store.scan({ after, limit });
         for (const record of page.records) {
           checked++;
-          if (isCurrent(record)) continue;
           try {
+            if (isCurrent(record)) continue;
             const next = await wrap(await unwrap(record, record.owner), record.owner, record.key);
             if (await store.replaceWrap(record.owner, record.key, next, record.wrappedDek)) rewrapped++;
             else remaining++;
