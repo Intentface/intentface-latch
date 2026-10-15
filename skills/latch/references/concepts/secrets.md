@@ -37,7 +37,59 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 > **Keep the master key safe, and keep it**
 >
-> Every secret is encrypted with it. Lose it, or change it, and every stored secret becomes unreadable; there's no built-in way to re-encrypt under a new key yet. On Node, `deriveMasterKey(passphrase, { salt })` from `@intentface/latch-core/node` turns a passphrase into a master key, if that's easier to manage.
+> Every secret is encrypted with it. Lose it, and every secret it encrypted becomes unreadable. To change it, rotate (below) rather than swapping it: a swapped key can't read anything saved before.
+
+On Node, `deriveMasterKey(passphrase, { salt, cost: 2 ** 17 })` from `@intentface/latch-core/node` turns a passphrase into a master key, if that's easier to manage. The salt must stay the same for the deployment. Leave out `cost` only for a deployment that already derives its key without it: a different cost gives a different key.
+
+### Rotating the master key
+
+Rotate when someone who had the key leaves, when it may have leaked, or on a schedule. Give the new key an id, and keep the old one readable while secrets move over:
+
+```ts title="lib/vault.ts"
+export const vault = createVault<Principal>({
+  store,
+  masterKey: { id: "2026-10", key: process.env.LATCH_VAULT_KEY! },
+  previousKeys: [{ id: "default", key: process.env.LATCH_VAULT_KEY_OLD! }],
+});
+```
+
+A plain string key has the id `default`, so that's the old key's id the first time. From then on, new and updated secrets are saved under the new key, and secrets under the old one still read. Then, from a script or an admin route, once the new config is deployed everywhere:
+
+```ts
+const { rewrapped, remaining, errors } = await vault.rotate();
+```
+
+It moves every secret onto the new key. Only each secret's own small data key is re-encrypted, never the values, so it's quick even with many secrets, and safe to run again or stop part-way. Run it only once every instance is on the new config: an instance still on the old one keeps saving secrets under the old key, including ones `rotate()` has already passed, and `remaining` can't count those. With every instance on the new config, `remaining: 0` means nothing needs the old key any more: remove it from `previousKeys` and from your environment. A secret saved while it ran can count in `remaining`; run it again. A secret that no configured key opens is listed in `errors` and left as it is.
+
+### A master key in a key service
+
+To keep the master key out of your app altogether, in AWS KMS, Google Cloud KMS, HashiCorp Vault or your own HSM, give the vault a key it calls instead of one it holds: an id, and functions that wrap and unwrap a secret's data key through your service. Here, AWS KMS:
+
+```ts title="lib/vault.ts"
+import { DecryptCommand, EncryptCommand, KMSClient } from "@aws-sdk/client-kms";
+import { createVault, type VaultKeyProvider } from "@intentface/latch-core";
+
+const kms = new KMSClient({});
+const KeyId = process.env.VAULT_KMS_KEY_ARN!;
+
+const awsKms: VaultKeyProvider = {
+  id: "kms-1",
+  async wrap(dataKey, { context }) {
+    const out = await kms.send(new EncryptCommand({ KeyId, Plaintext: dataKey, EncryptionContext: context }));
+    return out.CiphertextBlob!;
+  },
+  async unwrap(wrapped, { context }) {
+    const out = await kms.send(new DecryptCommand({ KeyId, CiphertextBlob: wrapped, EncryptionContext: context }));
+    return out.Plaintext!;
+  },
+};
+
+export const vault = createVault<Principal>({ store, masterKey: awsKms });
+```
+
+`context` names the secret and, with the shipped stores, its owner. Pass it on, as the encryption context or, for services that take bytes (Google Cloud KMS's `additionalAuthenticatedData`), as `aad`, so the service refuses a secret copied into another owner's row. Each `get` and `set` makes one call to the service. To move existing secrets over, put your current key in `previousKeys` and run `vault.rotate()`, as above.
+
+Each secret is also tied to the row it's saved in, its owner and its name: a record copied into another owner's row doesn't decrypt there. (With a store of your own, that takes `ownerKeyOf`; without it, secrets are tied to their name only.) Secrets saved before 0.21 aren't tied yet: `rotate()` ties them as it moves them, and running it once without a new key ties them where they are. Once a deployment saves secrets with 0.21, an older version can't read those, so don't roll back past it.
 
 ## Put secrets in
 
@@ -124,7 +176,7 @@ Either way the token goes from the vault to the request, and never into the conv
 | A tool returning the raw response, headers included | The model can see, and repeat, whatever came back | Return only the fields the model needs |
 | Reading the key in your route and passing it along | It isn't there when an answer continues, and it travels further than needed | Read it in the tool from the restored principal |
 | The master key in the database or the repo | Encryption protects nothing | An environment variable or a key manager |
-| Rotating the master key like an API key | Every stored secret becomes unreadable | Keep it stable; rotate customers' keys with `vault.set` |
+| Swapping the master key like an API key | Every secret saved under the old key becomes unreadable | [Rotate it](#rotating-the-master-key): the new key with an id, the old one in `previousKeys`, then `vault.rotate()` |
 
 ## Go deeper
 

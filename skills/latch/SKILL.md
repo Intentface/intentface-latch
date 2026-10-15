@@ -316,8 +316,14 @@ Read [Principal, context and params](references/concepts/inputs.md).
 - **Token and cost limits can be overrun.** Request limits (`turns`) hold
   exactly; token and cost caps are checked against what's already recorded, so
   answers still running can go past them. Leave a margin.
-- **The vault's master key can't be rotated yet.** Lose or change it and every
-  stored secret is unreadable.
+- **Never swap the vault's master key; rotate it.** A swapped key reads nothing
+  saved before. Give the new key an id, keep the old one in `previousKeys`, deploy
+  that everywhere, then run `vault.rotate()` until `remaining: 0` and drop the old
+  key. Rotating while an instance still has the old config leaves the secrets it
+  saves on the old key, unseen by `remaining`. Lose a key that
+  secrets are still under and they're unreadable. To use AWS KMS, Google Cloud
+  KMS or HashiCorp Vault, implement a `VaultKeyProvider`; don't fetch the key out
+  of the service.
 - **Memory is experimental.** `memory` options and `@intentface/latch-memory`
   may change in any release; don't build on them unless asked.
 
