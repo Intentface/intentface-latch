@@ -155,10 +155,11 @@ export interface Vault<P> {
 export interface RotatableVault<P> extends Vault<P> {
   /**
    * Re-wraps every secret not yet under the current master key (and binding)
-   * onto it. Values aren't re-encrypted, so it's quick. Run it after adding a
-   * new `masterKey` with the old one in `previousKeys`; when it reports
-   * `remaining: 0`, nothing needs the old keys any more and you can remove
-   * them. Safe to run again or stop part-way. Needs a store with `scan` and
+   * onto it. Values aren't re-encrypted, so it's quick. Run it once every
+   * instance has the new `masterKey` with the old one in `previousKeys`: an
+   * instance still on the old config saves under the old key, even secrets
+   * this has passed. Then, when it reports `remaining: 0`, nothing needs the
+   * old keys any more and you can remove them. Safe to run again or stop part-way. Needs a store with `scan` and
    * `replaceWrap` (the shipped ones have them); throws
    * `UnsupportedOperationError` otherwise.
    */

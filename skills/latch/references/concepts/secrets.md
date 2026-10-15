@@ -59,7 +59,7 @@ A plain string key has the id `default`, so that's the old key's id the first ti
 const { rewrapped, remaining, errors } = await vault.rotate();
 ```
 
-It moves every secret onto the new key. Only each secret's own small data key is re-encrypted, never the values, so it's quick even with many secrets, and safe to run again or stop part-way. When it reports `remaining: 0`, nothing needs the old key any more: remove it from `previousKeys` and from your environment. A secret saved by an instance still on the old config while it ran counts in `remaining`; run it again. A secret that no configured key opens is listed in `errors` and left as it is.
+It moves every secret onto the new key. Only each secret's own small data key is re-encrypted, never the values, so it's quick even with many secrets, and safe to run again or stop part-way. Run it only once every instance is on the new config: an instance still on the old one keeps saving secrets under the old key, including ones `rotate()` has already passed, and `remaining` can't count those. With every instance on the new config, `remaining: 0` means nothing needs the old key any more: remove it from `previousKeys` and from your environment. A secret saved while it ran can count in `remaining`; run it again. A secret that no configured key opens is listed in `errors` and left as it is.
 
 ### A master key in a key service
 
@@ -87,9 +87,9 @@ const awsKms: VaultKeyProvider = {
 export const vault = createVault<Principal>({ store, masterKey: awsKms });
 ```
 
-`context` names the secret and its owner. Pass it on, as the encryption context or, for services that take bytes (Google Cloud KMS's `additionalAuthenticatedData`), as `aad`, so the service refuses a secret copied into another owner's row. Each `get` and `set` makes one call to the service. To move existing secrets over, put your current key in `previousKeys` and run `vault.rotate()`, as above.
+`context` names the secret and, with the shipped stores, its owner. Pass it on, as the encryption context or, for services that take bytes (Google Cloud KMS's `additionalAuthenticatedData`), as `aad`, so the service refuses a secret copied into another owner's row. Each `get` and `set` makes one call to the service. To move existing secrets over, put your current key in `previousKeys` and run `vault.rotate()`, as above.
 
-Each secret is also tied to the row it's saved in, its owner and its name: a record copied into another owner's row doesn't decrypt there. Secrets saved before 0.21 aren't tied yet: `rotate()` ties them as it moves them, and running it once without a new key ties them where they are. Once a deployment saves secrets with 0.21, an older version can't read those, so don't roll back past it.
+Each secret is also tied to the row it's saved in, its owner and its name: a record copied into another owner's row doesn't decrypt there. (With a store of your own, that takes `ownerKeyOf`; without it, secrets are tied to their name only.) Secrets saved before 0.21 aren't tied yet: `rotate()` ties them as it moves them, and running it once without a new key ties them where they are. Once a deployment saves secrets with 0.21, an older version can't read those, so don't roll back past it.
 
 ## Put secrets in
 

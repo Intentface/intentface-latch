@@ -317,8 +317,10 @@ Read [Principal, context and params](references/concepts/inputs.md).
   exactly; token and cost caps are checked against what's already recorded, so
   answers still running can go past them. Leave a margin.
 - **Never swap the vault's master key; rotate it.** A swapped key reads nothing
-  saved before. Give the new key an id, keep the old one in `previousKeys`, run
-  `vault.rotate()` until `remaining: 0`, then drop the old key. Lose a key that
+  saved before. Give the new key an id, keep the old one in `previousKeys`, deploy
+  that everywhere, then run `vault.rotate()` until `remaining: 0` and drop the old
+  key. Rotating while an instance still has the old config leaves the secrets it
+  saves on the old key, unseen by `remaining`. Lose a key that
   secrets are still under and they're unreadable. To use AWS KMS, Google Cloud
   KMS or HashiCorp Vault, implement a `VaultKeyProvider`; don't fetch the key out
   of the service.

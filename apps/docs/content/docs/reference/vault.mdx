@@ -23,7 +23,7 @@ const vault = createVault<Principal>({
 | `masterKey` | The key new secrets are saved under: base64 of 32 random bytes, `{ id, key }`, or a `VaultKeyProvider` that calls your key service. A plain string has the id `default`. |
 | `previousKeys` | Keys, in either form, that still read secrets but never save new ones. Keep the old key here while rotating. |
 
-Each saved secret records the id of the key it was saved under, in `wrappedDek`. A secret is read with that key when it's configured, and otherwise with whichever configured key opens it. Rotating is described in [Secrets](/docs/concepts/secrets#rotating-the-master-key).
+Each saved secret records the id of the key it was saved under, in `wrappedDek`. A secret is read with that key when it's configured, and otherwise with whichever configured key held here (not a key service) opens it. Rotating is described in [Secrets](/docs/concepts/secrets#rotating-the-master-key).
 
 A key in a key service (example in [Secrets](/docs/concepts/secrets#a-master-key-in-a-key-service)):
 

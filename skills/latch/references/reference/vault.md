@@ -26,7 +26,7 @@ const vault = createVault<Principal>({
 | `masterKey` | The key new secrets are saved under: base64 of 32 random bytes, `{ id, key }`, or a `VaultKeyProvider` that calls your key service. A plain string has the id `default`. |
 | `previousKeys` | Keys, in either form, that still read secrets but never save new ones. Keep the old key here while rotating. |
 
-Each saved secret records the id of the key it was saved under, in `wrappedDek`. A secret is read with that key when it's configured, and otherwise with whichever configured key opens it. Rotating is described in [Secrets](../concepts/secrets.md#rotating-the-master-key).
+Each saved secret records the id of the key it was saved under, in `wrappedDek`. A secret is read with that key when it's configured, and otherwise with whichever configured key held here (not a key service) opens it. Rotating is described in [Secrets](../concepts/secrets.md#rotating-the-master-key).
 
 A key in a key service (example in [Secrets](../concepts/secrets.md#a-master-key-in-a-key-service)):
 
@@ -49,7 +49,7 @@ A record whose key id isn't configured is tried against the keys held here, neve
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `rotate` | `(opts?: { batchSize?: number; }) => Promise<{ checked: number; rewrapped: number; remaining: number; errors: { owner: string; key: string; error: unknown; }[]; }>` | Re-wraps every secret not yet under the current master key (and binding) onto it. Values aren't re-encrypted, so it's quick. Run it after adding a new `masterKey` with the old one in `previousKeys`; when it reports `remaining: 0`, nothing needs the old keys any more and you can remove them. Safe to run again or stop part-way. Needs a store with `scan` and `replaceWrap` (the shipped ones have them); throws `UnsupportedOperationError` otherwise. |
+| `rotate` | `(opts?: { batchSize?: number; }) => Promise<{ checked: number; rewrapped: number; remaining: number; errors: { owner: string; key: string; error: unknown; }[]; }>` | Re-wraps every secret not yet under the current master key (and binding) onto it. Values aren't re-encrypted, so it's quick. Run it once every instance has the new `masterKey` with the old one in `previousKeys`: an instance still on the old config saves under the old key, even secrets this has passed. Then, when it reports `remaining: 0`, nothing needs the old keys any more and you can remove them. Safe to run again or stop part-way. Needs a store with `scan` and `replaceWrap` (the shipped ones have them); throws `UnsupportedOperationError` otherwise. |
 | `set` | `(principal: P, key: string, value: string) => Promise<void>` | Saves a secret, encrypted, replacing any value under that key. This is also how you rotate one. |
 | `get` | `(principal: P, key: string) => Promise<string \| undefined>` | The secret's value, or `undefined` if there is none. Use it in your server code and tools; never return it to the model or the browser. |
 | `has` | `(principal: P, key: string) => Promise<boolean>` | Whether a secret is set, without decrypting it. For a settings page's "connected" state. |
