@@ -110,12 +110,12 @@ jobs:
       #   npx skills add https://github.com/Intentface/intentface-latch/tree/v0.20.0/skills/latch
       # The per-package tags (`@intentface/latch-core@0.20.0`) contain a `/`,
       # which a tree URL can't hold. Versions are fixed across the packages,
-      # so latch-core's is the release's.
+      # so latch-core's is the release's. Read from the package itself: on the
+      # 0.21.0 run `publishedPackages` came back empty though `published` was
+      # true, and parsing it failed the job after a good publish.
       - if: steps.changesets.outputs.published == 'true'
-        env:
-          PUBLISHED: ${{ steps.changesets.outputs.publishedPackages }}
         run: |
-          version=$(node -e 'const p = JSON.parse(process.env.PUBLISHED).find((p) => p.name === "@intentface/latch-core"); if (p) console.log(p.version)')
+          version=$(node -p 'require("./packages/core/package.json").version')
           if [ -n "$version" ] && ! git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
             git tag "v$version"
             git push origin "refs/tags/v$version"
