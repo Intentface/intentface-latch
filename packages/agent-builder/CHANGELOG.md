@@ -1,5 +1,12 @@
 # @intentface/latch-agent-builder
 
+## 0.21.0
+
+### Patch Changes
+
+- Updated dependencies [c69e6cd]
+  - @intentface/latch-core@0.21.0
+
 ## 0.20.0
 
 ### Minor Changes
