@@ -1,9 +1,0 @@
-{
-  "services": {
-    "render": {
-      "root": ".",
-      "entrypoint": "Dockerfile.vercel"
-    }
-  },
-  "rewrites": [{ "source": "/(.*)", "destination": { "service": "render" } }]
-}

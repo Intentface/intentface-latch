@@ -1,9 +1,0 @@
-import { createAuthClient } from "better-auth/react";
-import { organizationClient } from "better-auth/client/plugins";
-
-/** Browser auth client. Same-origin (no baseURL) → calls /api/auth/*. */
-export const authClient = createAuthClient({
-  plugins: [organizationClient()],
-});
-
-export const { signIn, signUp, signOut, useSession, organization } = authClient;
