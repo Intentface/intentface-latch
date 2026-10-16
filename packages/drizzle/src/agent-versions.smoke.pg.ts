@@ -42,7 +42,6 @@ async function newEnv(): Promise<AgentVersionsEnv<P>> {
         tools: null,
         exec: row.exec,
         subagents: null,
-        attachedEvals: null,
         maxSteps: row.maxSteps,
         scope: "user",
         createdAt: row.createdAt,

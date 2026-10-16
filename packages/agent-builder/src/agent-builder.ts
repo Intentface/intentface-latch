@@ -20,8 +20,8 @@ import { sharedReadTools } from "./shared-read-tools.js";
  * confirms the exact spec before it persists.
  *
  * The core is host-agnostic: models, connections, storage, and the runtime
- * arrive through `AgentBuilderConfig.deps`; optional feature sets (evals,
- * tool authoring) arrive as `extensions`.
+ * arrive through `AgentBuilderConfig.deps`; optional feature sets (tool
+ * authoring, connections) arrive as `extensions`.
  */
 
 const SCOPE = AgentScopeSchema;
@@ -114,7 +114,7 @@ export interface AgentBuilderConfig<P, RuntimeContext = unknown> {
    * own via an extension. delete_agent's schedule cascade runs either way.
    */
   scheduling?: boolean;
-  /** Optional feature sets: evals, tool authoring, … */
+  /** Optional feature sets: tool authoring, connections, … */
   extensions?: AgentBuilderExtension<P>[];
   /**
    * Interval (ms) for test_agent's progress heartbeat data part
@@ -267,7 +267,7 @@ async function builderTools<P>(
 
   return {
     // get_agent / list_connection_tools — shared with delegate agents (e.g.
-    // an eval author) so the implementations can't drift.
+    // a reviewer) so the implementations can't drift.
     ...sharedReadTools(principal, { store, connectionTools }),
 
     list_agents: tool({
@@ -398,16 +398,15 @@ async function builderTools<P>(
           };
         }
         // The builder speaks the record's model-facing fields. Per-tool
-        // selections (`tools`) and attached evals are managed by other
-        // surfaces (an editor, an evals feature) — carry them over when the
-        // input doesn't mention them, so a save never silently detaches them.
+        // selections (`tools`) are managed by another surface (an editor) —
+        // carry them over when the input doesn't mention them, so a save
+        // never silently detaches them.
         // Pinned to the record's own scope: a same-named agent in the other
         // scope must not donate its state.
         const existing = await store.getRecord(principal, `${rec.scope}:${name}`);
         const merged: AgentRecord = {
           ...rec,
           tools: rec.tools ?? existing?.tools,
-          attachedEvals: rec.attachedEvals ?? existing?.attachedEvals,
         };
         // Extension vetoes (e.g. tool-authoring existence + org-scope rules).
         for (const ext of extensions) {
@@ -575,8 +574,7 @@ async function builderTools<P>(
         // turn — minutes for a web-heavy agent. Emit a small heartbeat data
         // part on an interval: it keeps idle-timeout proxies from killing
         // the chat stream, and gives the user live progress instead of dead
-        // air. Reconciled in place by id (one part, updated), like
-        // a host's eval progress card.
+        // air. Reconciled in place by id (one part, updated).
         const env = (options ?? {}) as {
           toolCallId?: string;
           context?: { writer?: TurnWriter };

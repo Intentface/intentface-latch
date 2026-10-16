@@ -143,6 +143,8 @@ const ALTERS = [
   `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'`,
   `ALTER TABLE latch_chats ADD COLUMN IF NOT EXISTS parent_agent TEXT`,
   `ALTER TABLE latch_memory_chat_state ADD COLUMN IF NOT EXISTS last_extracted_key TEXT`,
+  // attached_evals: unused since 0.22 (evals left latch). Kept so existing
+  // databases and the version backfill below stay valid.
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS attached_evals JSONB`,
   `ALTER TABLE latch_agents ADD COLUMN IF NOT EXISTS published_version INTEGER`,
   `ALTER TABLE latch_runs ADD COLUMN IF NOT EXISTS agent_version INTEGER`,

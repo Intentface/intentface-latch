@@ -3,8 +3,8 @@ import { z } from "zod";
 import type { AgentBuilderStore } from "./store.js";
 
 /**
- * Read-only discovery tools the builder shares with delegate agents (e.g. an
- * eval author) — one implementation so the two can't drift. All are bound to
+ * Read-only discovery tools the builder shares with delegate agents (e.g. a
+ * reviewer) — one implementation so the two can't drift. All are bound to
  * the chatting user's principal; none mutate anything.
  */
 

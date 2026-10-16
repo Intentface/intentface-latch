@@ -4,7 +4,7 @@ import type { AgentRecord } from "./record.js";
  * The extension seam.
  *
  * The builder core is agent CRUD + discovery + test_agent. Anything beyond
- * that — evals, tool authoring, connections, memory schemas, whatever a host
+ * that — tool authoring, connections, memory schemas, whatever a host
  * grows next — plugs in here instead of being compiled into the core, so hosts
  * without the feature get a builder that simply never mentions it. An
  * extension contributes:
@@ -12,7 +12,7 @@ import type { AgentRecord } from "./record.js";
  *  - tools:            merged into the builder's toolset (name-collision =
  *                      extension wins; keep names distinct).
  *  - promptSections:   appended verbatim to the builder's instructions.
- *  - subagents:        delegate agents (e.g. "eval-author"). Subagents run
+ *  - subagents:        delegate agents (e.g. "reviewer"). Subagents run
  *                      autonomously; if the host auto-approves subagent tools
  *                      or the extension's flows must never mutate state, keep
  *                      the subagent READ-ONLY — persisting writes belong on
@@ -22,13 +22,13 @@ import type { AgentRecord } from "./record.js";
  *  - validateSave:     veto a save_agent record (return an error string).
  *  - decorate*Result:  append guidance to save_agent / test_agent results —
  *                      the model acts on tool results far more reliably than
- *                      on distant prompt instructions (e.g. eval nudges).
+ *                      on distant prompt instructions (e.g. a next-step nudge).
  */
 
 type MaybePromise<T> = T | Promise<T>;
 
 export interface AgentBuilderExtension<P> {
-  /** Short id for diagnostics (e.g. "evals", "tool-authoring"). */
+  /** Short id for diagnostics (e.g. "tool-authoring"). */
   name: string;
   /** Extra tools bound to the chatting user's principal. */
   tools?: (principal: P) => MaybePromise<Record<string, unknown>>;
@@ -52,7 +52,7 @@ export interface AgentBuilderExtension<P> {
    * persisted; runs after the core validations.
    */
   validateSave?: (principal: P, record: AgentRecord) => MaybePromise<string | undefined>;
-  /** Amend the save_agent success result (e.g. append an eval nudge to `note`). */
+  /** Amend the save_agent success result (e.g. append a next-step nudge to `note`). */
   decorateSaveResult?: (
     principal: P,
     agentName: string,

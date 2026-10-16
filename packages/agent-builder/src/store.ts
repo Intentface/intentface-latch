@@ -11,7 +11,7 @@ import type { AgentRecord, AgentScope } from "./record.js";
  * `AgentConfig` a code-declared agent would.
  */
 
-export type { AgentRecord, AgentScope, AttachedEval, AgentRecordInput } from "./record.js";
+export type { AgentRecord, AgentScope, AgentRecordInput } from "./record.js";
 export { isCandidateId, normalizeAgentName, parseAgentRef } from "./record.js";
 export type { AgentRefAt } from "./record.js";
 
