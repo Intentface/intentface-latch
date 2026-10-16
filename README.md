@@ -124,13 +124,11 @@ More in [Build with AI](https://intentface-latch-docs.vercel.app/docs/build-with
 @intentface/latch-agent-builder  agent records as data + the builder agent
 @intentface/latch-langfuse       tracing (Langfuse over OpenTelemetry)
 @intentface/latch-net            SSRF-safe fetch for your own code
-@intentface/latch-renderer       headless-browser fetch service (private, deployed
-                                 not published)
 
 apps/example                 runnable example + the smoke-test suite (not published)
 ```
 
-Minimal install = **core + drizzle** (+ server if standalone). Everything else is opt-in. Packages publish to npm as `@intentface/latch-*`, every published package at the same version (`latch-renderer` is private and stays out). See [RELEASING.md](RELEASING.md).
+Minimal install = **core + drizzle** (+ server if standalone). Everything else is opt-in. Packages publish to npm as `@intentface/latch-*`, every package at the same version. See [RELEASING.md](RELEASING.md).
 
 ---
 
@@ -142,7 +140,7 @@ Minimal install = **core + drizzle** (+ server if standalone). Everything else i
 
 **Also working:** subagents (`spawn_agent`, each in its own persisted thread; approvals surface to the parent), compaction (`runtime.compactChat`, projection-only — the record is never rewritten), a sandbox seam with the harness tools, code execution in a QuickJS engine, OpenAPI tools, per org/user/agent limits, agents as data, and the models.dev catalog for pricing, reasoning and prompt caching.
 
-**Not built:** files & attachments as a seam (`FileStore`), MCP elicitation, a CLI, a reusable evals package (the platform app has an eval runner; nothing is published), and observability beyond the Langfuse/OpenTelemetry exporter. See [`PLAN.md`](./PLAN.md).
+**Not built:** files & attachments as a seam (`FileStore`), MCP elicitation, a CLI, and observability beyond the Langfuse/OpenTelemetry exporter. See [`PLAN.md`](./PLAN.md).
 
 Pre-1.0 on purpose, on AI SDK v7 (`ai >= 7` as a peer). Public API may still move; releases are patch-level until it settles.
 

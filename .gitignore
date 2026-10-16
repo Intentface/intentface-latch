@@ -35,10 +35,6 @@ pnpm-debug.log*
 .claude/settings.local.json
 .claude/skills/*
 .agents/skills/
-# repo-local skills are symlinked into .claude/skills and ARE committed
-# (`/*` instead of `/` above — git cannot re-include inside an ignored dir)
-!.claude/skills/latch-telegram-setup
-!.claude/skills/latch-whatsapp-setup
 
 # internal-only (kept locally, never committed)
 STRATEGY.md

@@ -49,7 +49,7 @@ createRuntime({
 });
 ```
 
-The platform's `apps/latch-platform/src/lib/schedule-delivery.ts` is the reference: a Telegram or WhatsApp target replays the prompt into the user's current conversation with that bot through the channel kernel; a Slack target posts an anchor message and runs the turn threaded under it. Return `true` only when you ran *and* delivered — anything else falls back to a fresh chat so a stale target never loses the fire.
+For a Telegram or WhatsApp target, replay the prompt into the user's current conversation with that bot through the channel kernel; for a Slack target, post an anchor message and run the turn threaded under it. Return `true` only when you ran *and* delivered — anything else falls back to a fresh chat so a stale target never loses the fire.
 
 ## Let the agent schedule itself
 
@@ -105,8 +105,7 @@ export const POST = async (request: Request) => {
 ## Run it
 
 ```bash
-pnpm --filter @intentface/latch-example smoke:scheduler          # an interval sweep reaps + resumes a stuck run
-pnpm --filter latch-platform exec vitest run schedule-delivery   # the delivery gate: every refusal has a case
+pnpm --filter @intentface/latch-example smoke:scheduler   # an interval sweep reaps + resumes a stuck run
 ```
 
 ## Next

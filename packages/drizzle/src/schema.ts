@@ -143,7 +143,7 @@ export const usage = sqliteTable(
 /**
  * Builder/editor-created agents (see `@intentface/latch-agent-builder`'s
  * `AgentRecord`). Owner-keyed for org/personal scope; config isn't secret.
- * Same table shape latch-platform's libsql store uses, so hosts can share DBs.
+ * One table shape for every host's agent store, so hosts can share DBs.
  */
 export const agents = sqliteTable(
   "latch_agents",
