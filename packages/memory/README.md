@@ -80,15 +80,13 @@ agent and the platform does all upkeep:
 | `prompts/*` | injection block, extractor/consolidator instructions + prompt builders |
 | `jobs/types` | `MemoryJobStore` (implemented in `@intentface/latch-drizzle`: `createMemoryJobStore`) |
 
-The sweep itself is platform glue (`apps/latch-platform/src/lib/memory/sweep.ts`),
-following the Codex pattern: idle-gated parallel extraction, per-scope
+The sweep itself is host glue, not shipped here. It follows the Codex pattern: idle-gated parallel extraction, per-scope
 lease-serialized consolidation with cooldown + watermark, usage-based expiry
 (default 30 days unrecalled).
 
 ## Wiring it into a host
 
-This package ships the ingredients, not the jobs — a host app (see
-`apps/latch-platform` for the reference implementation of every step) wires:
+This package ships the ingredients, not the jobs — a host app wires:
 
 1. **Tables + job store** — `@intentface/latch-drizzle`'s migrations create
    `latch_memory_chat_state` / `latch_memory_scope_state` / `latch_memory_usage`;
@@ -120,8 +118,8 @@ This package ships the ingredients, not the jobs — a host app (see
    `runtime.runAgent("memory-extractor", …)` under the chat's own reconstructed
    principal → advance the seq watermark; claim dirty scopes past cooldown →
    `runtime.runAgent("memory-consolidator", …)` → clear consumed episodes.
-   Copy `apps/latch-platform/src/lib/memory/sweep.ts` — the always-advance
-   eligibility discipline (no hot loops) and the lease fencing live there.
+   Always advance eligibility, even when a job fails (no hot loops), and
+   fence consolidation with the scope lease.
 5. **Declare memory on agents** — `memory: { scope, connection }` in
    `defineAgent` config or the UI agent record; the connection must be one the
    agent itself declares.

@@ -275,8 +275,8 @@ Before adding a new package to the scope:
   dependency in consumer installs
 - `repository.directory` points at the package (npm renders the source link
   from it, and provenance attestation needs it)
-- `private: true` if it isn't meant to be published — `latch-renderer` is a
-  deployable service, not a library, and is marked private for that reason
+- `private: true` if it isn't meant to be published (the docs site and
+  `apps/example` are, so changesets leaves them out)
 - peer dependency ranges agree with the rest of the scope
 - `publishConfig.registry` is `https://registry.npmjs.org` and
   `publishConfig.access` is `public` — a scoped package defaults to restricted,

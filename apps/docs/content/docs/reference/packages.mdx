@@ -17,7 +17,6 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 | [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
 | [`latch-langfuse`](#latch-langfuse) | tracing |
 | [`latch-net`](#latch-net) | SSRF protection for your own fetches |
-| [`latch-renderer`](#latch-renderer) | a headless browser for page fetches |
 
 ---
 
@@ -181,14 +180,6 @@ Used by `latch-mcp` and `latch-openapi`. Worth importing directly for any fetch 
 import { isBlockedHost } from "@intentface/latch-net";
 import { pinnedFetch } from "@intentface/latch-net/pinned";
 ```
-
-## latch-renderer
-
-**A headless browser as a service.** Unlike the others this is a *deployable server*, not a library — it depends on `playwright`, so it runs as its own process rather than inside your app.
-
-Fetches a page with JavaScript executed and returns structured parts (`text`, `jsonLd`, `links`, `clickables`, `html`) instead of raw markup, so a render costs a fraction of the context a full DOM would. Has its own SSRF guard, since the URLs it visits often come from model output.
-
----
 
 ## Choosing a starting set
 

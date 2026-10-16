@@ -9,9 +9,9 @@ import type { AskSession, Question } from "./types.js";
  * whole `askUser` call in one shot: answers accumulate in an `AskSession` and
  * only the last question emits `completed`.
  *
- * The output is a flat `Record<questionText, answer>` — the exact shape the web
- * composer submits (`apps/latch-platform/src/components/chat.tsx`), including
- * joining multi-select picks with `", "`.
+ * The output is a flat `Record<questionText, answer>` — the same shape a web
+ * chat composer submits for `askUser`, including joining multi-select picks
+ * with `", "`.
  */
 
 export type AskEvent =

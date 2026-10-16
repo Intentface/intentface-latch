@@ -31,9 +31,6 @@ Add the rest as you need the capability:
 | `latch-agent-builder` | agents defined as data, created from your UI |
 | `latch-net` | SSRF blocklist and a rebinding-safe pinned `fetch` |
 
-`latch-renderer` is not in this list on purpose: it's a headless-browser service
-you deploy, not a package you install. See [Packages](https://intentface-latch-docs.vercel.app/docs/reference/packages#latch-renderer).
-
 ## Next
 
 - [Quickstart](./quickstart.md) — the whole backend in one call

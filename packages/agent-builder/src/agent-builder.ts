@@ -576,7 +576,7 @@ async function builderTools<P>(
         // part on an interval: it keeps idle-timeout proxies from killing
         // the chat stream, and gives the user live progress instead of dead
         // air. Reconciled in place by id (one part, updated), like
-        // latch-platform's eval progress card.
+        // a host's eval progress card.
         const env = (options ?? {}) as {
           toolCallId?: string;
           context?: { writer?: TurnWriter };

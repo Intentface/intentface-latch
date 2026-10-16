@@ -29,7 +29,7 @@ Slack keeps its own adapter — its surface is threads, native streaming and tas
 
 ## What you supply
 
-The persistence: which agent a bot serves, the identity links, held messages, delivery dedup — the platform's `channel-store.ts` is the reference, one set of tables for every kind. One turn per chat is **not** yours to guard: core's storage adapter refuses a second live run and the channels render that as "still working". On a custom adapter without that invariant, wire the optional `claimTurn` / `releaseTurn` lease.
+The persistence: which agent a bot serves, the identity links, held messages, delivery dedup. One set of tables can serve every kind of channel. One turn per chat is **not** yours to guard: core's storage adapter refuses a second live run and the channels render that as "still working". On a custom adapter without that invariant, wire the optional `claimTurn` / `releaseTurn` lease.
 
 ## Where this gets hard
 

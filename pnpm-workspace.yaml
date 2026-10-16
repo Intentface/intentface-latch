@@ -2,7 +2,7 @@ packages:
   - "packages/*"
   - "apps/*"
 
-# Native build scripts pnpm should run (resolver used by the TanStack platform app).
+# Native build scripts pnpm should run.
 onlyBuiltDependencies:
   - unrs-resolver
   - esbuild
