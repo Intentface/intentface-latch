@@ -6,7 +6,7 @@ Latch is the connective tissue you'd otherwise write by hand around the AI SDK: 
 
 It starts as thin ergonomics over the AI SDK (define an agent, stream it — runs on any serverless backend, zero infrastructure). When the product needs more, you turn on a database, then durability, then connections — **each step additive, never a rewrite or a data migration.** A weekend prototype and a multi-tenant production platform run the *same* core.
 
-> Why it exists, in one line: stop rebuilding the same agent backend for every product. See [`PHILOSOPHY.md`](./PHILOSOPHY.md) for the *why* and [`PLAN.md`](./PLAN.md) for the *how*.
+> Why it exists, in one line: stop rebuilding the same agent backend for every product. See [`PHILOSOPHY.md`](./PHILOSOPHY.md) for the *why* and [the docs](https://intentface-latch-docs.vercel.app) for the *how*.
 
 ---
 
@@ -140,7 +140,7 @@ Minimal install = **core + drizzle** (+ server if standalone). Everything else i
 
 **Also working:** subagents (`spawn_agent`, each in its own persisted thread; approvals surface to the parent), compaction (`runtime.compactChat`, projection-only — the record is never rewritten), a sandbox seam with the harness tools, code execution in a QuickJS engine, OpenAPI tools, per org/user/agent limits, agents as data, and the models.dev catalog for pricing, reasoning and prompt caching.
 
-**Not built:** files & attachments as a seam (`FileStore`), MCP elicitation, a CLI, and observability beyond OpenTelemetry tracing (`latch-otel`). See [`PLAN.md`](./PLAN.md).
+**Not built:** files & attachments as a seam (`FileStore`), MCP elicitation, a CLI, and observability beyond OpenTelemetry tracing (`latch-otel`).
 
 Pre-1.0 on purpose, on AI SDK v7 (`ai >= 7` as a peer). Public API may still move; releases are patch-level until it settles.
 
@@ -172,4 +172,4 @@ Monorepo: pnpm + Turborepo. Dev uses a `development` export condition so editing
 
 ## License
 
-MIT.
+[Apache-2.0](LICENSE). Releases up to 0.22.0 were published under MIT.

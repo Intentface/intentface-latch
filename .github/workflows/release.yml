@@ -85,12 +85,18 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Tags yes, GitHub Releases no. A tag ties a published version to a
           # commit — how a consumer's bug report is bisected against exactly
-          # what they installed, and what provenance would attest to. A Release
-          # is a notes page nobody outside this private repo can see, and under
-          # lockstep versioning there would be TEN of them per version, each a
-          # slice of the same changelog that already ships in every tarball.
-          # Flip this if the repo goes public and a per-version page is wanted.
+          # what they installed, and what provenance attests to. Under lockstep
+          # versioning there would be TEN Releases per version, each a slice of
+          # the same changelog that already ships in every tarball. Flip this if
+          # a per-version page is wanted.
           create-github-releases: false
+        env:
+          # Sign each tarball against this workflow run: npm shows the
+          # verified badge and links the exact commit. Needs the repository to
+          # be public (npm rejects provenance from private sources, failing
+          # the publish), `id-token: write` above, and `repository.directory`
+          # in every manifest (checked by verify:publish).
+          NPM_CONFIG_PROVENANCE: "true"
         # No npm credential. The publish authenticates through npm's OIDC
         # trusted publishing: this job mints a short-lived identity token
         # (`id-token: write` above) and npm checks it against the publisher
@@ -100,10 +106,6 @@ jobs:
         # This cannot bootstrap itself: npm will not let you authorize a
         # publisher for a package that does not exist, so the first publish of
         # each package was done by hand. See RELEASING.md.
-        #
-        # NOT set: NPM_CONFIG_PROVENANCE. npm rejects provenance from private
-        # source repositories — the publish fails rather than degrading. If
-        # this repository goes public it is one line here.
 
       # One plain `v<version>` tag per release, next to the per-package tags.
       # It's what pins the coding-agent skill to a release:

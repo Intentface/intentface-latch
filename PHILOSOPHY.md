@@ -1,6 +1,6 @@
 # Latch — Philosophy & Core Idea
 
-> The *why*. For the *how*, see [`PLAN.md`](./PLAN.md).
+> The *why*. For the *how*, see [the docs](https://intentface-latch-docs.vercel.app).
 
 ## The problem
 Every time we build an agent product for a customer, we rebuild the same backend from scratch: message persistence, tool-loop agents, per-tenant context and workspaces, MCP wiring, usage/cost tracking, rate limiting, durability so a run survives a crash. It's the same plumbing every time, re-implemented slightly differently, and the interesting product work waits behind it.
@@ -38,13 +38,11 @@ It starts as a thin layer of ergonomics over the AI SDK (define an agent, stream
 - **Isn't (yet)**: a hosted platform. And never: an opinionated auth system, a model gateway you must route through, or a replacement for the AI SDK. It's the connective tissue around the SDK that you'd otherwise write by hand.
 
 ## Future direction: framework → platform
-A hosted platform is a natural later layer, **not a pivot** — and the design is built for it. The framework comes first (and stays open / embeddable), which is the adoption on-ramp; the platform is the same pluggable core with **managed default adapters** (managed event log, executor/queue, file storage, workspaces, MCP gateway) plus a **control plane** (the usage/cost, rate-limit, admin-event, and agent/schedule management we're already building as adapters) and a multi-tenant dashboard + billing.
+A hosted platform is a natural later layer, **not a pivot** — and the design is built for it. The framework comes first (and stays open / embeddable), which is the adoption on-ramp; the platform is the same pluggable core with **managed default adapters** (managed event log, executor/queue, file storage, workspaces, MCP gateway) plus a **control plane** (the usage/cost, rate-limit, admin-event, and agent/schedule management we're already building as adapters) and a multi-tenant dashboard.
 
 Two commitments make this an open-core model, not lock-in:
 - The same core runs **self-hosted** with zero proprietary pieces — customers can always eject.
 - "Hosted" only ever means *we operate the adapters for you*; it never changes the contracts.
-
-The progressive tiers (stateless → persistence → durability) map naturally to a pricing ladder, so adoption and monetization share one architecture.
 
 ## Inspirations (and where we differ)
 - **AI SDK v7** — our foundation; we extend, never fork.
