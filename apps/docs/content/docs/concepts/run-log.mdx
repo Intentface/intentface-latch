@@ -12,7 +12,7 @@ Every turn appends to a log: the user message, the assistant message's parts as 
 - **One turn per conversation.** The storage adapter enforces one active run per chat (a partial unique index). Two tabs, a webhook retry and a scheduled brief arriving mid-conversation all meet the same rule: one runs, the other is told to wait. A crashed turn never blocks its chat — the next message supersedes it, fencing the old worker out.
 - **Cost and audit.** Every tool call with its input, every token priced per model, per tenant, in the same rows — a query, not a reconstruction.
 - **Compaction without loss.** A long conversation gets a summary boundary appended; later turns read from the boundary. Stored history is never rewritten, so nothing is lost and a chat can be compacted again.
-- **Memory and evals.** Idle conversations are extracted into memory, and evals run on real turns, both by reading the log after the fact.
+- **Memory and evaluation.** Idle conversations are extracted into memory, and an evaluator can grade real turns, both by reading the log after the fact.
 
 ## Where the hard parts are
 

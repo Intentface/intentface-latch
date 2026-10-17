@@ -106,6 +106,14 @@ function changedFieldsBetween(
 }
 
 /**
+ * Record fields that no longer exist but older versions, drafts and candidates
+ * still carry. Dropped on read: kept, they'd make an unchanged agent look
+ * changed on its next publish, and fail the builder's strict schema on restore.
+ * `attachedEvals` left with 0.22.
+ */
+const RETIRED_FIELDS = new Set(["attachedEvals"]);
+
+/**
  * A stored version payload back into an `AgentRecord`. Nulls become absent
  * (see `canonicalize`) so a backfilled row and a published one round-trip to
  * the same record. JSON columns arrive parsed from both dialects; a string is
@@ -115,7 +123,7 @@ function recordFromJson(value: unknown): AgentRecord {
   const raw = (typeof value === "string" ? JSON.parse(value) : value) as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   for (const [key, v] of Object.entries(raw ?? {})) {
-    if (v === null || v === undefined) continue;
+    if (v === null || v === undefined || RETIRED_FIELDS.has(key)) continue;
     out[key] = v;
   }
   if (!Array.isArray(out.connections)) out.connections = [];
@@ -172,7 +180,6 @@ interface AgentRow {
   tools: unknown;
   exec: unknown;
   subagents: unknown;
-  attachedEvals: unknown;
   maxSteps: number | null;
   scope: string;
   publishedVersion: number | null;
@@ -323,7 +330,6 @@ function createStore<P>(queries: AgentQueries, opts: AgentStoreOptions<P>): Agen
     tools: (row.tools ?? undefined) as AgentRecord["tools"],
     exec: (row.exec ?? undefined) as AgentRecord["exec"],
     subagents: (row.subagents ?? undefined) as string[] | undefined,
-    attachedEvals: (row.attachedEvals ?? undefined) as AgentRecord["attachedEvals"],
     scope: row.scope as AgentScope,
   });
 
@@ -796,7 +802,6 @@ function upsertValues(row: {
       tools: rec.tools ?? null,
       exec: rec.exec ?? null,
       subagents: rec.subagents?.length ? rec.subagents : null,
-      attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : null,
       maxSteps,
       scope: rec.scope,
       publishedVersion,
@@ -812,7 +817,6 @@ function upsertValues(row: {
       tools: rec.tools ?? null,
       exec: rec.exec ?? null,
       subagents: rec.subagents?.length ? rec.subagents : null,
-      attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : null,
       maxSteps,
       scope: rec.scope,
       publishedVersion,

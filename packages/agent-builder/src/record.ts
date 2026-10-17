@@ -72,21 +72,6 @@ type _MemoryConfigMatchesCore = z.infer<typeof MemoryConfigSchema> extends Memor
 const _memoryConfigMatchesCore: _MemoryConfigMatchesCore = true;
 void _memoryConfigMatchesCore;
 
-/**
- * One judge rubric attached to an agent. `trigger` is a host-defined predicate
- * tree (see the host's eval feature) — opaque here; the host narrows it.
- */
-export const AttachedEvalSchema = z.object({
-  name: z.string().min(1).describe("Kebab-case id — becomes the score name."),
-  prompt: z.string().max(1000).describe("The judging instructions: one observable quality of a good response."),
-  judgeModelId: z.string().optional().describe("Judge model override (default: the host judge model)."),
-  scale: z.enum(["binary", "score"]).default("binary").describe("binary → pass/fail; score → graded 0–1."),
-  enabled: z.boolean().default(true),
-  trigger: z.unknown().optional().describe("When the judge runs — host-defined predicate; absent → every completed turn."),
-  context: z.enum(["turn", "chat", "loop"]).optional().describe("What the judge sees: turn (default), chat, or loop."),
-});
-export type AttachedEval = z.infer<typeof AttachedEvalSchema>;
-
 /** Per-tool selection over the connections' tools. */
 export const AgentToolsSchema = z.object({
   /** Namespaced tool names the model may call (empty → all). */
@@ -150,7 +135,6 @@ export const AgentRecordSchema = z
     tools: AgentToolsSchema.optional(),
     exec: AgentExecSchema.optional(),
     subagents: z.array(z.string()).optional().describe("Names of agents this one may delegate to."),
-    attachedEvals: z.array(AttachedEvalSchema).optional(),
     scope: AgentScopeSchema.describe("'user' (personal) or 'org' (shared). Ask the user — never guess."),
   })
   .superRefine((rec, ctx) => {
@@ -267,7 +251,6 @@ export function normalizeAgentRecord(rec: AgentRecord): AgentRecord {
     description: blankToUndefined(rec.description),
     exec,
     subagents: rec.subagents?.length ? rec.subagents : undefined,
-    attachedEvals: rec.attachedEvals?.length ? rec.attachedEvals : undefined,
   };
 }
 

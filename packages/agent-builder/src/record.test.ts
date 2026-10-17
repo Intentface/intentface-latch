@@ -60,12 +60,8 @@ describe("AgentRecordSchema — shape", () => {
     expect(issues({ ...BASE, exec: { memory: { scope: "agent-user", connection: "" } } })).not.toEqual([]);
   });
 
-  it("attached evals get their defaults", () => {
-    const rec = AgentRecordSchema.parse({
-      ...BASE,
-      attachedEvals: [{ name: "on-topic", prompt: "Stays on topic." }],
-    });
-    expect(rec.attachedEvals?.[0]).toMatchObject({ scale: "binary", enabled: true });
+  it("rejects attachedEvals, retired in 0.22 (stores drop it from old versions on read)", () => {
+    expect(issues({ ...BASE, attachedEvals: [{ name: "on-topic", prompt: "Stays on topic." }] })).not.toEqual([]);
   });
 });
 
@@ -142,12 +138,10 @@ describe("normalizeAgentRecord", () => {
         memory: { scope: "agent-user", connection: "loredex", extractTo: ["agent-user"], schemas: {} },
       },
       subagents: [],
-      attachedEvals: [],
     });
     expect(rec.exec?.memory).toEqual({ scope: "agent-user", connection: "loredex" });
     expect(rec.exec?.authoredTools).toBeUndefined();
     expect(rec.subagents).toBeUndefined();
-    expect(rec.attachedEvals).toBeUndefined();
   });
 
   it("an exec with nothing set becomes absent, and normalization is idempotent", () => {

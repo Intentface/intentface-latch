@@ -29,7 +29,6 @@ async function main() {
     maxSteps: "unlimited",
     exec: { sandbox: true, effort: "low", memory: { scope: "agent-user", connection: "github" } },
     subagents: ["assistant"],
-    attachedEvals: [{ name: "on-topic", prompt: "Stays on topic.", scale: "binary", enabled: true }],
     scope: "user",
   });
   await store.upsert(p, {
@@ -51,7 +50,6 @@ async function main() {
   assert(helper.maxSteps === "unlimited", "maxSteps unlimited round-trips");
   assert(helper.exec?.sandbox === true && helper.exec?.effort === "low", "exec round-trips");
   assert(Array.isArray(helper.connections) && helper.connections[0] === "github", "connections round-trip");
-  assert(helper.attachedEvals?.[0]?.name === "on-topic", "attachedEvals round-trip");
   assert(helper.exec?.memory?.connection === "github", "exec.memory round-trips");
 
   // getRecord: bare name (personal wins), org: pin, user: pin miss

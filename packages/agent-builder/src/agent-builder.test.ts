@@ -526,7 +526,7 @@ describe("scheduling tools", () => {
 });
 
 describe("save_agent carry-over", () => {
-  it("keeps editor-managed tools and attached evals when the input omits them", async () => {
+  it("keeps editor-managed tools when the input omits them", async () => {
     const deps = makeDeps();
     deps.records.push({
       name: "my-agent",
@@ -534,7 +534,6 @@ describe("save_agent carry-over", () => {
       instructions: "v1",
       connections: [],
       tools: { enabled: ["github_search"], approval: { github_search: true } },
-      attachedEvals: [{ name: "on-topic", prompt: "Stays on topic.", scale: "binary", enabled: true }],
       scope: "user",
     });
     const { tools } = await openTools(deps);
@@ -542,7 +541,6 @@ describe("save_agent carry-over", () => {
     expect(res.saved).toBe(true);
     expect(deps.records[0]!.instructions).toBe("v2");
     expect(deps.records[0]!.tools?.enabled).toEqual(["github_search"]);
-    expect(deps.records[0]!.attachedEvals?.[0]?.name).toBe("on-topic");
     // Explicit input still wins.
     await tools.save_agent!.execute({ ...SAVE, tools: { enabled: [], approval: {} } });
     expect(deps.records[0]!.tools).toEqual({ enabled: [], approval: {} });
@@ -555,13 +553,13 @@ describe("save_agent carry-over", () => {
       modelId: "m-1",
       instructions: "org one",
       connections: [],
-      attachedEvals: [{ name: "org-only", prompt: "x", scale: "binary", enabled: true }],
+      tools: { enabled: ["org_only"], approval: {} },
       scope: "org",
     });
     const { tools } = await openTools(deps);
     await tools.save_agent!.execute(SAVE); // scope: user
     const personal = deps.records.find((r) => r.scope === "user")!;
-    expect(personal.attachedEvals).toBeUndefined();
+    expect(personal.tools).toBeUndefined();
   });
 });
 
