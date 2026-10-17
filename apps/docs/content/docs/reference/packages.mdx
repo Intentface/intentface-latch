@@ -15,7 +15,7 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 | [`latch-memory`](#latch-memory) | agents that remember across sessions (**experimental**) |
 | [`latch-channels`](#latch-channels) | Slack, Telegram, WhatsApp |
 | [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
-| [`latch-langfuse`](#latch-langfuse) | tracing |
+| [`latch-otel`](#latch-otel) | tracing over OpenTelemetry, Langfuse included |
 | [`latch-net`](#latch-net) | SSRF protection for your own fetches |
 
 ---
@@ -158,17 +158,25 @@ A record carries the model, instructions, connections, per-tool selection and ap
 
 Key exports: `createAgentBuilder` · `normalizeAgentName` · `sharedReadTools` · the `AgentBuilderExtension` seam for host-specific builder tools.
 
-## latch-langfuse
+## latch-otel
 
-**Tracing over standard OpenTelemetry.** One trace per run, its id derived deterministically from the run id, tagged by owner and agent. Implements core's `telemetry` seam; omit the seam and nothing is traced, at zero cost.
+**Tracing over OpenTelemetry, to any backend.** One trace per run, its id derived from the run id (`traceIdForRun`), with the AI SDK's own spans under it in the GenAI semantic conventions: each step, each model call with its messages and token usage, each tool call with its arguments and result. Every span carries the session (the conversation), the user and the run, so the backend can filter on them. Implements core's `telemetry` seam; omit it and nothing is traced, at zero cost.
 
 ```ts
-import { langfuseTelemetry } from "@intentface/latch-langfuse";
+import { otelTelemetry } from "@intentface/latch-otel";
+import { langfuse } from "@intentface/latch-otel/langfuse";
 
-createRuntime({ telemetry: langfuseTelemetry({ ownerTag: (p) => p.orgId }) });
+createRuntime({
+  telemetry: otelTelemetry({
+    user: (p) => p.orgId,
+    export: langfuse(), // or leave out: OTLP to OTEL_EXPORTER_OTLP_ENDPOINT
+  }),
+});
 ```
 
-Also exposes `postScore` for writing evaluation scores back onto a run's trace.
+`langfuse()` reads `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` and adds what Langfuse shows: the trace name, session, user, tags (`agent:`, `run:`, `agent-version:` …) and environment. Without a preset, spans go over OTLP to whatever `OTEL_EXPORTER_OTLP_ENDPOINT` points at (Grafana, Honeycomb, Datadog, Jaeger), or pass your own `SpanExporter`. It runs its own tracer provider, so it doesn't replace one your app has. Install `@ai-sdk/otel` at the version matching your `ai`.
+
+Replaces `@intentface/latch-langfuse`, which also read traces and wrote scores back; that's left to your app or an evaluation tool.
 
 ## latch-net
 
@@ -209,7 +217,7 @@ pnpm add @intentface/latch-core @intentface/latch-drizzle \
          @intentface/latch-server @intentface/latch-mcp \
          @intentface/latch-openapi @intentface/latch-memory \
          @intentface/latch-channels @intentface/latch-agent-builder \
-         @intentface/latch-langfuse @intentface/latch-net \
+         @intentface/latch-otel @ai-sdk/otel @intentface/latch-net \
          ai @ai-sdk/anthropic
 ```
 Add capabilities when you want them rather than up front — each one is a seam

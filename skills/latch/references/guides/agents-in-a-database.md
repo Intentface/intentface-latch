@@ -81,7 +81,7 @@ await runtime.runAgent({ principal, agent: `support@${c.id}`, prompt: "Where is 
 await store.closeCandidate(principal, "support", "org", c.id, { publishedAs: 4 });
 ```
 
-**Runs record the version behind them.** The resolved config carries `configVersion`, the runtime stamps it on the run as `agentVersion` — when the run *opens*, so a run that errors or crashes still says what it ran — and a tracer can tag the trace with it (`@intentface/latch-langfuse` emits `agent-version:<n>`). A past answer stays attributable to an exact configuration, and eval scores can be compared across versions.
+**Runs record the version behind them.** The resolved config carries `configVersion`, the runtime stamps it on the run as `agentVersion` — when the run *opens*, so a run that errors or crashes still says what it ran — and a tracer can tag the trace with it (`@intentface/latch-otel` records `latch.agent.version`, and its Langfuse preset the tag `agent-version:<n>`). A past answer stays attributable to an exact configuration, and its results can be compared across versions.
 
 > **Migrating an existing database**
 >
