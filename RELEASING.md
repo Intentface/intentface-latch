@@ -41,7 +41,9 @@ merely the tidier option; it is the one with a future.
    changelogs.
 
 3. **Merge the version PR.** The workflow runs again, sees no pending
-   changesets, and publishes to npm.
+   changesets, and publishes to npm, with provenance. That needs this
+   repository to be **public**: from a private one npm rejects the attestation
+   and the publish fails (see [Provenance](#provenance)).
 
 So a release is always two merges: your change, then the version PR. Nothing
 publishes straight off a feature merge.
