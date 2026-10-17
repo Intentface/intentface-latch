@@ -110,6 +110,16 @@ function lastAssistantText(messages: unknown[]): string | undefined {
   return undefined;
 }
 
+/** A host callback's result, or undefined (and a warning) when it throws: telemetry never fails a turn. */
+function guarded<T>(label: string, runId: string, f: () => T): T | undefined {
+  try {
+    return f();
+  } catch (e) {
+    console.warn(`latch-otel: ${label} failed (run ${runId}):`, e);
+    return undefined;
+  }
+}
+
 const defined = (a: Record<string, string | number | boolean | undefined>): Attributes =>
   Object.fromEntries(Object.entries(a).filter(([, v]) => v !== undefined)) as Attributes;
 
@@ -194,38 +204,16 @@ export function otelTelemetry<P>(opts: OtelTelemetryOptions<P> = {}): LatchTelem
     },
 
     async withRunSpan(meta, fn) {
-      ensureContextManager();
-      let agentOwner: string | undefined;
+      // Core awaits this unguarded (it has to run `fn`), so nothing before
+      // `fn` may throw: a failing callback loses its attributes, anything else
+      // loses the span, and the turn runs either way.
+      let ctx: Context | undefined;
       try {
-        agentOwner = await opts.agentOwner?.(meta);
+        ctx = await startRun(meta);
       } catch (e) {
-        console.warn(`latch-otel: agentOwner failed (run ${meta.runId}):`, e);
+        console.warn(`latch-otel: couldn't start the run's span (run ${meta.runId}):`, e);
       }
-      const run: OtelRun = {
-        runId: meta.runId,
-        chatId: meta.chatId,
-        sessionId: meta.rootChatId ?? meta.chatId,
-        agent: meta.agent,
-        modelId: meta.modelId,
-        depth: meta.depth,
-        trigger: meta.trigger,
-        agentVersion: meta.agentVersion,
-        parentRunId: meta.parentRunId,
-        user: opts.user?.(meta.principal),
-        agentOwner,
-        environment: opts.environment,
-      };
-      const extra = destination.runAttributes?.(run);
-      const everySpan = { ...standardAttributes(run), ...opts.attributes?.(meta), ...extra?.everySpan };
-      nextTraceId = await traceIdForRun(meta.runId);
-      const span = tracer.startSpan(`latch.run ${meta.agent}`, {
-        root: true,
-        attributes: { ...everySpan, "latch.model": meta.modelId, ...extra?.root },
-      });
-      nextTraceId = undefined;
-      open.set(meta.runId, { span, run });
-      const ctx = trace.setSpan(context.active().setValue(RUN_ATTRIBUTES, everySpan), span);
-      return context.with(ctx, fn);
+      return ctx ? context.with(ctx, fn) : fn();
     },
 
     async onRunFinished(meta, outcome) {
@@ -233,22 +221,25 @@ export function otelTelemetry<P>(opts: OtelTelemetryOptions<P> = {}): LatchTelem
       if (!entry) return;
       open.delete(meta.runId);
       const { span, run } = entry;
-      span.setAttributes(
-        defined({
-          "input.value": outcome.inputText,
-          "output.value": lastAssistantText(outcome.messages),
-          "latch.run.status": outcome.status,
-          "latch.usage.input_tokens": outcome.usage.inputTokens,
-          "latch.usage.output_tokens": outcome.usage.outputTokens,
-          "latch.usage.cache_read_tokens": outcome.usage.cacheReadTokens,
-          "latch.usage.cache_write_tokens": outcome.usage.cacheWriteTokens,
-          "latch.cost": outcome.cost,
-        }),
-      );
-      const finished = destination.finishedAttributes?.(run, outcome);
-      if (finished) span.setAttributes(finished);
-      if (outcome.status === "errored") span.setStatus({ code: SpanStatusCode.ERROR, message: outcome.error });
-      span.end();
+      try {
+        span.setAttributes(
+          defined({
+            "input.value": outcome.inputText,
+            "output.value": lastAssistantText(outcome.messages),
+            "latch.run.status": outcome.status,
+            "latch.usage.input_tokens": outcome.usage.inputTokens,
+            "latch.usage.output_tokens": outcome.usage.outputTokens,
+            "latch.usage.cache_read_tokens": outcome.usage.cacheReadTokens,
+            "latch.usage.cache_write_tokens": outcome.usage.cacheWriteTokens,
+            "latch.cost": outcome.cost,
+          }),
+        );
+        if (outcome.status === "errored") span.setStatus({ code: SpanStatusCode.ERROR, message: outcome.error });
+        const finished = guarded("finishedAttributes", meta.runId, () => destination.finishedAttributes?.(run, outcome));
+        if (finished) span.setAttributes(finished);
+      } finally {
+        span.end();
+      }
     },
 
     async flush() {
@@ -257,4 +248,47 @@ export function otelTelemetry<P>(opts: OtelTelemetryOptions<P> = {}): LatchTelem
       await done;
     },
   };
+
+  /** Open the run's span; the context the run then runs in. */
+  async function startRun(meta: TelemetryRunMeta<P>): Promise<Context> {
+    ensureContextManager();
+    let agentOwner: string | undefined;
+    try {
+      agentOwner = await opts.agentOwner?.(meta);
+    } catch (e) {
+      console.warn(`latch-otel: agentOwner failed (run ${meta.runId}):`, e);
+    }
+    const run: OtelRun = {
+      runId: meta.runId,
+      chatId: meta.chatId,
+      sessionId: meta.rootChatId ?? meta.chatId,
+      agent: meta.agent,
+      modelId: meta.modelId,
+      depth: meta.depth,
+      trigger: meta.trigger,
+      agentVersion: meta.agentVersion,
+      parentRunId: meta.parentRunId,
+      user: opts.user ? guarded("user", meta.runId, () => opts.user!(meta.principal)) : undefined,
+      agentOwner,
+      environment: opts.environment,
+    };
+    const extra = guarded("runAttributes", meta.runId, () => destination.runAttributes?.(run));
+    const everySpan = {
+      ...standardAttributes(run),
+      ...guarded("attributes", meta.runId, () => opts.attributes?.(meta)),
+      ...extra?.everySpan,
+    };
+    nextTraceId = await traceIdForRun(meta.runId);
+    let span: Span;
+    try {
+      span = tracer.startSpan(`latch.run ${meta.agent}`, {
+        root: true,
+        attributes: { ...everySpan, "latch.model": meta.modelId, ...extra?.root },
+      });
+    } finally {
+      nextTraceId = undefined;
+    }
+    open.set(meta.runId, { span, run });
+    return trace.setSpan(context.active().setValue(RUN_ATTRIBUTES, everySpan), span);
+  }
 }

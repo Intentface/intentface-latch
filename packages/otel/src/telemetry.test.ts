@@ -99,6 +99,25 @@ describe("otelTelemetry", () => {
     expect(root.attributes).toMatchObject({ "latch.run.status": "errored", "langfuse.observation.level": "ERROR" });
   });
 
+  it("never fails a turn: a throwing callback only loses its attributes", async () => {
+    const exporter = new InMemorySpanExporter();
+    const boom = () => {
+      throw new Error("boom");
+    };
+    const result = await runOnce(
+      otelTelemetry<P>({
+        user: boom,
+        attributes: boom,
+        agentOwner: async () => boom(),
+        export: { exporter, runAttributes: boom, finishedAttributes: boom },
+      }),
+    );
+    expect(result.answer).toBe("It's sunny.");
+    const root = rootOf(exporter.getFinishedSpans());
+    expect(root.attributes).toMatchObject({ "latch.run.status": "completed" });
+    expect(root.attributes).not.toHaveProperty("user.id");
+  });
+
   it("derives the same trace id latch-langfuse did", async () => {
     expect(await traceIdForRun("run_abc")).toBe("ccce92cfea89e318e24539046f02ffaf");
   });
