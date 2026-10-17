@@ -59,9 +59,9 @@
   "dependencies": {
     "@intentface/latch-core": "workspace:^",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/context-async-hooks": "^2.7.1",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.217.0",
-    "@opentelemetry/sdk-trace-base": "^2.7.1"
+    "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0"
   },
   "peerDependencies": {
     "@ai-sdk/otel": ">=1.0.0",
