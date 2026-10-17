@@ -172,4 +172,4 @@ Monorepo: pnpm + Turborepo. Dev uses a `development` export condition so editing
 
 ## License
 
-MIT.
+[Apache-2.0](LICENSE). Releases up to 0.22.0 were published under MIT.

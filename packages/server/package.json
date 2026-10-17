@@ -1,7 +1,7 @@
 {
   "name": "@intentface/latch-server",
   "version": "0.22.0",
-  "description": "The mountable Latch HTTP surface \u2014 one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath, Node (Express, Fastify, NestJS) in /node.",
+  "description": "The mountable Latch HTTP surface — one framework-agnostic Web handler (chat, approvals, lists, MCP connection OAuth). Hono adapter in the /hono subpath, Node (Express, Fastify, NestJS) in /node.",
   "keywords": [
     "ai",
     "ai-sdk",
@@ -12,7 +12,11 @@
     "webhooks",
     "express"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "homepage": "https://intentface-latch-docs.vercel.app",
+  "bugs": {
+    "url": "https://github.com/Intentface/intentface-latch/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

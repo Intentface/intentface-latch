@@ -9,7 +9,11 @@
     "llm",
     "agent-memory"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "homepage": "https://intentface-latch-docs.vercel.app",
+  "bugs": {
+    "url": "https://github.com/Intentface/intentface-latch/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

@@ -195,37 +195,28 @@ hand. The workflow now runs v2, which reads an output file, and every release
 from here gets its tags from the workflow itself.
 
 GitHub Releases are deliberately off (`create-github-releases: false`). A tag is
-what ties a published version to a commit; a Release is a notes page nobody
-outside this private repository can see, and under lockstep versioning there
-would be ten of them per version, each carrying a slice of the changelog that
-already ships in every tarball. Turn them on if the repository goes public.
+what ties a published version to a commit; under lockstep versioning there
+would be ten Releases per version, each carrying a slice of the changelog that
+already ships in every tarball. Turn them on if a per-version page is wanted.
 
-## Published metadata points at nothing, on purpose
+## Published metadata
 
-The manifests carry `repository` (npm wants it, and provenance will need it)
-but no `homepage` or `bugs`. Both would have pointed into a private repository,
-so every consumer clicking "Homepage" or "Issues" from the npm page would get a
-404. Better to advertise nothing than a door that does not open. Add them back
-the day there is a public destination — a docs site, or this repository going
-public.
+Every manifest carries `repository` (with a `directory`; provenance needs it),
+`homepage` (the docs site) and `bugs` (this repository's issues).
 
-## Provenance is off, and why
+## Provenance
 
-npm can sign each tarball against the workflow run that built it, which is what
-puts the verified badge and a source link on the package page. We don't, because
-npm [stopped accepting provenance from private source
-repositories](https://github.blog/changelog/2023-07-25-publishing-with-npm-provenance-from-private-source-repositories-is-no-longer-supported/)
-in July 2023. Enabling it here would not degrade quietly — the registry rejects
-the attestation and the publish fails.
+The workflow publishes with `NPM_CONFIG_PROVENANCE=true`: npm signs each tarball
+against the workflow run that built it, shows the verified badge on the package
+page and links the exact commit. It needs three things, all in place: a public
+repository, `id-token: write` in the job's `permissions`, and a `repository`
+field with a `directory` in every manifest (enforced by `verify:publish`).
 
-This is a property of the repository, not of the token: provenance stays
-unavailable under trusted publishing too, which npm skips rather than fails on.
-
-If this repository ever goes public, it becomes a two-line change: add
-`id-token: write` to the job's `permissions` and `NPM_CONFIG_PROVENANCE: "true"`
-to the publish step's environment. The third prerequisite, a `repository` field
-with a `directory` in every manifest, is already enforced by
-`verify:publish`.
+Provenance only works from a **public** repository. npm [stopped accepting it
+from private sources](https://github.blog/changelog/2023-07-25-publishing-with-npm-provenance-from-private-source-repositories-is-no-longer-supported/)
+in July 2023, and it doesn't degrade quietly: the registry rejects the
+attestation and the publish fails. Releases up to 0.22.0 were published from a
+private repository, without it.
 
 ## One license, copied by pnpm
 
@@ -234,7 +225,7 @@ There is a single `LICENSE` at the workspace root, and no per-package copies.
 would only be something to keep in sync.
 
 That convenience belongs to pnpm, not to npm. Publish with bare `npm publish`
-and the tarballs would claim MIT while shipping no license text — which is why
+and the tarballs would claim Apache-2.0 while shipping no license text — which is why
 `verify:publish` reads the license out of the packed tarball and compares it to
 the root, rather than checking that a file sits in the directory.
 
