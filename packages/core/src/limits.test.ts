@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
 import { createRuntime } from "./runtime.js";
@@ -196,7 +196,21 @@ describe("limits — pure helpers", () => {
   });
 });
 
+/**
+ * Windows are aligned to the clock, so two turns either side of a boundary land
+ * in different windows and the second isn't refused. Freeze `Date` (timers stay
+ * real) in the middle of a minute for the tests that count turns in one.
+ */
+function pinClockMidMinute() {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-01-01T12:00:30Z"));
+}
+
 describe("limits — in the runtime", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("counts the turn at admission, settles tokens + cost on finish", async () => {
     const policy: LimitPolicy = { key: "org:org_a", windowMs: DAY_MS, max: { tokens: 1000 } };
     const { rt, store } = build([policy]);
@@ -207,6 +221,7 @@ describe("limits — in the runtime", () => {
   });
 
   it("refuses the turn that would exceed a turn cap — before anything is persisted", async () => {
+    pinClockMidMinute();
     const onRefused = vi.fn();
     const { rt } = build([{ key: "user:u1", windowMs: MINUTE_MS, max: { turns: 1 }, label: "your per-minute turn limit" }], { onRefused });
     await (await rt.handleChat({ agent: "echo", principal, message: userMessage("a") })).text();
@@ -231,6 +246,7 @@ describe("limits — in the runtime", () => {
   });
 
   it("admits exactly one of N concurrent turns against a one-turn cap, and the losers release their reservation", async () => {
+    pinClockMidMinute();
     const policy: LimitPolicy = { key: "user:u1", windowMs: MINUTE_MS, max: { turns: 1 } };
     const { rt, store } = build([policy]);
     const results = await Promise.allSettled(
