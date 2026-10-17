@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-net",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "description": "Network-safety primitives for Latch — SSRF guards (private-IP blocklist + DNS-rebinding backstop) and a DNS-pinned egress fetch, shared by every host that opens an outbound connection.",
   "keywords": [
     "ai",
