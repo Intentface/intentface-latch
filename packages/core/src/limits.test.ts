@@ -208,13 +208,15 @@ describe("limits — in the runtime", () => {
 
   it("refuses the turn that would exceed a turn cap — before anything is persisted", async () => {
     const onRefused = vi.fn();
-    const { rt } = build([{ key: "user:u1", windowMs: MINUTE_MS, max: { turns: 1 }, label: "your per-minute turn limit" }], { onRefused });
+    // A day window, not a minute: windows are aligned to the clock, and two
+    // turns either side of a minute boundary would land in different windows.
+    const { rt } = build([{ key: "user:u1", windowMs: DAY_MS, max: { turns: 1 }, label: "your daily turn limit" }], { onRefused });
     await (await rt.handleChat({ agent: "echo", principal, message: userMessage("a") })).text();
     await settled();
     const err = await rt.handleChat({ agent: "echo", principal, chatId: "chat_1", message: userMessage("b") }).catch((e) => e);
     expect(isLimitExceededError(err)).toBe(true);
     expect((err as LimitExceededError).retryAfterMs).toBeGreaterThan(0);
-    expect((err as LimitExceededError).retryAfterMs).toBeLessThanOrEqual(MINUTE_MS);
+    expect((err as LimitExceededError).retryAfterMs).toBeLessThanOrEqual(DAY_MS);
     expect(onRefused).toHaveBeenCalledWith(expect.objectContaining({ agent: "echo", trigger: "chat" }));
     // The refused message never reached history.
     expect((await rt.loadHistory({ chatId: "chat_1", principal })).map((m) => m.id)).toEqual(expect.not.arrayContaining(["b"]));
@@ -231,7 +233,7 @@ describe("limits — in the runtime", () => {
   });
 
   it("admits exactly one of N concurrent turns against a one-turn cap, and the losers release their reservation", async () => {
-    const policy: LimitPolicy = { key: "user:u1", windowMs: MINUTE_MS, max: { turns: 1 } };
+    const policy: LimitPolicy = { key: "user:u1", windowMs: DAY_MS, max: { turns: 1 } }; // day: see above
     const { rt, store } = build([policy]);
     const results = await Promise.allSettled(
       Array.from({ length: 5 }, (_, i) => rt.runAgent({ principal, agent: "echo", prompt: `p${i}` })),
