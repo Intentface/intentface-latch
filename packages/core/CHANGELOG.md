@@ -1,5 +1,12 @@
 # @intentface/latch-core
 
+## 0.22.1
+
+### Patch Changes
+
+- a672cee: Licensed under Apache-2.0 (0.22.0 and earlier were MIT). Packages are now published with npm provenance, and their npm pages link the docs site (homepage) and the GitHub issues (bugs).
+- @intentface/latch-net@0.22.1
+
 ## 0.22.0
 
 ### Minor Changes

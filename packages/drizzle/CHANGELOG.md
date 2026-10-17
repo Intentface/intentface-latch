@@ -1,5 +1,14 @@
 # @intentface/latch-drizzle
 
+## 0.22.1
+
+### Patch Changes
+
+- Updated dependencies [a672cee]
+  - @intentface/latch-core@0.22.1
+  - @intentface/latch-agent-builder@0.22.1
+  - @intentface/latch-memory@0.22.1
+
 ## 0.22.0
 
 ### Minor Changes

@@ -1,5 +1,13 @@
 # @intentface/latch-server
 
+## 0.22.1
+
+### Patch Changes
+
+- Updated dependencies [a672cee]
+  - @intentface/latch-core@0.22.1
+  - @intentface/latch-mcp@0.22.1
+
 ## 0.22.0
 
 ### Patch Changes
