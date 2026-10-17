@@ -71,15 +71,15 @@ higher cache-write price), which you can opt into by returning your own plan:
 ## Telemetry — tracing
 
 ```ts
-import { langfuseTelemetry } from "@intentface/latch-langfuse";
+import { otelTelemetry } from "@intentface/latch-otel";
 
 createRuntime({
   // …
-  telemetry: langfuseTelemetry({ ownerTag: (p) => p.orgId }),
+  telemetry: otelTelemetry({ user: (p) => p.orgId }), // OTLP to OTEL_EXPORTER_OTLP_ENDPOINT
 });
 ```
 
-The option supplies per-run AI SDK telemetry options, an optional trace wrapper around the model call, and a post-turn hook. `latch-langfuse` implements it over a standard OpenTelemetry provider: one trace per run, its id derived deterministically from the run id, tagged by owner and agent. Leave it out and nothing is traced, at zero cost.
+The option supplies per-run AI SDK telemetry options, an optional trace wrapper around the model call, and a post-turn hook. `latch-otel` implements it over OpenTelemetry: one trace per run, its id derived from the run id, with the AI SDK's model and tool spans under it, sent over OTLP to any backend (`export: langfuse()` for Langfuse). Leave it out and nothing is traced, at zero cost.
 
 ## Telemetry hooks — usage, analytics, and "someone needs to be told"
 
@@ -113,7 +113,7 @@ telemetry: {
 },
 ```
 
-A tracer and these callbacks are one object: `langfuseTelemetry({...})` implements `telemetryFor`/`withRunSpan`/`onRunFinished`; add your own `onStep` alongside by wrapping or composing. An impl whose `telemetryFor` returns `undefined` for a run opts that run out of every hook.
+A tracer and these callbacks are one object: `otelTelemetry({...})` implements `telemetryFor`/`withRunSpan`/`onRunFinished`; add your own `onStep` alongside by wrapping or composing. An impl whose `telemetryFor` returns `undefined` for a run opts that run out of every hook.
 
 ## Sandbox — a workspace for the agent
 

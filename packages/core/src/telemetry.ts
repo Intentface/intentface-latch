@@ -3,7 +3,7 @@ import type { TelemetryOptions } from "ai";
 /**
  * The telemetry seam — THE observation point for a turn, kept out of core so it
  * carries no OTEL/vendor dep. A host supplies an implementation via
- * `RuntimeConfig.telemetry`: a full tracer (`@intentface/latch-langfuse`), or
+ * `RuntimeConfig.telemetry`: a full tracer (`@intentface/latch-otel`), or
  * just the hooks it wants (`onRunFinished` for a usage ledger or an
  * operational notification, `onStep` for per-tool analytics). Without one,
  * nothing changes.

@@ -1,15 +1,16 @@
 {
-  "name": "@intentface/latch-langfuse",
+  "name": "@intentface/latch-otel",
   "version": "0.21.0",
-  "description": "Latch observability on Langfuse — one-line tracing for latch runtimes via the AI SDK telemetry integration, plus score and trace-read helpers for platforms.",
+  "description": "Latch tracing over OpenTelemetry — one trace per run, the AI SDK's GenAI spans under it, sent over OTLP to any backend, with a ready preset for Langfuse.",
   "keywords": [
     "ai",
     "ai-sdk",
     "agents",
     "llm",
-    "langfuse",
     "opentelemetry",
-    "observability"
+    "otlp",
+    "observability",
+    "langfuse"
   ],
   "license": "MIT",
   "type": "module",
@@ -21,6 +22,11 @@
       "development": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./langfuse": {
+      "development": "./src/langfuse.ts",
+      "types": "./dist/langfuse.d.ts",
+      "import": "./dist/langfuse.js"
     }
   },
   "files": [
@@ -34,6 +40,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "import": "./dist/index.js"
+      },
+      "./langfuse": {
+        "types": "./dist/langfuse.d.ts",
+        "import": "./dist/langfuse.js"
       }
     }
   },
@@ -44,25 +54,29 @@
   },
   "dependencies": {
     "@intentface/latch-core": "workspace:^",
-    "@langfuse/client": "^5.11.1",
-    "@langfuse/otel": "^5.11.1",
-    "@langfuse/tracing": "^5.11.1",
-    "@langfuse/vercel-ai-sdk": "^5.11.1",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/sdk-trace-node": "^2.0.0"
+    "@opentelemetry/context-async-hooks": "^2.7.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.217.0",
+    "@opentelemetry/sdk-trace-base": "^2.7.1"
   },
   "peerDependencies": {
+    "@ai-sdk/otel": ">=1.0.0",
     "ai": ">=7.0.0"
   },
   "devDependencies": {
+    "@ai-sdk/otel": "1.0.106",
+    "@intentface/latch-drizzle": "workspace:^",
+    "@libsql/client": "^0.15.0",
     "@types/node": "^22",
     "ai": "^7.0.106",
+    "drizzle-orm": "^0.45.0",
     "typescript": "^5.7.0",
-    "vitest": "^4"
+    "vitest": "^4",
+    "zod": "^4.0.0"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Intentface/intentface-latch.git",
-    "directory": "packages/langfuse"
+    "directory": "packages/otel"
   }
 }

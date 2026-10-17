@@ -401,7 +401,7 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
   ) => PromptCachingPlan | undefined;
   /**
    * Observes runs: tracing, per-step and per-run callbacks. Use
-   * `@intentface/latch-langfuse` for full tracing, or only the callbacks you
+   * `@intentface/latch-otel` for full tracing, or only the callbacks you
    * need (usage dashboards, alerts when a scheduled run waits on a person).
    * Subagent runs are reported too.
    *
