@@ -1,5 +1,12 @@
 # @intentface/latch-channels
 
+## 0.22.0
+
+### Patch Changes
+
+- Updated dependencies [6fd0423]
+  - @intentface/latch-core@0.22.0
+
 ## 0.21.0
 
 ### Patch Changes

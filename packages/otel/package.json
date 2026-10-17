@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-otel",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Latch tracing over OpenTelemetry — one trace per run, the AI SDK's GenAI spans under it, sent over OTLP to any backend, with a ready preset for Langfuse.",
   "keywords": [
     "ai",
