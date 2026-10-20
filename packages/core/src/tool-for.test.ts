@@ -36,9 +36,18 @@ describe("toolFor", () => {
     expect(seen).toEqual({ greeting: "hello Ada", userId: principal.userId, agent: "greeter" });
   });
 
-  it("takes a tool without execute, like tool() does (the client or a queue answers it)", () => {
+  it("has tool()'s shapes: execute guaranteed when given, and tools the client answers, with or without an outputSchema", () => {
     const tool = toolFor<P, Ctx>();
+    const greet = tool({ inputSchema: z.object({ name: z.string() }), execute: async ({ name }) => name });
+    // execute can't be undefined, so it's callable without a guard
+    expectTypeOf<undefined extends typeof greet.execute ? true : false>().toEqualTypeOf<false>();
     const pick_date = tool({ description: "Ask the user for a date", inputSchema: z.object({ label: z.string() }) });
     expect(pick_date.execute).toBeUndefined();
+    const pick_slot = tool({
+      description: "Ask the user to pick a time slot",
+      inputSchema: z.object({ day: z.string() }),
+      outputSchema: z.object({ slot: z.string() }),
+    });
+    expect(pick_slot.execute).toBeUndefined();
   });
 });

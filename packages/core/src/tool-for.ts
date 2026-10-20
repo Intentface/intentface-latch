@@ -33,13 +33,18 @@ export function toolFor<P, RuntimeContext = unknown, Params = unknown, MessageCo
   return ((definition: Tool<unknown, unknown, never>) => tool(definition)) as never;
 }
 
-/** What `toolFor` returns: `tool()`'s two shapes, with `CONTEXT` as the tool's context. */
+/**
+ * What `toolFor` returns: `tool()`'s shapes, with `CONTEXT` as the tool's
+ * context. The same overloads as the AI SDK's `tool()`, in the same order.
+ */
 export interface ToolFactory<CONTEXT extends Record<string, unknown>> {
-  /** A tool that runs here: `execute` receives `CONTEXT` as `options.context`. */
+  /** A tool that runs here: `execute` receives `CONTEXT` as `options.context`, and is always present on the result. */
   <INPUT, OUTPUT>(
     definition: Tool<INPUT, OUTPUT, CONTEXT> & { execute: ToolExecuteFunction<INPUT, OUTPUT, CONTEXT> },
-  ): Tool<INPUT, OUTPUT, CONTEXT>;
-  /** A tool without `execute`, answered by the client or a queue. */
+  ): Tool<INPUT, OUTPUT, CONTEXT> & { execute: ToolExecuteFunction<INPUT, OUTPUT, CONTEXT> };
+  /** A tool without `execute` but with an `outputSchema`: the client or a queue answers it, in that shape. */
+  <INPUT, OUTPUT>(definition: Tool<INPUT, OUTPUT, CONTEXT>): Tool<INPUT, OUTPUT, CONTEXT>;
+  /** A tool without `execute` or `outputSchema`. */
   <INPUT>(definition: Tool<INPUT, never, CONTEXT>): Tool<INPUT, never, CONTEXT>;
 }
 
