@@ -29,15 +29,20 @@ The `{ build }` object from `defineContext` still works but is deprecated: its `
 Every tool gets what the context function returned, plus what Latch adds, as `options.context`:
 
 ```ts
-import type { ToolContext } from "@intentface/latch-core";
+import { toolFor } from "@intentface/latch-core";
 
-execute: async ({ reason }, { context }) => {
-  const { db, principal, params, messageContext } = context as ToolContext<Principal, Ctx, TicketParams, View>;
-  return db.tickets.close(params.ticketId, { by: principal.userId, reason });
-},
+const tool = toolFor<Principal, Ctx, TicketParams, View>();
+
+const close_ticket = tool({
+  inputSchema: z.object({ reason: z.string() }),
+  execute: async ({ reason }, { context }) => {
+    const { db, principal, params, messageContext } = context; // typed, no cast
+    return db.tickets.close(params.ticketId, { by: principal.userId, reason });
+  },
+});
 ```
 
-`ToolContext<Principal, Ctx, Params, MessageContext>` is that shape. The cast is still needed: the AI SDK can only infer a tool's context type from a `contextSchema`.
+`toolFor<Principal, Ctx, Params, MessageContext>()` returns the AI SDK's `tool()` with `options.context` typed as `ToolContext<Principal, Ctx, Params, MessageContext>`. Make it once and use it for every tool. The AI SDK on its own types a tool's context only from a `contextSchema`, which validates at runtime and can't describe clients and functions. With a plain `tool()`, cast instead: `context as ToolContext<Principal, Ctx>`.
 
 <auto-type-table path="../../../../../packages/core/src/context.ts" name="ToolContext" />
 

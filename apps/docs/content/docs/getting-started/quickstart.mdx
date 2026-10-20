@@ -32,8 +32,9 @@ const { app } = await createLatchHonoApp<Principal>({
   storage: createSqliteAdapter<Principal>(drizzle(client, { schema }), {
     owner: (p) => [p.userId], // each user sees only their own chats
   }),
-  // Who is asking. A demo shortcut: in your app, read your real session here.
-  resolveContext: async (req) => ({ userId: req.headers.get("x-user") ?? "demo" }),
+  // Who is asking. Here everyone is one demo user; read your real session
+  // instead. In production it refuses everyone (401) until you do.
+  resolvePrincipal: async () => (process.env.NODE_ENV === "production" ? null : { userId: "demo" }),
   agents: (models) => ({
     assistant: defineAgent<Principal>({
       model: models.modelFor("claude-sonnet-4-6"),
@@ -82,7 +83,7 @@ That one file is already more than a demo:
 Each of these takes a few lines on top of this file:
 
 - [Ask before risky actions](/docs/hard-parts/approvals): a person approves before a tool runs.
-- [Your real users](/docs/hard-parts/access): replace the `x-user` header with your login, and decide who sees which chats.
+- [Your real users](/docs/hard-parts/access): replace the demo user with your login, and decide who sees which chats.
 - [Usage limits](/docs/hard-parts/limits): requests and tokens per user, per day.
 - [Running on many servers](/docs/hard-parts/durability): what changes on Vercel or behind a load balancer.
 - [Files and images](/docs/hard-parts/attachments): what happens when users attach them.

@@ -95,15 +95,18 @@ Build data access bound to the org in `context`; tools get it, plus the
 principal, through `options.context`:
 
 ```ts
+import { toolFor } from "@intentface/latch-core";
+
 export const context = ({ principal }: { principal: Principal }) => ({
   orders: ordersFor(principal.orgId),
 });
-type Ctx = ToolContext<Principal, ReturnType<typeof context>>;
+type Ctx = ReturnType<typeof context>;
+const tool = toolFor<Principal, Ctx>(); // AI SDK tool(), context typed; once per app
 
 export const find_order = tool({
   description: "Look up an order",
   inputSchema: z.object({ orderId: z.string() }),
-  execute: async ({ orderId }, { context }) => (context as Ctx).orders.get(orderId),
+  execute: async ({ orderId }, { context }) => context.orders.get(orderId),
 });
 ```
 
@@ -277,8 +280,9 @@ or a crash, when the answer continues without your route running.
   never changes and prompt caching keeps working. Max 32 KB.
 
 The agent function receives `{ principal, context, params, messageContext }`;
-tools receive the same through `options.context`, typed with
-`ToolContext<Principal, Ctx, Params>`.
+tools receive the same through `options.context`, typed when the tool comes
+from `toolFor<Principal, Ctx, Params>()` (or cast to
+`ToolContext<Principal, Ctx, Params>` with a plain `tool()`).
 
 | Mistake | Instead |
 | --- | --- |

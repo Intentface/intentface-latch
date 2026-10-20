@@ -14,14 +14,15 @@ A tool in a product acts for one customer, often with that customer's credential
 
 ## Your own tools
 
-Plain AI SDK tools. They receive the [context](./inputs.md), so they act for the right customer:
+Plain AI SDK tools. They receive the [context](./inputs.md), so they act for the right customer. `toolFor` gives you the AI SDK's `tool()` with that context typed:
 
 ```ts
+const tool = toolFor<Principal, Ctx>(); // from @intentface/latch-core, once per app
+
 const refund = tool({
   description: "Refund an order",
   inputSchema: z.object({ orderId: z.string() }),
-  execute: async ({ orderId }, { context }) =>
-    (context as ToolContext<Principal, Ctx>).orders.refund(orderId),
+  execute: async ({ orderId }, { context }) => context.orders.refund(orderId),
 });
 ```
 

@@ -8,7 +8,7 @@ Online: https://intentface-latch-docs.vercel.app/docs/guides/mount-the-handler
 
 > **Shortest path**
 >
-> `createLatchApp({ storage, agents, resolveContext })` wires the runtime with every default — durability, cron, model catalog, harness tools — and returns `{ runtime, handler, models, stop }`, the `handler` being the one described below, already mounted over that runtime. `createLatchHonoApp` returns the same plus `app`. The rest of this page is for when you want to assemble the pieces yourself.
+> `createLatchApp({ storage, agents, resolvePrincipal })` wires the runtime with every default — durability, cron, model catalog, harness tools — and returns `{ runtime, handler, models, stop }`, the `handler` being the one described below, already mounted over that runtime. `createLatchHonoApp` returns the same plus `app`. The rest of this page is for when you want to assemble the pieces yourself.
 
 `@intentface/latch-server` gives you the whole runtime as **one handler**:
 
@@ -26,7 +26,7 @@ export const latch = createLatchHandler({
   runtime,
   basePath: "/api/latch",
   // Your existing auth, returning your Principal. Null → 401.
-  resolveContext: async (request) => {
+  resolvePrincipal: async (request) => {
     const session = await auth.getSession(request);
     return session ? { orgId: session.orgId, userId: session.userId } : null;
   },
@@ -54,7 +54,7 @@ import { createLatchHono } from "@intentface/latch-server/hono";
 const app = new Hono();
 
 // Your middleware still applies — auth, CORS, logging.
-app.route("/api/latch", createLatchHono({ runtime, resolveContext }));
+app.route("/api/latch", createLatchHono({ runtime, resolvePrincipal }));
 
 export default app;
 ```
@@ -121,7 +121,7 @@ Express, Fastify and NestJS predate `Request`/`Response`, so they go through `to
 import { createLatchHandler } from "@intentface/latch-server";
 import { toNodeHandler } from "@intentface/latch-server/node";
 
-export const handle = toNodeHandler(createLatchHandler({ runtime, resolveContext, basePath: "/api/latch" }));
+export const handle = toNodeHandler(createLatchHandler({ runtime, resolvePrincipal, basePath: "/api/latch" }));
 ```
 
 > **Do not body-parse the Latch route**
@@ -257,7 +257,7 @@ The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messag
 ```ts
 createLatchHandler({
   runtime,
-  resolveContext,
+  resolvePrincipal,
   cronSecret: process.env.LATCH_CRON_SECRET,
 });
 ```
@@ -284,12 +284,12 @@ On a long-lived Node process you can skip the HTTP route entirely and use the in
 
 ```ts
 // One database, isolated by owner key on every row.
-createLatchHandler({ runtime, resolveContext });
+createLatchHandler({ runtime, resolvePrincipal });
 
 // A database per tenant — hard isolation.
 createLatchHandler({
   runtime: (principal) => runtimeFor(principal.orgId),
-  resolveContext,
+  resolvePrincipal,
   // No principal exists on cron/run, so supply the system-wide tick yourself.
   cronRun: async () => {
     for (const tenant of await listTenants()) {

@@ -13,19 +13,20 @@ Online: https://intentface-latch-docs.vercel.app/docs/reference/server
 Builds the runtime with sensible defaults (crash recovery, schedules, the model catalog, built-in tools) and the handler over it. Returns `{ runtime, handler, models, stop }`.
 
 ```ts
-const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, resolveContext });
+const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, resolvePrincipal });
 ```
 
 | Option | Type | Description |
 | --- | --- | --- |
 | `storage` | `StorageAdapter<P>` | Where conversations, runs and usage are stored, for example `createPostgresAdapter(db, { owner })`. |
 | `agents` | `Record<string, AgentFactory<P, any, any>> \| ((models: ModelCatalog) => Record<string, AgentFactory<P, any, any>>)` | Your agents, by name. Pass a function to get the model catalog, so an agent can pick its model by id: `(models) => ({ assistant: defineAgent({ model: models.modelFor("claude-sonnet-4-6"), … }) })`. |
-| `resolveContext` | `(request: Request) => P \| Promise<P \| null> \| null` | Your login: turns a request into the principal, or `null` for a `401`. |
+| `resolvePrincipal` (optional) | `PrincipalResolver<P>` | Your login: turns a request into the principal, or `null` for a `401`. Required (`resolveContext` is its old name). |
+| `resolveContext` (optional) | `PrincipalResolver<P>` | The old name of `resolvePrincipal`. Still works; set one or the other. |
 | `context` (optional) | `ContextInput<P, RC>` | What your agents and tools can work with, built from who is asking on every turn: `async ({ principal }) => ({ … })`. Default: ``{}``. |
 | `models` (optional) | `ModelCatalog` | A model catalog you already loaded. Default: ``loadModelCatalog()``. |
 | `principalKey` (optional) | `((principal: P) => string)` | A key per caller for prompt caching, so one person's cached prompt is never reused for another. Usually the same as the storage owner. |
 | `runtime` (optional) | `Partial<Omit<RuntimeConfig<P, RC>, "agents" \| "context" \| "storage">>` | Any other `createRuntime` option (limits, connections, schedules…), or a different value for one of the defaults. |
-| `handler` (optional) | `Partial<Omit<LatchHandlerConfig<P>, "resolveContext" \| "runtime">>` | Any other `createLatchHandler` option, such as `basePath`, `connections` or `cronSecret`. |
+| `handler` (optional) | `Partial<Omit<LatchHandlerConfig<P>, "resolveContext" \| "resolvePrincipal" \| "runtime">>` | Any other `createLatchHandler` option, such as `basePath`, `connections` or `cronSecret`. |
 | `cronIntervalMs` (optional) | `number \| false` | How often to call `runtime.cron()` in this process, in ms, or `false` for never. Off on serverless (when `VERCEL` or `AWS_LAMBDA_FUNCTION_NAME` is set), where nothing runs between requests: call `runtime.cron()` from a cron route instead. Default: `30000 on a long-running server`. |
 
 ## createLatchHandler
@@ -33,13 +34,14 @@ const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, 
 The handler on its own, over a runtime you built. Returns `(request) => Promise<Response | undefined>`: `undefined` means the path isn't one of its routes.
 
 ```ts
-const handler = createLatchHandler<Principal>({ runtime, resolveContext, basePath: "/api/latch" });
+const handler = createLatchHandler<Principal>({ runtime, resolvePrincipal, basePath: "/api/latch" });
 ```
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `runtime` | `Runtime<P> \| ((principal: P) => Runtime<P> \| Promise<Runtime<P>>)` | The runtime the routes call. For a database per customer, pass a function instead: it gets the principal from `resolveContext` and returns that customer's runtime. In that case also set `cronRun`, because the cron route has no principal to pick a runtime with. |
-| `resolveContext` | `(request: Request) => P \| null \| Promise<P \| null>` | Your login: turns a request into the principal, or `null` for a `401`. Not used when a sign-in to a connection returns (the OAuth callback): the principal that started the sign-in is saved with it and restored with `reconstructPrincipal`, so whatever session the returning browser has can't change whose account the credentials are saved to. |
+| `runtime` | `Runtime<P> \| ((principal: P) => Runtime<P> \| Promise<Runtime<P>>)` | The runtime the routes call. For a database per customer, pass a function instead: it gets the principal from `resolvePrincipal` and returns that customer's runtime. In that case also set `cronRun`, because the cron route has no principal to pick a runtime with. |
+| `resolvePrincipal` (optional) | `PrincipalResolver<P>` | Your login: turns a request into the principal, or `null` for a `401`. Required (`resolveContext` is its old name). Not used when a sign-in to a connection returns (the OAuth callback): the principal that started the sign-in is saved with it and restored with `reconstructPrincipal`, so whatever session the returning browser has can't change whose account the credentials are saved to. |
+| `resolveContext` (optional) | `PrincipalResolver<P>` | The old name of `resolvePrincipal`. Still works; set one or the other. |
 | `reconstructPrincipal` (optional) | `((identity: unknown, request: Request) => P \| null \| Promise<P \| null>)` | Restores the principal that started a connection sign-in, when the sign-in returns. Check it's still valid here (for example, still a member); return `null` to refuse with a `401`. By default the saved principal is used as is. |
 | `oauthFlowMaxAgeMs` (optional) | `number` | How long a user has to finish signing in to a connection. A later return redirects with `?error=flow_expired`. Default: `30 minutes`. |
 | `connections` (optional) | `McpConnections<P> \| ((principal: P) => McpConnections<P> \| Promise<McpConnections<P>>)` | The services users can connect, from `createMcpConnections`. Adds the routes to list, sign in to, test and disconnect them. Pass a function to give each customer their own set. |
@@ -52,7 +54,7 @@ const handler = createLatchHandler<Principal>({ runtime, resolveContext, basePat
 
 ## Routes
 
-Paths are relative to `basePath`. Every route except the cron route and the connection sign-in callback calls `resolveContext` first. The callback restores the principal that started the sign-in instead (see `reconstructPrincipal` above).
+Paths are relative to `basePath`. Every route except the cron route and the connection sign-in callback calls `resolvePrincipal` first. (Before 0.23 it was called `resolveContext`; that name still works, deprecated.) The callback restores the principal that started the sign-in instead (see `reconstructPrincipal` above).
 
 | Route | What it does |
 | --- | --- |

@@ -4,7 +4,7 @@ The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web 
 
 ## What it does
 
-`createLatchHandler({ runtime, connections, resolveContext })` returns a `(Request) => Response` handler that exposes the runtime over HTTP:
+`createLatchHandler({ runtime, connections, resolvePrincipal })` returns a `(Request) => Response` handler that exposes the runtime over HTTP:
 
 - `POST /agents/:agent/:id` — run a chat turn (streams UIMessage SSE).
 - `POST /agents/:agent/:id/approvals` — submit HITL approval decisions (resumes the turn).
@@ -13,19 +13,19 @@ The mountable HTTP surface for a Latch runtime — **one framework-agnostic Web 
 - `GET/POST/DELETE /schedules`, `GET /schedules/:id`, `POST /schedules/:id/run-now` — manage scheduled agents; `GET`/`POST /cron/run` — the host-guarded tick (a bearer token or `x-latch-cron-secret`, so Vercel Cron can call it).
 - `GET /connections`, `…/:name/authorize`, `…/:name/callback`, `…/:name/disconnect`, `…/test` — generic MCP connection OAuth + status.
 
-`resolveContext(request)` turns a request into your `Principal` (bring-your-own auth). A Hono adapter is exported from the `/hono` subpath.
+`resolvePrincipal(request)` turns a request into your `Principal` (bring-your-own auth). A Hono adapter is exported from the `/hono` subpath.
 
 ## OAuth callback identity
 
 The connection callback is the one route that does NOT authenticate via
-`resolveContext`. An IdP redirect arrives at a moment you don't control, so a
+`resolvePrincipal`. An IdP redirect arrives at a moment you don't control, so a
 degraded session there must never decide where credentials land. Instead,
 `authorize` pins the resolved principal into the OAuth flow state, and the
 callback rebuilds it from that pin:
 
 ```ts
 createLatchHandler<Principal>({
-  runtime, connections, resolveContext,
+  runtime, connections, resolvePrincipal,
   // Validate/re-hydrate the pinned identity on the callback (e.g. re-check
   // org membership). Null → 401. Default: trust the pin as-is.
   reconstructPrincipal: async (identity) => validateMembership(identity),
@@ -82,7 +82,7 @@ import { createLatchHandler } from "@intentface/latch-server";
 
 const handler = createLatchHandler<Principal>({
   runtime, connections,
-  resolveContext: (req) => getPrincipalFromHeaders(req.headers),
+  resolvePrincipal: (req) => getPrincipalFromHeaders(req.headers),
 });
 // mount at /api/latch/* — every Latch operation flows through this one handler.
 ```

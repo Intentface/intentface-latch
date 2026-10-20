@@ -10,7 +10,7 @@ description: createLatchApp and createLatchHandler from @intentface/latch-server
 Builds the runtime with sensible defaults (crash recovery, schedules, the model catalog, built-in tools) and the handler over it. Returns `{ runtime, handler, models, stop }`.
 
 ```ts
-const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, resolveContext });
+const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, resolvePrincipal });
 ```
 
 <auto-type-table path="../../../../../packages/server/src/app.ts" name="LatchAppConfig" />
@@ -20,14 +20,14 @@ const { runtime, handler } = await createLatchApp<Principal>({ storage, agents, 
 The handler on its own, over a runtime you built. Returns `(request) => Promise<Response | undefined>`: `undefined` means the path isn't one of its routes.
 
 ```ts
-const handler = createLatchHandler<Principal>({ runtime, resolveContext, basePath: "/api/latch" });
+const handler = createLatchHandler<Principal>({ runtime, resolvePrincipal, basePath: "/api/latch" });
 ```
 
 <auto-type-table path="../../../../../packages/server/src/handler.ts" name="LatchHandlerConfig" />
 
 ## Routes
 
-Paths are relative to `basePath`. Every route except the cron route and the connection sign-in callback calls `resolveContext` first. The callback restores the principal that started the sign-in instead (see `reconstructPrincipal` above).
+Paths are relative to `basePath`. Every route except the cron route and the connection sign-in callback calls `resolvePrincipal` first. (Before 0.23 it was called `resolveContext`; that name still works, deprecated.) The callback restores the principal that started the sign-in instead (see `reconstructPrincipal` above).
 
 | Route | What it does |
 | --- | --- |

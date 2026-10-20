@@ -79,7 +79,7 @@ adapter before trusting it.
 
 **One mountable handler for the whole runtime.** A framework-agnostic `(Request) => Promise<Response | undefined>` covering chat, approvals, chat and run lists, history, schedules, and the generic connection OAuth.
 
-`createLatchApp({ storage, agents, resolveContext })` is the composition root: durability on, a croner cron evaluator, the models.dev catalog with its four provider hooks, the default harness tools, the handler mounted over the runtime, and an in-process cron driver on a long-running host (disabled on serverless — hit `POST /cron/run`). `agents` may be a function of the loaded catalog. App-level options (`models`, `principalKey`, `cronIntervalMs`) live on the config; runtime and handler defaults are overridable through `runtime` / `handler`. It returns `{ runtime, handler, models, scheduler?, stop }`; `createLatchHonoApp` returns the same plus `app` (a mounted Hono app).
+`createLatchApp({ storage, agents, resolvePrincipal })` is the composition root: durability on, a croner cron evaluator, the models.dev catalog with its four provider hooks, the default harness tools, the handler mounted over the runtime, and an in-process cron driver on a long-running host (disabled on serverless — hit `POST /cron/run`). `agents` may be a function of the loaded catalog. App-level options (`models`, `principalKey`, `cronIntervalMs`) live on the config; runtime and handler defaults are overridable through `runtime` / `handler`. It returns `{ runtime, handler, models, scheduler?, stop }`; `createLatchHonoApp` returns the same plus `app` (a mounted Hono app).
 
 ```ts
 import { createLatchApp, createLatchHandler, createCronerEvaluator } from "@intentface/latch-server";

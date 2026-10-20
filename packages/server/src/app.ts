@@ -10,7 +10,7 @@ import {
 } from "@intentface/latch-core";
 import { loadModelCatalog, providerDefaults, type ModelCatalog } from "@intentface/latch-core/models";
 import { defaultHarnessTools } from "@intentface/latch-core/harness";
-import { createLatchHandler, type LatchHandler, type LatchHandlerConfig } from "./handler.js";
+import { createLatchHandler, principalResolverOf, type LatchHandler, type LatchHandlerConfig, type PrincipalResolver } from "./handler.js";
 import { createCronerEvaluator } from "./cron.js";
 
 /**
@@ -36,8 +36,14 @@ export interface LatchAppConfig<P, RC = unknown> {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- each agent declares its own params
   agents: Record<string, AgentFactory<P, any, any>> | ((models: ModelCatalog) => Record<string, AgentFactory<P, any, any>>);
-  /** Your login: turns a request into the principal, or `null` for a `401`. */
-  resolveContext: LatchHandlerConfig<P>["resolveContext"];
+  /** Your login: turns a request into the principal, or `null` for a `401`. Required (`resolveContext` is its old name). */
+  resolvePrincipal?: PrincipalResolver<P>;
+  /**
+   * The old name of `resolvePrincipal`. Still works; set one or the other.
+   *
+   * @deprecated Renamed to `resolvePrincipal`.
+   */
+  resolveContext?: PrincipalResolver<P>;
   /** What your agents and tools can work with, built from who is asking on every turn: `async ({ principal }) => ({ … })`. @default `{}` */
   context?: ContextInput<P, RC>;
   /** A model catalog you already loaded. @default `loadModelCatalog()` */
@@ -47,7 +53,7 @@ export interface LatchAppConfig<P, RC = unknown> {
   /** Any other `createRuntime` option (limits, connections, schedules…), or a different value for one of the defaults. */
   runtime?: Partial<Omit<RuntimeConfig<P, RC>, "storage" | "agents" | "context">>;
   /** Any other `createLatchHandler` option, such as `basePath`, `connections` or `cronSecret`. */
-  handler?: Partial<Omit<LatchHandlerConfig<P>, "runtime" | "resolveContext">>;
+  handler?: Partial<Omit<LatchHandlerConfig<P>, "runtime" | "resolvePrincipal" | "resolveContext">>;
   /**
    * How often to call `runtime.cron()` in this process, in ms, or `false` for
    * never. Off on serverless (when `VERCEL` or `AWS_LAMBDA_FUNCTION_NAME` is
@@ -95,7 +101,7 @@ export async function createLatchApp<P, RC = unknown>(cfg: LatchAppConfig<P, RC>
 
   const handler = createLatchHandler<P>({
     runtime,
-    resolveContext: cfg.resolveContext,
+    resolvePrincipal: principalResolverOf(cfg, "createLatchApp"),
     // The system-wide cron route is unauthenticated — enabled only when a
     // secret is set (the handler 404s it otherwise). CRON_SECRET is the one
     // Vercel sends to its crons, so on Vercel a cron in vercel.json pointing

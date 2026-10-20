@@ -27,7 +27,7 @@ function encodeState(payload: unknown): string {
 }
 
 function build(opts?: {
-  resolveContext?: (req: Request) => P | null;
+  resolvePrincipal?: (req: Request) => P | null;
   reconstructPrincipal?: (identity: unknown, req: Request) => P | null | Promise<P | null>;
   oauthFlowMaxAgeMs?: number;
 }) {
@@ -44,18 +44,18 @@ function build(opts?: {
     status: async () => [],
     testTools: async () => [],
   };
-  const resolveContext = vi.fn(
-    opts?.resolveContext ?? (() => ({ orgId: "org_a", userId: "u1" })),
+  const resolvePrincipal = vi.fn(
+    opts?.resolvePrincipal ?? (() => ({ orgId: "org_a", userId: "u1" })),
   );
   const handler = createLatchHandler<P>({
     runtime: {} as never,
     connections: conns as never,
     basePath: "/api/latch",
-    resolveContext,
+    resolvePrincipal,
     reconstructPrincipal: opts?.reconstructPrincipal,
     oauthFlowMaxAgeMs: opts?.oauthFlowMaxAgeMs,
   });
-  return { handler, start, finish, resolveContext };
+  return { handler, start, finish, resolvePrincipal };
 }
 
 const authorize = (q = "") =>
@@ -64,6 +64,20 @@ const callback = (state: string, code = "abc") =>
   new Request(
     `https://app.example/api/latch/connections/loredex/callback?code=${code}&state=${encodeURIComponent(state)}`,
   );
+
+describe("resolvePrincipal", () => {
+  it("still accepts its old name, resolveContext", async () => {
+    const resolveContext = vi.fn(() => null);
+    const handler = createLatchHandler<P>({ runtime: {} as never, basePath: "/api/latch", resolveContext });
+    const res = await handler(new Request("https://app.example/api/latch/chats"));
+    expect(res?.status).toBe(401);
+    expect(resolveContext).toHaveBeenCalled();
+  });
+
+  it("is required: without it the handler refuses to be built", () => {
+    expect(() => createLatchHandler<P>({ runtime: {} as never })).toThrow(/pass resolvePrincipal/);
+  });
+});
 
 describe("authorize", () => {
   it("pins the resolved principal (+ iat) into the flow state", async () => {
@@ -87,17 +101,17 @@ describe("callback with a pinned principal", () => {
     });
 
   it("rebuilds identity from the pin — the session is never consulted", async () => {
-    const { handler, finish, resolveContext } = build({
+    const { handler, finish, resolvePrincipal } = build({
       // A live session would resolve to a DIFFERENT principal (the incident
       // shape: personal tenant). It must not be asked at all.
-      resolveContext: () => {
-        throw new Error("resolveContext must not run on a pinned callback");
+      resolvePrincipal: () => {
+        throw new Error("resolvePrincipal must not run on a pinned callback");
       },
     });
     const res = await handler(callback(pinnedState()));
     expect(res?.status).toBe(302);
     expect(res?.headers.get("location")).toContain("connected=loredex");
-    expect(resolveContext).not.toHaveBeenCalled();
+    expect(resolvePrincipal).not.toHaveBeenCalled();
     // finish — and therefore the token write — ran under the PINNED principal.
     expect(finish.mock.calls[0]![0]).toEqual({ orgId: "org_pinned", userId: "u_pinned" });
   });
@@ -132,9 +146,9 @@ describe("callback without a pin", () => {
     ["no state param", "https://app.example/api/latch/connections/loredex/callback?code=abc"],
     ["malformed state", "https://app.example/api/latch/connections/loredex/callback?code=abc&state=not-a-state"],
   ])("%s is rejected as expired and never reaches the session", async (_label, href) => {
-    const { handler, finish, resolveContext } = build({
-      resolveContext: () => {
-        throw new Error("resolveContext must not run on any callback");
+    const { handler, finish, resolvePrincipal } = build({
+      resolvePrincipal: () => {
+        throw new Error("resolvePrincipal must not run on any callback");
       },
     });
     const res = await handler(new Request(href));
@@ -142,14 +156,14 @@ describe("callback without a pin", () => {
     const loc = res?.headers.get("location") ?? "";
     expect(loc.startsWith("/")).toBe(true);
     expect(loc).toContain("error=flow_expired");
-    expect(resolveContext).not.toHaveBeenCalled();
+    expect(resolvePrincipal).not.toHaveBeenCalled();
     expect(finish).not.toHaveBeenCalled();
   });
 
   it("is rejected as expired — the session is never a stand-in for a flow", async () => {
-    const { handler, finish, resolveContext } = build({
-      resolveContext: () => {
-        throw new Error("resolveContext must not run on any callback");
+    const { handler, finish, resolvePrincipal } = build({
+      resolvePrincipal: () => {
+        throw new Error("resolvePrincipal must not run on any callback");
       },
     });
     const res = await handler(callback(encodeState({ returnTo: "/x" })));
@@ -157,7 +171,7 @@ describe("callback without a pin", () => {
     const loc = res?.headers.get("location") ?? "";
     expect(loc.startsWith("/x")).toBe(true);
     expect(loc).toContain("error=flow_expired");
-    expect(resolveContext).not.toHaveBeenCalled();
+    expect(resolvePrincipal).not.toHaveBeenCalled();
     expect(finish).not.toHaveBeenCalled();
   });
 });
@@ -202,7 +216,7 @@ function buildRoutes(opts?: { schedules?: StubSchedule[]; runNow?: boolean }) {
     runtime: { schedule, runScheduleNow, unschedule, listSchedules, listRuns } as never,
     connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
     basePath: "/api/latch",
-    resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+    resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
   });
   return { handler, schedule, runScheduleNow, unschedule, listSchedules };
 }
@@ -316,7 +330,7 @@ describe("POST /agents/:agent/:id with a message the runtime refuses", () => {
       runtime: { handleChat } as never,
       connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
       basePath: "/api/latch",
-      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+      resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
     });
     const res = (await handler(
       post("agents/assistant/chat_1", { message: { id: "m1", role: "assistant", parts: [{ type: "text", text: "x" }] } }),
@@ -333,7 +347,7 @@ describe("POST /agents/:agent/:id with useChat's default body ({ messages })", (
       runtime: { handleChat } as never,
       connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
       basePath: "/api/latch",
-      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+      resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
     });
     return { handler, handleChat };
   }
@@ -376,7 +390,7 @@ describe("POST /agents/:agent/:id regenerating or editing an earlier question", 
       runtime: { handleChat } as never,
       connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
       basePath: "/api/latch",
-      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+      resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
     });
     const res = (await handler(post("agents/assistant/chat_1", { message: { id: "m1", role: "user", parts: [{ type: "text", text: "x" }] } })))!;
     expect(res.status).toBe(409);
@@ -391,7 +405,7 @@ describe("POST /agents/:agent/:id with params", () => {
       runtime: { handleChat } as never,
       connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
       basePath: "/api/latch",
-      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+      resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
     });
     return { handler, handleChat };
   }
@@ -429,7 +443,7 @@ describe("DELETE chats/:id", () => {
     createLatchHandler<P>({
       runtime: { deleteChat } as never,
       basePath: "/api/latch",
-      resolveContext: () => ({ orgId: "org_a", userId: "u1" }),
+      resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
     });
 
   it("deletes the caller's chat and lists what went", async () => {

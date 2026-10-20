@@ -27,7 +27,7 @@ const storage = createSqliteAdapter<Principal>(db, {
 >
 > Latch enforces **isolation** — a read scoped to an owner key cannot return
 > another owner's rows. Latch does not do **authorization** — whether this user
-> may use that agent, or spend that budget, is your `resolveContext`'s job. Isolation
+> may use that agent, or spend that budget, is your `resolvePrincipal`'s job. Isolation
 > is structural; authorization is policy.
 
 ## Pattern 1 — Each end user owns their own sessions
@@ -53,7 +53,7 @@ Now every chat, run, usage row and schedule belongs to one person. `listChats` f
 ```ts
 const latch = createLatchHandler({
   runtime,
-  resolveContext: async (request) => {
+  resolvePrincipal: async (request) => {
     const session = await auth.getSession(request);
     if (!session) return null; // → 401
     return { orgId: session.orgId, userId: session.userId };
@@ -125,7 +125,7 @@ When a column isn't enough — a compliance commitment, a customer with their ow
 ```ts
 createLatchHandler({
   runtime: (principal) => runtimeFor(principal.orgId),
-  resolveContext,
+  resolvePrincipal,
   cronRun: async () => {
     // Not a serial for-loop: `runDue` awaits each scheduled turn to
     // completion, so one tenant's hour-long agent turn would stall every
@@ -147,7 +147,7 @@ createLatchHandler({
 });
 ```
 
-The resolver runs *after* `resolveContext`, so the principal picks the database. Note the `cronRun`: the system-wide tick has no principal, so with per-tenant databases you must supply it yourself. With a single runtime it defaults to `runtime.cron()`.
+The resolver runs *after* `resolvePrincipal`, so the principal picks the database. Note the `cronRun`: the system-wide tick has no principal, so with per-tenant databases you must supply it yourself. With a single runtime it defaults to `runtime.cron()`.
 
 Both models can coexist — column-scoped for self-serve customers, a dedicated database for enterprise ones — because the choice lives in a function rather than in the schema.
 
@@ -194,7 +194,7 @@ The mistake is to run the turn as the admin and "look at" the customer's data. T
 Resolve the **subject's** principal deliberately instead:
 
 ```ts
-resolveContext: async (request) => {
+resolvePrincipal: async (request) => {
   const session = await auth.getSession(request);
   if (!session) return null;
 

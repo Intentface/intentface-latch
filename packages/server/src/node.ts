@@ -13,7 +13,7 @@ import type { LatchHandler } from "./handler.js";
  * `false` when the path isn't a Latch route, so your app can carry on:
  *
  * ```ts
- * const latch = toNodeHandler(createLatchHandler({ runtime, resolveContext, basePath: "/api/latch" }));
+ * const latch = toNodeHandler(createLatchHandler({ runtime, resolvePrincipal, basePath: "/api/latch" }));
  * app.all("/api/latch/*", async (req, res, next) => {
  *   if (!(await latch(req, res))) next();
  * });

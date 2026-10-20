@@ -3,7 +3,7 @@ import { assert, makeRuntime, type Principal } from "./setup.js";
 
 /**
  * The HTTP layer: POST through the Hono route end-to-end (no real port — Hono's
- * `app.request`), with a BYO `resolveContext`. Asserts the streamed response and
+ * `app.request`), with a BYO `resolvePrincipal`. Asserts the streamed response and
  * that the turn persisted under the caller's `owner` key — and that another org
  * (a different owner) cannot see the same chat id.
  */
@@ -13,7 +13,7 @@ async function main() {
   // BYO-auth: this is the only glue a customer writes.
   const app = createLatchHono<Principal>({
     runtime,
-    resolveContext: (req): Principal => {
+    resolvePrincipal: (req): Principal => {
       const org = req.headers.get("x-org") ?? "org_a";
       return { orgId: org, userId: "user_1" };
     },
