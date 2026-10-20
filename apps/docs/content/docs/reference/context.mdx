@@ -42,7 +42,7 @@ const close_ticket = tool({
 });
 ```
 
-`toolFor<Principal, Ctx, Params, MessageContext>()` returns the AI SDK's `tool()` with `options.context` typed as `ToolContext<Principal, Ctx, Params, MessageContext>`. Make it once and use it for every tool. The AI SDK on its own types a tool's context only from a `contextSchema`, which validates at runtime and can't describe clients and functions. With a plain `tool()`, cast instead: `context as ToolContext<Principal, Ctx>`.
+`toolFor<Principal, Ctx, Params, MessageContext>()` is for typing only. It returns the AI SDK's `tool()` with `options.context` typed as `ToolContext<Principal, Ctx, Params, MessageContext>`; at runtime it is `tool()`, and the tools it makes are ordinary AI SDK tools. Make it once and use it for every tool, or keep plain `tool()` and the cast below: both work the same. The AI SDK on its own types a tool's context only from a `contextSchema`, which validates at runtime and can't describe clients and functions. With a plain `tool()`, cast instead: `context as ToolContext<Principal, Ctx>`.
 
 <auto-type-table path="../../../../../packages/core/src/context.ts" name="ToolContext" />
 

@@ -101,7 +101,7 @@ export const context = ({ principal }: { principal: Principal }) => ({
   orders: ordersFor(principal.orgId),
 });
 type Ctx = ReturnType<typeof context>;
-const tool = toolFor<Principal, Ctx>(); // AI SDK tool(), context typed; once per app
+const tool = toolFor<Principal, Ctx>(); // types only: AI SDK tool() with context typed
 
 export const find_order = tool({
   description: "Look up an order",

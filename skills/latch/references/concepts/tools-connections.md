@@ -14,7 +14,7 @@ A tool in a product acts for one customer, often with that customer's credential
 
 ## Your own tools
 
-Plain AI SDK tools. They receive the [context](./inputs.md), so they act for the right customer. `toolFor` gives you the AI SDK's `tool()` with that context typed:
+Plain AI SDK tools. They receive the [context](./inputs.md), so they act for the right customer. `toolFor` is for typing only: it gives you the AI SDK's `tool()` with that context typed, and changes nothing at runtime.
 
 ```ts
 const tool = toolFor<Principal, Ctx>(); // from @intentface/latch-core, once per app

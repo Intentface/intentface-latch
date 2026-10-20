@@ -78,7 +78,7 @@ createRuntime({ storage, context, agents });
 ```ts
 import { toolFor } from "@intentface/latch-core";
 
-const tool = toolFor<Principal, Ctx>(); // the AI SDK's tool(), with the context typed
+const tool = toolFor<Principal, Ctx>(); // types only: the AI SDK's tool(), with the context typed
 
 const find_ticket = tool({
   description: "Look up a ticket",

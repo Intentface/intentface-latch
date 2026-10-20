@@ -2,7 +2,11 @@ import { tool, type Tool, type ToolExecuteFunction } from "ai";
 import type { ToolContext } from "./context.js";
 
 /**
- * The AI SDK's `tool()`, with `options.context` typed for your app: what your
+ * Types only: the AI SDK's `tool()`, with `options.context` typed for your app.
+ * Nothing changes at runtime (it calls `tool()` and returns its tool), and a
+ * plain `tool()` with a cast works exactly the same.
+ *
+ * The context is what your
  * context function returns, plus what Latch adds (`principal`, `run`,
  * `writer`, `runtime`, `params`, `messageContext`). Make it once, use it for
  * every tool, and drop the `context as ToolContext<…>` cast:
@@ -17,8 +21,7 @@ import type { ToolContext } from "./context.js";
  * });
  * ```
  *
- * The types are the only difference: it calls `tool()` and returns its tool. The
- * AI SDK's own way to type a tool's context is a `contextSchema`, which
+ * Why it exists: the AI SDK's own way to type a tool's context is a `contextSchema`, which
  * validates at runtime; Latch's context holds clients and functions, so this
  * types it without one. Add `Params` and `MessageContext` for an agent that
  * declares `params` or reads the `data-context` part. A tool without
