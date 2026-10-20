@@ -35,8 +35,10 @@ const { app } = await createLatchHonoApp<Principal>({
   storage: createSqliteAdapter<Principal>(drizzle(client, { schema }), {
     owner: (p) => [p.userId], // each user sees only their own chats
   }),
-  // Who is asking. A demo shortcut: in your app, read your real session here.
-  resolveContext: async (req) => ({ userId: req.headers.get("x-user") ?? "demo" }),
+  // Who is asking. Everyone is one demo user, and only when NODE_ENV is
+  // "development": anywhere else it refuses everyone (401) until you read
+  // your real session here.
+  resolvePrincipal: async () => (process.env.NODE_ENV === "development" ? { userId: "demo" } : null),
   agents: (models) => ({
     assistant: defineAgent<Principal>({
       model: models.modelFor("claude-sonnet-4-6"),
@@ -49,7 +51,7 @@ serve({ fetch: app.fetch, port: 8787 });
 ```
 
 ```bash
-npx tsx server.ts
+NODE_ENV=development npx tsx server.ts
 ```
 
 ## 3. Talk to it
@@ -85,7 +87,7 @@ That one file is already more than a demo:
 Each of these takes a few lines on top of this file:
 
 - [Ask before risky actions](https://intentface-latch-docs.vercel.app/docs/hard-parts/approvals): a person approves before a tool runs.
-- [Your real users](https://intentface-latch-docs.vercel.app/docs/hard-parts/access): replace the `x-user` header with your login, and decide who sees which chats.
+- [Your real users](https://intentface-latch-docs.vercel.app/docs/hard-parts/access): replace the demo user with your login, and decide who sees which chats.
 - [Usage limits](https://intentface-latch-docs.vercel.app/docs/hard-parts/limits): requests and tokens per user, per day.
 - [Running on many servers](https://intentface-latch-docs.vercel.app/docs/hard-parts/durability): what changes on Vercel or behind a load balancer.
 - [Files and images](https://intentface-latch-docs.vercel.app/docs/hard-parts/attachments): what happens when users attach them.

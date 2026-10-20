@@ -11,7 +11,7 @@ import { decodeOAuthState } from "@intentface/latch-mcp";
  * history, and the *generic* connection OAuth (authorize/callback) + status/
  * test/disconnect for any MCP connection in the registry. No per-server routes.
  *
- * Auth is BYO: `resolveContext(request)` returns the `Principal` (or null →
+ * Auth is BYO: `resolvePrincipal(request)` returns the `Principal` (or null →
  * 401). The core never authenticates; everything is scoped by that principal.
  *
  * Routes (relative to `basePath`):
@@ -74,23 +74,34 @@ function connectionFailure(
   return { error: fallback, ...(status ? { status: Number(status) } : {}) };
 }
 
+/** Your login: turns a request into the principal, or `null` for a `401`. */
+export type PrincipalResolver<P> = (request: Request) => P | null | Promise<P | null>;
+
 export interface LatchHandlerConfig<P> {
   /**
    * The runtime the routes call. For a database per customer, pass a function
-   * instead: it gets the principal from `resolveContext` and returns that
+   * instead: it gets the principal from `resolvePrincipal` and returns that
    * customer's runtime. In that case also set `cronRun`, because the cron
    * route has no principal to pick a runtime with.
    */
   runtime: Runtime<P> | ((principal: P) => Runtime<P> | Promise<Runtime<P>>);
   /**
    * Your login: turns a request into the principal, or `null` for a `401`.
+   * Required (`resolveContext` is its old name).
    *
    * Not used when a sign-in to a connection returns (the OAuth callback): the
    * principal that started the sign-in is saved with it and restored with
    * `reconstructPrincipal`, so whatever session the returning browser has
    * can't change whose account the credentials are saved to.
    */
-  resolveContext: (request: Request) => P | null | Promise<P | null>;
+  resolvePrincipal?: PrincipalResolver<P>;
+  /**
+   * The old name of `resolvePrincipal`. Still works; set one or the other.
+   *
+   * @deprecated Renamed to `resolvePrincipal`: it returns the principal, and
+   * "context" is what your context function builds from it.
+   */
+  resolveContext?: PrincipalResolver<P>;
   /**
    * Restores the principal that started a connection sign-in, when the sign-in
    * returns. Check it's still valid here (for example, still a member);
@@ -298,10 +309,21 @@ function refusalResponse(e: unknown): Response | undefined {
   }
 }
 
+/** `resolvePrincipal`, or the deprecated `resolveContext`; one is required. */
+export function principalResolverOf<P>(
+  config: { resolvePrincipal?: PrincipalResolver<P>; resolveContext?: PrincipalResolver<P> },
+  caller: string,
+): PrincipalResolver<P> {
+  const resolve = config.resolvePrincipal ?? config.resolveContext;
+  if (!resolve) throw new Error(`${caller}: pass resolvePrincipal, the function that turns a request into the principal`);
+  return resolve;
+}
+
 export function createLatchHandler<P>(
   config: LatchHandlerConfig<P>,
 ): LatchHandler {
-  const { runtime, resolveContext, connections } = config;
+  const { runtime, connections } = config;
+  const resolvePrincipal = principalResolverOf(config, "createLatchHandler");
   const basePath = config.basePath ?? "/";
   /** Resolve the runtime for this request's principal (static value or per-principal resolver). */
   const resolveRuntime = (principal: P): Runtime<P> | Promise<Runtime<P>> =>
@@ -369,7 +391,7 @@ export function createLatchHandler<P>(
           request,
         );
       } else {
-        principal = await resolveContext(request);
+        principal = await resolvePrincipal(request);
       }
       if (!principal) return json({ error: "unauthorized" }, 401);
 
@@ -483,7 +505,7 @@ export function createLatchHandler<P>(
 
     // --- runtime ops ------------------------------------------------------
     if (seg[0] === "agents") {
-      const principal = await resolveContext(request);
+      const principal = await resolvePrincipal(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       // GET agents — the agents available to the caller (for a picker).
@@ -578,7 +600,7 @@ export function createLatchHandler<P>(
     }
 
     if (seg[0] === "chats" && method === "GET") {
-      const principal = await resolveContext(request);
+      const principal = await resolvePrincipal(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       const id = seg[1];
@@ -591,7 +613,7 @@ export function createLatchHandler<P>(
     // DELETE chats/:id — the chat, its messages, runs and usage, and the
     // subagent threads it spawned. 404 when it isn't the caller's.
     if (seg[0] === "chats" && seg[1] && !seg[2] && method === "DELETE") {
-      const principal = await resolveContext(request);
+      const principal = await resolvePrincipal(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       try {
@@ -605,7 +627,7 @@ export function createLatchHandler<P>(
     }
 
     if (seg[0] === "runs" && method === "GET") {
-      const principal = await resolveContext(request);
+      const principal = await resolvePrincipal(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       // `identity` is the serialized Principal — durable SERVER state, and a
@@ -619,7 +641,7 @@ export function createLatchHandler<P>(
 
     // --- schedules (cron-driven agents) -----------------------------------
     if (seg[0] === "schedules") {
-      const principal = await resolveContext(request);
+      const principal = await resolvePrincipal(request);
       if (!principal) return json({ error: "unauthorized" }, 401);
       const rt = await resolveRuntime(principal);
       const id = seg[1];

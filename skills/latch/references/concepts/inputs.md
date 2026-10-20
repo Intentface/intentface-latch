@@ -76,13 +76,15 @@ createRuntime({ storage, context, agents });
 - **Reaches the agent function** as `context`, and **every tool** as `options.context`, together with `principal`:
 
 ```ts
+import { toolFor } from "@intentface/latch-core";
+
+const tool = toolFor<Principal, Ctx>(); // types only: the AI SDK's tool(), with the context typed
+
 const find_ticket = tool({
   description: "Look up a ticket",
   inputSchema: z.object({ id: z.string() }),
-  execute: async ({ id }, { context }) => {
-    const { db } = context as ToolContext<Principal, Ctx>;
-    return db.tickets.get(id); // can't reach another organization's tickets
-  },
+  execute: async ({ id }, { context }) =>
+    context.db.tickets.get(id), // can't reach another organization's tickets
 });
 ```
 

@@ -98,7 +98,7 @@ The same code with `createClient({ url: ":memory:" })`: a fresh database per pro
 
 ## Mount it
 
-`createLatchHandler({ runtime, resolveContext })` gives you the Web-standard handler; [Hosting](../guides/mount-the-handler.md) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
+`createLatchHandler({ runtime, resolvePrincipal })` gives you the Web-standard handler; [Hosting](../guides/mount-the-handler.md) mounts it in Hono, Express, Fastify, NestJS or any framework that speaks `Request` and `Response`.
 
 ## Next
 

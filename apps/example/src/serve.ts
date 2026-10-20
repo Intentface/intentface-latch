@@ -30,7 +30,7 @@ const owner = (p: Principal) => (p.userId ? [p.orgId, p.userId] : [p.orgId]);
 // BYO-auth: the only glue a customer writes. LOCAL DEMO ONLY — this trusts a
 // caller-supplied header, which is impersonation by construction. A real app
 // derives the Principal from its session and returns null (→ 401) otherwise.
-const resolveContext = (req: Request): Principal => ({
+const resolvePrincipal = (req: Request): Principal => ({
   orgId: req.headers.get("x-org") ?? "org_a",
   userId: req.headers.get("x-user") ?? "user_1",
 });
@@ -44,7 +44,7 @@ const db = drizzle(client, { schema });
 // web-tool / prompt-caching hooks, and the harness tools.
 const { app, runtime, stop } = await createLatchHonoApp<Principal>({
   storage: createSqliteAdapter<Principal>(db, { owner }),
-  resolveContext,
+  resolvePrincipal,
   agents: (models) => ({
     assistant: defineAgent<Principal>({
       model: models.modelFor("claude-sonnet-4-6"),

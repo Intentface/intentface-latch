@@ -20,7 +20,7 @@ export const { runtime, handler } = await createLatchApp<Principal>({
   storage,
   agents: { assistant },
   // Your login. Return null and the request gets 401.
-  resolveContext: async (request) => {
+  resolvePrincipal: async (request) => {
     const user = await getUser(request);
     return user ? { orgId: user.orgId, userId: user.id } : null;
   },

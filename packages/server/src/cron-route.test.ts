@@ -9,9 +9,9 @@ import { createLatchHandler } from "./handler.js";
 
 function build(cronSecret?: string) {
   const cronRun = vi.fn(async () => ({ due: { fired: 0 }, resumed: [] }));
-  const resolveContext = vi.fn(() => null);
-  const handler = createLatchHandler({ runtime: {} as never, resolveContext, cronSecret, cronRun });
-  return { handler, cronRun, resolveContext };
+  const resolvePrincipal = vi.fn(() => null);
+  const handler = createLatchHandler({ runtime: {} as never, resolvePrincipal, cronSecret, cronRun });
+  return { handler, cronRun, resolvePrincipal };
 }
 
 const cron = (init: RequestInit = {}) => new Request("https://app.example/cron/run", init);
@@ -25,12 +25,12 @@ describe("cron/run", () => {
   });
 
   it("runs for Vercel Cron: GET with a bearer token", async () => {
-    const { handler, cronRun, resolveContext } = build("s3cret");
+    const { handler, cronRun, resolvePrincipal } = build("s3cret");
     const res = await handler(cron({ headers: { authorization: "Bearer s3cret" } }));
     expect(res?.status).toBe(200);
     expect(cronRun).toHaveBeenCalledOnce();
     // No user is involved.
-    expect(resolveContext).not.toHaveBeenCalled();
+    expect(resolvePrincipal).not.toHaveBeenCalled();
   });
 
   it("runs for a POST with the x-latch-cron-secret header", async () => {
