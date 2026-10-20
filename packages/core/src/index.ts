@@ -9,7 +9,7 @@ export * from "./principal.js";
 export * from "./message.js";
 export * from "./storage.js";
 export * from "./context.js";
-export { toolFor, type LatchToolContext, type TypedTool } from "./tool-for.js";
+export { toolFor, type LatchToolContext, type ToolFactory } from "./tool-for.js";
 export * from "./current-date.js";
 export * from "./agent.js";
 export * from "./memory.js";

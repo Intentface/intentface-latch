@@ -35,4 +35,10 @@ describe("toolFor", () => {
     expect(result.answer).toBe("done");
     expect(seen).toEqual({ greeting: "hello Ada", userId: principal.userId, agent: "greeter" });
   });
+
+  it("takes a tool without execute, like tool() does (the client or a queue answers it)", () => {
+    const tool = toolFor<P, Ctx>();
+    const pick_date = tool({ description: "Ask the user for a date", inputSchema: z.object({ label: z.string() }) });
+    expect(pick_date.execute).toBeUndefined();
+  });
 });

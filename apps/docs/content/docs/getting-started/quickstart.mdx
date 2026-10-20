@@ -32,9 +32,10 @@ const { app } = await createLatchHonoApp<Principal>({
   storage: createSqliteAdapter<Principal>(drizzle(client, { schema }), {
     owner: (p) => [p.userId], // each user sees only their own chats
   }),
-  // Who is asking. Here everyone is one demo user; read your real session
-  // instead. In production it refuses everyone (401) until you do.
-  resolvePrincipal: async () => (process.env.NODE_ENV === "production" ? null : { userId: "demo" }),
+  // Who is asking. Everyone is one demo user, and only when NODE_ENV is
+  // "development": anywhere else it refuses everyone (401) until you read
+  // your real session here.
+  resolvePrincipal: async () => (process.env.NODE_ENV === "development" ? { userId: "demo" } : null),
   agents: (models) => ({
     assistant: defineAgent<Principal>({
       model: models.modelFor("claude-sonnet-4-6"),
@@ -47,7 +48,7 @@ serve({ fetch: app.fetch, port: 8787 });
 ```
 
 ```bash
-npx tsx server.ts
+NODE_ENV=development npx tsx server.ts
 ```
 
 ## 3. Talk to it
