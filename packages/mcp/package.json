@@ -1,6 +1,6 @@
 {
   "name": "@intentface/latch-mcp",
-  "version": "0.22.1",
+  "version": "0.23.0",
   "description": "Latch MCP host — connect to MCP servers as tools, with a per-tenant SSRF allowlist and vault-brokered auth.",
   "keywords": [
     "ai",
