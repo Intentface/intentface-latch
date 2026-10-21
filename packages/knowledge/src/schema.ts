@@ -26,7 +26,9 @@ export const MIGRATIONS: readonly string[] = [
      body        text not null,
      size        int not null,
      updated_at  timestamptz not null default now(),
-     updated_by  text not null
+     updated_by  text not null,
+     -- Whether a trusted subject wrote the whole current body (see trustedSubjects).
+     trusted_author boolean not null default false
    )`,
   `create unique index if not exists kb_files_path on kb_files (space_id, path)`,
   `create index if not exists kb_files_trgm on kb_files using gin (body gin_trgm_ops)`,

@@ -25,8 +25,10 @@ export interface KnowledgeConfig<P> {
   /** Resolves a principal's subjects and mounts. Runs once per view, so on every turn. */
   access: (principal: P) => KnowledgeAccess | Promise<KnowledgeAccess>;
   /**
-   * Subjects whose write access doesn't lower trust: your staff, your curator
-   * agents. A file is trusted when no one outside these can write it.
+   * Subjects whose writes are trusted: your staff, your curator agents. A file
+   * is trusted when one of these wrote it, and no one outside them can change
+   * it now. Replacing a file sets its trust from the writer; an edit can only
+   * lower it, since the rest of the text is still the earlier writer's.
    */
   trustedSubjects?: string[];
   /** Who a principal's writes are recorded as. Default: its first subject. */
@@ -185,7 +187,7 @@ export function createKnowledge<P>(config: KnowledgeConfig<P>): Knowledge<P> {
   };
 
   function createView(principal: P): KnowledgeView {
-    let resolved: Promise<{ subjects: string[]; mounts: Map<string, string>; kinds: Map<string, SpaceKind>; actor: string }> | undefined;
+    let resolved: Promise<{ subjects: string[]; mounts: Map<string, string>; kinds: Map<string, SpaceKind>; actor: string; trustedWriter: boolean }> | undefined;
     const state = () =>
       (resolved ??= (async () => {
         const access = await config.access(principal);
@@ -197,7 +199,8 @@ export function createKnowledge<P>(config: KnowledgeConfig<P>): Knowledge<P> {
         const subjects = [...new Set(["everyone", ...access.subjects])];
         const { rows } = await db.query<{ id: string; kind: SpaceKind }>(`select id, kind from kb_spaces where id = any($1)`, [[...mounts.values()]]);
         const kinds = new Map(rows.map((r) => [r.id, r.kind]));
-        return { subjects, mounts, kinds, actor: config.actor?.(principal) ?? access.subjects[0] ?? "unknown" };
+        const trustedWriter = access.subjects.some((x) => trustedSubjects.includes(x));
+        return { subjects, mounts, kinds, actor: config.actor?.(principal) ?? access.subjects[0] ?? "unknown", trustedWriter };
       })());
 
     /** The space behind a mount, or not_found (a mount the caller doesn't have looks like a missing path). */
@@ -215,7 +218,7 @@ export function createKnowledge<P>(config: KnowledgeConfig<P>): Knowledge<P> {
     )`;
     const readable = (f: string) => `exists (select 1 from g where g.space_id = ${f}.space_id and ${coversSql("g.path", `${f}.path`)})`;
     /** `$3` = trusted subjects. */
-    const trusted = (f: string) => `not exists (
+    const trusted = (f: string) => `${f}.trusted_author and not exists (
       select 1 from kb_grants e
       where e.space_id = ${f}.space_id and e.role = 'editor' and (e.expires_at is null or e.expires_at > now())
         and ${coversSql("e.path", `${f}.path`)} and not (e.subject = any($3))
@@ -372,20 +375,21 @@ export function createKnowledge<P>(config: KnowledgeConfig<P>): Knowledge<P> {
             if (opts?.version === undefined) throw new KnowledgeError("conflict", `${input} exists: read it, then pass its version to replace it`);
             if (opts.version !== existing.version) throw new KnowledgeError("conflict", `${input} changed since version ${opts.version}: it's at ${existing.version} now`);
             const version = existing.version + 1;
-            await tx.query(`update kb_files set body = $1, size = $2, version = $3, updated_at = now(), updated_by = $4 where id = $5`, [
-              content,
-              byteLength(content),
-              version,
-              s.actor,
-              existing.id,
-            ]);
+            await tx.query(
+              `update kb_files set body = $1, size = $2, version = $3, updated_at = now(), updated_by = $4, trusted_author = $6 where id = $5`,
+              [content, byteLength(content), version, s.actor, existing.id, s.trustedWriter],
+            );
             await saveVersion(tx, existing.id, version, content, s.actor, opts.runId);
             return { path: virtualPath(mount, rel), version };
           }
+          // Two runs creating the same path at once: the second finds no row to
+          // lock, and its insert waits on the first's, then does nothing.
           const { rows: created } = await tx.query<{ id: string }>(
-            `insert into kb_files (space_id, path, version, body, size, updated_by) values ($1, $2, 1, $3, $4, $5) returning id`,
-            [space, rel, content, byteLength(content), s.actor],
+            `insert into kb_files (space_id, path, version, body, size, updated_by, trusted_author) values ($1, $2, 1, $3, $4, $5, $6)
+             on conflict (space_id, path) do nothing returning id`,
+            [space, rel, content, byteLength(content), s.actor, s.trustedWriter],
           );
+          if (!created[0]) throw new KnowledgeError("conflict", `${input} was just created by someone else: read it, then pass its version to replace it`);
           await saveVersion(tx, created[0]!.id, 1, content, s.actor, opts?.runId);
           return { path: virtualPath(mount, rel), version: 1 };
         });
@@ -408,13 +412,10 @@ export function createKnowledge<P>(config: KnowledgeConfig<P>): Knowledge<P> {
           const body = file.body.slice(0, at) + newText + file.body.slice(at + oldText.length);
           if (byteLength(body) > MAX_FILE_BYTES) throw new KnowledgeError("invalid", `Documents are limited to ${MAX_FILE_BYTES} bytes`);
           const version = file.version + 1;
-          await tx.query(`update kb_files set body = $1, size = $2, version = $3, updated_at = now(), updated_by = $4 where id = $5`, [
-            body,
-            byteLength(body),
-            version,
-            s.actor,
-            file.id,
-          ]);
+          await tx.query(
+            `update kb_files set body = $1, size = $2, version = $3, updated_at = now(), updated_by = $4, trusted_author = trusted_author and $6 where id = $5`,
+            [body, byteLength(body), version, s.actor, file.id, s.trustedWriter],
+          );
           await saveVersion(tx, file.id, version, body, s.actor, opts?.runId);
           return { path: virtualPath(resolvePath(input).mount, rel), version };
         });

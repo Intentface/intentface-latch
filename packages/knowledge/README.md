@@ -35,9 +35,11 @@ knowledge, and it finds the skill that fits.
 
 ## Trusted or reference
 
-Every file the tools return is marked by who can change it. A file no one
-outside `trustedSubjects` can edit is **trusted**: the agent follows it. Any
-other file is **reference**: information, never instructions. So `/practices`
+Every file the tools return is marked by who wrote it and who can change it.
+A file written by one of `trustedSubjects`, which no one outside them can edit
+now, is **trusted**: the agent follows it. Any other file is **reference**:
+information, never instructions. An edit can only lower a file's trust; a
+trusted writer replacing the whole file restores it. So `/practices`
 and an org's `/org/playbooks`, written by your own staff, steer the agent,
 while `/org/docs` and `/me`, written by users, inform it. Give a customer an
 editor grant on their playbooks and they become reference the same moment.

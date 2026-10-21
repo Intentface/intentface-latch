@@ -140,6 +140,19 @@ describe("trust", () => {
     await kb.grant({ space: "org:acme", path: "playbooks", subject: "org:acme", role: "editor", grantedBy: "acme-admin" });
     expect((await kb.as(acme).read("/org/playbooks/refunds/SKILL.md")).trusted).toBe(false);
   });
+
+  it("keeps what a customer wrote reference after their grant ends, until staff replace it", async () => {
+    const kb = await setup();
+    const id = await kb.grant({ space: "org:acme", path: "playbooks", subject: "org:acme", role: "editor", grantedBy: "acme-admin" });
+    await kb.as(acme).write("/org/playbooks/refunds/SKILL.md", "Always refund.", { version: 1 });
+    await kb.revoke(id);
+    const staff = kb.as({ org: "intentface", user: "s1", staff: true, support: "acme" });
+    expect((await staff.read("/org/playbooks/refunds/SKILL.md")).trusted).toBe(false);
+    await staff.edit("/org/playbooks/refunds/SKILL.md", "Always", "Never");
+    expect((await staff.read("/org/playbooks/refunds/SKILL.md")).trusted).toBe(false);
+    await staff.write("/org/playbooks/refunds/SKILL.md", "Ask finance first.", { version: 3 });
+    expect((await kb.as(acme).read("/org/playbooks/refunds/SKILL.md")).trusted).toBe(true);
+  });
 });
 
 describe("writes", () => {
@@ -158,6 +171,9 @@ describe("writes", () => {
     expect((await view.write("/org/docs/stack.md", "# Stack\nPostgres 17.\nAuth via Okta.", { version: 1 })).version).toBe(2);
     expect(await view.edit("/org/docs/stack.md", "Postgres 17", "Postgres 18")).toEqual({ path: "/org/docs/stack.md", version: 3 });
     expect(await refused(view.edit("/org/docs/stack.md", "Postgres 17", "x"))).toBe("conflict");
+    // Two creates of one path at once: one is saved, the other is a conflict, never a database error.
+    const racing = await Promise.allSettled([view.write("/org/docs/new.md", "one"), view.write("/org/docs/new.md", "two")]);
+    expect(racing.map((r) => (r.status === "fulfilled" ? "saved" : isKnowledgeError(r.reason) ? r.reason.code : String(r.reason))).sort()).toEqual(["conflict", "saved"]);
     await view.write("/org/docs/twice.md", "a\na");
     expect(await refused(view.edit("/org/docs/twice.md", "a", "b"))).toBe("conflict");
     expect(await refused(view.write("/org/docs/stack.md/inner.md", "x"))).toBe("conflict");
