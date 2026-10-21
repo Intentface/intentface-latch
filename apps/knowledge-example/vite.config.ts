@@ -1,3 +1,4 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 
@@ -19,5 +20,5 @@ const api = (): Plugin => ({
 
 export default defineConfig(({ mode }) => {
   Object.assign(process.env, loadEnv(mode, process.cwd(), ""));
-  return { plugins: [react(), api()], server: { port: 5180 } };
+  return { plugins: [react(), tailwindcss(), api()], server: { port: 5180 } };
 });

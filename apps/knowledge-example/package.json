@@ -17,11 +17,14 @@
     "@intentface/latch-drizzle": "workspace:*",
     "@intentface/latch-knowledge": "workspace:*",
     "@intentface/latch-server": "workspace:*",
+    "@keyline-icons/react": "1.7.0",
+    "@tailwindcss/vite": "4.3.3",
     "ai": "^7.0.106",
     "drizzle-orm": "^0.45.2",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "react-markdown": "10.1.0"
+    "streamdown": "2.5.0",
+    "tailwindcss": "4.3.3"
   },
   "devDependencies": {
     "@types/node": "^22",

@@ -1,743 +1,95 @@
-:root {
-  --ground: #f3f4f7;
-  --surface: #ffffff;
-  --surface-sunk: #eceef3;
-  --ink: #18202e;
-  --ink-2: #4b5567;
-  --ink-3: #7c8597;
-  --line: #dfe2e9;
-  --focus: #3c5bd9;
-  --trusted: #17775a;
-  --trusted-soft: #e3f3ec;
-  --reference: #a1610a;
-  --reference-soft: #fbf0dc;
-  --danger: #b4322a;
-  --bubble: #18202e;
-  --bubble-ink: #f6f7fa;
-  --sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  color-scheme: light;
-}
+@import "tailwindcss";
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --ground: #10141c;
-    --surface: #171c26;
-    --surface-sunk: #1e2430;
-    --ink: #e8ebf1;
-    --ink-2: #aab2c2;
-    --ink-3: #7b8496;
-    --line: #2a3140;
-    --focus: #8aa0ff;
-    --trusted: #4cc79a;
-    --trusted-soft: #143328;
-    --reference: #e7a948;
-    --reference-soft: #3a2a10;
-    --danger: #ff8a80;
-    --bubble: #e8ebf1;
-    --bubble-ink: #121722;
-    color-scheme: dark;
-  }
-}
+/* Streamdown's own elements carry Tailwind classes. */
+@source "../node_modules/streamdown/dist/*.js";
 
-* {
-  box-sizing: border-box;
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 html,
 body,
 #root {
   height: 100%;
-  margin: 0;
 }
 
 body {
-  background: var(--ground);
-  color: var(--ink);
-  font: 14px/1.5 var(--sans);
-  -webkit-font-smoothing: antialiased;
+  @apply bg-[#f5f5f6] font-sans text-zinc-900 antialiased dark:bg-[#131315] dark:text-zinc-100;
+  color-scheme: light dark;
 }
 
-button {
-  font: inherit;
-  color: inherit;
-}
-
-:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+/*
+ * The knowledge tree's rail, from the Nav docs demo (rail.css). The package
+ * publishes the signal (data-rail, data-branches, data-open); the geometry is
+ * ours. 15px hangs the rail under a 16px icon at px-2; 7px is its lane; 6px
+ * the elbow's radius; 2px bridges the gap between rows. --rail must be opaque.
+ */
+.kb-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
   overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
+  opacity: 1;
+  transition:
+    height 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 200ms ease-out;
 }
-
-/* Layout: people + knowledge | chat | open file */
-
-.app {
-  display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  height: 100%;
+.kb-nav [data-nav-list][data-starting-style],
+.kb-nav [data-nav-list][data-ending-style] {
+  height: 0;
+  opacity: 0;
 }
-
-.app[data-viewer="open"] {
-  grid-template-columns: 300px minmax(0, 1fr) minmax(320px, 420px);
+.kb-nav [data-nav-list] > * {
+  flex-shrink: 0;
 }
-
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 18px 16px 24px;
-  overflow-y: auto;
-  border-right: 1px solid var(--line);
-  background: var(--surface);
+.kb-nav [data-nav-list][data-indent] {
+  --nav-row: 30px;
+  margin-top: 2px;
+  margin-left: 15px;
+  padding-left: 7px;
 }
-
-.main {
-  min-width: 0;
-  height: 100%;
-}
-
-.loading {
-  padding: 24px;
-  color: var(--ink-3);
-}
-
-.brand {
-  display: flex;
-  flex-direction: column;
-}
-
-.brand-name {
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.brand-sub {
-  color: var(--ink-3);
-  font-size: 12px;
-}
-
-.section-title {
-  margin: 0 0 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink-2);
-}
-
-/* People */
-
-.people ul,
-.tree ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.people-org + .people-org {
-  margin-top: 10px;
-}
-
-.people-org-name {
-  font-size: 12px;
-  color: var(--ink-3);
-  margin: 0 0 4px 4px;
-}
-
-.person {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 6px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-}
-
-.person:hover {
-  background: var(--surface-sunk);
-}
-
-.person[aria-pressed="true"] {
-  background: var(--surface-sunk);
-  box-shadow: inset 3px 0 0 var(--ink);
-}
-
-.avatar {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: var(--surface-sunk);
-  border: 1px solid var(--line);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.avatar[data-staff] {
-  background: var(--trusted-soft);
-  border-color: var(--trusted);
-  color: var(--trusted);
-}
-
-.person-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.person-name {
-  font-weight: 600;
-}
-
-.person-role {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-/* Trust marks: a filled seal for trusted, a dashed ring for reference */
-
-.trust {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--reference);
-}
-
-.trust[data-trusted] {
-  color: var(--trusted);
-}
-
-.trust-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1.5px dashed currentColor;
-}
-
-.trust[data-trusted] .trust-dot {
-  border-style: solid;
-  background: currentColor;
-}
-
-.legend {
-  margin: 0 0 12px;
-  font-size: 12px;
-  line-height: 1.8;
-  color: var(--ink-2);
-}
-
-/* Knowledge tree */
-
-.mount + .mount {
-  margin-top: 14px;
-}
-
-.mount-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 0 4px 4px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 4px;
-}
-
-.mount-name {
-  font-family: var(--mono);
-  font-weight: 500;
-}
-
-.mount-hint {
-  font-size: 11px;
-  color: var(--ink-3);
-  text-align: right;
-}
-
-.file {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 4px;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-}
-
-.file:hover,
-.file[aria-current="true"] {
-  background: var(--surface-sunk);
-}
-
-.file-path {
-  font-family: var(--mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.skill-tag {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.empty {
-  margin: 4px;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-/* Chat */
-
-.chat {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.chat-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 24px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.chat-title {
-  font-weight: 600;
-}
-
-.chat-sub {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.ghost-button {
-  padding: 6px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  cursor: pointer;
-}
-
-.ghost-button:hover {
-  background: var(--surface-sunk);
-}
-
-.ghost-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.thread {
+.kb-nav [data-nav-list][data-rail] > * {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
+  overflow: visible;
+}
+.kb-nav [data-nav-list][data-rail] > *::before,
+.kb-nav [data-nav-list][data-rail] > *::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  border-color: var(--rail);
+  border-left-width: 1px;
+}
+.kb-nav [data-nav-list][data-rail] > *::before {
+  top: -2px;
+  width: 6px;
+  height: calc(var(--nav-row) / 2 + 2px);
+}
+.kb-nav [data-nav-list][data-rail] > *::after {
+  top: calc(var(--nav-row) / 2 - 6px);
+  bottom: -2px;
+}
+.kb-nav [data-nav-list][data-rail] > *:last-child::after {
+  display: none;
+}
+.kb-nav [data-nav-list][data-branches] > [data-nav-group]::before {
+  border-bottom-width: 1px;
+  border-bottom-left-radius: 6px;
 }
 
-.thread-viewport {
-  flex: 1;
-  overflow-y: auto;
+/* The people list collapses the same way, without a rail. */
+.people-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
+  overflow: hidden;
+  transition: height 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-
-.thread-content {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 24px 24px 16px;
-}
-
-.starters {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  padding-top: 12vh;
-}
-
-.starters p {
-  max-width: 52ch;
-  margin: 0 0 6px;
-  color: var(--ink-2);
-}
-
-.starter {
-  max-width: 100%;
-  padding: 9px 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-  text-align: left;
-  cursor: pointer;
-}
-
-.starter:hover {
-  border-color: var(--ink-3);
-}
-
-.message {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.message[data-role="user"] {
-  align-items: flex-end;
-}
-
-.bubble {
-  max-width: 80%;
-  margin: 0;
-  padding: 9px 14px;
-  border-radius: 14px 14px 4px 14px;
-  background: var(--bubble);
-  color: var(--bubble-ink);
-  white-space: pre-wrap;
-}
-
-.thinking {
-  color: var(--ink-3);
-  font-size: 13px;
-}
-
-.chat-error {
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--reference-soft);
-  color: var(--danger);
-}
-
-/* Tool steps */
-
-.steps {
-  max-width: 68ch;
-  display: flex;
-  flex-direction: column;
-  padding: 6px 0;
-  border-left: 2px solid var(--line);
-}
-
-.step-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 10px;
-}
-
-.step-trigger {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 3px 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  color: var(--ink-2);
-  cursor: pointer;
-}
-
-.step-trigger:hover {
-  color: var(--ink);
-}
-
-.step-icon {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ink-3);
-}
-
-.step-icon[data-status="running"] {
-  background: var(--focus);
-  animation: pulse 1s ease-in-out infinite;
-}
-
-.step-icon[data-status="error"] {
-  background: var(--danger);
-}
-
-@keyframes pulse {
-  50% {
-    opacity: 0.3;
-  }
+.people-nav [data-nav-list][data-starting-style],
+.people-nav [data-nav-list][data-ending-style] {
+  height: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .step-icon[data-status="running"] {
-    animation: none;
-  }
-}
-
-.step-label {
-  font-size: 13px;
-  min-width: 0;
-}
-
-.step-path {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-
-.step-refused {
-  margin-left: 6px;
-  font-size: 12px;
-  color: var(--danger);
-}
-
-.step-open {
-  margin-left: auto;
-  padding: 1px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.step-panel {
-  overflow: hidden;
-}
-
-.step-output {
-  margin: 4px 0 8px 25px;
-  padding: 10px 12px;
-  max-height: 260px;
-  overflow: auto;
-  border-radius: 8px;
-  background: var(--surface-sunk);
-  font: 12px/1.55 var(--mono);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* Composer */
-
-.thread-composer {
-  padding: 0 24px 20px;
-}
-
-.composer {
-  max-width: 760px;
-  margin: 0 auto;
-}
-
-.composer-box {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 10px 10px 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
-  box-shadow: 0 1px 2px rgb(16 20 28 / 0.06);
-}
-
-.composer-box:focus-within {
-  border-color: var(--ink-3);
-}
-
-.composer-input:focus-visible {
-  outline: none;
-}
-
-.composer-input {
-  flex: 1;
-  min-height: 24px;
-  max-height: 200px;
-  overflow-y: auto;
-  padding: 4px 0;
-  outline: none;
-}
-
-.composer-input[data-placeholder]::before,
-.composer-input:empty::before {
-  color: var(--ink-3);
-}
-
-.send-button {
-  padding: 7px 14px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--ink);
-  color: var(--surface);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.send-button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-/* File viewer */
-
-.viewer {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  height: 100%;
-  overflow-y: auto;
-  border-left: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.viewer-head {
-  position: sticky;
-  top: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.viewer-path {
-  flex: 1;
-  font-family: var(--mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.icon-button {
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.icon-button:hover {
-  background: var(--surface-sunk);
-}
-
-.viewer-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  padding: 12px 18px 0;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.viewer-description {
-  margin: 10px 18px 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--surface-sunk);
-  color: var(--ink-2);
-}
-
-.viewer-body {
-  padding: 4px 18px 24px;
-}
-
-.viewer-error {
-  padding: 18px;
-  color: var(--danger);
-}
-
-/* Prose */
-
-.prose {
-  max-width: 68ch;
-  line-height: 1.6;
-}
-
-.prose > :first-child {
-  margin-top: 0;
-}
-
-.prose h1 {
-  font-size: 18px;
-  margin: 16px 0 8px;
-}
-
-.prose h2 {
-  font-size: 15px;
-  margin: 18px 0 6px;
-}
-
-.prose h3 {
-  font-size: 14px;
-  margin: 14px 0 4px;
-}
-
-.prose p,
-.prose ul,
-.prose ol {
-  margin: 8px 0;
-}
-
-.prose ul,
-.prose ol {
-  padding-left: 20px;
-}
-
-.prose code {
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--surface-sunk);
-}
-
-/* Narrow screens: the sidebar stacks above the chat, the file opens over it */
-
-@media (max-width: 860px) {
-  .app,
-  .app[data-viewer="open"] {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .sidebar {
-    max-height: 38vh;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .viewer {
-    position: fixed;
-    inset: 0;
-    z-index: 10;
-  }
-
-  .chat-head,
-  .thread-content,
-  .thread-composer {
-    padding-left: 16px;
-    padding-right: 16px;
+  .kb-nav [data-nav-group] > [data-nav-list],
+  .people-nav [data-nav-group] > [data-nav-list] {
+    transition: none;
   }
 }

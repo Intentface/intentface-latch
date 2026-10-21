@@ -42,6 +42,15 @@ person sees it, and it's exactly what the agent can reach in their chat.
   what differs per customer comes from the files it reads.
 - `server/people.ts`: the demo login. The browser names a person and the
   server looks them up; a real app reads its session in `resolvePrincipal`.
-- `src/`: the chat on [`@intentface/chat`](https://ui.intentface.com)
-  primitives (thread, steps, composer), the people switcher, the knowledge
-  tree and a file viewer.
+- `src/`: the UI, on [`@intentface/chat`](https://ui.intentface.com)
+  primitives styled the way its docs demos are (Tailwind; the shared class
+  strings are in `src/ui.ts`):
+  - `Shell`: the sidebar, collapsible, resizable and floating out from the
+    left edge;
+  - `Nav`: the people switcher and the knowledge tree, with the docs' rail;
+  - `Tabs`: the chat and every file you open, side by side;
+  - `Thread`, `Message`, `Steps`, `Composer`: the chat, with each tool call
+    the agent makes as a step, marked trusted or reference.
+
+  Chats live in a store (`src/chats.ts`), not in the tab: a tab's content
+  unmounts when you switch away, and an answer keeps streaming.
