@@ -7,11 +7,12 @@ export function frontmatterDescription(markdown: string): string | undefined {
   const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(markdown);
   if (!m) return undefined;
   for (const line of m[1]!.split(/\r?\n/)) {
-    const kv = /^description:\s*(.*)$/.exec(line);
-    if (kv) {
-      const value = kv[1]!.trim().replace(/^(['"])(.*)\1$/, "$2");
+    if (line.startsWith("description:")) {
+      const value = unquote(line.slice("description:".length).trim());
       return value || undefined;
     }
   }
   return undefined;
 }
+
+const unquote = (v: string) => (v.length >= 2 && (v[0] === '"' || v[0] === "'") && v.at(-1) === v[0] ? v.slice(1, -1) : v);
