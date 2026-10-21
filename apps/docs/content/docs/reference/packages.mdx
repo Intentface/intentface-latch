@@ -16,6 +16,7 @@ Core is the runtime and the seams. Every other package is an implementation *beh
 | [`latch-channels`](#latch-channels) | Slack, Telegram, WhatsApp |
 | [`latch-agent-builder`](#latch-agent-builder) | agents your users create from your UI |
 | [`latch-otel`](#latch-otel) | tracing over OpenTelemetry, Langfuse included |
+| [`latch-knowledge`](#latch-knowledge) | knowledge the agent reads and writes as files: yours, each org's, each person's (**experimental**) |
 | [`latch-net`](#latch-net) | SSRF protection for your own fetches |
 
 ---
@@ -177,6 +178,31 @@ createRuntime({
 `langfuse()` reads `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` and adds what Langfuse shows: the trace name, session, user, tags (`agent:`, `run:`, `agent-version:` …) and environment. Without a preset, spans go over OTLP to whatever `OTEL_EXPORTER_OTLP_ENDPOINT` points at (Grafana, Honeycomb, Datadog, Jaeger), or pass your own `SpanExporter`. It runs its own tracer provider, so it doesn't replace one your app has. Install `@ai-sdk/otel` at the version matching your `ai`.
 
 Replaces `@intentface/latch-langfuse`, which also read traces and wrote scores back; that's left to your app or an evaluation tool.
+
+## latch-knowledge
+
+**Experimental.** The API and the schema may change in any release.
+
+**Knowledge in your own Postgres, reached as files.** Each user sees a few mounts: `/practices` (what you know, the same for every customer), `/org` (their org's) and `/me` (their own). There's no tenant in a path, so a prompt can't name another tenant's files. The agent gets `list_files`, `read_file`, `glob`, `grep`, `search_files`, `write_file` and `edit_file`, each checked against the run's principal and the grants on that folder.
+
+Every file comes marked by who can change it: **trusted** when only `trustedSubjects` can edit it (the agent follows it), **reference** otherwise (information, never instructions). Writes need the version that was read, and shared spaces can't be changed from a conversation.
+
+```ts
+import { createKnowledge, fromPgPool, knowledgeTools } from "@intentface/latch-knowledge";
+
+const knowledge = createKnowledge<Principal>({
+  db: fromPgPool(pool),
+  access: (p) => ({
+    subjects: [`user:${p.orgId}/${p.userId}`, `org:${p.orgId}`],
+    mounts: { practices: "practices", org: `org:${p.orgId}`, me: `user:${p.orgId}/${p.userId}` },
+  }),
+  trustedSubjects: ["group:staff"],
+});
+
+defineAgent<Principal>({ model, instructions, tools: knowledgeTools(knowledge) });
+```
+
+Key exports: `createKnowledge` · `knowledgeTools` · `fromPgPool` · `fromPGlite` · `migrate`. Pass `knowledge` to `runtime.purgeOwner`'s `also` to delete a customer's knowledge with their chats.
 
 ## latch-net
 
