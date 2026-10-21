@@ -1,0 +1,34 @@
+{
+  "name": "@intentface/latch-knowledge-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "reset": "rm -rf .data"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.57",
+    "@ai-sdk/react": "4.0.109",
+    "@electric-sql/pglite": "^0.2.0",
+    "@intentface/chat": "0.5.3",
+    "@intentface/latch-core": "workspace:*",
+    "@intentface/latch-drizzle": "workspace:*",
+    "@intentface/latch-knowledge": "workspace:*",
+    "@intentface/latch-server": "workspace:*",
+    "ai": "^7.0.106",
+    "drizzle-orm": "^0.45.2",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "^5.7.0",
+    "vite": "8.0.16"
+  }
+}

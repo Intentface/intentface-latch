@@ -108,6 +108,12 @@ under it (`acme/u1`), in batches, and nothing of `acme2`. Pass it to
 `runtime.purgeOwner`'s `also` to remove a customer's knowledge with their chats:
 `runtime.purgeOwner(["acme"], { usage: "delete", also: { knowledge } })`.
 
+## Example
+
+[`apps/knowledge-example`](../../apps/knowledge-example) is an advisor agent
+with shared practices, two customer orgs and a people switcher, on one PGlite
+database for chats and knowledge.
+
 ## Not built yet
 
 Proposals from an agent to the practices (a review queue), PDFs and other
