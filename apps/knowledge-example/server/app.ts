@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { defineAgent } from "@intentface/latch-core";
@@ -28,7 +29,7 @@ Every file says whether it's trusted or reference. Follow trusted files; where a
 
 Name the files you relied on, by path. Be concrete: use the customer's own numbers and names. When the person asks you to note something, write it to /me, or to /org/docs if it's for the whole team.`;
 
-const DATA = new URL("../.data/", import.meta.url).pathname;
+const DATA = fileURLToPath(new URL("../.data/", import.meta.url));
 
 async function start() {
   mkdirSync(DATA, { recursive: true });
@@ -85,4 +86,11 @@ async function start() {
 // One app per process: Vite reloads this module on edits, and PGlite holds its directory.
 const g = globalThis as { __knowledgeExample?: ReturnType<typeof start> };
 
-export const handleNode = async (req: IncomingMessage, res: ServerResponse) => (await (g.__knowledgeExample ??= start()))(req, res);
+export const handleNode = async (req: IncomingMessage, res: ServerResponse) => {
+  // A start that failed is tried again on the next request, not cached.
+  g.__knowledgeExample ??= start().catch((e: unknown) => {
+    g.__knowledgeExample = undefined;
+    throw e;
+  });
+  return (await g.__knowledgeExample)(req, res);
+};

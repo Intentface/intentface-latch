@@ -24,6 +24,11 @@ export function chatFor(person: string, chatId: string): Promise<Chat<UIMessage>
           transport: new DefaultChatTransport({ api: api.chatUrl(chatId), headers: api.headers(person) }),
           onFinish: () => finished.forEach((fn) => fn()),
         }),
+      (e: unknown) => {
+        // Not cached: opening the chat again tries again.
+        chats.delete(key);
+        throw e;
+      },
     );
     chats.set(key, chat);
   }

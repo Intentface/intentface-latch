@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PGlite } from "@electric-sql/pglite";
 import { createKnowledge, fromPGlite, type Knowledge } from "@intentface/latch-knowledge";
 import { ORGS, PEOPLE, type Principal } from "./people.js";
@@ -24,7 +25,7 @@ export function knowledgeFor(pg: PGlite): Knowledge<Principal> {
   });
 }
 
-const SEED = new URL("../seed/", import.meta.url).pathname;
+const SEED = fileURLToPath(new URL("../seed/", import.meta.url));
 
 async function filesIn(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -43,8 +44,11 @@ async function copy(knowledge: Knowledge<Principal>, as: Principal, from: string
 /** Spaces, grants and the example material, on first start. */
 export async function seed(pg: PGlite, knowledge: Knowledge<Principal>) {
   await knowledge.migrate();
-  const { rows } = await pg.query<{ n: number }>(`select count(*)::int as n from kb_spaces`);
+  // Seeded once, all of it: a start that failed halfway leaves no marker, and the next start begins again.
+  await pg.query(`create table if not exists example_seeded (at timestamptz not null default now())`);
+  const { rows } = await pg.query<{ n: number }>(`select count(*)::int as n from example_seeded`);
   if (rows[0]!.n > 0) return;
+  await pg.query(`truncate kb_versions, kb_grants, kb_files, kb_spaces`);
 
   const staff = PEOPLE.find((p) => p.principal.staff)!.principal;
   await knowledge.createSpace({ id: "practices", owner: ["advisor"], kind: "shared", name: "Practices" });
@@ -73,4 +77,5 @@ export async function seed(pg: PGlite, knowledge: Knowledge<Principal>) {
     await knowledge.grant({ space: id, subject: id, role: "editor", grantedBy: "seed" });
     await copy(knowledge, p, `people/${person.id}`, "/me");
   }
+  await pg.query(`insert into example_seeded default values`);
 }

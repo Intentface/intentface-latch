@@ -36,13 +36,32 @@ const STARTERS: Record<string, string[]> = {
 /** The chat for one person and chat id. The chat itself lives in a store, so an answer keeps streaming while another tab is open. */
 export function ChatView({ person, chatId, onOpenFile }: { person: Person; chatId: string; onOpenFile: (path: string) => void }) {
   const [chat, setChat] = useState<Chat<UIMessage> | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
-    chatFor(person.id, chatId).then((c) => live && setChat(c));
+    setChat(null);
+    setFailed(null);
+    chatFor(person.id, chatId).then(
+      (c) => live && setChat(c),
+      (e: unknown) => live && setFailed(e instanceof Error ? e.message : String(e)),
+    );
     return () => {
       live = false;
     };
-  }, [person.id, chatId]);
+  }, [person.id, chatId, attempt]);
+  if (failed) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <p className="rounded-lg bg-red-500/8 px-3.5 py-2.5 text-[13px] text-red-700 dark:text-red-300">
+          Couldn't load this chat: {failed}.{" "}
+          <button type="button" className="font-medium underline underline-offset-2" onClick={() => setAttempt((n) => n + 1)}>
+            Try again
+          </button>
+        </p>
+      </div>
+    );
+  }
   return chat ? <LiveChat chat={chat} person={person} onOpenFile={onOpenFile} /> : null;
 }
 
