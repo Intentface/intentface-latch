@@ -12,7 +12,7 @@ Online: https://intentface-latch-docs.vercel.app/docs/reference/runtime
 | --- | --- | --- |
 | `listAgents` | `(principal: P) => Promise<AgentInfo[]>` | The agents this person can use (yours and their dynamic ones), for an agent picker. |
 | `handleChat` | `(input: HandleChatInput<P>) => Promise<Response>` | Runs one chat turn and streams the answer. Returns a streaming `Response` in the AI SDK's UI message format, ready to return from your route to `useChat`. The run keeps going and is saved even if the client disconnects: to end an answer early, call `stopRun`. |
-| `stopRun` | `(input: { principal: P; chatId: string; }) => Promise<{ runId: string; } \| null>` | Stops the chat's running answer, if the chat is the caller's. What was said so far is saved, marked `stopped`, and the run is completed, so crash recovery never resumes it. A closed tab or a dropped connection never stops an answer; only this does. Immediate when the run is on this server. On another server it stops within `stopCheckMs`, with a storage adapter that has `requestStop`. Returns the run's id, or `null` when nothing is running in that chat. |
+| `stopRun` | `(input: { principal: P; chatId: string; }) => Promise<{ runId: string; } \| null>` | Stops the chat's running answer, if the chat is the caller's. The step it was in the middle of is dropped: its text and reasoning were cut off, and would break or mislead the next turn. Steps that finished (and the tools they ran) are saved, marked `stopped`; when none did, no answer is saved. The run is completed, so crash recovery never resumes it. A closed tab or a dropped connection never stops an answer; only this does. Immediate when the run is on this server. On another server it stops within `stopCheckMs`, with a storage adapter that has `requestStop`. Returns the run's id, or `null` when nothing is running in that chat. |
 | `runAgent` | `(input: RunAgentInput<P>) => Promise<RunAgentResult>` | Runs an agent to completion without a client and returns its answer: for webhooks, background jobs, tests and evaluations. Never throws for a run that fails once started; the failure comes back as `error`. |
 | `compactChat` | `(input: { chatId: string; principal: P; focus?: string; request?: Request; turnContext?: unknown; }) => Promise<{ summary: string; compacted: number; } \| null>` | Summarizes a long conversation so later turns send the model the summary instead of the old messages. The stored history is kept in full. Returns `null` when there is too little to summarize or the chat isn't the caller's; throws `PendingApprovalError` while the chat waits on an approval. |
 | `loadHistory` | `(input: { chatId: string; principal: P; }) => Promise<AppMessage[]>` | A chat's messages for showing to the user, with internal messages left out. Use it to render a conversation when the page loads. |
@@ -57,7 +57,7 @@ export async function POST(req: Request) {
 
 ## stopRun
 
-Stops the chat's running answer. The answer ends where it was cut off, is saved with `metadata.stopped: true`, and the run is completed, so crash recovery never resumes it. A subagent the answer started stops with it. Returns `{ runId }`, or `null` when nothing is running in the chat or it isn't the caller's.
+Stops the chat's running answer. The step it was in the middle of is dropped: its text and reasoning were cut off, and sent back to the model they'd break or mislead the next turn. Steps that finished, with the tools they ran, are saved with `metadata.stopped: true`; when none did, no answer is saved. The run is completed, so crash recovery never resumes it. A subagent the answer started stops with it. Returns `{ runId }`, or `null` when nothing is running in the chat or it isn't the caller's.
 
 ```ts
 await runtime.stopRun({ principal, chatId });
@@ -89,12 +89,12 @@ const { answer, error } = await runtime.runAgent({
 | `blockGated` (optional) | `"simulate-success" \| boolean` | What happens to tools that need a person's approval, since nobody is there to give it: - `true`: they don't run; the model is told they were blocked. - `"simulate-success"`: they don't run; the model is told they succeeded. For testing what an agent would do next. - `false`: they run for real, without approval. Default: `true`. |
 | `memory` (optional) | `boolean` | Set `false` to run without the agent's long-term memory: nothing is recalled and nothing saved. Useful when running one agent over many test inputs, so earlier inputs can't influence later ones. |
 | `model` (optional) | `LanguageModel` | Run on a different model than the agent's own, for this run only. For comparing models on the same task. |
-| `abortSignal` (optional) | `AbortSignal` | Stops the run when it aborts, like `stopRun`: what was said so far is saved and returned with `stopped: true`. |
+| `abortSignal` (optional) | `AbortSignal` | Stops the run when it aborts, like `stopRun`: the result has `stopped: true`, and only steps that finished are kept. |
 | `turnContext` (optional) | `unknown` |  |
 | `promptCaching` (optional) | `boolean` | Set `false` to turn prompt caching off for this run, for example as the control in a cost comparison. |
 | `trigger` (optional) | `TurnTrigger` | How telemetry labels this run. Pass `"chat"` when a person is waiting on the answer, for example a webhook that replies to them. Default: `"programmatic"`. |
 
-To stop it early, pass an `abortSignal`: the result then has `stopped: true` and the answer so far.
+To stop it early, pass an `abortSignal`: the result then has `stopped: true`, and `answer` has only the steps that finished.
 
 It returns:
 
@@ -102,7 +102,7 @@ It returns:
 | --- | --- | --- |
 | `threadId` | `string` | The thread the run used. Pass it back as `threadId` to continue. |
 | `answer` | `string` | The agent's final answer. Empty when the run failed. |
-| `stopped` (optional) | `true` | Set when the run was stopped (`abortSignal`, or `stopRun` on its thread): `answer` is what was said until then. |
+| `stopped` (optional) | `true` | Set when the run was stopped (`abortSignal`, or `stopRun` on its thread): `answer` has only the steps that finished, often none. |
 | `error` (optional) | `string` | Why the run failed, when it did: the model provider refused, a tool source wouldn't open, and so on. |
 
 ## applyApproval

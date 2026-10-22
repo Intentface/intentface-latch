@@ -566,8 +566,8 @@ export interface RunAgentInput<P> {
    */
   model?: LanguageModel;
   /**
-   * Stops the run when it aborts, like `stopRun`: what was said so far is
-   * saved and returned with `stopped: true`.
+   * Stops the run when it aborts, like `stopRun`: the result has `stopped:
+   * true`, and only steps that finished are kept.
    */
   abortSignal?: AbortSignal;
   /**
@@ -596,7 +596,7 @@ export interface RunAgentResult {
   threadId: string;
   /** The agent's final answer. Empty when the run failed. */
   answer: string;
-  /** Set when the run was stopped (`abortSignal`, or `stopRun` on its thread): `answer` is what was said until then. */
+  /** Set when the run was stopped (`abortSignal`, or `stopRun` on its thread): `answer` has only the steps that finished, often none. */
   stopped?: true;
   /**
    * Why the run failed, when it did: the model provider refused, a tool source
@@ -738,10 +738,12 @@ export interface Runtime<P> {
    */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
   /**
-   * Stops the chat's running answer, if the chat is the caller's. What was
-   * said so far is saved, marked `stopped`, and the run is completed, so
-   * crash recovery never resumes it. A closed tab or a dropped connection
-   * never stops an answer; only this does.
+   * Stops the chat's running answer, if the chat is the caller's. The step it
+   * was in the middle of is dropped: its text and reasoning were cut off, and
+   * would break or mislead the next turn. Steps that finished (and the tools
+   * they ran) are saved, marked `stopped`; when none did, no answer is saved.
+   * The run is completed, so crash recovery never resumes it. A closed tab or
+   * a dropped connection never stops an answer; only this does.
    *
    * Immediate when the run is on this server. On another server it stops
    * within `stopCheckMs`, with a storage adapter that has `requestStop`.
@@ -1748,6 +1750,29 @@ function fireAndForget(fn: (() => void | Promise<void>) | undefined): void {
 const SECRETISH_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential/i;
 
 /** The last `error` chunk's text in a UI message stream body (SSE `data:` lines), if any. */
+/** Whether a turn's SSE body ended with an `abort` part: someone stopped it. */
+function streamWasStopped(body: string): boolean {
+  return body.split("\n").some((line) => line.startsWith("data: ") && line.includes('"type":"abort"'));
+}
+
+/**
+ * A stopped answer without the step it was in the middle of: that step's text
+ * and reasoning were cut off (a reasoning trace without its signature, text
+ * that doesn't match it), and sent back to the model they'd break or mislead
+ * the next turn. Steps that finished stay, with the tools they ran. `keep` is
+ * how many steps finished, counting the message's earlier ones; `null` when
+ * nothing is left.
+ */
+function withoutUnfinishedStep(message: AppMessage, keep: number): AppMessage | null {
+  let starts = 0;
+  const parts: AppMessage["parts"] = [];
+  for (const p of message.parts) {
+    if (p.type === "step-start" && ++starts > keep) break;
+    parts.push(p);
+  }
+  return starts === 0 || parts.length === 0 ? null : ({ ...message, parts } as AppMessage);
+}
+
 function lastStreamError(body: string): string | undefined {
   let error: string | undefined;
   for (const line of body.split("\n")) {
@@ -3128,7 +3153,11 @@ export function createRuntime<P, RC = unknown>(
               messages = [...messages.slice(0, i), insertStepParts(last, appendedByStep, priorSteps) as AppMessage];
           }
         }
-        if (stoppedBeforeStart || handled || stoppedHere)
+        if (stoppedHere && messages.at(-1)?.role === "assistant") {
+          const kept = withoutUnfinishedStep(messages.at(-1)!, priorSteps + stepsSeen);
+          messages = kept ? [...messages.slice(0, -1), kept] : messages.slice(0, -1);
+        }
+        if (stoppedBeforeStart || handled)
           // Nothing (or nothing but a command with no reply) was said: the SDK
           // still assembles an empty assistant message from the bare `finish`,
           // and there is no reason to store a blank turn.
@@ -4700,7 +4729,8 @@ export function createRuntime<P, RC = unknown>(
     // A failure that ends the run without an error chunk (a final-step
     // `step_end` handler, caught in onFinish) is only on the run row: read it
     // back so a failed turn never looks like a silent one.
-    const error = lastStreamError(await res.text()) ?? (await terminalError(run));
+    const body = await res.text();
+    const error = lastStreamError(body) ?? (await terminalError(run));
 
     const after = await storage.loadMessages(o.principal, chatId);
     // The verdict is about THIS turn, so read the FINAL message only (the same
@@ -4712,11 +4742,12 @@ export function createRuntime<P, RC = unknown>(
       pending.length > 0 ||
       hasPendingApproval(after) ||
       (!!last && hasPendingToolResult([last]));
-    // Stopped before it said anything, there is no answer message to carry the mark.
-    const stopped = last?.role === "assistant" ? last.metadata?.stopped === true : o.signal?.aborted === true;
+    // From the stream, not the message: a stopped answer that finished no step saves none.
+    const stopped = streamWasStopped(body);
     return {
       chatId,
-      answer: pending.length > 0 ? "" : lastAssistantText(after),
+      // A stop that kept no step leaves the user message last: no answer, not the previous turn's.
+      answer: pending.length > 0 || (stopped && last?.role !== "assistant") ? "" : lastAssistantText(after),
       parked,
       ...(pending.length > 0 ? { pending } : {}),
       ...(error ? { error } : {}),

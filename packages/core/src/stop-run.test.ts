@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
+import { tool } from "ai";
+import { z } from "zod";
 import { createRuntime } from "./runtime.js";
 import { defineContext } from "./context.js";
 import { defineAgent } from "./agent.js";
@@ -9,8 +11,9 @@ import { chunksOf, principal, user, type P } from "./__tests__/turn.js";
 
 /**
  * Stopping an answer: `stopRun` (same server, or another one through the run
- * row), `runAgent`'s `abortSignal`, and a stopped parent's subagent. What was
- * said is saved and marked `stopped`, and the run completes.
+ * row), `runAgent`'s `abortSignal`, and a stopped parent's subagent. The step
+ * being written is dropped (its reasoning and text were cut off); steps that
+ * finished are saved, marked `stopped`, and the run completes.
  */
 
 const usage = {
@@ -50,6 +53,27 @@ function slowModel(words = 200, everyMs = 10) {
         },
       });
       return { stream };
+    }) as never,
+  });
+}
+
+/** Step 1 looks something up (reasoning and a tool call); step 2 reasons and talks slowly. */
+function lookupThenSlowModel() {
+  const slow = slowModel();
+  let n = 0;
+  return new MockLanguageModelV4({
+    modelId: "lookup-then-slow",
+    doStream: (async (options: { abortSignal?: AbortSignal }) => {
+      if (n++ > 0) return (slow.doStream as (o: unknown) => Promise<unknown>)(options);
+      const chunks = [
+        { type: "stream-start", warnings: [] },
+        { type: "reasoning-start", id: "r" },
+        { type: "reasoning-delta", id: "r", delta: "I should look it up." },
+        { type: "reasoning-end", id: "r", providerMetadata: { anthropic: { signature: "sig_1" } } },
+        { type: "tool-call", toolCallId: "call_1", toolName: "lookup", input: "{}" },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
+      ];
+      return { stream: new ReadableStream({ start: (c) => (chunks.forEach((x) => c.enqueue(x)), c.close()) }) };
     }) as never,
   });
 }
@@ -115,7 +139,7 @@ const textOf = (m: { parts: unknown[] } | undefined) =>
   (m?.parts ?? []).map((p) => (p as { type: string; text?: string }).text ?? "").join("");
 
 describe("stopRun", () => {
-  it("stops an answer on this server: the client sees it end, and what was said is saved", async () => {
+  it("stops an answer on this server: the client sees it end, and the cut-off step isn't saved", async () => {
     const mem = memoryStorage<P>();
     const runtime = runtimeOn(mem.storage, slowModel());
     const res = await runtime.handleChat({ agent: "a", principal, chatId: "c1", message: user("talk") });
@@ -129,13 +153,41 @@ describe("stopRun", () => {
 
     const received = await chunks;
     expect(received.map((c) => c.type)).toContain("abort");
+    expect(received.some((c) => c.type === "text-delta")).toBe(true);
     await waitFor(() => mem.runs.get(run.id)!.status !== "active");
     expect(mem.runs.get(run.id)).toMatchObject({ status: "completed", endedAt: expect.any(Number) });
+    // Only the question: the one step was cut off, so there's no answer to keep.
+    expect(mem.messages.get("c1")!.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("keeps the steps that finished, with their tools, and drops the one in progress", async () => {
+    const mem = memoryStorage<P>();
+    const lookups: string[] = [];
+    const runtime = createRuntime<P>({
+      storage: mem.storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: {
+        a: defineAgent<P>({
+          model: lookupThenSlowModel(),
+          instructions: "Look, then talk.",
+          tools: { lookup: tool({ inputSchema: z.object({}), execute: async () => (lookups.push("ran"), "42") }) },
+        }),
+      },
+    });
+    const chunks = chunksOf(await runtime.handleChat({ agent: "a", principal, chatId: "c1", message: user("talk") }));
+    await waitFor(() => lookups.length === 1);
+    await new Promise((r) => setTimeout(r, 60));
+    await runtime.stopRun({ principal, chatId: "c1" });
+    await chunks;
+    await waitFor(() => [...mem.runs.values()].at(-1)!.status === "completed");
+
     const answer = mem.messages.get("c1")!.at(-1)!;
     expect(answer.role).toBe("assistant");
     expect(answer.metadata?.stopped).toBe(true);
-    expect(textOf(answer)).toMatch(/^w0 w1 /);
-    expect(textOf(answer)).not.toContain("w199");
+    const types = answer.parts.map((p) => p.type);
+    expect(types).toEqual(["step-start", "reasoning", "tool-lookup"]);
+    expect(answer.parts[2]).toMatchObject({ state: "output-available", output: "42" });
+    expect(textOf(answer)).not.toContain("w0");
   });
 
   it("returns null when nothing is running in the chat", async () => {
@@ -162,7 +214,7 @@ describe("stopRun", () => {
     expect((await chunks).map((c) => c.type)).toContain("abort");
     expect(Date.now() - startedWaiting).toBeLessThan(500);
     await waitFor(() => shared.runs.get(run.id)!.status === "completed");
-    expect(shared.messages.get("c1")!.at(-1)!.metadata?.stopped).toBe(true);
+    expect(shared.messages.get("c1")!.map((m) => m.role)).toEqual(["user"]);
   });
 
   it("doesn't check the row when stopCheckMs is false", async () => {
@@ -178,7 +230,7 @@ describe("stopRun", () => {
 });
 
 describe("runAgent abortSignal", () => {
-  it("returns what was said, marked stopped", async () => {
+  it("returns stopped, without the cut-off step", async () => {
     const mem = memoryStorage<P>();
     const runtime = runtimeOn(mem.storage, slowModel());
     const controller = new AbortController();
@@ -186,7 +238,7 @@ describe("runAgent abortSignal", () => {
     const result = await runtime.runAgent({ principal, agent: "a", prompt: "talk", abortSignal: controller.signal });
     expect(result.stopped).toBe(true);
     expect(result.error).toBeUndefined();
-    expect(result.answer).toMatch(/^w0 w1 /);
+    expect(result.answer).toBe("");
     expect([...mem.runs.values()].at(-1)!.status).toBe("completed");
   });
 
@@ -211,6 +263,6 @@ describe("runAgent abortSignal", () => {
     await waitFor(() => runs.every((r) => mem.runs.get(r.id)!.status !== "active"));
     const child = runs.find((r) => r.agent === "child")!;
     expect(mem.runs.get(child.id)!.status).toBe("completed");
-    expect(mem.messages.get(child.chatId)!.at(-1)!.metadata?.stopped).toBe(true);
+    expect(mem.messages.get(child.chatId)!.map((m) => m.role)).toEqual(["user"]);
   });
 });

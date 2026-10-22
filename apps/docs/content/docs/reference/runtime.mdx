@@ -23,7 +23,7 @@ export async function POST(req: Request) {
 
 ## stopRun
 
-Stops the chat's running answer. The answer ends where it was cut off, is saved with `metadata.stopped: true`, and the run is completed, so crash recovery never resumes it. A subagent the answer started stops with it. Returns `{ runId }`, or `null` when nothing is running in the chat or it isn't the caller's.
+Stops the chat's running answer. The step it was in the middle of is dropped: its text and reasoning were cut off, and sent back to the model they'd break or mislead the next turn. Steps that finished, with the tools they ran, are saved with `metadata.stopped: true`; when none did, no answer is saved. The run is completed, so crash recovery never resumes it. A subagent the answer started stops with it. Returns `{ runId }`, or `null` when nothing is running in the chat or it isn't the caller's.
 
 ```ts
 await runtime.stopRun({ principal, chatId });
@@ -46,7 +46,7 @@ const { answer, error } = await runtime.runAgent({
 
 <auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RunAgentInput" />
 
-To stop it early, pass an `abortSignal`: the result then has `stopped: true` and the answer so far.
+To stop it early, pass an `abortSignal`: the result then has `stopped: true`, and `answer` has only the steps that finished.
 
 It returns:
 

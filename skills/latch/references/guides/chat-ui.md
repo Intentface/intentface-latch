@@ -94,8 +94,10 @@ const onStop = () => fetch(`/api/latch/chats/${chatId}/stop`, { method: "POST" }
 
 Don't call `chat.stop()` as well: the server ends the stream with an `abort`
 part, so the open tab sees the answer end and `status` goes back to `ready`.
-The saved message has `metadata.stopped: true`, for a "Stopped" label. A
-`404` means nothing was running: the answer finished, or hadn't started yet.
+The step being written is not saved: the text the tab showed from it is gone
+after a reload. Steps that finished are saved with `metadata.stopped: true`,
+for a "Stopped" label. A `404` means nothing was running: the answer
+finished, or hadn't started yet.
 
 ## OAuth: the callback redirects — resuming is yours
 

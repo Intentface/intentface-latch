@@ -10,8 +10,8 @@ import * as pgSchema from "./schema.pg.js";
 /**
  * A stop that lands on another server: two runtimes on one Postgres, durable
  * runs. The one that receives `stopRun` only stamps the run row; the one
- * running the answer reads it and stops, saves what was said, and completes
- * the run, which crash recovery then leaves alone.
+ * running the answer reads it, stops, and completes the run, which crash
+ * recovery then leaves alone.
  */
 
 type P = { orgId: string; userId: string };
@@ -89,9 +89,8 @@ describe("stopRun across servers (Postgres)", () => {
 
     const run = await running.getRun({ principal: me, runId: stopped!.runId });
     expect(run).toMatchObject({ status: "completed", stopRequestedAt: expect.any(Number) });
-    const [, answer] = await running.loadHistory({ principal: me, chatId: "c1" });
-    expect(answer!.metadata?.stopped).toBe(true);
-    expect(answer!.parts.map((p) => (p as { text?: string }).text ?? "").join("")).toMatch(/^w0 w1 /);
+    // The one step was cut off mid-sentence: nothing of it is kept.
+    expect((await running.loadHistory({ principal: me, chatId: "c1" })).map((m) => m.role)).toEqual(["user"]);
 
     // Recovery after the lease would have lapsed: nothing to resume.
     await new Promise((r) => setTimeout(r, 400));
