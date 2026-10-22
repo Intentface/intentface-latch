@@ -83,6 +83,23 @@ Grants open a space, or a folder in it, to a subject as `viewer` or `editor`,
 optionally until `expiresAt`: a support engineer let into one customer's space
 for an hour is a grant with a reason and an expiry.
 
+## Without Latch
+
+The library is plain functions over Postgres: `knowledge.as(principal)` gives
+a view with `list`, `read`, `write`, `edit`, `glob`, `grep` and `search`, for
+an API route, an MCP server or any agent framework. The tools are AI SDK tools.
+Built from one person's view they need no context, so the AI SDK alone, or any
+library that takes its tools, can use them. Make them per request:
+
+```ts
+const result = streamText({
+  model,
+  prompt,
+  tools: knowledgeTools(knowledge.as(principal)),
+  stopWhen: stepCountIs(10),
+});
+```
+
 ## What the tools do
 
 - `read_file` returns numbered lines and a first line with the file's version

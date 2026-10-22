@@ -1,5 +1,5 @@
-import { toolFor, type LatchToolContext } from "@intentface/latch-core";
-import type { Tool } from "ai";
+import type { ToolFactory } from "@intentface/latch-core";
+import { tool as aiTool, type Tool } from "ai";
 import { z } from "zod";
 import { isKnowledgeError, KnowledgeError } from "./errors.js";
 import type { Knowledge, KnowledgeEntry, KnowledgeView, SpaceKind } from "./knowledge.js";
@@ -37,37 +37,67 @@ async function answer(fn: () => Promise<string>): Promise<string> {
   }
 }
 
+/** The names of the tools `knowledgeTools` returns. */
+export type KnowledgeToolName = "list_files" | "read_file" | "glob" | "grep" | "search_files" | "write_file" | "edit_file";
+
+/**
+ * What the tools read from `options.context` when built from a `Knowledge`:
+ * who is asking, and the run (one view per run, and its id on every change).
+ * Latch's tool context has both; without Latch, pass them in `toolsContext`.
+ */
+export type KnowledgeToolContext<P> = { principal: P; run: { id: string } } & Record<string, unknown>;
+
+/** The tools, with `CONTEXT` as what their `options.context` must hold. */
+export type KnowledgeTools<CONTEXT extends Record<string, unknown> = Record<string, unknown>> = Record<
+  KnowledgeToolName,
+  Tool<any, string, CONTEXT>
+>;
+
 /**
  * The file tools an agent reaches knowledge with: `list_files`, `read_file`,
- * `glob`, `grep`, `search_files`, `write_file` and `edit_file`. Each call
- * resolves the caller's view from `options.context.principal`, so grants and
- * mounts are checked on every call, and every file comes marked trusted or
- * reference.
+ * `glob`, `grep`, `search_files`, `write_file` and `edit_file`. Every file
+ * comes marked trusted or reference.
+ *
+ * From a `Knowledge`, each call resolves the caller's view from
+ * `options.context.principal`, so grants and mounts are checked per run. In
+ * Latch that context is already there:
  *
  * ```ts
  * defineAgent<Principal>({ model, instructions, tools: knowledgeTools(knowledge) });
  * ```
+ *
+ * From one person's view, the tools need no context, for the AI SDK on its own
+ * or any library that takes its tools. Make them per request:
+ *
+ * ```ts
+ * generateText({ model, prompt, tools: knowledgeTools(knowledge.as(principal)) });
+ * ```
  */
-/** The names of the tools `knowledgeTools` returns. */
-export type KnowledgeToolName = "list_files" | "read_file" | "glob" | "grep" | "search_files" | "write_file" | "edit_file";
-
-export function knowledgeTools<P>(
-  knowledge: Knowledge<P>,
-  opts?: KnowledgeToolsOptions,
-): Record<KnowledgeToolName, Tool<any, string, LatchToolContext<P>>> {
-  const tool = toolFor<P>();
-  const readOnly = new Set(opts?.readOnlyKinds ?? ["shared"]);
+export function knowledgeTools<P>(knowledge: Knowledge<P>, opts?: KnowledgeToolsOptions): KnowledgeTools<KnowledgeToolContext<P>>;
+export function knowledgeTools(view: KnowledgeView, opts?: KnowledgeToolsOptions): KnowledgeTools;
+export function knowledgeTools<P>(source: Knowledge<P> | KnowledgeView, opts?: KnowledgeToolsOptions): KnowledgeTools<any> {
+  if (!("as" in source)) return build<Record<string, unknown>>(() => source, () => undefined, opts);
   // One view per run: the access function runs once per turn, not per call.
   const views = new Map<string, KnowledgeView>();
-  const viewOf = (context: { principal: P; run: { id: string } }) => {
+  const viewOf = (context: KnowledgeToolContext<P>) => {
     let view = views.get(context.run.id);
     if (!view) {
-      view = knowledge.as(context.principal);
+      view = source.as(context.principal);
       views.set(context.run.id, view);
       if (views.size > 200) views.delete(views.keys().next().value!);
     }
     return view;
   };
+  return build<KnowledgeToolContext<P>>(viewOf, (context) => context.run.id, opts);
+}
+
+function build<C extends Record<string, unknown>>(
+  viewOf: (context: C) => KnowledgeView,
+  runOf: (context: C) => string | undefined,
+  opts: KnowledgeToolsOptions | undefined,
+): KnowledgeTools<C> {
+  const tool = aiTool as unknown as ToolFactory<C>;
+  const readOnly = new Set(opts?.readOnlyKinds ?? ["shared"]);
   const writable = async (view: KnowledgeView, path: string) => {
     if (readOnly.has(await view.kindOf(path))) {
       throw new KnowledgeError("read_only", `${path.split("/").slice(0, 2).join("/")} is shared and can't be changed from a conversation`);
@@ -163,7 +193,7 @@ export function knowledgeTools<P>(
         answer(async () => {
           const view = viewOf(context);
           await writable(view, path);
-          const saved = await view.write(path, content, { version, runId: context.run.id });
+          const saved = await view.write(path, content, { version, runId: runOf(context) });
           return `Saved ${saved.path}, version ${saved.version}`;
         }),
     }),
@@ -181,7 +211,7 @@ export function knowledgeTools<P>(
         answer(async () => {
           const view = viewOf(context);
           await writable(view, path);
-          const saved = await view.edit(path, old_text, new_text, { runId: context.run.id });
+          const saved = await view.edit(path, old_text, new_text, { runId: runOf(context) });
           return `Edited ${saved.path}, now version ${saved.version}`;
         }),
     }),

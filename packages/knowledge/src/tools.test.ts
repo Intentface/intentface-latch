@@ -2,7 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { createRuntime, defineAgent } from "@intentface/latch-core";
 import { createPostgresAdapter, migratePostgres, pgSchema } from "@intentface/latch-drizzle";
-import { simulateReadableStream } from "ai";
+import { simulateReadableStream, stepCountIs, streamText } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { drizzle } from "drizzle-orm/pglite";
 import { describe, expect, it } from "vitest";
@@ -84,6 +84,35 @@ describe("knowledgeTools in a turn", () => {
     const purged = await runtime.purgeOwner(["acme"], { usage: "delete", also: { knowledge } });
     expect(purged.removed.knowledge).toEqual({ spaces: 2, files: 2 });
     expect((await knowledge.as({ org: "beta", user: "u9" }).read("/org/docs/stack.md")).lines).toEqual(["Beta runs MySQL."]);
+    await pg.close();
+  });
+
+  it("works on the AI SDK alone, bound to one person's view, with no context to pass", async () => {
+    const pg = new PGlite({ extensions: { pg_trgm } });
+    const knowledge = createKnowledge<P>({
+      db: fromPGlite(pg),
+      access: (p) => ({ subjects: [`user:${p.org}/${p.user}`], mounts: { me: `user:${p.org}/${p.user}` } }),
+    });
+    await knowledge.migrate();
+    await knowledge.createSpace({ id: "user:acme/u1", owner: ["acme", "u1"], kind: "user" });
+    await knowledge.grant({ space: "user:acme/u1", subject: "user:acme/u1", role: "editor", grantedBy: "setup" });
+
+    const model = scripted([
+      { tool: "write_file", input: { path: "/me/notes.md", content: "Prefers short answers." } },
+      { tool: "read_file", input: { path: "/me/notes.md" } },
+      { text: "Done." },
+    ]);
+    const result = streamText({
+      model,
+      prompt: "Remember that I prefer short answers.",
+      tools: knowledgeTools(knowledge.as({ org: "acme", user: "u1" })),
+      stopWhen: stepCountIs(5),
+    });
+    expect(await result.text).toBe("Done.");
+
+    const toolResults = JSON.stringify(model.doStreamCalls.at(-1)!.prompt);
+    expect(toolResults).toContain("Saved /me/notes.md, version 1");
+    expect(toolResults).toContain("Prefers short answers.");
     await pg.close();
   });
 });
