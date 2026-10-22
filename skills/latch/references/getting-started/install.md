@@ -29,6 +29,7 @@ Add the rest as you need the capability:
 | `latch-channels` | Slack, Telegram and WhatsApp |
 | `latch-otel` | OpenTelemetry tracing, one trace per run, to any backend (Langfuse preset included) |
 | `latch-agent-builder` | agents defined as data, created from your UI |
+| `latch-knowledge` | knowledge the agent reads and writes as files, shared, per org and per person (**experimental**) |
 | `latch-net` | SSRF blocklist and a rebinding-safe pinned `fetch` |
 
 ## Next
