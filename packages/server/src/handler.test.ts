@@ -463,3 +463,30 @@ describe("DELETE chats/:id", () => {
     expect((await handlerWith(async () => Promise.reject(unsupported))(del("c1")))?.status).toBe(501);
   });
 });
+
+describe("POST chats/:id/stop", () => {
+  const stopReq = (id: string) => new Request(`https://app.example/api/latch/chats/${id}/stop`, { method: "POST" });
+  const handlerWith = (stopRun: (input: { principal: P; chatId: string }) => Promise<{ runId: string } | null>) =>
+    createLatchHandler<P>({
+      runtime: { stopRun } as never,
+      basePath: "/api/latch",
+      resolvePrincipal: () => ({ orgId: "org_a", userId: "u1" }),
+    });
+
+  it("stops the caller's running answer and returns its run", async () => {
+    const asked: Array<{ principal: P; chatId: string }> = [];
+    const res = await handlerWith(async (input) => (asked.push(input), { runId: "run_1" }))(stopReq("c1"));
+    expect(res?.status).toBe(200);
+    expect(await res!.json()).toEqual({ runId: "run_1" });
+    expect(asked).toEqual([{ principal: { orgId: "org_a", userId: "u1" }, chatId: "c1" }]);
+  });
+
+  it("is 404 when nothing is running there", async () => {
+    expect((await handlerWith(async () => null)(stopReq("c1")))?.status).toBe(404);
+  });
+
+  it("is 401 without a principal", async () => {
+    const handler = createLatchHandler<P>({ runtime: {} as never, basePath: "/api/latch", resolvePrincipal: () => null });
+    expect((await handler(stopReq("c1")))?.status).toBe(401);
+  });
+});

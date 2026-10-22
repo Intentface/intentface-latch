@@ -159,6 +159,7 @@ const ALTERS = [
   `ALTER TABLE latch_chats ADD COLUMN params TEXT`,
   `ALTER TABLE latch_schedules ADD COLUMN params TEXT`,
   `ALTER TABLE latch_runs ADD COLUMN owner_key TEXT`,
+  `ALTER TABLE latch_runs ADD COLUMN stop_requested_at INTEGER`,
   // AFTER the kind ALTER above — a pre-kind DB can't index the column earlier.
   `CREATE INDEX IF NOT EXISTS latch_chats_sweep_idx ON latch_chats (kind, updated_at)`,
 ];

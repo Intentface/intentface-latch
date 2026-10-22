@@ -58,6 +58,7 @@ It runs under Vitest, Jest or `node:test`. The built-in adapters pass the same c
 4. **Claims are atomic.** Of many servers claiming the same run, exactly one wins.
 5. **Leases come from the database's clock,** not each server's.
 6. **Stale servers are fenced out.** Writes carry the run's fencing number, and a write with an old number is refused.
+7. **Optional: stops reach other servers.** `requestStop` stamps `stopRequestedAt` on the chat's active run, scoped to its owner, and `getRun` returns it. `reclaimRun` refuses a run that has it. Without `requestStop`, `stopRun` only stops answers on the server that receives it.
 
 The [storage reference](https://intentface-latch-docs.vercel.app/docs/reference/storage) has every method and each guarantee in detail, with what breaks when it's missing.
 

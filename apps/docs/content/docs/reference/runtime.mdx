@@ -21,6 +21,16 @@ export async function POST(req: Request) {
 
 <auto-type-table path="../../../../../packages/core/src/runtime.ts" name="HandleChatInput" />
 
+## stopRun
+
+Stops the chat's running answer. The answer ends where it was cut off, is saved with `metadata.stopped: true`, and the run is completed, so crash recovery never resumes it. A subagent the answer started stops with it. Returns `{ runId }`, or `null` when nothing is running in the chat or it isn't the caller's.
+
+```ts
+await runtime.stopRun({ principal, chatId });
+```
+
+A closed tab never stops an answer; only this does. On the server running the answer it's immediate. On another server, the stop is written to the run row (the storage adapter's `requestStop`) and the running server notices within [`stopCheckMs`](/docs/reference/create-runtime), one second by default. The handler's `POST chats/:chatId/stop` route calls it.
+
 ## runAgent
 
 Runs an agent to completion with no client attached: a webhook, a background job, a test. Returns the final answer.
@@ -35,6 +45,8 @@ const { answer, error } = await runtime.runAgent({
 ```
 
 <auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RunAgentInput" />
+
+To stop it early, pass an `abortSignal`: the result then has `stopped: true` and the answer so far.
 
 It returns:
 

@@ -37,6 +37,7 @@ Paths are relative to `basePath`. Every route except the cron route and the conn
 | `POST agents/:agent/:chatId/tool-result` | Answer a tool the browser handles, such as a question for the user. |
 | `GET chats` | The caller's chats. |
 | `GET chats/:chatId` | One chat's messages. |
+| `POST chats/:chatId/stop` | Stop the chat's running answer: what was said so far is saved, marked `stopped`. Returns `{ runId }`; `404` when nothing is running there or the chat isn't the caller's. |
 | `DELETE chats/:chatId` | Delete the chat with its messages, runs and usage, and the subagent threads it spawned. `404` if it isn't the caller's, `409` while an answer runs, `501` if storage can't delete. |
 | `GET runs` | The caller's runs, with usage and cost. |
 | `GET schedules`, `POST schedules` | List or create the caller's schedules. |
