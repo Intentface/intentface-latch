@@ -246,6 +246,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   durability?: DurabilityConfig;
   /**
+   * How often, in ms, a running answer checks whether someone stopped it from
+   * another server (`stopRun` landing elsewhere), while it runs. A stop on the
+   * same server is immediate regardless. `false` turns the check off, so only
+   * same-server stops work. Only for a storage adapter with `requestStop`.
+   *
+   * @default 1000
+   */
+  stopCheckMs?: number | false;
+  /**
    * Prices per model, so each run records what it cost. Needed for cost-based
    * limits and usage reports. `providerDefaults` from
    * `@intentface/latch-core/models` supplies it from a model catalog.
@@ -557,6 +566,11 @@ export interface RunAgentInput<P> {
    */
   model?: LanguageModel;
   /**
+   * Stops the run when it aborts, like `stopRun`: the result has `stopped:
+   * true`, and only steps that finished are kept.
+   */
+  abortSignal?: AbortSignal;
+  /**
    * @deprecated Per-request data that isn't saved, so it is missing when an
    * answer continues. Use the agent's `params`, or a `data-context` part on the
    * message.
@@ -582,6 +596,8 @@ export interface RunAgentResult {
   threadId: string;
   /** The agent's final answer. Empty when the run failed. */
   answer: string;
+  /** Set when the run was stopped (`abortSignal`, or `stopRun` on its thread): `answer` has only the steps that finished, often none. */
+  stopped?: true;
   /**
    * Why the run failed, when it did: the model provider refused, a tool source
    * wouldn't open, and so on.
@@ -718,9 +734,22 @@ export interface Runtime<P> {
    * Runs one chat turn and streams the answer. Returns a streaming `Response`
    * in the AI SDK's UI message format, ready to return from your route to
    * `useChat`. The run keeps going and is saved even if the client
-   * disconnects.
+   * disconnects: to end an answer early, call `stopRun`.
    */
   handleChat(input: HandleChatInput<P>): Promise<Response>;
+  /**
+   * Stops the chat's running answer, if the chat is the caller's. The step it
+   * was in the middle of is dropped: its text and reasoning were cut off, and
+   * would break or mislead the next turn. Steps that finished (and the tools
+   * they ran) are saved, marked `stopped`; when none did, no answer is saved.
+   * The run is completed, so crash recovery never resumes it. A closed tab or
+   * a dropped connection never stops an answer; only this does.
+   *
+   * Immediate when the run is on this server. On another server it stops
+   * within `stopCheckMs`, with a storage adapter that has `requestStop`.
+   * Returns the run's id, or `null` when nothing is running in that chat.
+   */
+  stopRun(input: { principal: P; chatId: string }): Promise<{ runId: string } | null>;
   /**
    * Runs an agent to completion without a client and returns its answer: for
    * webhooks, background jobs, tests and evaluations. Never throws for a run
@@ -1156,6 +1185,18 @@ export class PendingApprovalError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PendingApprovalError";
+  }
+}
+
+/**
+ * The abort reason of a run someone stopped. Named `AbortError` because that
+ * is what the AI SDK (and `fetch`) take as an abort: the stream ends with an
+ * `abort` part, not an error.
+ */
+class RunStoppedError extends Error {
+  constructor(runId: string) {
+    super(`run ${runId} was stopped`);
+    this.name = "AbortError";
   }
 }
 
@@ -1709,6 +1750,29 @@ function fireAndForget(fn: (() => void | Promise<void>) | undefined): void {
 const SECRETISH_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential/i;
 
 /** The last `error` chunk's text in a UI message stream body (SSE `data:` lines), if any. */
+/** Whether a turn's SSE body ended with an `abort` part: someone stopped it. */
+function streamWasStopped(body: string): boolean {
+  return body.split("\n").some((line) => line.startsWith("data: ") && line.includes('"type":"abort"'));
+}
+
+/**
+ * A stopped answer without the step it was in the middle of: that step's text
+ * and reasoning were cut off (a reasoning trace without its signature, text
+ * that doesn't match it), and sent back to the model they'd break or mislead
+ * the next turn. Steps that finished stay, with the tools they ran. `keep` is
+ * how many steps finished, counting the message's earlier ones; `null` when
+ * nothing is left.
+ */
+function withoutUnfinishedStep(message: AppMessage, keep: number): AppMessage | null {
+  let starts = 0;
+  const parts: AppMessage["parts"] = [];
+  for (const p of message.parts) {
+    if (p.type === "step-start" && ++starts > keep) break;
+    parts.push(p);
+  }
+  return starts === 0 || parts.length === 0 ? null : ({ ...message, parts } as AppMessage);
+}
+
 function lastStreamError(body: string): string | undefined {
   let error: string | undefined;
   for (const line of body.split("\n")) {
@@ -1767,6 +1831,10 @@ export function createRuntime<P, RC = unknown>(
     heartbeatMs: config.durability?.heartbeatMs ?? 10_000,
     instanceId: config.durability?.instanceId ?? newInstanceId(),
   };
+  // Answers running on this instance, by run id: `stopRun` stops them here
+  // without waiting for their next check of the run row.
+  const live = new Map<string, { chatId: string; stop: () => void }>();
+  const stopCheckMs = config.stopCheckMs ?? 1000;
   if (dur.enabled && !storage.openTurn) {
     // Without `openTurn` a turn opens as two writes (run, then message), and a
     // crash between them leaves a run whose own message never landed. Recovery
@@ -1921,6 +1989,10 @@ export function createRuntime<P, RC = unknown>(
     observeStream?: (stream: ReadableStream<unknown>) => void;
     /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
     admitted?: Admitted;
+    /** Stops the turn when it aborts, as `stopRun` does: `runAgent`'s `abortSignal`, or a stopped parent's. */
+    signal?: AbortSignal;
+    /** Called when the turn is stopped (not when it loses its lease). */
+    onStop?: () => void;
   }): Promise<ReadableStream<unknown>> {
     const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
     // Every id-only write of this turn carries the run's owner key.
@@ -2052,6 +2124,48 @@ export function createRuntime<P, RC = unknown>(
       (heartbeat as { unref?: () => void }).unref?.();
     }
 
+    // A stop: someone ended the answer (`stopRun`, `runAgent`'s signal, a
+    // stopped parent). Unlike a lost lease, what was said so far is saved.
+    let stopped = false;
+    let stopCheck: ReturnType<typeof setInterval> | undefined;
+    // Aborts only on a stop, never on a lost lease: what subagents stop with.
+    const stopping = new AbortController();
+    const stop = () => {
+      if (stopped || abort.signal.aborted) return;
+      stopped = true;
+      args.onStop?.();
+      stopping.abort();
+      abort.abort(new RunStoppedError(run.id));
+    };
+    const onSignal = () => stop();
+    const endStop = () => {
+      live.delete(run.id);
+      if (stopCheck !== undefined) clearInterval(stopCheck);
+      stopCheck = undefined;
+      args.signal?.removeEventListener("abort", onSignal);
+    };
+    live.set(run.id, { chatId: resolvedChatId, stop });
+    if (args.signal?.aborted) stop();
+    else args.signal?.addEventListener("abort", onSignal, { once: true });
+    if (storage.requestStop && stopCheckMs !== false) {
+      // A stop that landed on another server is only on the run row.
+      let checking = false;
+      stopCheck = setInterval(() => {
+        if (checking) return;
+        checking = true;
+        void owned
+          .getRun(run.id)
+          .then((r) => {
+            if (r?.stopRequestedAt != null) stop();
+          })
+          .catch((e) => console.warn(`[latch] stop check failed for run ${run.id}:`, e))
+          .finally(() => {
+            checking = false;
+          });
+      }, stopCheckMs);
+      (stopCheck as { unref?: () => void }).unref?.();
+    }
+
     // Open dynamic tool sources (e.g. MCP) for this tenant, then merge their
     // tools with the static ones. They're closed when the turn ends. If opening
     // one fails, close any already opened so we don't leak connections.
@@ -2072,6 +2186,7 @@ export function createRuntime<P, RC = unknown>(
     } catch (error) {
       await Promise.all(opened.map((o) => o.close().catch(() => {})));
       stopHeartbeat();
+      endStop();
       throw error;
     }
     const closeSources = () =>
@@ -2257,6 +2372,8 @@ export function createRuntime<P, RC = unknown>(
             // A subagent inherits what set the tree off, so a scheduled fire's
             // delegate is still attributable to the schedule (see TurnTrigger).
             trigger,
+            // Stopping this turn stops the delegate too.
+            signal: stopping.signal,
           });
           if (result.pending?.length) {
             // The subagent paused on a gated tool. Surface it on THIS turn as a
@@ -2877,7 +2994,7 @@ export function createRuntime<P, RC = unknown>(
           agent.stream({
           prompt: modelMessages,
           experimental_sandbox: sandbox,
-          abortSignal: dur.enabled ? abort.signal : undefined,
+          abortSignal: abort.signal,
           // Optional: smooth the visible token cadence before deltas stream out.
           experimental_transform: cfg.smoothStream
             ? smoothStream(cfg.smoothStream === true ? undefined : cfg.smoothStream)
@@ -3016,8 +3133,12 @@ export function createRuntime<P, RC = unknown>(
         isAborted?: boolean;
       }) => {
         stopHeartbeat();
+        endStop();
         await closeSources();
         let messages = finishedMessages;
+        // Stopped by someone: saved and completed like any answer, cut off
+        // where it was. Any other abort is a lost lease, handled below.
+        const stoppedHere = stopped && isAborted === true && failed === undefined;
         if (stepHooks && failed === undefined && !isAborted) {
           // Every step's `step_end` has run before the record is settled. A
           // critical extension's throw on an EARLIER step surfaced through the
@@ -3034,6 +3155,10 @@ export function createRuntime<P, RC = unknown>(
             if (last?.role === "assistant")
               messages = [...messages.slice(0, i), insertStepParts(last, appendedByStep, priorSteps) as AppMessage];
           }
+        }
+        if (stoppedHere && messages.at(-1)?.role === "assistant") {
+          const kept = withoutUnfinishedStep(messages.at(-1)!, priorSteps + stepsSeen);
+          messages = kept ? [...messages.slice(0, -1), kept] : messages.slice(0, -1);
         }
         if (stoppedBeforeStart || handled)
           // Nothing (or nothing but a command with no reply) was said: the SDK
@@ -3069,6 +3194,7 @@ export function createRuntime<P, RC = unknown>(
         if (last?.role === "assistant") {
           last.metadata = {
             ...last.metadata,
+            ...(stoppedHere ? { stopped: true as const } : {}),
             usage: {
               inputTokens,
               outputTokens,
@@ -3083,7 +3209,7 @@ export function createRuntime<P, RC = unknown>(
         // messages/usage — an aborted run may already be reaped and re-claimed
         // by another node whose writes must win. The guarded update no-ops if
         // the run was reassigned. Exactly one terminal report either way.
-        if (failed !== undefined || isAborted) {
+        if (failed !== undefined || (isAborted && !stoppedHere)) {
           const settled = await owned.updateRun(
             run.id,
             {
@@ -3129,7 +3255,7 @@ export function createRuntime<P, RC = unknown>(
         }
         // A gated tool ended the turn awaiting a decision — pause, don't
         // complete. The decision arrives via applyApproval (message state).
-        const paused = hasPendingApproval(messages);
+        const paused = !stoppedHere && hasPendingApproval(messages);
         // Every step checkpoint has committed (or failed and been logged)
         // BEFORE the row is settled. Recovery never revisits a completed run,
         // so the moment the row says `completed` the stored message must
@@ -3181,6 +3307,7 @@ export function createRuntime<P, RC = unknown>(
       },
       onError: (error: unknown) => {
         stopHeartbeat();
+        endStop();
         void closeSources();
         const message = clientErrorMessage(error);
         if (hooks.has("error"))
@@ -4368,6 +4495,20 @@ export function createRuntime<P, RC = unknown>(
     return { removed };
   }
 
+  async function stopRun({ principal, chatId }: { principal: P; chatId: string }): Promise<{ runId: string } | null> {
+    if (!(await storage.getChat(principal, chatId))) return null;
+    // On the row first: the run may be on another server, which reads it there.
+    const stamped = storage.requestStop ? await storage.requestStop(principal, chatId) : null;
+    let here: string | undefined;
+    for (const [runId, r] of live) {
+      if (r.chatId !== chatId) continue;
+      r.stop();
+      here = runId;
+    }
+    const runId = stamped ?? here;
+    return runId ? { runId } : null;
+  }
+
   async function getRun({
     principal,
     runId,
@@ -4479,7 +4620,9 @@ export function createRuntime<P, RC = unknown>(
     turnContext?: unknown;
     /** Progressive snapshots of the turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
-  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
+    /** Stops the turn when it aborts (see `RunAgentInput.abortSignal`). */
+    signal?: AbortSignal;
+  }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string; stopped?: true }> {
     // `||` (not `??`): an empty-string id must mint a fresh one, or the chat is
     // created with id "" and the UI can never open it.
     const chatId = o.chatId?.trim() || generateSubchatId();
@@ -4530,6 +4673,8 @@ export function createRuntime<P, RC = unknown>(
       return { ...resolved, ...opened };
     });
     const onProgress = o.onProgress;
+    // Set only by a stop: a lost lease aborts the stream too, but isn't one.
+    let stopCalled = false;
     let res: Response;
     try {
       res = await buildTurn({
@@ -4556,6 +4701,10 @@ export function createRuntime<P, RC = unknown>(
         // Forward progressive UI-message snapshots to the caller (spawn_agent
         // streams them into the parent turn).
         observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
+        signal: o.signal,
+        onStop: () => {
+          stopCalled = true;
+        },
       });
     } catch (e) {
       // Setup failed after the run opened — a tool source that would not
@@ -4588,7 +4737,8 @@ export function createRuntime<P, RC = unknown>(
     // A failure that ends the run without an error chunk (a final-step
     // `step_end` handler, caught in onFinish) is only on the run row: read it
     // back so a failed turn never looks like a silent one.
-    const error = lastStreamError(await res.text()) ?? (await terminalError(run));
+    const body = await res.text();
+    const error = lastStreamError(body) ?? (await terminalError(run));
 
     const after = await storage.loadMessages(o.principal, chatId);
     // The verdict is about THIS turn, so read the FINAL message only (the same
@@ -4600,12 +4750,17 @@ export function createRuntime<P, RC = unknown>(
       pending.length > 0 ||
       hasPendingApproval(after) ||
       (!!last && hasPendingToolResult([last]));
+    // Not from the message: a stopped answer that finished no step saves none.
+    // The stream must have ended on the stop, and the run not have failed.
+    const stopped = stopCalled && !error && streamWasStopped(body);
     return {
       chatId,
-      answer: pending.length > 0 ? "" : lastAssistantText(after),
+      // A stop that kept no step leaves the user message last: no answer, not the previous turn's.
+      answer: pending.length > 0 || (stopped && last?.role !== "assistant") ? "" : lastAssistantText(after),
       parked,
       ...(pending.length > 0 ? { pending } : {}),
       ...(error ? { error } : {}),
+      ...(stopped ? { stopped: true as const } : {}),
     };
   }
 
@@ -4974,6 +5129,7 @@ export function createRuntime<P, RC = unknown>(
   const self: Runtime<P> = {
     listAgents: agentInfos,
     handleChat,
+    stopRun,
     runAgent: async ({
       principal,
       agent,
@@ -4986,6 +5142,7 @@ export function createRuntime<P, RC = unknown>(
       model,
       turnContext,
       promptCaching,
+      abortSignal,
       // No client stream: assume unattended unless the host says otherwise, so
       // a park here can't be silently filtered out as "someone's watching".
       trigger = "programmatic",
@@ -5005,8 +5162,14 @@ export function createRuntime<P, RC = unknown>(
         turnContext,
         promptCaching,
         trigger,
+        signal: abortSignal,
       });
-      return { threadId: r.chatId, answer: r.answer, ...(r.error ? { error: r.error } : {}) };
+      return {
+        threadId: r.chatId,
+        answer: r.answer,
+        ...(r.error ? { error: r.error } : {}),
+        ...(r.stopped ? { stopped: true as const } : {}),
+      };
     },
     compactChat,
     loadHistory,

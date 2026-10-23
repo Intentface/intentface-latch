@@ -232,6 +232,12 @@ export interface RunRecord {
    * attended turn's defaults.
    */
   settings?: RunSettings | null;
+  /**
+   * When someone asked the run to stop (`runtime.stopRun`), epoch ms; null
+   * or absent when nobody did. The running instance reads it and stops the
+   * answer, and crash recovery never resumes a run that has it.
+   */
+  stopRequestedAt?: number | null;
   error?: string | null;
   startedAt: number;
   endedAt?: number | null;
@@ -487,6 +493,7 @@ export interface StorageAdapter<P> {
   ): Promise<RunRecord | null>;
   // ↑ Also null when the chat has since started a NEWER active run (the crashed
   //   turn was superseded by a fresh message) — resuming it would interleave.
+  //   And null for a run with `stopRequestedAt`: someone stopped it.
   /**
    * Patch a run. With `guard`, the write only applies while `(leaseOwner,
    * fencingToken)` still match — stale-writer protection (fencing). Without it,
@@ -501,6 +508,17 @@ export interface StorageAdapter<P> {
     scope?: OwnerScope<P>,
   ): Promise<boolean>;
   getRun(id: string, scope?: OwnerScope<P>): Promise<RunRecord | null>;
+  /**
+   * Ask the chat's active run to stop: stamp `stopRequestedAt` on it, only if
+   * the chat is the caller's. Returns the run's id, or null when the chat has
+   * no active run. The instance running it notices on its next check (see
+   * `RuntimeConfig.stopCheckMs`) by reading `getRun`.
+   *
+   * Optional: without it, `runtime.stopRun` reaches only runs on the instance
+   * that receives the stop. A run on another server then finishes its answer.
+   * Implement it with `reclaimRun` refusing a run that has `stopRequestedAt`.
+   */
+  requestStop?(principal: P, chatId: string): Promise<string | null>;
   /** Scoped list of the caller's runs (joined via chats), most-recent first. */
   listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
   /**

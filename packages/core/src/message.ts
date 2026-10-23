@@ -38,6 +38,8 @@ export interface AppMetadata {
   cost?: number;
   /** Finish reason from the producing step. */
   finishReason?: string;
+  /** Set on an answer someone stopped (`runtime.stopRun`): it has the steps that finished before the stop. */
+  stopped?: true;
   /** Server-side creation timestamp (unix ms). */
   createdAt?: number;
   /** Set when the message text is a transcription of a recorded voice message. */

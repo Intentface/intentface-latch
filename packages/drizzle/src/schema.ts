@@ -91,6 +91,8 @@ export const runs = sqliteTable(
     agentVersion: integer("agent_version"),
     /** How the turn was asked to run (RunRecord.settings), so recovery resumes it the same way. */
     settings: text("settings", { mode: "json" }),
+    /** When someone asked the run to stop (RunRecord.stopRequestedAt). */
+    stopRequestedAt: integer("stop_requested_at"),
     error: text("error"),
     startedAt: integer("started_at").notNull(),
     endedAt: integer("ended_at"),

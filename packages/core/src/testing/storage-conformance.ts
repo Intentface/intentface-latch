@@ -330,6 +330,26 @@ function checks<P>(): ConformanceCheck<P>[] {
       },
     },
     {
+      name: "requestStop marks the caller's active run, and a stopped run is never reclaimed",
+      async run({ store, principals: [me, other] }) {
+        if (!store.requestStop) return; // optional: same-server stops only
+        const chat = await store.createChat(me, { agent: "a" });
+        check((await store.requestStop(me, chat.id)) === null, "a chat with no active run: null");
+        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 1 });
+        check((await store.requestStop(other, chat.id)) === null, "another owner can't stop it");
+        check((await store.getRun(run.id))?.stopRequestedAt == null, "nothing stamped by the refused stop");
+        check((await store.requestStop(me, chat.id)) === run.id, "the owner's stop returns the run id");
+        check(typeof (await store.getRun(run.id))?.stopRequestedAt === "number", "getRun returns stopRequestedAt");
+        await sleep(EXPIRE);
+        await store.reapExpiredRuns();
+        check((await store.reclaimRun(run.id, "n2", 60_000)) === null, "a stopped run is not resumed after a crash");
+        const done = await store.createChat(me, { agent: "a" });
+        const finished = await store.createRun(me, { chatId: done.id, agent: "a" });
+        await store.updateRun(finished.id, { status: "completed" });
+        check((await store.requestStop(me, done.id)) === null, "a finished run isn't stopped");
+      },
+    },
+    {
       name: "a guarded run update applies only for the current holder",
       async run({ store, principals: [me] }) {
         const chat = await store.createChat(me, { agent: "a" });

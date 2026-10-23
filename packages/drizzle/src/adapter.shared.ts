@@ -174,6 +174,7 @@ export function makeStorageAdapter<P>(
     toolsHash: r.toolsHash,
     agentVersion: r.agentVersion,
     settings: r.settings ?? null,
+    ...(r.stopRequestedAt != null ? { stopRequestedAt: r.stopRequestedAt } : {}),
     error: r.error,
     startedAt: r.startedAt,
     endedAt: r.endedAt,
@@ -674,6 +675,8 @@ export function makeStorageAdapter<P>(
           and(
             eq(s.runs.id, id),
             ne(s.runs.status, "completed"),
+            // Someone stopped it: a crash on the way out doesn't bring it back.
+            isNull(s.runs.stopRequestedAt),
             // Only runs that WERE leased and whose lease has expired. A
             // never-leased live (T1) run has leaseExpiresAt NULL and must not
             // be seizable; a reaped run keeps its (expired) leaseExpiresAt
@@ -738,15 +741,33 @@ export function makeStorageAdapter<P>(
     },
 
     async getRun(id, scope) {
-      await checkOwner("run", id, scope);
+      // The owner comes with the row, so the OwnerScope check needs no query
+      // of its own (a running answer reads its run every second).
       const rows = await db
         .select({ run: s.runs, owner: runOwner })
         .from(s.runs)
         .where(eq(s.runs.id, id));
       if (!rows[0]) return null;
+      if (scope?.ownerKey && rows[0].owner != null && rows[0].owner !== scope.ownerKey) throw new OwnerKeyMismatchError(`run ${id}`);
       // Asked for a person rather than by key: someone else's run is simply not found.
       if (scope?.principal !== undefined && rows[0].owner !== ownerKey(scope.principal)) return null;
       return rowToRun(rows[0].run);
+    },
+
+    async requestStop(principal, chatId) {
+      const stamped = await db
+        .update(s.runs)
+        .set({ stopRequestedAt: nowMs })
+        .where(
+          and(
+            eq(s.runs.chatId, chatId),
+            eq(s.runs.status, "active"),
+            // Only the caller's chat: the scope is the chat's owner.
+            sql`exists (select 1 from ${s.chats} where ${s.chats.id} = ${s.runs.chatId} and ${s.chats.owner} = ${ownerKey(principal)})`,
+          ),
+        )
+        .returning({ id: s.runs.id });
+      return stamped[0]?.id ?? null;
     },
 
     async listRuns(principal, opts) {

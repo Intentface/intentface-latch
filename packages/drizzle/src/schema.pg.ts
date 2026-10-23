@@ -90,6 +90,8 @@ export const runs = pgTable(
     agentVersion: integer("agent_version"),
     /** How the turn was asked to run (RunRecord.settings), so recovery resumes it the same way. */
     settings: jsonb("settings"),
+    /** When someone asked the run to stop (RunRecord.stopRequestedAt). */
+    stopRequestedAt: bigint("stop_requested_at", { mode: "number" }),
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }).notNull(),
     endedAt: bigint("ended_at", { mode: "number" }),

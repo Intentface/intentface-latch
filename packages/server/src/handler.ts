@@ -599,6 +599,17 @@ export function createLatchHandler<P>(
       }
     }
 
+    // POST chats/:id/stop — stop the chat's running answer (`runtime.stopRun`).
+    // The stop button calls this; a closed tab never stops anything. 404 when
+    // nothing is running there, or the chat isn't the caller's.
+    if (seg[0] === "chats" && seg[1] && seg[2] === "stop" && !seg[3] && method === "POST") {
+      const principal = await resolvePrincipal(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
+      const stopped = await rt.stopRun({ principal, chatId: seg[1] });
+      return stopped ? json(stopped) : json({ error: "nothing running" }, 404);
+    }
+
     if (seg[0] === "chats" && method === "GET") {
       const principal = await resolvePrincipal(request);
       if (!principal) return json({ error: "unauthorized" }, 401);

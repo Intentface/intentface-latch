@@ -82,6 +82,23 @@ that are easy to miss and produce confusing UIs when missed:
    card sits on screen for the whole run. Reconcile against server history
    (`GET /chats/:id`) when the stream ends.
 
+## Stop: a request, not a disconnect
+
+`useChat`'s `stop()` aborts the browser's request. To the server that's the
+same as closing the tab, and the answer keeps running so it's there when the
+user comes back. A stop button sends its own request instead:
+
+```ts
+const onStop = () => fetch(`/api/latch/chats/${chatId}/stop`, { method: "POST" });
+```
+
+Don't call `chat.stop()` as well: the server ends the stream with an `abort`
+part, so the open tab sees the answer end and `status` goes back to `ready`.
+The step being written is not saved: the text the tab showed from it is gone
+after a reload. Steps that finished are saved with `metadata.stopped: true`,
+for a "Stopped" label. A `404` means nothing was running: the answer
+finished, or hadn't started yet.
+
 ## OAuth: the callback redirects — resuming is yours
 
 When an agent needs a connection the user hasn't authorized, it calls the
