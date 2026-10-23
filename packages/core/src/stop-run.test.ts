@@ -23,9 +23,10 @@ const usage = {
 
 /**
  * A model that says "w0 w1 w2 …" one word every `everyMs`, like a provider
- * stream: it ends with the abort reason when the call's signal aborts.
+ * stream: it ends with the abort reason when the call's signal aborts, unless
+ * `ignoreAbort`, when it keeps going and the SDK sees the abort between chunks.
  */
-function slowModel(words = 200, everyMs = 10) {
+function slowModel(words = 200, everyMs = 10, ignoreAbort = false) {
   return new MockLanguageModelV4({
     modelId: "slow",
     doStream: (async ({ abortSignal }: { abortSignal?: AbortSignal }) => {
@@ -45,10 +46,11 @@ function slowModel(words = 200, everyMs = 10) {
             controller.enqueue({ type: "text-delta", id: "t", delta: `w${i++} ` });
             timer = setTimeout(next, everyMs);
           };
-          abortSignal?.addEventListener("abort", () => {
-            clearTimeout(timer);
-            controller.error(abortSignal.reason);
-          });
+          if (!ignoreAbort)
+            abortSignal?.addEventListener("abort", () => {
+              clearTimeout(timer);
+              controller.error(abortSignal.reason);
+            });
           next();
         },
       });
@@ -240,6 +242,33 @@ describe("runAgent abortSignal", () => {
     expect(result.error).toBeUndefined();
     expect(result.answer).toBe("");
     expect([...mem.runs.values()].at(-1)!.status).toBe("completed");
+  });
+
+  it("doesn't call a lost lease a stop", async () => {
+    const mem = memoryStorage<P>();
+    const storage: StorageAdapter<P> = {
+      ...mem.storage,
+      async claimRun(input) {
+        const run = await mem.storage.createRun(input.principal, { chatId: input.chatId, agent: input.agent });
+        const leased = { ...run, leaseOwner: input.owner, fencingToken: 1 };
+        mem.runs.set(run.id, leased);
+        return leased;
+      },
+      // Another server took the run over.
+      async heartbeatRun() {
+        return false;
+      },
+    };
+    const runtime = createRuntime<P>({
+      storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      durability: { enabled: true, heartbeatMs: 30 },
+      agents: { a: defineAgent<P>({ model: slowModel(30, 10, true), instructions: "Talk." }) },
+    });
+    const result = await runtime.runAgent({ principal, agent: "a", prompt: "talk" });
+    expect(result.stopped).toBeUndefined();
+    expect(result.error).toBeDefined();
+    expect([...mem.runs.values()].at(-1)!.status).toBe("errored");
   });
 
   it("stops a subagent along with the run that spawned it", async () => {

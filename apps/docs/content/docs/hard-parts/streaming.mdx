@@ -19,7 +19,7 @@ The answer should appear as it's written. The AI SDK streams it to the browser, 
 
 **The answer doesn't depend on the browser.** Closing the tab ends the stream, not the run: the answer finishes on the server and is saved, ready when the user comes back.
 
-**Stopping is a request, not a disconnect.** The stop button calls `POST chats/:id/stop` (`runtime.stopRun`). The step being written is dropped, because its text and reasoning were cut off and would confuse the next turn; finished steps, with the tools they ran, are saved marked `stopped`. Crash recovery leaves the run alone. On the server running it the stop is immediate; from another server it arrives through the run row within a second.
+**Stopping is a request, not a disconnect.** The stop button calls `POST chats/:id/stop` (`runtime.stopRun`). The step being written is dropped, because its text and reasoning were cut off and would confuse the next turn; finished steps, with the tools they ran, are saved marked `stopped`. Crash recovery leaves the run alone. On the server running it the stop is immediate. From another server it arrives through the run row, within `stopCheckMs` (one second by default), when the storage adapter has `requestStop` (the built-in ones do) and the check isn't turned off; otherwise only a stop on the same server reaches it.
 
 **One answer at a time per chat.** A message sent while an answer is running gets `409 chat_busy` with how long to wait, and nothing is saved, so the client can resend it.
 

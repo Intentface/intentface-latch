@@ -1991,6 +1991,8 @@ export function createRuntime<P, RC = unknown>(
     admitted?: Admitted;
     /** Stops the turn when it aborts, as `stopRun` does: `runAgent`'s `abortSignal`, or a stopped parent's. */
     signal?: AbortSignal;
+    /** Called when the turn is stopped (not when it loses its lease). */
+    onStop?: () => void;
   }): Promise<ReadableStream<unknown>> {
     const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
     // Every id-only write of this turn carries the run's owner key.
@@ -2131,6 +2133,7 @@ export function createRuntime<P, RC = unknown>(
     const stop = () => {
       if (stopped || abort.signal.aborted) return;
       stopped = true;
+      args.onStop?.();
       stopping.abort();
       abort.abort(new RunStoppedError(run.id));
     };
@@ -4670,6 +4673,8 @@ export function createRuntime<P, RC = unknown>(
       return { ...resolved, ...opened };
     });
     const onProgress = o.onProgress;
+    // Set only by a stop: a lost lease aborts the stream too, but isn't one.
+    let stopCalled = false;
     let res: Response;
     try {
       res = await buildTurn({
@@ -4697,6 +4702,9 @@ export function createRuntime<P, RC = unknown>(
         // streams them into the parent turn).
         observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
         signal: o.signal,
+        onStop: () => {
+          stopCalled = true;
+        },
       });
     } catch (e) {
       // Setup failed after the run opened — a tool source that would not
@@ -4742,8 +4750,9 @@ export function createRuntime<P, RC = unknown>(
       pending.length > 0 ||
       hasPendingApproval(after) ||
       (!!last && hasPendingToolResult([last]));
-    // From the stream, not the message: a stopped answer that finished no step saves none.
-    const stopped = streamWasStopped(body);
+    // Not from the message: a stopped answer that finished no step saves none.
+    // The stream must have ended on the stop, and the run not have failed.
+    const stopped = stopCalled && !error && streamWasStopped(body);
     return {
       chatId,
       // A stop that kept no step leaves the user message last: no answer, not the previous turn's.
