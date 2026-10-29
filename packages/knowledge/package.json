@@ -1,0 +1,71 @@
+{
+  "name": "@intentface/latch-knowledge",
+  "version": "0.23.0",
+  "description": "Experimental: permissioned knowledge for Latch agents — shared, per-org and personal spaces in your own Postgres, reached through file tools (list, read, grep, search, write, edit) bound to the principal on every turn.",
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "agents",
+    "llm",
+    "knowledge",
+    "skills",
+    "postgres",
+    "multi-tenant"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://intentface-latch-docs.vercel.app",
+  "bugs": {
+    "url": "https://github.com/Intentface/intentface-latch/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@intentface/latch-core": "workspace:^",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "ai": ">=7.0.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.0",
+    "@intentface/latch-drizzle": "workspace:^",
+    "@types/node": "^22",
+    "ai": "^7.0.106",
+    "drizzle-orm": "^0.45.2",
+    "typescript": "^5.7.0",
+    "vitest": "^4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Intentface/intentface-latch.git",
+    "directory": "packages/knowledge"
+  }
+}
