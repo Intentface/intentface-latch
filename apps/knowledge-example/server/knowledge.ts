@@ -28,15 +28,23 @@ export function knowledgeFor(pg: PGlite): Knowledge<Principal> {
 const SEED = fileURLToPath(new URL("../seed/", import.meta.url));
 
 async function filesIn(dir: string): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(dir, { withFileTypes: true });
   const nested = await Promise.all(entries.map((e) => (e.isDirectory() ? filesIn(join(dir, e.name)) : [join(dir, e.name)])));
   return nested.flat();
 }
 
-/** Writes everything under `seed/<from>` to `<to>` as the given person. */
-async function copy(knowledge: Knowledge<Principal>, as: Principal, from: string, to: string) {
+/**
+ * Writes everything under `seed/<from>` to `<to>` as the given person. A read
+ * failure fails the seed, so it's tried again on the next start; only an
+ * `optional` folder may be missing.
+ */
+async function copy(knowledge: Knowledge<Principal>, as: Principal, from: string, to: string, optional = false) {
   const view = knowledge.as(as);
-  for (const file of await filesIn(join(SEED, from))) {
+  const files = await filesIn(join(SEED, from)).catch((e: NodeJS.ErrnoException) => {
+    if (optional && e.code === "ENOENT") return [];
+    throw e;
+  });
+  for (const file of files) {
     await view.write(`${to}/${relative(join(SEED, from), file)}`, await readFile(file, "utf8"));
   }
 }
@@ -75,7 +83,8 @@ export async function seed(pg: PGlite, knowledge: Knowledge<Principal>) {
     const id = p.staff ? `user:staff/${p.userId}` : `user:${p.orgId}/${p.userId}`;
     await knowledge.createSpace({ id, owner: p.staff ? ["staff", p.userId] : [p.orgId, p.userId], kind: "user" });
     await knowledge.grant({ space: id, subject: id, role: "editor", grantedBy: "seed" });
-    await copy(knowledge, p, `people/${person.id}`, "/me");
+    // Not everyone starts with notes.
+    await copy(knowledge, p, `people/${person.id}`, "/me", true);
   }
   await pg.query(`insert into example_seeded default values`);
 }

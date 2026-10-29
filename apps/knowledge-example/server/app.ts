@@ -35,52 +35,58 @@ async function start() {
   mkdirSync(DATA, { recursive: true });
   // One Postgres for the chats and the knowledge.
   const pg = new PGlite(`${DATA}pg`, { extensions: { pg_trgm } });
-  const db = drizzle(pg, { schema: pgSchema });
-  await migratePostgres(db);
-  const knowledge = knowledgeFor(pg);
-  await seed(pg, knowledge);
+  try {
+    const db = drizzle(pg, { schema: pgSchema });
+    await migratePostgres(db);
+    const knowledge = knowledgeFor(pg);
+    await seed(pg, knowledge);
 
-  const { handler } = await createLatchApp<Principal>({
-    storage: createPostgresAdapter<Principal>(db, { owner: (p) => [p.orgId, p.userId] }),
-    // Demo login: the browser picks one of PEOPLE. Read your real session here.
-    resolvePrincipal: (request) => personOf(request)?.principal ?? null,
-    agents: (models) => ({
-      advisor: defineAgent<Principal>({
-        model: models.modelFor(process.env.MODEL ?? "claude-sonnet-5-5"),
-        instructions: INSTRUCTIONS,
-        tools: knowledgeTools(knowledge),
+    const { handler } = await createLatchApp<Principal>({
+      storage: createPostgresAdapter<Principal>(db, { owner: (p) => [p.orgId, p.userId] }),
+      // Demo login: the browser picks one of PEOPLE. Read your real session here.
+      resolvePrincipal: (request) => personOf(request)?.principal ?? null,
+      agents: (models) => ({
+        advisor: defineAgent<Principal>({
+          model: models.modelFor(process.env.MODEL ?? "claude-sonnet-5-5"),
+          instructions: INSTRUCTIONS,
+          tools: knowledgeTools(knowledge),
+        }),
       }),
-    }),
-    handler: { basePath: "/api/latch" },
-    cronIntervalMs: false,
-  });
+      handler: { basePath: "/api/latch" },
+      cronIntervalMs: false,
+    });
 
-  /** What the sidebar shows: the knowledge as the selected person sees it. */
-  async function knowledgeRoute(request: Request): Promise<Response | undefined> {
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith("/api/kb/")) return undefined;
-    const person = personOf(request);
-    if (!person) return Response.json({ error: "Pick a person" }, { status: 401 });
-    const view = knowledge.as(person.principal);
-    try {
-      if (url.pathname === "/api/kb/tree") {
-        const mounts = await view.list("/");
-        const tree = await Promise.all(mounts.map(async (m) => ({ mount: m.path, entries: await view.list(m.path, { depth: 10 }).catch(() => []) })));
-        return Response.json(tree);
+    /** What the sidebar shows: the knowledge as the selected person sees it. */
+    async function knowledgeRoute(request: Request): Promise<Response | undefined> {
+      const url = new URL(request.url);
+      if (!url.pathname.startsWith("/api/kb/")) return undefined;
+      const person = personOf(request);
+      if (!person) return Response.json({ error: "Pick a person" }, { status: 401 });
+      const view = knowledge.as(person.principal);
+      try {
+        if (url.pathname === "/api/kb/tree") {
+          const mounts = await view.list("/");
+          const tree = await Promise.all(mounts.map(async (m) => ({ mount: m.path, entries: await view.list(m.path, { depth: 10 }).catch(() => []) })));
+          return Response.json(tree);
+        }
+        if (url.pathname === "/api/kb/file") return Response.json(await view.read(url.searchParams.get("path") ?? ""));
+      } catch (e) {
+        if (isKnowledgeError(e)) return Response.json({ error: e.message, code: e.code }, { status: e.code === "not_found" ? 404 : 400 });
+        throw e;
       }
-      if (url.pathname === "/api/kb/file") return Response.json(await view.read(url.searchParams.get("path") ?? ""));
-    } catch (e) {
-      if (isKnowledgeError(e)) return Response.json({ error: e.message, code: e.code }, { status: e.code === "not_found" ? 404 : 400 });
-      throw e;
+      return undefined;
     }
-    return undefined;
-  }
 
-  const handle = async (request: Request) => {
-    if (new URL(request.url).pathname === "/api/people") return Response.json(PEOPLE);
-    return (await knowledgeRoute(request)) ?? handler(request);
-  };
-  return toNodeHandler(handle);
+    const handle = async (request: Request) => {
+      if (new URL(request.url).pathname === "/api/people") return Response.json(PEOPLE);
+      return (await knowledgeRoute(request)) ?? handler(request);
+    };
+    return toNodeHandler(handle);
+  } catch (e) {
+    // Let go of the data directory, so the retry on the next request can open it.
+    await pg.close().catch(() => {});
+    throw e;
+  }
 }
 
 // One app per process: Vite reloads this module on edits, and PGlite holds its directory.
