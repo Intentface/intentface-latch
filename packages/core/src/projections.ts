@@ -119,6 +119,11 @@ export const COMPACTION_PART_TYPE = "data-compaction";
  * two straddled the boundary, which can't happen: the marker is appended at the
  * tail of a settled conversation, so a call and its result are always on the
  * same side of it.
+ *
+ * One kind of message can land before the marker without being in the summary:
+ * a signal (`sendSignal`) stored while the summary was being written. The
+ * marker records the last message the summary read, and those signals are
+ * kept in the window.
  */
 export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -127,8 +132,15 @@ export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
     // the question before it) is no longer a boundary: the context reaches back
     // to the previous one, as it did before that summary was written.
     if (messages[i]!.metadata?.sendToModel === false) continue;
-    if (Array.isArray(parts) && parts.some((p) => p.type === COMPACTION_PART_TYPE)) {
-      return messages.slice(i);
+    const marker = Array.isArray(parts) ? parts.find((p) => p.type === COMPACTION_PART_TYPE) : undefined;
+    if (marker) {
+      // Signals stored while this summary was being written: after the last
+      // message it read (`through`), before the boundary. The summary doesn't
+      // cover them, so they stay in the window, right after it.
+      const through = (marker as { data?: { through?: unknown } }).data?.through;
+      const read = typeof through === "string" ? messages.findIndex((m) => m.id === through) : -1;
+      const missed = read === -1 ? [] : messages.slice(read + 1, i).filter((m) => m.metadata?.signal);
+      return missed.length ? [messages[i]!, ...missed, ...messages.slice(i + 1)] : messages.slice(i);
     }
   }
   return messages;
@@ -191,7 +203,7 @@ function signalBlock(m: AppMessage): string {
 }
 
 /** Signals as text parts for a user message, one labelled block each. */
-export const signalParts = (signals: AppMessage[]): AppMessage["parts"] =>
+const signalParts = (signals: AppMessage[]): AppMessage["parts"] =>
   signals.map((m) => ({ type: "text" as const, text: signalBlock(m) })) as AppMessage["parts"];
 
 /** A notice as the operator says it: the text, under a line naming its source when it has one. */

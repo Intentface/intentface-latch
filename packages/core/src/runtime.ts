@@ -30,7 +30,6 @@ import {
   COMPACTION_PART_TYPE,
   sliceAtCompaction,
   defaultNoticePlacement,
-  signalParts,
   type NoticePlacement,
   toClientMessages,
   toModelMessages,
@@ -4286,7 +4285,10 @@ export function createRuntime<P, RC = unknown>(
             { type: "text", text },
             {
               type: COMPACTION_PART_TYPE,
-              data: { compacted: live.length, at: Date.now() },
+              // `through`: the last message the summary could have read. A
+              // signal stored while it was being written sits after that and
+              // before this boundary; `sliceAtCompaction` keeps those.
+              data: { compacted: live.length, at: Date.now(), through: stored[stored.length - 1]!.id },
             },
           ],
           metadata: {
@@ -4303,20 +4305,6 @@ export function createRuntime<P, RC = unknown>(
           },
         } as AppMessage;
       await owned.appendMessages(chatId, [summaryMessage]);
-      // A signal stored while the summary was being written is in neither the
-      // summary nor the window after it, and would never be sent again. Once
-      // the boundary is stored that set is final (a later signal lands after
-      // it), so read it back and carry those in the summary message itself.
-      const seen = new Set(stored.map((m) => m.id));
-      const now = await storage.loadMessages(principal, chatId);
-      const boundary = now.findIndex((m) => m.id === summaryMessage.id);
-      const late = now.slice(0, Math.max(boundary, 0)).filter((m) => isSignal(m) && !seen.has(m.id) && m.metadata?.sendToModel !== false);
-      if (late.length > 0) {
-        const [summaryText, marker] = summaryMessage.parts;
-        await owned.appendMessages(chatId, [
-          { ...summaryMessage, parts: [summaryText!, ...signalParts(late), marker!] } as AppMessage,
-        ]);
-      }
       await owned.updateRun(run.id, {
         status: "completed",
         usageInputTokens: usage.inputTokens,

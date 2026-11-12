@@ -313,11 +313,20 @@ describe("sendSignal", () => {
     await h.current.turn(user("q2", "u2"));
     expect(await h.current.runtime.compactChat({ chatId: "chat_1", principal })).toMatchObject({ compacted: 4 });
 
+    // Stored before the boundary, and the summary never read it.
     const stored = h.current.mem.messages.get("chat_1")!;
-    expect(stored.map((m) => m.id).indexOf("sig_late")).toBeLessThan(stored.length - 1);
+    expect(stored.map((m) => m.id).indexOf("sig_late")).toBe(stored.length - 2);
+    expect(JSON.stringify(stored.at(-1))).not.toContain("Oslo");
+
     await h.current.turn(user("q3", "u3"));
-    const prompt = JSON.stringify(model.doStreamCalls.at(-1)!.prompt);
-    expect(prompt).toContain("They talked about time zones.");
-    expect(prompt).toContain("The office moved to Oslo.");
+    const prompt = model.doStreamCalls.at(-1)!.prompt as Array<{ role: string; content: unknown }>;
+    expect(prompt.map((m) => m.role)).toEqual(["system", "user", "user"]);
+    expect(JSON.stringify(prompt[1])).toContain("They talked about time zones.");
+    expect(JSON.stringify(prompt[2])).toContain("<notice>\\nThe office moved to Oslo.\\n</notice>");
+
+    // A second compaction reads it, so its summary covers it from then on.
+    await h.current.turn(user("q4", "u4"));
+    await h.current.runtime.compactChat({ chatId: "chat_1", principal });
+    expect(JSON.stringify(model.doGenerateCalls.at(-1)!.prompt)).toContain("The office moved to Oslo.");
   });
 });
