@@ -63,9 +63,9 @@ const forModel = await toModelMessages(stored, { tools }); // drops sendToModel:
 
 ## Signals
 
-`runtime.sendSignal` adds a note to a chat from server code without starting a turn: see [Tell a chat something from your server](/docs/guides/signals). It is stored as one more message, with `role: "system"` and `metadata.signal`, wherever it arrived.
+`runtime.sendSignal` tells a chat something from server code: see [Tell a chat something from your server](/docs/guides/signals). It is stored as one more message, with `role: "system"` and `metadata.signal`, wherever it arrived.
 
-The model projection moves it: a signal is read with the next user message after it, as a system message right after that message or as a labelled block inside it, depending on the model. One with no user message after it yet is left out. A signal sent with `wake: true` starts a turn of its own and is read where it is stored, as that turn's opening message. The position depends only on the stored order, so later turns send the same prefix and the prompt cache still hits.
+A signal that starts a turn (the default) is read where it is stored, as that turn's opening message. One that only waits (`wake: false`, or the chat wasn't free) is moved by the model projection: it is read with the next user message after it, as a system message right after that message or as a labelled block inside it, depending on the model. One with no user message after it yet is left out. The position depends only on the stored order, so later turns send the same prefix and the prompt cache still hits.
 
 ## Compaction
 

@@ -545,15 +545,17 @@ export interface SendSignalInput<P> {
   /** Your own id for it, so a retried call stores it once. */
   id?: string;
   /**
-   * Start a turn now, with this signal as what the agent answers, instead of
-   * waiting for the user's next message. `sendSignal` then resolves when the
-   * answer is finished. The chat's own agent runs, as `principal`, and counts
-   * against its limits like any turn; a tool that needs approval waits for
-   * the user.
+   * Whether the signal starts a turn. Default `true`: the agent answers it
+   * now, and `sendSignal` resolves when the answer is finished. The chat's
+   * own agent runs, as `principal`, and counts against its limits like any
+   * turn; a tool that needs approval waits for the user.
    *
-   * Only when the chat is free: with an answer running, an approval or tool
-   * result pending, or a limit reached, the signal is stored and waits for
-   * the next message like any other (`turn` is then absent from the result).
+   * A turn starts only when the chat is free: with an answer running, an
+   * approval or tool result pending, or a limit reached, the signal is stored
+   * and waits for the next message (`turn` is then absent from the result).
+   *
+   * `false`: store it and start nothing. The agent reads it with the user's
+   * next message.
    */
   wake?: boolean;
 }
@@ -562,7 +564,7 @@ export interface SendSignalInput<P> {
 export interface SendSignalResult {
   /** The stored message's id. */
   id: string;
-  /** The turn the signal started, when `wake` was set and the chat was free. */
+  /** The turn the signal started. Absent with `wake: false`, or when the chat wasn't free. */
   turn?: {
     /** The agent's answer. Empty when the turn failed or is waiting on a person. */
     answer: string;
@@ -802,10 +804,9 @@ export interface Runtime<P> {
     turnContext?: unknown;
   }): Promise<{ summary: string; compacted: number } | null>;
   /**
-   * Adds a note to a chat from server code, without starting a turn: an
-   * answer that arrived from elsewhere, a job that finished, a message from
-   * someone other than the chat's user. The agent reads it with the user's
-   * next message. Nothing already stored changes, so it can be called at any
+   * Tells a chat something from server code: an answer that arrived from
+   * elsewhere, a job that finished, a message from someone other than the
+   * chat's user. Nothing already stored changes, so it can be called at any
    * time, also while an answer is running (that answer won't see it).
    *
    * A `notice` (the default) is the application speaking: the model reads it
@@ -818,9 +819,10 @@ export interface Runtime<P> {
    * Put only text your application wrote, or a person it vouches for, in a
    * signal. Documents and tool output belong in tool results.
    *
-   * Pass `wake: true` to have the agent answer it now instead, when the chat
-   * is free; the call then resolves when that answer is finished, with it in
-   * `turn`. Nothing streams to an open page: the answer is in the history.
+   * The agent answers it now when the chat is free: the call resolves when
+   * that answer is finished, with it in `turn`. Nothing streams to an open
+   * page: the answer is in the history. Pass `wake: false` to only store it,
+   * for the agent to read with the user's next message.
    *
    * Returns the stored message's id, or `null` when the chat doesn't exist or
    * isn't the principal's. Pass `id` to make a retry safe: the same id stores
@@ -4401,7 +4403,7 @@ export function createRuntime<P, RC = unknown>(
         parts: [{ type: "text", text }],
         metadata: { visibility: visibility ?? "internal", createdAt: Date.now(), signal: mark },
       }) as AppMessage;
-    if (wake) {
+    if (wake !== false) {
       try {
         // The signal opens the turn: stored with the run or not at all.
         const r = await runToCompletion({

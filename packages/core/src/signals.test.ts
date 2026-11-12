@@ -217,7 +217,7 @@ describe("sendSignal", () => {
     await h.turn(user("q1"));
     const runsBefore = h.mem.runs.size;
 
-    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: 42." });
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: 42.", wake: false });
     expect(sent).not.toBeNull();
     expect(h.mem.runs.size).toBe(runsBefore);
     expect(model.doStreamCalls).toHaveLength(1);
@@ -235,7 +235,7 @@ describe("sendSignal", () => {
     const model = scripted([text("a1"), text("a2"), text("a3")]);
     const h = harness({ model, notices: "system" });
     await h.turn(user("q1"));
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: 42." });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: 42.", wake: false });
     await h.turn(user("q2", "u2"));
     const second = promptsOf(model)[1]!;
     expect(roles(second)).toEqual(["system", "user", "assistant", "user", "system"]);
@@ -257,8 +257,8 @@ describe("sendSignal", () => {
   it("stores a retried signal once, and never over another message", async () => {
     const h = harness({ model: scripted([text("a1")]) });
     await h.turn(user("q1"));
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "once", id: "sig_1" });
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "once", id: "sig_1" });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "once", id: "sig_1", wake: false });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "once", id: "sig_1", wake: false });
     expect(h.mem.messages.get("chat_1")!.filter((m) => m.id === "sig_1")).toHaveLength(1);
     await expect(h.runtime.sendSignal({ chatId: "chat_1", principal, text: "x", id: "u1" })).rejects.toSatisfy(isInvalidMessageError);
     expect(h.mem.messages.get("chat_1")!.find((m) => m.id === "u1")!.role).toBe("user");
@@ -267,9 +267,10 @@ describe("sendSignal", () => {
   it("shows the user only the signals marked for them", async () => {
     const h = harness({ model: scripted([text("a1")]) });
     await h.turn(user("q1"));
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "for the agent only" });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "for the agent only", wake: false });
     await h.runtime.sendSignal({
       chatId: "chat_1",
+      wake: false,
       principal,
       text: "Use the 2024 form.",
       kind: "message",
@@ -296,7 +297,7 @@ describe("sendSignal", () => {
     const model = scripted([text("a1"), text("a2")]);
     const h = harness({ model });
     await h.turn(user("q1"));
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "late news" });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "late news", wake: false });
     const again = await h.turn(user("q1"));
     expect(again.stored.filter((m) => m.role === "assistant" && m.metadata?.sendToModel !== false)).toHaveLength(1);
     // The regenerated answer is to the question before the notice: it waits for the next one.
@@ -308,7 +309,7 @@ describe("sendSignal", () => {
     const model = scripted([call("getTimezone"), text("Helsinki then."), text("a3")]);
     const h = harness({ model, tools, notices: "system" });
     await h.turn(user("what time is it for me?"));
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The office moved to Oslo." });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The office moved to Oslo.", wake: false });
 
     const res = await h.runtime.applyToolResult({ chatId: "chat_1", principal, toolCallId: "call_1", output: { tz: "Europe/Helsinki" } });
     await res.text();
@@ -331,7 +332,7 @@ describe("sendSignal", () => {
       modelId: "mock",
       doStream: base.doStream as never,
       doGenerate: (async () => {
-        await h.current!.runtime.sendSignal({ chatId: "chat_1", principal, text: "The office moved to Oslo.", id: "sig_late" });
+        await h.current!.runtime.sendSignal({ chatId: "chat_1", principal, text: "The office moved to Oslo.", id: "sig_late", wake: false });
         return {
           content: [{ type: "text", text: "They talked about time zones." }],
           finishReason: { unified: "stop", raw: "stop" },
@@ -371,7 +372,7 @@ describe("sendSignal with wake", () => {
     const h = harness({ model, notices: "system" });
     await h.turn(user("q1"));
 
-    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: ZEBRA-41.", wake: true });
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: ZEBRA-41." });
     expect(sent!.turn).toEqual({ answer: "The code is ZEBRA-41.", parked: false });
     const stored = h.mem.messages.get("chat_1")!;
     expect(stored.map((m) => m.role)).toEqual(["user", "assistant", "system", "assistant"]);
@@ -394,7 +395,7 @@ describe("sendSignal with wake", () => {
     const model = scripted([text("a1"), text("a2")]);
     const h = harness({ model });
     await h.turn(user("q1"));
-    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "held" });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "held", wake: false });
     await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "go", kind: "message", from: { name: "Ann" }, wake: true });
     const woken = promptsOf(model)[1]!;
     expect(roles(woken)).toEqual(["system", "user", "assistant", "user"]);
