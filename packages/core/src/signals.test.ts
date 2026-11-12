@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { generateText } from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { anthropicTakesSystemMidConversation, defaultNoticePlacement, placeSignals, toModelMessages } from "./projections.js";
 import { isInvalidMessageError, type AppMessage, type SignalMark } from "./message.js";
@@ -288,5 +289,35 @@ describe("sendSignal", () => {
     await h.turn(user("and now?", "u2"));
     const third = promptsOf(model)[2]!;
     expect(third.at(-1)).toEqual({ role: "system", content: "The office moved to Oslo." });
+  });
+
+  it("survives a compaction that was already running when it arrived", async () => {
+    const h: { current?: ReturnType<typeof harness> } = {};
+    const base = scripted([text("a1"), text("a2"), text("a3")]);
+    // The summary call: a signal lands while the model is still writing it.
+    const model = new MockLanguageModelV4({
+      modelId: "mock",
+      doStream: base.doStream as never,
+      doGenerate: (async () => {
+        await h.current!.runtime.sendSignal({ chatId: "chat_1", principal, text: "The office moved to Oslo.", id: "sig_late" });
+        return {
+          content: [{ type: "text", text: "They talked about time zones." }],
+          finishReason: { unified: "stop", raw: "stop" },
+          usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+          warnings: [],
+        };
+      }) as never,
+    });
+    h.current = harness({ model });
+    await h.current.turn(user("q1"));
+    await h.current.turn(user("q2", "u2"));
+    expect(await h.current.runtime.compactChat({ chatId: "chat_1", principal })).toMatchObject({ compacted: 4 });
+
+    const stored = h.current.mem.messages.get("chat_1")!;
+    expect(stored.map((m) => m.id).indexOf("sig_late")).toBeLessThan(stored.length - 1);
+    await h.current.turn(user("q3", "u3"));
+    const prompt = JSON.stringify(model.doStreamCalls.at(-1)!.prompt);
+    expect(prompt).toContain("They talked about time zones.");
+    expect(prompt).toContain("The office moved to Oslo.");
   });
 });

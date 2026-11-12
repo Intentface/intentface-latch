@@ -190,6 +190,10 @@ function signalBlock(m: AppMessage): string {
   return `<${mark.kind}${from}${via}>\n${textOf(m)}\n</${mark.kind}>`;
 }
 
+/** Signals as text parts for a user message, one labelled block each. */
+export const signalParts = (signals: AppMessage[]): AppMessage["parts"] =>
+  signals.map((m) => ({ type: "text" as const, text: signalBlock(m) })) as AppMessage["parts"];
+
 /** A notice as the operator says it: the text, under a line naming its source when it has one. */
 function noticeText(m: AppMessage): string {
   const from = (m.metadata!.signal as SignalMark).from;
@@ -226,8 +230,7 @@ export function placeSignals(
   const asSystem = opts.notices === "system";
   const out: AppMessage[] = [];
   let pending: AppMessage[] = [];
-  const blocks = (signals: AppMessage[]) =>
-    signals.map((m) => ({ type: "text" as const, text: signalBlock(m) })) as AppMessage["parts"];
+  const blocks = signalParts;
   for (const m of messages) {
     if (m.metadata?.signal) {
       pending.push(m);

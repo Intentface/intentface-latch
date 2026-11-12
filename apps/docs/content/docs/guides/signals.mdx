@@ -61,9 +61,12 @@ A system message outranks what the user says. A `<notice>` block does not: a use
 Override the choice per model with `resolveNoticePlacement` on the runtime:
 
 ```ts
+import { anthropicTakesSystemMidConversation, createRuntime } from "@intentface/latch-core";
+
 createRuntime({
   // …
-  resolveNoticePlacement: (modelId) => (modelId.startsWith("claude-opus") ? "system" : "user"),
+  // Claude behind a proxy Latch doesn't recognise as Anthropic.
+  resolveNoticePlacement: (modelId) => (anthropicTakesSystemMidConversation(modelId) ? "system" : "user"),
 });
 ```
 

@@ -30,6 +30,7 @@ import {
   COMPACTION_PART_TYPE,
   sliceAtCompaction,
   defaultNoticePlacement,
+  signalParts,
   type NoticePlacement,
   toClientMessages,
   toModelMessages,
@@ -1998,6 +1999,12 @@ export function createRuntime<P, RC = unknown>(
         ? args.model
         : ((args.model as { modelId?: string }).modelId ?? "unknown")
       : args.modelId;
+    // Where this model reads a notice (`sendSignal`). As a system message it
+    // sits among the messages, which the SDK refuses unless told otherwise.
+    // Asked here, before the turn opens anything a throwing hook would leak.
+    const notices: NoticePlacement = config.resolveNoticePlacement
+      ? config.resolveNoticePlacement(modelId)
+      : defaultNoticePlacement(cfg.model);
     // Mutable: the start moments below may inject, replace or rewrite history
     // before the model runs. From here on this is the turn's transcript.
     let uiMessages = args.uiMessages;
@@ -2663,12 +2670,6 @@ export function createRuntime<P, RC = unknown>(
     const telemetryOn =
       !!config.telemetry &&
       !(config.telemetry.telemetryFor && telemetryOptions === undefined);
-
-    // Where this model reads a notice (`sendSignal`). As a system message it
-    // sits among the messages, which the SDK refuses unless told otherwise.
-    const notices: NoticePlacement = config.resolveNoticePlacement
-      ? config.resolveNoticePlacement(modelId)
-      : defaultNoticePlacement(cfg.model);
 
     const agent = new ToolLoopAgent({
       model: cfg.model,
@@ -4278,8 +4279,7 @@ export function createRuntime<P, RC = unknown>(
       // didn't write; `sendToModel` stays default-true so the model DOES see it.
       // Role `user` because after slicing this is the conversation's first
       // message, and a model prompt may not open with an assistant turn.
-      await owned.appendMessages(chatId, [
-        {
+      const summaryMessage = {
           id: generateMessageId(),
           role: "user",
           parts: [
@@ -4301,8 +4301,22 @@ export function createRuntime<P, RC = unknown>(
             },
             cost,
           },
-        } as AppMessage,
-      ]);
+        } as AppMessage;
+      await owned.appendMessages(chatId, [summaryMessage]);
+      // A signal stored while the summary was being written is in neither the
+      // summary nor the window after it, and would never be sent again. Once
+      // the boundary is stored that set is final (a later signal lands after
+      // it), so read it back and carry those in the summary message itself.
+      const seen = new Set(stored.map((m) => m.id));
+      const now = await storage.loadMessages(principal, chatId);
+      const boundary = now.findIndex((m) => m.id === summaryMessage.id);
+      const late = now.slice(0, Math.max(boundary, 0)).filter((m) => isSignal(m) && !seen.has(m.id) && m.metadata?.sendToModel !== false);
+      if (late.length > 0) {
+        const [summaryText, marker] = summaryMessage.parts;
+        await owned.appendMessages(chatId, [
+          { ...summaryMessage, parts: [summaryText!, ...signalParts(late), marker!] } as AppMessage,
+        ]);
+      }
       await owned.updateRun(run.id, {
         status: "completed",
         usageInputTokens: usage.inputTokens,
