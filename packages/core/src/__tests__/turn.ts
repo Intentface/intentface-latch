@@ -84,6 +84,8 @@ export interface TurnOptions {
   extensions?: Extension[];
   /** The agent's own. */
   agentExtensions?: Extension[];
+  /** `RuntimeConfig.resolveNoticePlacement`, fixed for every model. */
+  notices?: "system" | "user";
 }
 
 export function harness(o: TurnOptions) {
@@ -92,6 +94,7 @@ export function harness(o: TurnOptions) {
     storage: mem.storage,
     context: defineContext<P, unknown>({ build: async () => ({}) }),
     extensions: o.extensions,
+    ...(o.notices ? { resolveNoticePlacement: () => o.notices! } : {}),
     agents: {
       a: defineAgent<P>({
         model: o.model,

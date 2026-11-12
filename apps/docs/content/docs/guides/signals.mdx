@@ -1,0 +1,82 @@
+---
+title: Tell a chat something from your server
+description: Add a note to a chat without starting a turn — an answer that arrived from elsewhere, a job that finished, a message from someone else — so the agent knows it at the next message.
+---
+
+## Background
+
+Some things a chat should know are typed by nobody in it. A question the agent couldn't answer went to a human expert, who replied hours later somewhere else. A background job finished. A colleague wrote into a chat that belongs to someone else.
+
+`runtime.sendSignal` stores such a note in the chat. It starts no turn and changes nothing already stored. The agent reads it with the user's next message.
+
+## Send a notice
+
+```ts
+await runtime.sendSignal({
+  chatId,
+  principal, // whose chat it is
+  text: "The tax expert answered the question about form 6B: file it by 31 March, with the 2024 annex.",
+});
+// → { id } | null (the chat doesn't exist, or isn't the principal's)
+```
+
+A notice is your application speaking. Only server code can add one: a message from a client is rebuilt as a plain user message, so nobody can type their way into one.
+
+Call it at any time, also while an answer is running. That answer doesn't see the notice; the next turn does. Pass your own `id` when the call might be retried, and the same id stores once.
+
+## Send a person's message
+
+```ts
+await runtime.sendSignal({
+  chatId,
+  principal,
+  kind: "message",
+  from: { name: "Ann Lee", via: "expert console" },
+  text: "Use the 2024 annex, not the 2023 one.",
+  visibility: "user",
+});
+```
+
+A `message` is a named person other than the chat's user. The model reads it as a person speaking, never as your application.
+
+## Who sees it
+
+| | Default | Change it with |
+| --- | --- | --- |
+| The agent | always, from the next turn | — |
+| The user | no | `visibility: "user"` |
+
+A visible signal comes back from `loadHistory` as a message with `role: "system"` and `metadata.signal` (`{ kind, from }`). Render it from that: a stock chat UI has no bubble for it.
+
+## How the model reads it
+
+| Model | A notice | A person's message |
+| --- | --- | --- |
+| Claude Fable, Mythos, Opus 4.8 and later, Sonnet 5.5, Haiku 5.5: from Anthropic, on Vertex, or on Bedrock through `@ai-sdk/amazon-bedrock/anthropic` | a system message after the user's next message | a `<message from="…">` block at the top of the user's next message |
+| OpenAI models, from OpenAI or on Azure | a system message there (a developer message on reasoning models) | the same block |
+| Everything else, including Gemini, older Claude models, and Claude through Bedrock's default `bedrock()` model | a `<notice>` block at the top of the user's next message | the same block |
+
+A system message outranks what the user says. A `<notice>` block does not: a user can type one too. If your application depends on a notice being trusted, run the agent on a model in the first two rows.
+
+Override the choice per model with `resolveNoticePlacement` on the runtime:
+
+```ts
+createRuntime({
+  // …
+  resolveNoticePlacement: (modelId) => (modelId.startsWith("claude-opus") ? "system" : "user"),
+});
+```
+
+Return `"system"` only for a model that takes system messages mid-conversation. On one that doesn't, the request fails, and it fails on every later turn too, since the notice stays in the chat's history.
+
+## What goes in a signal
+
+Text your application wrote, or a person it vouches for. Phrase a notice as something the agent should know ("the expert answered: …"), not as an order that overrides the user.
+
+Documents, search results and tool output don't belong in a signal. A system message is trusted by the model, so anything a third party wrote there can steer it. Keep that content in tool results.
+
+## What it doesn't do yet
+
+- **Start a turn.** A signal waits for the user's next message; the agent doesn't act on it before then.
+- **Reach an open page.** A visible signal appears when the page next loads its history.
+- **Queue a user's message.** A message sent while an answer is running is still refused with `chat_busy`.

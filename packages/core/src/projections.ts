@@ -1,5 +1,5 @@
 import { convertToModelMessages, type ModelMessage } from "ai";
-import type { AppMessage } from "./message.js";
+import type { AppMessage, SignalMark } from "./message.js";
 
 /**
  * The one data part a client may attach to its message: what the user is
@@ -134,11 +134,134 @@ export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
   return messages;
 }
 
+/** How the model reads a notice: as the operator, or as a labelled note on the user side. */
+export type NoticePlacement = "system" | "user";
+
+/**
+ * Whether an Anthropic model takes a system message mid-conversation: Fable
+ * and Mythos, Opus from 4.8, Sonnet and Haiku from 5.5 (not Sonnet 5). An id
+ * this doesn't recognise answers no: a refused request would fail every later
+ * turn of the chat, since the notice stays in its history.
+ */
+export function anthropicTakesSystemMidConversation(modelId: string): boolean {
+  const m = /claude-(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?:[-@]|$)/i.exec(modelId);
+  if (!m) return false;
+  const family = m[1]!.toLowerCase();
+  const version = Number(m[2]) + Number(m[3] ?? 0) / 100;
+  if (family === "fable" || family === "mythos") return true;
+  return version >= (family === "opus" ? 4.08 : 5.05);
+}
+
+/**
+ * Where a notice goes for a model, when the host sets no
+ * `resolveNoticePlacement`. `"system"` for:
+ *  - OpenAI models, direct or on Azure (sent as a `developer` message on
+ *    reasoning models);
+ *  - the Anthropic models that take one mid-conversation, direct, on Vertex,
+ *    or on Bedrock through `@ai-sdk/amazon-bedrock/anthropic` (InvokeModel).
+ *
+ * `"user"` for everything else: Gemini takes one system instruction per
+ * request, Bedrock's Converse API (the default `bedrock()` model) refuses a
+ * system message after the first turn, and a provider Latch doesn't know gets
+ * the form every model accepts.
+ */
+export function defaultNoticePlacement(model: unknown): NoticePlacement {
+  if (typeof model !== "object" || model === null) return "user";
+  const { provider, modelId } = model as { provider?: unknown; modelId?: unknown };
+  const name = String(provider ?? "");
+  if (/^(openai|azure)\.(responses|chat)$/.test(name)) return "system";
+  if (/^(anthropic|bedrock\.anthropic|googleVertex\.anthropic|vertex\.anthropic)\./.test(name)) return anthropicTakesSystemMidConversation(String(modelId ?? "")) ? "system" : "user";
+  return "user";
+}
+
+const attr = (v: string) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const textOf = (m: AppMessage): string =>
+  (m.parts as { type: string; text?: string }[])
+    .filter((p) => p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text)
+    .join("\n");
+
+/** A signal as a labelled block on the user side: `<notice>` or `<message from="…">`. */
+function signalBlock(m: AppMessage): string {
+  const mark = m.metadata!.signal as SignalMark;
+  const from = mark.from?.name ? ` from="${attr(mark.from.name)}"` : "";
+  const via = mark.from?.via ? ` via="${attr(mark.from.via)}"` : "";
+  return `<${mark.kind}${from}${via}>\n${textOf(m)}\n</${mark.kind}>`;
+}
+
+/** A notice as the operator says it: the text, under a line naming its source when it has one. */
+function noticeText(m: AppMessage): string {
+  const from = (m.metadata!.signal as SignalMark).from;
+  const source = [from?.name, from?.via ? `via ${from.via}` : undefined].filter(Boolean).join(", ");
+  return source ? `[Notice from ${source}]\n${textOf(m)}` : textOf(m);
+}
+
+/**
+ * Put signals (messages added with `sendSignal`) where the model can read them.
+ *
+ * A signal is stored wherever it arrived: after an answer, between a question
+ * and its answer, while a turn was live. None of those is a place every
+ * provider accepts an operator message, and the answer next to it may never
+ * have seen it. So a signal is delivered with the NEXT user message after it:
+ *
+ *  - a `notice`, where the model takes operator messages mid-conversation
+ *    (`notices: "system"`), becomes one system message right after that user
+ *    message. Anthropic requires that slot: after a user turn, before the
+ *    answer. Elsewhere it is a `<notice>` block at the top of the user message.
+ *  - a `message` from a named person is always a `<message from="…">` block at
+ *    the top of the user message: a person speaking, not the operator.
+ *
+ * The position depends only on stored order, so it is the same on every later
+ * turn and the cached prefix still matches. A signal with no user message
+ * after it yet is held back: it joins the next turn. `keepTrailing` instead
+ * appends those as one user-side note, for a reader that has no next turn
+ * (the compaction summary).
+ */
+export function placeSignals(
+  messages: AppMessage[],
+  opts: { notices?: NoticePlacement; keepTrailing?: boolean } = {},
+): AppMessage[] {
+  if (!messages.some((m) => m.metadata?.signal)) return messages;
+  const asSystem = opts.notices === "system";
+  const out: AppMessage[] = [];
+  let pending: AppMessage[] = [];
+  const blocks = (signals: AppMessage[]) =>
+    signals.map((m) => ({ type: "text" as const, text: signalBlock(m) })) as AppMessage["parts"];
+  for (const m of messages) {
+    if (m.metadata?.signal) {
+      pending.push(m);
+      continue;
+    }
+    if (m.role !== "user" || pending.length === 0) {
+      out.push(m);
+      continue;
+    }
+    const system = asSystem ? pending.filter((s) => s.metadata!.signal!.kind === "notice") : [];
+    const inline = pending.filter((s) => !system.includes(s));
+    out.push(inline.length ? ({ ...m, parts: [...blocks(inline), ...m.parts] } as AppMessage) : m);
+    if (system.length) {
+      // One message for all of them: the slot after a user turn holds one.
+      out.push({
+        id: system[0]!.id,
+        role: "system",
+        parts: [{ type: "text", text: system.map(noticeText).join("\n\n") }],
+      } as AppMessage);
+    }
+    pending = [];
+  }
+  if (pending.length && opts.keepTrailing) {
+    out.push({ id: pending[0]!.id, role: "user", parts: blocks(pending) } as AppMessage);
+  }
+  return out;
+}
+
 /**
  * Model projection: cut to the live context window, drop `sendToModel === false`,
- * neutralize audio file parts, close any dangling tool calls, then convert to
- * model messages. (`data-*` parts — e.g. the compaction marker — are dropped by
- * the SDK during conversion, so they never reach the model.)
+ * place signals (see `placeSignals`), neutralize audio file parts, close any
+ * dangling tool calls, then convert to model messages. (`data-*` parts — e.g.
+ * the compaction marker — are dropped by the SDK during conversion, so they
+ * never reach the model.)
  */
 export async function toModelMessages(
   messages: AppMessage[],
@@ -149,11 +272,22 @@ export async function toModelMessages(
      * `undefined` to leave it out. Defaults to {@link defaultContextText}.
      */
     contextToText?: (data: unknown) => string | undefined;
+    /**
+     * How a notice reads to the model. `"system"` needs a model that takes
+     * system messages mid-conversation, and `allowSystemInMessages` on the
+     * call. Defaults to `"user"`, which every model accepts.
+     */
+    notices?: NoticePlacement;
+    /** Include signals no user message has followed yet (see `placeSignals`). */
+    keepTrailingSignals?: boolean;
   },
 ): Promise<ModelMessage[]> {
   const forModel = closeDanglingToolCalls(
     replaceAudioFileParts(
-      sliceAtCompaction(messages).filter((m) => m.metadata?.sendToModel !== false),
+      placeSignals(
+        sliceAtCompaction(messages).filter((m) => m.metadata?.sendToModel !== false),
+        { notices: opts?.notices, keepTrailing: opts?.keepTrailingSignals },
+      ),
     ),
   );
   const toText = opts?.contextToText ?? defaultContextText;

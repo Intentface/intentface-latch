@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, lastQuestionResent, latestMessageContext, type AppMessage } from "./message.js";
+import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, isSignal, lastQuestionResent, latestMessageContext, type AppMessage, type SignalMark, type Visibility } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
@@ -29,6 +29,8 @@ import type { MemoryProvider } from "./memory.js";
 import {
   COMPACTION_PART_TYPE,
   sliceAtCompaction,
+  defaultNoticePlacement,
+  type NoticePlacement,
   toClientMessages,
   toModelMessages,
 } from "./projections.js";
@@ -400,6 +402,17 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
     args: { agent: string; memoryScoped: boolean; principal: P },
   ) => PromptCachingPlan | undefined;
   /**
+   * How a model reads a notice added with `sendSignal`: `"system"` as an
+   * operator message after the user's next message, `"user"` as a labelled
+   * `<notice>` block inside it. `"system"` only works on a model that takes
+   * system messages mid-conversation; on one that doesn't, the request fails.
+   *
+   * Without it: `"system"` on OpenAI models (direct or Azure) and on the
+   * Anthropic models that support it (direct, Vertex, or Bedrock through
+   * `@ai-sdk/amazon-bedrock/anthropic`), `"user"` everywhere else.
+   */
+  resolveNoticePlacement?: (modelId: string) => NoticePlacement;
+  /**
    * Observes runs: tracing, per-step and per-run callbacks. Use
    * `@intentface/latch-otel` for full tracing, or only the callbacks you
    * need (usage dashboards, alerts when a scheduled run waits on a person).
@@ -514,6 +527,23 @@ export interface HandleChatInput<P> {
 }
 
 /** What `runAgent` takes: one prompt, run to completion without a client. */
+/** What `sendSignal` takes. */
+export interface SendSignalInput<P> {
+  chatId: string;
+  /** Whose chat it is. A signal is stored under the chat's owner. */
+  principal: P;
+  /** What the agent should know. Plain text your application wrote. */
+  text: string;
+  /** `"notice"` (default): the application speaking. `"message"`: a named person. */
+  kind?: SignalMark["kind"];
+  /** Who it is from and where it was sent from; a `message` should name its author. */
+  from?: SignalMark["from"];
+  /** Whether the user sees it. Defaults to `"internal"`: only the agent does. */
+  visibility?: Visibility;
+  /** Your own id for it, so a retried call stores it once. */
+  id?: string;
+}
+
 export interface RunAgentInput<P> {
   /** Who the run acts for. The run is scoped to this principal like a chat turn. */
   principal: P;
@@ -742,6 +772,28 @@ export interface Runtime<P> {
     request?: Request;
     turnContext?: unknown;
   }): Promise<{ summary: string; compacted: number } | null>;
+  /**
+   * Adds a note to a chat from server code, without starting a turn: an
+   * answer that arrived from elsewhere, a job that finished, a message from
+   * someone other than the chat's user. The agent reads it with the user's
+   * next message. Nothing already stored changes, so it can be called at any
+   * time, also while an answer is running (that answer won't see it).
+   *
+   * A `notice` (the default) is the application speaking: the model reads it
+   * as the operator where the provider allows (see `resolveNoticePlacement`).
+   * A `message` is a named person speaking, and is read as one. Only server
+   * code can add either; a client can't. The user doesn't see a signal unless
+   * you pass `visibility: "user"`; it is then in `loadHistory` as a `system`
+   * message with `metadata.signal`, for your UI to render.
+   *
+   * Put only text your application wrote, or a person it vouches for, in a
+   * signal. Documents and tool output belong in tool results.
+   *
+   * Returns the stored message's id, or `null` when the chat doesn't exist or
+   * isn't the principal's. Pass `id` to make a retry safe: the same id stores
+   * once.
+   */
+  sendSignal(input: SendSignalInput<P>): Promise<{ id: string } | null>;
   /**
    * A chat's messages for showing to the user, with internal messages left
    * out. Use it to render a conversation when the page loads.
@@ -1196,7 +1248,7 @@ type SubApprovalPart = {
  * press could clear it either.
  */
 function hasPendingApproval(messages: AppMessage[]): boolean {
-  const last = messages[messages.length - 1];
+  const last = tailOf(messages);
   // Strictly the FINAL message: a later user message means the turn moved on.
   if (last?.role !== "assistant") return false;
   for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
@@ -1231,7 +1283,7 @@ const SUPERSEDED_REASON =
  * user has walked away from. Mutates in place; returns the changed messages.
  */
 function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
-  const last = messages[messages.length - 1];
+  const last = tailOf(messages);
   if (last?.role !== "assistant") return [];
   const changed = new Set<AppMessage>();
   for (const p of (last.parts ?? []) as (ApprovalPart & SubApprovalPart)[]) {
@@ -1272,7 +1324,7 @@ function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
  * subagent approval's `data.approvalId`.
  */
 function approvalIsLast(messages: AppMessage[], approvalId: string): boolean {
-  const last = messages.at(-1);
+  const last = tailOf(messages);
   return ((last?.parts ?? []) as (ApprovalPart & SubApprovalPart)[]).some(
     (p) => p.approval?.id === approvalId || (p.type === "data-subagent-approval" && p.data?.approvalId === approvalId),
   );
@@ -1504,9 +1556,21 @@ export function supersededBy(
  * as the message to continue and write the new answer into it, where it would
  * stay hidden. The hidden answers stay stored; they're only left out here.
  */
+/**
+ * The message a turn can be paused on: the last one that isn't a signal. A
+ * note added with `sendSignal` while a chat waits on an approval or a tool
+ * result lands after the paused message, and must not hide it.
+ */
+function tailOf(messages: AppMessage[]): AppMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) if (!isSignal(messages[i])) return messages[i];
+  return undefined;
+}
+
 function withoutHiddenTail(messages: AppMessage[]): AppMessage[] {
   let end = messages.length;
-  while (end > 0 && messages[end - 1]!.metadata?.sendToModel === false) end--;
+  // Signals at the end too: the model reads one with the next user message,
+  // so a continuation of the turn before it runs as if it weren't there yet.
+  while (end > 0 && (messages[end - 1]!.metadata?.sendToModel === false || isSignal(messages[end - 1]))) end--;
   return end === messages.length ? messages : messages.slice(0, end);
 }
 
@@ -1519,7 +1583,7 @@ export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   let end = messages.length;
   // Hidden from the model too: an answer a regenerate replaced. If the crash
   // came after it was hidden, the turn still has to run from the user message.
-  while (end > 0 && (isCompactionMarker(messages[end - 1]) || messages[end - 1]!.metadata?.sendToModel === false)) end--;
+  while (end > 0 && (isCompactionMarker(messages[end - 1]) || messages[end - 1]!.metadata?.sendToModel === false || isSignal(messages[end - 1]))) end--;
   const turns = end === messages.length ? messages : messages.slice(0, end);
   // Checked next: a pending gate outranks the tail's shape, and its own tail
   // (narration after the gated call) would otherwise read as `loop-finished`.
@@ -1673,7 +1737,7 @@ function recordToolResult(
   // Recording onto it would mutate dead history AND resume an obsolete turn —
   // a stale button, or a redelivered submit for a long-dead question, would
   // trigger a spurious agent run instead of doing nothing.
-  const last = messages[messages.length - 1];
+  const last = tailOf(messages);
   if (last?.role !== "assistant") return [];
   let touched = false;
   for (const p of (last.parts ?? []) as ResultPart[]) {
@@ -2600,8 +2664,15 @@ export function createRuntime<P, RC = unknown>(
       !!config.telemetry &&
       !(config.telemetry.telemetryFor && telemetryOptions === undefined);
 
+    // Where this model reads a notice (`sendSignal`). As a system message it
+    // sits among the messages, which the SDK refuses unless told otherwise.
+    const notices: NoticePlacement = config.resolveNoticePlacement
+      ? config.resolveNoticePlacement(modelId)
+      : defaultNoticePlacement(cfg.model);
+
     const agent = new ToolLoopAgent({
       model: cfg.model,
+      ...(notices === "system" ? { allowSystemInMessages: true } : {}),
       // File URLs the model can't fetch itself: capped, refused where
       // addresses can't be checked, and stopped with the run (see
       // `file-download.ts`). Not with the request: a run outlives its client.
@@ -2850,7 +2921,7 @@ export function createRuntime<P, RC = unknown>(
         }
         // Model projection: drops `sendToModel:false` messages (and data-* parts).
         // `context` lets an extension reshape what the model reads this turn.
-        const projected = await toModelMessages(uiMessages, { tools, contextToText: contextToTextFor(run.agent) });
+        const projected = await toModelMessages(uiMessages, { tools, contextToText: contextToTextFor(run.agent), notices });
         const modelMessages = hooks.has("context")
           ? await hooks.context(projected, xctx(0, uiMessages))
           : projected;
@@ -3527,6 +3598,7 @@ export function createRuntime<P, RC = unknown>(
       openTurn(principal, chat, agentName, [...replaced, userMessage], cfg.configVersion),
     );
 
+    const resentAt = prior.findIndex((m) => m.id === userMessage.id);
     return buildTurn({
       resolvedChatId,
       principal,
@@ -3535,7 +3607,10 @@ export function createRuntime<P, RC = unknown>(
       run,
       lease,
       // A retried message replaces its earlier copy rather than appearing twice.
-      uiMessages: [...prior.filter((m) => m.id !== userMessage.id), userMessage],
+      // Signals stored after that copy stay after it in storage, where the
+      // next new message picks them up: leave them out here, or this turn
+      // would read them with the resent message and every later turn without.
+      uiMessages: [...prior.filter((m, i) => m.id !== userMessage.id && !(resentAt !== -1 && i > resentAt && isSignal(m))), userMessage],
       runtimeCtx,
       params,
       messageContext,
@@ -4132,7 +4207,8 @@ export function createRuntime<P, RC = unknown>(
     // boundary is already represented by that boundary's summary.
     const live = sliceAtCompaction(stored);
     if (live.length < MIN_COMPACTABLE_MESSAGES) return null;
-    if (hasPendingApproval(live) || hasPendingToolResult([live[live.length - 1]!])) {
+    const liveTail = tailOf(live);
+    if (hasPendingApproval(live) || (liveTail && hasPendingToolResult([liveTail]))) {
       throw new PendingApprovalError(
         "This chat is awaiting a decision — resolve the pending request before compacting.",
       );
@@ -4179,7 +4255,9 @@ export function createRuntime<P, RC = unknown>(
     try {
       const { text, truncated, usage } = await summarizeForCompaction({
         model: cfg.model as LanguageModel,
-        messages: await toModelMessages(live, { tools, contextToText: contextToTextFor(chat.agent) }),
+        // A signal nobody has answered yet goes into the summary too: the
+        // messages before the summary are never sent again.
+        messages: await toModelMessages(live, { tools, contextToText: contextToTextFor(chat.agent), keepTrailingSignals: true }),
         ...(focus ? { focus } : {}),
         ...(noThinking ? { providerOptions: noThinking } : {}),
         ...(signal ? { signal } : {}),
@@ -4254,6 +4332,39 @@ export function createRuntime<P, RC = unknown>(
         .catch(() => {});
       throw e;
     }
+  }
+
+  async function sendSignal({ chatId, principal, text, kind, from, visibility, id }: SendSignalInput<P>): Promise<{ id: string } | null> {
+    if (typeof text !== "string" || text.trim().length === 0) throw new InvalidMessageError("a signal needs text");
+    const chat = await storage.getChat(principal, chatId);
+    if (!chat) return null;
+    const messageId = id ?? generateMessageId();
+    if (id !== undefined) {
+      // A retry with the same id stores once. Any other message under that id
+      // is refused: appending would overwrite it.
+      const existing = (await storage.loadMessages(principal, chatId)).find((m) => m.id === id);
+      if (existing) {
+        if (isSignal(existing)) return { id };
+        throw new InvalidMessageError(`message id "${id}" is already in this chat`);
+      }
+    }
+    const signal: SignalMark = {
+      kind: kind ?? "notice",
+      ...(from?.name || from?.via
+        ? { from: { ...(from.name ? { name: from.name } : {}), ...(from.via ? { via: from.via } : {}) } }
+        : {}),
+    };
+    // Role `system`: neither a question nor an answer, so nothing that reads
+    // history for either mistakes it for one. No fence: it belongs to no run.
+    await ownedBy(chat.owner).appendMessages(chatId, [
+      {
+        id: messageId,
+        role: "system",
+        parts: [{ type: "text", text }],
+        metadata: { visibility: visibility ?? "internal", createdAt: Date.now(), signal },
+      } as AppMessage,
+    ]);
+    return { id: messageId };
   }
 
   async function loadHistory({
@@ -4594,7 +4705,7 @@ export function createRuntime<P, RC = unknown>(
     // The verdict is about THIS turn, so read the FINAL message only (the same
     // rule hasPendingApproval applies): an undecided gate in an older message
     // is an abandoned turn, not this one's pause point.
-    const last = after[after.length - 1];
+    const last = tailOf(after);
     const pending = last?.role === "assistant" ? collectPendingApprovals([last]) : [];
     const parked =
       pending.length > 0 ||
@@ -4634,7 +4745,7 @@ export function createRuntime<P, RC = unknown>(
   ): Promise<{ answer: string; pending?: SubagentPending[] }> {
     const subChat = await storage.getChat(principal, subChatId);
     if (!subChat) return { answer: "" };
-    const subMessages = await storage.loadMessages(principal, subChatId);
+    const subMessages = withoutHiddenTail(await storage.loadMessages(principal, subChatId));
     const changed = applyDecisions(subMessages, decisions);
     if (changed.length > 0) await ownedBy(subChat.owner).appendMessages(subChatId, changed);
     // Another gated call in the same sub step still undecided → can't finish.
@@ -4852,7 +4963,7 @@ export function createRuntime<P, RC = unknown>(
         if ((s.onParked ?? "skip") === "skip" && s.lastChatId) {
           try {
             const prior = await storage.loadMessages(principal, s.lastChatId);
-            const last = prior[prior.length - 1];
+            const last = tailOf(prior);
             if (hasPendingApproval(prior) || (last && hasPendingToolResult([last]))) {
               console.warn(
                 `[schedule] ${s.id} (${s.agent}): previous fire's chat ${s.lastChatId} ` +
@@ -5009,6 +5120,7 @@ export function createRuntime<P, RC = unknown>(
       return { threadId: r.chatId, answer: r.answer, ...(r.error ? { error: r.error } : {}) };
     },
     compactChat,
+    sendSignal,
     loadHistory,
     listChats,
     getChat: getChatById,
