@@ -1315,6 +1315,9 @@ const SUPERSEDED_REASON =
  * `collectDecidedSubagentApprovals` won't later try to resume a sub thread the
  * user has walked away from. Mutates in place; returns the changed messages.
  */
+/** Thrown by `runToCompletion({ refuseIfWaiting })`; never leaves the runtime. */
+class WaitingOnPerson extends Error {}
+
 function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
   const last = tailOf(messages);
   if (last?.role !== "assistant") return [];
@@ -4399,28 +4402,26 @@ export function createRuntime<P, RC = unknown>(
         metadata: { visibility: visibility ?? "internal", createdAt: Date.now(), signal: mark },
       }) as AppMessage;
     if (wake) {
-      // Not while the chat waits on a person: a new message there declines
-      // the pending request, and that is the user's call, not a notice's.
-      const prior = await storage.loadMessages(principal, chatId);
-      const tail = tailOf(prior);
-      const waiting = hasPendingApproval(prior) || (!!tail && hasPendingToolResult([tail]));
-      if (!waiting) {
-        try {
-          // The signal opens the turn: stored with the run or not at all.
-          const r = await runToCompletion({
-            principal,
-            agent: chat.agent,
-            chatId,
-            message: message({ ...signal, startsTurn: true }),
-            autoApprove: false,
-            trigger: "programmatic",
-          });
-          return { id: messageId, turn: { answer: r.answer, parked: r.parked, ...(r.error ? { error: r.error } : {}) } };
-        } catch (e) {
-          // An answer is running, or a limit is reached: nothing was stored.
-          // Keep the signal for the next message instead of losing it.
-          if (!isChatBusyError(e) && !isLimitExceededError(e)) throw e;
-        }
+      try {
+        // The signal opens the turn: stored with the run or not at all.
+        const r = await runToCompletion({
+          principal,
+          agent: chat.agent,
+          chatId,
+          message: message({ ...signal, startsTurn: true }),
+          autoApprove: false,
+          trigger: "programmatic",
+          // Not while the chat waits on a person: a new message there declines
+          // the pending request, and that is the user's call, not a notice's.
+          // Checked on the history the turn itself reads, not an earlier load.
+          refuseIfWaiting: true,
+        });
+        // A failed turn has no answer: `r.answer` would be an earlier turn's.
+        return { id: messageId, turn: { answer: r.error ? "" : r.answer, parked: r.parked, ...(r.error ? { error: r.error } : {}) } };
+      } catch (e) {
+        // The chat waits on a person, an answer is running, or a limit is
+        // reached: nothing was stored. Keep the signal for the next message.
+        if (!(e instanceof WaitingOnPerson) && !isChatBusyError(e) && !isLimitExceededError(e)) throw e;
       }
     }
     // No fence: it belongs to no run.
@@ -4651,6 +4652,12 @@ export function createRuntime<P, RC = unknown>(
     turnContext?: unknown;
     /** Progressive snapshots of the turn's exchange (prompt + streaming assistant). */
     onProgress?: (messages: AppMessage[]) => void;
+    /**
+     * Throw `WaitingOnPerson` instead of declining when the thread is waiting
+     * on an approval or a tool result. For a caller whose message is not the
+     * user's decision (`sendSignal({ wake })`).
+     */
+    refuseIfWaiting?: boolean;
   }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
     // `||` (not `??`): an empty-string id must mint a fresh one, or the chat is
     // created with id "" and the UI can never open it.
@@ -4676,6 +4683,10 @@ export function createRuntime<P, RC = unknown>(
       throw new Error(`Thread ${chatId} was delegated by another agent; omit threadId to start a new one.`);
     }
     const prior = await storage.loadMessages(o.principal, chatId);
+    if (o.refuseIfWaiting) {
+      const tail = tailOf(prior);
+      if (hasPendingApproval(prior) || (!!tail && hasPendingToolResult([tail]))) throw new WaitingOnPerson();
+    }
     // Same rule as handleChat: a new message while the thread is parked on an
     // approval IS the decision — close the stale gate as declined (persisted)
     // and carry on. Otherwise a continued thread (`runAgent({ threadId })`,

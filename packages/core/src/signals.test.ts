@@ -418,6 +418,23 @@ describe("sendSignal with wake", () => {
     expect([...h.mem.runs.values()].at(-1)!.status).toBe("completed");
   });
 
+  it("gives no answer for a turn that failed, not the one before it", async () => {
+    const base = scripted([text("a1")]);
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: "mock",
+      doStream: (async (o: never) => {
+        if (++calls > 1) throw new Error("model down");
+        return (base.doStream as (o: never) => unknown)(o);
+      }) as never,
+    });
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", wake: true });
+    expect(sent!.turn!.answer).toBe("");
+    expect(sent!.turn!.error).toBeTruthy();
+  });
+
   it("stores and waits when an answer is running", async () => {
     const model = scripted([text("a1"), text("a2")]);
     const h = harness({ model });
