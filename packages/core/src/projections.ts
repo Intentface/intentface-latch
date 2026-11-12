@@ -199,7 +199,10 @@ function signalBlock(m: AppMessage): string {
   const mark = m.metadata!.signal as SignalMark;
   const from = mark.from?.name ? ` from="${attr(mark.from.name)}"` : "";
   const via = mark.from?.via ? ` via="${attr(mark.from.via)}"` : "";
-  return `<${mark.kind}${from}${via}>\n${textOf(m)}\n</${mark.kind}>`;
+  // The text can't end its own block early. Not a defence against what the
+  // text says: only put text you vouch for in a signal.
+  const body = textOf(m).replace(new RegExp(`</(${mark.kind})`, "gi"), "&lt;/$1");
+  return `<${mark.kind}${from}${via}>\n${body}\n</${mark.kind}>`;
 }
 
 /** Signals as text parts for a user message, one labelled block each. */
@@ -222,9 +225,12 @@ function noticeText(m: AppMessage): string {
  * have seen it. So a signal is delivered with the NEXT user message after it:
  *
  *  - a `notice`, where the model takes operator messages mid-conversation
- *    (`notices: "system"`), becomes one system message right after that user
- *    message. Anthropic requires that slot: after a user turn, before the
- *    answer. Elsewhere it is a `<notice>` block at the top of the user message.
+ *    (`notices: "system"`), becomes one system message after that user
+ *    message. Anthropic requires that slot: after a user turn, and then the
+ *    answer or nothing. So when more user messages follow with no answer
+ *    between (a turn that failed before answering), it goes after the last
+ *    of them. Elsewhere it is a `<notice>` block at the top of the user
+ *    message.
  *  - a `message` from a named person is always a `<message from="…">` block at
  *    the top of the user message: a person speaking, not the operator.
  *
@@ -242,29 +248,37 @@ export function placeSignals(
   const asSystem = opts.notices === "system";
   const out: AppMessage[] = [];
   let pending: AppMessage[] = [];
+  // Notices already matched to a user message, waiting for the end of the
+  // run of user messages it is in.
+  let due: AppMessage[] = [];
   const blocks = signalParts;
+  const flush = () => {
+    if (!due.length) return;
+    // One message for all of them: the slot after a user turn holds one.
+    out.push({
+      id: due[0]!.id,
+      role: "system",
+      parts: [{ type: "text", text: due.map(noticeText).join("\n\n") }],
+    } as AppMessage);
+    due = [];
+  };
   for (const m of messages) {
     if (m.metadata?.signal) {
       pending.push(m);
       continue;
     }
-    if (m.role !== "user" || pending.length === 0) {
+    if (m.role !== "user") {
+      flush();
       out.push(m);
       continue;
     }
     const system = asSystem ? pending.filter((s) => s.metadata!.signal!.kind === "notice") : [];
     const inline = pending.filter((s) => !system.includes(s));
     out.push(inline.length ? ({ ...m, parts: [...blocks(inline), ...m.parts] } as AppMessage) : m);
-    if (system.length) {
-      // One message for all of them: the slot after a user turn holds one.
-      out.push({
-        id: system[0]!.id,
-        role: "system",
-        parts: [{ type: "text", text: system.map(noticeText).join("\n\n") }],
-      } as AppMessage);
-    }
+    due.push(...system);
     pending = [];
   }
+  flush();
   if (pending.length && opts.keepTrailing) {
     out.push({ id: pending[0]!.id, role: "user", parts: blocks(pending) } as AppMessage);
   }

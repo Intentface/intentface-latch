@@ -46,7 +46,9 @@ A `message` is a named person other than the chat's user. The model reads it as 
 | The agent | always, from the next turn | — |
 | The user | no | `visibility: "user"` |
 
-A visible signal comes back from `loadHistory` as a message with `role: "system"` and `metadata.signal` (`{ kind, from }`). Render it from that: a stock chat UI has no bubble for it.
+A visible signal comes back from `loadHistory` as a message with `role: "system"` and `metadata.signal` (`{ kind, from }`). Render it from that yourself: chat UIs are built around `user` and `assistant` messages, so check what yours does with a `system` one.
+
+A signal is not posted to a channel. In Slack, Telegram and the others the agent knows it from the next message, and the person sees nothing until the agent says it.
 
 ## How the model reads it
 
@@ -55,6 +57,8 @@ A visible signal comes back from `loadHistory` as a message with `role: "system"
 | Claude Fable, Mythos, Opus 4.8 and later, Sonnet 5.5, Haiku 5.5: from Anthropic, on Vertex, or on Bedrock through `@ai-sdk/amazon-bedrock/anthropic` | a system message after the user's next message | a `<message from="…">` block at the top of the user's next message |
 | OpenAI models, from OpenAI or on Azure | a system message there (a developer message on reasoning models) | the same block |
 | Everything else, including Gemini, older Claude models, and Claude through Bedrock's default `bedrock()` model | a `<notice>` block at the top of the user's next message | the same block |
+
+When a turn failed before answering and the user wrote again, the system message goes after the last of those user messages: Anthropic takes one only where the answer comes next.
 
 A system message outranks what the user says. A `<notice>` block does not: a user can type one too. If your application depends on a notice being trusted, run the agent on a model in the first two rows.
 
