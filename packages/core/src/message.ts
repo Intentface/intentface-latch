@@ -66,10 +66,22 @@ export interface SignalMark {
     /** Where it was sent from, for example `"email"` or `"expert console"`. */
     via?: string;
   };
+  /**
+   * Set on a signal that started a turn (`sendSignal` with `wake`): the agent
+   * answered it directly, so it stands where a user message would.
+   */
+  startsTurn?: true;
 }
 
 /** A message added with `sendSignal` (see {@link SignalMark}). */
 export const isSignal = (m: AppMessage | undefined): boolean => !!m?.metadata?.signal;
+
+/**
+ * A signal waiting for the next user message, as opposed to one that started
+ * a turn of its own. Code that reads history for the last exchange looks past
+ * these: they are part of no exchange yet.
+ */
+export const isHeldSignal = (m: AppMessage | undefined): boolean => isSignal(m) && !m!.metadata!.signal!.startsTurn;
 
 /** The stored conversation unit — a `UIMessage` typed with our metadata. */
 export type AppMessage<TOOLS extends UITools = UITools> = UIMessage<
@@ -172,9 +184,10 @@ const hide = (m: AppMessage): AppMessage => ({ ...m, metadata: { ...m.metadata, 
  * count: only what the user can still see.
  */
 export function lastQuestionResent(message: AppMessage, prior: readonly AppMessage[]): AppMessage[] | null {
-  // Signals take no part in an exchange: a notice that arrived after the
-  // answer doesn't stop the question before it being regenerated or edited.
-  const visible = prior.filter((m) => !isHidden(m) && !isSignal(m));
+  // A held signal takes no part in an exchange: a notice that arrived after
+  // the answer doesn't stop the question before it being regenerated or
+  // edited. One that started a turn does: its answer builds on that question.
+  const visible = prior.filter((m) => !isHidden(m) && !isHeldSignal(m));
   const at = visible.findIndex((m) => m.id === message.id);
   if (at === -1 || visible[at]!.role !== "user") return null;
   // After it: the answers, and possibly a compaction summary written since.
@@ -325,7 +338,7 @@ export function acceptUserMessage(
   // a fork; any other id is one of the agent's messages.
   // Signals are not part of an exchange (see `lastQuestionResent`); a signal's
   // own id is refused below like any other id already in the chat.
-  const visible = prior.filter((m) => !isHidden(m) && !isSignal(m));
+  const visible = prior.filter((m) => !isHidden(m) && !isHeldSignal(m));
   const existing = visible.findIndex((m) => m.id === message.id);
   const retry = existing === visible.length - 1 && visible[existing]?.role === "user";
   if (existing !== -1 && !retry && !lastQuestionResent({ ...message, parts }, prior)) {

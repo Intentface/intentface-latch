@@ -39,11 +39,31 @@ await runtime.sendSignal({
 
 A `message` is a named person other than the chat's user. The model reads it as a person speaking, never as your application.
 
+## Have the agent answer it now
+
+By default a signal waits for the user's next message. Pass `wake: true` when the agent should act on it straight away:
+
+```ts
+const sent = await runtime.sendSignal({
+  chatId,
+  principal,
+  text: "The export the user asked for is ready: https://files.example.com/export-41.csv",
+  wake: true,
+});
+// sent.turn → { answer, parked, error? } when a turn ran; absent when the signal was only stored
+```
+
+The chat's own agent runs a turn with the signal as what it answers, as `principal`, and the call resolves when the answer is finished. The turn counts against the agent's limits like any other, and a tool that needs approval waits for the user.
+
+A turn starts only when the chat is free. With an answer already running, an approval or a tool result pending, or a limit reached, the signal is stored and waits for the next message; `turn` is then absent. A retried call with the same `id` starts a turn at most once.
+
+Nothing streams to an open page. The answer is in the chat's history the next time the page loads it. On a serverless host, keep the function alive until the call resolves (`waitUntil`).
+
 ## Who sees it
 
 | | Default | Change it with |
 | --- | --- | --- |
-| The agent | always, from the next turn | — |
+| The agent | always: from the next turn, or at once with `wake` | — |
 | The user | no | `visibility: "user"` |
 
 A visible signal comes back from `loadHistory` as a message with `role: "system"` and `metadata.signal` (`{ kind, from }`). Render it from that yourself: chat UIs are built around `user` and `assistant` messages, so check what yours does with a `system` one.
@@ -84,6 +104,6 @@ Documents, search results and tool output don't belong in a signal. A system mes
 
 ## What it doesn't do yet
 
-- **Start a turn.** A signal waits for the user's next message; the agent doesn't act on it before then.
-- **Reach an open page.** A visible signal appears when the page next loads its history.
+- **Reach an open page.** A visible signal, and the answer to one sent with `wake`, appear when the page next loads its history.
+- **Wake a busy chat later.** A signal sent with `wake` while an answer is running is stored; it doesn't start a turn when that answer ends.
 - **Queue a user's message.** A message sent while an answer is running is still refused with `chat_busy`.

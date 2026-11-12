@@ -12,7 +12,7 @@ import {
   toUIMessageStream,
 } from "ai";
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
-import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, isSignal, lastQuestionResent, latestMessageContext, type AppMessage, type SignalMark, type Visibility } from "./message.js";
+import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, isHeldSignal, isSignal, lastQuestionResent, latestMessageContext, type AppMessage, type SignalMark, type Visibility } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
 import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
@@ -47,6 +47,7 @@ import {
 import type { TurnTrigger, LatchTelemetry, TelemetryRunMeta } from "./telemetry.js";
 import {
   LimitExceededError,
+  isLimitExceededError,
   exceededPolicy,
   remainingTokens,
   windowRef,
@@ -57,6 +58,7 @@ import {
 } from "./limits.js";
 import {
   encodeOwnerKey,
+  isChatBusyError,
   isOwnerKeyMismatchError,
   refileTarget,
   UnsupportedOperationError,
@@ -542,6 +544,33 @@ export interface SendSignalInput<P> {
   visibility?: Visibility;
   /** Your own id for it, so a retried call stores it once. */
   id?: string;
+  /**
+   * Start a turn now, with this signal as what the agent answers, instead of
+   * waiting for the user's next message. `sendSignal` then resolves when the
+   * answer is finished. The chat's own agent runs, as `principal`, and counts
+   * against its limits like any turn; a tool that needs approval waits for
+   * the user.
+   *
+   * Only when the chat is free: with an answer running, an approval or tool
+   * result pending, or a limit reached, the signal is stored and waits for
+   * the next message like any other (`turn` is then absent from the result).
+   */
+  wake?: boolean;
+}
+
+/** What `sendSignal` returns. */
+export interface SendSignalResult {
+  /** The stored message's id. */
+  id: string;
+  /** The turn the signal started, when `wake` was set and the chat was free. */
+  turn?: {
+    /** The agent's answer. Empty when the turn failed or is waiting on a person. */
+    answer: string;
+    /** The turn ended waiting on an approval or a tool result, not with an answer. */
+    parked: boolean;
+    /** Why the turn failed, when it did. The signal is stored either way. */
+    error?: string;
+  };
 }
 
 export interface RunAgentInput<P> {
@@ -789,11 +818,15 @@ export interface Runtime<P> {
    * Put only text your application wrote, or a person it vouches for, in a
    * signal. Documents and tool output belong in tool results.
    *
+   * Pass `wake: true` to have the agent answer it now instead, when the chat
+   * is free; the call then resolves when that answer is finished, with it in
+   * `turn`. Nothing streams to an open page: the answer is in the history.
+   *
    * Returns the stored message's id, or `null` when the chat doesn't exist or
    * isn't the principal's. Pass `id` to make a retry safe: the same id stores
-   * once.
+   * once, and starts a turn at most once.
    */
-  sendSignal(input: SendSignalInput<P>): Promise<{ id: string } | null>;
+  sendSignal(input: SendSignalInput<P>): Promise<SendSignalResult | null>;
   /**
    * A chat's messages for showing to the user, with internal messages left
    * out. Use it to render a conversation when the page loads.
@@ -1557,12 +1590,12 @@ export function supersededBy(
  * stay hidden. The hidden answers stay stored; they're only left out here.
  */
 /**
- * The message a turn can be paused on: the last one that isn't a signal. A
+ * The message a turn can be paused on: the last one that isn't a held signal. A
  * note added with `sendSignal` while a chat waits on an approval or a tool
  * result lands after the paused message, and must not hide it.
  */
 function tailOf(messages: AppMessage[]): AppMessage | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) if (!isSignal(messages[i])) return messages[i];
+  for (let i = messages.length - 1; i >= 0; i--) if (!isHeldSignal(messages[i])) return messages[i];
   return undefined;
 }
 
@@ -1570,7 +1603,7 @@ function withoutHiddenTail(messages: AppMessage[]): AppMessage[] {
   let end = messages.length;
   // Signals at the end too: the model reads one with the next user message,
   // so a continuation of the turn before it runs as if it weren't there yet.
-  while (end > 0 && (messages[end - 1]!.metadata?.sendToModel === false || isSignal(messages[end - 1]))) end--;
+  while (end > 0 && (messages[end - 1]!.metadata?.sendToModel === false || isHeldSignal(messages[end - 1]))) end--;
   return end === messages.length ? messages : messages.slice(0, end);
 }
 
@@ -1583,7 +1616,7 @@ export function resumeShapeOf(messages: AppMessage[]): ResumeShape {
   let end = messages.length;
   // Hidden from the model too: an answer a regenerate replaced. If the crash
   // came after it was hidden, the turn still has to run from the user message.
-  while (end > 0 && (isCompactionMarker(messages[end - 1]) || messages[end - 1]!.metadata?.sendToModel === false || isSignal(messages[end - 1]))) end--;
+  while (end > 0 && (isCompactionMarker(messages[end - 1]) || messages[end - 1]!.metadata?.sendToModel === false || isHeldSignal(messages[end - 1]))) end--;
   const turns = end === messages.length ? messages : messages.slice(0, end);
   // Checked next: a pending gate outranks the tail's shape, and its own tail
   // (narration after the gated call) would otherwise read as `loop-finished`.
@@ -3610,7 +3643,7 @@ export function createRuntime<P, RC = unknown>(
       // Signals stored after that copy stay after it in storage, where the
       // next new message picks them up: leave them out here, or this turn
       // would read them with the resent message and every later turn without.
-      uiMessages: [...prior.filter((m, i) => m.id !== userMessage.id && !(resentAt !== -1 && i > resentAt && isSignal(m))), userMessage],
+      uiMessages: [...prior.filter((m, i) => m.id !== userMessage.id && !(resentAt !== -1 && i > resentAt && isHeldSignal(m))), userMessage],
       runtimeCtx,
       params,
       messageContext,
@@ -4336,7 +4369,7 @@ export function createRuntime<P, RC = unknown>(
     }
   }
 
-  async function sendSignal({ chatId, principal, text, kind, from, visibility, id }: SendSignalInput<P>): Promise<{ id: string } | null> {
+  async function sendSignal({ chatId, principal, text, kind, from, visibility, id, wake }: SendSignalInput<P>): Promise<SendSignalResult | null> {
     if (typeof text !== "string" || text.trim().length === 0) throw new InvalidMessageError("a signal needs text");
     const chat = await storage.getChat(principal, chatId);
     if (!chat) return null;
@@ -4357,15 +4390,41 @@ export function createRuntime<P, RC = unknown>(
         : {}),
     };
     // Role `system`: neither a question nor an answer, so nothing that reads
-    // history for either mistakes it for one. No fence: it belongs to no run.
-    await ownedBy(chat.owner).appendMessages(chatId, [
-      {
+    // history for either mistakes it for one.
+    const message = (mark: SignalMark) =>
+      ({
         id: messageId,
         role: "system",
         parts: [{ type: "text", text }],
-        metadata: { visibility: visibility ?? "internal", createdAt: Date.now(), signal },
-      } as AppMessage,
-    ]);
+        metadata: { visibility: visibility ?? "internal", createdAt: Date.now(), signal: mark },
+      }) as AppMessage;
+    if (wake) {
+      // Not while the chat waits on a person: a new message there declines
+      // the pending request, and that is the user's call, not a notice's.
+      const prior = await storage.loadMessages(principal, chatId);
+      const tail = tailOf(prior);
+      const waiting = hasPendingApproval(prior) || (!!tail && hasPendingToolResult([tail]));
+      if (!waiting) {
+        try {
+          // The signal opens the turn: stored with the run or not at all.
+          const r = await runToCompletion({
+            principal,
+            agent: chat.agent,
+            chatId,
+            message: message({ ...signal, startsTurn: true }),
+            autoApprove: false,
+            trigger: "programmatic",
+          });
+          return { id: messageId, turn: { answer: r.answer, parked: r.parked, ...(r.error ? { error: r.error } : {}) } };
+        } catch (e) {
+          // An answer is running, or a limit is reached: nothing was stored.
+          // Keep the signal for the next message instead of losing it.
+          if (!isChatBusyError(e) && !isLimitExceededError(e)) throw e;
+        }
+      }
+    }
+    // No fence: it belongs to no run.
+    await ownedBy(chat.owner).appendMessages(chatId, [message(signal)]);
     return { id: messageId };
   }
 

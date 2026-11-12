@@ -3,9 +3,10 @@ import { generateText } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { anthropicTakesSystemMidConversation, defaultNoticePlacement, placeSignals, toModelMessages } from "./projections.js";
-import { isInvalidMessageError, type AppMessage, type SignalMark } from "./message.js";
+import { isInvalidMessageError, RewindNotSupportedError, type AppMessage, type SignalMark } from "./message.js";
 import { tool } from "ai";
 import { z } from "zod";
+import { ChatBusyError } from "./storage.js";
 import { call, harness, principal, promptsOf, scripted, text, user } from "./__tests__/turn.js";
 
 /**
@@ -359,5 +360,97 @@ describe("sendSignal", () => {
     await h.current.turn(user("q4", "u4"));
     await h.current.runtime.compactChat({ chatId: "chat_1", principal });
     expect(JSON.stringify(model.doGenerateCalls.at(-1)!.prompt)).toContain("The office moved to Oslo.");
+  });
+});
+
+describe("sendSignal with wake", () => {
+  const roles = (prompt: Array<{ role: string }>) => prompt.map((m) => m.role);
+
+  it("starts a turn the agent answers, and later turns send the same messages", async () => {
+    const model = scripted([text("a1"), text("The code is ZEBRA-41."), text("a3")]);
+    const h = harness({ model, notices: "system" });
+    await h.turn(user("q1"));
+
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "The expert answered: ZEBRA-41.", wake: true });
+    expect(sent!.turn).toEqual({ answer: "The code is ZEBRA-41.", parked: false });
+    const stored = h.mem.messages.get("chat_1")!;
+    expect(stored.map((m) => m.role)).toEqual(["user", "assistant", "system", "assistant"]);
+    expect(stored[2]!.metadata!.signal).toEqual({ kind: "notice", startsTurn: true });
+    expect([...h.mem.runs.values()].at(-1)!.status).toBe("completed");
+
+    // A user turn saying nobody wrote, then the notice as the operator.
+    const woken = promptsOf(model)[1]!;
+    expect(roles(woken)).toEqual(["system", "user", "assistant", "user", "system"]);
+    expect(JSON.stringify(woken[3])).toContain("No new message from the user");
+    expect(woken[4]!.content).toBe("The expert answered: ZEBRA-41.");
+
+    await h.turn(user("q2", "u2"));
+    const next = promptsOf(model)[2]!;
+    expect(JSON.stringify(next.slice(0, woken.length))).toBe(JSON.stringify(woken));
+    expect(roles(next.slice(woken.length))).toEqual(["assistant", "user"]);
+  });
+
+  it("brings the signals held before it, as blocks where there is no place for a system message", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "held" });
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "go", kind: "message", from: { name: "Ann" }, wake: true });
+    const woken = promptsOf(model)[1]!;
+    expect(roles(woken)).toEqual(["system", "user", "assistant", "user"]);
+    expect(JSON.stringify(woken[3])).toContain("<notice>\\nheld\\n</notice>");
+    expect(JSON.stringify(woken[3])).toContain('<message from=\\"Ann\\">\\ngo\\n</message>');
+    expect(JSON.stringify(woken[3])).not.toContain("No new message");
+  });
+
+  it("stores and waits when the chat is waiting on a person", async () => {
+    const tools = { getTimezone: tool({ description: "The user's timezone.", inputSchema: z.object({}) }) };
+    const model = scripted([call("getTimezone"), text("Helsinki then.")]);
+    const h = harness({ model, tools });
+    await h.turn(user("what time is it for me?"));
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", wake: true });
+    expect(sent!.turn).toBeUndefined();
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(h.mem.messages.get("chat_1")!.at(-1)!.metadata!.signal).toEqual({ kind: "notice" });
+    // The paused call is still there to answer.
+    const res = await h.runtime.applyToolResult({ chatId: "chat_1", principal, toolCallId: "call_1", output: { tz: "Europe/Helsinki" } });
+    await res.text();
+    expect([...h.mem.runs.values()].at(-1)!.status).toBe("completed");
+  });
+
+  it("stores and waits when an answer is running", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    // One live turn per chat, as the shipped adapters enforce it.
+    const createRun = h.mem.storage.createRun.bind(h.mem.storage);
+    h.mem.storage.createRun = async (p, input) => {
+      for (const r of h.mem.runs.values()) if (r.chatId === input.chatId && r.status === "active") throw new ChatBusyError(input.chatId, 1000);
+      return createRun(p, input);
+    };
+    // Opened, not yet read: the turn is live.
+    const live = await h.runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: user("q1") });
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", wake: true });
+    await live.text();
+    expect(sent!.turn).toBeUndefined();
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(h.mem.messages.get("chat_1")!.find((m) => m.id === sent!.id)!.metadata!.signal).toEqual({ kind: "notice" });
+  });
+
+  it("starts a turn at most once for a retried id", async () => {
+    const model = scripted([text("a1"), text("a2"), text("a3")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", id: "sig_1", wake: true });
+    const again = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", id: "sig_1", wake: true });
+    expect(again).toEqual({ id: "sig_1" });
+    expect(model.doStreamCalls).toHaveLength(2);
+  });
+
+  it("makes the question before it an earlier one: no regenerate in place", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", wake: true });
+    await expect(h.runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: user("q1") })).rejects.toBeInstanceOf(RewindNotSupportedError);
   });
 });

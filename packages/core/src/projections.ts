@@ -146,6 +146,9 @@ export function sliceAtCompaction(messages: AppMessage[]): AppMessage[] {
   return messages;
 }
 
+/** The user turn of a signal-started turn that has nothing else to say on the user side. */
+const NO_USER_MESSAGE = "[No new message from the user. The application sent a notice; act on it.]";
+
 /** How the model reads a notice: as the operator, or as a labelled note on the user side. */
 export type NoticePlacement = "system" | "user";
 
@@ -234,6 +237,10 @@ function noticeText(m: AppMessage): string {
  *  - a `message` from a named person is always a `<message from="…">` block at
  *    the top of the user message: a person speaking, not the operator.
  *
+ * A signal that started a turn (`startsTurn`, from `sendSignal` with `wake`)
+ * needs no user message: it is delivered where it is stored, with any signals
+ * held before it, as a user turn of its own.
+ *
  * The position depends only on stored order, so it is the same on every later
  * turn and the cached prefix still matches. A signal with no user message
  * after it yet is held back: it joins the next turn. `keepTrailing` instead
@@ -263,18 +270,26 @@ export function placeSignals(
     due = [];
   };
   for (const m of messages) {
+    const opens = m.metadata?.signal?.startsTurn === true;
     if (m.metadata?.signal) {
       pending.push(m);
-      continue;
-    }
-    if (m.role !== "user") {
+      if (!opens) continue;
+    } else if (m.role !== "user") {
       flush();
       out.push(m);
       continue;
     }
     const system = asSystem ? pending.filter((s) => s.metadata!.signal!.kind === "notice") : [];
     const inline = pending.filter((s) => !system.includes(s));
-    out.push(inline.length ? ({ ...m, parts: [...blocks(inline), ...m.parts] } as AppMessage) : m);
+    if (opens) {
+      // A signal that started a turn stands where a user message would. A
+      // system message needs a user turn before it, so one is made: the
+      // blocks that belong on the user side, or a line saying nobody wrote.
+      const parts = inline.length ? blocks(inline) : ([{ type: "text", text: NO_USER_MESSAGE }] as AppMessage["parts"]);
+      out.push({ id: m.id, role: "user", parts } as AppMessage);
+    } else {
+      out.push(inline.length ? ({ ...m, parts: [...blocks(inline), ...m.parts] } as AppMessage) : m);
+    }
     due.push(...system);
     pending = [];
   }
