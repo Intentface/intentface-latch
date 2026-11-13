@@ -4946,7 +4946,10 @@ export function createRuntime<P, RC = unknown>(
     // request for a person. Read again now that nothing else can write.
     let history = prior;
     /** Close the run this turn opened without running it, and give back its reservation. */
+    /** The opened run is accounted for: closed here, or no longer this worker's to close. */
+    let closed = false;
     const giveUp = async (why: string) => {
+      closed = true;
       await ownedBy(run.ownerKey).updateRun(
         run.id,
         { status: "errored", error: `not started: ${why}`, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null },
@@ -4965,6 +4968,7 @@ export function createRuntime<P, RC = unknown>(
       // taken back before that isn't there; one taken back after is refused.
       // A retry that replaced one is taken as replaced.
       const queue = ownedBy(chat.owner);
+      try {
       history = await storage.loadMessages(o.principal, chatId);
       if (waitingIn(history)) {
         // An answer ended on a request for the person just before this run
@@ -4980,6 +4984,7 @@ export function createRuntime<P, RC = unknown>(
       if (taken === null) {
         // Not this run's to close (its successor has the chat), but the turn
         // it reserved never ran: give that back.
+        closed = true;
         await releaseReservation(admitted);
         throw new RunLost();
       }
@@ -5031,10 +5036,27 @@ export function createRuntime<P, RC = unknown>(
       // clears them.
       // Fenced: agent resolution above may have outlasted the lease.
       if ((await queue.appendMessages(chatId, opening, fence)) === false) {
+        closed = true;
         await releaseReservation(admitted);
         throw new RunLost();
       }
-      await queue.finishQueuedInputs(chatId, run.id);
+      } catch (e) {
+        // Anything else that failed between opening the run and storing its
+        // messages (a storage read, the sender check): the run must not stay
+        // open holding the chat and the inputs. They wait again; the error
+        // goes on to the caller.
+        if (!closed) {
+          await queue.returnQueuedInputs(chatId, run.id).catch(() => {});
+          await giveUp("it failed before it could start").catch(() => {});
+        }
+        throw e;
+      }
+      // The inputs are in the history and the turn goes ahead whatever
+      // happens here: copies left in the queue are cleared by the next run
+      // that takes them and finds them stored.
+      await queue.finishQueuedInputs(chatId, run.id).catch((e) =>
+        console.error(`[queue] couldn't clear answered inputs from the queue of chat ${chatId}:`, e),
+      );
     } else if (o.refuseIfWaiting) {
       // Up to the opening message only: a signal stored after it (no lease
       // stops one) belongs to a later turn, where it is stored.

@@ -387,6 +387,35 @@ describe("a held turn and what happens around it", () => {
     expect(mem.queued.get("chat_1")).toBeUndefined();
   });
 
+  it("closes its run and gives the inputs back when checking their senders fails", async () => {
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    let checks = 0;
+    let down = true;
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: { a: defineAgent<typeof principal>({ model, instructions: "Be brief." }) },
+      // Works when the queue is first looked at, fails once the run has taken it.
+      reconstructPrincipal: async (identity) => {
+        if (down && ++checks > 2) throw new Error("directory down");
+        return identity as typeof principal;
+      },
+    });
+    await (await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+
+    const failed = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(failed.held).toBe(0);
+    expect(failed.errors.some((e) => e.includes("directory down"))).toBe(true);
+    // The run it opened is closed, so the chat is free, and the input waits untaken.
+    expect([...mem.runs.values()].at(-1)).toMatchObject({ status: "errored", error: "not started: it failed before it could start" });
+    expect(mem.queued.get("chat_1")!.map((q) => [q.message.id, q.takenBy])).toEqual([["u2", undefined]]);
+
+    down = false;
+    expect((await runtime.cron({ now: Date.now() + 120_000 })).held).toBe(1);
+    expect(mem.messages.get("chat_1")!.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+
   it("gives the agent the context of the message it really answers", async () => {
     const mem = memoryStorage<typeof principal>();
     const model = scripted([text("a1"), text("a2")]);
