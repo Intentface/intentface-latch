@@ -25,7 +25,27 @@ export interface LiveStreams {
    * never published (the answer is in the history, or will be).
    */
   subscribe(streamId: string): Promise<ReadableStream<string> | null>;
+  /**
+   * Optional, with `listen`: send `message` to whoever listens on `channel`
+   * right now. Nothing is kept for a later listener. With both, a page can
+   * hold one connection per chat and be told when an answer starts
+   * (`watchChat`) instead of polling.
+   */
+  notify?(channel: string, message: string): Promise<void>;
+  /** What is sent to `channel` from now on. Cancel the stream to stop. */
+  listen?(channel: string): Promise<ReadableStream<string>>;
 }
+
+/** What a page watching a chat is told (`watchChat`). */
+export type ChatEvent =
+  /** First on every connection: whether an answer is running right now. */
+  | { type: "hello"; running: boolean }
+  /** An answer started: read it with `streamChat`. */
+  | { type: "started" }
+  /** That answer ended and is saved. */
+  | { type: "ended" }
+  /** Something else changed (a signal was stored, an input held or taken back): read `pollChat`. */
+  | { type: "changed" };
 
 /**
  * Live streams kept in this process. For one long-running server, and tests.
@@ -33,7 +53,33 @@ export interface LiveStreams {
  */
 export function memoryLiveStreams(): LiveStreams {
   const live = new Map<string, { chunks: string[]; readers: Set<ReadableStreamDefaultController<string>> }>();
+  const listeners = new Map<string, Set<ReadableStreamDefaultController<string>>>();
   return {
+    async notify(channel, message) {
+      for (const to of listeners.get(channel) ?? []) {
+        try {
+          to.enqueue(message);
+        } catch {
+          listeners.get(channel)?.delete(to);
+        }
+      }
+    },
+    async listen(channel) {
+      let mine: ReadableStreamDefaultController<string> | undefined;
+      const drop = () => {
+        const set = listeners.get(channel);
+        if (mine) set?.delete(mine);
+        if (set?.size === 0) listeners.delete(channel);
+      };
+      return new ReadableStream<string>({
+        start(controller) {
+          mine = controller;
+          if (!listeners.has(channel)) listeners.set(channel, new Set());
+          listeners.get(channel)!.add(controller);
+        },
+        cancel: drop,
+      });
+    },
     async publish(streamId, stream) {
       const entry = { chunks: [] as string[], readers: new Set<ReadableStreamDefaultController<string>>() };
       live.set(streamId, entry);

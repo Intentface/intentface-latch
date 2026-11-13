@@ -627,6 +627,16 @@ export function createLatchHandler<P>(
       return (await rt.streamChat({ chatId: seg[1], principal })) ?? new Response(null, { status: 204 });
     }
 
+    // GET chats/:id/events: server-sent events for a page watching the chat
+    // (an answer started or ended, something else changed). 404 when the
+    // runtime can't notify, so the page knows to poll instead.
+    if (seg[0] === "chats" && seg[1] && seg[2] === "events" && method === "GET") {
+      const principal = await resolvePrincipal(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
+      return (await rt.watchChat({ chatId: seg[1], principal })) ?? json({ error: "not found" }, 404);
+    }
+
     // DELETE chats/:id/queue/:messageId: take back a message that is still
     // waiting. Only one the caller can see waiting; 404 once its turn started.
     if (seg[0] === "chats" && seg[1] && seg[2] === "queue" && seg[3] && method === "DELETE") {

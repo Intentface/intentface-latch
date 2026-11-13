@@ -5,7 +5,7 @@ import { chunksOf, principal, user } from "./__tests__/turn.js";
 import { memoryStorage } from "./__tests__/memory-storage.js";
 import { createRuntime } from "./runtime.js";
 import { defineAgent } from "./agent.js";
-import { memoryLiveStreams, type LiveStreams } from "./live-stream.js";
+import { memoryLiveStreams, type ChatEvent, type LiveStreams } from "./live-stream.js";
 
 /**
  * Live streams: a request other than the one that started an answer reads
@@ -169,5 +169,79 @@ describe("streamChat", () => {
     const first = await t.send("q1", "u1");
     t.release(0);
     expect(textOf(await chunksOf(first))).toBe("a1");
+  });
+});
+
+/** What a watching page has been told so far, and a way to wait for more. */
+async function watching(res: Response) {
+  const seen: ChatEvent[] = [];
+  const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+  void (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      for (const line of value.split("\n\n")) if (line.startsWith("data: ")) seen.push(JSON.parse(line.slice(6)) as ChatEvent);
+    }
+  })();
+  return { seen, types: () => seen.map((e) => e.type), stop: () => reader.cancel() };
+}
+
+describe("a page watching a chat", () => {
+  it("is told when an answer starts in another tab, reads it live, and is told when it ended", async () => {
+    const t = setup(memoryLiveStreams(), ["a1", "a2"]);
+    // A first answer, so the chat exists for the second tab to watch.
+    const zero = await t.send("q0", "u0");
+    t.release(0);
+    await zero.text();
+    await t.settle();
+
+    const tab = await watching((await t.runtime.watchChat({ chatId: "chat_1", principal }))!);
+    await expect.poll(() => tab.seen).toEqual([{ type: "hello", running: false }]);
+
+    const first = await t.send("q1", "u1");
+    await expect.poll(tab.types).toEqual(["hello", "started"]);
+    const live = await t.runtime.streamChat({ chatId: "chat_1", principal });
+    t.release(1);
+    expect(textOf(await chunksOf(live!))).toBe("a2");
+    await first.text();
+    await expect.poll(tab.types).toEqual(["hello", "started", "ended"]);
+    await tab.stop();
+  });
+
+  it("is told an answer is running when it connects mid-answer", async () => {
+    const t = setup(memoryLiveStreams(), ["a1"]);
+    const first = await t.send("q1", "u1");
+    const tab = await watching((await t.runtime.watchChat({ chatId: "chat_1", principal }))!);
+    await expect.poll(() => tab.seen).toEqual([{ type: "hello", running: true }]);
+    t.release(0);
+    await first.text();
+    await tab.stop();
+  });
+
+  it("is told about a held message and a signal stored for later", async () => {
+    const t = setup(memoryLiveStreams(), ["a1", "a2"]);
+    const first = await t.send("q1", "u1");
+    const tab = await watching((await t.runtime.watchChat({ chatId: "chat_1", principal }))!);
+    await t.send("q2", "u2", true);
+    await expect.poll(tab.types).toEqual(["hello", "changed"]);
+    t.release(0);
+    t.release(1);
+    await first.text();
+    await t.settle();
+    // The first answer ended, the held one started and ended.
+    await expect.poll(tab.types).toEqual(["hello", "changed", "ended", "started", "ended"]);
+    await t.runtime.sendSignal({ chatId: "chat_1", principal, text: "fyi", wake: false });
+    await expect.poll(tab.types).toEqual(["hello", "changed", "ended", "started", "ended", "changed"]);
+    await tab.stop();
+  });
+
+  it("gets nothing when the store can't notify, or the chat isn't there", async () => {
+    const { notify: _n, listen: _l, ...streamsOnly } = memoryLiveStreams();
+    const t = setup(streamsOnly, ["a1"]);
+    const first = await t.send("q1", "u1");
+    expect(await t.runtime.watchChat({ chatId: "chat_1", principal })).toBeNull();
+    t.release(0);
+    await first.text();
+    expect(await setup(memoryLiveStreams(), ["a1"]).runtime.watchChat({ chatId: "nope", principal })).toBeNull();
   });
 });

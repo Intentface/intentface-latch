@@ -472,8 +472,9 @@ describe("the queue and poll routes", () => {
     const listQueued = vi.fn(async () => (o?.waiting ?? []).map((id) => ({ id })));
     const cancelQueued = vi.fn(async (_i: { id: string }) => o?.cancel ?? true);
     const streamChat = vi.fn(async (_i: { chatId: string }) => o?.live ?? null);
+    const watchChat = vi.fn(async (_i: { chatId: string }) => o?.live ?? null);
     const handler = createLatchHandler<P>({
-      runtime: { handleChat, pollChat, listQueued, cancelQueued, streamChat } as never,
+      runtime: { handleChat, pollChat, listQueued, cancelQueued, streamChat, watchChat } as never,
       connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
       basePath: "/api/latch",
       resolvePrincipal: () => principal,
@@ -513,6 +514,12 @@ describe("the queue and poll routes", () => {
     expect(await res!.text()).toBe("data: x\n\n");
     expect(r.streamChat.mock.calls[0]![0]).toEqual({ chatId: "chat_1", principal });
     expect((await routes().handler(r.req("chats/chat_1/stream")))?.status).toBe(204);
+  });
+
+  it("returns the chat's events, and 404 when the runtime can't notify", async () => {
+    const r = routes({ live: new Response("data: {}\n\n") });
+    expect(await (await r.handler(r.req("chats/chat_1/events")))!.text()).toBe("data: {}\n\n");
+    expect((await routes().handler(r.req("chats/chat_1/events")))?.status).toBe(404);
   });
 
   it("takes back a waiting message the caller can see, and nothing else", async () => {

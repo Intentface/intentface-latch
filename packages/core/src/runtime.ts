@@ -16,7 +16,7 @@ import {
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
 import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, isHeldSignal, isSignal, lastQuestionResent, latestMessageContext, type AppMessage, type SignalMark, type Visibility } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
-import type { LiveStreams } from "./live-stream.js";
+import type { ChatEvent, LiveStreams } from "./live-stream.js";
 import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
   AgentConfig,
@@ -918,6 +918,16 @@ export interface Runtime<P> {
    * the runtime has no `liveStreams`.
    */
   streamChat(input: { chatId: string; principal: P }): Promise<Response | null>;
+  /**
+   * One long-lived connection that tells a page what happens in a chat, as
+   * server-sent events (`ChatEvent`): first whether an answer is running,
+   * then each answer that starts and ends, and other changes. The page reads
+   * an answer with `streamChat` and the rest with `pollChat`, with no poll
+   * loop. `null` when the chat isn't the principal's or `liveStreams` has no
+   * `notify` and `listen`. A host that cuts long responses just ends it; the
+   * browser's `EventSource` connects again.
+   */
+  watchChat(input: { chatId: string; principal: P }): Promise<Response | null>;
   /**
    * A chat's messages for showing to the user, with internal messages left
    * out. Use it to render a conversation when the page loads.
@@ -3470,6 +3480,8 @@ export function createRuntime<P, RC = unknown>(
           console.error(`[live] couldn't publish the stream of run ${args.run.id}:`, e);
           void copy.cancel().catch(() => {});
         });
+      tell(resolvedChatId, { type: "started" });
+      void settled.then(() => tell(resolvedChatId, { type: "ended" }));
     }
     if (args.drain !== false && queueOn && config.waitUntil) {
       // Held inputs get their turn once this run is settled, after the response.
@@ -3830,6 +3842,7 @@ export function createRuntime<P, RC = unknown>(
       if (!(await storage.enqueueInput!(principal, resolvedChatId, userMessage, { cap: queueMax }))) {
         throw new QueueFullError(resolvedChatId, queueMax);
       }
+      tell(resolvedChatId, { type: "changed" });
       // The answer may have ended between the refusal and the enqueue, with
       // nobody left to look at the queue: look once ourselves.
       await afterResponse(startHeld(resolvedChatId, principal));
@@ -4655,6 +4668,7 @@ export function createRuntime<P, RC = unknown>(
           !isLimitExceededError(e) &&
           (await storage.enqueueInput!(principal, chatId, message(signal), { cap: queueMax }))
         ) {
+          tell(chatId, { type: "changed" });
           // The answer may have ended meanwhile, with nobody left to look.
           await afterResponse(startHeld(chatId, principal));
           return { id: messageId, queued: true };
@@ -4667,6 +4681,7 @@ export function createRuntime<P, RC = unknown>(
     if (id !== undefined && (await storage.loadMessages(principal, chatId)).some((m) => m.id === id)) return { id };
     // No fence: it belongs to no run.
     await ownedBy(chat.owner).appendMessages(chatId, [message(signal)]);
+    tell(chatId, { type: "changed" });
     return { id: messageId };
   }
 
@@ -5348,7 +5363,9 @@ export function createRuntime<P, RC = unknown>(
     if (!queueOn) return false;
     const chat = await storage.getChat(principal, chatId);
     if (!chat) return false;
-    return (await storage.removeQueuedInputs!(chatId, [id], { ownerKey: chat.owner })).length > 0;
+    const cancelled = (await storage.removeQueuedInputs!(chatId, [id], { ownerKey: chat.owner })).length > 0;
+    if (cancelled) tell(chatId, { type: "changed" });
+    return cancelled;
   }
 
   async function pollChat({
@@ -5381,6 +5398,67 @@ export function createRuntime<P, RC = unknown>(
    */
   function liveStreamId(runId: string, lease?: { fencingToken?: number | null } | null): string {
     return `${runId}:${lease?.fencingToken ?? 0}`;
+  }
+
+  const chatChannel = (chatId: string) => `chat:${chatId}`;
+
+  /** Tell the pages watching a chat. Never in the way of what it reports. */
+  function tell(chatId: string, event: ChatEvent): void {
+    void config.liveStreams?.notify?.(chatChannel(chatId), JSON.stringify(event)).catch((e) => {
+      console.error(`[live] couldn't notify the watchers of chat ${chatId}:`, e);
+    });
+  }
+
+  async function watchChat({ chatId, principal }: { chatId: string; principal: P }): Promise<Response | null> {
+    const live = config.liveStreams;
+    if (!live?.listen || !live.notify || !(await storage.getChat(principal, chatId))) return null;
+    // Listen first, then look: an answer that starts in between is in one of the two.
+    const events = (await live.listen(chatChannel(chatId))).getReader();
+    let running: boolean;
+    try {
+      const runs = await storage.listRuns(principal, { limit: 20, chatId });
+      running = runs.some((r) => r.chatId === chatId && r.status === "active");
+    } catch (e) {
+      await events.cancel().catch(() => {});
+      throw e;
+    }
+    const encoder = new TextEncoder();
+    const sse = (event: string) => encoder.encode(`data: ${event}\n\n`);
+    let ping: ReturnType<typeof setInterval> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(sse(JSON.stringify({ type: "hello", running } satisfies ChatEvent)));
+        // Proxies drop a connection that says nothing.
+        ping = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(": ping\n\n"));
+          } catch {
+            clearInterval(ping);
+          }
+        }, 25_000);
+        void (async () => {
+          try {
+            for (;;) {
+              const { done, value } = await events.read();
+              if (done) break;
+              controller.enqueue(sse(value));
+            }
+            controller.close();
+          } catch {
+            // The page left, or the store dropped the connection.
+          } finally {
+            clearInterval(ping);
+          }
+        })();
+      },
+      async cancel() {
+        clearInterval(ping);
+        await events.cancel().catch(() => {});
+      },
+    });
+    return new Response(body, {
+      headers: { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", "x-accel-buffering": "no" },
+    });
   }
 
   async function streamChat({ chatId, principal }: { chatId: string; principal: P }): Promise<Response | null> {
@@ -5801,6 +5879,7 @@ export function createRuntime<P, RC = unknown>(
     cancelQueued,
     pollChat,
     streamChat,
+    watchChat,
     loadHistory,
     listChats,
     getChat: getChatById,
