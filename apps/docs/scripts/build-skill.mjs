@@ -31,6 +31,7 @@ const PAGES = [
   "guides/chat-ui",
   "guides/mount-the-handler",
   "guides/approvals",
+  "guides/signals",
   "guides/schedules",
   "guides/connections",
   "guides/channels",

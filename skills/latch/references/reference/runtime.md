@@ -91,6 +91,38 @@ It returns:
 | `answer` | `string` | The agent's final answer. Empty when the run failed. |
 | `error` (optional) | `string` | Why the run failed, when it did: the model provider refused, a tool source wouldn't open, and so on. |
 
+## sendSignal
+
+Tells a chat something from server code: an answer that arrived from elsewhere, a finished job, a message from a named person. By default the chat's agent answers it at once and the call resolves when that answer is finished; with `wake: false` it is only stored, and the agent reads it with the user's next message. See [the signals guide](../guides/signals.md).
+
+```ts
+const sent = await runtime.sendSignal({
+  chatId,
+  principal,
+  text: "The tax expert answered: file form 6B by 31 March.",
+  from: { name: "Ann Lee", via: "expert console" },
+  id: `reply:${replyId}`, // a retry stores it once
+});
+```
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `chatId` | `string` |  |
+| `principal` | `P` | Whose chat it is. A signal is stored under the chat's owner. |
+| `text` | `string` | What the agent should know. Plain text your application wrote. |
+| `kind` (optional) | `"message" \| "notice"` | `"notice"` (default): the application speaking. `"message"`: a named person. |
+| `from` (optional) | `{ name?: string; via?: string; }` | Who it is from and where it was sent from; a `message` should name its author. |
+| `visibility` (optional) | `Visibility` | Whether the user sees it. Defaults to `"internal"`: only the agent does. |
+| `id` (optional) | `string` | Your own id for it, so a retried call stores it once. |
+| `wake` (optional) | `boolean` | Whether the signal starts a turn. Default `true`: the agent answers it now, and `sendSignal` resolves when the answer is finished. The chat's own agent runs, as `principal`, and counts against its limits like any turn; a tool that needs approval waits for the user. A turn starts only when the chat is free: with an answer running, an approval or tool result pending, or a limit reached, the signal is stored and waits for the next message (`turn` is then absent from the result). `false`: store it and start nothing. The agent reads it with the user's next message. |
+
+It returns `null` when the chat doesn't exist or isn't the principal's, and otherwise:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | The stored message's id. |
+| `turn` (optional) | `{ answer: string; parked: boolean; error?: string; }` | The turn the signal started. Absent with `wake: false`, or when the chat wasn't free. |
+
 ## applyApproval
 
 Continues a run that paused on a tool needing approval. Decisions that are no longer pending (a double click, an old tab) are ignored, so it is safe to call more than once.
