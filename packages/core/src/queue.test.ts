@@ -9,6 +9,7 @@ import { memoryStorage } from "./__tests__/memory-storage.js";
 import { createRuntime } from "./runtime.js";
 import { defineAgent } from "./agent.js";
 import { defineContext } from "./context.js";
+import { DAY_MS, usageKey, type LimitStore } from "./limits.js";
 
 /**
  * The input queue: a message or signal that arrives while an answer is
@@ -414,6 +415,41 @@ describe("a held turn and what happens around it", () => {
     down = false;
     expect((await runtime.cron({ now: Date.now() + 120_000 })).held).toBe(1);
     expect(mem.messages.get("chat_1")!.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+
+  it("gives back the turn it reserved even when its run can't be closed", async () => {
+    const mem = memoryStorage<typeof principal>();
+    const turns = { n: 0 };
+    const limitStore: LimitStore = {
+      read: async (refs) => Object.fromEntries(refs.map((r) => [usageKey(r), { turns: turns.n, tokens: 0, cost: 0 }])),
+      add: async (entries) => {
+        for (const e of entries) turns.n += e.usage.turns ?? 0;
+        return Object.fromEntries(entries.map((e) => [usageKey(e), { turns: turns.n, tokens: 0, cost: 0 }]));
+      },
+    };
+    let checks = 0;
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: { a: defineAgent<typeof principal>({ model: scripted([text("a1")]), instructions: "Be brief." }) },
+      limits: { store: limitStore, limitsFor: () => [{ key: "all", windowMs: DAY_MS, max: { turns: 100 } }] },
+      reconstructPrincipal: async (identity) => {
+        if (++checks > 2) throw new Error("directory down");
+        return identity as typeof principal;
+      },
+    });
+    await (await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+    const after = turns.n;
+
+    // The storage refuses the write that closes the run it opened.
+    const updateRun = mem.storage.updateRun.bind(mem.storage);
+    mem.storage.updateRun = async (id, patch, ...rest) => {
+      if (typeof patch.error === "string" && patch.error.startsWith("not started")) throw new Error("storage down");
+      return updateRun(id, patch, ...rest);
+    };
+    const failed = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(failed.errors.some((e) => e.includes("directory down"))).toBe(true);
+    expect(turns.n).toBe(after);
   });
 
   it("gives the agent the context of the message it really answers", async () => {

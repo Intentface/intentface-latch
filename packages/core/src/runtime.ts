@@ -4950,12 +4950,16 @@ export function createRuntime<P, RC = unknown>(
     let closed = false;
     const giveUp = async (why: string) => {
       closed = true;
-      await ownedBy(run.ownerKey).updateRun(
-        run.id,
-        { status: "errored", error: `not started: ${why}`, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null },
-        lease,
-      );
-      await releaseReservation(admitted);
+      try {
+        await ownedBy(run.ownerKey).updateRun(
+          run.id,
+          { status: "errored", error: `not started: ${why}`, endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null },
+          lease,
+        );
+      } finally {
+        // The turn never ran, whether or not its run could be closed.
+        await releaseReservation(admitted);
+      }
     };
     const waitingIn = (messages: AppMessage[]) => {
       const tail = tailOf(messages);
