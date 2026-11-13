@@ -231,6 +231,8 @@ All paths are relative to `basePath`.
 | `POST` | `agents/:agent/:chatId/approvals` | resolve a human-in-the-loop gate |
 | `POST` | `agents/:agent/:chatId/tool-result` | answer a client-handled tool |
 | `GET` | `chats` · `chats/:id` | the caller's chats, and one chat's history |
+| `GET` | `chats/:id/poll` | is an answer running, what is waiting, and the history if it changed |
+| `DELETE` | `chats/:id/queue/:messageId` | take back a message that is still waiting |
 | `DELETE` | `chats/:id` | delete a chat and the subagent threads it spawned |
 | `GET` | `runs` | run records, for an admin or debug view |
 | `GET` `POST` `DELETE` | `schedules` · `schedules/:id` | manage scheduled agents |

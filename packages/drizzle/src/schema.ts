@@ -60,6 +60,22 @@ export const messages = sqliteTable(
   ],
 );
 
+/** Messages held for a chat that was busy when they arrived (StorageAdapter.enqueueInput). */
+export const queuedInputs = sqliteTable(
+  "latch_queued_inputs",
+  {
+    chatId: text("chat_id").notNull(),
+    /** The message's id. */
+    id: text("id").notNull(),
+    /** AppMessage */
+    message: text("message", { mode: "json" }).notNull(),
+    /** The serialized principal that sent it. */
+    identity: text("identity", { mode: "json" }),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.chatId, t.id] })],
+);
+
 export const runs = sqliteTable(
   "latch_runs",
   {

@@ -60,6 +60,22 @@ export const messages = pgTable(
   ],
 );
 
+/** Messages held for a chat that was busy when they arrived (StorageAdapter.enqueueInput). */
+export const queuedInputs = pgTable(
+  "latch_queued_inputs",
+  {
+    chatId: text("chat_id").notNull(),
+    /** The message's id. */
+    id: text("id").notNull(),
+    /** AppMessage */
+    message: jsonb("message").notNull(),
+    /** The serialized principal that sent it. */
+    identity: jsonb("identity"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.chatId, t.id] })],
+);
+
 export const runs = pgTable(
   "latch_runs",
   {

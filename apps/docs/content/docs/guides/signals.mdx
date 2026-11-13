@@ -52,7 +52,9 @@ const sent = await runtime.sendSignal({
 
 The chat's own agent runs a turn with the signal as what it answers, as `principal`, and the call resolves when the answer is finished. The turn counts against the agent's limits like any other, and a tool that needs approval waits for the user.
 
-A turn starts only when the chat is free. With an answer already running, an approval or a tool result pending, or a limit reached, the signal is stored and waits for the next message; `turn` is then absent.
+A turn starts at once only when the chat is free. With an answer already running, or an approval or a tool result pending, the signal is held and gets its turn when that ends: the result is `{ id, queued: true }`, and the answer is in the history afterwards. See [Messages that arrive while the agent is answering](/docs/guides/queue).
+
+Two cases fall back to waiting for the user's next message: a limit was reached, or the storage adapter has no input queue.
 
 Nothing streams to an open page. The answer is in the chat's history the next time the page loads it. On a serverless host, keep the function alive until the call resolves (`waitUntil`).
 
@@ -118,6 +120,4 @@ Documents, search results and tool output don't belong in a signal. A system mes
 
 ## What it doesn't do yet
 
-- **Reach an open page.** A visible signal, and the agent's answer to one, appear when the page next loads its history.
-- **Wake a busy chat later.** A signal sent while an answer is running is stored; it doesn't start a turn when that answer ends.
-- **Queue a user's message.** A message sent while an answer is running is still refused with `chat_busy`.
+- **Stream to an open page.** A visible signal, and the agent's answer to one, appear when the page next loads its history or [polls the chat](/docs/guides/queue#keep-the-page-current-without-a-stream).

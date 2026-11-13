@@ -266,6 +266,7 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   pending_approval  409  a decision is outstanding — resolve it first
  *   chat_busy         409  a turn is live in this chat — retry after `Retry-After`
  *   chat_conflict     409  the client-chosen chat id exists and isn't yours
+ *   queue_full        429  the chat already holds as many waiting messages as it may
  *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
  *   invalid_message   400  the message isn't a new user message (text and files)
  *   rewind_not_supported 409  an earlier question was regenerated or edited: fork instead
@@ -294,6 +295,8 @@ function refusalResponse(e: unknown): Response | undefined {
       return json({ error: message("chat id is not available"), code }, 409);
     case "limit_exceeded":
       return withRetry({ error: message("limit exceeded"), code }, 429);
+    case "queue_full":
+      return json({ error: message("too many messages are waiting in this chat"), code }, 429);
     case "invalid_message":
       return json({ error: message("invalid message"), code }, 400);
     case "rewind_not_supported":
@@ -585,6 +588,9 @@ export function createLatchHandler<P>(
             // What the chat is about, for an agent that declares params: sent
             // with the first message, checked against the saved ones after.
             ...(body.params !== undefined ? { params: body.params } : {}),
+            // `queue: true`: hold the message when an answer is running,
+            // answered `202 { queued: { id } }` with no stream.
+            ...(body.queue === true ? { ifBusy: "queue" as const } : {}),
             request,
             // The POST body is parsed exactly once, here — pass it on as the
             // per-turn payload so `context.build` / agent factories can read
@@ -597,6 +603,30 @@ export function createLatchHandler<P>(
           throw e;
         }
       }
+    }
+
+    // GET chats/:id/poll?cursor=…: is an answer running, what is waiting,
+    // and the history when it differs from the cursor's. For a page with no
+    // stream open.
+    if (seg[0] === "chats" && seg[1] && seg[2] === "poll" && method === "GET") {
+      const principal = await resolvePrincipal(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
+      const cursor = url.searchParams.get("cursor") ?? undefined;
+      const poll = await rt.pollChat({ chatId: seg[1], principal, ...(cursor ? { cursor } : {}) });
+      return poll ? json(poll) : json({ error: "not found" }, 404);
+    }
+
+    // DELETE chats/:id/queue/:messageId: take back a message that is still
+    // waiting. Only one the caller can see waiting; 404 once its turn started.
+    if (seg[0] === "chats" && seg[1] && seg[2] === "queue" && seg[3] && method === "DELETE") {
+      const principal = await resolvePrincipal(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
+      const waiting = await rt.listQueued({ chatId: seg[1], principal });
+      const cancelled =
+        waiting.some((m) => m.id === seg[3]) && (await rt.cancelQueued({ chatId: seg[1], principal, id: seg[3] }));
+      return cancelled ? json({ cancelled: seg[3] }) : json({ error: "not found" }, 404);
     }
 
     if (seg[0] === "chats" && method === "GET") {

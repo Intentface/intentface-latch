@@ -1,5 +1,5 @@
 import type { AppMessage } from "../message.js";
-import type { ChatRecord, RunRecord, StorageAdapter } from "../storage.js";
+import { ChatBusyError, type ChatRecord, type QueuedInput, type RunRecord, type StorageAdapter } from "../storage.js";
 
 /**
  * In-memory storage: just enough of the adapter for a turn to run and persist.
@@ -18,6 +18,7 @@ export function memoryStorage<P = { orgId: string }>() {
   const chats = new Map<string, ChatRecord>();
   const messages = new Map<string, AppMessage[]>();
   const runs = new Map<string, RunRecord>();
+  const queued = new Map<string, QueuedInput[]>();
   const n = { get next() { return ++seq; } };
   const impl: Partial<StorageAdapter<P>> = {
     async createChat(_p, input) {
@@ -52,6 +53,10 @@ export function memoryStorage<P = { orgId: string }>() {
       messages.set(chatId, list);
     },
     async createRun(_p, input) {
+      // One live turn per chat, as the shipped adapters enforce it.
+      for (const r of runs.values()) {
+        if (r.chatId === input.chatId && r.status === "active") throw new ChatBusyError(input.chatId, 1000);
+      }
       const run: RunRecord = {
         id: `run_${n.next}`,
         chatId: input.chatId,
@@ -73,7 +78,28 @@ export function memoryStorage<P = { orgId: string }>() {
       return runs.get(id) ?? null;
     },
     async recordUsage() {},
+    async listRuns(_p, opts) {
+      return [...runs.values()].filter((r) => !opts?.chatId || r.chatId === opts.chatId).reverse();
+    },
+    async enqueueInput(p, chatId, message, { cap }) {
+      if (!chats.has(chatId)) return false;
+      const list = queued.get(chatId) ?? [];
+      const at = list.findIndex((q) => q.message.id === message.id);
+      if (at >= 0) list[at] = { ...list[at]!, message };
+      else if (list.length >= cap) return false;
+      else list.push({ message, identity: p, createdAt: Date.now() });
+      queued.set(chatId, list);
+      return true;
+    },
+    async listQueuedInputs(_p, chatId) {
+      return [...(queued.get(chatId) ?? [])];
+    },
+    async removeQueuedInputs(chatId, ids) {
+      const list = queued.get(chatId) ?? [];
+      queued.set(chatId, list.filter((q) => !ids.includes(q.message.id)));
+      return list.filter((q) => ids.includes(q.message.id)).map((q) => q.message.id);
+    },
   };
   const storage = impl as StorageAdapter<P>;
-  return { storage, chats, messages, runs };
+  return { storage, chats, messages, runs, queued };
 }

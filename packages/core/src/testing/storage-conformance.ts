@@ -724,6 +724,58 @@ function checks<P>(): ConformanceCheck<P>[] {
         check((await store.loadMessages(me, chat.id)).length === 0, "nothing came back");
       },
     },
+
+    // ── held inputs (the queue, when the adapter has it) ──────────────────
+    {
+      name: "held inputs are kept apart from the conversation, oldest first, and leave by id",
+      async run({ store, principals: [me, other] }) {
+        if (!store.enqueueInput || !store.listQueuedInputs || !store.removeQueuedInputs) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const cap = { cap: 5 };
+        check(await store.enqueueInput(me, chat.id, msg("q1"), cap), "the first is held");
+        await new Promise((r) => setTimeout(r, 2));
+        check(await store.enqueueInput(me, chat.id, msg("q2"), cap), "and the second");
+        check((await store.loadMessages(me, chat.id)).length === 0, "the conversation doesn't have them");
+        const held = await store.listQueuedInputs(me, chat.id);
+        check(held.map((q) => q.message.id).join() === "q1,q2", `oldest first (${held.map((q) => q.message.id).join()})`);
+        check(held[0]!.message.role === "user" && (held[0]!.message.parts[0] as { text?: string }).text === "q1", "the message comes back as given");
+        check(held[0]!.identity !== undefined, "with the principal that sent it");
+
+        check(await store.enqueueInput(me, chat.id, msg("q1", "again"), cap), "a retry of one held is accepted");
+        const after = await store.listQueuedInputs(me, chat.id);
+        check(after.map((q) => q.message.id).join() === "q1,q2", "and keeps its place, held once");
+
+        check(!(await store.enqueueInput(other, chat.id, msg("x1"), cap)), "another owner can't add to it");
+        check((await store.listQueuedInputs(other, chat.id)).length === 0, "or read it");
+
+        const gone = await store.removeQueuedInputs(chat.id, ["q1", "nope"], { ownerKey: chat.owner });
+        check(gone.join() === "q1", `only what was held is reported removed (${gone.join()})`);
+        check((await store.listQueuedInputs(me, chat.id)).map((q) => q.message.id).join() === "q2", "the rest stays");
+      },
+    },
+    {
+      name: "a chat never holds more inputs than the cap",
+      async run({ store, principals: [me] }) {
+        if (!store.enqueueInput || !store.listQueuedInputs) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        check(await store.enqueueInput(me, chat.id, msg("q1"), { cap: 2 }), "one");
+        check(await store.enqueueInput(me, chat.id, msg("q2"), { cap: 2 }), "two");
+        check(!(await store.enqueueInput(me, chat.id, msg("q3"), { cap: 2 })), "the third is refused");
+        check((await store.listQueuedInputs(me, chat.id)).length === 2, "and not stored");
+        check(await store.enqueueInput(me, chat.id, msg("q2", "again"), { cap: 2 }), "a retry of one held still fits");
+      },
+    },
+    {
+      name: "deleting a chat removes its held inputs",
+      async run({ store, principals: [me] }) {
+        if (!store.enqueueInput || !store.listQueuedInputs || !store.deleteChats) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        await store.enqueueInput(me, chat.id, msg("q1"), { cap: 5 });
+        await store.deleteChats(me, [chat.id]);
+        const again = await store.createChat(me, { id: chat.id, agent: "a" });
+        check((await store.listQueuedInputs(me, again.id)).length === 0, "a new chat under the same id starts with none");
+      },
+    },
   ];
 }
 

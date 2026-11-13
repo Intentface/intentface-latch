@@ -86,15 +86,25 @@ export interface TurnOptions {
   agentExtensions?: Extension[];
   /** `RuntimeConfig.resolveNoticePlacement`, fixed for every model. */
   notices?: "system" | "user";
+  /** `RuntimeConfig.inputQueue`. */
+  inputQueue?: { max?: number };
+  /** `false`: a storage adapter without the input queue. */
+  queue?: false;
 }
 
 export function harness(o: TurnOptions) {
   const mem = memoryStorage<P>();
+  if (o.queue === false) {
+    delete mem.storage.enqueueInput;
+    delete mem.storage.listQueuedInputs;
+    delete mem.storage.removeQueuedInputs;
+  }
   const runtime: Runtime<P> = createRuntime<P>({
     storage: mem.storage,
     context: defineContext<P, unknown>({ build: async () => ({}) }),
     extensions: o.extensions,
     ...(o.notices ? { resolveNoticePlacement: () => o.notices! } : {}),
+    ...(o.inputQueue ? { inputQueue: o.inputQueue } : {}),
     agents: {
       a: defineAgent<P>({
         model: o.model,

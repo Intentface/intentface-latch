@@ -22,6 +22,7 @@ import {
   refileTarget,
   type AppMessage,
   type PurgeResult,
+  type QueuedInput,
   type OwnerScope,
   type ChatRecord,
   type RunFence,
@@ -50,6 +51,8 @@ export interface AdapterSchema {
   runs: any;
   usage: any;
   schedules: any;
+  /** Held inputs (`enqueueInput`). A schema without it gets an adapter without the queue. */
+  queuedInputs?: any;
 }
 
 export interface SharedAdapterOptions<P> {
@@ -462,11 +465,57 @@ export function makeStorageAdapter<P>(
         fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
       })
       .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
+    if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, chatIds));
     const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
     const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
     const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
     return { chats: chats.length, messages: messages.length, runs: runs.length };
   }
+
+  /** The held-input queue (StorageAdapter.enqueueInput and its two companions). */
+  const queueMethods = (q: any): Pick<StorageAdapter<P>, "enqueueInput" | "listQueuedInputs" | "removeQueuedInputs"> => ({
+    async enqueueInput(principal, chatId, message, { cap }) {
+      if (!(await getChat(principal, chatId))) return false;
+      const here = and(eq(q.chatId, chatId), eq(q.id, message.id));
+      // A retry of one already held replaces it in place.
+      const updated: any[] = await db.update(q).set({ message }).where(here).returning({ id: q.id });
+      if (updated.length) return true;
+      try {
+        await db.insert(q).values({ chatId, id: message.id, message, identity: principal, createdAt: Date.now() });
+      } catch (error) {
+        // Two retries of the same message at once: the other one stored it.
+        if (isUniqueViolation(error)) return true;
+        throw error;
+      }
+      // Insert, then count: racing callers can both be refused, never both kept past the cap.
+      const held: any[] = await db.select({ id: q.id }).from(q).where(eq(q.chatId, chatId));
+      if (held.length <= cap) return true;
+      await db.delete(q).where(here);
+      return false;
+    },
+
+    async listQueuedInputs(principal, chatId) {
+      if (!(await getChat(principal, chatId))) return [];
+      const rows: any[] = await db.select().from(q).where(eq(q.chatId, chatId)).orderBy(asc(q.createdAt), asc(q.id));
+      return rows.map(
+        (r): QueuedInput => ({
+          message: r.message as AppMessage,
+          identity: r.identity ?? undefined,
+          createdAt: Number(r.createdAt),
+        }),
+      );
+    },
+
+    async removeQueuedInputs(chatId, ids, scope) {
+      await checkOwner("chat", chatId, scope);
+      if (ids.length === 0) return [];
+      const gone: any[] = await db
+        .delete(q)
+        .where(and(eq(q.chatId, chatId), inArray(q.id, ids)))
+        .returning({ id: q.id });
+      return gone.map((r) => r.id as string);
+    },
+  });
 
   return {
     async createChat(principal, input) {
@@ -754,7 +803,11 @@ export function makeStorageAdapter<P>(
         .select({ run: s.runs })
         .from(s.runs)
         .innerJoin(s.chats, eq(s.runs.chatId, s.chats.id))
-        .where(eq(s.chats.owner, ownerKey(principal)))
+        .where(
+          opts?.chatId
+            ? and(eq(s.chats.owner, ownerKey(principal)), eq(s.runs.chatId, opts.chatId))
+            : eq(s.chats.owner, ownerKey(principal)),
+        )
         .orderBy(sql`${s.runs.startedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map((r: any) => rowToRun(r.run));
@@ -950,8 +1003,12 @@ export function makeStorageAdapter<P>(
           .limit(1);
         throw new ChatBusyError(busy[0]?.chatId ?? kept[0].id, Math.max(1, Number(busy[0]?.left ?? 1)));
       }
+      // Held inputs of the chats that went (none did if the delete was refused above).
+      if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, owned));
       return owned;
     },
+
+    ...(s.queuedInputs ? queueMethods(s.queuedInputs) : {}),
 
     async purgeOwner(segments, opts) {
       const under = (col: any) => underOwnerPath(col, segments);

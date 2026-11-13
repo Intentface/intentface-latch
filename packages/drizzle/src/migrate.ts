@@ -40,6 +40,9 @@ const DDL = [
        AND (n.started_at > latch_runs.started_at
             OR (n.started_at = latch_runs.started_at AND n.id > latch_runs.id)))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS latch_runs_one_active_per_chat ON latch_runs (chat_id) WHERE status = 'active'`,
+  `CREATE TABLE IF NOT EXISTS latch_queued_inputs (
+     chat_id TEXT NOT NULL, id TEXT NOT NULL, message TEXT NOT NULL, identity TEXT,
+     created_at INTEGER NOT NULL, PRIMARY KEY (chat_id, id))`,
   `CREATE TABLE IF NOT EXISTS latch_usage (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL,
      model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,

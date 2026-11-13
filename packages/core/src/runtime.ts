@@ -62,6 +62,7 @@ import {
   isOwnerKeyMismatchError,
   refileTarget,
   UnsupportedOperationError,
+  QueueFullError,
   type ChatRecord,
   type PurgeOptions,
   type PurgeResult,
@@ -415,6 +416,13 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   resolveNoticePlacement?: (modelId: string) => NoticePlacement;
   /**
+   * The queue of messages and signals that arrived while a chat was busy.
+   * `max` is how many one chat may hold (default 20); past it a message is
+   * refused (`QueueFullError`, 429) and a signal waits for the user's next
+   * message instead.
+   */
+  inputQueue?: { max?: number };
+  /**
    * Observes runs: tracing, per-step and per-run callbacks. Use
    * `@intentface/latch-otel` for full tracing, or only the callbacks you
    * need (usage dashboards, alerts when a scheduled run waits on a person).
@@ -517,6 +525,14 @@ export interface HandleChatInput<P> {
    * different ones are refused (`ParamsFixedError`, 409).
    */
   params?: unknown;
+  /**
+   * What to do when an answer is already running in the chat. `"refuse"`
+   * (default) throws `ChatBusyError` (409). `"queue"` holds the message: the
+   * answer that ends starts the next one with everything held, and the
+   * response is `202` with `{ queued: { id } }` and no stream. Needs a storage
+   * adapter with the input queue; without one it refuses as before.
+   */
+  ifBusy?: "refuse" | "queue";
   /** @deprecated The original request. Missing when an answer continues; read what you need in your route. */
   request?: Request;
   /**
@@ -564,6 +580,12 @@ export interface SendSignalInput<P> {
 export interface SendSignalResult {
   /** The stored message's id. */
   id: string;
+  /**
+   * The chat wasn't free, so the signal is held: the answer that ends (or the
+   * decision the chat waits on) starts a turn with it. Not in the history
+   * until then.
+   */
+  queued?: true;
   /** The turn the signal started. Absent with `wake: false`, or when the chat wasn't free. */
   turn?: {
     /** The agent's answer. Empty when the turn failed or is waiting on a person. */
@@ -573,6 +595,18 @@ export interface SendSignalResult {
     /** Why the turn failed, when it did. The signal is stored either way. */
     error?: string;
   };
+}
+
+/** What `pollChat` returns. */
+export interface ChatPoll {
+  /** Send it back on the next poll. */
+  cursor: string;
+  /** An answer is running in the chat. */
+  running: boolean;
+  /** Held messages the user may see (see `listQueued`). */
+  queued: AppMessage[];
+  /** The history, as `loadHistory` returns it. Absent when it matches `cursor`. */
+  messages?: AppMessage[];
 }
 
 export interface RunAgentInput<P> {
@@ -829,6 +863,26 @@ export interface Runtime<P> {
    * once, and starts a turn at most once.
    */
   sendSignal(input: SendSignalInput<P>): Promise<SendSignalResult | null>;
+  /**
+   * The messages held for a chat that was busy when they arrived, oldest
+   * first, as the user may see them (a signal the user doesn't see is left
+   * out). They join the history when their turn starts.
+   */
+  listQueued(input: { chatId: string; principal: P }): Promise<AppMessage[]>;
+  /**
+   * Takes a held message back before its turn starts. `false` when it isn't
+   * held any more (its turn started, or it never was).
+   */
+  cancelQueued(input: { chatId: string; principal: P; id: string }): Promise<boolean>;
+  /**
+   * What a page needs to stay current without a stream: whether an answer is
+   * running, what is held, and the history when it differs from what the page
+   * has. Pass the `cursor` of the last result; `messages` is left out when
+   * nothing changed. A running answer is saved after each step, so polling
+   * shows it grow step by step. `null` when the chat doesn't exist or isn't
+   * the principal's.
+   */
+  pollChat(input: { chatId: string; principal: P; cursor?: string }): Promise<ChatPoll | null>;
   /**
    * A chat's messages for showing to the user, with internal messages left
    * out. Use it to render a conversation when the page loads.
@@ -1323,6 +1377,20 @@ class WaitingOnPerson extends Error {
   constructor(readonly stored = false) {
     super("the chat is waiting on a person");
   }
+}
+/** Thrown by `runToCompletion({ ifNew })`; never leaves the runtime. */
+class AlreadyStored extends Error {}
+
+/** A short fingerprint of a string (two FNV-1a passes and the length): equal text, equal value. */
+function fingerprint(text: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x85ebca6b) + a;
+  }
+  return `${text.length.toString(36)}.${(a >>> 0).toString(36)}.${(b >>> 0).toString(36)}`;
 }
 
 function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
@@ -2028,6 +2096,8 @@ export function createRuntime<P, RC = unknown>(
     observeStream?: (stream: ReadableStream<unknown>) => void;
     /** The limits this turn was admitted under (see `admitTurn`); absent = unlimited. */
     admitted?: Admitted;
+    /** `false`: the caller starts the turn for held inputs itself (see `drainQueue`). */
+    drain?: boolean;
   }): Promise<ReadableStream<unknown>> {
     const { resolvedChatId, principal, run, lease, runtimeCtx } = args;
     // Every id-only write of this turn carries the run's owner key.
@@ -2924,6 +2994,20 @@ export function createRuntime<P, RC = unknown>(
       }
     };
 
+    // Resolves when the finish hook is done: the run is settled and the chat
+    // free, which is when held inputs can start their turn.
+    let markSettled!: () => void;
+    const settled = new Promise<void>((resolve) => (markSettled = resolve));
+    const settling =
+      <A,>(fn: (a: A) => Promise<void>) =>
+      async (a: A) => {
+        try {
+          await fn(a);
+        } finally {
+          markSettled();
+        }
+      };
+
     // Lower-level composition (vs `createAgentUIStreamResponse`) so we get the
     // UI-stream `onStepEnd` (per-step persistence) and the `writer`. The model
     // call runs INSIDE `execute` so the writer is live during the turn — code
@@ -3122,7 +3206,7 @@ export function createRuntime<P, RC = unknown>(
               checkpoint(responseMessage);
             }
           : undefined,
-      onFinish: async ({
+      onFinish: settling(async ({
         messages: finishedMessages,
         isAborted,
       }: {
@@ -3292,7 +3376,7 @@ export function createRuntime<P, RC = unknown>(
           await reportRunFinished(paused ? "awaiting_input" : "completed", messages);
           await agentEnd();
         }
-      },
+      }),
       onError: (error: unknown) => {
         stopHeartbeat();
         void closeSources();
@@ -3316,6 +3400,26 @@ export function createRuntime<P, RC = unknown>(
     // the full message (the model's abort is tied to the lease, not the
     // request, so a disconnect doesn't cancel generation).
     let out = stream as ReadableStream<unknown>;
+    if (args.drain !== false && queueOn) {
+      // Held inputs get their turn before this stream closes: the process is
+      // alive for as long as something reads it, also on a serverless host.
+      // Nothing of that turn is written here; it is in the history after.
+      out = out.pipeThrough(
+        new TransformStream<unknown, unknown>({
+          transform: (chunk, controller) => controller.enqueue(chunk),
+          flush: async () => {
+            const done = await Promise.race([
+              settled.then(() => true),
+              new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 60_000)),
+            ]);
+            if (!done) return;
+            await drainQueue(resolvedChatId, principal).catch((e) =>
+              console.error(`[queue] couldn't start the turn for inputs held in chat ${resolvedChatId}:`, e),
+            );
+          },
+        }),
+      );
+    }
     if (args.observeStream) {
       const [main, observed] = out.tee();
       out = main;
@@ -3564,6 +3668,7 @@ export function createRuntime<P, RC = unknown>(
     params: paramsIn,
     request,
     turnContext,
+    ifBusy,
   }: HandleChatInput<P>): Promise<Response> {
     // `useChat`'s own approvals (`addToolApprovalResponse` +
     // `sendAutomaticallyWhen`) send the paused assistant message back with the
@@ -3637,9 +3742,30 @@ export function createRuntime<P, RC = unknown>(
     // Run + message open together (atomically where the adapter can): a chat
     // with a live turn refuses (`ChatBusyError` → 409) and the message never
     // lands in history — the client retries it (with its turn reservation released).
-    const { run, lease } = await withReservation(admitted, () =>
-      openTurn(principal, chat, agentName, [...replaced, userMessage], cfg.configVersion),
-    );
+    let opened: Awaited<ReturnType<typeof openTurn>>;
+    try {
+      opened = await withReservation(admitted, () =>
+        openTurn(principal, chat, agentName, [...replaced, userMessage], cfg.configVersion),
+      );
+    } catch (e) {
+      // A new message only: a question being regenerated or edited is about
+      // what is on screen now, not something to answer later.
+      const isNew = replaced.length === 0 && !existing.some((m) => m.id === userMessage.id);
+      if (!isChatBusyError(e) || ifBusy !== "queue" || !queueOn || !isNew) throw e;
+      if (!(await storage.enqueueInput!(principal, resolvedChatId, userMessage, { cap: queueMax }))) {
+        throw new QueueFullError(resolvedChatId, queueMax);
+      }
+      // The answer may have ended between the refusal and the enqueue, with
+      // nobody left to look at the queue: look once ourselves.
+      await drainQueue(resolvedChatId, principal).catch((err) =>
+        console.error(`[queue] couldn't start the turn for inputs held in chat ${resolvedChatId}:`, err),
+      );
+      return new Response(JSON.stringify({ queued: { id: userMessage.id } }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const { run, lease } = opened;
 
     const resentAt = prior.findIndex((m) => m.id === userMessage.id);
     return buildTurn({
@@ -4392,6 +4518,9 @@ export function createRuntime<P, RC = unknown>(
         if (isSignal(existing)) return { id };
         throw new InvalidMessageError(`message id "${id}" is already in this chat`);
       }
+      if (queueOn && (await storage.listQueuedInputs!(principal, chatId)).some((q) => q.message.id === id)) {
+        return { id, queued: true };
+      }
     }
     const signal: SignalMark = {
       kind: kind ?? "notice",
@@ -4428,10 +4557,27 @@ export function createRuntime<P, RC = unknown>(
         return { id: messageId, turn: { answer: r.error || r.parked ? "" : r.answer, parked: r.parked, ...(r.error ? { error: r.error } : {}) } };
       } catch (e) {
         // The chat waits on a person, an answer is running, or a limit is
-        // reached: nothing was stored. Keep the signal for the next message.
+        // reached: nothing was stored.
         if (!(e instanceof WaitingOnPerson) && !isChatBusyError(e) && !isLimitExceededError(e)) throw e;
         // The turn was opened and given up: the signal is stored already.
         if (e instanceof WaitingOnPerson && e.stored) return { id: messageId };
+        // A racing call with this id may have stored it meanwhile: holding
+        // or writing it again would put it in the chat twice, or replace it.
+        if (id !== undefined && (await storage.loadMessages(principal, chatId)).some((m) => m.id === id)) return { id };
+        // Busy or waiting: hold it, and the turn that ends starts one with
+        // it. Over a limit, or with the queue full or missing: keep it for
+        // the user's next message (below).
+        if (
+          queueOn &&
+          !isLimitExceededError(e) &&
+          (await storage.enqueueInput!(principal, chatId, message(signal), { cap: queueMax }))
+        ) {
+          // The answer may have ended meanwhile, with nobody left to look.
+          await drainQueue(chatId, principal).catch((err) =>
+            console.error(`[queue] couldn't start the turn for inputs held in chat ${chatId}:`, err),
+          );
+          return { id: messageId, queued: true };
+        }
       }
     }
     // Another call with this id may have stored it since the check above (a
@@ -4672,6 +4818,12 @@ export function createRuntime<P, RC = unknown>(
      * user's decision (`sendSignal({ wake })`).
      */
     refuseIfWaiting?: boolean;
+    /** Messages the turn opens with, stored before `message` in the same write (held inputs). */
+    opening?: AppMessage[];
+    /** Throw `AlreadyStored` when every opening message is in the history already (another worker ran them). */
+    ifNew?: boolean;
+    /** Don't start a turn for held inputs when this one ends (the caller is the one draining). */
+    noDrain?: boolean;
   }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
     // `||` (not `??`): an empty-string id must mint a fresh one, or the chat is
     // created with id "" and the UI can never open it.
@@ -4697,6 +4849,8 @@ export function createRuntime<P, RC = unknown>(
       throw new Error(`Thread ${chatId} was delegated by another agent; omit threadId to start a new one.`);
     }
     const prior = await storage.loadMessages(o.principal, chatId);
+    const opening = [...(o.opening ?? []), o.message];
+    if (o.ifNew && opening.every((m) => prior.some((p) => p.id === m.id))) throw new AlreadyStored();
     if (o.refuseIfWaiting) {
       const tail = tailOf(prior);
       if (hasPendingApproval(prior) || (!!tail && hasPendingToolResult([tail]))) throw new WaitingOnPerson();
@@ -4723,7 +4877,7 @@ export function createRuntime<P, RC = unknown>(
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
       }, chat.params, contextOf(o.message));
-      const opened = await openTurn(o.principal, chat, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
+      const opened = await openTurn(o.principal, chat, o.agent, opening, resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
     // The check above read the history before the run was ours: a turn that
@@ -4731,13 +4885,19 @@ export function createRuntime<P, RC = unknown>(
     // request for a person. Read again now that nothing else can write.
     let history = prior;
     if (o.refuseIfWaiting) {
-      // Up to the opening message only: a signal stored after it (no lease
-      // stops one) belongs to a later turn, where it is stored.
+      // Up to the opening messages only: a signal stored after them (no
+      // lease stops one) belongs to a later turn, where it is stored.
       const now = await storage.loadMessages(o.principal, chatId);
-      const at = now.findIndex((m) => m.id === o.message.id);
+      const at = now.findIndex((m) => opening.some((x) => x.id === m.id));
       history = at === -1 ? now : now.slice(0, at);
       const tail = tailOf(history);
-      if (hasPendingApproval(history) || (!!tail && hasPendingToolResult([tail]))) {
+      const waiting = hasPendingApproval(history) || (!!tail && hasPendingToolResult([tail]));
+      if (waiting && opening.some((m) => !isSignal(m))) {
+        // A held user message is stored after that request now, which makes
+        // it what any new message is: the decision. Close the gate and go on.
+        const declined = declinePendingApprovals(history);
+        if (declined.length > 0) await ownedBy(chat.owner).appendMessages(chatId, declined);
+      } else if (waiting) {
         // Give the turn up: the signal stays, as one that waits for the next
         // message, and the request for the person is still the last thing said.
         const { startsTurn: _, ...mark } = o.message.metadata?.signal ?? ({} as SignalMark);
@@ -4763,11 +4923,13 @@ export function createRuntime<P, RC = unknown>(
         cfg,
         run,
         lease,
-        uiMessages: [...history, o.message],
+        uiMessages: [...history.filter((p) => !opening.some((m) => m.id === p.id)), ...opening],
         runtimeCtx,
         params,
         messageContext,
         admitted,
+        // Held inputs are started below, after this turn's result is read.
+        drain: false,
         autoApprove: o.autoApprove,
         blockGated: o.blockGated,
         memory: o.memory,
@@ -4779,7 +4941,7 @@ export function createRuntime<P, RC = unknown>(
         trigger: o.trigger,
         // Forward progressive UI-message snapshots to the caller (spawn_agent
         // streams them into the parent turn).
-        observeStream: onProgress ? progressObserver([o.message], onProgress) : undefined,
+        observeStream: onProgress ? progressObserver(opening, onProgress) : undefined,
       });
     } catch (e) {
       // Setup failed after the run opened — a tool source that would not
@@ -4824,12 +4986,139 @@ export function createRuntime<P, RC = unknown>(
       pending.length > 0 ||
       hasPendingApproval(after) ||
       (!!last && hasPendingToolResult([last]));
-    return {
+    const result = {
       chatId,
       answer: pending.length > 0 ? "" : lastAssistantText(after),
       parked,
       ...(pending.length > 0 ? { pending } : {}),
       ...(error ? { error } : {}),
+    };
+    // Whatever arrived while this turn ran gets its own now. This turn's
+    // result is already read, so that one's answer isn't taken for it.
+    if (!o.noDrain && !parked) {
+      await drainQueue(chatId, o.principal).catch((e) =>
+        console.error(`[queue] couldn't start the turn for inputs held in chat ${chatId}:`, e),
+      );
+    }
+    return result;
+  }
+
+  const queueMax = Math.max(1, config.inputQueue?.max ?? 20);
+  const queueOn = !!(storage.enqueueInput && storage.listQueuedInputs && storage.removeQueuedInputs);
+
+  /**
+   * Start a turn with everything held for a chat (`enqueueInput`), and again
+   * for what arrives while that turn runs, until nothing is held. Called by
+   * whoever just saw the chat become free: the turn that ended, or a sender
+   * whose input was held a moment after it did. Does nothing when the chat is
+   * busy or waiting on a person: whoever ends that calls this again.
+   *
+   * One turn takes all of it. Signals go first, as ones that wait, so the
+   * model reads them with the held user messages; with no user message among
+   * them, the last signal opens the turn (as `sendSignal` does on a free chat).
+   * The turn runs as whoever sent the first user message, or the first signal.
+   *
+   * Inputs leave the queue only after their turn opened, and a turn opens
+   * only with inputs that aren't in the history yet, so a crash or two
+   * callers at once repeat nothing.
+   */
+  async function drainQueue(chatId: string, principal: P): Promise<void> {
+    if (!queueOn) return;
+    // Bounded: a chat that keeps receiving input can't hold this call forever.
+    for (let round = 0; round < 20; round++) {
+      const chat = await storage.getChat(principal, chatId);
+      if (!chat) return;
+      const held = await storage.listQueuedInputs!(principal, chatId);
+      if (held.length === 0) return;
+      const remove = (ids: string[]) => storage.removeQueuedInputs!(chatId, ids, { ownerKey: chat.owner });
+      const stored = new Set((await storage.loadMessages(principal, chatId)).map((m) => m.id));
+      const stale = held.filter((q) => stored.has(q.message.id)).map((q) => q.message.id);
+      if (stale.length > 0) await remove(stale);
+      const fresh = held.filter((q) => !stored.has(q.message.id));
+      if (fresh.length === 0) return;
+
+      const users = fresh.filter((q) => !isSignal(q.message));
+      const signals = fresh.filter((q) => isSignal(q.message)).map((q) => q.message);
+      const lead = users[0] ?? fresh[0]!;
+      const as = await reconstructPrincipal(lead.identity);
+      if (!as) {
+        // Its sender may no longer act: drop that one and look again.
+        console.warn(`[queue] dropped held input ${lead.message.id} in chat ${chatId}: its sender was refused`);
+        await remove([lead.message.id]);
+        continue;
+      }
+      const startsTurn = (m: AppMessage): AppMessage =>
+        ({ ...m, metadata: { ...m.metadata, signal: { ...m.metadata!.signal!, startsTurn: true } } }) as AppMessage;
+      const opening =
+        users.length > 0
+          ? [...signals, ...users.map((q) => q.message)]
+          : [...signals.slice(0, -1), startsTurn(signals[signals.length - 1]!)];
+      try {
+        await runToCompletion({
+          principal: as,
+          agent: chat.agent,
+          chatId,
+          opening: opening.slice(0, -1),
+          message: opening[opening.length - 1]!,
+          autoApprove: false,
+          trigger: users.length > 0 ? "chat" : "programmatic",
+          // A held message is not the answer to a pending approval.
+          refuseIfWaiting: true,
+          ifNew: true,
+          noDrain: true,
+        });
+      } catch (e) {
+        if (e instanceof AlreadyStored) {
+          await remove(fresh.map((q) => q.message.id));
+          continue;
+        }
+        if (e instanceof WaitingOnPerson && e.stored) {
+          // Opened, then given up: they are in the history now, as signals that wait.
+          await remove(fresh.map((q) => q.message.id));
+          return;
+        }
+        // Busy, waiting on a person, or over a limit: they stay held.
+        if (e instanceof WaitingOnPerson || isChatBusyError(e) || isLimitExceededError(e)) return;
+        throw e;
+      }
+      await remove(fresh.map((q) => q.message.id));
+    }
+  }
+
+  async function listQueued({ chatId, principal }: { chatId: string; principal: P }): Promise<AppMessage[]> {
+    if (!queueOn) return [];
+    const held = await storage.listQueuedInputs!(principal, chatId);
+    return toClientMessages(held.map((q) => q.message)) as AppMessage[];
+  }
+
+  async function cancelQueued({ chatId, principal, id }: { chatId: string; principal: P; id: string }): Promise<boolean> {
+    if (!queueOn) return false;
+    const chat = await storage.getChat(principal, chatId);
+    if (!chat) return false;
+    return (await storage.removeQueuedInputs!(chatId, [id], { ownerKey: chat.owner })).length > 0;
+  }
+
+  async function pollChat({
+    chatId,
+    principal,
+    cursor,
+  }: {
+    chatId: string;
+    principal: P;
+    cursor?: string;
+  }): Promise<ChatPoll | null> {
+    if (!(await storage.getChat(principal, chatId))) return null;
+    const [messages, queued, runs] = await Promise.all([
+      loadHistory({ chatId, principal }),
+      listQueued({ chatId, principal }),
+      storage.listRuns(principal, { limit: 20, chatId }),
+    ]);
+    const next = fingerprint(JSON.stringify(messages));
+    return {
+      cursor: next,
+      running: runs.some((r) => r.chatId === chatId && r.status === "active"),
+      queued,
+      ...(next === cursor ? {} : { messages }),
     };
   }
 
@@ -5234,6 +5523,9 @@ export function createRuntime<P, RC = unknown>(
     },
     compactChat,
     sendSignal,
+    listQueued,
+    cancelQueued,
+    pollChat,
     loadHistory,
     listChats,
     getChat: getChatById,

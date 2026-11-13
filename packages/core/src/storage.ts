@@ -502,7 +502,9 @@ export interface StorageAdapter<P> {
   ): Promise<boolean>;
   getRun(id: string, scope?: OwnerScope<P>): Promise<RunRecord | null>;
   /** Scoped list of the caller's runs (joined via chats), most-recent first. */
-  listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
+  listRuns(principal: P, opts?: { limit?: number; chatId?: string }): Promise<RunRecord[]>;
+  // ↑ `chatId` narrows to one chat. An adapter may ignore it: the runtime
+  //   filters what comes back too.
   /**
    * Reaper: mark active runs whose lease has expired (`leaseExpiresAt < now`) as
    * `errored`, clear the owner, and bump the fencing token (invalidating any
@@ -637,6 +639,32 @@ export interface StorageAdapter<P> {
    * `runtime.deleteChat` refuses.
    */
   deleteChats?(principal: P, ids: string[]): Promise<string[]>;
+
+  // queued input (optional as a set: implement all three or none)
+  /**
+   * OPTIONAL. Hold a message for a chat that can't take it now (an answer is
+   * running): the turn that ends starts the next one with everything held.
+   * Kept apart from the conversation, which stays in the order it happened.
+   *
+   * Scoped: a chat that isn't the caller's stores nothing and returns `false`.
+   * Stores the principal as the input's `identity`, like a run does. Upserts
+   * by `(chatId, message.id)`, keeping the first arrival's place. Returns
+   * `false`, storing nothing, when the chat already holds `cap` inputs. Two
+   * callers racing for the last place may both be refused; the chat must
+   * never hold more than `cap`.
+   *
+   * Without these three, a message sent to a busy chat is refused
+   * (`ChatBusyError`) and a signal waits for the user's next message.
+   */
+  enqueueInput?(principal: P, chatId: string, message: AppMessage, opts: { cap: number }): Promise<boolean>;
+  /** OPTIONAL. Scoped read of a chat's held inputs, oldest first. */
+  listQueuedInputs?(principal: P, chatId: string): Promise<QueuedInput[]>;
+  /**
+   * OPTIONAL. Remove held inputs by message id; returns the ids that were
+   * there. Deleting a chat (`deleteChats`, `purgeOwner`) removes its held
+   * inputs too.
+   */
+  removeQueuedInputs?(chatId: string, ids: string[], scope?: OwnerScope<P>): Promise<string[]>;
   /**
    * OPTIONAL system op (no principal): delete everything stored for an owner
    * path. That's every row whose owner key is `encodeOwnerKey(segments)` or
@@ -711,6 +739,34 @@ export interface PurgeResult {
 export function isUnderOwner(ownerKey: string, segments: readonly string[]): boolean {
   const key = encodeOwnerKey(segments);
   return ownerKey === key || ownerKey.startsWith(`${key}/`);
+}
+
+/** A message held for a chat that was busy when it arrived (see `enqueueInput`). */
+export interface QueuedInput {
+  message: AppMessage;
+  /** The serialized principal that sent it, like `RunRecord.identity`. */
+  identity?: unknown;
+  createdAt: number;
+}
+
+/**
+ * Thrown when a chat already holds as many queued inputs as it may
+ * (`inputQueue.max` on the runtime, 20 by default). Nothing was stored. The
+ * server answers `429`.
+ */
+export class QueueFullError extends Error {
+  readonly code = "queue_full";
+  constructor(
+    readonly chatId: string,
+    readonly max: number,
+  ) {
+    super(`This chat already has ${max} messages waiting; send again when it has answered.`);
+    this.name = "QueueFullError";
+  }
+}
+
+export function isQueueFullError(e: unknown): e is QueueFullError {
+  return e instanceof QueueFullError || (e as { code?: unknown } | null)?.code === "queue_full";
 }
 
 /**
