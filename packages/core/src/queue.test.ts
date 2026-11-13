@@ -8,6 +8,7 @@ import { call, harness, principal, promptsOf, scripted, text, user } from "./__t
 import { memoryStorage } from "./__tests__/memory-storage.js";
 import { createRuntime } from "./runtime.js";
 import { defineAgent } from "./agent.js";
+import { defineContext } from "./context.js";
 
 /**
  * The input queue: a message or signal that arrives while an answer is
@@ -246,6 +247,96 @@ describe("a held turn and what happens around it", () => {
     expect(h.mem.chats.has("chat_1")).toBe(false);
     expect(h.mem.messages.has("chat_1")).toBe(false);
     expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it("answers a held message as a retry last replaced it", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    const live = await open(h);
+    await send(h, user("q2 as first sent", "u2"));
+    // Replaced under the same id after the held turn's run opened, before it took the queue.
+    const createRun = h.mem.storage.createRun.bind(h.mem.storage);
+    h.mem.storage.createRun = async (p, input) => {
+      const run = await createRun(p, input);
+      await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2 as revised", "u2"), { cap: 20 });
+      return run;
+    };
+    await live.text();
+    const second = JSON.stringify(promptsOf(model)[1]);
+    expect(second).toContain("q2 as revised");
+    expect(second).not.toContain("q2 as first sent");
+    expect(h.mem.queued.get("chat_1")).toBeUndefined();
+  });
+
+  it("runs as the sender of what it really answers, in a chat two people share", async () => {
+    const ann = { orgId: "org_a", userId: "ann" };
+    const bo = { orgId: "org_a", userId: "bo" };
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    const ranAs: string[] = [];
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      context: defineContext<typeof principal, unknown>({
+        build: async ({ principal: p }) => {
+          ranAs.push(p.userId);
+          return {};
+        },
+      }),
+      agents: { a: defineAgent<typeof principal>({ model, instructions: "Be brief." }) },
+    });
+    await (await runtime.handleChat({ agent: "a", principal: ann, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!(ann, "chat_1", user("from ann", "u2"), { cap: 20 });
+    await mem.storage.enqueueInput!(bo, "chat_1", user("from bo", "u3"), { cap: 20 });
+    // Ann takes hers back just as the turn opened for it (as her) is about to take the queue.
+    const createRun = mem.storage.createRun.bind(mem.storage);
+    let once = false;
+    mem.storage.createRun = async (p, input) => {
+      const run = await createRun(p, input);
+      if (!once) {
+        once = true;
+        await runtime.cancelQueued({ chatId: "chat_1", principal: ann, id: "u2" });
+      }
+      return run;
+    };
+    const tick = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(1);
+    // Opened as Ann, given up, then run as Bo: only Bo's message is answered.
+    expect(ranAs.at(-1)).toBe("bo");
+    expect([...mem.runs.values()].map((r) => r.status)).toEqual(["completed", "errored", "completed"]);
+    const prompt = JSON.stringify(promptsOf(model)[1]);
+    expect(prompt).toContain("from bo");
+    expect(prompt).not.toContain("from ann");
+  });
+
+  it("keeps what is held when the agent can't be resolved for it, to try again", async () => {
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    let broken = true;
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: {
+        a: defineAgent<typeof principal>(({ messageContext }) => {
+          if (broken && (messageContext as { file?: string } | undefined)?.file === "three.md") throw new Error("lookup failed");
+          return { model, instructions: "Be brief." };
+        }),
+      },
+    });
+    const viewing = (id: string, t: string, file: string): AppMessage =>
+      ({ id, role: "user", parts: [{ type: "text", text: t }, { type: "data-context", data: { file } }], metadata: { visibility: "user" } }) as AppMessage;
+    await (await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: viewing("u1", "q1", "one.md") })).text();
+    await mem.storage.enqueueInput!(principal, "chat_1", viewing("u2", "q2", "two.md"), { cap: 20 });
+    await mem.storage.enqueueInput!(principal, "chat_1", viewing("u3", "q3", "three.md"), { cap: 20 });
+
+    const failed = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(failed.held).toBe(0);
+    expect(failed.errors.some((e) => e.includes("lookup failed"))).toBe(true);
+    // Nothing stored, nothing lost: both wait again, taken by nobody.
+    expect(mem.messages.get("chat_1")!.map((m) => m.id).filter((id) => id.startsWith("u"))).toEqual(["u1"]);
+    expect(mem.queued.get("chat_1")!.map((q) => [q.message.id, q.takenBy])).toEqual([["u2", undefined], ["u3", undefined]]);
+
+    broken = false;
+    expect((await runtime.cron({ now: Date.now() + 120_000 })).held).toBe(1);
+    expect(mem.messages.get("chat_1")!.map((m) => m.role)).toEqual(["user", "assistant", "user", "user", "assistant"]);
   });
 
   it("gives the agent the context of the message it really answers", async () => {

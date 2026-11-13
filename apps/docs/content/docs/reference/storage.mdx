@@ -46,8 +46,10 @@ interface StorageAdapter<P> {
   claimDueSchedules, completeSchedule
   // Deletion (optional)
   deleteChats, purgeOwner
-  // Held inputs (optional, the first three or none)
-  enqueueInput, listQueuedInputs, removeQueuedInputs, listChatsWithQueuedInputs
+  // Held inputs (optional, the first six or none)
+  enqueueInput, listQueuedInputs, removeQueuedInputs,
+  takeQueuedInputs, returnQueuedInputs, finishQueuedInputs,
+  listChatsWithQueuedInputs
 }
 ```
 
@@ -145,13 +147,20 @@ Both are optional; without them `runtime.deleteChat` and `runtime.purgeOwner` re
 
 Optional, as a set. Without them a message sent to a busy chat is refused with `ChatBusyError`, and a signal waits for the user's next message. With them the runtime holds both and starts the next turn with everything held (see [the queue guide](/docs/guides/queue)).
 
-- **`enqueueInput(principal, chatId, message, { cap })`** holds a message for a chat, apart from `loadMessages`. It is scoped: a chat that isn't the caller's stores nothing and returns `false`, and so does a chat deleted while the call ran (check the chat in the same statement as the insert). It stores the principal as the input's `identity`, as a run does. A message id already held is replaced in place, keeping its turn in line. It returns `false`, storing nothing, when the chat already holds `cap` inputs. Make that part of the insert: an input over the cap must never be stored, even for a moment, since a turn could take it before it is refused. The shipped adapters do it in one statement on SQLite, and under a lock on the chat row on Postgres, where two statements at once would otherwise both see room.
-- **`listQueuedInputs(principal, chatId)`** returns them in the order they arrived, each with its `identity` and `createdAt`. Arrival order is its own counter, not the timestamp: two inputs can share a millisecond.
-- **`removeQueuedInputs(chatId, ids, scope)`** removes by message id and returns the ids that were there, as one statement. The runtime relies on that: a run takes the inputs it answers this way, and a cancellation uses the same call, so exactly one of them gets each input.
-- **`listChatsWithQueuedInputs({ heldBefore, limit })`** is a system call with no principal, for the cron tick: at most `limit` chats holding an input from before `heldBefore`, each with the `identity` of its oldest held input. It marks the chats it returns as looked at and hands out the ones looked at longest ago first, so chats that can't start a turn (waiting on a person) never keep the others out. Optional on its own; without it, an input whose process died before starting its turn waits until something else happens in its chat.
+An input is in one of two states: waiting, or taken by the run that is answering it.
+
+- **`enqueueInput(principal, chatId, message, { cap })`** holds a message for a chat, apart from `loadMessages`. It is scoped: a chat that isn't the caller's stores nothing and returns `false`, and so does a chat deleted while the call ran (check the chat in the same statement as the insert). It stores the principal as the input's `identity`, as a run does.
+  - **The cap applies to new ids.** A new id returns `false`, storing nothing, when `cap` inputs are already waiting; taken ones don't count. Make that part of the insert: an input over the cap must never be stored, even for a moment. The shipped adapters do it in one statement on SQLite, and under a lock on the chat row on Postgres, where two statements at once would otherwise both see room.
+  - **An id already held returns `true`, whatever the cap.** While it waits, the message is replaced in place and keeps its place in line. Once a run has taken it, it is left as the run took it.
+- **`listQueuedInputs(principal, chatId)`** returns them in the order they arrived, each with its `identity`, `createdAt`, and `takenBy` when a run has it. Arrival order is its own counter, not the timestamp: two inputs can share a millisecond.
+- **`removeQueuedInputs(chatId, ids, scope)`** is a cancellation: it removes waiting inputs by message id and returns the ids removed. It never removes a taken one.
+- **`takeQueuedInputs(chatId, runId, scope)`** marks every input held for the chat as taken by `runId`, in one statement, and returns them as they are at that moment, in arrival order. The runtime calls it only while `runId` is the chat's one live run, so it also takes inputs an earlier run had taken: that run is over.
+- **`returnQueuedInputs(chatId, runId, scope)`** puts what `runId` took back in line, waiting again. The runtime calls it when the turn could not start.
+- **`finishQueuedInputs(chatId, runId, scope)`** deletes what `runId` took. The runtime calls it once those inputs are in the history.
+- **`listChatsWithQueuedInputs({ heldBefore, limit })`** is a system call with no principal, for the cron tick: at most `limit` chats holding an input from before `heldBefore`, waiting or taken, each with the `identity` of its oldest held input. It marks the chats it returns as looked at and hands out the ones looked at longest ago first, so chats that can't start a turn (waiting on a person) never keep the others out. Optional on its own; without it, an input whose process died before starting its turn waits until something else happens in its chat.
 - **Deleting a chat removes its held inputs**, in the same transaction as the chat, in `deleteChats` and `purgeOwner`.
 
-The runtime adds a held input to the history itself once the run that answers it is open, and takes it from the queue right after. Your adapter never moves one.
+Taking is what makes the rest safe. A turn for held inputs opens its run first, then takes. From that one statement on, a cancellation is refused, a retry changes nothing, and no other worker can answer the same input. Your adapter never moves an input into the history; the runtime does, between take and finish.
 
 ## Using the shipped adapter
 

@@ -100,6 +100,9 @@ export function harness(o: TurnOptions) {
     delete mem.storage.enqueueInput;
     delete mem.storage.listQueuedInputs;
     delete mem.storage.removeQueuedInputs;
+    delete mem.storage.takeQueuedInputs;
+    delete mem.storage.returnQueuedInputs;
+    delete mem.storage.finishQueuedInputs;
   }
   const runtime: Runtime<P> = createRuntime<P>({
     storage: mem.storage,

@@ -1400,10 +1400,6 @@ class WaitingOnPerson extends Error {
 /** Thrown by `runToCompletion({ held })` when no held input is left to answer; never leaves the runtime. */
 class NothingHeld extends Error {}
 
-/** Out of sight of the user and the model, but kept (see `isHidden`). */
-const hide = (m: AppMessage): AppMessage =>
-  ({ ...m, metadata: { ...m.metadata, visibility: "internal", sendToModel: false } }) as AppMessage;
-
 /**
  * Held inputs in the order a turn opens with them. Signals first, as signals
  * that wait, so the model reads them with the user messages after them. With
@@ -3611,7 +3607,9 @@ export function createRuntime<P, RC = unknown>(
       ) => storage.completeSchedule(id, patch, owner, claim, scope),
       noteScheduleFire: (id: string, patch: { lastChatId: string; firedAt: number }) =>
         storage.noteScheduleFire?.(id, patch, scope),
-      removeQueuedInputs: (chatId: string, ids: string[]) => storage.removeQueuedInputs!(chatId, ids, scope),
+      takeQueuedInputs: (chatId: string, runId: string) => storage.takeQueuedInputs!(chatId, runId, scope),
+      returnQueuedInputs: (chatId: string, runId: string) => storage.returnQueuedInputs!(chatId, runId, scope),
+      finishQueuedInputs: (chatId: string, runId: string) => storage.finishQueuedInputs!(chatId, runId, scope),
     };
   };
 
@@ -4868,13 +4866,14 @@ export function createRuntime<P, RC = unknown>(
      */
     refuseIfWaiting?: boolean;
     /**
-     * Held inputs to answer (`message` is the last of them, as a stand-in).
-     * The run opens with no message of its own; once the chat is this run's,
-     * the inputs still held are taken from the queue and stored, and the turn
-     * opens with exactly those. Throws `NothingHeld` when none is left
-     * (another worker answered them, or they were taken back).
+     * Answer what is held for the chat. The run opens with no message of its
+     * own (`message` only stands in until then); once the chat is this
+     * run's, it takes everything held, in one step, and opens with exactly
+     * that. `lead` is the identity `principal` was rebuilt from: if what was
+     * taken is led by someone else, the inputs go back and `NothingHeld` is
+     * thrown, as it is when nothing is left to answer.
      */
-    held?: QueuedInput[];
+    held?: { lead: unknown };
     /** Don't start a turn for held inputs when this one ends (the caller is the one draining). */
     noDrain?: boolean;
   }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
@@ -4908,7 +4907,7 @@ export function createRuntime<P, RC = unknown>(
     // Held inputs are settled once the run is open (below); until then
     // nothing about the queue is decided from here. An input in `prior` may
     // be one another run stored a moment ago and is about to take.
-    let opening = o.held ? arrangeHeld(o.held.map((q) => q.message)) : [o.message];
+    let opening = [o.message];
     if (o.refuseIfWaiting) {
       const tail = tailOf(prior);
       if (hasPendingApproval(prior) || (!!tail && hasPendingToolResult([tail]))) throw new WaitingOnPerson();
@@ -4958,64 +4957,60 @@ export function createRuntime<P, RC = unknown>(
       return hasPendingApproval(messages) || (!!tail && hasPendingToolResult([tail]));
     };
     if (o.held) {
-      // The chat is this run's now, so nobody else can open a turn with these
-      // inputs. What is still to settle is which of them are left: another
-      // worker may have answered some before this run opened, and the user
-      // may take one back at any moment.
+      // The chat is this run's now. Nothing about the queue was decided
+      // before this point, and nothing is decided from a copy of it: the run
+      // takes what is held, as it is at this moment, in one step. A message
+      // taken back before that isn't there; one taken back after is refused.
+      // A retry that replaced one is taken as replaced.
       const queue = ownedBy(chat.owner);
       history = await storage.loadMessages(o.principal, chatId);
-      // In the history already: answered by a run that ended before this one
-      // opened (no other run is live now), so its queue copy is left over.
-      const answered = o.held.filter((q) => history.some((p) => p.id === q.message.id));
-      if (answered.length > 0) await queue.removeQueuedInputs(chatId, answered.map((q) => q.message.id));
-      // Of the rest, the ones still held: some may have been taken back since they were listed.
-      const now = new Set((await storage.listQueuedInputs!(o.principal, chatId)).map((q) => q.message.id));
-      const present = o.held.filter((q) => !answered.includes(q) && now.has(q.message.id));
-      const left = present.map((q) => q.message);
-      if (left.length === 0 || waitingIn(history)) {
-        // Nothing left, or an answer ended on a request for the person just
-        // before this run opened: the inputs stay held, untouched.
-        await giveUp(left.length === 0 ? "nothing left to answer" : "the chat is waiting on a person");
-        throw left.length === 0 ? new NothingHeld() : new WaitingOnPerson();
+      if (waitingIn(history)) {
+        // An answer ended on a request for the person just before this run
+        // opened: what is held stays held, untouched.
+        await giveUp("the chat is waiting on a person");
+        throw new WaitingOnPerson();
       }
-      // The turn runs as whoever sent the first user message. If that one was
-      // taken back and another person's now leads, start over as them.
-      const lead = present.find((q) => !isSignal(q.message)) ?? present[0]!;
-      if (lead.message.id !== o.message.id && JSON.stringify(lead.identity) !== JSON.stringify(o.held.find((q) => q.message.id === o.message.id)?.identity)) {
-        await giveUp("the input it was opened for was taken back");
-        throw new NothingHeld();
-      }
-      // Stored first, then taken from the queue: a crash between the two
-      // leaves them in the history (a recovered run answers them) and the
-      // queue's copies are dropped as already answered. Taking is one
-      // delete, so of this and a cancellation exactly one gets each input.
-      const stored = arrangeHeld(left);
-      await queue.appendMessages(chatId, stored);
-      const taken = new Set(await queue.removeQueuedInputs(chatId, left.map((m) => m.id)));
-      const cancelled = stored.filter((m) => !taken.has(m.id));
-      // Taken back in that instant: kept out of sight of the user and the model.
-      if (cancelled.length > 0) await queue.appendMessages(chatId, cancelled.map(hide));
-      const kept = left.filter((m) => taken.has(m.id));
-      if (kept.length === 0) {
+      const taken = await queue.takeQueuedInputs(chatId, run.id);
+      /** The turn can't start: what was taken waits again, to be tried later. */
+      const putBack = async (why: string) => {
+        await queue.returnQueuedInputs(chatId, run.id);
+        await giveUp(why);
+      };
+      // In the history already: stored by a run that died before clearing
+      // them from the queue. They go when this run finishes with the queue.
+      const fresh = taken.filter((q) => !history.some((p) => p.id === q.message.id));
+      if (fresh.length === 0) {
+        await queue.finishQueuedInputs(chatId, run.id);
         await giveUp("nothing left to answer");
         throw new NothingHeld();
       }
-      opening = arrangeHeld(kept);
-      // A signal that now opens the turn, where another did before one was taken back.
-      const remarked = opening.filter((m) => JSON.stringify(m.metadata) !== JSON.stringify(stored.find((x) => x.id === m.id)!.metadata));
-      if (remarked.length > 0) await queue.appendMessages(chatId, remarked);
+      // The turn runs as whoever sent its first user message (or first
+      // signal). If that is not who this run was opened as, start over.
+      const lead = fresh.find((q) => !isSignal(q.message)) ?? fresh[0]!;
+      if (JSON.stringify(lead.identity) !== JSON.stringify(o.held.lead)) {
+        await putBack("the input it was opened for is no longer first");
+        throw new NothingHeld();
+      }
+      opening = arrangeHeld(fresh.map((q) => q.message));
       // The agent, its tools and `messageContext` follow the message being
-      // answered: the latest user message of the ones this turn really opens
-      // with, not the stand-in the run was opened for.
+      // answered: the latest user message this turn opens with, not the
+      // stand-in the run was opened for. Before anything is stored, so a
+      // failure here leaves the inputs held, to be tried again.
       const answering = latestMessageContext(opening);
       if (JSON.stringify(answering) !== JSON.stringify(contextOf(o.message))) {
         try {
           ({ cfg, modelId, runtimeCtx, params, messageContext } = await resolveFor(answering));
         } catch (e) {
-          await giveUp("its agent could not be resolved");
+          await putBack("its agent could not be resolved");
           throw e;
         }
       }
+      // Stored, then cleared from the queue. A crash between the two leaves
+      // them in the history, where a recovered run answers them, and taken
+      // in the queue, where the next run to look finds them stored and
+      // clears them.
+      await queue.appendMessages(chatId, opening);
+      await queue.finishQueuedInputs(chatId, run.id);
     } else if (o.refuseIfWaiting) {
       // Up to the opening message only: a signal stored after it (no lease
       // stops one) belongs to a later turn, where it is stored.
@@ -5120,7 +5115,14 @@ export function createRuntime<P, RC = unknown>(
   }
 
   const queueMax = Math.max(1, config.inputQueue?.max ?? 20);
-  const queueOn = !!(storage.enqueueInput && storage.listQueuedInputs && storage.removeQueuedInputs);
+  const queueOn = !!(
+    storage.enqueueInput &&
+    storage.listQueuedInputs &&
+    storage.removeQueuedInputs &&
+    storage.takeQueuedInputs &&
+    storage.returnQueuedInputs &&
+    storage.finishQueuedInputs
+  );
 
   /**
    * Start a turn with everything held for a chat (`enqueueInput`), and again
@@ -5134,10 +5136,11 @@ export function createRuntime<P, RC = unknown>(
    * them, the last signal opens the turn (as `sendSignal` does on a free chat).
    * The turn runs as whoever sent the first user message, or the first signal.
    *
-   * Inputs are taken from the queue by the run that answers them, once the
-   * chat is that run's (see `runToCompletion({ held })`): two callers at once
-   * answer nothing twice, a held input is no longer listed or counted while
-   * it is being answered, and one taken back in time is never answered.
+   * The run that answers them takes them, in one step, once the chat is that
+   * run's (see `runToCompletion({ held })`). So two callers at once answer
+   * nothing twice; an input being answered is no longer listed, counted or
+   * cancellable; one taken back in time is never answered; and one replaced
+   * by a retry is answered as replaced.
    */
   async function drainQueue(chatId: string, principal: P): Promise<number> {
     let started = 0;
@@ -5146,14 +5149,17 @@ export function createRuntime<P, RC = unknown>(
     for (let round = 0; round < 20; round++) {
       const chat = await storage.getChat(principal, chatId);
       if (!chat) return started;
+      // A look, to learn whether anything is held and who would lead the
+      // turn. The turn itself opens with what its run takes, not with this.
       const held = await storage.listQueuedInputs!(principal, chatId);
       if (held.length === 0) return started;
       const lead = held.find((q) => !isSignal(q.message)) ?? held[0]!;
       const as = await reconstructPrincipal(lead.identity);
       if (!as) {
         // Its sender may no longer act: drop that one and look again.
+        const dropped = await storage.removeQueuedInputs!(chatId, [lead.message.id], { ownerKey: chat.owner });
+        if (dropped.length === 0) return started;
         console.warn(`[queue] dropped held input ${lead.message.id} in chat ${chatId}: its sender was refused`);
-        await storage.removeQueuedInputs!(chatId, [lead.message.id], { ownerKey: chat.owner });
         continue;
       }
       try {
@@ -5161,8 +5167,8 @@ export function createRuntime<P, RC = unknown>(
           principal: as,
           agent: chat.agent,
           chatId,
-          held,
-          // Stands in for the turn's message until the run knows which are left.
+          held: { lead: lead.identity },
+          // Stands in for the turn's message until the run has taken what is held.
           message: lead.message,
           autoApprove: false,
           trigger: held.some((q) => !isSignal(q.message)) ? "chat" : "programmatic",
@@ -5171,7 +5177,7 @@ export function createRuntime<P, RC = unknown>(
           noDrain: true,
         });
       } catch (e) {
-        // Answered by another worker, or taken back: look again for what arrived since.
+        // Nothing left (answered, or taken back), or led by someone else now: look again.
         if (e instanceof NothingHeld) continue;
         // Busy, waiting on a person, or over a limit: they stay held.
         if (e instanceof WaitingOnPerson || isChatBusyError(e) || isLimitExceededError(e)) return started;
@@ -5222,7 +5228,8 @@ export function createRuntime<P, RC = unknown>(
   async function listQueued({ chatId, principal }: { chatId: string; principal: P }): Promise<AppMessage[]> {
     if (!queueOn) return [];
     const held = await storage.listQueuedInputs!(principal, chatId);
-    return toClientMessages(held.map((q) => q.message)) as AppMessage[];
+    // Waiting ones only: what a run has taken is being answered.
+    return toClientMessages(held.filter((q) => !q.takenBy).map((q) => q.message)) as AppMessage[];
   }
 
   async function cancelQueued({ chatId, principal, id }: { chatId: string; principal: P; id: string }): Promise<boolean> {

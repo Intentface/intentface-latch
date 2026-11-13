@@ -23,6 +23,7 @@ export function memoryStorage<P = { orgId: string }>() {
   const attempted = new Map<string, number>();
   let looks = 0;
   const n = { get next() { return ++seq; } };
+  const put = (chatId: string, list: QueuedInput[]) => (list.length ? queued.set(chatId, list) : queued.delete(chatId));
   const impl: Partial<StorageAdapter<P>> = {
     async createChat(_p, input) {
       const chat: ChatRecord = {
@@ -88,8 +89,9 @@ export function memoryStorage<P = { orgId: string }>() {
       if (!chats.has(chatId)) return false;
       const list = queued.get(chatId) ?? [];
       const at = list.findIndex((q) => q.message.id === message.id);
-      if (at >= 0) list[at] = { ...list[at]!, message };
-      else if (list.length >= cap) return false;
+      if (at >= 0) {
+        if (!list[at]!.takenBy) list[at] = { ...list[at]!, message };
+      } else if (list.filter((q) => !q.takenBy).length >= cap) return false;
       else list.push({ message, identity: p, createdAt: Date.now() });
       queued.set(chatId, list);
       return true;
@@ -108,10 +110,20 @@ export function memoryStorage<P = { orgId: string }>() {
     },
     async removeQueuedInputs(chatId, ids) {
       const list = queued.get(chatId) ?? [];
-      const rest = list.filter((q) => !ids.includes(q.message.id));
-      if (rest.length) queued.set(chatId, rest);
-      else queued.delete(chatId);
-      return list.filter((q) => ids.includes(q.message.id)).map((q) => q.message.id);
+      const gone = list.filter((q) => ids.includes(q.message.id) && !q.takenBy);
+      put(chatId, list.filter((q) => !gone.includes(q)));
+      return gone.map((q) => q.message.id);
+    },
+    async takeQueuedInputs(chatId, runId) {
+      const list = (queued.get(chatId) ?? []).map((q) => ({ ...q, takenBy: runId }));
+      put(chatId, list);
+      return [...list];
+    },
+    async returnQueuedInputs(chatId, runId) {
+      put(chatId, (queued.get(chatId) ?? []).map((q) => (q.takenBy === runId ? { ...q, takenBy: undefined } : q)));
+    },
+    async finishQueuedInputs(chatId, runId) {
+      put(chatId, (queued.get(chatId) ?? []).filter((q) => q.takenBy !== runId));
     },
   };
   const storage = impl as StorageAdapter<P>;

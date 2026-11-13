@@ -76,6 +76,8 @@ export const queuedInputs = sqliteTable(
     createdAt: integer("created_at").notNull(),
     /** When the cron tick last looked at this chat's held inputs. */
     attemptedAt: integer("attempted_at"),
+    /** The run answering it (StorageAdapter.takeQueuedInputs); NULL while it waits. */
+    takenBy: text("taken_by"),
   },
   (t) => [primaryKey({ columns: [t.chatId, t.id] }), uniqueIndex("latch_queued_inputs_chat_seq_idx").on(t.chatId, t.seq)],
 );

@@ -788,6 +788,44 @@ function checks<P>(): ConformanceCheck<P>[] {
       },
     },
     {
+      name: "a run takes everything held in one step, and what it took is no longer waiting",
+      async run({ store, principals: [me] }) {
+        if (!store.enqueueInput || !store.listQueuedInputs || !store.removeQueuedInputs) return;
+        if (!store.takeQueuedInputs || !store.returnQueuedInputs || !store.finishQueuedInputs) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const scope = { ownerKey: chat.owner };
+        await store.enqueueInput(me, chat.id, msg("q1"), { cap: 2 });
+        await store.enqueueInput(me, chat.id, msg("q2"), { cap: 2 });
+        await store.enqueueInput(me, chat.id, msg("q2", "revised"), { cap: 2 });
+
+        const taken = await store.takeQueuedInputs(chat.id, "run_1", scope);
+        check(taken.map((q) => q.message.id).join() === "q1,q2", `everything held, in arrival order (${taken.map((q) => q.message.id).join()})`);
+        check((taken[1]!.message.parts[0] as { text?: string }).text === "revised", "as last replaced");
+        check((await store.listQueuedInputs(me, chat.id)).every((q) => q.takenBy === "run_1"), "listed as taken by that run");
+        check((await store.removeQueuedInputs(chat.id, ["q1"], scope)).length === 0, "one being answered can't be taken back");
+        check(await store.enqueueInput(me, chat.id, msg("q2", "too late"), { cap: 2 }), "a retry of one being answered is accepted");
+        check(await store.enqueueInput(me, chat.id, msg("q3"), { cap: 2 }), "and there is room again: taken ones don't count");
+        check(await store.enqueueInput(me, chat.id, msg("q4"), { cap: 2 }), "up to the cap");
+        check(!(await store.enqueueInput(me, chat.id, msg("q5"), { cap: 2 })), "and no further");
+
+        await store.finishQueuedInputs(chat.id, "run_1", scope);
+        const left = await store.listQueuedInputs(me, chat.id);
+        check(left.map((q) => q.message.id).join() === "q3,q4" && left.every((q) => !q.takenBy), "finishing removes what the run took, and only that");
+
+        // A turn that could not start gives them back, in their places.
+        await store.takeQueuedInputs(chat.id, "run_2", scope);
+        await store.returnQueuedInputs(chat.id, "run_2", scope);
+        const back = await store.listQueuedInputs(me, chat.id);
+        check(back.map((q) => q.message.id).join() === "q3,q4" && back.every((q) => !q.takenBy), "returned inputs wait again, in order");
+        check((await store.removeQueuedInputs(chat.id, ["q3"], scope)).join() === "q3", "and can be taken back again");
+
+        // A run that died holding some: the next run to take gets them too.
+        await store.takeQueuedInputs(chat.id, "run_dead", scope);
+        const next = await store.takeQueuedInputs(chat.id, "run_3", scope);
+        check(next.map((q) => q.message.id).join() === "q4" && next[0]!.takenBy === "run_3", "a later run takes what a dead one held");
+      },
+    },
+    {
       name: "a chat never holds more inputs than the cap",
       async run({ store, principals: [me] }) {
         if (!store.enqueueInput || !store.listQueuedInputs) return;
@@ -803,6 +841,13 @@ function checks<P>(): ConformanceCheck<P>[] {
         const kept = await store.listQueuedInputs(me, busy.id);
         check(kept.length <= 3, `the cap holds under concurrent calls (${kept.length})`);
         check(kept.length === results.filter(Boolean).length, "and every call told accepted is held");
+        // The same new id twice at once, for the last place: both are told it is held.
+        const last = await store.createChat(me, { agent: "a" });
+        await store.enqueueInput(me, last.id, msg("l1"), { cap: 2 });
+        const twice = await Promise.all([0, 1].map(() => store.enqueueInput!(me, last.id, msg("l2"), { cap: 2 })));
+        check(twice.every(Boolean), `a retry racing its first call is accepted, not refused as full (${twice.join()})`);
+        check((await store.listQueuedInputs(me, last.id)).length === 2, "and held once");
+        check(await store.enqueueInput(me, last.id, msg("l2", "again"), { cap: 2 }), "a retry of one held is accepted on a full queue");
       },
     },
     {

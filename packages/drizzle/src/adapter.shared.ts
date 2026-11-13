@@ -474,6 +474,13 @@ export function makeStorageAdapter<P>(
     return { chats: chats.length, messages: messages.length, runs: runs.length };
   }
 
+  const rowToQueued = (r: any): QueuedInput => ({
+    message: r.message as AppMessage,
+    identity: r.identity ?? undefined,
+    createdAt: Number(r.createdAt),
+    ...(r.takenBy ? { takenBy: r.takenBy as string } : {}),
+  });
+
   /**
    * The held-input queue (StorageAdapter.enqueueInput and its companions).
    * Arrival order is a per-chat `seq`, computed inside the INSERT like a
@@ -481,16 +488,26 @@ export function makeStorageAdapter<P>(
    */
   const queueMethods = (
     q: any,
-  ): Pick<StorageAdapter<P>, "enqueueInput" | "listQueuedInputs" | "removeQueuedInputs" | "listChatsWithQueuedInputs"> => ({
+  ): Pick<
+    StorageAdapter<P>,
+    | "enqueueInput"
+    | "listQueuedInputs"
+    | "removeQueuedInputs"
+    | "takeQueuedInputs"
+    | "returnQueuedInputs"
+    | "finishQueuedInputs"
+    | "listChatsWithQueuedInputs"
+  > => ({
     async enqueueInput(principal, chatId, message, { cap }) {
       if (!(await getChat(principal, chatId))) return false;
       const here = and(eq(q.chatId, chatId), eq(q.id, message.id));
       const nextSeq = sql`(select coalesce(max(${q.seq}), -1) + 1 from ${q} where ${q.chatId} = ${chatId})`;
-      // The chat's id when the chat exists AND holds fewer than `cap`; NULL
-      // otherwise, which the NOT NULL column refuses. Admission is part of
-      // the insert itself: an input over the cap, or for a chat deleted since
-      // the check above, is never stored, not even for a moment.
-      const admitted = sql`(select ${s.chats.id} from ${s.chats} where ${s.chats.id} = ${chatId} and (select count(*) from ${q} where ${q.chatId} = ${chatId}) < ${cap})`;
+      // The chat's id when the chat exists AND fewer than `cap` inputs wait
+      // (ones a run has taken don't count); NULL otherwise, which the NOT
+      // NULL column refuses. Admission is part of the insert itself: an
+      // input over the cap, or for a chat deleted since the check above, is
+      // never stored, not even for a moment.
+      const admitted = sql`(select ${s.chats.id} from ${s.chats} where ${s.chats.id} = ${chatId} and (select count(*) from ${q} where ${q.chatId} = ${chatId} and ${q.takenBy} is null) < ${cap})`;
       const insert = (exec: any) =>
         exec.insert(q).values({
           chatId: admitted as unknown as string,
@@ -500,11 +517,14 @@ export function makeStorageAdapter<P>(
           seq: nextSeq as unknown as number,
           createdAt: Date.now(),
         });
+      /** Already held under this id: replaced in place while it waits, left alone once a run has it. */
+      const alreadyHeld = async (): Promise<boolean> => {
+        const waiting: any[] = await db.update(q).set({ message }).where(and(here, isNull(q.takenBy))).returning({ id: q.id });
+        if (waiting.length) return true;
+        return ((await db.select({ id: q.id }).from(q).where(here)) as any[]).length > 0;
+      };
       for (let attempt = 0; ; attempt++) {
-        // A retry of one already held replaces it in place, keeping its turn
-        // in line. It was admitted when it was first held.
-        const held: any[] = await db.update(q).set({ message }).where(here).returning({ id: q.id });
-        if (held.length) return true;
+        if (await alreadyHeld()) return true;
         try {
           if (opts.lockFencedRun) {
             // Postgres: each statement counts on its own snapshot, so two
@@ -519,8 +539,9 @@ export function makeStorageAdapter<P>(
           }
           return true;
         } catch (error) {
-          // Full, or the chat is gone.
-          if (isNotNullViolation(error)) return false;
+          // Full, or the chat is gone. Unless a call with this same id took
+          // the last place while this one waited: then it is held.
+          if (isNotNullViolation(error)) return alreadyHeld();
           // A retry of this one landed first, or (SQLite over a network)
           // another input took this seq: go again.
           if (!isUniqueViolation(error) || attempt >= 8) throw error;
@@ -531,23 +552,36 @@ export function makeStorageAdapter<P>(
     async listQueuedInputs(principal, chatId) {
       if (!(await getChat(principal, chatId))) return [];
       const rows: any[] = await db.select().from(q).where(eq(q.chatId, chatId)).orderBy(asc(q.seq));
-      return rows.map(
-        (r): QueuedInput => ({
-          message: r.message as AppMessage,
-          identity: r.identity ?? undefined,
-          createdAt: Number(r.createdAt),
-        }),
-      );
+      return rows.map(rowToQueued);
     },
 
     async removeQueuedInputs(chatId, ids, scope) {
       await checkOwner("chat", chatId, scope);
       if (ids.length === 0) return [];
+      // Only ones still waiting: what a run has taken is being answered.
       const gone: any[] = await db
         .delete(q)
-        .where(and(eq(q.chatId, chatId), inArray(q.id, ids)))
+        .where(and(eq(q.chatId, chatId), inArray(q.id, ids), isNull(q.takenBy)))
         .returning({ id: q.id });
       return gone.map((r) => r.id as string);
+    },
+
+    async takeQueuedInputs(chatId, runId, scope) {
+      await checkOwner("chat", chatId, scope);
+      // Every row of the chat, also ones an earlier run took: the caller is
+      // the chat's one live run, so that run is over. One statement.
+      const rows: any[] = await db.update(q).set({ takenBy: runId }).where(eq(q.chatId, chatId)).returning();
+      return rows.sort((a, b) => Number(a.seq) - Number(b.seq)).map(rowToQueued);
+    },
+
+    async returnQueuedInputs(chatId, runId, scope) {
+      await checkOwner("chat", chatId, scope);
+      await db.update(q).set({ takenBy: null }).where(and(eq(q.chatId, chatId), eq(q.takenBy, runId)));
+    },
+
+    async finishQueuedInputs(chatId, runId, scope) {
+      await checkOwner("chat", chatId, scope);
+      await db.delete(q).where(and(eq(q.chatId, chatId), eq(q.takenBy, runId)));
     },
 
     async listChatsWithQueuedInputs({ heldBefore, limit }) {
@@ -571,7 +605,10 @@ export function makeStorageAdapter<P>(
       const oldest = new Map<string, unknown>();
       for (const r of rows) if (!oldest.has(r.chatId)) oldest.set(r.chatId, r.identity ?? undefined);
       // Looked at now: the next call starts with the chats this one left out.
-      await db.update(q).set({ attemptedAt: Date.now() }).where(inArray(q.chatId, ids));
+      // Later than every earlier look, also within one millisecond.
+      const latest: any[] = await db.select({ at: sql`max(${q.attemptedAt})` }).from(q);
+      const stamp = Math.max(Date.now(), Number(latest[0]?.at ?? 0) + 1);
+      await db.update(q).set({ attemptedAt: stamp }).where(inArray(q.chatId, ids));
       return ids.map((chatId) => ({ chatId, identity: oldest.get(chatId) }));
     },
   });

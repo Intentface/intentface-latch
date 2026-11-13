@@ -640,7 +640,7 @@ export interface StorageAdapter<P> {
    */
   deleteChats?(principal: P, ids: string[]): Promise<string[]>;
 
-  // queued input (optional as a set: implement all three or none)
+  // queued input (optional as a set: the first six, or none)
   /**
    * OPTIONAL. Hold a message for a chat that can't take it now (an answer is
    * running): the turn that ends starts the next one with everything held.
@@ -649,34 +649,53 @@ export interface StorageAdapter<P> {
    * Scoped: a chat that isn't the caller's stores nothing and returns `false`.
    * So does a chat that was deleted while the call ran: nothing is held for
    * a chat that is gone. Stores the principal as the input's `identity`,
-   * like a run does. Upserts by `(chatId, message.id)`, keeping the first
-   * arrival's place. Returns
-   * `false`, storing nothing, when the chat already holds `cap` inputs. The
-   * check is part of the write: an input over the cap is never stored, even
-   * for a moment (a turn could take it before it was refused), and calls at
-   * once never leave the chat holding more than `cap`.
+   * like a run does.
    *
-   * Without these three, a message sent to a busy chat is refused
+   * A message id already held is replaced in place, keeping its place in
+   * line, and returns `true` whatever the cap. One a run has taken
+   * (`takeQueuedInputs`) is left as the run took it, and returns `true`: it
+   * is being answered.
+   *
+   * A new id returns `false`, storing nothing, when the chat already holds
+   * `cap` inputs that no run has taken. The check is part of the write: an
+   * input over the cap is never stored, even for a moment, and calls at once
+   * never leave the chat holding more than `cap`.
+   *
+   * Without the queue, a message sent to a busy chat is refused
    * (`ChatBusyError`) and a signal waits for the user's next message.
    */
   enqueueInput?(principal: P, chatId: string, message: AppMessage, opts: { cap: number }): Promise<boolean>;
   /**
    * OPTIONAL. Scoped read of a chat's held inputs, in the order they arrived
    * (an order of its own, not the timestamp: two can share a millisecond).
+   * Includes the ones a run has taken, marked with `takenBy`.
    */
   listQueuedInputs?(principal: P, chatId: string): Promise<QueuedInput[]>;
   /**
-   * OPTIONAL. Remove held inputs by message id; returns the ids that were
-   * there. One statement: a run taking the inputs it answers and a
-   * cancellation both call this, and exactly one of them must get each
-   * input. Deleting a chat (`deleteChats`, `purgeOwner`) removes its held
-   * inputs too, in the same transaction.
+   * OPTIONAL. Take held inputs back by message id (a cancellation); returns
+   * the ids removed. Only ones no run has taken: an input being answered
+   * can't be taken back. Deleting a chat (`deleteChats`, `purgeOwner`)
+   * removes its held inputs too, in the same transaction.
    */
   removeQueuedInputs?(chatId: string, ids: string[], scope?: OwnerScope<P>): Promise<string[]>;
   /**
+   * OPTIONAL. Mark every input held for the chat as taken by `runId`, in one
+   * statement, and return them as they are at that moment, in arrival order.
+   * The runtime calls it only while `runId` is the chat's one live run, so
+   * it takes inputs another run had taken too: that run is over. From here
+   * to `finishQueuedInputs` or `returnQueuedInputs`, these inputs are not
+   * waiting: they don't count against the cap, can't be removed, and a
+   * retry of one doesn't change it.
+   */
+  takeQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<QueuedInput[]>;
+  /** OPTIONAL. Put the inputs `runId` took back in line, untaken (its turn could not start). */
+  returnQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<void>;
+  /** OPTIONAL. Delete the inputs `runId` took (they are in the conversation now). */
+  finishQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<void>;
+  /**
    * OPTIONAL system op (no principal): the chats holding an input that was
-   * held before `heldBefore` (epoch ms), at most `limit` chats, each with
-   * the `identity` of its oldest held input. The cron tick uses it to start
+   * held before `heldBefore` (epoch ms), taken by a run or not, at most
+   * `limit` chats, each with the `identity` of its oldest held input. The cron tick uses it to start
    * the turn for inputs nobody did (the process that should have died
    * first). It marks the chats it returns as looked at, and returns the ones
    * looked at longest ago first: chats that can't start a turn (waiting on a
@@ -766,6 +785,8 @@ export interface QueuedInput {
   /** The serialized principal that sent it, like `RunRecord.identity`. */
   identity?: unknown;
   createdAt: number;
+  /** The run answering it (`takeQueuedInputs`). Absent while it waits. */
+  takenBy?: string;
 }
 
 /**
