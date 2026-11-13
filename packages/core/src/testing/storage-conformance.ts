@@ -754,6 +754,27 @@ function checks<P>(): ConformanceCheck<P>[] {
       },
     },
     {
+      name: "chats with inputs held for a while are listed for the cron tick, longest-waiting first",
+      async run({ store, principals: [me, other] }) {
+        if (!store.enqueueInput || !store.listChatsWithQueuedInputs || !store.removeQueuedInputs) return;
+        const first = await store.createChat(me, { agent: "a" });
+        const second = await store.createChat(other, { agent: "a" });
+        await store.enqueueInput(me, first.id, msg("q1"), { cap: 5 });
+        await new Promise((r) => setTimeout(r, 5));
+        await store.enqueueInput(me, first.id, msg("q2"), { cap: 5 });
+        await store.enqueueInput(other, second.id, msg("q3"), { cap: 5 });
+        const later = Date.now() + 1000;
+        const held = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 10 });
+        check(held.map((h) => h.chatId).join() === [first.id, second.id].join(), "one row per chat, across owners, oldest first");
+        check(held[0]!.identity !== undefined, "with the identity of its oldest input");
+        check((await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 1 })).length === 1, "limit counts chats");
+        check((await store.listChatsWithQueuedInputs({ heldBefore: 1, limit: 10 })).length === 0, "nothing held before then");
+        await store.removeQueuedInputs(first.id, ["q1", "q2"], { ownerKey: first.owner });
+        const rest = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 10 });
+        check(rest.map((h) => h.chatId).join() === second.id, "a chat with nothing held is not listed");
+      },
+    },
+    {
       name: "a chat never holds more inputs than the cap",
       async run({ store, principals: [me] }) {
         if (!store.enqueueInput || !store.listQueuedInputs) return;

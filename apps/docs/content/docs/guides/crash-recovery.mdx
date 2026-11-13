@@ -22,11 +22,11 @@ What happens:
 4. **Reap** — a later `sweep()` (or `cron()`) finds runs whose lease has expired, marks them `errored`, clears the owner and bumps the fencing token (invalidating any zombie holder).
 5. **Resume** — `resume(runId)` reclaims the run under a fresh lease, then reads the tail of persisted history to decide what it needs. A turn whose last step called no tool had already finished, so its row is reconciled (`completed`, or `awaiting_input` when a gate is pending) with no model call. Anything else re-runs from history and completes server-side.
 
-Point any cron at `cron()` — it fires due schedules, then reaps and resumes in one call:
+Point any cron at `cron()` — it fires due schedules, reaps and resumes, and starts the turn for [held inputs](/docs/guides/queue) nobody started one for, in one call:
 
 ```ts title="The whole operational wiring"
 await runtime.cron({ maxAttempts: 5 });
-// → { due: {…}, reaped: RunRecord[], resumed: RunOutcome[], errors: string[] }
+// → { due: {…}, reaped: RunRecord[], resumed: RunOutcome[], held: number, errors: string[] }
 ```
 
 `maxAttempts` (default 5) is the poison-run cap: a run that keeps dying stops being retried instead of looping forever. `sweep()` is the reap-and-resume half on its own, and `resume(runId)` reclaims and re-runs one run — for when you want the pieces separately.

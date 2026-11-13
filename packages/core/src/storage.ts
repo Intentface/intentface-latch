@@ -666,6 +666,15 @@ export interface StorageAdapter<P> {
    */
   removeQueuedInputs?(chatId: string, ids: string[], scope?: OwnerScope<P>): Promise<string[]>;
   /**
+   * OPTIONAL system op (no principal): the chats holding an input that was
+   * held before `heldBefore` (epoch ms), longest-waiting first, at most
+   * `limit` chats, each with the `identity` of its oldest held input. The
+   * cron tick uses it to start the turn for inputs nobody did (the process
+   * that should have died first). Without it, such inputs wait until
+   * something else happens in their chat.
+   */
+  listChatsWithQueuedInputs?(opts: { heldBefore: number; limit: number }): Promise<Array<{ chatId: string; identity?: unknown }>>;
+  /**
    * OPTIONAL system op (no principal): delete everything stored for an owner
    * path. That's every row whose owner key is `encodeOwnerKey(segments)` or
    * starts with it plus `/` (see `isUnderOwner`): `["t1"]` covers `t1` and

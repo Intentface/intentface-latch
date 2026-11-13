@@ -124,7 +124,7 @@ await runtime.schedule({
 
 ## cron
 
-The one function to call on a timer, every minute or so. It fires due schedules and, with `durability` on, resumes interrupted runs. Safe to call from every server at once.
+The one function to call on a timer, every minute or so. It fires due schedules, resumes interrupted runs (with `durability` on), and starts the turn for [held inputs](/docs/guides/queue) that waited more than 15 seconds with nobody starting one; `held` counts those turns. Safe to call from every server at once.
 
 ```ts
 // app/api/cron/route.ts — called by your platform's cron every minute

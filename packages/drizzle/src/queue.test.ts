@@ -66,6 +66,49 @@ function answering(answers: string[]) {
   });
 }
 
+describe.each(adapters)("the input queue with crash recovery on (%s)", (_name, open) => {
+  const runtimeOn = (storage: StorageAdapter<P>, model: MockLanguageModelV4) =>
+    createRuntime<P>({
+      storage,
+      durability: { enabled: true, heartbeatMs: 5, leaseTtlMs: 60_000 },
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: { a: defineAgent<P>({ model, instructions: "Be brief." }) },
+    });
+
+  it("answers what is held as a leased run of its own", async () => {
+    const storage = await open();
+    const model = answering(["a1", "a2"]);
+    const runtime = runtimeOn(storage, model);
+    const live = await runtime.handleChat({ agent: "a", principal: me, chatId: "c1", message: user("q1", "u1") });
+    expect((await runtime.handleChat({ agent: "a", principal: me, chatId: "c1", message: user("q2", "u2"), ifBusy: "queue" })).status).toBe(202);
+    await live.text();
+
+    expect((await storage.loadMessages(me, "c1")).map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    const runs = await storage.listRuns(me, { chatId: "c1" });
+    expect(runs.map((r) => r.status)).toEqual(["completed", "completed"]);
+    // Each was a leased run of its own.
+    expect(runs.every((r) => r.fencingToken === 1)).toBe(true);
+    expect(new Set(runs.map((r) => r.id)).size).toBe(2);
+  });
+
+  it("starts the turn from the cron tick when the process that held the input is gone", async () => {
+    const storage = await open();
+    const model = answering(["a1", "a2"]);
+    const first = runtimeOn(storage, model);
+    await (await first.handleChat({ agent: "a", principal: me, chatId: "c1", message: user("q1", "u1") })).text();
+    // Held by a process that died before it could start the turn.
+    await storage.enqueueInput!(me, "c1", user("q2", "u2"), { cap: 20 });
+
+    // Another server's tick, later.
+    const second = runtimeOn(storage, model);
+    const tick = await second.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(1);
+    expect(tick.errors).toEqual([]);
+    expect((await storage.loadMessages(me, "c1")).map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(await storage.listQueuedInputs!(me, "c1")).toEqual([]);
+  });
+});
+
 describe.each(adapters)("the input queue (%s)", (_name, open) => {
   it("holds what arrives mid-answer and answers it in one turn when that answer ends", async () => {
     const storage = await open();

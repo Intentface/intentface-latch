@@ -105,8 +105,29 @@ useEffect(() => {
 
 `sendMessage` expects a stream back, so use it only when the chat is free. While `status` is not `ready`, or `chat.running` is true, send with the `fetch` call above and render `chat.queued` below the conversation.
 
+## Who runs the next turn
+
+The process that wrote the answer that just ended. Two things follow from that.
+
+**Give the runtime `waitUntil`.** The next turn has to outlive the response that was open:
+
+```ts
+import { waitUntil } from "@vercel/functions"; // or your host's equivalent
+
+createRuntime({
+  // …
+  waitUntil, // on a long-running server: (work) => void work
+});
+```
+
+With it, the page's stream closes when its own answer is done, the page is ready again, and polling shows the next answer as it is written. A held message's `202` comes back at once.
+
+Without it, Latch keeps the open stream open, with nothing on it, until the next turn is finished. That works on every host, since an open response is what keeps a function alive, but the page shows "answering" for both turns and gets the second answer only when the stream closes.
+
+**Call `runtime.cron()`.** If that process dies before it starts the next turn, the cron tick does: it picks up inputs that have waited more than 15 seconds with nobody starting a turn for them. Its result counts them as `held`. A chat that is busy, or waiting on a person, is left alone.
+
 ## What it doesn't do yet
 
-- **Stream the next turn to the page.** The answer to a held message arrives by polling. The stream the page had open stays open until that answer is finished, then closes.
-- **Recover on its own after a crash.** If the process that should start the next turn dies first, what is waiting stays held until another turn in that chat ends, or another input is held for it.
+- **Stream the next turn to the page.** The answer to a held message arrives by polling, step by step.
 - **Expire.** A held input waits as long as it takes, for example behind an approval nobody answers.
+- **Poll cheaply on long chats.** Each poll reads the whole history on the server to tell whether it changed; only the response is small.

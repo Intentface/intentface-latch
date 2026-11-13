@@ -46,8 +46,8 @@ interface StorageAdapter<P> {
   claimDueSchedules, completeSchedule
   // Deletion (optional)
   deleteChats, purgeOwner
-  // Held inputs (optional, all three or none)
-  enqueueInput, listQueuedInputs, removeQueuedInputs
+  // Held inputs (optional, the first three or none)
+  enqueueInput, listQueuedInputs, removeQueuedInputs, listChatsWithQueuedInputs
 }
 ```
 
@@ -148,6 +148,7 @@ Optional, as a set. Without them a message sent to a busy chat is refused with `
 - **`enqueueInput(principal, chatId, message, { cap })`** holds a message for a chat, apart from `loadMessages`. It is scoped: a chat that isn't the caller's stores nothing and returns `false`. It stores the principal as the input's `identity`, as a run does. A message id already held is replaced in place. It returns `false`, storing nothing, when the chat already holds `cap` inputs; two callers racing for the last place may both be refused, but the chat never holds more.
 - **`listQueuedInputs(principal, chatId)`** returns them oldest first, each with its `identity` and `createdAt`.
 - **`removeQueuedInputs(chatId, ids, scope)`** removes by message id and returns the ids that were there.
+- **`listChatsWithQueuedInputs({ heldBefore, limit })`** is a system call with no principal, for the cron tick: the chats holding an input from before `heldBefore`, longest-waiting first, each with the `identity` of its oldest held input. Optional on its own; without it, an input whose process died before starting its turn waits until something else happens in its chat.
 - **Deleting a chat removes its held inputs**, in `deleteChats` and `purgeOwner`.
 
 The runtime adds a held input to the history itself when its turn opens, and removes it from the queue after. Your adapter never moves one.

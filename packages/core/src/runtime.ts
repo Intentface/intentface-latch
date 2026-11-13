@@ -423,6 +423,18 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   inputQueue?: { max?: number };
   /**
+   * Keeps the process alive for work that outlives a response, such as
+   * `waitUntil` from `@vercel/functions` or a Cloudflare `ctx.waitUntil`. On
+   * a long-running server, `(work) => void work` is enough.
+   *
+   * With it, the turn for held inputs (see `inputQueue`) runs after the
+   * response has ended: the answer's stream closes when that answer is done,
+   * and a message that was held is answered `202` at once. Without it, the
+   * stream stays open, and silent, until the held turn is done, because an
+   * open response is the only thing that keeps every host alive.
+   */
+  waitUntil?: (work: Promise<unknown>) => void;
+  /**
    * Observes runs: tracing, per-step and per-run callbacks. Use
    * `@intentface/latch-otel` for full tracing, or only the callbacks you
    * need (usage dashboards, alerts when a scheduled run waits on a person).
@@ -967,8 +979,9 @@ export interface Runtime<P> {
     errors: string[];
   }>;
   /**
-   * The one function to call on a timer: fires due schedules, then (with
-   * `durability`) resumes interrupted runs. Call it every minute or so from a
+   * The one function to call on a timer: fires due schedules, (with
+   * `durability`) resumes interrupted runs, and starts the turn for inputs
+   * that were held with nobody left to start it. Call it every minute or so from a
    * cron route, or with `createIntervalScheduler`. Safe to call from every
    * server at once. Failures are returned in `errors`, never thrown.
    */
@@ -981,6 +994,8 @@ export interface Runtime<P> {
     due: RunDueResult;
     reaped: RunRecord[];
     resumed: RunOutcome[];
+    /** Turns started for inputs held more than 15 seconds with nobody starting one (see `inputQueue`). */
+    held: number;
     /** What failed, as `"runDue: …"` or `"sweep: …"`. */
     errors: string[];
   }>;
@@ -3400,10 +3415,14 @@ export function createRuntime<P, RC = unknown>(
     // the full message (the model's abort is tied to the lease, not the
     // request, so a disconnect doesn't cancel generation).
     let out = stream as ReadableStream<unknown>;
-    if (args.drain !== false && queueOn) {
-      // Held inputs get their turn before this stream closes: the process is
-      // alive for as long as something reads it, also on a serverless host.
-      // Nothing of that turn is written here; it is in the history after.
+    if (args.drain !== false && queueOn && config.waitUntil) {
+      // Held inputs get their turn once this run is settled, after the response.
+      config.waitUntil(settled.then(() => startHeld(resolvedChatId, principal)));
+    } else if (args.drain !== false && queueOn) {
+      // No way to outlive the response: held inputs get their turn before
+      // this stream closes. The process is alive for as long as something
+      // reads it, also on a serverless host. Nothing of that turn is written
+      // here; it is in the history after.
       out = out.pipeThrough(
         new TransformStream<unknown, unknown>({
           transform: (chunk, controller) => controller.enqueue(chunk),
@@ -3412,10 +3431,7 @@ export function createRuntime<P, RC = unknown>(
               settled.then(() => true),
               new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 60_000)),
             ]);
-            if (!done) return;
-            await drainQueue(resolvedChatId, principal).catch((e) =>
-              console.error(`[queue] couldn't start the turn for inputs held in chat ${resolvedChatId}:`, e),
-            );
+            if (done) await startHeld(resolvedChatId, principal);
           },
         }),
       );
@@ -3757,9 +3773,7 @@ export function createRuntime<P, RC = unknown>(
       }
       // The answer may have ended between the refusal and the enqueue, with
       // nobody left to look at the queue: look once ourselves.
-      await drainQueue(resolvedChatId, principal).catch((err) =>
-        console.error(`[queue] couldn't start the turn for inputs held in chat ${resolvedChatId}:`, err),
-      );
+      await afterResponse(startHeld(resolvedChatId, principal));
       return new Response(JSON.stringify({ queued: { id: userMessage.id } }), {
         status: 202,
         headers: { "content-type": "application/json" },
@@ -4061,6 +4075,7 @@ export function createRuntime<P, RC = unknown>(
     due: RunDueResult;
     reaped: RunRecord[];
     resumed: RunOutcome[];
+    held: number;
     errors: string[];
   }> {
     const errors: string[] = [];
@@ -4091,7 +4106,14 @@ export function createRuntime<P, RC = unknown>(
         errors.push(`limits.prune: ${describe(e)}`);
       }
     }
-    return { due, reaped, resumed, errors };
+    // Held inputs nobody started a turn for (see `startStrandedInputs`).
+    let held = 0;
+    try {
+      held = await startStrandedInputs(opts?.now ?? Date.now());
+    } catch (e) {
+      errors.push(`held inputs: ${describe(e)}`);
+    }
+    return { due, reaped, resumed, held, errors };
   }
 
   async function applyApproval({
@@ -4573,9 +4595,7 @@ export function createRuntime<P, RC = unknown>(
           (await storage.enqueueInput!(principal, chatId, message(signal), { cap: queueMax }))
         ) {
           // The answer may have ended meanwhile, with nobody left to look.
-          await drainQueue(chatId, principal).catch((err) =>
-            console.error(`[queue] couldn't start the turn for inputs held in chat ${chatId}:`, err),
-          );
+          await afterResponse(startHeld(chatId, principal));
           return { id: messageId, queued: true };
         }
       }
@@ -4995,11 +5015,7 @@ export function createRuntime<P, RC = unknown>(
     };
     // Whatever arrived while this turn ran gets its own now. This turn's
     // result is already read, so that one's answer isn't taken for it.
-    if (!o.noDrain && !parked) {
-      await drainQueue(chatId, o.principal).catch((e) =>
-        console.error(`[queue] couldn't start the turn for inputs held in chat ${chatId}:`, e),
-      );
-    }
+    if (!o.noDrain && !parked) await afterResponse(startHeld(chatId, o.principal));
     return result;
   }
 
@@ -5022,20 +5038,21 @@ export function createRuntime<P, RC = unknown>(
    * only with inputs that aren't in the history yet, so a crash or two
    * callers at once repeat nothing.
    */
-  async function drainQueue(chatId: string, principal: P): Promise<void> {
-    if (!queueOn) return;
+  async function drainQueue(chatId: string, principal: P): Promise<number> {
+    let started = 0;
+    if (!queueOn) return started;
     // Bounded: a chat that keeps receiving input can't hold this call forever.
     for (let round = 0; round < 20; round++) {
       const chat = await storage.getChat(principal, chatId);
-      if (!chat) return;
+      if (!chat) return started;
       const held = await storage.listQueuedInputs!(principal, chatId);
-      if (held.length === 0) return;
+      if (held.length === 0) return started;
       const remove = (ids: string[]) => storage.removeQueuedInputs!(chatId, ids, { ownerKey: chat.owner });
       const stored = new Set((await storage.loadMessages(principal, chatId)).map((m) => m.id));
       const stale = held.filter((q) => stored.has(q.message.id)).map((q) => q.message.id);
       if (stale.length > 0) await remove(stale);
       const fresh = held.filter((q) => !stored.has(q.message.id));
-      if (fresh.length === 0) return;
+      if (fresh.length === 0) return started;
 
       const users = fresh.filter((q) => !isSignal(q.message));
       const signals = fresh.filter((q) => isSignal(q.message)).map((q) => q.message);
@@ -5075,14 +5092,46 @@ export function createRuntime<P, RC = unknown>(
         if (e instanceof WaitingOnPerson && e.stored) {
           // Opened, then given up: they are in the history now, as signals that wait.
           await remove(fresh.map((q) => q.message.id));
-          return;
+          return started;
         }
         // Busy, waiting on a person, or over a limit: they stay held.
-        if (e instanceof WaitingOnPerson || isChatBusyError(e) || isLimitExceededError(e)) return;
+        if (e instanceof WaitingOnPerson || isChatBusyError(e) || isLimitExceededError(e)) return started;
         throw e;
       }
       await remove(fresh.map((q) => q.message.id));
+      started++;
     }
+    return started;
+  }
+
+  /** `drainQueue`, for callers with nobody to report a failure to. */
+  const startHeld = (chatId: string, principal: P): Promise<void> =>
+    drainQueue(chatId, principal).then(
+      () => undefined,
+      (e) => console.error(`[queue] couldn't start the turn for inputs held in chat ${chatId}:`, e),
+    );
+
+  /** Run `work` after the response where the host can (`waitUntil`), before it ends where it can't. */
+  const afterResponse = async (work: Promise<void>): Promise<void> => {
+    if (config.waitUntil) config.waitUntil(work);
+    else await work;
+  };
+
+  /**
+   * The cron tick's part: start the turn for inputs that have been held a
+   * while with nobody starting it (the process that should have died first).
+   * A chat that is busy or waiting on a person is left as it is.
+   */
+  async function startStrandedInputs(now: number): Promise<number> {
+    if (!queueOn || !storage.listChatsWithQueuedInputs) return 0;
+    let started = 0;
+    for (const { chatId, identity } of await storage.listChatsWithQueuedInputs({ heldBefore: now - 15_000, limit: 50 })) {
+      const principal = await reconstructPrincipal(identity);
+      // Refused: the sender may no longer act. Left for a person to look at.
+      if (!principal) continue;
+      started += await drainQueue(chatId, principal);
+    }
+    return started;
   }
 
   async function listQueued({ chatId, principal }: { chatId: string; principal: P }): Promise<AppMessage[]> {

@@ -94,6 +94,12 @@ export function memoryStorage<P = { orgId: string }>() {
     async listQueuedInputs(_p, chatId) {
       return [...(queued.get(chatId) ?? [])];
     },
+    async listChatsWithQueuedInputs({ heldBefore, limit }) {
+      return [...queued.entries()]
+        .filter(([, list]) => list.some((q) => q.createdAt < heldBefore))
+        .slice(0, limit)
+        .map(([chatId, list]) => ({ chatId, identity: list[0]!.identity }));
+    },
     async removeQueuedInputs(chatId, ids) {
       const list = queued.get(chatId) ?? [];
       queued.set(chatId, list.filter((q) => !ids.includes(q.message.id)));

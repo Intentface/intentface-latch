@@ -90,6 +90,8 @@ export interface TurnOptions {
   inputQueue?: { max?: number };
   /** `false`: a storage adapter without the input queue. */
   queue?: false;
+  /** `RuntimeConfig.waitUntil`. */
+  waitUntil?: (work: Promise<unknown>) => void;
 }
 
 export function harness(o: TurnOptions) {
@@ -105,6 +107,7 @@ export function harness(o: TurnOptions) {
     extensions: o.extensions,
     ...(o.notices ? { resolveNoticePlacement: () => o.notices! } : {}),
     ...(o.inputQueue ? { inputQueue: o.inputQueue } : {}),
+    ...(o.waitUntil ? { waitUntil: o.waitUntil } : {}),
     agents: {
       a: defineAgent<P>({
         model: o.model,

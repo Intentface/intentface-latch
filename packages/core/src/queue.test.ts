@@ -209,6 +209,53 @@ describe("a signal sent while the chat is busy", () => {
   });
 });
 
+describe("with waitUntil", () => {
+  it("closes the stream when its answer ends, and answers what is held after", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const background: Promise<unknown>[] = [];
+    const h = harness({ model, waitUntil: (work) => void background.push(work) });
+    const live = await open(h);
+    const res = await send(h, user("q2", "u2"));
+    expect(res.status).toBe(202);
+
+    await live.text();
+    // The page's stream is done; the held turn is the host's to keep alive.
+    await Promise.all(background);
+    expect(roles(stored(h))).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(model.doStreamCalls).toHaveLength(2);
+  });
+});
+
+describe("runtime.cron", () => {
+  it("starts the turn for inputs nobody started one for", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    // Held, and the process that would have started its turn is gone.
+    await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+
+    // Too fresh to be stranded: whoever held it may still be about to start it.
+    expect((await h.runtime.cron()).held).toBe(0);
+    const tick = await h.runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(1);
+    expect(tick.errors.filter((e) => e.startsWith("held inputs"))).toEqual([]);
+    expect(roles(stored(h))).toEqual(["user", "assistant", "user", "assistant"]);
+    expect((await h.runtime.cron({ now: Date.now() + 60_000 })).held).toBe(0);
+  });
+
+  it("leaves a chat that is waiting on a person alone", async () => {
+    const tools = { getTimezone: tool({ description: "The user's timezone.", inputSchema: z.object({}) }) };
+    const model = scripted([call("getTimezone"), text("Helsinki then.")]);
+    const h = harness({ model, tools });
+    await h.turn(user("what time is it for me?"));
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news" });
+    const tick = await h.runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(0);
+    expect(h.mem.queued.get("chat_1")).toHaveLength(1);
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+});
+
 describe("a storage adapter without the queue", () => {
   it("refuses a message and keeps a signal for the next one, as before", async () => {
     const model = scripted([text("a1")]);

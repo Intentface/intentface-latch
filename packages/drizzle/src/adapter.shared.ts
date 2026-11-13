@@ -473,7 +473,25 @@ export function makeStorageAdapter<P>(
   }
 
   /** The held-input queue (StorageAdapter.enqueueInput and its two companions). */
-  const queueMethods = (q: any): Pick<StorageAdapter<P>, "enqueueInput" | "listQueuedInputs" | "removeQueuedInputs"> => ({
+  const queueMethods = (
+    q: any,
+  ): Pick<StorageAdapter<P>, "enqueueInput" | "listQueuedInputs" | "removeQueuedInputs" | "listChatsWithQueuedInputs"> => ({
+    async listChatsWithQueuedInputs({ heldBefore, limit }) {
+      // Oldest rows first; a chat's first row here is its oldest held input.
+      const rows: any[] = await db
+        .select({ chatId: q.chatId, identity: q.identity })
+        .from(q)
+        .where(lt(q.createdAt, heldBefore))
+        .orderBy(asc(q.createdAt), asc(q.id))
+        .limit(limit * 20);
+      const chats = new Map<string, { chatId: string; identity?: unknown }>();
+      for (const r of rows) {
+        if (chats.size >= limit) break;
+        if (!chats.has(r.chatId)) chats.set(r.chatId, { chatId: r.chatId, identity: r.identity ?? undefined });
+      }
+      return [...chats.values()];
+    },
+
     async enqueueInput(principal, chatId, message, { cap }) {
       if (!(await getChat(principal, chatId))) return false;
       const here = and(eq(q.chatId, chatId), eq(q.id, message.id));
