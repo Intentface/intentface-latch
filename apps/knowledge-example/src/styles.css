@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/* Streamdown's own elements carry Tailwind classes. */
+@source "../node_modules/streamdown/dist/*.js";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-[#f5f5f6] font-sans text-zinc-900 antialiased dark:bg-[#131315] dark:text-zinc-100;
+  color-scheme: light dark;
+}
+
+/*
+ * The knowledge tree's rail, from the Nav docs demo (rail.css). The package
+ * publishes the signal (data-rail, data-branches, data-open); the geometry is
+ * ours. 15px hangs the rail under a 16px icon at px-2; 7px is its lane; 6px
+ * the elbow's radius; 2px bridges the gap between rows. --rail must be opaque.
+ */
+.kb-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    height 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 200ms ease-out;
+}
+.kb-nav [data-nav-list][data-starting-style],
+.kb-nav [data-nav-list][data-ending-style] {
+  height: 0;
+  opacity: 0;
+}
+.kb-nav [data-nav-list] > * {
+  flex-shrink: 0;
+}
+.kb-nav [data-nav-list][data-indent] {
+  --nav-row: 30px;
+  margin-top: 2px;
+  margin-left: 15px;
+  padding-left: 7px;
+}
+.kb-nav [data-nav-list][data-rail] > * {
+  position: relative;
+  overflow: visible;
+}
+.kb-nav [data-nav-list][data-rail] > *::before,
+.kb-nav [data-nav-list][data-rail] > *::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  border-color: var(--rail);
+  border-left-width: 1px;
+}
+.kb-nav [data-nav-list][data-rail] > *::before {
+  top: -2px;
+  width: 6px;
+  height: calc(var(--nav-row) / 2 + 2px);
+}
+.kb-nav [data-nav-list][data-rail] > *::after {
+  top: calc(var(--nav-row) / 2 - 6px);
+  bottom: -2px;
+}
+.kb-nav [data-nav-list][data-rail] > *:last-child::after {
+  display: none;
+}
+.kb-nav [data-nav-list][data-branches] > [data-nav-group]::before {
+  border-bottom-width: 1px;
+  border-bottom-left-radius: 6px;
+}
+
+/* The people list collapses the same way, without a rail. */
+.people-nav [data-nav-group] > [data-nav-list] {
+  height: var(--nav-list-height);
+  overflow: hidden;
+  transition: height 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.people-nav [data-nav-list][data-starting-style],
+.people-nav [data-nav-list][data-ending-style] {
+  height: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kb-nav [data-nav-group] > [data-nav-list],
+  .people-nav [data-nav-group] > [data-nav-list] {
+    transition: none;
+  }
+}

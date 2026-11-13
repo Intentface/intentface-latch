@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node", "vite/client"],
+    // Resolve workspace packages to their `src`, as the dev server does.
+    "customConditions": ["development"]
+  },
+  "include": ["src", "server", "vite.config.ts"]
+}

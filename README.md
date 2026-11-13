@@ -123,6 +123,8 @@ More in [Build with AI](https://intentface-latch-docs.vercel.app/docs/build-with
 @intentface/latch-channels       Slack, Telegram, WhatsApp on one turn kernel
 @intentface/latch-agent-builder  agent records as data + the builder agent
 @intentface/latch-otel           tracing over OpenTelemetry (Langfuse preset)
+@intentface/latch-knowledge      shared, per-org and personal knowledge in Postgres,
+                                 reached through file tools (experimental)
 @intentface/latch-net            SSRF-safe fetch for your own code
 
 apps/example                 runnable example + the smoke-test suite (not published)
