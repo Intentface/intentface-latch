@@ -732,13 +732,15 @@ function checks<P>(): ConformanceCheck<P>[] {
         if (!store.enqueueInput || !store.listQueuedInputs || !store.removeQueuedInputs) return;
         const chat = await store.createChat(me, { agent: "a" });
         const cap = { cap: 5 };
-        check(await store.enqueueInput(me, chat.id, msg("q1"), cap), "the first is held");
-        await new Promise((r) => setTimeout(r, 2));
-        check(await store.enqueueInput(me, chat.id, msg("q2"), cap), "and the second");
+        // Ids that sort against arrival, held in the same instant: arrival wins.
+        check(await store.enqueueInput(me, chat.id, msg("q1", "z"), cap), "the first is held");
+        check(await store.enqueueInput(me, chat.id, msg("a0", "a"), cap), "and the second");
+        check((await store.removeQueuedInputs(chat.id, ["a0"], { ownerKey: chat.owner })).join() === "a0", "one taken back");
+        check(await store.enqueueInput(me, chat.id, msg("q2"), cap), "and another held");
         check((await store.loadMessages(me, chat.id)).length === 0, "the conversation doesn't have them");
         const held = await store.listQueuedInputs(me, chat.id);
-        check(held.map((q) => q.message.id).join() === "q1,q2", `oldest first (${held.map((q) => q.message.id).join()})`);
-        check(held[0]!.message.role === "user" && (held[0]!.message.parts[0] as { text?: string }).text === "q1", "the message comes back as given");
+        check(held.map((q) => q.message.id).join() === "q1,q2", `in the order they arrived (${held.map((q) => q.message.id).join()})`);
+        check(held[0]!.message.role === "user" && (held[0]!.message.parts[0] as { text?: string }).text === "z", "the message comes back as given");
         check(held[0]!.identity !== undefined, "with the principal that sent it");
 
         check(await store.enqueueInput(me, chat.id, msg("q1", "again"), cap), "a retry of one held is accepted");
@@ -767,8 +769,19 @@ function checks<P>(): ConformanceCheck<P>[] {
         const held = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 10 });
         check(held.map((h) => h.chatId).join() === [first.id, second.id].join(), "one row per chat, across owners, oldest first");
         check(held[0]!.identity !== undefined, "with the identity of its oldest input");
-        check((await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 1 })).length === 1, "limit counts chats");
+        const many = await store.createChat(me, { agent: "a" });
+        for (let i = 0; i < 6; i++) await store.enqueueInput(me, many.id, msg(`m${i}`), { cap: 10 });
+        const all = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 3 });
+        check(all.length === 3, `limit counts chats, however many inputs each holds (${all.length})`);
+        await store.removeQueuedInputs(many.id, ["m0", "m1", "m2", "m3", "m4", "m5"], { ownerKey: many.owner });
         check((await store.listChatsWithQueuedInputs({ heldBefore: 1, limit: 10 })).length === 0, "nothing held before then");
+        // Each call marks what it returned as looked at, so a chat that can't
+        // start a turn (waiting on a person) never keeps the others out.
+        const turns = [
+          (await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 1 }))[0]?.chatId,
+          (await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 1 }))[0]?.chatId,
+        ];
+        check(new Set(turns).size === 2, `two calls of one chat each reach both chats (${turns.join()})`);
         await store.removeQueuedInputs(first.id, ["q1", "q2"], { ownerKey: first.owner });
         const rest = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 10 });
         check(rest.map((h) => h.chatId).join() === second.id, "a chat with nothing held is not listed");
@@ -795,6 +808,8 @@ function checks<P>(): ConformanceCheck<P>[] {
         await store.deleteChats(me, [chat.id]);
         const again = await store.createChat(me, { id: chat.id, agent: "a" });
         check((await store.listQueuedInputs(me, again.id)).length === 0, "a new chat under the same id starts with none");
+        await store.deleteChats(me, [again.id]);
+        check(!(await store.enqueueInput(me, chat.id, msg("q2"), { cap: 5 })), "nothing is held for a chat that is gone");
       },
     },
   ];

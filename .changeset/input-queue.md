@@ -8,6 +8,7 @@ An input queue: what arrives while an answer is running is held, and the answer 
 
 - `handleChat({ ifBusy: "queue" })`, or `queue: true` in the body of `POST agents/:agent/:chatId`: a message sent to a busy chat is held and answered `202 { queued: { id } }`, where it was refused with `chat_busy`. The default is unchanged.
 - `sendSignal` on a busy chat, or one waiting on an approval or tool result, now holds the signal and returns `{ id, queued: true }`; its turn starts when the chat is free. Before, it waited for the user's next message. `wake: false` is unchanged.
+- A held input is taken from the queue by the run that answers it, once that run is open: it is answered once however many workers go for it, it stops counting against the cap and leaves `listQueued` when its turn starts, and one taken back in time is never answered.
 - One turn takes everything held, signals read with the messages. A chat holds at most `inputQueue.max` inputs (20 by default); past it a message is refused with `QueueFullError` (`queue_full`, 429).
 - `runtime.listQueued`, `runtime.cancelQueued`, and `DELETE chats/:chatId/queue/:messageId`.
 - `runtime.pollChat` and `GET chats/:chatId/poll?cursor=…`: whether an answer is running, what is held, and the history when it changed. For a page with no stream open.

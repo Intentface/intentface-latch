@@ -42,7 +42,8 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS latch_runs_one_active_per_chat ON latch_runs (chat_id) WHERE status = 'active'`,
   `CREATE TABLE IF NOT EXISTS latch_queued_inputs (
      chat_id TEXT NOT NULL, id TEXT NOT NULL, message TEXT NOT NULL, identity TEXT,
-     created_at INTEGER NOT NULL, PRIMARY KEY (chat_id, id))`,
+     seq INTEGER NOT NULL, created_at INTEGER NOT NULL, attempted_at INTEGER, PRIMARY KEY (chat_id, id))`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS latch_queued_inputs_chat_seq_idx ON latch_queued_inputs (chat_id, seq)`,
   `CREATE TABLE IF NOT EXISTS latch_usage (
      id TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL,
      model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,

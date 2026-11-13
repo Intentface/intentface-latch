@@ -51,8 +51,15 @@ export const maxDuration = 300; // seconds: long enough for your longest answer
 
 export async function POST(req: Request) {
   const user = await requireUser(req);
-  const { id, message } = await req.json();
-  return runtime.handleChat({ agent: "assistant", chatId: id, principal: { orgId: user.orgId, userId: user.id }, message });
+  const { id, message, queue } = await req.json();
+  return runtime.handleChat({
+    agent: "assistant",
+    chatId: id,
+    principal: { orgId: user.orgId, userId: user.id },
+    message,
+    // `queue: true` from the page: hold the message if an answer is running.
+    ...(queue === true ? { ifBusy: "queue" as const } : {}),
+  });
 }
 ```
 

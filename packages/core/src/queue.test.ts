@@ -137,6 +137,68 @@ describe("a message sent while an answer is running", () => {
   });
 });
 
+describe("taking held inputs when their turn opens", () => {
+  it("frees their place in the queue while they are being answered", async () => {
+    const h: { current?: H } = {};
+    const base = scripted([text("a1"), text("a2"), text("a3")]);
+    let calls = 0;
+    let during: string[] | undefined;
+    const model = new MockLanguageModelV4({
+      modelId: "mock",
+      doStream: (async (o: never) => {
+        if (++calls === 2) {
+          // The one place is free again: the held message is being answered, not waiting.
+          await send(h.current!, user("q3", "u3"));
+          during = ids(await h.current!.runtime.listQueued({ chatId: "chat_1", principal }));
+        }
+        return (base.doStream as (o: never) => unknown)(o);
+      }) as never,
+    });
+    h.current = harness({ model, inputQueue: { max: 1 } });
+    const live = await open(h.current);
+    await send(h.current, user("q2", "u2"));
+    await live.text();
+    expect(during).toEqual(["u3"]);
+    expect(calls).toBe(3);
+  });
+
+  it("never answers one that was taken back just as its turn opened", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    const live = await open(h);
+    await send(h, user("q2", "u2"));
+    // The held turn's run opens, and in that instant the user takes the message back.
+    const createRun = h.mem.storage.createRun.bind(h.mem.storage);
+    let cancelled: boolean | undefined;
+    h.mem.storage.createRun = async (p, input) => {
+      const run = await createRun(p, input);
+      cancelled = await h.runtime.cancelQueued({ chatId: "chat_1", principal, id: "u2" });
+      return run;
+    };
+    await live.text();
+    expect(cancelled).toBe(true);
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(ids(await h.runtime.loadHistory({ chatId: "chat_1", principal }))).not.toContain("u2");
+    // The run it opened is closed, and the chat is free.
+    expect([...h.mem.runs.values()].at(-1)).toMatchObject({ status: "errored", error: "not started: nothing left to answer" });
+    h.mem.storage.createRun = createRun;
+    await h.turn(user("q3", "u3"));
+    expect(JSON.stringify(promptsOf(model).at(-1))).not.toContain("q2");
+  });
+
+  it("answers them once when two workers go for them at the same time", async () => {
+    const model = scripted([text("a1"), text("a2"), text("a3")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+    const later = Date.now() + 60_000;
+    const ticks = await Promise.all([h.runtime.cron({ now: later }), h.runtime.cron({ now: later })]);
+    expect(ticks[0]!.held + ticks[1]!.held).toBe(1);
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(roles(stored(h).filter((m) => m.metadata?.sendToModel !== false))).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+});
+
 describe("a signal sent while the chat is busy", () => {
   it("starts its turn when the answer ends", async () => {
     const model = scripted([text("a1"), text("Your export is ready.")]);
@@ -241,6 +303,24 @@ describe("runtime.cron", () => {
     expect(tick.errors.filter((e) => e.startsWith("held inputs"))).toEqual([]);
     expect(roles(stored(h))).toEqual(["user", "assistant", "user", "assistant"]);
     expect((await h.runtime.cron({ now: Date.now() + 60_000 })).held).toBe(0);
+  });
+
+  it("carries on with the other chats when one fails", async () => {
+    const model = scripted([text("a1"), text("a2"), text("a3")]);
+    const h = harness({ model });
+    await h.turn(user("q1"), "chat_broken");
+    await h.turn(user("q1"), "chat_1");
+    await h.mem.storage.enqueueInput!(principal, "chat_broken", user("q2", "u2"), { cap: 20 });
+    await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+    // Its agent is gone since.
+    h.mem.chats.get("chat_broken")!.agent = "retired";
+
+    const tick = await h.runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(1);
+    expect(tick.errors.filter((e) => e.includes("chat_broken"))).toHaveLength(1);
+    expect(roles(stored(h))).toEqual(["user", "assistant", "user", "assistant"]);
+    // The failed one is still held, for when it can be answered.
+    expect(h.mem.queued.get("chat_broken")).toHaveLength(1);
   });
 
   it("leaves a chat that is waiting on a person alone", async () => {

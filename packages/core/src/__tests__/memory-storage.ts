@@ -19,6 +19,9 @@ export function memoryStorage<P = { orgId: string }>() {
   const messages = new Map<string, AppMessage[]>();
   const runs = new Map<string, RunRecord>();
   const queued = new Map<string, QueuedInput[]>();
+  /** When the cron tick last looked at a chat's held inputs. */
+  const attempted = new Map<string, number>();
+  let looks = 0;
   const n = { get next() { return ++seq; } };
   const impl: Partial<StorageAdapter<P>> = {
     async createChat(_p, input) {
@@ -95,14 +98,19 @@ export function memoryStorage<P = { orgId: string }>() {
       return [...(queued.get(chatId) ?? [])];
     },
     async listChatsWithQueuedInputs({ heldBefore, limit }) {
-      return [...queued.entries()]
+      const lookedAt = (chatId: string, list: QueuedInput[]) => attempted.get(chatId) ?? list[0]!.createdAt;
+      const picked = [...queued.entries()]
         .filter(([, list]) => list.some((q) => q.createdAt < heldBefore))
-        .slice(0, limit)
-        .map(([chatId, list]) => ({ chatId, identity: list[0]!.identity }));
+        .sort((a, b) => lookedAt(...a) - lookedAt(...b))
+        .slice(0, limit);
+      for (const [chatId] of picked) attempted.set(chatId, Date.now() + ++looks);
+      return picked.map(([chatId, list]) => ({ chatId, identity: list[0]!.identity }));
     },
     async removeQueuedInputs(chatId, ids) {
       const list = queued.get(chatId) ?? [];
-      queued.set(chatId, list.filter((q) => !ids.includes(q.message.id)));
+      const rest = list.filter((q) => !ids.includes(q.message.id));
+      if (rest.length) queued.set(chatId, rest);
+      else queued.delete(chatId);
       return list.filter((q) => ids.includes(q.message.id)).map((q) => q.message.id);
     },
   };

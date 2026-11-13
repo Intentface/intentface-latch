@@ -465,56 +465,66 @@ export function makeStorageAdapter<P>(
         fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
       })
       .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
-    if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, chatIds));
     const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
     const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
     const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
+    // After the chats: an input held just before they went is removed here,
+    // and one held after is refused by its own insert (see enqueueInput).
+    if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, chatIds));
     return { chats: chats.length, messages: messages.length, runs: runs.length };
   }
 
-  /** The held-input queue (StorageAdapter.enqueueInput and its two companions). */
+  /**
+   * The held-input queue (StorageAdapter.enqueueInput and its companions).
+   * Arrival order is a per-chat `seq`, computed inside the INSERT like a
+   * message's, with the unique `(chat_id, seq)` index behind it.
+   */
   const queueMethods = (
     q: any,
   ): Pick<StorageAdapter<P>, "enqueueInput" | "listQueuedInputs" | "removeQueuedInputs" | "listChatsWithQueuedInputs"> => ({
-    async listChatsWithQueuedInputs({ heldBefore, limit }) {
-      // Oldest rows first; a chat's first row here is its oldest held input.
-      const rows: any[] = await db
-        .select({ chatId: q.chatId, identity: q.identity })
-        .from(q)
-        .where(lt(q.createdAt, heldBefore))
-        .orderBy(asc(q.createdAt), asc(q.id))
-        .limit(limit * 20);
-      const chats = new Map<string, { chatId: string; identity?: unknown }>();
-      for (const r of rows) {
-        if (chats.size >= limit) break;
-        if (!chats.has(r.chatId)) chats.set(r.chatId, { chatId: r.chatId, identity: r.identity ?? undefined });
-      }
-      return [...chats.values()];
-    },
-
     async enqueueInput(principal, chatId, message, { cap }) {
       if (!(await getChat(principal, chatId))) return false;
       const here = and(eq(q.chatId, chatId), eq(q.id, message.id));
-      // A retry of one already held replaces it in place.
-      const updated: any[] = await db.update(q).set({ message }).where(here).returning({ id: q.id });
-      if (updated.length) return true;
-      try {
-        await db.insert(q).values({ chatId, id: message.id, message, identity: principal, createdAt: Date.now() });
-      } catch (error) {
-        // Two retries of the same message at once: the other one stored it.
-        if (isUniqueViolation(error)) return true;
-        throw error;
+      const nextSeq = sql`(select coalesce(max(${q.seq}), -1) + 1 from ${q} where ${q.chatId} = ${chatId})`;
+      for (let attempt = 0; ; attempt++) {
+        // A retry of one already held replaces it in place, keeping its turn in line.
+        const held: any[] = await db.update(q).set({ message }).where(here).returning({ id: q.id });
+        if (held.length) break;
+        try {
+          await db.insert(q).values({
+            // NULL when the chat is gone (deleted since the check above): the
+            // NOT NULL column refuses it, so nothing is held for no chat.
+            chatId: chatRef(chatId) as unknown as string,
+            id: message.id,
+            message,
+            identity: principal,
+            seq: nextSeq as unknown as number,
+            createdAt: Date.now(),
+          });
+          break;
+        } catch (error) {
+          if (isNotNullViolation(error)) return false;
+          // Another input took this seq, or a retry of this one landed first: go again.
+          if (!isUniqueViolation(error) || attempt >= 8) throw error;
+        }
       }
-      // Insert, then count: racing callers can both be refused, never both kept past the cap.
-      const held: any[] = await db.select({ id: q.id }).from(q).where(eq(q.chatId, chatId));
-      if (held.length <= cap) return true;
-      await db.delete(q).where(here);
-      return false;
+      // Admitted when it is among the first `cap` by arrival. Decided by the
+      // row's own place, so a retry that found the row and the call that
+      // inserted it reach the same answer.
+      const ahead: any[] = await db
+        .select({ id: q.id })
+        .from(q)
+        .where(and(eq(q.chatId, chatId), sql`${q.seq} <= (select ${q.seq} from ${q} where ${here})`));
+      // Gone already: its turn opened, so it was accepted.
+      if (ahead.length === 0 || ahead.length <= cap) return true;
+      const refused: any[] = await db.delete(q).where(here).returning({ id: q.id });
+      // Taken by a turn before it could be refused: it ran, so it was accepted.
+      return refused.length === 0;
     },
 
     async listQueuedInputs(principal, chatId) {
       if (!(await getChat(principal, chatId))) return [];
-      const rows: any[] = await db.select().from(q).where(eq(q.chatId, chatId)).orderBy(asc(q.createdAt), asc(q.id));
+      const rows: any[] = await db.select().from(q).where(eq(q.chatId, chatId)).orderBy(asc(q.seq));
       return rows.map(
         (r): QueuedInput => ({
           message: r.message as AppMessage,
@@ -532,6 +542,31 @@ export function makeStorageAdapter<P>(
         .where(and(eq(q.chatId, chatId), inArray(q.id, ids)))
         .returning({ id: q.id });
       return gone.map((r) => r.id as string);
+    },
+
+    async listChatsWithQueuedInputs({ heldBefore, limit }) {
+      // One row per chat, the one looked at longest ago first (never looked
+      // at: since its oldest input arrived).
+      const lookedAt = sql`coalesce(max(${q.attemptedAt}), min(${q.createdAt}))`;
+      const chats: any[] = await db
+        .select({ chatId: q.chatId })
+        .from(q)
+        .groupBy(q.chatId)
+        .having(sql`min(${q.createdAt}) < ${heldBefore}`)
+        .orderBy(sql`${lookedAt} asc`)
+        .limit(limit);
+      const ids = chats.map((c) => c.chatId as string);
+      if (ids.length === 0) return [];
+      const rows: any[] = await db
+        .select({ chatId: q.chatId, identity: q.identity })
+        .from(q)
+        .where(inArray(q.chatId, ids))
+        .orderBy(asc(q.seq));
+      const oldest = new Map<string, unknown>();
+      for (const r of rows) if (!oldest.has(r.chatId)) oldest.set(r.chatId, r.identity ?? undefined);
+      // Looked at now: the next call starts with the chats this one left out.
+      await db.update(q).set({ attemptedAt: Date.now() }).where(inArray(q.chatId, ids));
+      return ids.map((chatId) => ({ chatId, identity: oldest.get(chatId) }));
     },
   });
 
@@ -989,6 +1024,8 @@ export function makeStorageAdapter<P>(
         exec.delete(s.messages).where(where(inArray(s.messages.chatId, owned))),
         exec.delete(s.runs).where(where(inArray(s.runs.chatId, owned))),
         exec.delete(s.chats).where(where(inArray(s.chats.id, owned))),
+        // Held inputs go in the same transaction, after the chats (see removeChats).
+        ...(s.queuedInputs ? [exec.delete(s.queuedInputs).where(where(inArray(s.queuedInputs.chatId, owned)))] : []),
       ];
       if (opts.batch) {
         // One transaction without branching: every statement carries the same
@@ -1021,8 +1058,6 @@ export function makeStorageAdapter<P>(
           .limit(1);
         throw new ChatBusyError(busy[0]?.chatId ?? kept[0].id, Math.max(1, Number(busy[0]?.left ?? 1)));
       }
-      // Held inputs of the chats that went (none did if the delete was refused above).
-      if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, owned));
       return owned;
     },
 

@@ -71,9 +71,13 @@ export const queuedInputs = pgTable(
     message: jsonb("message").notNull(),
     /** The serialized principal that sent it. */
     identity: jsonb("identity"),
+    /** Arrival order within the chat. */
+    seq: integer("seq").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** When the cron tick last looked at this chat's held inputs. */
+    attemptedAt: bigint("attempted_at", { mode: "number" }),
   },
-  (t) => [primaryKey({ columns: [t.chatId, t.id] })],
+  (t) => [primaryKey({ columns: [t.chatId, t.id] }), uniqueIndex("latch_queued_inputs_chat_seq_idx").on(t.chatId, t.seq)],
 );
 
 export const runs = pgTable(

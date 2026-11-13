@@ -57,7 +57,7 @@ The chat's own agent runs a turn with the signal as what it answers, as `princip
 
 A turn starts at once only when the chat is free. With an answer already running, or an approval or a tool result pending, the signal is held and gets its turn when that ends: the result is `{ id, queued: true }`, and the answer is in the history afterwards. See [Messages that arrive while the agent is answering](./queue.md).
 
-Two cases fall back to waiting for the user's next message: a limit was reached, or the storage adapter has no input queue.
+Three cases fall back to waiting for the user's next message, with neither `queued` nor `turn` in the result: a limit was reached, the chat's queue is full (`inputQueue.max`, 20 by default), or the storage adapter has no input queue.
 
 Nothing streams to an open page. The answer is in the chat's history the next time the page loads it. On a serverless host, keep the function alive until the call resolves (`waitUntil`).
 
