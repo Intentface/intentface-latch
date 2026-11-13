@@ -4423,8 +4423,9 @@ export function createRuntime<P, RC = unknown>(
           // Checked on the history the turn itself reads, not an earlier load.
           refuseIfWaiting: true,
         });
-        // A failed turn has no answer: `r.answer` would be an earlier turn's.
-        return { id: messageId, turn: { answer: r.error ? "" : r.answer, parked: r.parked, ...(r.error ? { error: r.error } : {}) } };
+        // A failed turn has no answer (`r.answer` would be an earlier turn's),
+        // and neither has one that stopped for a person part-way.
+        return { id: messageId, turn: { answer: r.error || r.parked ? "" : r.answer, parked: r.parked, ...(r.error ? { error: r.error } : {}) } };
       } catch (e) {
         // The chat waits on a person, an answer is running, or a limit is
         // reached: nothing was stored. Keep the signal for the next message.
@@ -4433,6 +4434,10 @@ export function createRuntime<P, RC = unknown>(
         if (e instanceof WaitingOnPerson && e.stored) return { id: messageId };
       }
     }
+    // Another call with this id may have stored it since the check above (a
+    // retry racing the first): writing again would replace that one, and
+    // turn a signal that started a turn into one that waits.
+    if (id !== undefined && (await storage.loadMessages(principal, chatId)).some((m) => m.id === id)) return { id };
     // No fence: it belongs to no run.
     await ownedBy(chat.owner).appendMessages(chatId, [message(signal)]);
     return { id: messageId };
@@ -4726,7 +4731,11 @@ export function createRuntime<P, RC = unknown>(
     // request for a person. Read again now that nothing else can write.
     let history = prior;
     if (o.refuseIfWaiting) {
-      history = (await storage.loadMessages(o.principal, chatId)).filter((m) => m.id !== o.message.id);
+      // Up to the opening message only: a signal stored after it (no lease
+      // stops one) belongs to a later turn, where it is stored.
+      const now = await storage.loadMessages(o.principal, chatId);
+      const at = now.findIndex((m) => m.id === o.message.id);
+      history = at === -1 ? now : now.slice(0, at);
       const tail = tailOf(history);
       if (hasPendingApproval(history) || (!!tail && hasPendingToolResult([tail]))) {
         // Give the turn up: the signal stays, as one that waits for the next

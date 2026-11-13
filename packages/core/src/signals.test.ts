@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generateText } from "ai";
+import { generateText, simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { anthropicTakesSystemMidConversation, defaultNoticePlacement, placeSignals, toModelMessages } from "./projections.js";
@@ -445,6 +445,86 @@ describe("sendSignal with wake", () => {
     await res.text();
     expect([...h.mem.runs.values()].at(-1)!.status).toBe("completed");
     expect(JSON.stringify(promptsOf(model)[1])).not.toContain("news");
+  });
+
+  it("leaves a signal stored just after it opened for the next message", async () => {
+    const model = scripted([text("a1"), text("a2"), text("a3")]);
+    const h = harness({ model, notices: "system" });
+    await h.turn(user("q1"));
+    // Stored between the turn opening and its read of the history.
+    const load = h.mem.storage.loadMessages.bind(h.mem.storage);
+    let reads = 0;
+    h.mem.storage.loadMessages = async (p, chatId) => {
+      if (++reads === 2) {
+        h.mem.messages.get(chatId)!.push({
+          id: "sig_late",
+          role: "system",
+          parts: [{ type: "text", text: "late" }],
+          metadata: { visibility: "internal", signal: { kind: "notice" } },
+        } as AppMessage);
+      }
+      return load(p, chatId);
+    };
+    await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news" });
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(promptsOf(model)[1])).not.toContain("late");
+
+    // The next message brings it, once.
+    await h.turn(user("q2", "u2"));
+    const third = JSON.stringify(promptsOf(model)[2]);
+    expect(third.split("late").length - 1).toBe(1);
+  });
+
+  it("gives no answer for a turn that stopped for the person part-way", async () => {
+    const tools = { getTimezone: tool({ description: "The user's timezone.", inputSchema: z.object({}) }) };
+    const base = scripted([text("a1"), call("getTimezone")]);
+    let calls = 0;
+    // The second answer says something, then asks the person.
+    const model = new MockLanguageModelV4({
+      modelId: "mock",
+      doStream: (async (o: never) => {
+        if (++calls < 2) return (base.doStream as (o: never) => unknown)(o);
+        const finish = { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } } };
+        return {
+          stream: simulateReadableStream({
+            initialDelayInMs: 0,
+            chunkDelayInMs: 0,
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "text-start", id: "t0" },
+              { type: "text-delta", id: "t0", delta: "Let me check." },
+              { type: "text-end", id: "t0" },
+              { type: "tool-call", toolCallId: "call_1", toolName: "getTimezone", input: "{}" },
+              finish,
+            ],
+          }),
+        };
+      }) as never,
+    });
+    const h = harness({ model, tools });
+    await h.turn(user("q1"));
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news" });
+    expect(sent!.turn).toEqual({ answer: "", parked: true });
+  });
+
+  it("doesn't write over a signal that a racing call with the same id stored", async () => {
+    const model = scripted([text("a1")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    // The other call wins the chat and stores the signal as its turn's opener.
+    h.mem.storage.createRun = async (_p, input) => {
+      h.mem.messages.get(input.chatId)!.push({
+        id: "s1",
+        role: "system",
+        parts: [{ type: "text", text: "news" }],
+        metadata: { visibility: "internal", signal: { kind: "notice", startsTurn: true } },
+      } as AppMessage);
+      throw new ChatBusyError(input.chatId, 1000);
+    };
+    expect(await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", id: "s1" })).toEqual({ id: "s1" });
+    const stored = h.mem.messages.get("chat_1")!.filter((m) => m.id === "s1");
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.metadata!.signal).toEqual({ kind: "notice", startsTurn: true });
   });
 
   it("gives no answer for a turn that failed, not the one before it", async () => {
