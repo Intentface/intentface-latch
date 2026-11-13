@@ -4996,14 +4996,22 @@ export function createRuntime<P, RC = unknown>(
         await giveUp("nothing left to answer");
         throw new NothingHeld();
       }
+      // Inputs whose sender may no longer act are dropped here, by the run
+      // that holds them: they go with the rest when it finishes with the queue.
+      const { allowed, refused, lead } = await sendersOf(fresh);
+      for (const q of refused) console.warn(`[queue] dropped held input ${q.message.id} in chat ${chatId}: its sender was refused`);
+      if (!lead) {
+        await queue.finishQueuedInputs(chatId, run.id);
+        await giveUp("nothing left to answer");
+        throw new NothingHeld();
+      }
       // The turn runs as whoever sent its first user message (or first
       // signal). If that is not who this run was opened as, start over.
-      const lead = fresh.find((q) => !isSignal(q.message)) ?? fresh[0]!;
       if (JSON.stringify(lead.identity) !== JSON.stringify(o.held.lead)) {
         await putBack("the input it was opened for is no longer first");
         throw new NothingHeld();
       }
-      opening = arrangeHeld(fresh.map((q) => q.message));
+      opening = arrangeHeld(allowed.map((q) => q.message));
       // The agent, its tools and `messageContext` follow the message being
       // answered: the latest user message this turn opens with, not the
       // stand-in the run was opened for. Before anything is stored, so a
@@ -5169,24 +5177,12 @@ export function createRuntime<P, RC = unknown>(
       // turn. The turn itself opens with what its run takes, not with this.
       const held = await storage.listQueuedInputs!(principal, chatId);
       if (held.length === 0) return started;
-      const lead = held.find((q) => !isSignal(q.message)) ?? held[0]!;
-      const as = await reconstructPrincipal(lead.identity);
-      if (!as) {
-        // Its sender may no longer act: drop that one and look again. If a
-        // run took it and died before storing it, it waits again first; one
-        // a live run holds is being answered, and is left alone.
-        if (lead.takenBy) {
-          // A lookup that fails is not a dead run: it throws, and nothing is
-          // released from under a run that may be answering.
-          const holder = await ownedBy(chat.owner).getRun(lead.takenBy);
-          if (holder?.status === "active") return started;
-          await ownedBy(chat.owner).returnQueuedInputs(chatId, lead.takenBy);
-        }
-        const dropped = await storage.removeQueuedInputs!(chatId, [lead.message.id], { ownerKey: chat.owner });
-        if (dropped.length === 0) return started;
-        console.warn(`[queue] dropped held input ${lead.message.id} in chat ${chatId}: its sender was refused`);
-        continue;
-      }
+      // Who the turn would run as: the sender of the first user message
+      // (or first signal) among those who may still act. With nobody left,
+      // the inputs stay for a person to look at. Nothing is dropped or
+      // released here: that is for the run that takes them.
+      const { lead, as } = await sendersOf(held);
+      if (!lead || !as) return started;
       try {
         await runToCompletion({
           principal: as,
@@ -5212,6 +5208,20 @@ export function createRuntime<P, RC = unknown>(
       started++;
     }
     return started;
+  }
+
+  /**
+   * Held inputs split by whether their sender may still act
+   * (`reconstructPrincipal`), and who a turn for them runs as: the sender of
+   * the first user message among the allowed ones, or of the first signal.
+   */
+  async function sendersOf(inputs: QueuedInput[]): Promise<{ allowed: QueuedInput[]; refused: QueuedInput[]; lead?: QueuedInput; as?: P }> {
+    const verdicts = new Map<string, P | null>();
+    const of = (q: QueuedInput) => JSON.stringify(q.identity);
+    for (const q of inputs) if (!verdicts.has(of(q))) verdicts.set(of(q), await reconstructPrincipal(q.identity));
+    const allowed = inputs.filter((q) => verdicts.get(of(q)));
+    const lead = allowed.find((q) => !isSignal(q.message)) ?? allowed[0];
+    return { allowed, refused: inputs.filter((q) => !verdicts.get(of(q))), lead, as: lead ? verdicts.get(of(lead))! : undefined };
   }
 
   /** `drainQueue`, for callers with nobody to report a failure to. */

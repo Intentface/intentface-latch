@@ -557,7 +557,7 @@ describe("runtime.cron", () => {
     expect(JSON.stringify(promptsOf(model)[1])).toContain("from bo");
   });
 
-  it("releases nothing when it can't tell whether the run holding an input is alive", async () => {
+  it("leaves inputs a live run holds alone, also when their sender may no longer act", async () => {
     const mem = memoryStorage<typeof principal>();
     const model = scripted([text("a1"), text("a2")]);
     const runtime = createRuntime<typeof principal>({
@@ -570,15 +570,20 @@ describe("runtime.cron", () => {
     await mem.storage.enqueueInput!(principal, "chat_1", user("q3", "u3"), { cap: 20 });
     const holder = await mem.storage.createRun(principal, { chatId: "chat_1", agent: "a" });
     await mem.storage.takeQueuedInputs!("chat_1", holder.id);
-    mem.storage.getRun = async () => {
-      throw new Error("db down");
-    };
 
     const tick = await runtime.cron({ now: Date.now() + 60_000 });
     expect(tick.held).toBe(0);
-    expect(tick.errors.some((e) => e.includes("db down"))).toBe(true);
     // Still that run's: neither put back in line nor dropped.
     expect(mem.queued.get("chat_1")!.map((q) => [q.message.id, q.takenBy])).toEqual([["u2", holder.id], ["u3", holder.id]]);
+
+    // That run died without ending (no lease to expire). Once storage lets a
+    // new run supersede it, the refused sender's input goes and the other is answered.
+    mem.runs.set(holder.id, { ...holder, status: "errored" });
+    expect((await runtime.cron({ now: Date.now() + 120_000 })).held).toBe(1);
+    const prompt = JSON.stringify(promptsOf(model)[1]);
+    expect(prompt).toContain("q3");
+    expect(prompt).not.toContain("q2");
+    expect(mem.queued.get("chat_1")).toBeUndefined();
   });
 
   it("leaves a chat that is waiting on a person alone", async () => {

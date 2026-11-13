@@ -465,6 +465,10 @@ export function makeStorageAdapter<P>(
         fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
       })
       .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
+    // Held inputs before the chats too: these are separate statements, and
+    // once a chat is gone nothing leads back to its rows. Stopped part-way,
+    // the next pass finds the chats still there and starts again.
+    if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, chatIds));
     const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
     const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
     const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
