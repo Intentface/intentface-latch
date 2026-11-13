@@ -463,3 +463,55 @@ describe("DELETE chats/:id", () => {
     expect((await handlerWith(async () => Promise.reject(unsupported))(del("c1")))?.status).toBe(501);
   });
 });
+
+describe("the queue and poll routes", () => {
+  const principal = { orgId: "org_a", userId: "u1" };
+  function routes(o?: { waiting?: string[]; poll?: unknown; cancel?: boolean }) {
+    const handleChat = vi.fn(async (_i: { ifBusy?: string }) => new Response("ok"));
+    const pollChat = vi.fn(async (_i: { cursor?: string }) => (o && "poll" in o ? o.poll : { cursor: "c2", running: false, queued: [] }));
+    const listQueued = vi.fn(async () => (o?.waiting ?? []).map((id) => ({ id })));
+    const cancelQueued = vi.fn(async (_i: { id: string }) => o?.cancel ?? true);
+    const handler = createLatchHandler<P>({
+      runtime: { handleChat, pollChat, listQueued, cancelQueued } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolvePrincipal: () => principal,
+    });
+    const req = (path: string, init?: RequestInit) => new Request(`https://app.example/api/latch/${path}`, init);
+    return { handler, req, handleChat, pollChat, listQueued, cancelQueued };
+  }
+  const send = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
+
+  it("holds a message only when the body asks for it", async () => {
+    const r = routes();
+    await r.handler(r.req("agents/a/chat_1", send({ text: "hi" })));
+    await r.handler(r.req("agents/a/chat_1", send({ text: "hi", queue: true })));
+    expect(r.handleChat.mock.calls[0]![0].ifBusy).toBeUndefined();
+    expect(r.handleChat.mock.calls[1]![0].ifBusy).toBe("queue");
+  });
+
+  it("answers 429 when too many messages are waiting", async () => {
+    const r = routes();
+    r.handleChat.mockRejectedValueOnce(Object.assign(new Error("full"), { code: "queue_full" }));
+    const res = await r.handler(r.req("agents/a/chat_1", send({ text: "hi", queue: true })));
+    expect(res?.status).toBe(429);
+    expect((await res!.json()).code).toBe("queue_full");
+  });
+
+  it("polls a chat with the cursor it was given, and 404s one that isn't the caller's", async () => {
+    const r = routes();
+    const res = await r.handler(r.req("chats/chat_1/poll?cursor=c1"));
+    expect(await res!.json()).toEqual({ cursor: "c2", running: false, queued: [] });
+    expect(r.pollChat.mock.calls[0]![0]).toEqual({ chatId: "chat_1", principal, cursor: "c1" });
+    expect((await routes({ poll: null }).handler(r.req("chats/nope/poll")))?.status).toBe(404);
+  });
+
+  it("takes back a waiting message the caller can see, and nothing else", async () => {
+    const r = routes({ waiting: ["u2"] });
+    const res = await r.handler(r.req("chats/chat_1/queue/u2", { method: "DELETE" }));
+    expect(await res!.json()).toEqual({ cancelled: "u2" });
+    // A held signal the user doesn't see is not theirs to cancel.
+    expect((await r.handler(r.req("chats/chat_1/queue/sig_1", { method: "DELETE" })))?.status).toBe(404);
+    expect(r.cancelQueued).toHaveBeenCalledTimes(1);
+  });
+});

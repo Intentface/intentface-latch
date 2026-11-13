@@ -46,6 +46,10 @@ interface StorageAdapter<P> {
   claimDueSchedules, completeSchedule
   // Deletion (optional)
   deleteChats, purgeOwner
+  // Held inputs (optional, the first six or none)
+  enqueueInput, listQueuedInputs, removeQueuedInputs,
+  takeQueuedInputs, returnQueuedInputs, finishQueuedInputs,
+  listChatsWithQueuedInputs
 }
 ```
 
@@ -138,6 +142,25 @@ Both are optional; without them `runtime.deleteChat` and `runtime.purgeOwner` re
 - **Nothing lands for a deleted chat.** A run, message or usage row written for a chat (or its run) that's gone must fail rather than become an orphan row nobody can see or delete. The shipped adapters look the chat up inside each such insert (on Postgres with `FOR SHARE`, which also makes a run starting in a chat wait for that chat's deletion to commit).
 - **Usage stays.** Neither operation rewrites the usage ledger on its own: `deleteChats` leaves a chat's usage rows, and `purgeOwner` does what `PurgeOptions.usage` says (default `"refile"`: move the rows to `refileTo`, by default the path one level up, and set their `run_id` to `"erased"`; or `"keep"`, or `"delete"`). Report re-filed rows as `usageRefiled`, deleted ones as `usage`.
 - **`purgeOwner(segments, { batchSize, usage, refileTo })`** removes every chat (with messages and runs) and every schedule whose owner key falls under the path: the key itself or anything starting with it plus `/` (`isUnderOwner`). Compare prefixes as plain strings (`substr`), never with `LIKE`: encoded keys contain `%` and `_`. Settle live runs first with their fencing token bumped, so a worker still running one has its writes refused. Stop each pass at `batchSize` rows per table and return `done: false`; the runtime calls again until `done`, and stops with an error if a pass reports `done: false` but removed nothing.
+
+### Held inputs stay out of the conversation
+
+Optional, as a set. Without them a message sent to a busy chat is refused with `ChatBusyError`, and a signal waits for the user's next message. With them the runtime holds both and starts the next turn with everything held (see [the queue guide](/docs/guides/queue)).
+
+An input is in one of two states: waiting, or taken by the run that is answering it.
+
+- **`enqueueInput(principal, chatId, message, { cap })`** holds a message for a chat, apart from `loadMessages`. It is scoped: a chat that isn't the caller's stores nothing and returns `false`, and so does a chat deleted while the call ran (check the chat in the same statement as the insert). It stores the principal as the input's `identity`, as a run does.
+  - **The cap applies to new ids.** A new id returns `false`, storing nothing, when `cap` inputs are already waiting; taken ones don't count. Make that part of the insert: an input over the cap must never be stored, even for a moment. The shipped adapters do it in one statement on SQLite, and under a lock on the chat row on Postgres, where two statements at once would otherwise both see room.
+  - **An id already held returns `true`, whatever the cap.** While it waits, the message is replaced in place and keeps its place in line. Once a run has taken it, it is left as the run took it.
+- **`listQueuedInputs(principal, chatId)`** returns them in the order they arrived, each with its `identity`, `createdAt`, and `takenBy` when a run has it. Arrival order is its own counter, not the timestamp: two inputs can share a millisecond.
+- **`removeQueuedInputs(chatId, ids, scope)`** is a cancellation: it removes waiting inputs by message id and returns the ids removed. It never removes a taken one.
+- **`takeQueuedInputs(chatId, runId, scope, fence)`** marks every input held for the chat as taken by `runId`, in one statement, and returns them as they are at that moment, in arrival order. Only for the chat's live run, checked in that same statement: the run is `active`, and with `fence` it still holds that lease. A run that isn't (a worker that paused past its lease and was replaced) takes nothing and gets `null`, where a live run with nothing held gets `[]`. A live run also takes inputs an earlier run had taken: that run is over.
+- **`returnQueuedInputs(chatId, runId, scope)`** puts what `runId` took back in line, waiting again. The runtime calls it when the turn could not start.
+- **`finishQueuedInputs(chatId, runId, scope)`** deletes what `runId` took. The runtime calls it once those inputs are in the history.
+- **`listChatsWithQueuedInputs({ heldBefore, limit })`** is a system call with no principal, for the cron tick: at most `limit` chats holding an input from before `heldBefore`, waiting or taken, each with the `identities` of its held inputs in arrival order. The runtime acts as the first of them who may still act. It marks the chats it returns as looked at and hands out the ones looked at longest ago first, so chats that can't start a turn (waiting on a person) never keep the others out. Optional on its own; without it, an input whose process died before starting its turn waits until something else happens in its chat.
+- **Deleting a chat removes its held inputs**, in the same transaction as the chat, in `deleteChats` and `purgeOwner`.
+
+Taking is what makes the rest safe. A turn for held inputs opens its run first, then takes. From that one statement on, a cancellation is refused, a retry changes nothing, and no other worker can answer the same input. Your adapter never moves an input into the history; the runtime does, between take and finish.
 
 ## Using the shipped adapter
 

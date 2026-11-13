@@ -19,7 +19,9 @@ The answer should appear as it's written. The AI SDK streams it to the browser, 
 
 **The answer doesn't depend on the browser.** Closing the tab ends the stream, not the run: the answer finishes on the server and is saved, ready when the user comes back.
 
-**One answer at a time per chat.** A message sent while an answer is running gets `409 chat_busy` with how long to wait, and nothing is saved, so the client can resend it.
+**One answer at a time per chat.** A message sent while an answer is running gets `409 chat_busy` with how long to wait, and nothing is saved, so the client can resend it. Sent with `queue: true`, it is [held and answered next](/docs/guides/queue) instead.
+
+**A page without a stream can ask.** An answer started by a schedule, a signal or a held message has no page attached. `GET chats/:id/poll` says whether one is running and returns the history when it changed.
 
 **With crash recovery on, every step is saved as it finishes.** A reload shows the answer up to its last finished step; the rest appears when it's done. A server that took over a crashed answer saves to the same place.
 

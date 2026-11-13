@@ -59,11 +59,13 @@ Paths are relative to `basePath`. Every route except the cron route and the conn
 | Route | What it does |
 | --- | --- |
 | `GET agents` | The agents the caller can use, for a picker. |
-| `POST agents/:agent/:chatId` | Send a message; streams the answer. Body: `{ message }` or the AI SDK's `{ messages }`. |
+| `POST agents/:agent/:chatId` | Send a message; streams the answer. Body: `{ message }` or the AI SDK's `{ messages }`. With `queue: true`, a message sent while an answer is running is held: `202 { queued: { id } }`, no stream. |
 | `POST agents/:agent/:chatId/approvals` | Approve or deny paused tools; streams the rest of the answer. |
 | `POST agents/:agent/:chatId/tool-result` | Answer a tool the browser handles, such as a question for the user. |
 | `GET chats` | The caller's chats. |
 | `GET chats/:chatId` | One chat's messages. |
+| `GET chats/:chatId/poll?cursor=…` | Whether an answer is running, the messages waiting, and the history when it differs from `cursor`. For a page with no stream open. |
+| `DELETE chats/:chatId/queue/:messageId` | Take back a waiting message the caller can see. `404` once its turn started. |
 | `DELETE chats/:chatId` | Delete the chat with its messages, runs and usage, and the subagent threads it spawned. `404` if it isn't the caller's, `409` while an answer runs, `501` if storage can't delete. |
 | `GET runs` | The caller's runs, with usage and cost. |
 | `GET schedules`, `POST schedules` | List or create the caller's schedules. |

@@ -502,7 +502,9 @@ export interface StorageAdapter<P> {
   ): Promise<boolean>;
   getRun(id: string, scope?: OwnerScope<P>): Promise<RunRecord | null>;
   /** Scoped list of the caller's runs (joined via chats), most-recent first. */
-  listRuns(principal: P, opts?: { limit?: number }): Promise<RunRecord[]>;
+  listRuns(principal: P, opts?: { limit?: number; chatId?: string }): Promise<RunRecord[]>;
+  // ↑ `chatId` narrows to one chat. An adapter may ignore it: the runtime
+  //   filters what comes back too.
   /**
    * Reaper: mark active runs whose lease has expired (`leaseExpiresAt < now`) as
    * `errored`, clear the owner, and bump the fencing token (invalidating any
@@ -637,6 +639,73 @@ export interface StorageAdapter<P> {
    * `runtime.deleteChat` refuses.
    */
   deleteChats?(principal: P, ids: string[]): Promise<string[]>;
+
+  // queued input (optional as a set: the first six, or none)
+  /**
+   * OPTIONAL. Hold a message for a chat that can't take it now (an answer is
+   * running): the turn that ends starts the next one with everything held.
+   * Kept apart from the conversation, which stays in the order it happened.
+   *
+   * Scoped: a chat that isn't the caller's stores nothing and returns `false`.
+   * So does a chat that was deleted while the call ran: nothing is held for
+   * a chat that is gone. Stores the principal as the input's `identity`,
+   * like a run does.
+   *
+   * A message id already held is replaced in place, keeping its place in
+   * line, and returns `true` whatever the cap. One a run has taken
+   * (`takeQueuedInputs`) is left as the run took it, and returns `true`: it
+   * is being answered.
+   *
+   * A new id returns `false`, storing nothing, when the chat already holds
+   * `cap` inputs that no run has taken. The check is part of the write: an
+   * input over the cap is never stored, even for a moment, and calls at once
+   * never leave the chat holding more than `cap`.
+   *
+   * Without the queue, a message sent to a busy chat is refused
+   * (`ChatBusyError`) and a signal waits for the user's next message.
+   */
+  enqueueInput?(principal: P, chatId: string, message: AppMessage, opts: { cap: number }): Promise<boolean>;
+  /**
+   * OPTIONAL. Scoped read of a chat's held inputs, in the order they arrived
+   * (an order of its own, not the timestamp: two can share a millisecond).
+   * Includes the ones a run has taken, marked with `takenBy`.
+   */
+  listQueuedInputs?(principal: P, chatId: string): Promise<QueuedInput[]>;
+  /**
+   * OPTIONAL. Take held inputs back by message id (a cancellation); returns
+   * the ids removed. Only ones no run has taken: an input being answered
+   * can't be taken back. Deleting a chat (`deleteChats`, `purgeOwner`)
+   * removes its held inputs too, in the same transaction.
+   */
+  removeQueuedInputs?(chatId: string, ids: string[], scope?: OwnerScope<P>): Promise<string[]>;
+  /**
+   * OPTIONAL. Mark every input held for the chat as taken by `runId`, in one
+   * statement, and return them as they are at that moment, in arrival order.
+   * Only while `runId` is the chat's live run, checked in that statement:
+   * its row is `active`, and with `fence` it still holds that lease. A run
+   * that isn't (a worker that paused past its lease and was superseded)
+   * takes nothing and gets `null`. A live run takes inputs another run had
+   * taken too: that run is over. From here to `finishQueuedInputs` or
+   * `returnQueuedInputs`, these inputs are not waiting: they don't count
+   * against the cap, can't be removed, and a retry of one doesn't change it.
+   */
+  takeQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>, fence?: RunFence): Promise<QueuedInput[] | null>;
+  /** OPTIONAL. Put the inputs `runId` took back in line, untaken (its turn could not start). */
+  returnQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<void>;
+  /** OPTIONAL. Delete the inputs `runId` took (they are in the conversation now). */
+  finishQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<void>;
+  /**
+   * OPTIONAL system op (no principal): the chats holding an input that was
+   * held before `heldBefore` (epoch ms), taken by a run or not, at most
+   * `limit` chats, each with the `identities` of its held inputs in arrival
+   * order (the runtime acts as the first of them that may still act). The cron tick uses it to start
+   * the turn for inputs nobody did (the process that should have died
+   * first). It marks the chats it returns as looked at, and returns the ones
+   * looked at longest ago first: chats that can't start a turn (waiting on a
+   * person) must not keep the others out, tick after tick. Without it, such
+   * inputs wait until something else happens in their chat.
+   */
+  listChatsWithQueuedInputs?(opts: { heldBefore: number; limit: number }): Promise<Array<{ chatId: string; identities: unknown[] }>>;
   /**
    * OPTIONAL system op (no principal): delete everything stored for an owner
    * path. That's every row whose owner key is `encodeOwnerKey(segments)` or
@@ -711,6 +780,36 @@ export interface PurgeResult {
 export function isUnderOwner(ownerKey: string, segments: readonly string[]): boolean {
   const key = encodeOwnerKey(segments);
   return ownerKey === key || ownerKey.startsWith(`${key}/`);
+}
+
+/** A message held for a chat that was busy when it arrived (see `enqueueInput`). */
+export interface QueuedInput {
+  message: AppMessage;
+  /** The serialized principal that sent it, like `RunRecord.identity`. */
+  identity?: unknown;
+  createdAt: number;
+  /** The run answering it (`takeQueuedInputs`). Absent while it waits. */
+  takenBy?: string;
+}
+
+/**
+ * Thrown when a chat already holds as many queued inputs as it may
+ * (`inputQueue.max` on the runtime, 20 by default). Nothing was stored. The
+ * server answers `429`.
+ */
+export class QueueFullError extends Error {
+  readonly code = "queue_full";
+  constructor(
+    readonly chatId: string,
+    readonly max: number,
+  ) {
+    super(`This chat already has ${max} messages waiting; send again when it has answered.`);
+    this.name = "QueueFullError";
+  }
+}
+
+export function isQueueFullError(e: unknown): e is QueueFullError {
+  return e instanceof QueueFullError || (e as { code?: unknown } | null)?.code === "queue_full";
 }
 
 /**

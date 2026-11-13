@@ -5,6 +5,7 @@
     "---Build---",
     "approvals",
     "signals",
+    "queue",
     "schedules",
     "scheduled-brief",
     "ownership-patterns",

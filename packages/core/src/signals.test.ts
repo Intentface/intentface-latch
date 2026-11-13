@@ -404,10 +404,11 @@ describe("sendSignal with wake", () => {
     expect(JSON.stringify(woken[3])).not.toContain("No new message");
   });
 
+  // With a storage adapter that has no input queue. With one, see queue.test.ts.
   it("stores and waits when the chat is waiting on a person", async () => {
     const tools = { getTimezone: tool({ description: "The user's timezone.", inputSchema: z.object({}) }) };
     const model = scripted([call("getTimezone"), text("Helsinki then.")]);
-    const h = harness({ model, tools });
+    const h = harness({ model, tools, queue: false });
     await h.turn(user("what time is it for me?"));
     const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", wake: true });
     expect(sent!.turn).toBeUndefined();
@@ -546,13 +547,7 @@ describe("sendSignal with wake", () => {
 
   it("stores and waits when an answer is running", async () => {
     const model = scripted([text("a1"), text("a2")]);
-    const h = harness({ model });
-    // One live turn per chat, as the shipped adapters enforce it.
-    const createRun = h.mem.storage.createRun.bind(h.mem.storage);
-    h.mem.storage.createRun = async (p, input) => {
-      for (const r of h.mem.runs.values()) if (r.chatId === input.chatId && r.status === "active") throw new ChatBusyError(input.chatId, 1000);
-      return createRun(p, input);
-    };
+    const h = harness({ model, queue: false });
     // Opened, not yet read: the turn is live.
     const live = await h.runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: user("q1") });
     const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news", wake: true });

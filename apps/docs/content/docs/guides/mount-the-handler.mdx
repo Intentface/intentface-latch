@@ -236,6 +236,8 @@ All paths are relative to `basePath`.
 | `POST` | `agents/:agent/:chatId/approvals` | resolve a human-in-the-loop gate |
 | `POST` | `agents/:agent/:chatId/tool-result` | answer a client-handled tool |
 | `GET` | `chats` · `chats/:id` | the caller's chats, and one chat's history |
+| `GET` | `chats/:id/poll` | is an answer running, what is waiting, and the history if it changed |
+| `DELETE` | `chats/:id/queue/:messageId` | take back a message that is still waiting |
 | `DELETE` | `chats/:id` | delete a chat and the subagent threads it spawned |
 | `GET` | `runs` | run records, for an admin or debug view |
 | `GET` `POST` `DELETE` | `schedules` · `schedules/:id` | manage scheduled agents |
@@ -254,6 +256,7 @@ The turn route accepts `{ message }`, `{ text }`, or a `useChat`-style `{ messag
 | `409` | `chat_busy` | A turn is already running in this chat (two tabs, a retry racing a reply). Nothing was persisted. | Wait `Retry-After` (also `retryAfterMs` in the body) and resend the same message. |
 | `409` | `chat_conflict` | The client-chosen chat id exists and isn't yours. | Pick another id. |
 | `429` | `limit_exceeded` | A turn, token or cost budget is spent. | Wait `Retry-After`; tell the user which budget. |
+| `429` | `queue_full` | Sent with `queue: true`, and the chat already holds as many waiting messages as it may. Nothing was stored. | Send it again after the chat has answered. |
 
 ## The cron route
 

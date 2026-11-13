@@ -22,6 +22,7 @@ import {
   refileTarget,
   type AppMessage,
   type PurgeResult,
+  type QueuedInput,
   type OwnerScope,
   type ChatRecord,
   type RunFence,
@@ -50,6 +51,8 @@ export interface AdapterSchema {
   runs: any;
   usage: any;
   schedules: any;
+  /** Held inputs (`enqueueInput`). A schema without it gets an adapter without the queue. */
+  queuedInputs?: any;
 }
 
 export interface SharedAdapterOptions<P> {
@@ -462,11 +465,172 @@ export function makeStorageAdapter<P>(
         fencingToken: sql`coalesce(${s.runs.fencingToken}, 0) + 1`,
       })
       .where(and(inArray(s.runs.chatId, chatIds), eq(s.runs.status, "active")));
+    // Held inputs before the chats too: these are separate statements, and
+    // once a chat is gone nothing leads back to its rows. Stopped part-way,
+    // the next pass finds the chats still there and starts again.
+    if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, chatIds));
     const messages = await db.delete(s.messages).where(inArray(s.messages.chatId, chatIds)).returning({ id: s.messages.id });
     const runs = await db.delete(s.runs).where(inArray(s.runs.chatId, chatIds)).returning({ id: s.runs.id });
     const chats = await db.delete(s.chats).where(inArray(s.chats.id, chatIds)).returning({ id: s.chats.id });
+    // After the chats: an input held just before they went is removed here,
+    // and one held after is refused by its own insert (see enqueueInput).
+    if (s.queuedInputs) await db.delete(s.queuedInputs).where(inArray(s.queuedInputs.chatId, chatIds));
     return { chats: chats.length, messages: messages.length, runs: runs.length };
   }
+
+  const rowToQueued = (r: any): QueuedInput => ({
+    message: r.message as AppMessage,
+    identity: r.identity ?? undefined,
+    createdAt: Number(r.createdAt),
+    ...(r.takenBy ? { takenBy: r.takenBy as string } : {}),
+  });
+
+  /**
+   * The held-input queue (StorageAdapter.enqueueInput and its companions).
+   * Arrival order is a per-chat `seq`, computed inside the INSERT like a
+   * message's, with the unique `(chat_id, seq)` index behind it.
+   */
+  const queueMethods = (
+    q: any,
+  ): Pick<
+    StorageAdapter<P>,
+    | "enqueueInput"
+    | "listQueuedInputs"
+    | "removeQueuedInputs"
+    | "takeQueuedInputs"
+    | "returnQueuedInputs"
+    | "finishQueuedInputs"
+    | "listChatsWithQueuedInputs"
+  > => ({
+    async enqueueInput(principal, chatId, message, { cap }) {
+      if (!(await getChat(principal, chatId))) return false;
+      const here = and(eq(q.chatId, chatId), eq(q.id, message.id));
+      const nextSeq = sql`(select coalesce(max(${q.seq}), -1) + 1 from ${q} where ${q.chatId} = ${chatId})`;
+      // The chat's id when the chat exists AND fewer than `cap` inputs wait
+      // (ones a run has taken don't count); NULL otherwise, which the NOT
+      // NULL column refuses. Admission is part of the insert itself: an
+      // input over the cap, or for a chat deleted since the check above, is
+      // never stored, not even for a moment.
+      const admitted = sql`(select ${s.chats.id} from ${s.chats} where ${s.chats.id} = ${chatId} and (select count(*) from ${q} where ${q.chatId} = ${chatId} and ${q.takenBy} is null) < ${cap})`;
+      const insert = (exec: any) =>
+        exec.insert(q).values({
+          chatId: admitted as unknown as string,
+          id: message.id,
+          message,
+          identity: principal,
+          seq: nextSeq as unknown as number,
+          createdAt: Date.now(),
+        });
+      /** Already held under this id: replaced in place while it waits, left alone once a run has it. */
+      const alreadyHeld = async (): Promise<boolean> => {
+        const waiting: any[] = await db.update(q).set({ message }).where(and(here, isNull(q.takenBy))).returning({ id: q.id });
+        if (waiting.length) return true;
+        return ((await db.select({ id: q.id }).from(q).where(here)) as any[]).length > 0;
+      };
+      for (let attempt = 0; ; attempt++) {
+        if (await alreadyHeld()) return true;
+        try {
+          if (opts.lockFencedRun) {
+            // Postgres: each statement counts on its own snapshot, so two
+            // inserts at once could both see room. Lock the chat row first;
+            // the second waits, then counts what the first committed.
+            await opts.withTx(async (tx) => {
+              await tx.select({ id: s.chats.id }).from(s.chats).where(eq(s.chats.id, chatId)).for("update");
+              await insert(tx);
+            });
+          } else {
+            await insert(db);
+          }
+          return true;
+        } catch (error) {
+          // Full, or the chat is gone. Unless a call with this same id took
+          // the last place while this one waited: then it is held.
+          if (isNotNullViolation(error)) return alreadyHeld();
+          // A retry of this one landed first, or (SQLite over a network)
+          // another input took this seq: go again.
+          if (!isUniqueViolation(error) || attempt >= 8) throw error;
+        }
+      }
+    },
+
+    async listQueuedInputs(principal, chatId) {
+      if (!(await getChat(principal, chatId))) return [];
+      const rows: any[] = await db.select().from(q).where(eq(q.chatId, chatId)).orderBy(asc(q.seq));
+      return rows.map(rowToQueued);
+    },
+
+    async removeQueuedInputs(chatId, ids, scope) {
+      await checkOwner("chat", chatId, scope);
+      if (ids.length === 0) return [];
+      // Only ones still waiting: what a run has taken is being answered.
+      const gone: any[] = await db
+        .delete(q)
+        .where(and(eq(q.chatId, chatId), inArray(q.id, ids), isNull(q.takenBy)))
+        .returning({ id: q.id });
+      return gone.map((r) => r.id as string);
+    },
+
+    async takeQueuedInputs(chatId, runId, scope, fence) {
+      await checkOwner("chat", chatId, scope);
+      // The caller must still be the chat's live run, checked in the same
+      // statement as the take: a worker that paused past its lease must not
+      // put its name on inputs the run that replaced it is answering.
+      const live = and(
+        eq(s.runs.id, runId),
+        eq(s.runs.chatId, chatId),
+        eq(s.runs.status, "active"),
+        ...(fence ? [eq(s.runs.leaseOwner, fence.owner), eq(s.runs.fencingToken, fence.fencingToken)] : []),
+      );
+      const holds = sql`exists (select 1 from ${s.runs} where ${live}${opts.lockFencedRun ? sql` for share` : sql``})`;
+      // Every row of the chat, also ones an earlier run took: that run is
+      // over, since this one is live and a chat has one live run.
+      const rows: any[] = await db.update(q).set({ takenBy: runId }).where(and(eq(q.chatId, chatId), holds)).returning();
+      if (rows.length === 0) {
+        // Nothing held, or not the live run: say which.
+        const mine: any[] = await db.select({ id: s.runs.id }).from(s.runs).where(live);
+        return mine.length ? [] : null;
+      }
+      return rows.sort((a, b) => Number(a.seq) - Number(b.seq)).map(rowToQueued);
+    },
+
+    async returnQueuedInputs(chatId, runId, scope) {
+      await checkOwner("chat", chatId, scope);
+      await db.update(q).set({ takenBy: null }).where(and(eq(q.chatId, chatId), eq(q.takenBy, runId)));
+    },
+
+    async finishQueuedInputs(chatId, runId, scope) {
+      await checkOwner("chat", chatId, scope);
+      await db.delete(q).where(and(eq(q.chatId, chatId), eq(q.takenBy, runId)));
+    },
+
+    async listChatsWithQueuedInputs({ heldBefore, limit }) {
+      // One row per chat, the one looked at longest ago first (never looked
+      // at: since its oldest input arrived).
+      const lookedAt = sql`coalesce(max(${q.attemptedAt}), min(${q.createdAt}))`;
+      const chats: any[] = await db
+        .select({ chatId: q.chatId })
+        .from(q)
+        .groupBy(q.chatId)
+        .having(sql`min(${q.createdAt}) < ${heldBefore}`)
+        .orderBy(sql`${lookedAt} asc`)
+        .limit(limit);
+      const ids = chats.map((c) => c.chatId as string);
+      if (ids.length === 0) return [];
+      const rows: any[] = await db
+        .select({ chatId: q.chatId, identity: q.identity })
+        .from(q)
+        .where(inArray(q.chatId, ids))
+        .orderBy(asc(q.seq));
+      const senders = new Map<string, unknown[]>();
+      for (const r of rows) senders.set(r.chatId, [...(senders.get(r.chatId) ?? []), r.identity ?? undefined]);
+      // Looked at now: the next call starts with the chats this one left out.
+      // Later than every earlier look, also within one millisecond.
+      const latest: any[] = await db.select({ at: sql`max(${q.attemptedAt})` }).from(q);
+      const stamp = Math.max(Date.now(), Number(latest[0]?.at ?? 0) + 1);
+      await db.update(q).set({ attemptedAt: stamp }).where(inArray(q.chatId, ids));
+      return ids.map((chatId) => ({ chatId, identities: senders.get(chatId) ?? [] }));
+    },
+  });
 
   return {
     async createChat(principal, input) {
@@ -754,7 +918,11 @@ export function makeStorageAdapter<P>(
         .select({ run: s.runs })
         .from(s.runs)
         .innerJoin(s.chats, eq(s.runs.chatId, s.chats.id))
-        .where(eq(s.chats.owner, ownerKey(principal)))
+        .where(
+          opts?.chatId
+            ? and(eq(s.chats.owner, ownerKey(principal)), eq(s.runs.chatId, opts.chatId))
+            : eq(s.chats.owner, ownerKey(principal)),
+        )
         .orderBy(sql`${s.runs.startedAt} desc`)
         .limit(opts?.limit ?? 100);
       return rows.map((r: any) => rowToRun(r.run));
@@ -918,6 +1086,8 @@ export function makeStorageAdapter<P>(
         exec.delete(s.messages).where(where(inArray(s.messages.chatId, owned))),
         exec.delete(s.runs).where(where(inArray(s.runs.chatId, owned))),
         exec.delete(s.chats).where(where(inArray(s.chats.id, owned))),
+        // Held inputs go in the same transaction, after the chats (see removeChats).
+        ...(s.queuedInputs ? [exec.delete(s.queuedInputs).where(where(inArray(s.queuedInputs.chatId, owned)))] : []),
       ];
       if (opts.batch) {
         // One transaction without branching: every statement carries the same
@@ -953,6 +1123,8 @@ export function makeStorageAdapter<P>(
       return owned;
     },
 
+    ...(s.queuedInputs ? queueMethods(s.queuedInputs) : {}),
+
     async purgeOwner(segments, opts) {
       const under = (col: any) => underOwnerPath(col, segments);
       const limit = opts?.batchSize ?? 500;
@@ -962,6 +1134,15 @@ export function makeStorageAdapter<P>(
       const chats: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(under(s.chats.owner)).limit(limit);
       const chatIds = chats.map((c) => c.id as string);
       if (chatIds.length) Object.assign(removed, await removeChats(chatIds));
+      // Held inputs whose chat is gone: a pass stopped between deleting the
+      // chats and the held inputs that arrived meanwhile leaves rows nothing
+      // leads back to. An input is only ever held for a chat that exists
+      // (see enqueueInput), so a row without one is always such a leftover.
+      if (s.queuedInputs) {
+        await db
+          .delete(s.queuedInputs)
+          .where(sql`not exists (select 1 from ${s.chats} where ${s.chats.id} = ${s.queuedInputs.chatId})`);
+      }
       // The usage ledger, as the host chose: re-filed one level up with the
       // run id cleared (a handle back to data that's gone), kept, or deleted.
       let usage = 0;

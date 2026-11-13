@@ -15,6 +15,9 @@ Online: https://intentface-latch-docs.vercel.app/docs/reference/runtime
 | `runAgent` | `(input: RunAgentInput<P>) => Promise<RunAgentResult>` | Runs an agent to completion without a client and returns its answer: for webhooks, background jobs, tests and evaluations. Never throws for a run that fails once started; the failure comes back as `error`. |
 | `compactChat` | `(input: { chatId: string; principal: P; focus?: string; request?: Request; turnContext?: unknown; }) => Promise<{ summary: string; compacted: number; } \| null>` | Summarizes a long conversation so later turns send the model the summary instead of the old messages. The stored history is kept in full. Returns `null` when there is too little to summarize or the chat isn't the caller's; throws `PendingApprovalError` while the chat waits on an approval. |
 | `sendSignal` | `(input: SendSignalInput<P>) => Promise<SendSignalResult \| null>` | Tells a chat something from server code: an answer that arrived from elsewhere, a job that finished, a message from someone other than the chat's user. Nothing already stored changes, so it can be called at any time, also while an answer is running (that answer won't see it). A `notice` (the default) is the application speaking: the model reads it as the operator where the provider allows (see `resolveNoticePlacement`). A `message` is a named person speaking, and is read as one. Only server code can add either; a client can't. The user doesn't see a signal unless you pass `visibility: "user"`; it is then in `loadHistory` as a `system` message with `metadata.signal`, for your UI to render. Put only text your application wrote, or a person it vouches for, in a signal. Documents and tool output belong in tool results. The agent answers it now when the chat is free: the call resolves when that answer is finished, with it in `turn`. Nothing streams to an open page: the answer is in the history. Pass `wake: false` to only store it, for the agent to read with the user's next message. Returns the stored message's id, or `null` when the chat doesn't exist or isn't the principal's. Pass `id` to make a retry safe: the same id stores once, and starts a turn at most once. |
+| `listQueued` | `(input: { chatId: string; principal: P; }) => Promise<AppMessage[]>` | The messages held for a chat that was busy when they arrived, oldest first, as the user may see them (a signal the user doesn't see is left out). They join the history when their turn starts. |
+| `cancelQueued` | `(input: { chatId: string; principal: P; id: string; }) => Promise<boolean>` | Takes a held message back before its turn starts. `false` when it isn't held any more (its turn started, or it never was). |
+| `pollChat` | `(input: { chatId: string; principal: P; cursor?: string; }) => Promise<ChatPoll \| null>` | What a page needs to stay current without a stream: whether an answer is running, what is held, and the history when it differs from what the page has. Pass the `cursor` of the last result; `messages` is left out when nothing changed. A running answer is saved after each step, so polling shows it grow step by step. `null` when the chat doesn't exist or isn't the principal's. |
 | `loadHistory` | `(input: { chatId: string; principal: P; }) => Promise<AppMessage[]>` | A chat's messages for showing to the user, with internal messages left out. Use it to render a conversation when the page loads. |
 | `listChats` | `(input: { principal: P; limit?: number; kind?: string; }) => Promise<ChatRecord[]>` | The caller's chats, newest first, for a sidebar. Pass `kind: "user"` to leave out the threads subagents use internally. |
 | `getChat` | `(input: { principal: P; id: string; }) => Promise<ChatRecord \| null>` | One chat, or `null` when it doesn't exist or isn't the caller's. |
@@ -24,7 +27,7 @@ Online: https://intentface-latch-docs.vercel.app/docs/reference/runtime
 | `purgeOwner` | `(segments: string[], opts?: PurgeOptions & { also?: Record<string, OwnerPurgeable>; }) => Promise<{ removed: Record<string, Record<string, number>>; }>` | Deletes everything stored for an owner path, in every store you pass: `["t1"]` removes a whole tenant (keys `t1` and `t1/…`), `["t1", "u7"]` one person. Runs each store's purge until it's done and returns what each removed. Checks first that every store can purge, and refuses (`UnsupportedOperationError`) before deleting anything if one can't. Chats, messages, runs and schedules are covered by the storage adapter. The usage ledger is kept and re-filed one level up by default, since billing records usually must outlive the person (see `PurgeOptions`): pass `usage: "delete"` to remove a whole tenant. Pass your other stores by name in `also`: the secret store, stored agents, the memory job store, your own channel store. The result reports each under the same name (the storage adapter as `storage`). Usage-limit counters are keyed by names you chose, and may contain the person's id (`user:org1:u7`): clear those yourself for a complete erasure. |
 | `resume` | `(run: string \| Pick<RunRecord, "id" \| "ownerKey">) => Promise<RunOutcome \| null>` | Resumes one interrupted run and finishes it. Needs `durability`. Returns `null` when the run can't be resumed: it already finished, or another server has it. You rarely call this yourself; `cron()` does it. Pass the run record (from `reapExpiredRuns`, say) rather than its id when your storage adapter checks or routes by owner key: the record carries it. |
 | `sweep` | `(opts?: { now?: number; maxAttempts?: number; error?: string; }) => Promise<{ reaped: RunRecord[]; resumed: RunOutcome[]; errors: string[]; }>` | Finds runs whose server died and resumes them. Gives up on a run after `maxAttempts` tries (default 5), so one that crashes every time can't loop forever. Safe to call from every server at once. Needs `durability`; `cron()` calls it for you. |
-| `cron` | `(opts?: { now?: number; maxAttempts?: number; }) => Promise<{ due: RunDueResult; reaped: RunRecord[]; resumed: RunOutcome[]; errors: string[]; }>` | The one function to call on a timer: fires due schedules, then (with `durability`) resumes interrupted runs. Call it every minute or so from a cron route, or with `createIntervalScheduler`. Safe to call from every server at once. Failures are returned in `errors`, never thrown. |
+| `cron` | `(opts?: { now?: number; maxAttempts?: number; }) => Promise<{ due: RunDueResult; reaped: RunRecord[]; resumed: RunOutcome[]; held: number; errors: string[]; }>` | The one function to call on a timer: fires due schedules, (with `durability`) resumes interrupted runs, and starts the turn for inputs that were held with nobody left to start it. Call it every minute or so from a cron route, or with `createIntervalScheduler`. Safe to call from every server at once. Failures are returned in `errors`, never thrown. |
 | `applyApproval` | `(input: ApplyApprovalInput<P>) => Promise<Response>` | Records a person's approve or deny decisions and continues the run: approved tools run, denied ones don't. Returns the continuation as a streaming `Response`. Works from any device or channel, any time later, because the waiting state is stored in the conversation. Repeated or stale decisions are ignored. |
 | `applyToolResult` | `(input: ApplyToolResultInput<P>) => Promise<Response>` | Answers a tool the client handles (one without `execute`, like `askUser`) and continues the run. Returns the continuation as a streaming `Response`, or an empty response while other client tools in the same step still need answers. |
 | `schedule` | `(input: ScheduleInput<P>) => Promise<ScheduleRecord>` | Schedules an agent to run on a timer, as the caller. |
@@ -52,6 +55,7 @@ export async function POST(req: Request) {
 | `principal` | `P` | Who is asking, as your auth resolved it. Everything the run reads and writes is scoped to this principal, so build it on the server, never from client input. |
 | `message` | `AppMessage` | The user's message, as `useChat` sends it. Accepted: - a new user message with text and files (files sent inline count against `maxInlineFileBytes`); - the chat's last question resent unchanged (`regenerate()`) or edited (`sendMessage({ messageId })`): the old answer is hidden, not deleted, and the agent answers again; - the paused assistant message with approval answers on it (`addToolApprovalResponse` with `sendAutomaticallyWhen`): only the decisions are read, as `applyApproval` would. Anything else is refused: another role or part type (`InvalidMessageError`, 400), or an earlier question regenerated or edited (`RewindNotSupportedError`, 409; fork the chat instead). |
 | `params` (optional) | `unknown` | What the chat is about, for an agent that declares `params` (see `defineAgent`). Pass them with the chat's first message; they're validated, saved on the chat, and given to the agent on every later turn, so later messages don't send them again. Sending the same params again is fine; different ones are refused (`ParamsFixedError`, 409). |
+| `ifBusy` (optional) | `"queue" \| "refuse"` | What to do when an answer is already running in the chat. `"refuse"` (default) throws `ChatBusyError` (409). `"queue"` holds the message: the answer that ends starts the next one with everything held, and the response is `202` with `{ queued: { id } }` and no stream. Needs a storage adapter with the input queue; without one it refuses as before. |
 | `request` (optional) | `Request` |  |
 | `turnContext` (optional) | `unknown` |  |
 
@@ -114,14 +118,42 @@ const sent = await runtime.sendSignal({
 | `from` (optional) | `{ name?: string; via?: string; }` | Who it is from and where it was sent from; a `message` should name its author. |
 | `visibility` (optional) | `Visibility` | Whether the user sees it. Defaults to `"internal"`: only the agent does. |
 | `id` (optional) | `string` | Your own id for it, so a retried call stores it once. |
-| `wake` (optional) | `boolean` | Whether the signal starts a turn. Default `true`: the agent answers it now, and `sendSignal` resolves when the answer is finished. The chat's own agent runs, as `principal`, and counts against its limits like any turn; a tool that needs approval waits for the user. A turn starts only when the chat is free: with an answer running, an approval or tool result pending, or a limit reached, the signal is stored and waits for the next message (`turn` is then absent from the result). `false`: store it and start nothing. The agent reads it with the user's next message. |
+| `wake` (optional) | `boolean` | Whether the signal starts a turn. Default `true`: the agent answers it now, and `sendSignal` resolves when the answer is finished. The chat's own agent runs, as `principal`, and counts against its limits like any turn; a tool that needs approval waits for the user. A turn starts at once only when the chat is free. With an answer running, or an approval or tool result pending, the signal is held and its turn starts when that ends (`queued: true`, no `turn`). When it can't be held (a limit was reached, the chat's queue is full, or the storage adapter has no input queue), it is stored and the agent reads it with the user's next message: the result has neither `queued` nor `turn`. `false`: store it and start nothing. The agent reads it with the user's next message. |
 
 It returns `null` when the chat doesn't exist or isn't the principal's, and otherwise:
 
 | Option | Type | Description |
 | --- | --- | --- |
 | `id` | `string` | The stored message's id. |
+| `queued` (optional) | `true` | The chat wasn't free, so the signal is held: the answer that ends (or the decision the chat waits on) starts a turn with it. Not in the history until then. |
 | `turn` (optional) | `{ answer: string; parked: boolean; error?: string; }` | The turn the signal started. Absent with `wake: false`, or when the chat wasn't free. |
+
+## listQueued, cancelQueued
+
+What is held for a chat that was busy when it arrived, and taking one back before its turn starts. See [the queue guide](../guides/queue.md). A message is held by `handleChat({ ifBusy: "queue" })`, a signal by `sendSignal` on a busy chat.
+
+```ts
+const waiting = await runtime.listQueued({ chatId, principal }); // AppMessage[], oldest first
+const cancelled = await runtime.cancelQueued({ chatId, principal, id: waiting[0].id }); // false once its turn started
+```
+
+`listQueued` returns only what the user may see: a held signal sent without `visibility: "user"` is left out. `cancelQueued` takes any held id, so check it against `listQueued` before acting on an id from the browser, as the server's route does.
+
+## pollChat
+
+For a page with no stream open: whether an answer is running, what is held, and the history when it differs from what the page has.
+
+```ts
+const poll = await runtime.pollChat({ chatId, principal, cursor });
+if (poll?.messages) render(poll.messages); // absent when nothing changed since `cursor`
+```
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `cursor` | `string` | Send it back on the next poll. |
+| `running` | `boolean` | An answer is running in the chat. |
+| `queued` | `AppMessage[]` | Held messages the user may see (see `listQueued`). |
+| `messages` (optional) | `AppMessage[]` | The history, as `loadHistory` returns it. Absent when it matches `cursor`. |
 
 ## applyApproval
 
@@ -191,7 +223,7 @@ await runtime.schedule({
 
 ## cron
 
-The one function to call on a timer, every minute or so. It fires due schedules and, with `durability` on, resumes interrupted runs. Safe to call from every server at once.
+The one function to call on a timer, every minute or so. It fires due schedules, resumes interrupted runs (with `durability` on), and starts the turn for [held inputs](../guides/queue.md) that waited more than 15 seconds with nobody starting one; `held` counts those turns. Safe to call from every server at once.
 
 ```ts
 // app/api/cron/route.ts — called by your platform's cron every minute

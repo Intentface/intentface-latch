@@ -60,6 +60,28 @@ It returns `null` when the chat doesn't exist or isn't the principal's, and othe
 
 <auto-type-table path="../../../../../packages/core/src/runtime.ts" name="SendSignalResult" />
 
+## listQueued, cancelQueued
+
+What is held for a chat that was busy when it arrived, and taking one back before its turn starts. See [the queue guide](/docs/guides/queue). A message is held by `handleChat({ ifBusy: "queue" })`, a signal by `sendSignal` on a busy chat.
+
+```ts
+const waiting = await runtime.listQueued({ chatId, principal }); // AppMessage[], oldest first
+const cancelled = await runtime.cancelQueued({ chatId, principal, id: waiting[0].id }); // false once its turn started
+```
+
+`listQueued` returns only what the user may see: a held signal sent without `visibility: "user"` is left out. `cancelQueued` takes any held id, so check it against `listQueued` before acting on an id from the browser, as the server's route does.
+
+## pollChat
+
+For a page with no stream open: whether an answer is running, what is held, and the history when it differs from what the page has.
+
+```ts
+const poll = await runtime.pollChat({ chatId, principal, cursor });
+if (poll?.messages) render(poll.messages); // absent when nothing changed since `cursor`
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="ChatPoll" />
+
 ## applyApproval
 
 Continues a run that paused on a tool needing approval. Decisions that are no longer pending (a double click, an old tab) are ignored, so it is safe to call more than once.
@@ -102,7 +124,7 @@ await runtime.schedule({
 
 ## cron
 
-The one function to call on a timer, every minute or so. It fires due schedules and, with `durability` on, resumes interrupted runs. Safe to call from every server at once.
+The one function to call on a timer, every minute or so. It fires due schedules, resumes interrupted runs (with `durability` on), and starts the turn for [held inputs](/docs/guides/queue) that waited more than 15 seconds with nobody starting one; `held` counts those turns. Safe to call from every server at once.
 
 ```ts
 // app/api/cron/route.ts — called by your platform's cron every minute

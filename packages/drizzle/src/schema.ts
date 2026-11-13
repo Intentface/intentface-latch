@@ -60,6 +60,28 @@ export const messages = sqliteTable(
   ],
 );
 
+/** Messages held for a chat that was busy when they arrived (StorageAdapter.enqueueInput). */
+export const queuedInputs = sqliteTable(
+  "latch_queued_inputs",
+  {
+    chatId: text("chat_id").notNull(),
+    /** The message's id. */
+    id: text("id").notNull(),
+    /** AppMessage */
+    message: text("message", { mode: "json" }).notNull(),
+    /** The serialized principal that sent it. */
+    identity: text("identity", { mode: "json" }),
+    /** Arrival order within the chat. */
+    seq: integer("seq").notNull(),
+    createdAt: integer("created_at").notNull(),
+    /** When the cron tick last looked at this chat's held inputs. */
+    attemptedAt: integer("attempted_at"),
+    /** The run answering it (StorageAdapter.takeQueuedInputs); NULL while it waits. */
+    takenBy: text("taken_by"),
+  },
+  (t) => [primaryKey({ columns: [t.chatId, t.id] }), uniqueIndex("latch_queued_inputs_chat_seq_idx").on(t.chatId, t.seq)],
+);
+
 export const runs = sqliteTable(
   "latch_runs",
   {

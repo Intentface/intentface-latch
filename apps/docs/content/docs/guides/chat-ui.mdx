@@ -79,7 +79,11 @@ A [signal](/docs/guides/signals) sent with `visibility: "user"` is in the histor
 )}
 ```
 
-Nothing streams to the page for a signal: it, and the agent's answer to it, are there the next time the page loads the history.
+Nothing streams to the page for a signal: it, and the agent's answer to it, are there the next time the page loads the history, or [polls the chat](/docs/guides/queue#keep-the-page-current-without-a-stream).
+
+## Sending while an answer is running
+
+`sendMessage` gets `409 chat_busy` when an answer is already running in the chat. To have the message answered next instead, send it yourself with `queue: true`, show what is waiting from the poll's `queued`, and let the poll bring the answer. [The queue guide](/docs/guides/queue) has the code.
 
 ## The continuation protocol
 

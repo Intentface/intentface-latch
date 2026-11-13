@@ -14,6 +14,8 @@ type P = { orgId: string };
 function stub(overrides: Partial<StorageAdapter<P>>, calls: string[]): StorageAdapter<P> {
   return new Proxy({} as StorageAdapter<P>, {
     get(_t, prop: string) {
+      // An adapter without the optional input queue.
+      if (/Queued|enqueueInput/.test(prop)) return undefined;
       if (prop in overrides) {
         return (...args: unknown[]) => {
           calls.push(prop);
@@ -69,7 +71,7 @@ describe("runtime.cron()", () => {
       agents: {},
     });
     const out = await rt.cron();
-    expect(out).toEqual({ due: { fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 }, reaped: [], resumed: [], errors: [] });
+    expect(out).toEqual({ due: { fired: 0, errors: 0, skipped: 0, parked: 0, rejected: 0 }, reaped: [], resumed: [], held: 0, errors: [] });
     expect(calls).toEqual(["claimDueSchedules"]);
   });
 

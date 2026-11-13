@@ -1,5 +1,5 @@
 import type { AppMessage } from "../message.js";
-import type { ChatRecord, RunRecord, StorageAdapter } from "../storage.js";
+import { ChatBusyError, type ChatRecord, type QueuedInput, type RunRecord, type StorageAdapter } from "../storage.js";
 
 /**
  * In-memory storage: just enough of the adapter for a turn to run and persist.
@@ -18,7 +18,12 @@ export function memoryStorage<P = { orgId: string }>() {
   const chats = new Map<string, ChatRecord>();
   const messages = new Map<string, AppMessage[]>();
   const runs = new Map<string, RunRecord>();
+  const queued = new Map<string, QueuedInput[]>();
+  /** When the cron tick last looked at a chat's held inputs. */
+  const attempted = new Map<string, number>();
+  let looks = 0;
   const n = { get next() { return ++seq; } };
+  const put = (chatId: string, list: QueuedInput[]) => (list.length ? queued.set(chatId, list) : queued.delete(chatId));
   const impl: Partial<StorageAdapter<P>> = {
     async createChat(_p, input) {
       const chat: ChatRecord = {
@@ -52,6 +57,10 @@ export function memoryStorage<P = { orgId: string }>() {
       messages.set(chatId, list);
     },
     async createRun(_p, input) {
+      // One live turn per chat, as the shipped adapters enforce it.
+      for (const r of runs.values()) {
+        if (r.chatId === input.chatId && r.status === "active") throw new ChatBusyError(input.chatId, 1000);
+      }
       const run: RunRecord = {
         id: `run_${n.next}`,
         chatId: input.chatId,
@@ -73,7 +82,51 @@ export function memoryStorage<P = { orgId: string }>() {
       return runs.get(id) ?? null;
     },
     async recordUsage() {},
+    async listRuns(_p, opts) {
+      return [...runs.values()].filter((r) => !opts?.chatId || r.chatId === opts.chatId).reverse();
+    },
+    async enqueueInput(p, chatId, message, { cap }) {
+      if (!chats.has(chatId)) return false;
+      const list = queued.get(chatId) ?? [];
+      const at = list.findIndex((q) => q.message.id === message.id);
+      if (at >= 0) {
+        if (!list[at]!.takenBy) list[at] = { ...list[at]!, message };
+      } else if (list.filter((q) => !q.takenBy).length >= cap) return false;
+      else list.push({ message, identity: p, createdAt: Date.now() });
+      queued.set(chatId, list);
+      return true;
+    },
+    async listQueuedInputs(_p, chatId) {
+      return [...(queued.get(chatId) ?? [])];
+    },
+    async listChatsWithQueuedInputs({ heldBefore, limit }) {
+      const lookedAt = (chatId: string, list: QueuedInput[]) => attempted.get(chatId) ?? list[0]!.createdAt;
+      const picked = [...queued.entries()]
+        .filter(([, list]) => list.some((q) => q.createdAt < heldBefore))
+        .sort((a, b) => lookedAt(...a) - lookedAt(...b))
+        .slice(0, limit);
+      for (const [chatId] of picked) attempted.set(chatId, Date.now() + ++looks);
+      return picked.map(([chatId, list]) => ({ chatId, identities: list.map((q) => q.identity) }));
+    },
+    async removeQueuedInputs(chatId, ids) {
+      const list = queued.get(chatId) ?? [];
+      const gone = list.filter((q) => ids.includes(q.message.id) && !q.takenBy);
+      put(chatId, list.filter((q) => !gone.includes(q)));
+      return gone.map((q) => q.message.id);
+    },
+    async takeQueuedInputs(chatId, runId) {
+      if (runs.get(runId)?.status !== "active") return null;
+      const list = (queued.get(chatId) ?? []).map((q) => ({ ...q, takenBy: runId }));
+      put(chatId, list);
+      return [...list];
+    },
+    async returnQueuedInputs(chatId, runId) {
+      put(chatId, (queued.get(chatId) ?? []).map((q) => (q.takenBy === runId ? { ...q, takenBy: undefined } : q)));
+    },
+    async finishQueuedInputs(chatId, runId) {
+      put(chatId, (queued.get(chatId) ?? []).filter((q) => q.takenBy !== runId));
+    },
   };
   const storage = impl as StorageAdapter<P>;
-  return { storage, chats, messages, runs };
+  return { storage, chats, messages, runs, queued };
 }
