@@ -66,6 +66,24 @@ what it will do instead. A user typing a new message instead of deciding also
 resolves the gate (declined as superseded) — so stop rendering the card as
 live once the user sends something.
 
+## Signals: a message your UI may not expect
+
+A [signal](./signals.md) sent with `visibility: "user"` is in the history as a message with `role: "system"` and `metadata.signal` (`{ kind, from }`). Chat components usually render only `user` and `assistant`, so give it its own row:
+
+```tsx
+{messages.map((m) =>
+  m.metadata?.signal ? (
+    <Notice key={m.id} from={m.metadata.signal.from?.name}>
+      {m.parts.map((p) => (p.type === "text" ? p.text : null))}
+    </Notice>
+  ) : (
+    <Message key={m.id} message={m} />
+  ),
+)}
+```
+
+Nothing streams to the page for a signal: it, and the agent's answer to it, are there the next time the page loads the history.
+
 ## The continuation protocol
 
 Whenever a paused turn resumes — an approval decision, a client-handled tool

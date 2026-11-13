@@ -25,6 +25,7 @@ Three things are required: where to store things (`storage`), what tools receive
 runtime.handleChat({ agent, chatId, principal, message });   // a chat message, streamed back
 runtime.runAgent({ agent, principal, prompt });              // a job with no chat: webhooks, tests
 runtime.applyApproval({ chatId, principal, decisions });     // a person's decision on a paused tool
+runtime.sendSignal({ chatId, principal, text });             // something your server tells a chat
 runtime.loadHistory({ chatId, principal });                  // a conversation, for display
 runtime.cron();                                               // every minute: schedules and crash recovery
 ```

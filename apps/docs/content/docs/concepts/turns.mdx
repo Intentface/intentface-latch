@@ -35,6 +35,7 @@ interface AppMetadata {
   finishReason?: string;
   createdAt?: number;
   voice?: { durationMs: number };
+  signal?: { kind: "notice" | "message"; from?: { name?: string; via?: string }; startsTurn?: true }; // added with sendSignal
 }
 ```
 
@@ -58,7 +59,13 @@ const forModel = await toModelMessages(stored, { tools }); // drops sendToModel:
 `toModelMessages` wraps the SDK's `convertToModelMessages`, which consults each tool's `toModelOutput` to decide what a tool result looks like to the model. Pass the same tool set you passed to the agent, or replayed history won't match what the model saw live.
 </Callout>
 
-`toModelMessages` also, in order: cuts to the live context window at the compaction boundary, drops `sendToModel: false`, neutralizes audio file parts, and closes any dangling tool calls (a tool call with no result makes conversion throw).
+`toModelMessages` also, in order: cuts to the live context window at the compaction boundary, drops `sendToModel: false`, places signals, neutralizes audio file parts, and closes any dangling tool calls (a tool call with no result makes conversion throw).
+
+## Signals
+
+`runtime.sendSignal` tells a chat something from server code: see [Tell a chat something from your server](/docs/guides/signals). It is stored as one more message, with `role: "system"` and `metadata.signal`, wherever it arrived.
+
+A signal that starts a turn (the default) is read where it is stored, as that turn's opening message. One that only waits (`wake: false`, or the chat wasn't free) is moved by the model projection: it is read with the next user message after it, as a system message right after that message or as a labelled block inside it, depending on the model. One with no user message after it yet is left out. The position depends only on the stored order, so later turns send the same prefix and the prompt cache still hits.
 
 ## Compaction
 

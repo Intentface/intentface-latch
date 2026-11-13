@@ -56,6 +56,8 @@ export async function POST(req: Request) {
 
 An answer that runs past `maxDuration` isn't lost: the function stops, its lease runs out, and the next cron tick finishes the answer on another instance.
 
+A route that calls `runtime.sendSignal` needs `maxDuration` too. By default the agent answers the signal inside that call, so the function runs for as long as the answer takes. A route that should return at once passes `wake: false`, or wraps the call in `waitUntil` from `@vercel/functions`.
+
 ## 4. The cron
 
 Vercel Cron calls a URL with `GET` and your `CRON_SECRET` as a bearer token. One small route turns that into `runtime.cron()`, which fires due schedules and recovers interrupted answers:

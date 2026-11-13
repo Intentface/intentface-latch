@@ -40,6 +40,26 @@ It returns:
 
 <auto-type-table path="../../../../../packages/core/src/runtime.ts" name="RunAgentResult" />
 
+## sendSignal
+
+Tells a chat something from server code: an answer that arrived from elsewhere, a finished job, a message from a named person. By default the chat's agent answers it at once and the call resolves when that answer is finished; with `wake: false` it is only stored, and the agent reads it with the user's next message. See [the signals guide](/docs/guides/signals).
+
+```ts
+const sent = await runtime.sendSignal({
+  chatId,
+  principal,
+  text: "The tax expert answered: file form 6B by 31 March.",
+  from: { name: "Ann Lee", via: "expert console" },
+  id: `reply:${replyId}`, // a retry stores it once
+});
+```
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="SendSignalInput" />
+
+It returns `null` when the chat doesn't exist or isn't the principal's, and otherwise:
+
+<auto-type-table path="../../../../../packages/core/src/runtime.ts" name="SendSignalResult" />
+
 ## applyApproval
 
 Continues a run that paused on a tool needing approval. Decisions that are no longer pending (a double click, an old tab) are ignored, so it is safe to call more than once.

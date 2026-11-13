@@ -14,6 +14,7 @@ Online: https://intentface-latch-docs.vercel.app/docs/reference/runtime
 | `handleChat` | `(input: HandleChatInput<P>) => Promise<Response>` | Runs one chat turn and streams the answer. Returns a streaming `Response` in the AI SDK's UI message format, ready to return from your route to `useChat`. The run keeps going and is saved even if the client disconnects. |
 | `runAgent` | `(input: RunAgentInput<P>) => Promise<RunAgentResult>` | Runs an agent to completion without a client and returns its answer: for webhooks, background jobs, tests and evaluations. Never throws for a run that fails once started; the failure comes back as `error`. |
 | `compactChat` | `(input: { chatId: string; principal: P; focus?: string; request?: Request; turnContext?: unknown; }) => Promise<{ summary: string; compacted: number; } \| null>` | Summarizes a long conversation so later turns send the model the summary instead of the old messages. The stored history is kept in full. Returns `null` when there is too little to summarize or the chat isn't the caller's; throws `PendingApprovalError` while the chat waits on an approval. |
+| `sendSignal` | `(input: SendSignalInput<P>) => Promise<SendSignalResult \| null>` | Tells a chat something from server code: an answer that arrived from elsewhere, a job that finished, a message from someone other than the chat's user. Nothing already stored changes, so it can be called at any time, also while an answer is running (that answer won't see it). A `notice` (the default) is the application speaking: the model reads it as the operator where the provider allows (see `resolveNoticePlacement`). A `message` is a named person speaking, and is read as one. Only server code can add either; a client can't. The user doesn't see a signal unless you pass `visibility: "user"`; it is then in `loadHistory` as a `system` message with `metadata.signal`, for your UI to render. Put only text your application wrote, or a person it vouches for, in a signal. Documents and tool output belong in tool results. The agent answers it now when the chat is free: the call resolves when that answer is finished, with it in `turn`. Nothing streams to an open page: the answer is in the history. Pass `wake: false` to only store it, for the agent to read with the user's next message. Returns the stored message's id, or `null` when the chat doesn't exist or isn't the principal's. Pass `id` to make a retry safe: the same id stores once, and starts a turn at most once. |
 | `loadHistory` | `(input: { chatId: string; principal: P; }) => Promise<AppMessage[]>` | A chat's messages for showing to the user, with internal messages left out. Use it to render a conversation when the page loads. |
 | `listChats` | `(input: { principal: P; limit?: number; kind?: string; }) => Promise<ChatRecord[]>` | The caller's chats, newest first, for a sidebar. Pass `kind: "user"` to leave out the threads subagents use internally. |
 | `getChat` | `(input: { principal: P; id: string; }) => Promise<ChatRecord \| null>` | One chat, or `null` when it doesn't exist or isn't the caller's. |
@@ -89,6 +90,38 @@ It returns:
 | `threadId` | `string` | The thread the run used. Pass it back as `threadId` to continue. |
 | `answer` | `string` | The agent's final answer. Empty when the run failed. |
 | `error` (optional) | `string` | Why the run failed, when it did: the model provider refused, a tool source wouldn't open, and so on. |
+
+## sendSignal
+
+Tells a chat something from server code: an answer that arrived from elsewhere, a finished job, a message from a named person. By default the chat's agent answers it at once and the call resolves when that answer is finished; with `wake: false` it is only stored, and the agent reads it with the user's next message. See [the signals guide](../guides/signals.md).
+
+```ts
+const sent = await runtime.sendSignal({
+  chatId,
+  principal,
+  text: "The tax expert answered: file form 6B by 31 March.",
+  from: { name: "Ann Lee", via: "expert console" },
+  id: `reply:${replyId}`, // a retry stores it once
+});
+```
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `chatId` | `string` |  |
+| `principal` | `P` | Whose chat it is. A signal is stored under the chat's owner. |
+| `text` | `string` | What the agent should know. Plain text your application wrote. |
+| `kind` (optional) | `"message" \| "notice"` | `"notice"` (default): the application speaking. `"message"`: a named person. |
+| `from` (optional) | `{ name?: string; via?: string; }` | Who it is from and where it was sent from; a `message` should name its author. |
+| `visibility` (optional) | `Visibility` | Whether the user sees it. Defaults to `"internal"`: only the agent does. |
+| `id` (optional) | `string` | Your own id for it, so a retried call stores it once. |
+| `wake` (optional) | `boolean` | Whether the signal starts a turn. Default `true`: the agent answers it now, and `sendSignal` resolves when the answer is finished. The chat's own agent runs, as `principal`, and counts against its limits like any turn; a tool that needs approval waits for the user. A turn starts only when the chat is free: with an answer running, an approval or tool result pending, or a limit reached, the signal is stored and waits for the next message (`turn` is then absent from the result). `false`: store it and start nothing. The agent reads it with the user's next message. |
+
+It returns `null` when the chat doesn't exist or isn't the principal's, and otherwise:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | The stored message's id. |
+| `turn` (optional) | `{ answer: string; parked: boolean; error?: string; }` | The turn the signal started. Absent with `wake: false`, or when the chat wasn't free. |
 
 ## applyApproval
 
