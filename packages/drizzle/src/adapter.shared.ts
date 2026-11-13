@@ -1134,6 +1134,15 @@ export function makeStorageAdapter<P>(
       const chats: any[] = await db.select({ id: s.chats.id }).from(s.chats).where(under(s.chats.owner)).limit(limit);
       const chatIds = chats.map((c) => c.id as string);
       if (chatIds.length) Object.assign(removed, await removeChats(chatIds));
+      // Held inputs whose chat is gone: a pass stopped between deleting the
+      // chats and the held inputs that arrived meanwhile leaves rows nothing
+      // leads back to. An input is only ever held for a chat that exists
+      // (see enqueueInput), so a row without one is always such a leftover.
+      if (s.queuedInputs) {
+        await db
+          .delete(s.queuedInputs)
+          .where(sql`not exists (select 1 from ${s.chats} where ${s.chats.id} = ${s.queuedInputs.chatId})`);
+      }
       // The usage ledger, as the host chose: re-filed one level up with the
       // run id cleared (a handle back to data that's gone), kept, or deleted.
       let usage = 0;

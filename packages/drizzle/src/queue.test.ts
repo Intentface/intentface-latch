@@ -150,3 +150,50 @@ describe.each(adapters)("the input queue (%s)", (_name, open) => {
     expect((await runtime.pollChat({ chatId: "c1", principal: me, cursor: after.cursor }))!.messages).toBeUndefined();
   });
 });
+
+describe("held inputs left behind by an interrupted purge", () => {
+  const cases: [string, () => Promise<{ storage: StorageAdapter<P>; dropChats: () => Promise<unknown>; rows: () => Promise<unknown[]> }>][] = [
+    [
+      "SQLite",
+      async () => {
+        const client = createClient({ url: ":memory:" });
+        await migrate(client);
+        const db = drizzle(client, { schema });
+        return {
+          storage: createSqliteAdapter<P>(db, { owner }),
+          dropChats: () => db.delete(schema.chats),
+          rows: () => db.select().from(schema.queuedInputs),
+        };
+      },
+    ],
+    [
+      "Postgres",
+      async () => {
+        const db = drizzlePg(new PGlite(), { schema: schemaPg });
+        await migratePostgres(db);
+        return {
+          storage: createPostgresAdapter<P>(db, { owner }),
+          dropChats: () => db.delete(schemaPg.chats),
+          rows: () => db.select().from(schemaPg.queuedInputs),
+        };
+      },
+    ],
+  ];
+
+  it.each(cases)("are removed by the next pass (%s)", async (_name, open) => {
+    const { storage, dropChats, rows } = await open();
+    const runtime = createRuntime<P>({
+      storage,
+      context: defineContext<P, unknown>({ build: async () => ({}) }),
+      agents: { a: defineAgent<P>({ model: answering(["a1"]), instructions: "Be brief." }) },
+    });
+    await (await runtime.handleChat({ agent: "a", principal: me, chatId: "c1", message: user("q1", "u1") })).text();
+    expect(await storage.enqueueInput!(me, "c1", user("q2", "u2"), { cap: 20 })).toBe(true);
+    // A purge that stopped right after deleting the chats, with an input held meanwhile.
+    await dropChats();
+    expect(await rows()).toHaveLength(1);
+
+    await storage.purgeOwner!(owner(me));
+    expect(await rows()).toEqual([]);
+  });
+});

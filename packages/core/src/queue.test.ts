@@ -622,6 +622,32 @@ describe("runtime.cron", () => {
     expect(JSON.stringify(promptsOf(model)[1])).toContain("from bo");
   });
 
+  it("passes over a first sender who can no longer read the chat", async () => {
+    const ann = { orgId: "org_a", userId: "ann" };
+    const bo = { orgId: "org_a", userId: "bo" };
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: { a: defineAgent<typeof principal>({ model, instructions: "Be brief." }) },
+      reconstructPrincipal: async (identity) => identity as typeof principal,
+    });
+    await (await runtime.handleChat({ agent: "a", principal: bo, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!(ann, "chat_1", user("from ann", "u2"), { cap: 20 });
+    await mem.storage.enqueueInput!(bo, "chat_1", user("from bo", "u3"), { cap: 20 });
+    // Ann may still act, but the chat is no longer hers to read.
+    const getChat = mem.storage.getChat.bind(mem.storage);
+    mem.storage.getChat = async (p, id) => ((p as typeof principal).userId === "ann" ? null : getChat(p, id));
+
+    const tick = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.errors.filter((e) => e.includes("held inputs"))).toEqual([]);
+    expect(tick.held).toBe(1);
+    const prompt = JSON.stringify(promptsOf(model)[1]);
+    expect(prompt).toContain("from bo");
+    expect(prompt).not.toContain("from ann");
+    expect(mem.queued.get("chat_1")).toBeUndefined();
+  });
+
   it("leaves inputs a live run holds alone, also when their sender may no longer act", async () => {
     const mem = memoryStorage<typeof principal>();
     const model = scripted([text("a1"), text("a2")]);

@@ -5007,7 +5007,7 @@ export function createRuntime<P, RC = unknown>(
       }
       // Inputs whose sender may no longer act are dropped here, by the run
       // that holds them: they go with the rest when it finishes with the queue.
-      const { allowed, refused, lead } = await sendersOf(fresh);
+      const { allowed, refused, lead } = await sendersOf(chatId, fresh);
       for (const q of refused) console.warn(`[queue] dropped held input ${q.message.id} in chat ${chatId}: its sender was refused`);
       if (!lead) {
         await queue.finishQueuedInputs(chatId, run.id);
@@ -5207,7 +5207,7 @@ export function createRuntime<P, RC = unknown>(
       // (or first signal) among those who may still act. With nobody left,
       // the inputs stay for a person to look at. Nothing is dropped or
       // released here: that is for the run that takes them.
-      const { lead, as } = await sendersOf(held);
+      const { lead, as } = await sendersOf(chatId, held);
       if (!lead || !as) return started;
       try {
         await runToCompletion({
@@ -5238,13 +5238,19 @@ export function createRuntime<P, RC = unknown>(
 
   /**
    * Held inputs split by whether their sender may still act
-   * (`reconstructPrincipal`), and who a turn for them runs as: the sender of
-   * the first user message among the allowed ones, or of the first signal.
+   * (`reconstructPrincipal`) and still reach this chat, and who a turn for
+   * them runs as: the sender of the first user message among the allowed
+   * ones, or of the first signal. A sender who can no longer read the chat
+   * counts as refused: a turn can't run as them, and would block the rest.
    */
-  async function sendersOf(inputs: QueuedInput[]): Promise<{ allowed: QueuedInput[]; refused: QueuedInput[]; lead?: QueuedInput; as?: P }> {
+  async function sendersOf(chatId: string, inputs: QueuedInput[]): Promise<{ allowed: QueuedInput[]; refused: QueuedInput[]; lead?: QueuedInput; as?: P }> {
     const verdicts = new Map<string, P | null>();
     const of = (q: QueuedInput) => JSON.stringify(q.identity);
-    for (const q of inputs) if (!verdicts.has(of(q))) verdicts.set(of(q), await reconstructPrincipal(q.identity));
+    for (const q of inputs) {
+      if (verdicts.has(of(q))) continue;
+      const sender = await reconstructPrincipal(q.identity);
+      verdicts.set(of(q), sender && (await storage.getChat(sender, chatId)) ? sender : null);
+    }
     const allowed = inputs.filter((q) => verdicts.get(of(q)));
     const lead = allowed.find((q) => !isSignal(q.message)) ?? allowed[0];
     return { allowed, refused: inputs.filter((q) => !verdicts.get(of(q))), lead, as: lead ? verdicts.get(of(lead))! : undefined };
