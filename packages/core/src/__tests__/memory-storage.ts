@@ -106,7 +106,7 @@ export function memoryStorage<P = { orgId: string }>() {
         .sort((a, b) => lookedAt(...a) - lookedAt(...b))
         .slice(0, limit);
       for (const [chatId] of picked) attempted.set(chatId, Date.now() + ++looks);
-      return picked.map(([chatId, list]) => ({ chatId, identity: list[0]!.identity }));
+      return picked.map(([chatId, list]) => ({ chatId, identities: list.map((q) => q.identity) }));
     },
     async removeQueuedInputs(chatId, ids) {
       const list = queued.get(chatId) ?? [];
@@ -115,6 +115,7 @@ export function memoryStorage<P = { orgId: string }>() {
       return gone.map((q) => q.message.id);
     },
     async takeQueuedInputs(chatId, runId) {
+      if (runs.get(runId)?.status !== "active") return null;
       const list = (queued.get(chatId) ?? []).map((q) => ({ ...q, takenBy: runId }));
       put(chatId, list);
       return [...list];

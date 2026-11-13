@@ -1399,6 +1399,8 @@ class WaitingOnPerson extends Error {
 }
 /** Thrown by `runToCompletion({ held })` when no held input is left to answer; never leaves the runtime. */
 class NothingHeld extends Error {}
+/** Thrown by `runToCompletion({ held })` when its run stopped being the chat's live run; never leaves the runtime. */
+class RunLost extends Error {}
 
 /**
  * Held inputs in the order a turn opens with them. Signals first, as signals
@@ -3607,7 +3609,7 @@ export function createRuntime<P, RC = unknown>(
       ) => storage.completeSchedule(id, patch, owner, claim, scope),
       noteScheduleFire: (id: string, patch: { lastChatId: string; firedAt: number }) =>
         storage.noteScheduleFire?.(id, patch, scope),
-      takeQueuedInputs: (chatId: string, runId: string) => storage.takeQueuedInputs!(chatId, runId, scope),
+      takeQueuedInputs: (chatId: string, runId: string, fence?: RunFence) => storage.takeQueuedInputs!(chatId, runId, scope, fence),
       returnQueuedInputs: (chatId: string, runId: string) => storage.returnQueuedInputs!(chatId, runId, scope),
       finishQueuedInputs: (chatId: string, runId: string) => storage.finishQueuedInputs!(chatId, runId, scope),
     };
@@ -4970,7 +4972,12 @@ export function createRuntime<P, RC = unknown>(
         await giveUp("the chat is waiting on a person");
         throw new WaitingOnPerson();
       }
-      const taken = await queue.takeQueuedInputs(chatId, run.id);
+      // Everything this run does to the queue and the history from here is
+      // refused once it is no longer the chat's live run: a worker that
+      // paused past its lease finds another run answering these inputs.
+      const fence: RunFence | undefined = lease ? { runId: run.id, ...lease } : undefined;
+      const taken = await queue.takeQueuedInputs(chatId, run.id, fence);
+      if (taken === null) throw new RunLost();
       /** The turn can't start: what was taken waits again, to be tried later. */
       const putBack = async (why: string) => {
         await queue.returnQueuedInputs(chatId, run.id);
@@ -5009,7 +5016,8 @@ export function createRuntime<P, RC = unknown>(
       // them in the history, where a recovered run answers them, and taken
       // in the queue, where the next run to look finds them stored and
       // clears them.
-      await queue.appendMessages(chatId, opening);
+      // Fenced: agent resolution above may have outlasted the lease.
+      if ((await queue.appendMessages(chatId, opening, fence)) === false) throw new RunLost();
       await queue.finishQueuedInputs(chatId, run.id);
     } else if (o.refuseIfWaiting) {
       // Up to the opening message only: a signal stored after it (no lease
@@ -5156,7 +5164,14 @@ export function createRuntime<P, RC = unknown>(
       const lead = held.find((q) => !isSignal(q.message)) ?? held[0]!;
       const as = await reconstructPrincipal(lead.identity);
       if (!as) {
-        // Its sender may no longer act: drop that one and look again.
+        // Its sender may no longer act: drop that one and look again. If a
+        // run took it and died before storing it, it waits again first; one
+        // a live run holds is being answered, and is left alone.
+        if (lead.takenBy) {
+          const holder = await ownedBy(chat.owner).getRun(lead.takenBy).catch(() => null);
+          if (holder?.status === "active") return started;
+          await ownedBy(chat.owner).returnQueuedInputs(chatId, lead.takenBy);
+        }
         const dropped = await storage.removeQueuedInputs!(chatId, [lead.message.id], { ownerKey: chat.owner });
         if (dropped.length === 0) return started;
         console.warn(`[queue] dropped held input ${lead.message.id} in chat ${chatId}: its sender was refused`);
@@ -5179,8 +5194,9 @@ export function createRuntime<P, RC = unknown>(
       } catch (e) {
         // Nothing left (answered, or taken back), or led by someone else now: look again.
         if (e instanceof NothingHeld) continue;
-        // Busy, waiting on a person, or over a limit: they stay held.
-        if (e instanceof WaitingOnPerson || isChatBusyError(e) || isLimitExceededError(e)) return started;
+        // Busy, waiting on a person, over a limit, or superseded by another
+        // run (which has them now): they stay held.
+        if (e instanceof WaitingOnPerson || e instanceof RunLost || isChatBusyError(e) || isLimitExceededError(e)) return started;
         throw e;
       }
       started++;
@@ -5212,12 +5228,23 @@ export function createRuntime<P, RC = unknown>(
     let started = 0;
     // The adapter hands out the chats it was asked about longest ago first,
     // so ones that can't start (waiting on a person) don't keep others out.
-    for (const { chatId, identity } of await storage.listChatsWithQueuedInputs({ heldBefore: now - 15_000, limit: 50 })) {
+    for (const { chatId, identities } of await storage.listChatsWithQueuedInputs({ heldBefore: now - 15_000, limit: 50 })) {
       // One chat's failure (an agent that no longer resolves, say) is its own.
       try {
-        const principal = await reconstructPrincipal(identity);
-        // Refused: the sender may no longer act. Left for a person to look at.
-        if (principal) started += await drainQueue(chatId, principal);
+        // Read the chat as the first sender who may still act. The drain
+        // drops the inputs of senders who may not, and picks who the turn
+        // runs as itself. With nobody left, the inputs stay for a person to
+        // look at.
+        const tried = new Set<string>();
+        for (const identity of identities) {
+          const key = JSON.stringify(identity);
+          if (tried.has(key)) continue;
+          tried.add(key);
+          const principal = await reconstructPrincipal(identity);
+          if (!principal) continue;
+          started += await drainQueue(chatId, principal);
+          break;
+        }
       } catch (e) {
         errors.push(`held inputs in chat ${chatId}: ${e instanceof Error ? e.message : String(e)}`);
       }

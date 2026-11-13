@@ -681,13 +681,15 @@ export interface StorageAdapter<P> {
   /**
    * OPTIONAL. Mark every input held for the chat as taken by `runId`, in one
    * statement, and return them as they are at that moment, in arrival order.
-   * The runtime calls it only while `runId` is the chat's one live run, so
-   * it takes inputs another run had taken too: that run is over. From here
-   * to `finishQueuedInputs` or `returnQueuedInputs`, these inputs are not
-   * waiting: they don't count against the cap, can't be removed, and a
-   * retry of one doesn't change it.
+   * Only while `runId` is the chat's live run, checked in that statement:
+   * its row is `active`, and with `fence` it still holds that lease. A run
+   * that isn't (a worker that paused past its lease and was superseded)
+   * takes nothing and gets `null`. A live run takes inputs another run had
+   * taken too: that run is over. From here to `finishQueuedInputs` or
+   * `returnQueuedInputs`, these inputs are not waiting: they don't count
+   * against the cap, can't be removed, and a retry of one doesn't change it.
    */
-  takeQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<QueuedInput[]>;
+  takeQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>, fence?: RunFence): Promise<QueuedInput[] | null>;
   /** OPTIONAL. Put the inputs `runId` took back in line, untaken (its turn could not start). */
   returnQueuedInputs?(chatId: string, runId: string, scope?: OwnerScope<P>): Promise<void>;
   /** OPTIONAL. Delete the inputs `runId` took (they are in the conversation now). */
@@ -695,14 +697,15 @@ export interface StorageAdapter<P> {
   /**
    * OPTIONAL system op (no principal): the chats holding an input that was
    * held before `heldBefore` (epoch ms), taken by a run or not, at most
-   * `limit` chats, each with the `identity` of its oldest held input. The cron tick uses it to start
+   * `limit` chats, each with the `identities` of its held inputs in arrival
+   * order (the runtime acts as the first of them that may still act). The cron tick uses it to start
    * the turn for inputs nobody did (the process that should have died
    * first). It marks the chats it returns as looked at, and returns the ones
    * looked at longest ago first: chats that can't start a turn (waiting on a
    * person) must not keep the others out, tick after tick. Without it, such
    * inputs wait until something else happens in their chat.
    */
-  listChatsWithQueuedInputs?(opts: { heldBefore: number; limit: number }): Promise<Array<{ chatId: string; identity?: unknown }>>;
+  listChatsWithQueuedInputs?(opts: { heldBefore: number; limit: number }): Promise<Array<{ chatId: string; identities: unknown[] }>>;
   /**
    * OPTIONAL system op (no principal): delete everything stored for an owner
    * path. That's every row whose owner key is `encodeOwnerKey(segments)` or

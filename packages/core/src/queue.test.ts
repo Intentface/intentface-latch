@@ -339,6 +339,54 @@ describe("a held turn and what happens around it", () => {
     expect(mem.messages.get("chat_1")!.map((m) => m.role)).toEqual(["user", "assistant", "user", "user", "assistant"]);
   });
 
+  it("stops when its run is no longer the chat's live one", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+    // The worker paused after opening its run; by the time it takes the
+    // queue, the run was superseded.
+    const createRun = h.mem.storage.createRun.bind(h.mem.storage);
+    h.mem.storage.createRun = async (p, input) => {
+      const run = await createRun(p, input);
+      h.mem.runs.set(run.id, { ...run, status: "errored" });
+      return run;
+    };
+    const tick = await h.runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(0);
+    expect(model.doStreamCalls).toHaveLength(1);
+    // Nothing stored, and the input waits for the run that has the chat now.
+    expect(ids(stored(h))).not.toContain("u2");
+    expect(h.mem.queued.get("chat_1")!.map((q) => [q.message.id, q.takenBy])).toEqual([["u2", undefined]]);
+  });
+
+  it("lets go of inputs a dead run took, when their sender may no longer act", async () => {
+    const ann = { orgId: "org_a", userId: "ann" };
+    const bo = { orgId: "org_a", userId: "bo" };
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: { a: defineAgent<typeof principal>({ model, instructions: "Be brief." }) },
+      // Ann has left since she sent her message.
+      reconstructPrincipal: async (identity) => ((identity as typeof principal).userId === "ann" ? null : (identity as typeof principal)),
+    });
+    await (await runtime.handleChat({ agent: "a", principal: bo, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!(ann, "chat_1", user("from ann", "u2"), { cap: 20 });
+    await mem.storage.enqueueInput!(bo, "chat_1", user("from bo", "u3"), { cap: 20 });
+    // A run took both and died before storing them.
+    const dead = await mem.storage.createRun(bo, { chatId: "chat_1", agent: "a" });
+    await mem.storage.takeQueuedInputs!("chat_1", dead.id);
+    mem.runs.set(dead.id, { ...dead, status: "errored" });
+
+    const tick = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(1);
+    const prompt = JSON.stringify(promptsOf(model)[1]);
+    expect(prompt).toContain("from bo");
+    expect(prompt).not.toContain("from ann");
+    expect(mem.queued.get("chat_1")).toBeUndefined();
+  });
+
   it("gives the agent the context of the message it really answers", async () => {
     const mem = memoryStorage<typeof principal>();
     const model = scripted([text("a1"), text("a2")]);

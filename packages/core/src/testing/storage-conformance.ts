@@ -768,7 +768,7 @@ function checks<P>(): ConformanceCheck<P>[] {
         const later = Date.now() + 1000;
         const held = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 10 });
         check(held.map((h) => h.chatId).join() === [first.id, second.id].join(), "one row per chat, across owners, oldest first");
-        check(held[0]!.identity !== undefined, "with the identity of its oldest input");
+        check(held[0]!.identities.length === 2 && held[0]!.identities.every((i) => i !== undefined), "with the identities of its inputs, in arrival order");
         const many = await store.createChat(me, { agent: "a" });
         for (let i = 0; i < 6; i++) await store.enqueueInput(me, many.id, msg(`m${i}`), { cap: 10 });
         const all = await store.listChatsWithQueuedInputs({ heldBefore: later, limit: 3 });
@@ -794,35 +794,70 @@ function checks<P>(): ConformanceCheck<P>[] {
         if (!store.takeQueuedInputs || !store.returnQueuedInputs || !store.finishQueuedInputs) return;
         const chat = await store.createChat(me, { agent: "a" });
         const scope = { ownerKey: chat.owner };
+        const ids = (list: { message: AppMessage }[] | null) => (list ?? []).map((q) => q.message.id).join();
         await store.enqueueInput(me, chat.id, msg("q1"), { cap: 2 });
         await store.enqueueInput(me, chat.id, msg("q2"), { cap: 2 });
         await store.enqueueInput(me, chat.id, msg("q2", "revised"), { cap: 2 });
 
-        const taken = await store.takeQueuedInputs(chat.id, "run_1", scope);
-        check(taken.map((q) => q.message.id).join() === "q1,q2", `everything held, in arrival order (${taken.map((q) => q.message.id).join()})`);
-        check((taken[1]!.message.parts[0] as { text?: string }).text === "revised", "as last replaced");
-        check((await store.listQueuedInputs(me, chat.id)).every((q) => q.takenBy === "run_1"), "listed as taken by that run");
+        const run1 = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        const taken = await store.takeQueuedInputs(chat.id, run1.id, scope);
+        check(ids(taken) === "q1,q2", `everything held, in arrival order (${ids(taken)})`);
+        check((taken![1]!.message.parts[0] as { text?: string }).text === "revised", "as last replaced");
+        check((await store.listQueuedInputs(me, chat.id)).every((q) => q.takenBy === run1.id), "listed as taken by that run");
         check((await store.removeQueuedInputs(chat.id, ["q1"], scope)).length === 0, "one being answered can't be taken back");
         check(await store.enqueueInput(me, chat.id, msg("q2", "too late"), { cap: 2 }), "a retry of one being answered is accepted");
         check(await store.enqueueInput(me, chat.id, msg("q3"), { cap: 2 }), "and there is room again: taken ones don't count");
         check(await store.enqueueInput(me, chat.id, msg("q4"), { cap: 2 }), "up to the cap");
         check(!(await store.enqueueInput(me, chat.id, msg("q5"), { cap: 2 })), "and no further");
 
-        await store.finishQueuedInputs(chat.id, "run_1", scope);
+        await store.finishQueuedInputs(chat.id, run1.id, scope);
         const left = await store.listQueuedInputs(me, chat.id);
-        check(left.map((q) => q.message.id).join() === "q3,q4" && left.every((q) => !q.takenBy), "finishing removes what the run took, and only that");
+        check(ids(left) === "q3,q4" && left.every((q) => !q.takenBy), "finishing removes what the run took, and only that");
+        await store.updateRun(run1.id, { status: "completed", endedAt: Date.now() });
 
         // A turn that could not start gives them back, in their places.
-        await store.takeQueuedInputs(chat.id, "run_2", scope);
-        await store.returnQueuedInputs(chat.id, "run_2", scope);
+        const run2 = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        await store.takeQueuedInputs(chat.id, run2.id, scope);
+        await store.returnQueuedInputs(chat.id, run2.id, scope);
         const back = await store.listQueuedInputs(me, chat.id);
-        check(back.map((q) => q.message.id).join() === "q3,q4" && back.every((q) => !q.takenBy), "returned inputs wait again, in order");
+        check(ids(back) === "q3,q4" && back.every((q) => !q.takenBy), "returned inputs wait again, in order");
         check((await store.removeQueuedInputs(chat.id, ["q3"], scope)).join() === "q3", "and can be taken back again");
 
-        // A run that died holding some: the next run to take gets them too.
-        await store.takeQueuedInputs(chat.id, "run_dead", scope);
-        const next = await store.takeQueuedInputs(chat.id, "run_3", scope);
-        check(next.map((q) => q.message.id).join() === "q4" && next[0]!.takenBy === "run_3", "a later run takes what a dead one held");
+        // A run that died holding some: the next live run takes them too.
+        await store.takeQueuedInputs(chat.id, run2.id, scope);
+        await store.updateRun(run2.id, { status: "errored", endedAt: Date.now() });
+        const run3 = await store.createRun(me, { chatId: chat.id, agent: "a" });
+        const next = await store.takeQueuedInputs(chat.id, run3.id, scope);
+        check(ids(next) === "q4" && next![0]!.takenBy === run3.id, "a later run takes what a dead one held");
+      },
+    },
+    {
+      name: "only the chat's live run can take what is held",
+      async run({ store, principals: [me] }) {
+        if (!store.enqueueInput || !store.listQueuedInputs || !store.takeQueuedInputs) return;
+        const chat = await store.createChat(me, { agent: "a" });
+        const scope = { ownerKey: chat.owner };
+        await store.enqueueInput(me, chat.id, msg("q1"), { cap: 5 });
+
+        // A leased run that lost its lease (reaped, then claimed again elsewhere).
+        const run = await store.claimRun({ principal: me, chatId: chat.id, agent: "a", owner: "n1", ttlMs: 60_000 });
+        const fence = fenceOf(run, "n1");
+        const stale = { ...fence, fencingToken: fence.fencingToken + 1 };
+        check((await store.takeQueuedInputs(chat.id, run.id, scope, stale)) === null, "a run that no longer holds its lease takes nothing");
+        check((await store.takeQueuedInputs(chat.id, run.id, scope, { ...fence, owner: "n2" })) === null, "nor one whose lease another node holds");
+        check((await store.listQueuedInputs(me, chat.id)).every((q) => !q.takenBy), "and leaves the inputs unmarked");
+        check((await store.takeQueuedInputs(chat.id, run.id, scope, fence))?.length === 1, "the lease holder takes them");
+
+        // A run that has ended, leased or not.
+        await store.updateRun(run.id, { status: "completed", endedAt: Date.now(), leaseOwner: null }, fence);
+        check((await store.takeQueuedInputs(chat.id, run.id, scope)) === null, "a run that has ended takes nothing");
+        const other = await store.createChat(me, { agent: "a" });
+        const elsewhere = await store.createRun(me, { chatId: other.id, agent: "a" });
+        check((await store.takeQueuedInputs(chat.id, elsewhere.id, scope)) === null, "nor a run of another chat");
+
+        // Nothing held is not the same as not being the live run.
+        const empty = await store.takeQueuedInputs(other.id, elsewhere.id, { ownerKey: other.owner });
+        check(Array.isArray(empty) && empty.length === 0, "a live run with nothing held gets an empty list");
       },
     },
     {

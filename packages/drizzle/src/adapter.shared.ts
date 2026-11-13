@@ -566,11 +566,26 @@ export function makeStorageAdapter<P>(
       return gone.map((r) => r.id as string);
     },
 
-    async takeQueuedInputs(chatId, runId, scope) {
+    async takeQueuedInputs(chatId, runId, scope, fence) {
       await checkOwner("chat", chatId, scope);
-      // Every row of the chat, also ones an earlier run took: the caller is
-      // the chat's one live run, so that run is over. One statement.
-      const rows: any[] = await db.update(q).set({ takenBy: runId }).where(eq(q.chatId, chatId)).returning();
+      // The caller must still be the chat's live run, checked in the same
+      // statement as the take: a worker that paused past its lease must not
+      // put its name on inputs the run that replaced it is answering.
+      const live = and(
+        eq(s.runs.id, runId),
+        eq(s.runs.chatId, chatId),
+        eq(s.runs.status, "active"),
+        ...(fence ? [eq(s.runs.leaseOwner, fence.owner), eq(s.runs.fencingToken, fence.fencingToken)] : []),
+      );
+      const holds = sql`exists (select 1 from ${s.runs} where ${live}${opts.lockFencedRun ? sql` for share` : sql``})`;
+      // Every row of the chat, also ones an earlier run took: that run is
+      // over, since this one is live and a chat has one live run.
+      const rows: any[] = await db.update(q).set({ takenBy: runId }).where(and(eq(q.chatId, chatId), holds)).returning();
+      if (rows.length === 0) {
+        // Nothing held, or not the live run: say which.
+        const mine: any[] = await db.select({ id: s.runs.id }).from(s.runs).where(live);
+        return mine.length ? [] : null;
+      }
       return rows.sort((a, b) => Number(a.seq) - Number(b.seq)).map(rowToQueued);
     },
 
@@ -602,14 +617,14 @@ export function makeStorageAdapter<P>(
         .from(q)
         .where(inArray(q.chatId, ids))
         .orderBy(asc(q.seq));
-      const oldest = new Map<string, unknown>();
-      for (const r of rows) if (!oldest.has(r.chatId)) oldest.set(r.chatId, r.identity ?? undefined);
+      const senders = new Map<string, unknown[]>();
+      for (const r of rows) senders.set(r.chatId, [...(senders.get(r.chatId) ?? []), r.identity ?? undefined]);
       // Looked at now: the next call starts with the chats this one left out.
       // Later than every earlier look, also within one millisecond.
       const latest: any[] = await db.select({ at: sql`max(${q.attemptedAt})` }).from(q);
       const stamp = Math.max(Date.now(), Number(latest[0]?.at ?? 0) + 1);
       await db.update(q).set({ attemptedAt: stamp }).where(inArray(q.chatId, ids));
-      return ids.map((chatId) => ({ chatId, identity: oldest.get(chatId) }));
+      return ids.map((chatId) => ({ chatId, identities: senders.get(chatId) ?? [] }));
     },
   });
 
