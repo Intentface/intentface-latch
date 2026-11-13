@@ -125,7 +125,35 @@ It returns `null` when the chat doesn't exist or isn't the principal's, and othe
 | Option | Type | Description |
 | --- | --- | --- |
 | `id` | `string` | The stored message's id. |
+| `queued` (optional) | `true` | The chat wasn't free, so the signal is held: the answer that ends (or the decision the chat waits on) starts a turn with it. Not in the history until then. |
 | `turn` (optional) | `{ answer: string; parked: boolean; error?: string; }` | The turn the signal started. Absent with `wake: false`, or when the chat wasn't free. |
+
+## listQueued, cancelQueued
+
+What is held for a chat that was busy when it arrived, and taking one back before its turn starts. See [the queue guide](../guides/queue.md). A message is held by `handleChat({ ifBusy: "queue" })`, a signal by `sendSignal` on a busy chat.
+
+```ts
+const waiting = await runtime.listQueued({ chatId, principal }); // AppMessage[], oldest first
+const cancelled = await runtime.cancelQueued({ chatId, principal, id: waiting[0].id }); // false once its turn started
+```
+
+`listQueued` returns only what the user may see: a held signal sent without `visibility: "user"` is left out. `cancelQueued` takes any held id, so check it against `listQueued` before acting on an id from the browser, as the server's route does.
+
+## pollChat
+
+For a page with no stream open: whether an answer is running, what is held, and the history when it differs from what the page has.
+
+```ts
+const poll = await runtime.pollChat({ chatId, principal, cursor });
+if (poll?.messages) render(poll.messages); // absent when nothing changed since `cursor`
+```
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `cursor` | `string` | Send it back on the next poll. |
+| `running` | `boolean` | An answer is running in the chat. |
+| `queued` | `AppMessage[]` | Held messages the user may see (see `listQueued`). |
+| `messages` (optional) | `AppMessage[]` | The history, as `loadHistory` returns it. Absent when it matches `cursor`. |
 
 ## applyApproval
 

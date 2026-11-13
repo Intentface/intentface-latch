@@ -17,7 +17,7 @@ That holds until the chat is used like a real one.
 
 ## What Latch does
 
-**One answer at a time per chat.** While an answer is being written, a second message to the same chat is turned away (`409`, with how long to wait) and nothing of it is saved. Two tabs can't interleave.
+**One answer at a time per chat.** While an answer is being written, a second message to the same chat is turned away (`409`, with how long to wait) and nothing of it is saved. Two tabs can't interleave. A message sent with `queue: true` is [held outside the history](/docs/guides/queue) and joins it when its own turn starts, so the history still reads in the order things happened.
 
 **Messages come in as messages, not as history.** A chat request may add a user message with text and files, and nothing else. A message claiming another role, a tool result, or the id of an existing message is refused. The one exception is a resend of the chat's last question, explained next.
 

@@ -32,6 +32,7 @@ const PAGES = [
   "guides/mount-the-handler",
   "guides/approvals",
   "guides/signals",
+  "guides/queue",
   "guides/schedules",
   "guides/connections",
   "guides/channels",

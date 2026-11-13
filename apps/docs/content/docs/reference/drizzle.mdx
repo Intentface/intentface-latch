@@ -18,6 +18,8 @@ const storage = createPostgresAdapter<Principal>(db, { owner: (p) => [p.orgId, p
 
 <auto-type-table path="../../../../../packages/drizzle/src/adapter.ts" name="SqliteAdapterOptions" />
 
+Both implement the optional parts of the storage contract: deletion, and the [input queue](/docs/guides/queue) (the `latch_queued_inputs` table).
+
 Postgres needs a driver that supports transactions (`pg`, `postgres`, Neon's `neon-serverless`), not `neon-http`.
 
 ## Everything else in the package
